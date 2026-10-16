@@ -489,5 +489,8 @@ pub use scene_derivation::{
 pub use scene_liveness::SceneBufferLiveness;
 pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use shader::{populate_bind_group_entries, CachedBindGroup, ReflectedShader};
-pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};
+pub use traits::{
+    AsAny, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, MaybeSend, MaybeSync,
+    RenderPass,
+};
 pub use frame_inputs::{CoordinateSpacesFrameData, RenderFrameInputs};

@@ -46,8 +46,14 @@ const LEAF_CAPACITY: u64 = 48 << 20;
 const LEAF_PAGE: u64 = 64;
 const LEAF_PAGES: u64 = 64;
 /// A brush buffer's content when there are none.
-const NO_BRUSH: [FaceBrush; 1] = [FaceBrush { flags: 0, radius_half: 0, k_lo: 0, k_hi: 0, center: [0; 4], ball: [0; 4] }];
-
+const NO_BRUSH: [FaceBrush; 1] = [FaceBrush {
+    flags: 0,
+    radius_half: 0,
+    k_lo: 0,
+    k_hi: 0,
+    center: [0; 4],
+    ball: [0; 4],
+}];
 
 /// Chunk table entries: the drawn chunks and the drawn cut's columns.
 const TABLE_SLOTS: usize = 4 * MAX_CHUNKS;
@@ -77,7 +83,6 @@ struct ChunkJob {
     baked: u32,
     _pad: u32,
 }
-
 
 /// `ChunkStatic` of chunk_draw.wgsl: a chunk's frame, written when it is
 /// generated (its layers when they are read back).
@@ -168,14 +173,27 @@ struct Frame {
 fn chunk_frame(grid: &Grid, tile: TileKey, cz: i32, z: f64) -> Frame {
     let s = f64::from(1u32 << tile.level);
     let half = f64::from(CHUNK / 2) * s;
-    let centre = [f64::from(tile.cx * CHUNK) * s + half, f64::from(tile.cy * CHUNK) * s + half, (f64::from(cz * CHUNK) + z) * s];
-    let at = |d: [f64; 3]| grid.position(tile.face, [centre[0] + d[0], centre[1] + d[1], centre[2] + d[2]]);
+    let centre = [
+        f64::from(tile.cx * CHUNK) * s + half,
+        f64::from(tile.cy * CHUNK) * s + half,
+        (f64::from(cz * CHUNK) + z) * s,
+    ];
+    let at = |d: [f64; 3]| {
+        grid.position(
+            tile.face,
+            [centre[0] + d[0], centre[1] + d[1], centre[2] + d[2]],
+        )
+    };
     let n = f64::from(CHUNK);
     let u = (at([half, 0.0, 0.0]) - at([-half, 0.0, 0.0])) / n;
     let v = (at([0.0, half, 0.0]) - at([0.0, -half, 0.0])) / n;
     let w = (at([0.0, 0.0, half]) - at([0.0, 0.0, -half])) / n;
     let m = DMat3::from_cols(u, v, w);
-    Frame { origin: at([0.0; 3]) - m * DVec3::new(n / 2.0, n / 2.0, z), m, inv: m.inverse() }
+    Frame {
+        origin: at([0.0; 3]) - m * DVec3::new(n / 2.0, n / 2.0, z),
+        m,
+        inv: m.inverse(),
+    }
 }
 
 /// The first level drawing walks in the grid's own cells (chunk_draw.wgsl
@@ -192,7 +210,8 @@ fn exact_level(grid: &Grid) -> u32 {
     (0..grid.levels())
         .find(|&level| {
             let cell = grid.level_size(level);
-            512.0 * cell / grid.radius() >= 0.05 && cell >= 50.0 * grid.radius() * f64::from(f32::EPSILON)
+            512.0 * cell / grid.radius() >= 0.05
+                && cell >= 50.0 * grid.radius() * f64::from(f32::EPSILON)
         })
         .unwrap_or(grid.levels())
 }
@@ -207,9 +226,22 @@ fn reach_past(grid: &Grid, tile: TileKey, cz: i32, frame: &Frame, z: (f32, f32))
         for b in 0..=8 {
             for k in [z.0, z.1] {
                 let local = DVec3::new(f64::from(a * 8), f64::from(b * 8), f64::from(k));
-                let at = grid.position(tile.face, [(f64::from(tile.cx * CHUNK) + local.x) * s, (f64::from(tile.cy * CHUNK) + local.y) * s, (f64::from(cz * CHUNK) + local.z) * s]);
+                let at = grid.position(
+                    tile.face,
+                    [
+                        (f64::from(tile.cx * CHUNK) + local.x) * s,
+                        (f64::from(tile.cy * CHUNK) + local.y) * s,
+                        (f64::from(cz * CHUNK) + local.z) * s,
+                    ],
+                );
                 let f = frame.inv * (at - frame.origin);
-                excess = excess.max(-f.x).max(f.x - 64.0).max(-f.y).max(f.y - 64.0).max(f64::from(z.0) - f.z).max(f.z - f64::from(z.1));
+                excess = excess
+                    .max(-f.x)
+                    .max(f.x - 64.0)
+                    .max(-f.y)
+                    .max(f.y - 64.0)
+                    .max(f64::from(z.0) - f.z)
+                    .max(f.z - f64::from(z.1));
             }
         }
     }
@@ -220,15 +252,35 @@ fn reach_past(grid: &Grid, tile: TileKey, cz: i32, frame: &Frame, z: (f32, f32))
 /// `z` and its frame made about height `about` (cells in the chunk); at an
 /// exact level (from `exact`) how far its cells reach past the frame's box
 /// (m.x_axis.w).
-fn chunk_static(grid: &Grid, tile: TileKey, cz: i32, slot: u32, z: (f32, f32), about: f32, exact: u32) -> ChunkStatic {
+fn chunk_static(
+    grid: &Grid,
+    tile: TileKey,
+    cz: i32,
+    slot: u32,
+    z: (f32, f32),
+    about: f32,
+    exact: u32,
+) -> ChunkStatic {
     let frame = chunk_frame(grid, tile, cz, f64::from(about));
     let (m, inv) = (frame.m.as_mat3(), frame.inv.as_mat3());
     let (origin_hi, origin_lo) = split(frame.origin);
     let flags = u32::from(frame.m.determinant() < 0.0) | (tile.level << 8);
-    let grow = if tile.level >= exact { reach_past(grid, tile, cz, &frame, z) } else { 0.0 };
+    let grow = if tile.level >= exact {
+        reach_past(grid, tile, cz, &frame, z)
+    } else {
+        0.0
+    };
     ChunkStatic {
-        m: [m.x_axis.extend(grow).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
-        inv: [inv.row(0).extend(0.0).to_array(), inv.row(1).extend(0.0).to_array(), inv.row(2).extend(0.0).to_array()],
+        m: [
+            m.x_axis.extend(grow).to_array(),
+            m.y_axis.extend(0.0).to_array(),
+            m.z_axis.extend(0.0).to_array(),
+        ],
+        inv: [
+            inv.row(0).extend(0.0).to_array(),
+            inv.row(1).extend(0.0).to_array(),
+            inv.row(2).extend(0.0).to_array(),
+        ],
         origin_hi,
         origin_lo,
         bounds: [z.0, z.1, f32::from_bits(slot), f32::from_bits(flags)],
@@ -265,7 +317,15 @@ impl Eye {
                 faces[face as usize] = Some((c, [axis(0), axis(1), axis(2)]));
             }
         }
-        Self { position, faces, reach: if grid.is_plane() { f64::INFINITY } else { grid.radius() / 64.0 } }
+        Self {
+            position,
+            faces,
+            reach: if grid.is_plane() {
+                f64::INFINITY
+            } else {
+                grid.radius() / 64.0
+            },
+        }
     }
 
     /// From the eye to the nearest point of the tile's columns between
@@ -275,9 +335,16 @@ impl Eye {
     fn offset(&self, tile: TileKey, range: (i32, i32)) -> Option<DVec3> {
         let (e, axes) = self.faces[tile.face as usize]?;
         let s = f64::from(1u32 << tile.level);
-        let (i0, j0) = (f64::from(tile.cx * CHUNK) * s, f64::from(tile.cy * CHUNK) * s);
+        let (i0, j0) = (
+            f64::from(tile.cx * CHUNK) * s,
+            f64::from(tile.cy * CHUNK) * s,
+        );
         let w = f64::from(CHUNK) * s;
-        let d = [e[0].clamp(i0, i0 + w) - e[0], e[1].clamp(j0, j0 + w) - e[1], e[2].clamp(f64::from(range.0) * s, f64::from(range.1) * s) - e[2]];
+        let d = [
+            e[0].clamp(i0, i0 + w) - e[0],
+            e[1].clamp(j0, j0 + w) - e[1],
+            e[2].clamp(f64::from(range.0) * s, f64::from(range.1) * s) - e[2],
+        ];
         let across = axes[0] * d[0] + axes[1] * d[1];
         (across.length() <= self.reach).then(|| across + axes[2] * d[2])
     }
@@ -289,7 +356,10 @@ impl Eye {
             let s = f64::from(1u32 << tile.level);
             let middle = (f64::from(tile.cx * CHUNK) + f64::from(CHUNK) / 2.0) * s;
             let across = (f64::from(tile.cy * CHUNK) + f64::from(CHUNK) / 2.0) * s;
-            grid.position(tile.face, [middle, across, f64::from(range.0 + range.1) * s / 2.0]) - self.position
+            grid.position(
+                tile.face,
+                [middle, across, f64::from(range.0 + range.1) * s / 2.0],
+            ) - self.position
         })
     }
 }
@@ -302,7 +372,10 @@ fn tile_distance(grid: &Grid, tile: TileKey, range: (i32, i32), eye: &Eye) -> f6
         return offset.length();
     }
     let s = f64::from(1u32 << tile.level);
-    let (i0, j0) = (f64::from(tile.cx * CHUNK) * s, f64::from(tile.cy * CHUNK) * s);
+    let (i0, j0) = (
+        f64::from(tile.cx * CHUNK) * s,
+        f64::from(tile.cy * CHUNK) * s,
+    );
     let w = f64::from(CHUNK) * s;
     let (k0, k1) = (f64::from(range.0) * s, f64::from(range.1) * s);
     let c = grid.position(tile.face, [i0 + w / 2.0, j0 + w / 2.0, (k0 + k1) / 2.0]);
@@ -311,14 +384,24 @@ fn tile_distance(grid: &Grid, tile: TileKey, range: (i32, i32), eye: &Eye) -> f6
 }
 
 fn loaded(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_>> {
-    Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })
+    Some(wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+        },
+    })
 }
 
 /// The analytic brushes of `edits` resolved per face: the large log's,
 /// then the recent log's; the count of large ones, and each recent brush's
 /// face count.
 fn analytic_faces(edits: &Edits) -> (Vec<FaceBrush>, usize, Vec<usize>) {
-    let mut faces: Vec<FaceBrush> = (0..edits.large.len() as u32).flat_map(|id| edits.large.resolved(id).faces.iter().copied()).collect();
+    let mut faces: Vec<FaceBrush> = (0..edits.large.len() as u32)
+        .flat_map(|id| edits.large.resolved(id).faces.iter().copied())
+        .collect();
     let large = faces.len();
     let mut counts = Vec::new();
     for id in 0..edits.recent.len() as u32 {
@@ -340,7 +423,11 @@ struct EditState {
 
 impl EditState {
     fn of(edits: &Edits) -> Self {
-        Self { len: edits.len(), hash: edits.hash(), sealed: edits.baked_state() }
+        Self {
+            len: edits.len(),
+            hash: edits.hash(),
+            sealed: edits.baked_state(),
+        }
     }
 }
 
@@ -364,19 +451,34 @@ impl GenBatch {
         let mut any = false;
         for by in 0..8 {
             for bx in 0..8 {
-                let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + bx, cj: tile.cy * 8 + by };
-                let Some(column) = store.column(&key) else { continue };
+                let key = ColumnKey {
+                    face: tile.face,
+                    level: tile.level as u8,
+                    ci: tile.cx * 8 + bx,
+                    cj: tile.cy * 8 + by,
+                };
+                let Some(column) = store.column(&key) else {
+                    continue;
+                };
                 for (bk, brick) in column.iter() {
                     let bz = bk - cz * 8;
                     if !(0..8).contains(&bz) {
                         continue;
                     }
                     let cells = &mut self.baked_cells;
-                    let at = *self.bricks.entry(std::sync::Arc::as_ptr(brick) as usize).or_insert_with(|| {
-                        let n = (cells.len() / 256) as u32;
-                        cells.extend(brick.cells.chunks(2).map(|p| u32::from(p[0].0) | (u32::from(p[1].0) << 16)));
-                        n
-                    });
+                    let at = *self
+                        .bricks
+                        .entry(std::sync::Arc::as_ptr(brick) as usize)
+                        .or_insert_with(|| {
+                            let n = (cells.len() / 256) as u32;
+                            cells.extend(
+                                brick
+                                    .cells
+                                    .chunks(2)
+                                    .map(|p| u32::from(p[0].0) | (u32::from(p[1].0) << 16)),
+                            );
+                            n
+                        });
                     table[((by * 8 + bx) * 8 + bz) as usize] = at;
                     any = true;
                 }
@@ -393,27 +495,55 @@ impl GenBatch {
 
 /// A chunk's key in the chunk table: face and level, tile, layer.
 fn chunk_key(tile: TileKey, cz: i32) -> [i32; 4] {
-    [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, cz]
+    [
+        i32::from(tile.face) | ((tile.level as i32) << 8),
+        tile.cx,
+        tile.cy,
+        cz,
+    ]
 }
 
 /// Layers [lo, hi) whose chunks `tile` generates (its `ranges` with its
 /// edits, [`ChunkWorld::with_edits`]): the volume's whole extent where rays
 /// reached under its surface band (`deep`: through cave mouths) or within a
 /// few chunks of the eye, else from the surface band up.
-fn layers_needed(grid: &Grid, tile: TileKey, ranges: residency::Ranges, eye: &Eye, deep: bool) -> (i32, i32) {
-    let near_eye = tile_distance(grid, tile, ranges.volume, eye) < 4.0 * f64::from(CHUNK) * grid.level_size(tile.level);
-    if deep || near_eye { ranges.volume } else { (ranges.surface.0, ranges.volume.1) }
+fn layers_needed(
+    grid: &Grid,
+    tile: TileKey,
+    ranges: residency::Ranges,
+    eye: &Eye,
+    deep: bool,
+) -> (i32, i32) {
+    let near_eye = tile_distance(grid, tile, ranges.volume, eye)
+        < 4.0 * f64::from(CHUNK) * grid.level_size(tile.level);
+    if deep || near_eye {
+        ranges.volume
+    } else {
+        (ranges.surface.0, ranges.volume.1)
+    }
 }
 
 /// Whether `fb` can touch cells of `level` with half-cell bounds `i`, `j`,
 /// `k` (inclusive).
-fn brush_meets(fb: &FaceBrush, face: u8, level: u32, i: (i64, i64), j: (i64, i64), k: (i64, i64)) -> bool {
+fn brush_meets(
+    fb: &FaceBrush,
+    face: u8,
+    level: u32,
+    i: (i64, i64),
+    j: (i64, i64),
+    k: (i64, i64),
+) -> bool {
     if fb.face() != face || fb.radius_half < (1u32 << level) {
         return false;
     }
     let w = i64::from(fb.center[3]);
     let (ci, cj) = (i64::from(fb.center[0]), i64::from(fb.center[1]));
-    ci + w >= i.0 && ci - w <= i.1 && cj + w >= j.0 && cj - w <= j.1 && i64::from(fb.k_hi) >= k.0 && i64::from(fb.k_lo) <= k.1
+    ci + w >= i.0
+        && ci - w <= i.1
+        && cj + w >= j.0
+        && cj - w <= j.1
+        && i64::from(fb.k_hi) >= k.0
+        && i64::from(fb.k_lo) <= k.1
 }
 
 /// A generated chunk.
@@ -449,7 +579,10 @@ impl Layers {
     /// Whether these chunks hold every layer `need` asks for, with the same
     /// gap.
     fn holds(&self, need: &Layers) -> bool {
-        self.gap == need.gap && need.bands.iter().all(|&(a, b)| (a..=b).all(|cz| self.bands.iter().any(|&(c, d)| (c..=d).contains(&cz))))
+        self.gap == need.gap
+            && need.bands.iter().all(|&(a, b)| {
+                (a..=b).all(|cz| self.bands.iter().any(|&(c, d)| (c..=d).contains(&cz)))
+            })
     }
 }
 
@@ -735,6 +868,8 @@ pub struct ChunkWorld {
     /// Whether draws write the plain colour target (a world drawn alone:
     /// tests, harnesses); a host's gbuffer takes the published surface.
     plain_colour: bool,
+    /// Renderer-wide mode, consumed by the voxel debug shading.
+    debug_mode: u32,
     pick_slots: Vec<PickSlot>,
     /// Each slot's chunk key (`chunk_keys`, mirrored).
     slot_keys: Vec<[i32; 4]>,
@@ -823,7 +958,13 @@ struct GenCost {
 impl GenCost {
     /// Before the first measured frame: an RTX 3060's (a 300 m/s cruise and
     /// a 50 m blast).
-    const PRIOR: Self = Self { tile: 0.035, chunk: 0.007, chunks_per_tile: 1.7, tiles: CostLine::EMPTY, chunks: CostLine::EMPTY };
+    const PRIOR: Self = Self {
+        tile: 0.035,
+        chunk: 0.007,
+        chunks_per_tile: 1.7,
+        tiles: CostLine::EMPTY,
+        chunks: CostLine::EMPTY,
+    };
 
     /// A batch's fixed milliseconds, then a tile's and a chunk's: the lines'
     /// once their batches spread enough, else the averages.
@@ -846,11 +987,23 @@ struct CostLine {
 }
 
 impl CostLine {
-    const EMPTY: Self = Self { w: 0.0, x: 0.0, y: 0.0, xx: 0.0, xy: 0.0 };
+    const EMPTY: Self = Self {
+        w: 0.0,
+        x: 0.0,
+        y: 0.0,
+        xx: 0.0,
+        xy: 0.0,
+    };
 
     fn add(&mut self, x: f64, y: f64) {
         const KEEP: f64 = 0.98;
-        *self = Self { w: self.w * KEEP + 1.0, x: self.x * KEEP + x, y: self.y * KEEP + y, xx: self.xx * KEEP + x * x, xy: self.xy * KEEP + x * y };
+        *self = Self {
+            w: self.w * KEEP + 1.0,
+            x: self.x * KEEP + x,
+            y: self.y * KEEP + y,
+            xx: self.xx * KEEP + x * x,
+            xy: self.xy * KEEP + x * y,
+        };
     }
 
     /// Fixed and per-item milliseconds, once enough batches of spread
@@ -913,7 +1066,11 @@ impl Targets {
         let texture = |label: &str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -932,13 +1089,21 @@ impl Targets {
             visibility: texture("chunk visibility", wgpu::TextureFormat::Rg32Uint, s),
             colour: texture("chunk colour", wgpu::TextureFormat::Rgba8Unorm, s),
             distance: texture("chunk distance", wgpu::TextureFormat::R32Float, s),
-            exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
+            exits: texture(
+                "chunk exits",
+                wgpu::TextureFormat::R32Float,
+                s | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            ),
             sun_view: view(&sun),
             sun,
             normal: texture("chunk normal", wgpu::TextureFormat::Rgba16Float, s),
             sun_samples: device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("chunk sun samples"),
-                size: wgpu::Extent3d { width: size[0].div_ceil(2), height: size[1].div_ceil(2), depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size[0].div_ceil(2),
+                    height: size[1].div_ceil(2),
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -948,7 +1113,11 @@ impl Targets {
             }),
             sky_samples: device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("chunk sky samples"),
-                size: wgpu::Extent3d { width: size[0].div_ceil(4), height: size[1].div_ceil(4), depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size[0].div_ceil(4),
+                    height: size[1].div_ceil(4),
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -965,7 +1134,9 @@ impl Targets {
             fallback_groups: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chunk sun fallback workgroups"),
                 size: 12,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
         }
@@ -976,28 +1147,50 @@ fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&Default::default())
 }
 
-fn storage(binding: u32, read_only: bool, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+fn storage(
+    binding: u32,
+    read_only: bool,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
 
 fn entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+    wgpu::BindGroupEntry {
+        binding,
+        resource: b.as_entire_binding(),
+    }
 }
 
 fn view_entry(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::TextureView(v),
+    }
 }
 
-fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+fn texture_entry(
+    binding: u32,
+    sample_type: wgpu::TextureSampleType,
+    visibility: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
-        ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         count: None,
     }
 }
@@ -1006,7 +1199,11 @@ fn storage_texture(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroup
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: wgpu::TextureViewDimension::D2 },
+        ty: wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format,
+            view_dimension: wgpu::TextureViewDimension::D2,
+        },
         count: None,
     }
 }
@@ -1015,7 +1212,11 @@ fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayou
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -1027,11 +1228,15 @@ fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayou
 /// (`..._fine`: the kernels for hits finer than the exact levels).
 fn walk_templates(source: &str) -> String {
     // Past a marker's line (checkouts may end lines with \r\n).
-    let past_line = |text: &str, at: usize| text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
+    let past_line =
+        |text: &str, at: usize| text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
     let mut out = String::with_capacity(source.len() * 2);
     let mut rest = source;
     while let Some(start) = rest.find("// WALK {") {
-        let end = rest[start..].find("// } WALK").expect("closed walk template") + start;
+        let end = rest[start..]
+            .find("// } WALK")
+            .expect("closed walk template")
+            + start;
         let body = &rest[past_line(rest, start)..end];
         out.push_str(&rest[..start]);
         out.push_str(body);
@@ -1047,13 +1252,33 @@ fn walk_templates(source: &str) -> String {
     out
 }
 
-pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wide64: bool, counting: bool) -> [(&'static str, String); 2] {
+pub fn shader_sources(
+    plane: bool,
+    program: &crate::terrain::TerrainProgram,
+    wide64: bool,
+    counting: bool,
+) -> [(&'static str, String); 2] {
     // Counters only in a counting build: side effects in a fragment shader
     // can turn early depth tests off.
     // Primary rays count in the trace (`COUNT`), in their walks when
     // `counted` (`WCOUNT`; shadow walks do not).
-    let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
-    let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); heat += u32({n} == 1); }}") } else { String::new() };
+    let count = |n: u32| {
+        if counting {
+            format!("atomicAdd(&counters[{n}], 1u);")
+        } else {
+            String::new()
+        }
+    };
+    let wcount = |n: u32| {
+        let heat = format!(
+            "if counted && (debug_mode() == 2u || debug_mode() == 32u) {{ heat += u32({n} == 1); }}"
+        );
+        if counting {
+            format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}")
+        } else {
+            heat
+        }
+    };
     // The noise library (materials' patches), then the draw.
     let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
@@ -1083,15 +1308,34 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         )
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("PLANE_WORLD", if plane { "true" } else { "false" });
-    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
+    [
+        (
+            "chunk generation",
+            terrain_source(plane, program, wide64, true)
+                + &format!(
+                    "const HALO_GROUPS: u32 = {}u;\n",
+                    crate::engine::HALO_GROUPS
+                )
+                + include_str!("../../shaders/chunk_generate.wgsl"),
+        ),
+        ("chunk draw", draw),
+    ]
 }
 
 impl ChunkWorld {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet) -> Self {
         let program = planet.field().program();
         let wide64 = device.features().contains(wgpu::Features::SHADER_INT64);
-        let [(_, gen_source), (_, draw_source)] = shader_sources(planet.grid().is_plane(), &program, wide64, std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some());
-        let gen_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk generation"), source: wgpu::ShaderSource::Wgsl(gen_source.into()) });
+        let [(_, gen_source), (_, draw_source)] = shader_sources(
+            planet.grid().is_plane(),
+            &program,
+            wide64,
+            std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some(),
+        );
+        let gen_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("chunk generation"),
+            source: wgpu::ShaderSource::Wgsl(gen_source.into()),
+        });
         let c = wgpu::ShaderStages::COMPUTE;
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk generation"),
@@ -1124,7 +1368,11 @@ impl ChunkWorld {
                 storage(27, false, c),
             ],
         });
-        let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
+        let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&gen_layout)],
+            immediate_size: 0,
+        });
         let compute = |entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -1141,19 +1389,35 @@ impl ChunkWorld {
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
-        let table_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk table"), source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_table.wgsl").into()) });
-        let table_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("chunk table"), entries: &[storage(0, true, c), storage(1, false, c)] });
+        let table_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("chunk table"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_table.wgsl").into()),
+        });
+        let table_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk table"),
+            entries: &[storage(0, true, c), storage(1, false, c)],
+        });
         let table_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("chunk table"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&table_layout)], immediate_size: 0 })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(&table_layout)],
+                    immediate_size: 0,
+                }),
+            ),
             module: &table_module,
             entry_point: Some("table_update"),
             compilation_options: Default::default(),
             cache: None,
         });
 
-        let draw_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk draw"), source: wgpu::ShaderSource::Wgsl(draw_source.into()) });
-        let all = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
+        let draw_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("chunk draw"),
+            source: wgpu::ShaderSource::Wgsl(draw_source.into()),
+        });
+        let all =
+            wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk draw"),
             entries: &[
@@ -1178,21 +1442,36 @@ impl ChunkWorld {
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk trace"),
             entries: &[
-                texture_entry(0, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
+                texture_entry(
+                    0,
+                    wgpu::TextureSampleType::Uint,
+                    wgpu::ShaderStages::COMPUTE,
+                ),
                 storage_texture(1, wgpu::TextureFormat::Rg32Uint),
                 storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
                 storage_texture(3, wgpu::TextureFormat::R32Float),
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::ReadWrite, format: wgpu::TextureFormat::R32Float, view_dimension: wgpu::TextureViewDimension::D2 },
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadWrite,
+                        format: wgpu::TextureFormat::R32Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
                     count: None,
                 },
             ],
         });
         let seed_layout_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk seed exits"),
-            entries: &[texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT), storage(22, true, wgpu::ShaderStages::VERTEX)],
+            entries: &[
+                texture_entry(
+                    5,
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
+                storage(22, true, wgpu::ShaderStages::VERTEX),
+            ],
         });
         // The cull writes the draw list the draw layout reads: its own layouts.
         let cull_layout = [
@@ -1202,10 +1481,20 @@ impl ChunkWorld {
             }),
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("chunk cull"),
-                entries: &[storage(17, true, c), storage(18, false, c), storage(19, false, c), storage(20, false, c), storage(21, false, c)],
+                entries: &[
+                    storage(17, true, c),
+                    storage(18, false, c),
+                    storage(19, false, c),
+                    storage(20, false, c),
+                    storage(21, false, c),
+                ],
             }),
         ];
-        let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk cull"), bind_group_layouts: &[Some(&cull_layout[0]), Some(&cull_layout[1])], immediate_size: 0 });
+        let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("chunk cull"),
+            bind_group_layouts: &[Some(&cull_layout[0]), Some(&cull_layout[1])],
+            immediate_size: 0,
+        });
         let cull = |entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -1216,30 +1505,69 @@ impl ChunkWorld {
                 cache: None,
             })
         };
-        let (cull_bin, cull_offsets, cull_scatter) = (cull("cull_bin"), cull("cull_offsets"), cull("cull_scatter"));
+        let (cull_bin, cull_offsets, cull_scatter) =
+            (cull("cull_bin"), cull("cull_offsets"), cull("cull_scatter"));
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk depth resolve"),
             entries: &[
-                texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
-                texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::FRAGMENT),
-                texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(
+                    4,
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
+                texture_entry(
+                    7,
+                    wgpu::TextureSampleType::Uint,
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
+                texture_entry(
+                    14,
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
             ],
         });
-        let layout = |second: &wgpu::BindGroupLayout| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&draw_layout), Some(second)], immediate_size: 0 });
+        let layout = |second: &wgpu::BindGroupLayout| {
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&draw_layout), Some(second)],
+                immediate_size: 0,
+            })
+        };
         let seed_layout = layout(&seed_layout_1);
         let depth = |compare: wgpu::CompareFunction| {
-            Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: Some(true), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() })
+            Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(compare),
+                stencil: Default::default(),
+                bias: Default::default(),
+            })
         };
         let seed = |vertex: &str, fragment: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(fragment),
                 layout: Some(&seed_layout),
-                vertex: wgpu::VertexState { module: &draw_module, entry_point: Some(vertex), compilation_options: Default::default(), buffers: &[] },
-                primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), front_face: wgpu::FrontFace::Ccw, ..Default::default() },
+                vertex: wgpu::VertexState {
+                    module: &draw_module,
+                    entry_point: Some(vertex),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    front_face: wgpu::FrontFace::Ccw,
+                    ..Default::default()
+                },
                 // The nearest box wins (`seed_box`).
                 depth_stencil: depth(helio_core::depth::NEARER),
                 multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState { module: &draw_module, entry_point: Some(fragment), compilation_options: Default::default(), targets: &[Some(SEED_FORMAT.into())] }),
+                fragment: Some(wgpu::FragmentState {
+                    module: &draw_module,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(SEED_FORMAT.into())],
+                }),
                 multiview_mask: None,
                 cache: None,
             })
@@ -1256,13 +1584,26 @@ impl ChunkWorld {
         });
         // Sun shadows: samples a 2x2 block, then every hit.
         let hits = [
-            texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
-            texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
+            texture_entry(
+                4,
+                wgpu::TextureSampleType::Float { filterable: false },
+                wgpu::ShaderStages::COMPUTE,
+            ),
+            texture_entry(
+                7,
+                wgpu::TextureSampleType::Uint,
+                wgpu::ShaderStages::COMPUTE,
+            ),
         ];
-        let shadow_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("chunk sun samples"),
-            entries: &[hits[0], hits[1], storage_texture(9, wgpu::TextureFormat::Rgba32Uint)],
-        });
+        let shadow_sample_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk sun samples"),
+                entries: &[
+                    hits[0],
+                    hits[1],
+                    storage_texture(9, wgpu::TextureFormat::Rgba32Uint),
+                ],
+            });
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk shadow"),
             entries: &[
@@ -1270,22 +1611,42 @@ impl ChunkWorld {
                 hits[1],
                 storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
                 storage_texture(8, wgpu::TextureFormat::Rgba16Float),
-                texture_entry(10, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
+                texture_entry(
+                    10,
+                    wgpu::TextureSampleType::Uint,
+                    wgpu::ShaderStages::COMPUTE,
+                ),
                 storage(11, false, wgpu::ShaderStages::COMPUTE),
                 storage(12, false, wgpu::ShaderStages::COMPUTE),
                 storage_texture(13, wgpu::TextureFormat::Rgba16Float),
-                texture_entry(16, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
+                texture_entry(
+                    16,
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::ShaderStages::COMPUTE,
+                ),
             ],
         });
         let sky_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk sky samples"),
-            entries: &[hits[0], hits[1], storage_texture(15, wgpu::TextureFormat::Rg32Float)],
+            entries: &[
+                hits[0],
+                hits[1],
+                storage_texture(15, wgpu::TextureFormat::Rg32Float),
+            ],
         });
         // The fallbacks' walks: their workgroups are the dispatch's.
-        let shadow_fallback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("chunk shadow fallbacks"),
-            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE), storage_texture(13, wgpu::TextureFormat::Rgba16Float)],
-        });
+        let shadow_fallback_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk shadow fallbacks"),
+                entries: &[
+                    hits[0],
+                    hits[1],
+                    storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
+                    storage_texture(8, wgpu::TextureFormat::Rgba16Float),
+                    storage(11, false, wgpu::ShaderStages::COMPUTE),
+                    storage_texture(13, wgpu::TextureFormat::Rgba16Float),
+                ],
+            });
         let compute = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
@@ -1296,16 +1657,41 @@ impl ChunkWorld {
                 cache: None,
             })
         };
-        let shadow_sample = compute("chunk sun samples", &layout(&shadow_sample_layout), "shadow_sample");
-        let sky_sample = compute("chunk sky samples", &layout(&sky_sample_layout), "sky_sample");
-        let shadow_sample_far = compute("chunk far sun samples", &layout(&shadow_sample_layout), "shadow_sample_far");
-        let sky_sample_far = compute("chunk far sky samples", &layout(&sky_sample_layout), "sky_sample_far");
+        let shadow_sample = compute(
+            "chunk sun samples",
+            &layout(&shadow_sample_layout),
+            "shadow_sample",
+        );
+        let sky_sample = compute(
+            "chunk sky samples",
+            &layout(&sky_sample_layout),
+            "sky_sample",
+        );
+        let shadow_sample_far = compute(
+            "chunk far sun samples",
+            &layout(&shadow_sample_layout),
+            "shadow_sample_far",
+        );
+        let sky_sample_far = compute(
+            "chunk far sky samples",
+            &layout(&sky_sample_layout),
+            "sky_sample_far",
+        );
         let shadow = compute("chunk shadow", &layout(&shadow_layout), "shadow");
-        let shadow_fallback = compute("chunk shadow fallbacks", &layout(&shadow_fallback_layout), "shadow_fallback");
+        let shadow_fallback = compute(
+            "chunk shadow fallbacks",
+            &layout(&shadow_fallback_layout),
+            "shadow_fallback",
+        );
         let publish = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk gbuffer"),
             layout: Some(&layout(&resolve_layout)),
-            vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
+            vertex: wgpu::VertexState {
+                module: &draw_module,
+                entry_point: Some("resolve_vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
             primitive: Default::default(),
             depth_stencil: depth(helio_core::depth::NEARER),
             multisample: Default::default(),
@@ -1313,29 +1699,73 @@ impl ChunkWorld {
                 module: &draw_module,
                 entry_point: Some("publish"),
                 compilation_options: Default::default(),
-                targets: &crate::engine::GBUFFER_FORMATS.map(|format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })),
+                targets: &crate::engine::GBUFFER_FORMATS.map(|format| {
+                    Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
+                }),
             }),
             multiview_mask: None,
             cache: None,
         });
 
-        let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
+        let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
         // Brushes kept analytic: the large ones, then the recent ones.
         let edits = planet.edits();
         let (faces, large_faces, recent_counts) = analytic_faces(edits);
         let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
-        let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
-        let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
-        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk materials"), contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
-        let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
-            (
-                device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: QUERIES * TIMING_RING as u32 }),
-                buffer("chunk timestamps", u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT) * TIMING_RING, wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
-            )
+        let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk world"),
+            contents: bytemuck::bytes_of(&WorldGpu::new(planet)),
+            usage: wgpu::BufferUsages::UNIFORM,
         });
+        let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk terrain"),
+            contents: &terrain_bytes(&program),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
+        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk materials"),
+            contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let queries = device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| {
+                (
+                    device.create_query_set(&wgpu::QuerySetDescriptor {
+                        label: Some("chunk draw"),
+                        ty: wgpu::QueryType::Timestamp,
+                        count: QUERIES * TIMING_RING as u32,
+                    }),
+                    buffer(
+                        "chunk timestamps",
+                        u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT) * TIMING_RING,
+                        wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    ),
+                )
+            });
         let timing_slots = (0..if queries.is_some() { TIMING_RING } else { 0 })
-            .map(|_| TimingSlot { buffer: buffer("chunk timestamps read", u64::from(QUERIES) * 8, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), frame: None, ready: None })
+            .map(|_| TimingSlot {
+                buffer: buffer(
+                    "chunk timestamps read",
+                    u64::from(QUERIES) * 8,
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                ),
+                frame: None,
+                ready: None,
+            })
             .collect();
         let drawn_set = drawn::DrawnSet::new(MAX_CHUNKS, TABLE_SLOTS, planet.grid().levels() - 1);
         let chunk_table = buffer("chunk table", (TABLE_SLOTS * 32) as u64, s);
@@ -1373,45 +1803,100 @@ impl ChunkWorld {
             publish,
             last_group: None,
             targets: None,
-            rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+            rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
             world,
             terrain,
             tile_jobs: buffer("chunk tile jobs", (TILE_BATCH * 16) as u64, s),
-            tile_data: buffer("chunk tile columns", TILE_BATCH as u64 * TILE_COLUMNS * 16, wgpu::BufferUsages::STORAGE),
+            tile_data: buffer(
+                "chunk tile columns",
+                TILE_BATCH as u64 * TILE_COLUMNS * 16,
+                wgpu::BufferUsages::STORAGE,
+            ),
             // The tiles' nodes, the scratch nodes, and the 8 a column's
             // node words read past the last.
             tile_node_data: buffer(
                 "chunk tile nodes",
-                (TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + 8) * u64::from(crate::engine::node_words(&program).max(1)) * 4,
+                (TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2))
+                    + u64::from(crate::engine::NODE_SCRATCH)
+                    + 8)
+                    * u64::from(crate::engine::node_words(&program).max(1))
+                    * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
-            tile_halo_data: buffer("chunk tile halo", TILE_BATCH as u64 * 40 * 40 * 4, wgpu::BufferUsages::STORAGE),
+            tile_halo_data: buffer(
+                "chunk tile halo",
+                TILE_BATCH as u64 * 40 * 40 * 4,
+                wgpu::BufferUsages::STORAGE,
+            ),
             // Four words a tile, then the batch's tile count.
-            tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
+            tile_ranges: buffer(
+                "chunk tile ranges",
+                (TILE_BATCH * 16 + 4) as u64,
+                s | wgpu::BufferUsages::COPY_SRC,
+            ),
             chunk_jobs: buffer("chunk jobs", (CHUNK_BATCH * 32) as u64, s),
-            column_masks: buffer("chunk column masks", CHUNK_BATCH as u64 * TILE_COLUMNS * 8, wgpu::BufferUsages::STORAGE),
-            chunk_meta: buffer("chunk meta", (MAX_CHUNKS * 48) as u64, s | wgpu::BufferUsages::COPY_SRC),
-            mids: buffer("chunk mids", (MAX_CHUNKS * 64 * 16) as u64, wgpu::BufferUsages::STORAGE),
-            mid_leaves: buffer("chunk mid leaves", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
-            leaves: buffer("chunk leaves", LEAF_CAPACITY * 8, wgpu::BufferUsages::STORAGE),
+            column_masks: buffer(
+                "chunk column masks",
+                CHUNK_BATCH as u64 * TILE_COLUMNS * 8,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            chunk_meta: buffer(
+                "chunk meta",
+                (MAX_CHUNKS * 48) as u64,
+                s | wgpu::BufferUsages::COPY_SRC,
+            ),
+            mids: buffer(
+                "chunk mids",
+                (MAX_CHUNKS * 64 * 16) as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            mid_leaves: buffer(
+                "chunk mid leaves",
+                (MAX_CHUNKS * 64 * 4) as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            leaves: buffer(
+                "chunk leaves",
+                LEAF_CAPACITY * 8,
+                wgpu::BufferUsages::STORAGE,
+            ),
             // Every page free: the stack's count, no overflow.
             leaf_alloc: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk leaf allocator"),
                 contents: bytemuck::cast_slice(&[(LEAF_CAPACITY / LEAF_PAGE) as i32, 0]),
                 usage: s | wgpu::BufferUsages::COPY_SRC,
             }),
-            column_materials: buffer("chunk column materials", CHUNK_BATCH as u64 * TILE_COLUMNS * 4, wgpu::BufferUsages::STORAGE),
+            column_materials: buffer(
+                "chunk column materials",
+                CHUNK_BATCH as u64 * TILE_COLUMNS * 4,
+                wgpu::BufferUsages::STORAGE,
+            ),
             leaf_materials: buffer("chunk leaf materials", LEAF_CAPACITY * 2, s),
             leaf_normals: buffer("chunk leaf normals", LEAF_CAPACITY * 2, s),
-            mid_materials: buffer("chunk mid materials", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
-            params: buffer("chunk draw params", std::mem::size_of::<DrawParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
+            mid_materials: buffer(
+                "chunk mid materials",
+                (MAX_CHUNKS * 64 * 4) as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            params: buffer(
+                "chunk draw params",
+                std::mem::size_of::<DrawParams>() as u64,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
             materials,
             chunk_keys: buffer("chunk keys", (MAX_CHUNKS * 16) as u64, s),
             chunk_table,
 
             face_cells: planet.grid().cells() as u32,
             exact_level: exact_level(planet.grid()),
-            statics: buffer("chunk statics", (MAX_CHUNKS * std::mem::size_of::<ChunkStatic>()) as u64, s),
+            statics: buffer(
+                "chunk statics",
+                (MAX_CHUNKS * std::mem::size_of::<ChunkStatic>()) as u64,
+                s,
+            ),
             draw_list: buffer("chunk draw list", (MAX_CHUNKS * 4) as u64, s),
             drawn_slots: buffer("chunk drawn slots", (MAX_CHUNKS * 4) as u64, s),
             cull_state: buffer("chunk cull", CULL_BYTES, s | wgpu::BufferUsages::COPY_SRC),
@@ -1425,31 +1910,75 @@ impl ChunkWorld {
             reach: buffer("chunk reach", REACH_BYTES, s | wgpu::BufferUsages::COPY_SRC),
             polls_device: true,
             plain_colour: true,
-            reach_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk reach read", REACH_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free }).collect(),
+            debug_mode: 0,
+            reach_slots: (0..TIMING_RING)
+                .map(|_| ReachSlot {
+                    buffer: buffer(
+                        "chunk reach read",
+                        REACH_BYTES,
+                        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    ),
+                    state: ReachState::Free,
+                })
+                .collect(),
             deep: FxHashSet::default(),
             reached: Vec::new(),
-            pick_slots: (0..3).map(|_| PickSlot { buffer: buffer("chunk picks", 256 * MAX_PICKS as u64, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), requests: Vec::new(), sink: None, state: ReachState::Free }).collect(),
+            pick_slots: (0..3)
+                .map(|_| PickSlot {
+                    buffer: buffer(
+                        "chunk picks",
+                        256 * MAX_PICKS as u64,
+                        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    ),
+                    requests: Vec::new(),
+                    sink: None,
+                    state: ReachState::Free,
+                })
+                .collect(),
             slot_keys: vec![[-1, 0, 0, 0]; MAX_CHUNKS],
             evict_pipeline,
             table_layout,
             table_pipeline,
             free_pages: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk free pages"),
-                contents: bytemuck::cast_slice(&(0..(LEAF_CAPACITY / LEAF_PAGE) as u32).collect::<Vec<u32>>()),
+                contents: bytemuck::cast_slice(
+                    &(0..(LEAF_CAPACITY / LEAF_PAGE) as u32).collect::<Vec<u32>>(),
+                ),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
-            leaf_pages: buffer("chunk leaf pages", MAX_CHUNKS as u64 * LEAF_PAGES * 4, wgpu::BufferUsages::STORAGE),
-            job_results: buffer("chunk job results", (CHUNK_BATCH * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
+            leaf_pages: buffer(
+                "chunk leaf pages",
+                MAX_CHUNKS as u64 * LEAF_PAGES * 4,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            job_results: buffer(
+                "chunk job results",
+                (CHUNK_BATCH * 16) as u64,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            ),
             brushes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk brushes"),
-                contents: bytemuck::cast_slice(if faces.is_empty() { &NO_BRUSH[..] } else { &faces }),
+                contents: bytemuck::cast_slice(if faces.is_empty() {
+                    &NO_BRUSH[..]
+                } else {
+                    &faces
+                }),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
             faces,
             large_faces,
             recent_counts,
             baked: edits.baked.clone(),
-            baked_tiles: edits.baked.bricks().map(|(k, _)| TileKey { face: k.face, level: u32::from(k.level), cx: k.bi >> 3, cy: k.bj >> 3 }).collect(),
+            baked_tiles: edits
+                .baked
+                .bricks()
+                .map(|(k, _)| TileKey {
+                    face: k.face,
+                    level: u32::from(k.level),
+                    cx: k.bi >> 3,
+                    cy: k.bj >> 3,
+                })
+                .collect(),
             edit_state: EditState::of(edits),
             urgent: FxHashSet::default(),
             hidden: FxHashSet::default(),
@@ -1486,17 +2015,30 @@ impl ChunkWorld {
         if size == 0 {
             return Vec::new();
         }
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(source, 0, &staging, 0, size);
         self.queue.submit([encoder.finish()]);
         staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let out = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
         out
     }
 
-    fn gen_group(&self, brush_refs: &wgpu::Buffer, evictions: &wgpu::Buffer, baked_refs: &wgpu::Buffer, baked_cells: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn gen_group(
+        &self,
+        brush_refs: &wgpu::Buffer,
+        evictions: &wgpu::Buffer,
+        baked_refs: &wgpu::Buffer,
+        baked_cells: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk generation"),
             layout: &self.gen_layout,
@@ -1538,11 +2080,29 @@ impl ChunkWorld {
     /// is near an eye down there).
     fn with_edits(&self, tile: TileKey, ranges: residency::Ranges) -> residency::Ranges {
         let shift = tile.level + 1;
-        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let span = |c: i32| {
+            (
+                i64::from(c * CHUNK) << shift,
+                (i64::from(c * CHUNK + CHUNK) << shift) - 1,
+            )
+        };
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for fb in &self.faces {
-            if fb.op() <= 1 && brush_meets(fb, tile.face, tile.level, span(tile.cx), span(tile.cy), (i64::MIN / 4, i64::MAX / 4)) {
-                for band in self.surface_bands(fb, tile).into_iter().filter(|b| b.1 > b.0) {
+            if fb.op() <= 1
+                && brush_meets(
+                    fb,
+                    tile.face,
+                    tile.level,
+                    span(tile.cx),
+                    span(tile.cy),
+                    (i64::MIN / 4, i64::MAX / 4),
+                )
+            {
+                for band in self
+                    .surface_bands(fb, tile)
+                    .into_iter()
+                    .filter(|b| b.1 > b.0)
+                {
                     lo = lo.min(band.0);
                     hi = hi.max(band.1);
                 }
@@ -1551,7 +2111,12 @@ impl ChunkWorld {
         if self.baked_tiles.contains(&tile) {
             for by in 0..8 {
                 for bx in 0..8 {
-                    let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + bx, cj: tile.cy * 8 + by };
+                    let key = ColumnKey {
+                        face: tile.face,
+                        level: tile.level as u8,
+                        ci: tile.cx * 8 + bx,
+                        cj: tile.cy * 8 + by,
+                    };
                     for (bk, _) in self.baked.column(&key).into_iter().flat_map(|c| c.iter()) {
                         lo = lo.min(bk * 8);
                         hi = hi.max(bk * 8 + 8);
@@ -1559,7 +2124,14 @@ impl ChunkWorld {
                 }
             }
         }
-        residency::Ranges { edits: if lo > hi { residency::NO_EDITS } else { (lo, hi) }, ..ranges }
+        residency::Ranges {
+            edits: if lo > hi {
+                residency::NO_EDITS
+            } else {
+                (lo, hi)
+            },
+            ..ranges
+        }
     }
 
     /// Layers [lo, hi) of `tile`'s level where brush `fb`'s surface can be
@@ -1574,14 +2146,22 @@ impl ChunkWorld {
     fn surface_bands(&self, fb: &FaceBrush, tile: TileKey) -> [(i32, i32); 2] {
         let grid = &self.grid;
         let shift = tile.level + 1;
-        let band = |k_lo: i32, k_hi: i32| ((k_lo.max(fb.k_lo) >> shift) - 1, (k_hi.min(fb.k_hi) >> shift) + 2);
+        let band = |k_lo: i32, k_hi: i32| {
+            (
+                (k_lo.max(fb.k_lo) >> shift) - 1,
+                (k_hi.min(fb.k_hi) >> shift) + 2,
+            )
+        };
         const NO_BAND: (i32, i32) = (0, 0);
         if fb.shape() != crate::edits::SHAPE_BALL || grid.is_plane() {
             return [band(fb.k_lo, fb.k_hi), NO_BAND];
         }
         let units = f64::from(grid.sphere_constants()[2]) / grid.radius();
         let centre = glam::IVec3::from_slice(&fb.ball[..3]).as_dvec3() / units;
-        let (d, r) = (centre.length(), f64::from(fb.ball[3].unsigned_abs()) / units);
+        let (d, r) = (
+            centre.length(),
+            f64::from(fb.ball[3].unsigned_abs()) / units,
+        );
         // The tile's directions in the brushes' (domain) space: its middle,
         // and the angle to its farthest corner cell (its edges are great
         // circles) and two base cells more.
@@ -1595,23 +2175,44 @@ impl ChunkWorld {
             .fold(0.0, f64::max)
             * 1.01
             + 2.0 * grid.voxel_size() / grid.radius();
-        let t = if d > 0.0 { middle.angle_between(centre / d) } else { 0.0 };
-        let (near, far) = ((t - spread).max(0.0), (t + spread).min(std::f64::consts::PI));
+        let t = if d > 0.0 {
+            middle.angle_between(centre / d)
+        } else {
+            0.0
+        };
+        let (near, far) = (
+            (t - spread).max(0.0),
+            (t + spread).min(std::f64::consts::PI),
+        );
         // Half base cells of a radius, two cells of margin.
-        let k = |radius: f64, margin: f64| (((radius - grid.radius()) / grid.voxel_size() + margin) * 2.0).clamp(-2.0e9, 2.0e9) as i32;
-        let cap = |t: f64, sign: f64| d * t.cos() + sign * (r * r - (d * t.sin()).powi(2)).max(0.0).sqrt();
+        let k = |radius: f64, margin: f64| {
+            (((radius - grid.radius()) / grid.voxel_size() + margin) * 2.0).clamp(-2.0e9, 2.0e9)
+                as i32
+        };
+        let cap = |t: f64, sign: f64| {
+            d * t.cos() + sign * (r * r - (d * t.sin()).powi(2)).max(0.0).sqrt()
+        };
         if d <= r {
             // The planet's centre is inside: the upper cap alone.
-            return [band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)), NO_BAND];
+            return [
+                band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)),
+                NO_BAND,
+            ];
         }
         let silhouette = (r / d).asin();
         if near >= silhouette {
             return [NO_BAND; 2];
         }
         if far >= silhouette {
-            return [band(k(cap(near, -1.0), -2.0), k(cap(near, 1.0), 2.0)), NO_BAND];
+            return [
+                band(k(cap(near, -1.0), -2.0), k(cap(near, 1.0), 2.0)),
+                NO_BAND,
+            ];
         }
-        [band(k(cap(near, -1.0), -2.0), k(cap(far, -1.0), 2.0)), band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0))]
+        [
+            band(k(cap(near, -1.0), -2.0), k(cap(far, -1.0), 2.0)),
+            band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)),
+        ]
     }
 
     /// The chunk layers `tile` generates and what lies where it has none.
@@ -1626,7 +2227,12 @@ impl ChunkWorld {
     fn layers(&self, tile: TileKey, ranges: residency::Ranges, eye: &Eye, deep: bool) -> Layers {
         let grid = &self.grid;
         let shift = tile.level + 1;
-        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let span = |c: i32| {
+            (
+                i64::from(c * CHUNK) << shift,
+                (i64::from(c * CHUNK + CHUNK) << shift) - 1,
+            )
+        };
         let mut bands: Vec<(i32, i32)> = Vec::new();
         let (lo, hi) = layers_needed(grid, tile, ranges, eye, deep);
         if hi > lo {
@@ -1635,9 +2241,22 @@ impl ChunkWorld {
         // The brushes that add or remove over the tile, in order.
         let mut shapes = Vec::new();
         for fb in &self.faces {
-            if fb.op() <= 1 && brush_meets(fb, tile.face, tile.level, span(tile.cx), span(tile.cy), (i64::MIN / 4, i64::MAX / 4)) {
+            if fb.op() <= 1
+                && brush_meets(
+                    fb,
+                    tile.face,
+                    tile.level,
+                    span(tile.cx),
+                    span(tile.cy),
+                    (i64::MIN / 4, i64::MAX / 4),
+                )
+            {
                 let before = bands.len();
-                bands.extend(self.surface_bands(fb, tile).into_iter().filter(|b| b.1 > b.0));
+                bands.extend(
+                    self.surface_bands(fb, tile)
+                        .into_iter()
+                        .filter(|b| b.1 > b.0),
+                );
                 if bands.len() > before {
                     shapes.push(fb);
                 }
@@ -1646,7 +2265,12 @@ impl ChunkWorld {
         if self.baked_tiles.contains(&tile) {
             for by in 0..8 {
                 for bx in 0..8 {
-                    let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + bx, cj: tile.cy * 8 + by };
+                    let key = ColumnKey {
+                        face: tile.face,
+                        level: tile.level as u8,
+                        ci: tile.cx * 8 + bx,
+                        cj: tile.cy * 8 + by,
+                    };
                     for (bk, _) in self.baked.column(&key).into_iter().flat_map(|c| c.iter()) {
                         bands.push((bk * 8, bk * 8 + 8));
                     }
@@ -1656,7 +2280,11 @@ impl ChunkWorld {
         // Without edits a tile is the field's band: rock under it, air over.
         let edited = bands.len() > usize::from(hi > lo);
         // Chunk layers, merged where fewer than two chunks apart.
-        let mut layers: Vec<(i32, i32)> = bands.iter().filter(|b| b.1 > b.0).map(|&(a, b)| (a.div_euclid(CHUNK), (b - 1).div_euclid(CHUNK))).collect();
+        let mut layers: Vec<(i32, i32)> = bands
+            .iter()
+            .filter(|b| b.1 > b.0)
+            .map(|&(a, b)| (a.div_euclid(CHUNK), (b - 1).div_euclid(CHUNK)))
+            .collect();
         layers.sort_unstable();
         let mut merged: Vec<(i32, i32)> = Vec::new();
         for (a, b) in layers {
@@ -1668,19 +2296,32 @@ impl ChunkWorld {
         // Only regions clear of the field's volume (its caves may lie under
         // the surface band) hold no surface; a gap within it keeps its
         // chunks, and under the chunks stays rock reached through mouths.
-        let volume = (ranges.volume.0.div_euclid(CHUNK), (ranges.volume.1 - 1).div_euclid(CHUNK));
+        let volume = (
+            ranges.volume.0.div_euclid(CHUNK),
+            (ranges.volume.1 - 1).div_euclid(CHUNK),
+        );
         // What fills a region without surfaces: at a cell of it under the
         // tile's centre, the last brush that adds or removes there, else the
         // field (rock under its volume, air over it). Baked edits lie in
         // bands of their own.
         let solid = |z: i32| {
             let (i, j) = (tile.cx * CHUNK + CHUNK / 2, tile.cy * CHUNK + CHUNK / 2);
-            let centre = [center_half(i, tile.level), center_half(j, tile.level), center_half(z, tile.level)];
+            let centre = [
+                center_half(i, tile.level),
+                center_half(j, tile.level),
+                center_half(z, tile.level),
+            ];
             let mut point = None;
             shapes
                 .iter()
                 .rev()
-                .find(|b| b.contains(centre, || *point.get_or_insert_with(|| grid.volume_point(tile.face, i, j, z, tile.level))))
+                .find(|b| {
+                    b.contains(centre, || {
+                        *point.get_or_insert_with(|| {
+                            grid.volume_point(tile.face, i, j, z, tile.level)
+                        })
+                    })
+                })
                 .map_or(z < ranges.volume.0, |b| b.op() == 1)
         };
         let clear = |a: i32, b: i32| b <= volume.0 || a > volume.1;
@@ -1700,7 +2341,11 @@ impl ChunkWorld {
             }
             if let Some(&widest) = rock.iter().max_by_key(|g| g.1 - g.0) {
                 gap.solid = widest;
-                fill.extend(rock.iter().filter(|&&g| g != widest).map(|&(a, b)| (a, b - 1)));
+                fill.extend(
+                    rock.iter()
+                        .filter(|&&g| g != widest)
+                        .map(|&(a, b)| (a, b - 1)),
+                );
             }
             merged.extend(fill);
             merged.sort_unstable();
@@ -1711,7 +2356,16 @@ impl ChunkWorld {
     /// Jobs generating `key` (with `ranges`) into `batch`; its old chunks,
     /// if any, to `evictions`. False when the batch or the slots are full.
     #[allow(clippy::too_many_arguments)]
-    fn queue_tile(&mut self, key: TileKey, ranges: residency::Ranges, eye_at: &Eye, batch: &mut GenBatch, readback: &mut Readback, evictions: &mut Vec<u32>, stats: &mut UpdateStats) -> bool {
+    fn queue_tile(
+        &mut self,
+        key: TileKey,
+        ranges: residency::Ranges,
+        eye_at: &Eye,
+        batch: &mut GenBatch,
+        readback: &mut Readback,
+        evictions: &mut Vec<u32>,
+        stats: &mut UpdateStats,
+    ) -> bool {
         let grid = self.grid;
         let ranges = self.with_edits(key, ranges);
         let layers = self.layers(key, ranges, eye_at, self.deep.contains(&key));
@@ -1724,10 +2378,20 @@ impl ChunkWorld {
             return false;
         }
         let index = batch.tile_jobs.len() as u32;
-        batch.tile_jobs.push(TileJob { face: u32::from(key.face), level: key.level, cx: key.cx, cy: key.cy });
+        batch.tile_jobs.push(TileJob {
+            face: u32::from(key.face),
+            level: key.level,
+            cx: key.cx,
+            cy: key.cy,
+        });
         readback.tiles.push(key);
         let shift = key.level + 1;
-        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let span = |c: i32| {
+            (
+                i64::from(c * CHUNK) << shift,
+                (i64::from(c * CHUNK + CHUNK) << shift) - 1,
+            )
+        };
         let baked = self.baked_tiles.contains(&key);
         let mut chunks = Vec::new();
         for cz in layers.bands.iter().flat_map(|&(a, b)| a..=b) {
@@ -1736,24 +2400,65 @@ impl ChunkWorld {
             let first = batch.refs.len() as u32;
             let mut large = 0;
             for (b, fb) in self.faces.iter().enumerate() {
-                if brush_meets(fb, key.face, key.level, span(key.cx), span(key.cy), span(cz)) {
+                if brush_meets(
+                    fb,
+                    key.face,
+                    key.level,
+                    span(key.cx),
+                    span(key.cy),
+                    span(cz),
+                ) {
                     batch.refs.push(b as u32);
                     large += u32::from(b < self.large_faces);
                 }
             }
-            let baked = if baked { batch.baked_table(&self.baked, key, cz) } else { u32::MAX };
-            batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, _pad: 0 });
+            let baked = if baked {
+                batch.baked_table(&self.baked, key, cz)
+            } else {
+                u32::MAX
+            };
+            batch.chunk_jobs.push(ChunkJob {
+                tile: index,
+                cz,
+                slot,
+                brushes: first,
+                brush_count: batch.refs.len() as u32 - first,
+                large,
+                baked,
+                _pad: 0,
+            });
             // Layers not read back yet: the whole chunk.
             let record = chunk_static(&grid, key, cz, slot, (0.0, 64.0), 32.0, self.exact_level);
-            self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
-            chunks.push(Chunk { cz, slot, serial: self.serial, z: None });
-            self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(key, cz)));
+            self.queue.write_buffer(
+                &self.statics,
+                u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64,
+                bytemuck::bytes_of(&record),
+            );
+            chunks.push(Chunk {
+                cz,
+                slot,
+                serial: self.serial,
+                z: None,
+            });
+            self.queue.write_buffer(
+                &self.chunk_keys,
+                u64::from(slot) * 16,
+                bytemuck::cast_slice(&chunk_key(key, cz)),
+            );
             self.slot_keys[slot as usize] = chunk_key(key, cz);
             readback.chunks.push((key, cz, slot, self.serial));
         }
         stats.generated_chunks += chunks.len();
         let shown = self.drawn_set.holds(key);
-        let old = self.tiles.insert(key, TileChunks { chunks, layers, ranges, shown });
+        let old = self.tiles.insert(
+            key,
+            TileChunks {
+                chunks,
+                layers,
+                ranges,
+                shown,
+            },
+        );
         stats.shown_tiles += usize::from(shown && !old.as_ref().is_some_and(|o| o.shown));
         if let Some(old) = old {
             evictions.extend(old.chunks.iter().map(|c| c.slot));
@@ -1776,7 +2481,9 @@ impl ChunkWorld {
         if state == self.edit_state {
             return true;
         }
-        let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else { return false };
+        let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else {
+            return false;
+        };
         let (faces, large_faces, recent_counts) = analytic_faces(edits);
         // Brushes in one list and not the other.
         let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
@@ -1803,17 +2510,28 @@ impl ChunkWorld {
             }
         }
         for column in columns {
-            let key = TileKey { face: column.face, level: u32::from(column.level), cx: column.ci >> 3, cy: column.cj >> 3 };
+            let key = TileKey {
+                face: column.face,
+                level: u32::from(column.level),
+                cx: column.ci >> 3,
+                cy: column.cj >> 3,
+            };
             self.baked_tiles.insert(key);
             if self.tiles.contains_key(&key) && !self.urgent.contains(&key) {
                 self.stale.insert(key);
             }
         }
-        self.brushes = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk brushes"),
-            contents: bytemuck::cast_slice(if faces.is_empty() { &NO_BRUSH[..] } else { &faces }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        self.brushes = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk brushes"),
+                contents: bytemuck::cast_slice(if faces.is_empty() {
+                    &NO_BRUSH[..]
+                } else {
+                    &faces
+                }),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
         self.faces = faces;
         self.large_faces = large_faces;
         self.recent_counts = recent_counts;
@@ -1827,15 +2545,30 @@ impl ChunkWorld {
     /// the tiles under its footprint, or (a footprint of more tiles than
     /// are resident: a planet-scale brush) the resident tiles in it.
     fn mark_brush(&mut self, fb: &FaceBrush) {
-        let (ci, cj, w) = (i64::from(fb.center[0]), i64::from(fb.center[1]), i64::from(fb.center[3]));
+        let (ci, cj, w) = (
+            i64::from(fb.center[0]),
+            i64::from(fb.center[1]),
+            i64::from(fb.center[3]),
+        );
         // Half base cells to tiles of a level.
-        let tile = |half: i64, level: u32| (half.div_euclid(2) >> level).div_euclid(i64::from(CHUNK)) as i32;
-        let span = |level: u32| (tile(ci - w, level)..=tile(ci + w, level), tile(cj - w, level)..=tile(cj + w, level));
-        let levels = (0..self.grid.levels()).take_while(|&l| fb.active(l)).count() as u32;
-        let footprint: u64 = (0..levels).map(|l| {
-            let (x, y) = span(l);
-            (x.end() - x.start() + 1) as u64 * (y.end() - y.start() + 1) as u64
-        }).sum();
+        let tile = |half: i64, level: u32| {
+            (half.div_euclid(2) >> level).div_euclid(i64::from(CHUNK)) as i32
+        };
+        let span = |level: u32| {
+            (
+                tile(ci - w, level)..=tile(ci + w, level),
+                tile(cj - w, level)..=tile(cj + w, level),
+            )
+        };
+        let levels = (0..self.grid.levels())
+            .take_while(|&l| fb.active(l))
+            .count() as u32;
+        let footprint: u64 = (0..levels)
+            .map(|l| {
+                let (x, y) = span(l);
+                (x.end() - x.start() + 1) as u64 * (y.end() - y.start() + 1) as u64
+            })
+            .sum();
         let mut marked = Vec::new();
         if footprint > self.tiles.len() as u64 {
             marked.extend(self.tiles.keys().filter(|k| {
@@ -1847,7 +2580,12 @@ impl ChunkWorld {
                 let (xs, ys) = span(level);
                 for cx in xs {
                     for cy in ys.clone() {
-                        let key = TileKey { face: fb.face(), level, cx, cy };
+                        let key = TileKey {
+                            face: fb.face(),
+                            level,
+                            cx,
+                            cy,
+                        };
                         if self.tiles.contains_key(&key) {
                             marked.push(key);
                         }
@@ -1866,13 +2604,25 @@ impl ChunkWorld {
     /// back finished generation results, plan, evict, and generate the
     /// most wanted tiles within the budget. [`Self::draw`] then shows the
     /// plan's tiles.
-    pub fn update(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, eye: DVec3, velocity: DVec3, view: Option<residency::View>, frame: u64, config: &ResidencyConfig) -> UpdateStats {
+    pub fn update(
+        &mut self,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        eye: DVec3,
+        velocity: DVec3,
+        view: Option<residency::View>,
+        frame: u64,
+        config: &ResidencyConfig,
+    ) -> UpdateStats {
         let grid = self.grid;
         let eye_at = Eye::new(&grid, eye);
         self.claim_timing(frame);
         let mut stats = UpdateStats::default();
         if self.worker.is_none() {
-            self.worker = Some(residency::Worker::spawn(grid, self.height_layers, config.plan));
+            self.worker = Some(residency::Worker::spawn(
+                grid,
+                self.height_layers,
+                config.plan,
+            ));
         }
         let mut evictions: Vec<u32> = Vec::new();
 
@@ -1885,7 +2635,11 @@ impl ChunkWorld {
         if self.polls_device {
             let _ = self.device.poll(wgpu::PollType::Poll);
         }
-        while self.readbacks.front().is_some_and(|r| r.ready.load(std::sync::atomic::Ordering::Acquire)) {
+        while self
+            .readbacks
+            .front()
+            .is_some_and(|r| r.ready.load(std::sync::atomic::Ordering::Acquire))
+        {
             let r = self.readbacks.pop_front().unwrap();
             {
                 let data = r.buffer.slice(..).get_mapped_range().unwrap();
@@ -1895,7 +2649,14 @@ impl ChunkWorld {
                     if w[0] > w[1] {
                         continue;
                     }
-                    let ranges = self.with_edits(*key, residency::Ranges { volume: (w[0], w[1]), surface: (w[2], w[1]), edits: residency::NO_EDITS });
+                    let ranges = self.with_edits(
+                        *key,
+                        residency::Ranges {
+                            volume: (w[0], w[1]),
+                            surface: (w[2], w[1]),
+                            edits: residency::NO_EDITS,
+                        },
+                    );
                     self.events.push(residency::Event::Measured(*key, ranges));
                     if let Some(t) = self.tiles.get_mut(key) {
                         t.ranges = ranges;
@@ -1913,8 +2674,12 @@ impl ChunkWorld {
                 let base = r.tiles.len() * 4;
                 for (n, &(key, _, _, serial)) in r.chunks.iter().enumerate() {
                     let w = &words[base + n * 4..base + n * 4 + 4];
-                    let Some(tile) = self.tiles.get_mut(&key) else { continue };
-                    let Some(i) = tile.chunks.iter().position(|c| c.serial == serial) else { continue };
+                    let Some(tile) = self.tiles.get_mut(&key) else {
+                        continue;
+                    };
+                    let Some(i) = tile.chunks.iter().position(|c| c.serial == serial) else {
+                        continue;
+                    };
                     self.changed_tiles.insert(key);
                     if w[3] & 8 != 0 {
                         stats.out_of_leaves = true;
@@ -1930,9 +2695,25 @@ impl ChunkWorld {
                         // Its frame about its columns' mean top (its ground),
                         // else its occupied layers.
                         let surface = (w[3] as u32) >> 16;
-                        let about = if surface == 0xffff { (w[1] + w[2]) as f32 * 0.5 } else { surface as f32 / 4.0 };
-                        let record = chunk_static(&self.grid, key, c.cz, c.slot, (w[1] as f32, w[2] as f32), about, self.exact_level);
-                        self.queue.write_buffer(&self.statics, u64::from(c.slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
+                        let about = if surface == 0xffff {
+                            (w[1] + w[2]) as f32 * 0.5
+                        } else {
+                            surface as f32 / 4.0
+                        };
+                        let record = chunk_static(
+                            &self.grid,
+                            key,
+                            c.cz,
+                            c.slot,
+                            (w[1] as f32, w[2] as f32),
+                            about,
+                            self.exact_level,
+                        );
+                        self.queue.write_buffer(
+                            &self.statics,
+                            u64::from(c.slot) * std::mem::size_of::<ChunkStatic>() as u64,
+                            bytemuck::bytes_of(&record),
+                        );
                     }
                 }
             }
@@ -1967,7 +2748,13 @@ impl ChunkWorld {
         stats.plan_ms = self.plan_made.1;
         // Events the plan has not seen, or another eye or view (a camera
         // that moved since): its requests are not yet known.
-        let unseen = !self.events.is_empty() || self.planned_for != Some(residency::PlannedFor { events_seen: worker.events_sent(), eye, view });
+        let unseen = !self.events.is_empty()
+            || self.planned_for
+                != Some(residency::PlannedFor {
+                    events_seen: worker.events_sent(),
+                    eye,
+                    view,
+                });
         worker.submit(eye, velocity, view, frame, &mut self.events);
         lap(&mut stats, 1);
         let plan = &self.plan;
@@ -1991,7 +2778,12 @@ impl ChunkWorld {
         // now; baked edits, within the budget), then the most wanted.
         let mut batch = GenBatch::default();
         let mut readback = Readback {
-            buffer: self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: 16, usage: wgpu::BufferUsages::MAP_READ, mapped_at_creation: false }),
+            buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chunk results"),
+                size: 16,
+                usage: wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
             ready: Default::default(),
             tiles: Vec::new(),
             chunks: Vec::new(),
@@ -2002,10 +2794,16 @@ impl ChunkWorld {
         let cpt = self.cost.chunks_per_tile;
         let cost = config.generate_ms.map(|ms| (ms, self.cost.model()));
         let most = config.tiles_per_frame.min(TILE_BATCH);
-        stats.budget = cost.map_or(most, |(ms, (fixed, tile, chunk))| (((ms - fixed).max(0.0) / (tile + chunk * cpt)) as usize).clamp(8, most));
+        stats.budget = cost.map_or(most, |(ms, (fixed, tile, chunk))| {
+            (((ms - fixed).max(0.0) / (tile + chunk * cpt)) as usize).clamp(8, most)
+        });
         let full = |batch: &GenBatch| {
             let tiles = batch.tile_jobs.len();
-            tiles >= most || cost.is_some_and(|(ms, (fixed, tile, chunk))| tiles >= 8 && fixed + tiles as f64 * tile + batch.chunk_jobs.len() as f64 * chunk >= ms)
+            tiles >= most
+                || cost.is_some_and(|(ms, (fixed, tile, chunk))| {
+                    tiles >= 8
+                        && fixed + tiles as f64 * tile + batch.chunk_jobs.len() as f64 * chunk >= ms
+                })
         };
         // Tiles edits changed: coarsest first, then drawn ones, nearest
         // first, within the frame's budget. A blast shows at once in coarse
@@ -2015,11 +2813,24 @@ impl ChunkWorld {
         let mut edited: Vec<(TileKey, bool, f64)> = Vec::with_capacity(self.urgent.len());
         for k in self.urgent.drain() {
             let tiles = &self.tiles;
-            let distance = *self.urgent_distance.entry(k).or_insert_with(|| tiles.get(&k).map_or(f64::INFINITY, |t| tile_distance(&grid, k, t.ranges.extent(), &eye_at)));
+            let distance = *self.urgent_distance.entry(k).or_insert_with(|| {
+                tiles.get(&k).map_or(f64::INFINITY, |t| {
+                    tile_distance(&grid, k, t.ranges.extent(), &eye_at)
+                })
+            });
             edited.push((k, !self.drawn_set.holds(k), distance));
         }
-        edited.sort_unstable_by(|a, b| b.0.level.cmp(&a.0.level).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
-        let edited: Vec<(TileKey, bool)> = edited.into_iter().map(|(k, ..)| (k, true)).chain(self.stale.iter().map(|k| (*k, false))).collect();
+        edited.sort_unstable_by(|a, b| {
+            b.0.level
+                .cmp(&a.0.level)
+                .then(a.1.cmp(&b.1))
+                .then(a.2.total_cmp(&b.2))
+        });
+        let edited: Vec<(TileKey, bool)> = edited
+            .into_iter()
+            .map(|(k, ..)| (k, true))
+            .chain(self.stale.iter().map(|k| (*k, false)))
+            .collect();
         for (key, urgent) in edited {
             if full(&batch) || batch.chunk_jobs.len() >= CHUNK_BATCH || stats.out_of_slots {
                 if urgent {
@@ -2029,8 +2840,18 @@ impl ChunkWorld {
                 break;
             }
             self.stale.remove(&key);
-            let Some(ranges) = self.tiles.get(&key).map(|t| t.ranges) else { continue };
-            if !self.queue_tile(key, ranges, &eye_at, &mut batch, &mut readback, &mut evictions, &mut stats) {
+            let Some(ranges) = self.tiles.get(&key).map(|t| t.ranges) else {
+                continue;
+            };
+            if !self.queue_tile(
+                key,
+                ranges,
+                &eye_at,
+                &mut batch,
+                &mut readback,
+                &mut evictions,
+                &mut stats,
+            ) {
                 if urgent {
                     self.urgent.insert(key);
                 } else {
@@ -2054,54 +2875,112 @@ impl ChunkWorld {
             if self.tiles.contains_key(key) {
                 continue;
             }
-            if !self.queue_tile(*key, *ranges, &eye_at, &mut batch, &mut readback, &mut evictions, &mut stats) {
+            if !self.queue_tile(
+                *key,
+                *ranges,
+                &eye_at,
+                &mut batch,
+                &mut readback,
+                &mut evictions,
+                &mut stats,
+            ) {
                 break;
             }
         }
         self.plan.requests = requests;
-        let GenBatch { tile_jobs, chunk_jobs, refs, baked_refs, baked_cells, .. } = batch;
+        let GenBatch {
+            tile_jobs,
+            chunk_jobs,
+            refs,
+            baked_refs,
+            baked_cells,
+            ..
+        } = batch;
 
         // GPU: blocks of evicted chunks back to their free lists, then the
         // tiles' columns, the chunks' columns and trees.
-        let refs_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk brush refs"),
-            contents: bytemuck::cast_slice(if refs.is_empty() { &[0u32][..] } else { &refs }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let evictions_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk evictions"),
-            contents: bytemuck::cast_slice(if evictions.is_empty() { &[u32::MAX][..] } else { &evictions }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let baked_refs_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk baked refs"),
-            contents: bytemuck::cast_slice(if baked_refs.is_empty() { &[u32::MAX][..] } else { &baked_refs }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let baked_cells_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk baked cells"),
-            contents: bytemuck::cast_slice(if baked_cells.is_empty() { &[0u32][..] } else { &baked_cells }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let group = self.gen_group(&refs_buffer, &evictions_buffer, &baked_refs_buffer, &baked_cells_buffer);
+        let refs_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk brush refs"),
+                contents: bytemuck::cast_slice(if refs.is_empty() { &[0u32][..] } else { &refs }),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let evictions_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk evictions"),
+                contents: bytemuck::cast_slice(if evictions.is_empty() {
+                    &[u32::MAX][..]
+                } else {
+                    &evictions
+                }),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let baked_refs_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk baked refs"),
+                contents: bytemuck::cast_slice(if baked_refs.is_empty() {
+                    &[u32::MAX][..]
+                } else {
+                    &baked_refs
+                }),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let baked_cells_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("chunk baked cells"),
+                    contents: bytemuck::cast_slice(if baked_cells.is_empty() {
+                        &[0u32][..]
+                    } else {
+                        &baked_cells
+                    }),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+        let group = self.gen_group(
+            &refs_buffer,
+            &evictions_buffer,
+            &baked_refs_buffer,
+            &baked_cells_buffer,
+        );
         if !tile_jobs.is_empty() {
-            self.queue.write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
-            let empty: Vec<[i32; 4]> = vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; tile_jobs.len()];
-            self.queue.write_buffer(&self.tile_ranges, 0, bytemuck::cast_slice(&empty));
-            self.queue.write_buffer(&self.tile_ranges, (TILE_BATCH * 16) as u64, bytemuck::bytes_of(&(tile_jobs.len() as i32)));
+            self.queue
+                .write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
+            let empty: Vec<[i32; 4]> =
+                vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; tile_jobs.len()];
+            self.queue
+                .write_buffer(&self.tile_ranges, 0, bytemuck::cast_slice(&empty));
+            self.queue.write_buffer(
+                &self.tile_ranges,
+                (TILE_BATCH * 16) as u64,
+                bytemuck::bytes_of(&(tile_jobs.len() as i32)),
+            );
         }
         if !chunk_jobs.is_empty() {
-            self.queue.write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
+            self.queue
+                .write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
         }
         // A pass per kernel, each timed (`QUERIES`).
         let stamp = |begin: Option<u32>, end: u32| {
-            self.queries.as_ref().zip(self.timing_now).map(|((set, _), ring)| {
-                let ring = ring as u32;
-                wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: begin.map(|b| QUERIES * ring + b), end_of_pass_write_index: Some(QUERIES * ring + end) }
-            })
+            self.queries
+                .as_ref()
+                .zip(self.timing_now)
+                .map(|((set, _), ring)| {
+                    let ring = ring as u32;
+                    wgpu::ComputePassTimestampWrites {
+                        query_set: set,
+                        beginning_of_pass_write_index: begin.map(|b| QUERIES * ring + b),
+                        end_of_pass_write_index: Some(QUERIES * ring + end),
+                    }
+                })
         };
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile nodes"), timestamp_writes: stamp(Some(0), 8) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk tile nodes"),
+                timestamp_writes: stamp(Some(0), 8),
+            });
             pass.set_bind_group(0, &group, &[]);
             if !evictions.is_empty() {
                 pass.set_pipeline(&self.evict_pipeline);
@@ -2113,7 +2992,10 @@ impl ChunkWorld {
             }
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile columns"), timestamp_writes: stamp(None, 9) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk tile columns"),
+                timestamp_writes: stamp(None, 9),
+            });
             pass.set_bind_group(0, &group, &[]);
             if !tile_jobs.is_empty() {
                 pass.set_pipeline(&self.tile_columns);
@@ -2121,15 +3003,25 @@ impl ChunkWorld {
             }
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile halos"), timestamp_writes: stamp(None, 1) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk tile halos"),
+                timestamp_writes: stamp(None, 1),
+            });
             pass.set_bind_group(0, &group, &[]);
             if !tile_jobs.is_empty() {
                 pass.set_pipeline(&self.tile_halo);
-                pass.dispatch_workgroups((tile_jobs.len() as u32).min(crate::engine::HALO_GROUPS), 1, 1);
+                pass.dispatch_workgroups(
+                    (tile_jobs.len() as u32).min(crate::engine::HALO_GROUPS),
+                    1,
+                    1,
+                );
             }
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk columns"), timestamp_writes: stamp(None, 5) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk columns"),
+                timestamp_writes: stamp(None, 5),
+            });
             pass.set_bind_group(0, &group, &[]);
             if !chunk_jobs.is_empty() {
                 pass.set_pipeline(&self.chunk_columns);
@@ -2137,7 +3029,10 @@ impl ChunkWorld {
             }
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk build"), timestamp_writes: stamp(None, 6) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk build"),
+                timestamp_writes: stamp(None, 6),
+            });
             pass.set_bind_group(0, &group, &[]);
             if !chunk_jobs.is_empty() {
                 pass.set_pipeline(&self.chunk_build);
@@ -2148,10 +3043,21 @@ impl ChunkWorld {
         if !tile_jobs.is_empty() {
             let tiles = (tile_jobs.len() * 16) as u64;
             let chunks = (chunk_jobs.len() * 16) as u64;
-            readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: tiles + chunks, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chunk results"),
+                size: tiles + chunks,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             encoder.copy_buffer_to_buffer(&self.tile_ranges, 0, &readback.buffer, 0, tiles);
             if chunks > 0 {
-                encoder.copy_buffer_to_buffer(&self.job_results, 0, &readback.buffer, tiles, chunks);
+                encoder.copy_buffer_to_buffer(
+                    &self.job_results,
+                    0,
+                    &readback.buffer,
+                    tiles,
+                    chunks,
+                );
             }
             self.pending = Some(readback);
         }
@@ -2169,15 +3075,21 @@ impl ChunkWorld {
                         .chunks
                         .iter()
                         .map(|c| {
-                            let z = c.z.map_or((0.0, 64.0), |(a, b)| (f64::from(a), f64::from(b)));
-                            drawn::DrawnChunk { key: chunk_key(key, c.cz), slot: c.slot, z }
+                            let z =
+                                c.z.map_or((0.0, 64.0), |(a, b)| (f64::from(a), f64::from(b)));
+                            drawn::DrawnChunk {
+                                key: chunk_key(key, c.cz),
+                                slot: c.slot,
+                                z,
+                            }
                         })
                         .collect(),
                     gap: tile.layers.gap,
                 },
             )
         };
-        self.drawn_set.update(&added, &removed, &self.changed_tiles, frame, chunks_of);
+        self.drawn_set
+            .update(&added, &removed, &self.changed_tiles, frame, chunks_of);
         for key in &added {
             if let Some(tile) = self.tiles.get_mut(key) {
                 stats.shown_tiles += usize::from(!tile.shown);
@@ -2189,9 +3101,22 @@ impl ChunkWorld {
         // One upload of the changed entries, scattered on the GPU.
         let changes = self.drawn_set.take_changes();
         if !changes.is_empty() {
-            let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk table changes"), contents: bytemuck::cast_slice(&changes), usage: wgpu::BufferUsages::STORAGE });
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("chunk table"), layout: &self.table_layout, entries: &[entry(0, &buffer), entry(1, &self.chunk_table)] });
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk table"), timestamp_writes: None });
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("chunk table changes"),
+                    contents: bytemuck::cast_slice(&changes),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk table"),
+                layout: &self.table_layout,
+                entries: &[entry(0, &buffer), entry(1, &self.chunk_table)],
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk table"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.table_pipeline);
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups((changes.len() as u32 / 3).div_ceil(64), 1, 1);
@@ -2201,7 +3126,13 @@ impl ChunkWorld {
         stats.fading_tiles = self.drawn_set.fading();
         self.last_generated = (stats.generated_tiles, stats.generated_chunks);
         // Settled: a plan that saw every event wants nothing more.
-        self.last_requests = self.plan.requests.iter().filter(|(k, _)| !self.tiles.contains_key(k)).count() + usize::from(unseen || !self.events.is_empty() || stats.generated_tiles > 0);
+        self.last_requests = self
+            .plan
+            .requests
+            .iter()
+            .filter(|(k, _)| !self.tiles.contains_key(k))
+            .count()
+            + usize::from(unseen || !self.events.is_empty() || stats.generated_tiles > 0);
         stats.drawn_chunks = self.drawn_set.list.len();
         stats.resident_chunks = self.tiles.values().map(|t| t.chunks.len()).sum();
         stats
@@ -2211,9 +3142,19 @@ impl ChunkWorld {
     /// submit).
     /// Copy the last draw's hits under `picks`' requests (at most
     /// `MAX_PICKS` a frame) for readback; [`Self::submitted`] answers them.
-    pub fn copy_picks(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, picks: &crate::engine::SharedPicks) {
+    pub fn copy_picks(
+        &mut self,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        picks: &crate::engine::SharedPicks,
+    ) {
         let Some(targets) = &self.targets else { return };
-        let Some(slot) = self.pick_slots.iter_mut().find(|s| matches!(s.state, ReachState::Free)) else { return };
+        let Some(slot) = self
+            .pick_slots
+            .iter_mut()
+            .find(|s| matches!(s.state, ReachState::Free))
+        else {
+            return;
+        };
         let requests: Vec<crate::engine::PickRequest> = {
             let Ok(mut shared) = picks.lock() else { return };
             let n = shared.requests.len().min(MAX_PICKS);
@@ -2224,13 +3165,31 @@ impl ChunkWorld {
         }
         let size = targets.size;
         for (n, request) in requests.iter().enumerate() {
-            let x = ((request.uv[0].clamp(0.0, 1.0) * size[0] as f32) as u32).min(size[0].max(1) - 1);
-            let y = ((request.uv[1].clamp(0.0, 1.0) * size[1] as f32) as u32).min(size[1].max(1) - 1);
+            let x =
+                ((request.uv[0].clamp(0.0, 1.0) * size[0] as f32) as u32).min(size[0].max(1) - 1);
+            let y =
+                ((request.uv[1].clamp(0.0, 1.0) * size[1] as f32) as u32).min(size[1].max(1) - 1);
             for (texture, at) in [(&targets.visibility, 0), (&targets.distance, 16)] {
                 encoder.copy_texture_to_buffer(
-                    wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
-                    wgpu::TexelCopyBufferInfo { buffer: &slot.buffer, layout: wgpu::TexelCopyBufferLayout { offset: 256 * n as u64 + at, bytes_per_row: None, rows_per_image: None } },
-                    wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &slot.buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 256 * n as u64 + at,
+                            bytes_per_row: None,
+                            rows_per_image: None,
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
                 );
             }
         }
@@ -2251,7 +3210,12 @@ impl ChunkWorld {
         let down = (cell >> 20) & 1 == 1;
         Some(crate::engine::PickHit {
             distance: f64::from(t),
-            cell: crate::grid::Cell::new((key[0] & 0xff) as u8, key[1] * CHUNK + local[0], key[2] * CHUNK + local[1], key[3] * CHUNK + local[2]),
+            cell: crate::grid::Cell::new(
+                (key[0] & 0xff) as u8,
+                key[1] * CHUNK + local[0],
+                key[2] * CHUNK + local[1],
+                key[3] * CHUNK + local[2],
+            ),
             level: (key[0] >> 8) as u32,
             entered: Some(2 * axis + u32::from(!down)),
         })
@@ -2264,18 +3228,36 @@ impl ChunkWorld {
                 ReachState::Copied => {
                     let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let flag = ready.clone();
-                    self.pick_slots[n].buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                        if r.is_ok() {
-                            flag.store(true, std::sync::atomic::Ordering::Release);
-                        }
-                    });
+                    self.pick_slots[n]
+                        .buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |r| {
+                            if r.is_ok() {
+                                flag.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        });
                     self.pick_slots[n].state = ReachState::Mapping(ready);
                 }
                 ReachState::Mapping(ready) if ready.load(std::sync::atomic::Ordering::Acquire) => {
                     let results: Vec<crate::engine::PickResult> = {
-                        let data = self.pick_slots[n].buffer.slice(..).get_mapped_range().unwrap();
+                        let data = self.pick_slots[n]
+                            .buffer
+                            .slice(..)
+                            .get_mapped_range()
+                            .unwrap();
                         let words: &[u32] = bytemuck::cast_slice(&data);
-                        self.pick_slots[n].requests.iter().enumerate().map(|(i, &id)| crate::engine::PickResult { id, hit: self.pick_hit([words[i * 64], words[i * 64 + 1]], f32::from_bits(words[i * 64 + 4])) }).collect()
+                        self.pick_slots[n]
+                            .requests
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &id)| crate::engine::PickResult {
+                                id,
+                                hit: self.pick_hit(
+                                    [words[i * 64], words[i * 64 + 1]],
+                                    f32::from_bits(words[i * 64 + 4]),
+                                ),
+                            })
+                            .collect()
                     };
                     let slot = &mut self.pick_slots[n];
                     slot.buffer.unmap();
@@ -2295,11 +3277,13 @@ impl ChunkWorld {
                 ReachState::Copied => {
                     let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let flag = ready.clone();
-                    slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                        if r.is_ok() {
-                            flag.store(true, std::sync::atomic::Ordering::Release);
-                        }
-                    });
+                    slot.buffer
+                        .slice(..)
+                        .map_async(wgpu::MapMode::Read, move |r| {
+                            if r.is_ok() {
+                                flag.store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        });
                     slot.state = ReachState::Mapping(ready);
                 }
                 ReachState::Mapping(ready) if ready.load(std::sync::atomic::Ordering::Acquire) => {
@@ -2308,7 +3292,12 @@ impl ChunkWorld {
                         let words: &[[i32; 4]] = bytemuck::cast_slice(&data);
                         let count = (words[0][0] as u32 as usize).min(words.len() - 1);
                         for k in &words[1..=count] {
-                            self.reached.push(TileKey { face: (k[0] & 0xff) as u8, level: (k[0] >> 8) as u32, cx: k[1], cy: k[2] });
+                            self.reached.push(TileKey {
+                                face: (k[0] & 0xff) as u8,
+                                level: (k[0] >> 8) as u32,
+                                cx: k[1],
+                                cy: k[2],
+                            });
                         }
                     }
                     slot.buffer.unmap();
@@ -2331,7 +3320,17 @@ impl ChunkWorld {
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
                     let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
+                    let timing = FrameTimings {
+                        frame,
+                        draw: ms(t[2], t[4]),
+                        seed: ms(t[2], t[3]),
+                        shadow: ms(t[4], t[7]),
+                        generate: ms(t[0], t[6]),
+                        tiles,
+                        chunks,
+                        stages,
+                        tile_stages,
+                    };
                     if tiles > 0 {
                         self.cost.tiles.add(tiles as f64, stages[0]);
                         self.cost.chunks.add(chunks as f64, stages[1] + stages[2]);
@@ -2350,11 +3349,13 @@ impl ChunkWorld {
             } else if slot.frame.is_some() {
                 let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let flag = ready.clone();
-                slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                    if r.is_ok() {
-                        flag.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                });
+                slot.buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| {
+                        if r.is_ok() {
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    });
                 slot.ready = Some(ready);
             }
         }
@@ -2363,15 +3364,16 @@ impl ChunkWorld {
         }
         if let Some(r) = self.pending.take() {
             let ready = r.ready.clone();
-            r.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-                if result.is_ok() {
-                    ready.store(true, std::sync::atomic::Ordering::Release);
-                }
-            });
+            r.buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    if result.is_ok() {
+                        ready.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                });
             self.readbacks.push_back(r);
         }
     }
-
 
     /// Tiles whose whole volume is generated because rays reached under
     /// their surface band.
@@ -2382,22 +3384,45 @@ impl ChunkWorld {
     /// Whether nothing waits to be generated or read back, and no switch
     /// between levels is fading (fades move with drawn frames).
     pub fn settled(&self) -> bool {
-        self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0 && self.urgent.is_empty() && self.stale.is_empty() && self.drawn_set.fading() == 0
+        self.pending.is_none()
+            && self.readbacks.is_empty()
+            && self.last_requests == 0
+            && self.urgent.is_empty()
+            && self.stale.is_empty()
+            && self.drawn_set.fading() == 0
     }
 
     /// Tile, chunk layer and occupied layers of the drawn chunk in `slot`.
     pub fn chunk_at(&self, slot: u32) -> Option<(TileKey, i32, Option<(i32, i32)>)> {
-        self.tiles.iter().find_map(|(k, t)| t.chunks.iter().find(|c| c.slot == slot).map(|c| (*k, c.cz, c.z)))
+        self.tiles.iter().find_map(|(k, t)| {
+            t.chunks
+                .iter()
+                .find(|c| c.slot == slot)
+                .map(|c| (*k, c.cz, c.z))
+        })
     }
 
     /// Chunks over base column (`face`, `i`, `j`): tile, chunk layer,
     /// occupied layers, drawn.
-    pub fn chunks_over(&self, face: u8, i: i32, j: i32) -> Vec<(TileKey, i32, Option<(i32, i32)>, bool)> {
+    pub fn chunks_over(
+        &self,
+        face: u8,
+        i: i32,
+        j: i32,
+    ) -> Vec<(TileKey, i32, Option<(i32, i32)>, bool)> {
         let mut out: Vec<_> = self
             .tiles
             .iter()
-            .filter(|(k, _)| k.face == face && (i >> k.level).div_euclid(CHUNK) == k.cx && (j >> k.level).div_euclid(CHUNK) == k.cy)
-            .flat_map(|(k, t)| t.chunks.iter().map(|c| (*k, c.cz, c.z, self.drawn_set.contains(c.slot))))
+            .filter(|(k, _)| {
+                k.face == face
+                    && (i >> k.level).div_euclid(CHUNK) == k.cx
+                    && (j >> k.level).div_euclid(CHUNK) == k.cy
+            })
+            .flat_map(|(k, t)| {
+                t.chunks
+                    .iter()
+                    .map(|c| (*k, c.cz, c.z, self.drawn_set.contains(c.slot)))
+            })
             .collect();
         out.sort_by_key(|c| (c.0.level, c.1));
         out
@@ -2419,6 +3444,11 @@ impl ChunkWorld {
         self.plain_colour = on;
     }
 
+    /// Set the renderer-wide debug mode for this voxel world.
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode & 0xff;
+    }
+
     /// Chunks drawn by the last [`Self::update`].
     pub fn chunk_count(&self) -> usize {
         self.drawn_set.list.len()
@@ -2430,37 +3460,62 @@ impl ChunkWorld {
     pub fn resident_bytes(&self) -> u64 {
         let alloc: Vec<[i32; 2]> = self.read(&self.leaf_alloc, 1);
         let chunks: usize = self.tiles.values().map(|t| t.chunks.len()).sum();
-        let leaves = (LEAF_CAPACITY / LEAF_PAGE).saturating_sub(alloc[0][0].max(0) as u64) * LEAF_PAGE;
+        let leaves =
+            (LEAF_CAPACITY / LEAF_PAGE).saturating_sub(alloc[0][0].max(0) as u64) * LEAF_PAGE;
         leaves * 10 + chunks as u64 * (64 * 24 + 48 + LEAF_PAGES * 4)
     }
 
     /// Every pixel's hit in the last [`Self::draw`], row by row (waits for
     /// the GPU: tests and diagnostics).
     pub fn read_hits(&self) -> Vec<Option<crate::engine::PickHit>> {
-        let Some(targets) = &self.targets else { return Vec::new() };
+        let Some(targets) = &self.targets else {
+            return Vec::new();
+        };
         let [w, h] = targets.size;
         let rows = |bytes: u32| (w * bytes).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let read = |texture: &wgpu::Texture, bytes: u32| -> Vec<u8> {
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(rows(bytes) * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: u64::from(rows(bytes) * h),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let mut encoder = self.device.create_command_encoder(&Default::default());
             encoder.copy_texture_to_buffer(
                 texture.as_image_copy(),
-                wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rows(bytes)), rows_per_image: None } },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(rows(bytes)),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
             );
             self.queue.submit([encoder.finish()]);
             staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
             let out = staging.slice(..).get_mapped_range().unwrap().to_vec();
             out
         };
         let (visibility, distance) = (read(&targets.visibility, 8), read(&targets.distance, 4));
-        let word = |data: &[u8], at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+        let word =
+            |data: &[u8], at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
         (0..h)
             .flat_map(|y| (0..w).map(move |x| (x, y)))
             .map(|(x, y)| {
                 let v = (y * rows(8) + x * 8) as usize;
-                self.pick_hit([word(&visibility, v), word(&visibility, v + 4)], f32::from_bits(word(&distance, (y * rows(4) + x * 4) as usize)))
+                self.pick_hit(
+                    [word(&visibility, v), word(&visibility, v + 4)],
+                    f32::from_bits(word(&distance, (y * rows(4) + x * 4) as usize)),
+                )
             })
             .collect()
     }
@@ -2474,7 +3529,17 @@ impl ChunkWorld {
     /// `size` pixels into [`Self::targets`], timing it as draw number
     /// `frame` ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2]) {
+    pub fn draw(
+        &mut self,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: u64,
+        eye: DVec3,
+        view_proj: Mat4,
+        prev_view_proj: Mat4,
+        near: f32,
+        sun: Vec3,
+        size: [u32; 2],
+    ) {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
@@ -2487,11 +3552,13 @@ impl ChunkWorld {
         if self.slots_version != Some(self.drawn_set.version()) {
             let slots: Vec<u32> = self.drawn_set.list.iter().map(|c| c.slot).collect();
             if !slots.is_empty() {
-                self.queue.write_buffer(&self.drawn_slots, 0, bytemuck::cast_slice(&slots));
+                self.queue
+                    .write_buffer(&self.drawn_slots, 0, bytemuck::cast_slice(&slots));
             }
             self.slots_version = Some(self.drawn_set.version());
         }
-        self.queue.write_buffer(&self.cull_state, 0, &[0u8; CULL_BYTES as usize]);
+        self.queue
+            .write_buffer(&self.cull_state, 0, &[0u8; CULL_BYTES as usize]);
         let (eye_hi, eye_lo) = split(eye);
         let params = DrawParams {
             view_proj: view_proj.to_cols_array_2d(),
@@ -2501,13 +3568,23 @@ impl ChunkWorld {
             eye_lo,
             sun: sun.normalize().extend(near).to_array(),
             debug: {
-                let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
-                [
-                    (if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
-                        2
+                let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL")
+                    .ok()
+                    .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+                    .unwrap_or_default();
+                let debug_mode = if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
+                    2
+                } else if let Ok(levels) = std::env::var("HELIO_VOXEL_CHUNKS_LEVELS") {
+                    if levels == "half" {
+                        3
                     } else {
-                        std::env::var("HELIO_VOXEL_CHUNKS_LEVELS").map_or(0, |v| if v == "half" { 3 } else { 1 })
-                    }) | (u32::from(self.plain_colour) << 8),
+                        1
+                    }
+                } else {
+                    self.debug_mode
+                };
+                [
+                    debug_mode | (u32::from(self.plain_colour) << 8),
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),
@@ -2522,10 +3599,26 @@ impl ChunkWorld {
                 let d = eye / crate::grid::DOMAIN_UNIT;
                 (d - d.floor()).as_vec3().extend(0.0).to_array()
             },
-            up: if self.grid.is_plane() { [0.0, 1.0, 0.0, 0.0] } else { eye.normalize_or_zero().as_vec3().extend(eye.length() as f32).to_array() },
+            up: if self.grid.is_plane() {
+                [0.0, 1.0, 0.0, 0.0]
+            } else {
+                eye.normalize_or_zero()
+                    .as_vec3()
+                    .extend(eye.length() as f32)
+                    .to_array()
+            },
             ceiling: {
                 let c = self.grid.radius() + self.ceiling;
-                [if self.grid.is_plane() { (eye.y - self.ceiling) as f32 } else { (eye.length_squared() - c * c) as f32 }, 0.0, 0.0, 0.0]
+                [
+                    if self.grid.is_plane() {
+                        (eye.y - self.ceiling) as f32
+                    } else {
+                        (eye.length_squared() - c * c) as f32
+                    },
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
             },
             planet: [
                 self.grid.radius() as f32,
@@ -2534,17 +3627,46 @@ impl ChunkWorld {
                 (eye.length_squared() - self.grid.radius() * self.grid.radius()) as f32,
             ],
         };
-        self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        self.queue
+            .write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.reach, 0, &[0u8; 16]);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach), entry(14, &self.leaf_pages), entry(15, &self.leaf_normals)],
+            entries: &[
+                entry(0, &self.params),
+                entry(1, &self.statics),
+                entry(2, &self.chunk_meta),
+                entry(3, &self.mids),
+                entry(4, &self.mid_leaves),
+                entry(5, &self.leaves),
+                entry(6, &self.leaf_materials),
+                entry(7, &self.materials),
+                entry(8, &self.mid_materials),
+                entry(9, &self.counters),
+                entry(10, &self.chunk_table),
+                entry(11, &self.chunk_keys),
+                entry(12, &self.draw_list),
+                entry(13, &self.reach),
+                entry(14, &self.leaf_pages),
+                entry(15, &self.leaf_normals),
+            ],
         });
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();
-        let timing = self.queries.as_ref().zip(self.timing_now.filter(|&r| r == (frame % TIMING_RING) as usize)).map(|((set, resolve), ring)| (set, resolve, ring as u32));
-        let (depth, seed, exits) = (view(&targets.depth), view(&targets.seed), view(&targets.exits));
+        let timing = self
+            .queries
+            .as_ref()
+            .zip(
+                self.timing_now
+                    .filter(|&r| r == (frame % TIMING_RING) as usize),
+            )
+            .map(|((set, resolve), ring)| (set, resolve, ring as u32));
+        let (depth, seed, exits) = (
+            view(&targets.depth),
+            view(&targets.seed),
+            view(&targets.exits),
+        );
         // Every ray starts unresolved (0).
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("chunk exits clear"),
@@ -2552,7 +3674,10 @@ impl ChunkWorld {
                 view: &exits,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -2562,21 +3687,40 @@ impl ChunkWorld {
         let seed_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk seed exits"),
             layout: &self.seed_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&exits) }, entry(22, &self.cull_state)],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&exits),
+                },
+                entry(22, &self.cull_state),
+            ],
         });
         {
             // 0. The draw list: the drawn chunks in view, binned, ordered.
             let frames = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk cull frames"),
                 layout: &self.cull_layout[0],
-                entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta)],
+                entries: &[
+                    entry(0, &self.params),
+                    entry(1, &self.statics),
+                    entry(2, &self.chunk_meta),
+                ],
             });
             let lists = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk cull"),
                 layout: &self.cull_layout[1],
-                entries: &[entry(17, &self.drawn_slots), entry(18, &self.cull_state), entry(19, &self.cull_bins), entry(20, &self.draw_list), entry(21, &self.seed_args)],
+                entries: &[
+                    entry(17, &self.drawn_slots),
+                    entry(18, &self.cull_state),
+                    entry(19, &self.cull_bins),
+                    entry(20, &self.draw_list),
+                    entry(21, &self.seed_args),
+                ],
             });
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk cull"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk cull"),
+                timestamp_writes: None,
+            });
             pass.set_bind_group(0, &frames, &[]);
             pass.set_bind_group(1, &lists, &[]);
             pass.set_pipeline(&self.cull_bin);
@@ -2590,11 +3734,26 @@ impl ChunkWorld {
             label: Some("chunk trace"),
             layout: &self.trace_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&seed) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view(&targets.colour)) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&exits) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&seed),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view(&targets.colour)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&view(&targets.distance)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&exits),
+                },
             ],
         });
         // Rounds of seed and trace: each resolves the rays that hit in
@@ -2609,14 +3768,31 @@ impl ChunkWorld {
                         view: &seed,
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: f64::from(u32::MAX), g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: f64::from(u32::MAX),
+                                g: 0.0,
+                                b: 0.0,
+                                a: 0.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR), store: wgpu::StoreOp::Store }),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR),
+                            store: wgpu::StoreOp::Store,
+                        }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(QUERIES * ring + 2), end_of_pass_write_index: Some(QUERIES * ring + 3) }),
+                    timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| {
+                        wgpu::RenderPassTimestampWrites {
+                            query_set: set,
+                            beginning_of_pass_write_index: Some(QUERIES * ring + 2),
+                            end_of_pass_write_index: Some(QUERIES * ring + 3),
+                        }
+                    }),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -2633,7 +3809,13 @@ impl ChunkWorld {
             // 2. Trace each pixel's ray through its seed chunk.
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk trace"),
-                timestamp_writes: timing.filter(|_| round + 1 == rounds).map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 4) }),
+                timestamp_writes: timing
+                    .filter(|_| round + 1 == rounds)
+                    .map(|(set, _, ring)| wgpu::ComputePassTimestampWrites {
+                        query_set: set,
+                        beginning_of_pass_write_index: None,
+                        end_of_pass_write_index: Some(QUERIES * ring + 4),
+                    }),
             });
             pass.set_pipeline(&self.trace);
             pass.set_bind_group(0, &group, &[]);
@@ -2642,47 +3824,99 @@ impl ChunkWorld {
         }
         {
             // 4. Sun shadows: samples, then every hit.
-            let (distance, visibility, samples, colour, normal, sky) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour), view(&targets.normal), view(&targets.sky_samples));
+            let (distance, visibility, samples, colour, normal, sky) = (
+                view(&targets.distance),
+                view(&targets.visibility),
+                view(&targets.sun_samples),
+                view(&targets.colour),
+                view(&targets.normal),
+                view(&targets.sky_samples),
+            );
             let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
                 layout: &self.shadow_sample_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(9, &samples)],
+                entries: &[
+                    view_entry(4, &distance),
+                    view_entry(7, &visibility),
+                    view_entry(9, &samples),
+                ],
             });
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky)],
+                entries: &[
+                    view_entry(4, &distance),
+                    view_entry(7, &visibility),
+                    view_entry(2, &colour),
+                    view_entry(8, &targets.sun_view),
+                    view_entry(10, &samples),
+                    entry(11, &targets.fallbacks),
+                    entry(12, &targets.fallback_groups),
+                    view_entry(13, &normal),
+                    view_entry(16, &sky),
+                ],
             });
             let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sky samples"),
                 layout: &self.sky_sample_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(15, &sky)],
+                entries: &[
+                    view_entry(4, &distance),
+                    view_entry(7, &visibility),
+                    view_entry(15, &sky),
+                ],
             });
             let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow fallbacks"),
                 layout: &self.shadow_fallback_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks), view_entry(13, &normal)],
+                entries: &[
+                    view_entry(4, &distance),
+                    view_entry(7, &visibility),
+                    view_entry(2, &colour),
+                    view_entry(8, &targets.sun_view),
+                    entry(11, &targets.fallbacks),
+                    view_entry(13, &normal),
+                ],
             });
             // No fallbacks yet.
-            self.queue.write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
-            self.queue.write_buffer(&targets.fallback_groups, 0, bytemuck::cast_slice(&[0u32, 1, 1]));
+            self.queue
+                .write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
+            self.queue.write_buffer(
+                &targets.fallback_groups,
+                0,
+                bytemuck::cast_slice(&[0u32, 1, 1]),
+            );
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sun samples"), timestamp_writes: None });
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("chunk sun samples"),
+                    timestamp_writes: None,
+                });
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &sample_group, &[]);
                 for pipeline in [&self.shadow_sample, &self.shadow_sample_far] {
                     pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
+                    pass.dispatch_workgroups(
+                        size[0].div_ceil(2).div_ceil(8),
+                        size[1].div_ceil(2).div_ceil(8),
+                        1,
+                    );
                 }
                 pass.set_bind_group(1, &sky_group, &[]);
                 for pipeline in [&self.sky_sample, &self.sky_sample_far] {
                     pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(size[0].div_ceil(4).div_ceil(8), size[1].div_ceil(4).div_ceil(8), 1);
+                    pass.dispatch_workgroups(
+                        size[0].div_ceil(4).div_ceil(8),
+                        size[1].div_ceil(4).div_ceil(8),
+                        1,
+                    );
                 }
             }
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk shadow"),
-                timestamp_writes: timing.map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 7) }),
+                timestamp_writes: timing.map(|(set, _, ring)| wgpu::ComputePassTimestampWrites {
+                    query_set: set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(QUERIES * ring + 7),
+                }),
             });
             pass.set_pipeline(&self.shadow);
             pass.set_bind_group(0, &group, &[]);
@@ -2694,7 +3928,11 @@ impl ChunkWorld {
         }
         // The tiles reached under, back without waiting (a frame's copy
         // when a slot is free).
-        if let Some(slot) = self.reach_slots.iter_mut().find(|s| matches!(s.state, ReachState::Free)) {
+        if let Some(slot) = self
+            .reach_slots
+            .iter_mut()
+            .find(|s| matches!(s.state, ReachState::Free))
+        {
             encoder.copy_buffer_to_buffer(&self.reach, 0, &slot.buffer, 0, REACH_BYTES);
             slot.state = ReachState::Copied;
         }
@@ -2714,7 +3952,25 @@ impl ChunkWorld {
     pub fn take_counts(&self) -> TraceCounts {
         let words: Vec<[u32; 4]> = self.read(&self.counters, 4);
         self.queue.write_buffer(&self.counters, 0, &[0u8; 1024]);
-        TraceCounts { seeded: words[0][0], steps: words[0][1], hits: words[0][2], boxes: words[0][3], missed: words[2][0], missed_boxes: words[2][1], lost: words[2][2], lost_pixel: (words[3][2] & 0xffff, words[3][2] >> 16), lost_sites: [words[1][1], words[1][2], words[1][3], words[2][3], words[3][0], words[3][1], words[3][3]] }
+        TraceCounts {
+            seeded: words[0][0],
+            steps: words[0][1],
+            hits: words[0][2],
+            boxes: words[0][3],
+            missed: words[2][0],
+            missed_boxes: words[2][1],
+            lost: words[2][2],
+            lost_pixel: (words[3][2] & 0xffff, words[3][2] >> 16),
+            lost_sites: [
+                words[1][1],
+                words[1][2],
+                words[1][3],
+                words[2][3],
+                words[3][0],
+                words[3][1],
+                words[3][3],
+            ],
+        }
     }
 
     /// The boxes the debug pixel's ray crossed (counting builds): the frame
@@ -2728,8 +3984,19 @@ impl ChunkWorld {
             .map(|c| {
                 let w = &flat[16 + c * 5..21 + c * 5];
                 let slot = w[0];
-                let owner = self.tiles.iter().find_map(|(k, t)| t.chunks.iter().find(|ch| ch.slot == slot).map(|ch| (*k, ch.cz)));
-                (slot, [w[1] as i32, w[2] as i32, w[3] as i32], w[4] & 1 != 0, w[4] >> 1, owner)
+                let owner = self.tiles.iter().find_map(|(k, t)| {
+                    t.chunks
+                        .iter()
+                        .find(|ch| ch.slot == slot)
+                        .map(|ch| (*k, ch.cz))
+                });
+                (
+                    slot,
+                    [w[1] as i32, w[2] as i32, w[3] as i32],
+                    w[4] & 1 != 0,
+                    w[4] >> 1,
+                    owner,
+                )
             })
             .collect()
     }
@@ -2739,7 +4006,11 @@ impl ChunkWorld {
     pub fn lost_where(&self) -> (u8, u32, [i32; 3]) {
         let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
         let w = words[50];
-        ((w[0] & 0xff) as u8, w[0] >> 8, [w[1] as i32, w[2] as i32, w[3] as i32])
+        (
+            (w[0] & 0xff) as u8,
+            w[0] >> 8,
+            [w[1] as i32, w[2] as i32, w[3] as i32],
+        )
     }
 
     /// Boxes drawn by the last [`Self::draw`]: from outside, from inside
@@ -2753,13 +4024,21 @@ impl ChunkWorld {
     /// frame's times were read).
     fn claim_timing(&mut self, frame: u64) {
         let ring = (frame % TIMING_RING) as usize;
-        self.timing_now = self.timing_slots.get(ring).filter(|t| t.frame.is_none() && t.ready.is_none()).map(|_| ring);
+        self.timing_now = self
+            .timing_slots
+            .get(ring)
+            .filter(|t| t.frame.is_none() && t.ready.is_none())
+            .map(|_| ring);
     }
 
     /// Shade with `appearance` (the terrain's materials and detail).
     pub fn set_appearance(&mut self, appearance: &crate::engine::TerrainAppearance) {
         let (materials, detail) = crate::engine::material_table(appearance);
-        self.queue.write_buffer(&self.materials, 0, bytemuck::bytes_of(&ChunkMaterials { materials, detail }));
+        self.queue.write_buffer(
+            &self.materials,
+            0,
+            bytemuck::bytes_of(&ChunkMaterials { materials, detail }),
+        );
     }
 
     /// The last draw's sun visibility (Helio's `directional_visibility`).
@@ -2769,16 +4048,32 @@ impl ChunkWorld {
 
     /// The last draw's hits into Helio's gbuffer (`engine::GBUFFER_FORMATS`)
     /// and depth (Depth32Float, tested against what is there).
-    pub fn publish(&self, encoder: &mut helio_core::CommandRecorder<'_>, gbuffer: [&wgpu::TextureView; 8], depth: &wgpu::TextureView) {
+    pub fn publish(
+        &self,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        gbuffer: [&wgpu::TextureView; 8],
+        depth: &wgpu::TextureView,
+    ) {
         let Some(targets) = &self.targets else { return };
-        let Some(group) = &self.last_group else { return };
+        let Some(group) = &self.last_group else {
+            return;
+        };
         let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk gbuffer"),
             layout: &self.resolve_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
-                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&view(&targets.normal)) },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&view(&targets.distance)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: wgpu::BindingResource::TextureView(&view(&targets.normal)),
+                },
             ],
         });
 
@@ -2787,7 +4082,10 @@ impl ChunkWorld {
             color_attachments: &gbuffer.map(loaded),
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
@@ -2829,7 +4127,10 @@ mod tests {
             line.add(tiles as f64, 0.2 + 0.01 * tiles as f64);
         }
         let (fixed, per) = line.fit().unwrap();
-        assert!((fixed - 0.2).abs() < 1e-6 && (per - 0.01).abs() < 1e-8, "{fixed} {per}");
+        assert!(
+            (fixed - 0.2).abs() < 1e-6 && (per - 0.01).abs() < 1e-8,
+            "{fixed} {per}"
+        );
         let mut same = CostLine::EMPTY;
         for _ in 0..50 {
             same.add(14.0, 0.34);
@@ -2837,7 +4138,12 @@ mod tests {
         assert!(same.fit().is_none());
         // Its budget: a 3 ms frame holds 280 such tiles, not the 75 their
         // small batches' average (0.04 ms) would allow.
-        let cost = GenCost { tiles: line, chunks: CostLine::EMPTY, chunk: 0.0, ..GenCost::PRIOR };
+        let cost = GenCost {
+            tiles: line,
+            chunks: CostLine::EMPTY,
+            chunk: 0.0,
+            ..GenCost::PRIOR
+        };
         let (fixed, tile, _) = cost.model();
         assert_eq!(((3.0 - fixed) / tile).round(), 280.0);
     }
@@ -2845,11 +4151,27 @@ mod tests {
     #[test]
     fn walk_templates_expand_with_any_line_ends() {
         for end in ["\n", "\r\n"] {
-            let source = ["head", "// WALK {", "fn sun_walk() { walk(Walk(0)); }", "// } WALK", "tail", ""].join(end);
+            let source = [
+                "head",
+                "// WALK {",
+                "fn sun_walk() { walk(Walk(0)); }",
+                "// } WALK",
+                "tail",
+                "",
+            ]
+            .join(end);
             let out = walk_templates(&source);
             assert!(out.contains("fn sun_walk() { walk(Walk(0)); }"), "{out:?}");
-            assert!(out.contains("fn sun_walk_fine() { walk_fine(Walk(0)); }"), "{out:?}");
-            assert!(!out.contains("WALK {") && out.starts_with("head") && out.trim_end().ends_with("tail"), "{out:?}");
+            assert!(
+                out.contains("fn sun_walk_fine() { walk_fine(Walk(0)); }"),
+                "{out:?}"
+            );
+            assert!(
+                !out.contains("WALK {")
+                    && out.starts_with("head")
+                    && out.trim_end().ends_with("tail"),
+                "{out:?}"
+            );
         }
     }
 }

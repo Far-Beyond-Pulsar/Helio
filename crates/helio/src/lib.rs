@@ -44,8 +44,9 @@ pub use helio_bake::{
     LightmapConfig, ProbeConfig, ProbeSpec, SceneGeometry,
 };
 pub use helio_core::{
-    Actor, DebugViewDescriptor, Entity, Error, GpuCameraUniforms, GpuTimingAvailability, Movability,
-    RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
+    Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
+    GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
+    RenderPassTiming, RenderTimingSnapshot, Result,
 };
 pub use helio_pass_forward_lit::{GpuLight, LightType};
 pub use helio_pass_object_batch::{

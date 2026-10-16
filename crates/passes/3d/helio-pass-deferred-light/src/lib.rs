@@ -1475,7 +1475,8 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "Lighting Only",
                 debug_mode: 24,
-                description: "Direct plus indirect diffuse lighting without emissive or subsurface glow",
+                description:
+                    "Direct plus indirect diffuse lighting without emissive or subsurface glow",
             },
             DebugViewDescriptor {
                 name: "Emissive and SSS",
@@ -1491,6 +1492,11 @@ impl RenderPass for DeferredLightPass {
                 name: "GI Blend",
                 debug_mode: 27,
                 description: "Green=runtime radiance-cascade weight, blue=baked lightmap weight",
+            },
+            DebugViewDescriptor {
+                name: "Ray Trace vs Raster",
+                debug_mode: 33,
+                description: "Cyan=voxel ray-traced surfaces, orange=rasterized geometry",
             },
         ];
         VIEWS

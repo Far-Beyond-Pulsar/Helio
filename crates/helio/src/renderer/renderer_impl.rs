@@ -427,6 +427,11 @@ impl Renderer {
         self.graph.collect_debug_views()
     }
 
+    /// Color legends advertised by passes for the editor's debug views.
+    pub fn available_debug_view_legends(&self) -> Vec<(u32, helio_core::DebugViewLegend)> {
+        self.graph.collect_debug_view_legends()
+    }
+
     pub fn set_editor_mode(&mut self, enabled: bool) {
         self.editor_mode = enabled;
         if let Ok(mut s) = self.debug_state.lock() {

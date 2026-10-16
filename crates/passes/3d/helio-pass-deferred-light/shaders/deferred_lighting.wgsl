@@ -1153,6 +1153,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // the stored terrain visibility path instead.
     let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
+    if globals.debug_mode == 32u {
+        if is_stored_voxel {
+            return vec4<f32>(albedo, 1.0);
+        }
+        return vec4<f32>(0.035, 0.035, 0.035, 1.0);
+    }
+    if globals.debug_mode == 33u {
+        if is_stored_voxel {
+            return vec4<f32>(0.12, 0.78, 1.0, 1.0);
+        }
+        return vec4<f32>(1.0, 0.36, 0.08, 1.0);
+    }
     let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel);
     // Combined AO: material AO from G-buffer × screen-space AO.
     let ao_combined  = ao * ssao_factor;
@@ -1523,7 +1535,8 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 22u || globals.debug_mode == 23u
         || globals.debug_mode == 24u || globals.debug_mode == 25u
         || globals.debug_mode == 26u || globals.debug_mode == 27u
-        || globals.debug_mode == 20u || globals.debug_mode == 21u {
+        || globals.debug_mode == 20u || globals.debug_mode == 21u
+        || globals.debug_mode == 32u || globals.debug_mode == 33u {
         return vec4<f32>(0.0);
     }
 
