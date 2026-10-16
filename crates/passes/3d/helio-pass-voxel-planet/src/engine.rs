@@ -30,9 +30,27 @@ pub struct PlanetFrame {
     pub sun: Vec3,
     /// Where tools ask for the terrain hit under points of the view.
     pub picks: Option<SharedPicks>,
+    /// Chunks a save kept of the planet's edits: a world built for exactly
+    /// those edits restores them by copy instead of generating them
+    /// (others are refused, [`crate::chunks::ChunkWorld::load_kept`]).
+    pub kept: Option<Arc<crate::chunks::KeptChunks>>,
+    /// Where a host asks for the edited chunks for a save.
+    pub export: Option<SharedKeptExport>,
 }
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
+
+/// A save's request for the edited chunks: the host sets `wanted`; the pass
+/// packs every resident edited chunk and, a few frames later, answers with
+/// the planet shown and its world's kept chunks, valid for that planet's
+/// edits ([`crate::chunks::ChunkWorld::kept_chunks`]).
+#[derive(Default)]
+pub struct KeptExport {
+    pub wanted: bool,
+    pub answer: Option<(Arc<Planet>, crate::chunks::KeptChunks)>,
+}
+
+pub type SharedKeptExport = Arc<Mutex<KeptExport>>;
 
 /// A request for the terrain hit under view point `uv` (0..1, from the top
 /// left), answered a frame or two later in [`Picks::results`].

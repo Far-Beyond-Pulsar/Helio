@@ -221,7 +221,7 @@ impl Flight {
     /// milliseconds recording it took and those waiting.
     fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
         let started = Instant::now();
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun_at(eye), picks: self.picks.clone() });
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun_at(eye), picks: self.picks.clone(), kept: None, export: None });
         // As a host's camera-relative frames: the origin stays on a cell
         // corner while the camera moves within the cell, off the origin.
         let origin = (eye / ORIGIN_CELL).round() * ORIGIN_CELL;

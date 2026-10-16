@@ -17,9 +17,6 @@
 //! * the baked bricks: key, then runs of equal cells (version 3: large
 //!   brushes baked at their bake level too; older snapshots have them
 //!   baked on load, under the cells baked after them);
-//! * (version 4) a renderer's chunks of these edits, opaque here: its byte
-//!   count, then the bytes (`ChunkWorld::kept_snapshot`; none: 0), so a
-//!   loaded world restores what the history made instead of generating it;
 //! * a checksum of everything before it.
 use crate::edit_store::{Brick, BrickKey, CellEdit, EditStore, BRICK_CELLS};
 use crate::edits::Brush;
@@ -30,8 +27,7 @@ use crate::planet::{Edits, Planet, PlanetRecipe};
 const MAGIC: [u8; 4] = *b"HVPS";
 /// Version 2: brush records with the box height (version 1 still reads).
 /// Version 3: large brushes baked at their bake level (`planet::bake_level`).
-/// Version 4: a renderer's chunks after the bricks.
-const VERSION: u16 = 4;
+const VERSION: u16 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -146,12 +142,6 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
 impl Planet {
     /// Snapshot of the edits (see the module doc).
     pub fn snapshot(&self) -> Vec<u8> {
-        self.snapshot_with_chunks(&[])
-    }
-
-    /// [`Self::snapshot`] with a renderer's chunks of these edits (opaque
-    /// bytes, given back by [`Self::from_snapshot_with_chunks`]).
-    pub fn snapshot_with_chunks(&self, chunks: &[u8]) -> Vec<u8> {
         let edits = self.edits();
         let mut out = vec![0u8; 16];
         out[..4].copy_from_slice(&MAGIC);
@@ -184,8 +174,6 @@ impl Planet {
                 out.extend_from_slice(&value.to_le_bytes());
             }
         }
-        out.extend_from_slice(&(chunks.len() as u64).to_le_bytes());
-        out.extend_from_slice(chunks);
         let sum = record::fnv64(&out);
         out.extend_from_slice(&sum.to_le_bytes());
         out
@@ -193,12 +181,6 @@ impl Planet {
 
     /// A planet from its recipe and an edit snapshot.
     pub fn from_snapshot(recipe: PlanetRecipe, bytes: &[u8]) -> Result<Self, SnapshotError> {
-        Self::from_snapshot_with_chunks(recipe, bytes).map(|(planet, _)| planet)
-    }
-
-    /// [`Self::from_snapshot`] and the renderer's chunks the snapshot holds
-    /// (empty: none, or written before version 4).
-    pub fn from_snapshot_with_chunks(recipe: PlanetRecipe, bytes: &[u8]) -> Result<(Self, Vec<u8>), SnapshotError> {
         // Built first: the planet names the concrete generator version its
         // recipe resolves to, which the snapshot was written with.
         let mut planet = Planet::new(recipe).map_err(SnapshotError::Rejected)?;
@@ -225,11 +207,6 @@ impl Planet {
             }
             baked.set(key, Some(brick));
         }
-        let mut chunks = Vec::new();
-        if r.version >= 4 {
-            let len = r.u64()? as usize;
-            chunks = r.take(len)?.to_vec();
-        }
         if r.at != r.bytes.len() {
             return Err(SnapshotError::Corrupt("trailing data"));
         }
@@ -250,7 +227,7 @@ impl Planet {
             return Err(SnapshotError::Corrupt("history"));
         }
         planet.restore_edits(edits, bounds);
-        Ok((planet, chunks))
+        Ok(planet)
     }
 }
 

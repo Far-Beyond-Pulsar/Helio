@@ -4,7 +4,7 @@
 mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
-use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, ResidencyConfig};
+use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, KeptChunks, ResidencyConfig};
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::{Layer, LayerKind, TerrainLayers};
@@ -1058,10 +1058,11 @@ fn edited_chunks_come_back_by_copy() {
 }
 
 /// A saved world's edited chunks come back with it: packed (those resident
-/// too, `keep_resident`) and written into the edit snapshot, a world made
-/// from the loaded snapshot restores them by copy instead of generating
-/// them from the field and the history, and draws every pixel as the saved
-/// world did. Kept chunks of another history are refused.
+/// too, `keep_resident`) and saved as bytes beside the edit snapshot, a
+/// world made from the loaded snapshot restores them by copy instead of
+/// generating them from the field and the history, and draws every pixel
+/// as the saved world did. Kept chunks of another history, or damaged, are
+/// refused.
 #[test]
 fn a_loaded_world_restores_its_edited_chunks() {
     let Some(gpu) = gpu() else { return };
@@ -1077,10 +1078,10 @@ fn a_loaded_world_restores_its_edited_chunks() {
         saved.frame(&gpu, &planet, &here, None);
     }
     assert_eq!(saved.chunks.keeping(), 0, "packing the resident chunks");
-    let chunks = saved.chunks.kept_snapshot(&planet);
-    let snapshot = planet.snapshot_with_chunks(&chunks);
-    let plain = planet.snapshot().len();
-    let (loaded, chunks) = Planet::from_snapshot_with_chunks(PlanetRecipe::default(), &snapshot).unwrap();
+    let bytes = saved.chunks.kept_chunks(&planet).to_bytes();
+    let snapshot = planet.snapshot();
+    let loaded = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
+    let chunks = KeptChunks::from_bytes(&bytes).unwrap();
     let mut world = World::new(&gpu, &loaded);
     let kept = world.chunks.load_kept(&loaded, &chunks).unwrap();
     let (again, (restored, generated), keeping_ms, _) = settle_counting(&gpu, &mut world, &loaded, &here);
@@ -1088,9 +1089,9 @@ fn a_loaded_world_restores_its_edited_chunks() {
     let (_, (_, regenerated), generating_ms, _) = settle_counting(&gpu, &mut cold, &loaded, &here);
     let same = hits.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
     eprintln!(
-        "LOADED {kept} kept chunks, {} KiB in the snapshot ({} KiB without); edited chunks {restored} restored, {generated} generated ({regenerated} without them); {keeping_ms:.1} ms of generation GPU ({generating_ms:.1} without); {same}/{} pixels as saved",
-        (snapshot.len() - plain) / 1024,
-        plain / 1024,
+        "LOADED {kept} kept chunks, {} KiB of them besides the snapshot's {} KiB; edited chunks {restored} restored, {generated} generated ({regenerated} without them); {keeping_ms:.1} ms of generation GPU ({generating_ms:.1} without); {same}/{} pixels as saved",
+        bytes.len() / 1024,
+        snapshot.len() / 1024,
         hits.len()
     );
     assert!(kept > 100 && restored > 100, "{kept} kept, {restored} restored");
@@ -1100,6 +1101,10 @@ fn a_loaded_world_restores_its_edited_chunks() {
     let mut other = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
     other.apply(Brush { center: other.surface_point(dir, 0.0).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     assert!(World::new(&gpu, &other).chunks.load_kept(&other, &chunks).is_err());
+    // Damaged bytes: refused.
+    let mut damaged = bytes.clone();
+    damaged[40] ^= 1;
+    assert!(KeptChunks::from_bytes(&damaged).is_err());
 }
 
 /// Edits sealed under a running world: a crater and a mound too large to

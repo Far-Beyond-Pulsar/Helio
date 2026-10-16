@@ -517,24 +517,36 @@ with it (940 restored, exact).
 
 Before saving, `ChunkWorld::keep_resident` packs the resident edited
 chunks too (as packs fit a frame; `keeping` counts those left), and
-`kept_snapshot` writes every kept chunk: a header (the fingerprint of the
-generation shaders, terrain constants and world, so other generation code
-never loads them, and the history's length and hash), then the chunks
-deflated. `Planet::snapshot_with_chunks` carries them as an opaque section
-of the edit snapshot (version 4; older ones have none), given back by
-`Planet::from_snapshot_with_chunks`; `ChunkWorld::load_kept` keeps them
-before the world's first update, for exactly that history.
+`kept_chunks` takes every kept chunk (sharing the packs: cheap on the
+render thread). `KeptChunks::to_bytes` (on the saving thread) writes a
+header (the fingerprint of the generation shaders, terrain constants and
+world, so other generation code never loads them, and the history's
+length and hash), then the chunks deflated; `KeptChunks::from_bytes`
+reads them back and `ChunkWorld::load_kept` keeps them before the world's
+first update, for exactly that history.
+
+They are saved beside the edit snapshot, not in it: a host folds only its
+oldest edits into a snapshot (Pulsar lists its newest 4096), and the
+chunks are of every edit. Pulsar's `VoxelEditJournal` keeps them
+(`VoxelKeptChunks`: the bytes and the journal length and hash they are
+for), saved as `kept` with the level and dropped by any change of the
+edits.
+
+Hosts reach this through the pass: a `PlanetFrame`'s `kept` chunks go into
+the world built for its planet (`ChunkPass::kept_loaded` says how many, or
+why they were refused), and its `export` (`KeptExport`) asks for them: the
+pass packs the resident edited chunks over the next frames (asking for
+frames meanwhile) and answers with the planet shown and its kept chunks.
 
 `a_loaded_world_restores_its_edited_chunks` (a gate): the dug site saved
 (313 chunks, 316 KiB besides the snapshot's 260; 3.3 MiB undeflated) and
 loaded into a new world: 1172 edited chunks restored and none generated
 (313 without them), 90 ms of generation GPU against 234, every pixel as
-the saved world drew it. Kept chunks of another history are refused.
+the saved world drew it. Kept chunks of another history, or damaged, are
+refused.
 
 ### Next
 
-- Pulsar's saves write `kept_snapshot` with the edit base snapshot and load
-  it into the renderer's world.
 - Natural per-voxel materials where unedited leaves mix materials (5 % of
   their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).

@@ -112,7 +112,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // A host's first eye can be anywhere (an editor camera starts at the
         // planet's centre): nothing to stream there.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        *source.lock().unwrap() = Some(PlanetFrame { eye: glam::DVec3::new(8.0, 6.0, 12.0), planet: planet.clone(), sun: up, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye: glam::DVec3::new(8.0, 6.0, 12.0), planet: planet.clone(), sun: up, picks: None, kept: None, export: None });
         for _ in 0..600 {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -125,7 +125,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // Moved to the surface, it streams the planet around the eye until
         // settled: the plan for the old eye does not settle the new one
         // (hosts stop rendering once settled).
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, picks: None, kept: None, export: None });
         let mut frames = 0;
         let started = std::time::Instant::now();
         loop {
@@ -170,7 +170,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         assert!(observed.lock().unwrap().contains(&[config.internal_width(), config.internal_height()]));
 
         // A resize rebuilds the graph; downstream passes see the new size.
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, picks: None, kept: None, export: None });
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("final consumer resize"),
@@ -338,7 +338,7 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     let ground = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = ground.normalize();
     let forward = up.any_orthonormal_vector().as_vec3();
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), picks: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), picks: None, kept: None, export: None });
     let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
     // An editor camera held against the ground: a few centimetres of
     // clearance, the smallest near plane and a planetary far plane.
@@ -594,7 +594,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         ..Default::default()
     }).unwrap());
     let eye = glam::DVec3::Y * 20.0;
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, picks: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, picks: None, kept: None, export: None });
     editor.renderer.set_world_origin(Some(eye));
     let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
         std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 1000.0);
@@ -656,7 +656,7 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
     editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)));
     for height in [2.0, 25.0, 300.0, 20_000.0] {
         let eye = planet.surface_point(dir, height);
-        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, picks: None });
+        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, picks: None, kept: None, export: None });
         editor.renderer.set_world_origin(Some(eye));
         let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
         let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
@@ -680,5 +680,95 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
         }
     }
     }
+    assert!(pollster::block_on(validation.pop()).is_none());
+}
+
+/// A host's save asks the pass for the edited chunks through the frame
+/// (`KeptExport`): the pass asks for frames until it answers with the
+/// planet shown and its world's kept chunks. Given back with the loaded
+/// planet (`PlanetFrame::kept`), a new world restores the edited chunks by
+/// copy instead of generating them; chunks of another history are refused.
+#[test]
+fn saved_edited_chunks_come_back_through_the_frame() {
+    use helio_pass_voxel_planet::chunks::KeptChunks;
+    use helio_pass_voxel_planet::engine::KeptExport;
+    use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape};
+    let Some(mut editor) = editor(160, 90) else { return };
+    editor.renderer.set_editor_mode(false);
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = glam::DVec3::new(0.2, 1.0, 0.3);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    for k in 0..300 {
+        let (a, b) = (f64::from(k % 20) - 9.5, f64::from(k / 20) - 7.0);
+        let center = ground + side * (a * 2.0) + fwd * (b * 2.0 + 20.0) + up * 2.0;
+        planet.apply(Brush { center: center.to_array(), radius: 4.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    let planet = Arc::new(planet);
+    let eye = ground + up * 6.0;
+    editor.renderer.set_world_origin(Some(eye));
+    let forward = (fwd - up * 0.3).normalize().as_vec3();
+    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+    let frame = |planet: &Arc<Planet>, kept: Option<Arc<KeptChunks>>, export| {
+        Some(PlanetFrame { eye, planet: planet.clone(), sun: up.as_vec3(), picks: None, kept, export })
+    };
+    // Settled, it counts the edited chunks restored and generated.
+    let settle = |editor: &mut Editor| {
+        let started = std::time::Instant::now();
+        let (mut restored, mut generated) = (0, 0);
+        loop {
+            editor.render(&camera);
+            let pass = editor.renderer.find_pass::<ChunkPass>().unwrap();
+            restored += pass.stats().restored_chunks;
+            generated += pass.stats().generated_edited;
+            if pass.has_world() && !pass.needs_frame() {
+                return (restored, generated);
+            }
+            assert!(started.elapsed().as_secs() < 300, "residency did not settle");
+        }
+    };
+    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let export = Arc::new(Mutex::new(KeptExport::default()));
+    *editor.source.lock().unwrap() = frame(&planet, None, Some(export.clone()));
+    let (_, edited) = settle(&mut editor);
+    assert!(edited > 50, "{edited} edited chunks generated");
+
+    export.lock().unwrap().wanted = true;
+    let mut frames = 0;
+    let (shown, kept) = loop {
+        assert!(editor.renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "an export waits for frames");
+        editor.render(&camera);
+        frames += 1;
+        if let Some(answer) = export.lock().unwrap().answer.take() {
+            break answer;
+        }
+        assert!(frames < 200, "no export after {frames} frames");
+    };
+    assert!(Arc::ptr_eq(&shown, &planet) && !export.lock().unwrap().wanted);
+    assert!(kept.len() > 50, "{} chunks kept", kept.len());
+    let bytes = kept.to_bytes();
+
+    // Loaded: a planet from the edit snapshot, a new world with the chunks.
+    let loaded = Arc::new(Planet::from_snapshot(PlanetRecipe::default(), &planet.snapshot()).unwrap());
+    let chunks = Arc::new(KeptChunks::from_bytes(&bytes).unwrap());
+    *editor.source.lock().unwrap() = None;
+    editor.render(&camera);
+    *editor.source.lock().unwrap() = frame(&loaded, Some(chunks.clone()), None);
+    let (restored, generated) = settle(&mut editor);
+    let pass = editor.renderer.find_pass::<ChunkPass>().unwrap();
+    assert_eq!(pass.kept_loaded(), Some(&Ok(kept.len())));
+    eprintln!("KEPT_THROUGH_FRAME {} chunks ({} KiB) after {frames} frames; loaded: {restored} restored, {generated} generated ({edited} generated before)", kept.len(), bytes.len() / 1024);
+    assert!(restored > 50 && generated * 4 < restored, "{restored} restored, {generated} generated");
+
+    // Another history: refused, generated as before.
+    let mut other = (*loaded).clone();
+    other.apply(Brush { center: ground.to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    *editor.source.lock().unwrap() = None;
+    editor.render(&camera);
+    *editor.source.lock().unwrap() = frame(&Arc::new(other), Some(chunks), None);
+    editor.render(&camera);
+    assert!(editor.renderer.find_pass::<ChunkPass>().unwrap().kept_loaded().is_some_and(|r| r.is_err()));
     assert!(pollster::block_on(validation.pop()).is_none());
 }
