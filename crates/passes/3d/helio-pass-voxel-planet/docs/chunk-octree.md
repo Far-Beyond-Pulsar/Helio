@@ -363,9 +363,45 @@ Measured:
   - `mountain_slope` hold: primary rays 2.866 to 2.863 ms (drawing is
     unchanged).
 
+### Dug walls (2026-10-16)
+
+A leaf's subsurface byte follows its centre's depth, so the cells of a
+dug wall drew rock where they are soil a cell deep (a third of a pit's
+wall pixels). Every chunk under edits now gets a `cell_materials` slot (128
+a batch, 272 KiB each), whatever the edits set:
+
+- `chunk_columns_main` writes each cell's edit material, then the column's
+  natural top: over the chunk where the volume puts solid cells there
+  (scanned as `terrain::generated_top` does), else its highest natural
+  cell's.
+- `chunk_build_main` (`leaf_cells`), leaf by leaf with its pair: each
+  exposed solid cell (air on a side in the chunk's masks, or at the
+  chunk's faces) without an edit material gets `Planet::material`'s
+  natural one (`ground_material` at its volume point, depth from that
+  top). A cell its pair draws as it is (the surface under air, the
+  subsurface under ground) is cleared, except in a leaf that would be
+  implicit (drawn with its mid's material). Leaves with cells left get
+  detail pages as before.
+
+`dug_walls_draw_canonical_materials` (a gate): pits 5 m across at three
+varied spots; all 57050 pixels of their walls and floors draw
+`Planet::material` (about a third wrong before). A pit took about 170
+detail pages (0.7 MB). Before both fixes: 117 pixels where the volume
+carved the column's top cell (the natural top over the chunk), 66 in full
+leaves cleared against their own pair while drawn with their mid's.
+
+The natural-cells report, the same 906k pixels: 3.56 % wrong (9.35 %
+before). Under ground (the pits' walls): 0 of 87379. Top faces of uniform
+leaves: 0 of 190908. Other cells under air: 5.1 % of 627729 (8.8 %: the
+chunks a pit's edit covers now draw their surface cells exactly too).
+What is left is unedited leaves' surface vote over mixed columns; the
+commonest, dirt drawn as dark stone (3.1 % of pixels).
+
 ### Next
 
-- Natural per-voxel materials where leaves mix materials: dug walls (a
-  third of their pixels) first, then mixed surface leaves (9 %).
+- Edits on data: an edit changes the stored chunks it touches instead of
+  regenerating them from the field and the whole edit history.
+- Natural per-voxel materials where unedited leaves mix materials (5 % of
+  their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
 - A footprint's first computation: progressive (parent-seeded) synthesis.

@@ -784,6 +784,57 @@ fn uniform_leaves_draw_canonical_materials() {
     assert_eq!(wrong, 0, "{confusions:?}");
 }
 
+/// A pit's walls and floor draw `Planet::material` exactly: chunks under
+/// edits give exposed cells their own natural materials where their leaf's
+/// pair would draw them wrong (soil a cell deep drawn as rock).
+#[test]
+fn dug_walls_draw_canonical_materials() {
+    let Some(gpu) = gpu() else { return };
+    let natural = Planet::new(PlanetRecipe::default()).unwrap();
+    let grid = *natural.grid();
+    let radius = 2.5;
+    let (mut compared, mut wrong, mut pages) = (0, 0, 0);
+    let mut confusions: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    for (label, face, i, j) in varied_spots(&natural, 600, 2, 1) {
+        let dir = grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
+        let eye = natural.surface_point(dir, 1.7);
+        let up = eye.normalize();
+        let side = up.any_orthonormal_vector();
+        let centre = natural.surface_point(dir, 0.0) + side * 4.0;
+        let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+        planet.apply(Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let view = View::new(eye, (side - up * 0.35).normalize().as_vec3(), [320, 180]);
+        let mut world = World::new(&gpu, &planet);
+        let hits = world.settle(&gpu, &planet, &view);
+        pages += world.frame(&gpu, &planet, &view, None).detail_pages.0;
+        let view_proj = view.view_proj(&planet);
+        let near = 0.7 * grid.voxel_size() / view.pixel_angle();
+        let (mut n, mut w) = (0, 0);
+        for y in 0..view.size[1] {
+            for x in 0..view.size[0] {
+                let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
+                // The pit's cells: within a cell of its sphere.
+                if (grid.cell_center(cpu.cell) - centre).length() > radius + 2.0 * grid.voxel_size() {
+                    continue;
+                }
+                let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+                let own = planet.material(cpu.cell);
+                n += 1;
+                if drawn.material != own {
+                    w += 1;
+                    *confusions.entry((own, drawn.material)).or_default() += 1;
+                }
+            }
+        }
+        eprintln!("{label}: {w} of {n} pit pixels wrong");
+        compared += n;
+        wrong += w;
+    }
+    eprintln!("detail pages in use, summed over views: {pages}");
+    assert!(compared > 5000, "{compared} pixels compared");
+    assert_eq!(wrong, 0, "{confusions:?}");
+}
+
 /// How often unedited voxels draw another material than their own
 /// (`Planet::material`): over level-0 pixels of views at spots picked for
 /// relief and mixed materials, from 1.7 m and 6 m, then with a pit dug in

@@ -39,11 +39,15 @@ const CHUNK_BATCH: usize = 2048;
 /// Chunk slots by default (`HELIO_VOXEL_CHUNKS_SLOTS`), within what the
 /// device can bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
-/// Chunk jobs with per-voxel materials a batch (`cell_materials` slots:
-/// 256 KiB each).
-const DETAIL_JOBS: usize = 32;
+/// Chunk jobs under edits a batch (`cell_materials` slots: `CELL_WORDS`
+/// words a column, 272 KiB each).
+const DETAIL_JOBS: usize = 128;
+/// Words a column of a `cell_materials` slot (`CELL_WORDS` of
+/// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
+const CELL_WORDS: u64 = 17;
 /// Detail pages by default (`HELIO_VOXEL_DETAIL_PAGES`): 4 KiB each, one
-/// for each leaf page holding a leaf whose cells edits gave materials.
+/// for each leaf page holding a leaf under edits whose cells its pair would
+/// draw wrong.
 pub const DEFAULT_DETAIL_PAGES: usize = 16384;
 /// Words a detail page (`DETAIL_WORDS` of chunk_generate.wgsl).
 const DETAIL_WORDS: u64 = 1024;
@@ -173,8 +177,9 @@ struct ChunkJob {
     large: u32,
     /// Its baked bricks' table in `baked_refs`, or NONE.
     baked: u32,
-    /// Its `cell_materials` slot when edits give its cells materials (its
-    /// leaves get per-voxel materials), or NONE.
+    /// Its `cell_materials` slot when edits are over it (its leaves get
+    /// per-voxel materials where their pairs would draw cells wrong), or
+    /// NONE.
     detail: u32,
 }
 
@@ -464,12 +469,11 @@ impl GenBatch {
         self.computed.len() + self.cached.len()
     }
 
-    /// Whether `store`'s bricks under chunk `cz` of `tile` give any cell a
-    /// material.
-    fn baked_materials(store: &EditStore, tile: Footprint, cz: i32) -> bool {
+    /// Whether `store` holds bricks under chunk `cz` of `tile`.
+    fn bricks_under(store: &EditStore, tile: Footprint, cz: i32) -> bool {
         (0..64).any(|n| {
             let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + n % 8, cj: tile.cy * 8 + n / 8 };
-            store.column(&key).is_some_and(|column| column.iter().any(|(bk, brick)| (0..8).contains(&(bk - cz * 8)) && brick.cells.iter().any(|c| c.state() >= 2 && c.material() != 0)))
+            store.column(&key).is_some_and(|column| column.iter().any(|(bk, _)| (0..8).contains(&(bk - cz * 8))))
         })
     }
 
@@ -1663,7 +1667,7 @@ impl ChunkWorld {
             edit_state: EditState::of(edits),
             max_chunks,
             leaf_capacity,
-            cell_materials: buffer("chunk cell materials", DETAIL_JOBS as u64 * TILE_COLUMNS * 64, wgpu::BufferUsages::STORAGE),
+            cell_materials: buffer("chunk cell materials", DETAIL_JOBS as u64 * TILE_COLUMNS * CELL_WORDS * 4, wgpu::BufferUsages::STORAGE),
             // No leaf page has a detail page yet.
             detail_pages: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk detail pages"),
@@ -1819,24 +1823,20 @@ impl ChunkWorld {
         let edits = self.edits.clone();
         let baked = edits.bricks.footprints.contains(&fp);
         // Each chunk's brushes (from those over the footprint:
-        // `BrushIndex`), and whether edits give its cells materials (its
-        // leaves then get per-voxel materials, a `cell_materials` slot of
-        // the batch's): the chunks up to the first the batch has no slot
-        // for.
+        // `BrushIndex`), and whether edits are over it (its leaves then get
+        // per-voxel materials, a `cell_materials` slot of the batch's): the
+        // chunks up to the first the batch has no slot for.
         let near = edits.index.query(fp.face, i, j);
         let mut details = batch.details as usize;
         let mut chunks = Vec::with_capacity(n);
         for &cz in &czs[..n] {
             let refs: Vec<u32> = near.iter().copied().filter(|&b| brush_meets(&edits.faces[b as usize], fp.face, fp.level, i, j, span(cz))).collect();
-            let materials = refs.iter().any(|&b| {
-                let fb = &edits.faces[b as usize];
-                matches!(fb.op(), 1 | 2) && fb.material() != 0
-            }) || (baked && GenBatch::baked_materials(&edits.baked, fp, cz));
-            if materials && details >= DETAIL_JOBS {
+            let edited = !refs.is_empty() || (baked && GenBatch::bricks_under(&edits.baked, fp, cz));
+            if edited && details >= DETAIL_JOBS {
                 break;
             }
-            details += usize::from(materials);
-            chunks.push((cz, refs, materials));
+            details += usize::from(edited);
+            chunks.push((cz, refs, edited));
         }
         if chunks.is_empty() {
             return 0;
@@ -1860,8 +1860,8 @@ impl ChunkWorld {
             }
         };
         let queued = chunks.len();
-        for (cz, refs, materials) in chunks {
-            let detail = if materials {
+        for (cz, refs, edited) in chunks {
+            let detail = if edited {
                 batch.details += 1;
                 batch.details - 1
             } else {
