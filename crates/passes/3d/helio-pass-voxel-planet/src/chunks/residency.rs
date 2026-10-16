@@ -813,7 +813,7 @@ mod tests {
     }
 
     fn no_edits(grid: &Grid) -> Arc<EditView> {
-        Arc::new(EditView { grid: *grid, faces: Vec::new(), index: Default::default(), large_faces: 0, recent_counts: Vec::new(), baked: Default::default(), bricks: Default::default(), version: 0, volume_depth: 0 })
+        Arc::new(EditView { grid: *grid, faces: Vec::new(), index: Default::default(), recent_index: Default::default(), large_faces: 0, large_brushes: 0, large_prefix: 0, recent_counts: Vec::new(), baked: Default::default(), bricks: Default::default(), version: 0, volume_depth: 0 })
     }
 
     /// An Earth whose ground lies between -200 and 200 m.

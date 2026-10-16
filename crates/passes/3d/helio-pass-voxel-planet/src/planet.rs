@@ -85,9 +85,19 @@ struct RayColumn {
 pub const RECENT_BRUSHES: usize = 64;
 /// Brushes sealed at a time.
 const SEAL_BATCH: usize = 16;
-/// Largest brush baked into cells, radius in half base cells (32 cells):
-/// larger ones would bake millions of cells and stay analytic.
+/// Largest brush baked into base cells, radius in half base cells (32
+/// cells): larger ones would bake millions of cells, and bake at their
+/// [`bake_level`] instead.
 pub const BAKE_RADIUS_HALF: u32 = 64;
+
+/// The level a sealed large brush bakes at: the first whose cells it spans
+/// at most [`BAKE_RADIUS_HALF`] half cells of. Below it the brush stays
+/// analytic (`Edits::large`); there and above, baked cells hold it, so a
+/// coarse chunk reads bricks, not every large brush over it (10000 digs 8 m
+/// across cost a regenerated chunk 0.7 ms of brushes).
+pub fn bake_level(fb: &FaceBrush) -> u32 {
+    (0..31).find(|&level| (fb.radius_half >> level) <= BAKE_RADIUS_HALF).unwrap_or(31)
+}
 /// Seals kept undoable (the latest `UNDO_SEALS * SEAL_BATCH` sealed
 /// brushes undo without rebuilding the world).
 const UNDO_SEALS: usize = 128;
@@ -97,16 +107,18 @@ const CHANGES_KEPT: usize = 256;
 /// A world's edits in three layers, applied to the terrain in this order
 /// (see `edit_store`):
 ///
-/// 1. `large`: sealed brushes too large to bake, analytic;
+/// 1. `large`: sealed brushes too large to bake into base cells, analytic
+///    below their [`bake_level`];
 /// 2. `baked`: every other sealed brush, as baked cell edits (with coarser
 ///    levels built from the base level, so accumulated small edits show at
-///    any distance);
+///    any distance), and the large ones from their bake level up;
 /// 3. `recent`: the latest brushes, exact.
 ///
 /// Sealing keeps the order exact: a small brush bakes on top of the store;
-/// a large one is applied to the cells already baked (it came after them)
-/// and joins `large`, which is applied under the store. Every cell then
-/// reads `recent(baked(large(terrain)))`, the brushes in their order.
+/// a large one is applied to the cells already baked (it came after them),
+/// baked over its bake level's cells, and joins `large`, which is applied
+/// under the store. Every cell then reads `recent(baked(large(terrain)))`,
+/// the brushes in their order.
 ///
 /// Memory is bounded by the edits' effect, not their count: sealed brushes
 /// leave only their baked cells (and large ones their analytic record), a
@@ -371,6 +383,7 @@ impl Planet {
             } else {
                 for fb in faces {
                     changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
+                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb), false));
                 }
                 edits.large.push(&self.grid, *brush).expect("resolved above");
             }
@@ -456,6 +469,13 @@ impl Planet {
             .map(|(id, index)| log.resolved(id).faces[index as usize])
             .collect()
     }
+    /// [`Self::face_brushes`] of the large layer: those below their bake
+    /// level (baked cells hold them above).
+    fn large_brushes(&self, face: u8, i: i32, j: i32, k: Option<i32>, level: u32) -> Vec<FaceBrush> {
+        let mut brushes = Self::face_brushes(&self.edits.large, face, i, j, k, level);
+        brushes.retain(|fb| level < bake_level(fb));
+        brushes
+    }
     /// Canonical `(kind, material)` of a level cell: kind 0 air, 1 solid.
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
@@ -463,7 +483,7 @@ impl Planet {
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         let point = || self.grid.volume_point(face, i, j, k, level);
-        let large = Self::face_brushes(&self.edits.large, face, i, j, Some(k), level);
+        let large = self.large_brushes(face, i, j, Some(k), level);
         let (kind, material) = apply(large.into_iter(), center, point, kind, 0);
         let (kind, material) = self.edits.baked.cell(face, level, i, j, k).apply(kind, material);
         apply(Self::face_brushes(&self.edits.recent, face, i, j, Some(k), level).into_iter(), center, point, kind, material)
@@ -485,7 +505,7 @@ impl Planet {
             *column = Some(RayColumn {
                 key,
                 height: self.column_height(face, i, j, level),
-                large: Self::face_brushes(&self.edits.large, face, i, j, None, level),
+                large: self.large_brushes(face, i, j, None, level),
                 recent: Self::face_brushes(&self.edits.recent, face, i, j, None, level),
             });
         }
@@ -1184,6 +1204,50 @@ mod tests {
     }
 
     /// The walks' kinds are the canonical ones at every level.
+    #[test]
+    fn sealed_large_brushes_read_the_same_at_their_bake_level() {
+        // A dig 8 m across, sealed (it bakes at level 2), on unedited ground:
+        // at its bake level every cell reads as the brush applied
+        // analytically to the terrain, and below it the brush stays
+        // analytic.
+        let mut p = heightfield(PlanetRecipe::default());
+        let unedited = p.clone();
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 16, g.cells() / 2 - 32);
+        let top = p.column_top(face, i0, j0, 0);
+        let centre = g.cell_center(Cell::new(face, i0, j0, top));
+        let dig = Brush { center: centre.to_array(), radius: 8.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 };
+        p.apply(dig).unwrap();
+        // Far away small brushes push it out of the recent window.
+        let far = g.cell_center(Cell::new(face, i0 + 4000, j0, top));
+        for _ in 0..RECENT_BRUSHES + SEAL_BATCH {
+            p.apply(Brush { center: far.to_array(), radius: 0.1, shape: BrushShape::Cube, op: BrushOp::Paint, material: 3, height: 0.0 }).unwrap();
+        }
+        assert_eq!(p.edits().large.len(), 1, "the dig is sealed and large");
+        let faces = dig.resolve(&g).unwrap();
+        let level = bake_level(&faces[0]);
+        assert_eq!(level, 2);
+        assert!(p.edits().baked.brick_counts()[level as usize] > 0);
+        let (ci, cj, ck) = (i0 >> level, j0 >> level, top >> level);
+        let reach = 30;
+        let mut inside = 0;
+        for i in ci - reach..=ci + reach {
+            for j in cj - reach..=cj + reach {
+                for k in ck - reach..=ck + reach {
+                    let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
+                    let point = || g.volume_point(face, i, j, k, level);
+                    let natural = unedited.sample_kind(level, face, i, j, k);
+                    let want = apply(faces.iter().copied(), center, point, natural.0, natural.1);
+                    assert_eq!(p.sample_kind(level, face, i, j, k), want, "level {level} cell ({i}, {j}, {k})");
+                    inside += usize::from(natural.0 == 1 && want.0 == 0);
+                }
+            }
+        }
+        assert!(inside > 1000, "{inside} cells dug");
+        assert_eq!(p.large_brushes(face, i0 >> (level - 1), j0 >> (level - 1), None, level - 1).len(), 1);
+        assert!(p.large_brushes(face, ci, cj, None, level).is_empty());
+    }
+
     #[test]
     fn sealed_small_edits_show_at_coarse_levels() {
         let mut p = heightfield(PlanetRecipe::default());

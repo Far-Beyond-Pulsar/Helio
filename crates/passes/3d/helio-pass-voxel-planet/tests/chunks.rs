@@ -56,7 +56,7 @@ impl View {
 /// parallel fit in a 12 GB GPU (1.1 GB a test with its device; a game's
 /// default world, 2.9 GB, paged eight parallel tests out of device memory
 /// and stalled them).
-const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 2048, footprints: 1024 };
+const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 2048, footprints: 1024, bricks: 65536 };
 
 struct World {
     chunks: ChunkWorld,
@@ -937,19 +937,29 @@ fn edit_cost_against_history() {
             }
             let mut world = World::new(&gpu, &planet);
             world.settle(&gpu, &planet, &view);
-            // Ten more edits, each synced and its frame run.
-            let (mut sync_ms, mut frame_ms) = (Vec::new(), Vec::new());
+            // Ten more edits, each synced and its frame run: the update's
+            // CPU, the generation's GPU (`FrameTimings`), the chunks it
+            // generated.
+            let (mut sync_ms, mut frame_ms, mut update_ms, mut gen_ms, mut chunks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            world.chunks.take_timings();
             for _ in 0..10 {
                 dig(&mut planet);
                 let t = std::time::Instant::now();
                 world.sync(&gpu, &planet);
                 sync_ms.push(t.elapsed().as_secs_f64() * 1e3);
                 let t = std::time::Instant::now();
-                world.frame(&gpu, &planet, &view, None);
+                let stats = world.frame(&gpu, &planet, &view, None);
                 frame_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                update_ms.push(stats.cpu_ms.iter().sum::<f64>());
+                chunks.push(stats.generated_chunks as f64);
+                // The frame's GPU times come back with the next frame's.
+                world.frame(&gpu, &planet, &view, None);
+                gen_ms.push(world.chunks.take_timings().iter().map(|t| t.generate).sum::<f64>());
             }
-            sync_ms.sort_by(f64::total_cmp);
-            frame_ms.sort_by(f64::total_cmp);
+            for v in [&mut sync_ms, &mut frame_ms, &mut update_ms, &mut gen_ms, &mut chunks] {
+                v.sort_by(f64::total_cmp);
+            }
+            eprintln!("EDITPARTS history {n}: update CPU p50 {:.2} ms, generation GPU p50 {:.2} ms, chunks p50 {}", update_ms[5], gen_ms[5], chunks[5]);
             eprintln!(
                 "EDITCOST {label}, history {n}: analytic brushes {}, sealed {}; sync p50 {:.2} max {:.2} ms; frame p50 {:.2} max {:.2} ms",
                 planet.edits().len() - planet.edits().sealed_len(),

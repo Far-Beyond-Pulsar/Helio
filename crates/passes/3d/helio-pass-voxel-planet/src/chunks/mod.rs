@@ -18,7 +18,7 @@ pub mod residency;
 
 pub use classify::{Footprint, Kind, NodeKey};
 use classify::{brush_meets, EditView, Ranges};
-use crate::edit_store::{ColumnKey, EditStore};
+use crate::edit_store::{Brick, ColumnKey, EditStore};
 use crate::edits::FaceBrush;
 use crate::engine::{terrain_bytes, terrain_source, WorldGpu};
 use crate::grid::Grid;
@@ -47,6 +47,9 @@ const DETAIL_JOBS: usize = 128;
 /// their pairs (an edit's top materials vote in them): a dug wall's detail
 /// pages at every level filled a game's pages after some 80 digs 8 m across.
 const DETAIL_LEVELS: u32 = 2;
+/// A uniform brick's table entry flag (`UNIFORM_BRICK` of
+/// chunk_generate.wgsl): its cells' one edit in the low 16 bits.
+const UNIFORM_BRICK: u32 = 0x4000_0000;
 /// Words a column of a `cell_materials` slot (`CELL_WORDS` of
 /// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
 const CELL_WORDS: u64 = 17;
@@ -100,21 +103,24 @@ const SLOPE_LATTICE: u64 = 1444;
 
 /// What a [`ChunkWorld`] holds, each within what the device binds: chunk
 /// slots (a chunk's 64-tree and leaves, about 7 KB each), detail pages
-/// (4 KiB each) and footprint pool slots (75 KB each, at least two
-/// batches'). The default is a game's: 131072 chunks, a world and its
-/// device about 2.9 GB of device memory (`HELIO_VOXEL_CHUNKS_SLOTS`,
+/// (4 KiB each), footprint pool slots (75 KB each, at least two batches')
+/// and cached baked bricks (1 KiB each, before the least recently used are
+/// reused). The default is a game's: 131072 chunks, a world and its device
+/// about 2.9 GB of device memory (`HELIO_VOXEL_CHUNKS_SLOTS`,
 /// `HELIO_VOXEL_DETAIL_PAGES`).
 #[derive(Clone, Copy, Debug)]
 pub struct Capacity {
     pub chunks: usize,
     pub detail_pages: usize,
     pub footprints: usize,
+    /// Baked bricks kept on the GPU (1 KiB each; `BrickCache`).
+    pub bricks: usize,
 }
 
 impl Default for Capacity {
     fn default() -> Self {
         let var = |name: &str, default: usize| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-        Self { chunks: var("HELIO_VOXEL_CHUNKS_SLOTS", DEFAULT_CHUNKS), detail_pages: var("HELIO_VOXEL_DETAIL_PAGES", DEFAULT_DETAIL_PAGES), footprints: FOOTPRINT_POOL }
+        Self { chunks: var("HELIO_VOXEL_CHUNKS_SLOTS", DEFAULT_CHUNKS), detail_pages: var("HELIO_VOXEL_DETAIL_PAGES", DEFAULT_DETAIL_PAGES), footprints: FOOTPRINT_POOL, bricks: 65536 }
     }
 }
 
@@ -423,18 +429,6 @@ fn loaded(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_
 /// The analytic brushes of `edits` resolved per face: the large log's,
 /// then the recent log's; the count of large ones, and each recent brush's
 /// face count.
-fn analytic_faces(edits: &Edits) -> (Vec<FaceBrush>, usize, Vec<usize>) {
-    let mut faces: Vec<FaceBrush> = (0..edits.large.len() as u32).flat_map(|id| edits.large.resolved(id).faces.iter().copied()).collect();
-    let large = faces.len();
-    let mut counts = Vec::new();
-    for id in 0..edits.recent.len() as u32 {
-        let resolved = &edits.recent.resolved(id).faces;
-        faces.extend(resolved.iter().copied());
-        counts.push(resolved.len());
-    }
-    (faces, large, counts)
-}
-
 /// Which edits a world shows: brushes applied, the history's hash, the
 /// baked state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,11 +454,8 @@ struct GenBatch {
     cached: Vec<TileJob>,
     chunk_jobs: Vec<ChunkJob>,
     refs: Vec<u32>,
-    /// Baked brick tables (512 a job) and bricks (256 words each), each
-    /// brick once.
+    /// Baked brick tables (512 a job: `BrickCache` slots).
     baked_refs: Vec<u32>,
-    baked_cells: Vec<u32>,
-    bricks: FxHashMap<usize, u32>,
     /// `cell_materials` slots taken.
     details: u32,
 }
@@ -485,8 +476,9 @@ impl GenBatch {
         })
     }
 
-    /// The table of `store`'s bricks under chunk `cz` of `tile`, or NONE.
-    fn baked_table(&mut self, store: &EditStore, tile: Footprint, cz: i32) -> u32 {
+    /// The table of `store`'s bricks under chunk `cz` of `tile` (their
+    /// `cache` slots for `frame`), or NONE.
+    fn baked_table(&mut self, cache: &mut BrickCache, frame: u64, store: &EditStore, tile: Footprint, cz: i32) -> u32 {
         let mut table = [u32::MAX; 512];
         let mut any = false;
         for by in 0..8 {
@@ -498,13 +490,7 @@ impl GenBatch {
                     if !(0..8).contains(&bz) {
                         continue;
                     }
-                    let cells = &mut self.baked_cells;
-                    let at = *self.bricks.entry(std::sync::Arc::as_ptr(brick) as usize).or_insert_with(|| {
-                        let n = (cells.len() / 256) as u32;
-                        cells.extend(brick.cells.chunks(2).map(|p| u32::from(p[0].0) | (u32::from(p[1].0) << 16)));
-                        n
-                    });
-                    table[((by * 8 + bx) * 8 + bz) as usize] = at;
+                    table[((by * 8 + bx) * 8 + bz) as usize] = cache.entry(brick, frame);
                     any = true;
                 }
             }
@@ -518,26 +504,173 @@ impl GenBatch {
     }
 }
 
+/// Baked bricks on the GPU across batches (`baked_cells`), 256 words a
+/// slot: a brick is uploaded once while it stays in use, so regenerating
+/// chunks under heavily edited ground costs their tables, not their bricks
+/// again (a seal's regenerated chunks sent 5.5 MB of bricks a frame). Keyed
+/// by the brick's address; the cache holds the brick, so the address names
+/// it while cached. A brick of one edit (a large dig's inside) is its table
+/// entry (`UNIFORM_BRICK`), no slot. Slots not used this frame are reused
+/// least recently used first once `limit` are taken (the buffer grows to
+/// them, and past them when one frame wants more).
+struct BrickCache {
+    entries: FxHashMap<usize, (u32, std::sync::Arc<Brick>, u64)>,
+    free: Vec<u32>,
+    /// Slots handed out; the buffer holds `buffer_slots`.
+    slots: u32,
+    limit: u32,
+    buffer: wgpu::Buffer,
+    buffer_slots: u32,
+    /// Bricks given slots since the last upload.
+    pending: Vec<(u32, std::sync::Arc<Brick>)>,
+}
+
+/// Bytes a cached brick takes.
+const BRICK_BYTES: u64 = 1024;
+
+impl BrickCache {
+    fn new(device: &wgpu::Device, limit: u32) -> Self {
+        let buffer_slots = 4096.min(limit.max(1));
+        Self { entries: FxHashMap::default(), free: Vec::new(), slots: 0, limit, buffer: Self::buffer(device, buffer_slots), buffer_slots, pending: Vec::new() }
+    }
+
+    fn buffer(device: &wgpu::Device, slots: u32) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk baked bricks"), size: u64::from(slots) * BRICK_BYTES, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false })
+    }
+
+    /// `brick`'s table entry for `frame`: its slot (uploaded at the next
+    /// [`Self::upload`] when new), or its uniform edit.
+    fn entry(&mut self, brick: &std::sync::Arc<Brick>, frame: u64) -> u32 {
+        let key = std::sync::Arc::as_ptr(brick) as usize;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.2 = frame;
+            return entry.0;
+        }
+        let entry = if brick.cells.iter().all(|c| *c == brick.cells[0]) {
+            UNIFORM_BRICK | u32::from(brick.cells[0].0)
+        } else {
+            let slot = self.free.pop().or_else(|| (self.slots >= self.limit).then(|| self.evict(frame)).flatten()).unwrap_or_else(|| {
+                self.slots += 1;
+                self.slots - 1
+            });
+            self.pending.push((slot, brick.clone()));
+            slot
+        };
+        self.entries.insert(key, (entry, brick.clone(), frame));
+        entry
+    }
+
+    /// The least recently used quarter of the entries not used this frame
+    /// dropped; one of the slots they free.
+    fn evict(&mut self, frame: u64) -> Option<u32> {
+        let mut old: Vec<(u64, usize)> = self.entries.iter().filter(|(_, e)| e.2 < frame).map(|(k, e)| (e.2, *k)).collect();
+        if old.is_empty() {
+            return None;
+        }
+        old.sort_unstable();
+        for &(_, key) in &old[..(old.len() / 4).max(1)] {
+            if let Some((entry, ..)) = self.entries.remove(&key) {
+                if entry & UNIFORM_BRICK == 0 {
+                    self.free.push(entry);
+                }
+            }
+        }
+        self.free.pop()
+    }
+
+    /// The new bricks written, after growing the buffer to every slot
+    /// handed out (its old contents copied first, then the new bricks
+    /// copied over them in the same order).
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut helio_core::CommandRecorder<'_>) {
+        let words = |brick: &Brick| brick.cells.chunks(2).map(|p| u32::from(p[0].0) | (u32::from(p[1].0) << 16)).collect::<Vec<u32>>();
+        if self.slots <= self.buffer_slots {
+            // Runs of consecutive slots in one write each.
+            self.pending.sort_unstable_by_key(|(slot, _)| *slot);
+            let mut at = 0;
+            while at < self.pending.len() {
+                let first = self.pending[at].0;
+                let run = self.pending[at..].iter().enumerate().take_while(|(n, (slot, _))| *slot == first + *n as u32).count();
+                let data: Vec<u32> = self.pending[at..at + run].iter().flat_map(|(_, brick)| words(brick)).collect();
+                queue.write_buffer(&self.buffer, u64::from(first) * BRICK_BYTES, bytemuck::cast_slice(&data));
+                at += run;
+            }
+            self.pending.clear();
+            return;
+        }
+        let slots = self.slots.next_power_of_two();
+        let buffer = Self::buffer(device, slots);
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &buffer, 0, u64::from(self.buffer_slots) * BRICK_BYTES);
+        if !self.pending.is_empty() {
+            let data: Vec<u32> = self.pending.iter().flat_map(|(_, brick)| words(brick)).collect();
+            let staging = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk baked bricks upload"), contents: bytemuck::cast_slice(&data), usage: wgpu::BufferUsages::COPY_SRC });
+            for (n, (slot, _)) in self.pending.drain(..).enumerate() {
+                encoder.copy_buffer_to_buffer(&staging, n as u64 * BRICK_BYTES, &buffer, u64::from(slot) * BRICK_BYTES, BRICK_BYTES);
+            }
+        }
+        self.buffer = buffer;
+        self.buffer_slots = slots;
+    }
+}
+
 /// The edits of `planet` as classification and generation read them;
 /// `bricks`, the index of its baked store when that is unchanged.
-fn edit_view(planet: &Planet, version: u64, bricks: Option<std::sync::Arc<classify::BrickIndex>>) -> EditView {
+/// The analytic brushes `planet` shows and where they are (`EditView`):
+/// the large layer's faces, then the recent brushes'. From an earlier view
+/// (`from`), its large faces and their index are reused while the large
+/// layer only extends them (seals append; an unseal or another history
+/// starts again), so an edit costs the recent brushes, and a seal the
+/// large layer's index.
+fn edit_view(planet: &Planet, version: u64, from: Option<&EditView>, bricks: std::sync::Arc<classify::BrickIndex>) -> EditView {
     let edits = planet.edits();
-    let (faces, large_faces, recent_counts) = analytic_faces(edits);
+    let large = &edits.large;
+    let n = large.len();
+    let prefix = |count: usize| if count == 0 { 0 } else { large.prefix_hash(count as u32 - 1) };
+    let faces_of = |ids: std::ops::Range<usize>| ids.flat_map(|id| large.resolved(id as u32).faces.iter().copied()).collect::<Vec<FaceBrush>>();
+    let (mut faces, index) = match from.filter(|v| v.large_brushes <= n && prefix(v.large_brushes) == v.large_prefix) {
+        Some(v) if v.large_brushes == n => (v.faces[..v.large_faces].to_vec(), v.index.clone()),
+        Some(v) => {
+            let mut faces = v.faces[..v.large_faces].to_vec();
+            faces.extend(faces_of(v.large_brushes..n));
+            let index = std::sync::Arc::new(classify::BrushIndex::new(&faces, 0, true));
+            (faces, index)
+        }
+        None => {
+            let faces = faces_of(0..n);
+            let index = std::sync::Arc::new(classify::BrushIndex::new(&faces, 0, true));
+            (faces, index)
+        }
+    };
+    let large_faces = faces.len();
+    let mut recent_counts = Vec::new();
+    for id in 0..edits.recent.len() as u32 {
+        let resolved = &edits.recent.resolved(id).faces;
+        faces.extend(resolved.iter().copied());
+        recent_counts.push(resolved.len());
+    }
+    let recent_index = classify::BrushIndex::new(&faces[large_faces..], large_faces as u32, false);
     EditView {
         grid: *planet.grid(),
-        index: classify::BrushIndex::new(&faces),
         faces,
+        index,
+        recent_index,
         large_faces,
+        large_brushes: n,
+        large_prefix: prefix(n),
         recent_counts,
         baked: edits.baked.clone(),
-        bricks: bricks.unwrap_or_else(|| std::sync::Arc::new(classify::BrickIndex::new(planet.grid(), &edits.baked))),
+        bricks,
         version,
         volume_depth: (i64::from(planet.field().volume_bounds().0) / i64::from(planet.grid().layer_mm()) + 1) as i32,
     }
 }
 
-fn brush_buffer(device: &wgpu::Device, faces: &[FaceBrush]) -> wgpu::Buffer {
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk brushes"), contents: bytemuck::cast_slice(if faces.is_empty() { &NO_BRUSH[..] } else { faces }), usage: wgpu::BufferUsages::STORAGE })
+/// A brush buffer for `faces` with room for twice as many (at least 64):
+/// edits write their tail into it (`ChunkWorld::write_brushes`).
+fn brush_buffer(device: &wgpu::Device, queue: &wgpu::Queue, faces: &[FaceBrush]) -> (wgpu::Buffer, usize) {
+    let capacity = (faces.len() * 2).max(64);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk brushes"), size: (capacity * std::mem::size_of::<FaceBrush>()) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    queue.write_buffer(&buffer, 0, bytemuck::cast_slice(if faces.is_empty() { &NO_BRUSH[..] } else { faces }));
+    (buffer, capacity)
 }
 
 /// A generated node's chunk.
@@ -921,6 +1054,9 @@ pub struct ChunkWorld {
     edits: std::sync::Arc<EditView>,
     edits_unsent: Option<std::sync::Arc<EditView>>,
     brushes: wgpu::Buffer,
+    /// Faces `brushes` has room for.
+    brush_capacity: usize,
+    brick_cache: BrickCache,
     edit_state: EditState,
     /// Nodes to generate again: under brushes that came or went (first,
     /// coarsest first), drawn ones the frame they change; under baked
@@ -1585,7 +1721,8 @@ impl ChunkWorld {
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         // Brushes kept analytic: the large ones, then the recent ones.
         let edits = planet.edits();
-        let view = std::sync::Arc::new(edit_view(planet, 0, None));
+        let view = std::sync::Arc::new(edit_view(planet, 0, None, std::sync::Arc::new(classify::BrickIndex::new(planet.grid(), &planet.edits().baked))));
+        let (brushes, brush_capacity) = brush_buffer(device, queue, &view.faces);
         let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         // The capacity within what the device binds: the largest per-slot
         // buffer is its mids (1 KiB), and the leaves are 8 bytes each.
@@ -1726,7 +1863,9 @@ impl ChunkWorld {
             }),
             leaf_pages: buffer("chunk leaf pages", max_chunks as u64 * LEAF_PAGES * 4, wgpu::BufferUsages::STORAGE),
             job_results: buffer("chunk job results", (CHUNK_BATCH * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
-            brushes: brush_buffer(device, &view.faces),
+            brushes,
+            brush_capacity,
+            brick_cache: BrickCache::new(device, capacity.bricks.min((binding / BRICK_BYTES) as usize) as u32),
             edits: view.clone(),
             edits_unsent: None,
             edit_state: EditState::of(edits),
@@ -1891,11 +2030,20 @@ impl ChunkWorld {
         // `BrushIndex`), and whether edits are over it (its leaves then get
         // per-voxel materials, a `cell_materials` slot of the batch's): the
         // chunks up to the first the batch has no slot for.
-        let near = edits.index.query(fp.face, i, j);
+        let near = edits.brushes_near(fp.face, i, j, fp.level);
         let mut details = batch.details as usize;
         let mut chunks = Vec::with_capacity(n);
         for &cz in &czs[..n] {
-            let refs: Vec<u32> = near.iter().copied().filter(|&b| brush_meets(&edits.faces[b as usize], fp.face, fp.level, i, j, span(cz))).collect();
+            // Large brushes apply below their bake level (baked cells hold
+            // them from it up: `planet::bake_level`).
+            let refs: Vec<u32> = near
+                .iter()
+                .copied()
+                .filter(|&b| {
+                    let fb = &edits.faces[b as usize];
+                    brush_meets(fb, fp.face, fp.level, i, j, span(cz)) && ((b as usize) >= edits.large_faces || fp.level < crate::planet::bake_level(fb))
+                })
+                .collect();
             let edited = fp.level < DETAIL_LEVELS && (!refs.is_empty() || (baked && GenBatch::bricks_under(&edits.baked, fp, cz)));
             if edited && details >= DETAIL_JOBS {
                 break;
@@ -1938,7 +2086,7 @@ impl ChunkWorld {
             let first = batch.refs.len() as u32;
             let large = refs.iter().filter(|&&b| (b as usize) < edits.large_faces).count() as u32;
             batch.refs.extend_from_slice(&refs);
-            let baked = if baked { batch.baked_table(&edits.baked, fp, cz) } else { u32::MAX };
+            let baked = if baked { batch.baked_table(&mut self.brick_cache, self.frame_now, &edits.baked, fp, cz) } else { u32::MAX };
             batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, detail });
             // Layers not read back yet: the whole chunk.
             let record = chunk_static(&grid, fp, cz, slot, (0.0, 64.0), 32.0, self.exact_level);
@@ -1971,14 +2119,26 @@ impl ChunkWorld {
             return true;
         }
         let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else { return false };
-        let bricks = (state.sealed == self.edit_state.sealed).then(|| self.edits.bricks.clone());
-        let view = edit_view(planet, self.edits.version + 1, bricks);
-        // Brushes in one list and not the other.
+        let columns: Vec<_> = columns.into_iter().collect();
+        // Where the bricks are: unchanged without seals, extended by a
+        // seal's columns (bricks are only added), built again after an
+        // unseal.
+        let bricks = if state.sealed == self.edit_state.sealed {
+            self.edits.bricks.clone()
+        } else if state.sealed.0 > self.edit_state.sealed.0 {
+            std::sync::Arc::new(self.edits.bricks.extended(planet.grid(), &edits.baked, columns.iter().copied()))
+        } else {
+            std::sync::Arc::new(classify::BrickIndex::new(planet.grid(), &edits.baked))
+        };
+        let view = edit_view(planet, self.edits.version + 1, Some(&self.edits), bricks);
+        // Brushes in one list and not the other: past the lists' common
+        // start (the large layer's, at least, but for a seal's own).
+        let same = self.edits.faces.iter().zip(&view.faces).take_while(|(a, b)| a == b).count();
         let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
-        for fb in &self.edits.faces {
+        for fb in &self.edits.faces[same..] {
             *count.entry(bytemuck::cast(*fb)).or_default() -= 1;
         }
-        for fb in &view.faces {
+        for fb in &view.faces[same..] {
             *count.entry(bytemuck::cast(*fb)).or_default() += 1;
         }
         // Recent brushes sealed into the baked store left the list, not the
@@ -2011,11 +2171,22 @@ impl ChunkWorld {
                 }
             }
         }
-        self.brushes = brush_buffer(&self.device, &self.edits.faces);
+        self.write_brushes(same);
         self.edits_unsent = Some(self.edits.clone());
         self.edit_state = state;
         self.ceiling = planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN;
         true
+    }
+
+    /// The brush buffer for `self.edits`: its faces from `from` on written
+    /// in place, or a larger buffer when they outgrow it.
+    fn write_brushes(&mut self, from: usize) {
+        let faces = &self.edits.faces;
+        if faces.len() > self.brush_capacity {
+            (self.brushes, self.brush_capacity) = brush_buffer(&self.device, &self.queue, faces);
+        } else if from < faces.len() {
+            self.queue.write_buffer(&self.brushes, (from * std::mem::size_of::<FaceBrush>()) as u64, bytemuck::cast_slice(&faces[from..]));
+        }
     }
 
     /// Nodes brush `fb` can change, at every level it applies at: resident
@@ -2244,6 +2415,7 @@ impl ChunkWorld {
             let distance = *self.urgent_distance.entry(k).or_insert_with(|| tile_distance(&grid, k.footprint(), k.layers(), &eye_at));
             edited.push((k, !self.drawn_set.holds(k), distance));
         }
+
         edited.sort_unstable_by(|a, b| b.0.level.cmp(&a.0.level).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
         let edited: Vec<(NodeKey, bool)> = edited.into_iter().map(|(k, ..)| (k, true)).chain(self.stale.iter().map(|k| (*k, false))).collect();
         for (key, urgent) in edited {
@@ -2289,7 +2461,7 @@ impl ChunkWorld {
             at = end;
         }
         self.plan.requests = requests;
-        let GenBatch { computed, cached, mut chunk_jobs, refs, baked_refs, baked_cells, .. } = batch;
+        let GenBatch { computed, cached, mut chunk_jobs, refs, baked_refs, .. } = batch;
         // The batch's footprints: those it computes first (the kernels run
         // over them), then those it reads from the pool.
         let computed_count = computed.len();
@@ -2317,12 +2489,8 @@ impl ChunkWorld {
             contents: bytemuck::cast_slice(if baked_refs.is_empty() { &[u32::MAX][..] } else { &baked_refs }),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let baked_cells_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk baked cells"),
-            contents: bytemuck::cast_slice(if baked_cells.is_empty() { &[0u32][..] } else { &baked_cells }),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let group = self.gen_group(&refs_buffer, &evictions_buffer, &baked_refs_buffer, &baked_cells_buffer);
+        self.brick_cache.upload(&self.device, &self.queue, encoder);
+        let group = self.gen_group(&refs_buffer, &evictions_buffer, &baked_refs_buffer, &self.brick_cache.buffer);
         if !tile_jobs.is_empty() {
             self.queue.write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
             let empty: Vec<[i32; 4]> = vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; computed_count.max(1)];

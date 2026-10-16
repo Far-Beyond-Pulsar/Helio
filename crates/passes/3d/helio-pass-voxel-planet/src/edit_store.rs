@@ -11,7 +11,10 @@
 //! level is built from the one below by majority of the eight child cells
 //! ([`CellEdit::majority`]), so accumulated destruction (a hill removed by
 //! thousands of small digs) shows at every distance, where a point sample
-//! of each brush would omit brushes smaller than the level's cells.
+//! of each brush would omit brushes smaller than the level's cells. A brush
+//! too large to bake into base cells bakes at its bake level directly
+//! ([`EditStore::bake_at`]); a coarse cell whose children are mostly
+//! unchanged keeps such an edit when its level is rebuilt.
 //!
 //! Bricks are stored by column (a renderer column's bricks are one lookup)
 //! in shards shared copy-on-write: copying a store (what a renderer does to
@@ -407,8 +410,53 @@ impl EditStore {
         changed
     }
 
-    /// Rebuild the coarser levels above changed base bricks, up to `levels`
-    /// (exclusive). Returns every brick of every level that changed.
+    /// Bake a large brush at `level` directly (its bake level: a level whose
+    /// cells it spans at most `BAKE_RADIUS_HALF` half cells of; coarser ones
+    /// follow by majority). Each cell of `level` whose centre it holds takes
+    /// the brush after its baked edit; `under`: only unchanged cells, as if
+    /// the brush came before every baked edit (loading snapshots written
+    /// when large brushes stayed analytic, applied before baked cells).
+    /// Returns the bricks it changed.
+    pub fn bake_at(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, under: bool) -> Vec<BrickKey> {
+        let face = fb.face();
+        let material = fb.material();
+        let r = (fb.extent_cells() >> level) + 1;
+        let ci = (i64::from(fb.center[0]) / 2) >> level;
+        let cj = (i64::from(fb.center[1]) / 2) >> level;
+        let n = i64::from(grid.cells() >> level);
+        let clamp = |lo: i64, hi: i64| if grid.is_plane() && grid.shape() == crate::grid::Shape::InfinitePlane { (lo, hi) } else { (lo.max(0), hi.min(n - 1)) };
+        let (i0, i1) = clamp(ci - r, ci + r);
+        let (j0, j1) = clamp(cj - r, cj + r);
+        let (k0, k1) = ((i64::from(fb.k_lo) / 2 >> level) - 1, (i64::from(fb.k_hi) / 2 >> level) + 1);
+        let mut touched: FxHashMap<BrickKey, Brick> = FxHashMap::default();
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let (i, j, k) = (i as i32, j as i32, k as i32);
+                    let center = [crate::edits::center_half(i, level), crate::edits::center_half(j, level), crate::edits::center_half(k, level)];
+                    if !fb.contains(center, || grid.volume_point(face, i, j, k, level)) {
+                        continue;
+                    }
+                    let key = BrickKey::of_cell(face, level, i, j, k);
+                    let brick = touched.entry(key).or_insert_with(|| self.brick(&key).map_or_else(Brick::default, |b| (**b).clone()));
+                    let cell = &mut brick.cells[Brick::index(i, j, k)];
+                    if !under || cell.is_unchanged() {
+                        *cell = cell.then(op, material);
+                    }
+                }
+            }
+        }
+        let keys: Vec<BrickKey> = touched.keys().copied().collect();
+        for (key, brick) in touched {
+            self.set(key, Some(brick));
+        }
+        keys
+    }
+
+    /// Rebuild the coarser levels above changed bricks (of any level), up to
+    /// `levels` (exclusive). A coarse cell whose children are mostly
+    /// unchanged keeps its own edit: a large brush baked at its level
+    /// directly. Returns every brick of every level that changed.
     pub fn rebuild_coarse(&mut self, changed: Vec<BrickKey>, levels: u32) -> Vec<BrickKey> {
         let mut all = changed.clone();
         let mut current = changed;
@@ -447,7 +495,11 @@ impl EditStore {
                         let (dx, dy, dz) = ((c & 1) as i32, ((c >> 1) & 1) as i32, (c >> 2) as i32);
                         *child = self.cell(key.face, level, i * 2 + dx, j * 2 + dy, k * 2 + dz);
                     }
-                    out.cells[Brick::index(i, j, k)] = CellEdit::majority(children);
+                    // Children only gain edits (undo restores bricks), so a
+                    // majority of unchanged children means the cell's own
+                    // edit came at this level.
+                    let majority = CellEdit::majority(children);
+                    out.cells[Brick::index(i, j, k)] = if majority.is_unchanged() { self.cell(key.face, level + 1, i, j, k) } else { majority };
                 }
             }
         }

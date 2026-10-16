@@ -132,10 +132,19 @@ pub struct Class {
 /// the planner's thread.
 pub struct EditView {
     pub grid: Grid,
+    /// The large layer's faces (the first `large_faces`), then the recent
+    /// brushes' (`recent_counts` a brush).
     pub faces: Vec<FaceBrush>,
-    /// Where `faces` are (`BrushIndex`).
-    pub index: BrushIndex,
+    /// Where the large faces are, shared while seals leave the large layer
+    /// as it was (`BrushIndex`); where the recent ones are.
+    pub index: std::sync::Arc<BrushIndex>,
+    pub recent_index: BrushIndex,
     pub large_faces: usize,
+    /// Large brushes the view holds, and the history's hash at the last of
+    /// them (`EditLog::prefix_hash`): a later view extends them while the
+    /// large layer's first ones keep that hash.
+    pub large_brushes: usize,
+    pub large_prefix: u64,
     pub recent_counts: Vec<usize>,
     pub baked: EditStore,
     /// Where the baked bricks are (shared while the baked store is
@@ -166,23 +175,44 @@ pub struct BrickIndex {
 
 impl BrickIndex {
     pub fn new(grid: &Grid, store: &EditStore) -> Self {
-        let top = grid.levels() - 1;
         let mut index = Self::default();
-        let mut marked: FxHashSet<NodeKey> = FxHashSet::default();
-        for (k, _) in store.bricks() {
+        index.add(grid, store.bricks().map(|(k, _)| k));
+        index
+    }
+
+    /// This index with the bricks of `columns` added (a seal: bricks are
+    /// only added until an unseal restores them, which needs [`Self::new`]).
+    pub fn extended(&self, grid: &Grid, store: &EditStore, columns: impl Iterator<Item = crate::edit_store::ColumnKey>) -> Self {
+        let mut index = Self { footprints: self.footprints.clone(), nodes: self.nodes.clone(), layers: self.layers };
+        let keys: Vec<crate::edit_store::BrickKey> = columns
+            .filter_map(|c| store.column(&c).map(|column| column.iter().map(move |(bk, _)| crate::edit_store::BrickKey { face: c.face, level: c.level, bi: c.ci, bj: c.cj, bk: *bk }).collect::<Vec<_>>()))
+            .flatten()
+            .collect();
+        index.add(grid, keys.into_iter());
+        index
+    }
+
+    fn add(&mut self, grid: &Grid, keys: impl Iterator<Item = crate::edit_store::BrickKey>) {
+        let top = grid.levels() - 1;
+        for k in keys {
             let level = u32::from(k.level);
-            index.footprints.insert(Footprint { face: k.face, level, cx: k.bi >> 3, cy: k.bj >> 3 });
+            self.footprints.insert(Footprint { face: k.face, level, cx: k.bi >> 3, cy: k.bj >> 3 });
             let (lo, hi) = ((k.bk * 8) << level, (k.bk * 8 + 8) << level);
-            index.layers = Some(index.layers.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            self.layers = Some(self.layers.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            // A node marked is marked with its ancestors.
             let mut node = NodeKey { face: k.face, level, cx: k.bi >> 3, cy: k.bj >> 3, cz: k.bk >> 3 };
-            while marked.insert(node) && node.level < top {
+            loop {
+                let layers = self.nodes.entry(node.footprint()).or_default();
+                if layers.contains(&node.cz) {
+                    break;
+                }
+                layers.push(node.cz);
+                if node.level >= top {
+                    break;
+                }
                 node = node.parent();
             }
         }
-        for node in marked {
-            index.nodes.entry(node.footprint()).or_default().push(node.cz);
-        }
-        index
     }
 }
 
@@ -191,10 +221,19 @@ impl BrickIndex {
 /// smallest level where it spans at most two buckets a side. A query reads,
 /// level by level, the buckets over its rectangle (past `SCAN_BUCKETS` of
 /// them, the level's entries instead), so it costs the brushes near it, not
-/// the whole history's.
+/// the whole history's. Brushes are kept apart by the levels they apply at
+/// (`top`: below their size's, and a large brush below its bake level), so
+/// a coarse footprint's query skips those baked cells hold.
 #[derive(Default)]
 pub struct BrushIndex {
-    levels: Vec<FxHashMap<(u8, i64, i64), Vec<u32>>>,
+    parts: Vec<(u32, Vec<FxHashMap<(u8, i64, i64), Vec<u32>>>)>,
+}
+
+/// The levels `fb` applies at, `0..top`: those it spans half a cell of, and
+/// a large-layer brush's below its bake level.
+pub fn brush_top(fb: &FaceBrush, large: bool) -> u32 {
+    let size = 32 - fb.radius_half.leading_zeros();
+    if large { size.min(crate::planet::bake_level(fb)) } else { size }
 }
 
 /// The finest buckets: 4096 half cells (204.8 m at 0.1 m voxels).
@@ -210,9 +249,20 @@ fn brush_extent(fb: &FaceBrush) -> ((i64, i64), (i64, i64)) {
 }
 
 impl BrushIndex {
-    pub fn new(faces: &[FaceBrush]) -> Self {
-        let mut levels: Vec<FxHashMap<(u8, i64, i64), Vec<u32>>> = Vec::new();
+    /// The index of `faces`, numbered from `first`; `large`: the large
+    /// layer's.
+    pub fn new(faces: &[FaceBrush], first: u32, large: bool) -> Self {
+        let mut index = Self::default();
         for (n, fb) in faces.iter().enumerate() {
+            let top = brush_top(fb, large);
+            let part = match index.parts.iter().position(|(t, _)| *t == top) {
+                Some(part) => part,
+                None => {
+                    index.parts.push((top, Vec::new()));
+                    index.parts.len() - 1
+                }
+            };
+            let levels = &mut index.parts[part].1;
             let (i, j) = brush_extent(fb);
             let mut level = 0;
             while BUCKET_LOG2 + level < 62 && ((i.1 >> (BUCKET_LOG2 + level)) - (i.0 >> (BUCKET_LOG2 + level)) > 1 || (j.1 >> (BUCKET_LOG2 + level)) - (j.0 >> (BUCKET_LOG2 + level)) > 1) {
@@ -224,20 +274,20 @@ impl BrushIndex {
             let s = BUCKET_LOG2 + level;
             for bi in (i.0 >> s)..=(i.1 >> s) {
                 for bj in (j.0 >> s)..=(j.1 >> s) {
-                    levels[level as usize].entry((fb.face(), bi, bj)).or_default().push(n as u32);
+                    levels[level as usize].entry((fb.face(), bi, bj)).or_default().push(first + n as u32);
                 }
             }
         }
-        Self { levels }
+        index
     }
 
-    /// Brushes of `face` whose extent may meet half-cell rectangle `i`, `j`
-    /// (inclusive), in their order. A superset: callers test each exactly
-    /// (`brush_meets`).
-    pub fn query(&self, face: u8, i: (i64, i64), j: (i64, i64)) -> Vec<u32> {
+    /// Brushes of `face` that apply at `level` and whose extent may meet
+    /// half-cell rectangle `i`, `j` (inclusive), in their order. A superset:
+    /// callers test each exactly (`brush_meets`).
+    pub fn query(&self, face: u8, i: (i64, i64), j: (i64, i64), level: u32) -> Vec<u32> {
         let mut out = Vec::new();
-        for (level, buckets) in self.levels.iter().enumerate() {
-            let s = BUCKET_LOG2 + level as u32;
+        for (size, buckets) in self.parts.iter().filter(|(top, _)| level < *top).flat_map(|(_, sizes)| sizes.iter().enumerate()) {
+            let s = BUCKET_LOG2 + size as u32;
             let (bi, bj) = ((i.0 >> s, i.1 >> s), (j.0 >> s, j.1 >> s));
             if (bi.1 - bi.0 + 1).saturating_mul(bj.1 - bj.0 + 1) <= SCAN_BUCKETS {
                 for x in bi.0..=bi.1 {
@@ -276,7 +326,15 @@ impl EditView {
     /// still makes the nodes it crosses Mixed, so the cut refines to it).
     fn shapes_over(&self, fp: Footprint) -> impl Iterator<Item = (usize, &FaceBrush)> {
         let (i, j) = fp.span_half();
-        self.index.query(fp.face, i, j).into_iter().map(|n| (n as usize, &self.faces[n as usize])).filter(move |(_, fb)| fb.op() <= 1 && brush_meets(fb, fp.face, 0, i, j, (i64::MIN / 4, i64::MAX / 4)))
+        self.brushes_near(fp.face, i, j, 0).into_iter().map(|n| (n as usize, &self.faces[n as usize])).filter(move |(_, fb)| fb.op() <= 1 && brush_meets(fb, fp.face, 0, i, j, (i64::MIN / 4, i64::MAX / 4)))
+    }
+
+    /// Analytic brushes (indices into `faces`, in their order) that apply
+    /// at `level` and whose extent may meet half-cell rectangle `i`, `j`.
+    pub fn brushes_near(&self, face: u8, i: (i64, i64), j: (i64, i64), level: u32) -> Vec<u32> {
+        let mut near = self.index.query(face, i, j, level);
+        near.extend(self.recent_index.query(face, i, j, level));
+        near
     }
 
     /// Layers [lo, hi) of `fp`'s level where brush `fb`'s surface can be
@@ -414,14 +472,21 @@ mod tests {
                 FaceBrush { flags: face | ((next() % 3) as u32) << 4, radius_half: w as u32, k_lo: -100, k_hi: 100, center: [ci, cj, 0, w], ball: [0; 4] }
             })
             .collect();
-        let index = BrushIndex::new(&faces);
+        // The first half large (applying below their bake level).
+        let large = faces.len() / 2;
+        let index = BrushIndex::new(&faces[..large], 0, true);
+        let recent = BrushIndex::new(&faces[large..], large as u32, false);
         for _ in 0..2000 {
             let face = (next() % 6) as u8;
+            let level = (next() % 12) as u32;
             let w = 1i64 << (next() % 31);
             let (i0, j0) = ((next() % (1 << 30)) as i64, (next() % (1 << 30)) as i64);
             let (i, j) = ((i0, i0 + w), (j0, j0 + w));
-            let found: Vec<u32> = index.query(face, i, j).into_iter().filter(|&n| brush_meets(&faces[n as usize], face, 0, i, j, (-1000, 1000))).collect();
-            let scanned: Vec<u32> = (0..faces.len() as u32).filter(|&n| brush_meets(&faces[n as usize], face, 0, i, j, (-1000, 1000))).collect();
+            let applies = |n: u32| level < brush_top(&faces[n as usize], (n as usize) < large) && brush_meets(&faces[n as usize], face, level, i, j, (-1000, 1000));
+            let mut found: Vec<u32> = index.query(face, i, j, level);
+            found.extend(recent.query(face, i, j, level));
+            found.retain(|&n| applies(n));
+            let scanned: Vec<u32> = (0..faces.len() as u32).filter(|&n| applies(n)).collect();
             assert_eq!(found, scanned);
         }
     }

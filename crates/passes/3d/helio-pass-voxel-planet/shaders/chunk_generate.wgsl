@@ -473,9 +473,14 @@ fn apply_brushes(mask: vec2<u32>, job: ChunkJob, first: u32, end: u32, p: vec3<i
 // The baked edit of cell `z` of the job's column `li` in brick column
 // `column` (`edit_store::CellEdit`: state in bits 0..2, 1 air, 2 solid,
 // 3 paint; material in 8..16).
+// A brick's table entry: NONE (none), UNIFORM_BRICK | the edit of all its
+// cells, or its cells' first word / 256 in `baked_cells`.
+const UNIFORM_BRICK: u32 = 0x40000000u;
+
 fn baked_edit(job: ChunkJob, column: u32, li: u32, z: u32) -> u32 {
     let b = baked_refs[job.baked + column * 8u + (z >> 3u)];
     if b == NONE { return 0u; }
+    if (b & UNIFORM_BRICK) != 0u { return b & 0xffffu; }
     let n = (li & 7u) + 8u * ((li >> 3u) + 8u * (z & 7u));
     return (baked_cells[b * 256u + (n >> 1u)] >> ((n & 1u) * 16u)) & 0xffffu;
 }

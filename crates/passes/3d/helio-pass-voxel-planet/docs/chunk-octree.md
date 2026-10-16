@@ -425,21 +425,62 @@ large brushes, so a long game slows every edit and every chunk.
 
 **Edits on data**, in steps, each with its gate:
 
-1. **Large brushes into data.** A sealed large brush is applied to the
-   resident chunks it touches (a rebuild of their 64-trees from their own
-   cells and the brush, without the terrain program), and kept in the log
-   only for space no resident chunk covered. Gate: the table's 10000 large
-   digs at the cost of 100.
+1. **Large brushes into data** (done, below). Gate: the table's 10000
+   large digs at the cost of 100.
 2. **Edited chunks kept.** Edited level-0 chunks are read back,
    compressed and kept on the CPU (and in the save), so evicting one costs
    a copy, not a regeneration from the history; parents re-derived by
    downsampling.
-3. **Incremental sync.** `sync_edits` appends and indexes the new brush
-   instead of rebuilding the list, the index and the buffer.
+3. **Incremental sync** (done with step 1).
+
+### Large brushes into data (2026-10-16)
+
+Where the cost went at 10000 large digs: `sync_edits` 3.8 ms (hashing
+both brush lists 1.2-2.2, a new 480 KB brush buffer 1.4, the list, index
+and view rebuilt 1); the regenerated chunks 4.35 ms of GPU (700 us each,
+coarse ones evaluating up to a thousand brushes a column).
+
+- **Large brushes bake at their bake level** (`planet::bake_level`: the
+  first level whose cells a brush spans at most 32 of, level 2 for a dig
+  8 m across). Sealing applies one over the baked base cells (as before)
+  and bakes it at that level (`EditStore::bake_at`); coarser levels follow
+  by majority, and a coarse cell whose children are mostly unchanged keeps
+  its own edit. Below its bake level a large brush stays analytic. Every
+  cell still reads `recent(baked(large(terrain)))` in the brushes' order:
+  at the bake level, cell for cell as the analytic brush read
+  (`sealed_large_brushes_read_the_same_at_their_bake_level`). Snapshots
+  are version 3; older ones bake their large brushes on load, under the
+  cells baked after them (what analytic-first applied read).
+- **Brushes are indexed by the levels they apply at** (`BrushIndex` parts:
+  below their size's, and a large brush below its bake level), so a coarse
+  footprint's query skips the baked ones.
+- **Incremental sync.** The view keeps the large layer's faces and index
+  while seals only append to it (the large log's prefix hash); an edit
+  rebuilds the recent brushes' index alone, diffs the lists past their
+  common start, and writes the brush buffer's tail in place; a seal
+  extends the brick index by its columns.
+- **A brick cache.** Baked bricks stay on the GPU across batches
+  (`BrickCache`, 64 MB by default, least recently used reused): a
+  regenerated chunk sends its table, not its bricks again (a seal's
+  regenerated chunks sent 5.5 MB a frame, an edit's 0.5 MB); a brick of one
+  edit is its table entry. Runs of new bricks go in one write each.
+
+One more edit after `n` large digs 8 m across (ground view; the frame's
+wall time is too noisy in this harness, which waits for the GPU every
+frame and lets it downclock):
+
+| History | sync | update CPU | generation GPU |
+|---|---|---|---|
+| 100 | 0.34 ms | 0.30 ms | 0.20 ms |
+| 10000, before | 3.8 ms | 0.96 ms | 4.35 ms |
+| 10000 | 0.51 ms | 0.48 ms | 0.37 ms |
+
+What is left grows with the baked data under a heavily dug region (10000
+digs 8 m across lower 720 m of ground by some 40 m), not with the history.
 
 ### Next
 
-- Edits on data (above).
+- Edits on data, step 2: edited chunks kept (above).
 - Natural per-voxel materials where unedited leaves mix materials (5 % of
   their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
