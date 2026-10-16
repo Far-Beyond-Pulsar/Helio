@@ -103,6 +103,13 @@ struct ChunkMeta {
 // Each stored leaf's ground normal (`chunk_build_main`): two slope bytes
 // (x | y << 8, by angle), 0 where none.
 @group(0) @binding(15) var<storage, read> leaf_normals: array<u32>;
+// Per-voxel materials where edits set them (`chunk_generate.wgsl`): each
+// leaf page's detail page (NONE: none), 1024 words a page, 16 a leaf by its
+// place in the page, word x + 4 y its column's cells (byte z); 0: the
+// leaf's pair decides.
+@group(0) @binding(16) var<storage, read> detail_pages: array<u32>;
+@group(0) @binding(17) var<storage, read> detail_cells: array<u32>;
+@group(0) @binding(18) var<storage, read> slot_details: array<u32>;
 const LEAF_PAGES: u32 = 64u;
 
 // Leaf `index` of chunk `slot` (in its mids' order) in the leaf storage.
@@ -421,9 +428,9 @@ fn leaf_ground(slot: u32, c: vec3<i32>, f: ChunkDraw) -> vec3<f32> {
     return n * inverseSqrt(length2);
 }
 
-// The material pair of the stored leaf holding cell `c` of chunk `slot`
-// (NONE: the leaf is empty, full or past the chunk).
-fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
+// The leaf storage index of the stored leaf holding cell `c` of chunk
+// `slot` (NONE: the leaf is empty, full or past the chunk).
+fn stored_leaf(slot: u32, c: vec3<i32>) -> u32 {
     if any(c < vec3<i32>(0)) || any(c > vec3<i32>(63)) { return NONE; }
     let root = chunk_meta[slot];
     let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
@@ -431,8 +438,29 @@ fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
     let node = mids[slot * 64u + m];
     let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
     if !bit64(node.xy, l) || bit64(node.zw, l) { return NONE; }
-    let index = leaf_at_page(slot, mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l));
+    return leaf_at_page(slot, mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l));
+}
+
+// The material pair of stored leaf `index`.
+fn leaf_pair(index: u32) -> u32 {
     return (leaf_materials[index >> 1u] >> ((index & 1u) * 16u)) & 0xffffu;
+}
+
+// Cell `c`'s own material where edits set it (`detail_pages`), else 0.
+// Leaves holding such cells are always stored.
+fn cell_detail(slot: u32, c: vec3<i32>) -> u32 {
+    if slot_details[slot] == 0u { return 0u; }
+    let index = stored_leaf(slot, c);
+    if index == NONE { return 0u; }
+    return leaf_detail(index, c);
+}
+
+// Cell `c`'s own material in stored leaf `index` (0: none).
+fn leaf_detail(index: u32, c: vec3<i32>) -> u32 {
+    let page = detail_pages[index >> 6u];
+    if page == NONE { return 0u; }
+    let word = detail_cells[page * 1024u + (index & 63u) * 16u + u32((c.x & 3) + ((c.y & 3) << 2u))];
+    return (word >> (u32(c.z & 3) * 8u)) & 0xffu;
 }
 
 // A hit cell's material from its leaf's (or mid's) two (`pair`: what a
@@ -442,6 +470,8 @@ fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
 // lookups in the chunk over (`solid_over`) inside the walk's loop cost the
 // loop registers (+45% on a mountain's primary rays).
 fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
+    let own = cell_detail(slot, c);
+    if own != 0u { return own; }
     return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_over(slot, c));
 }
 
@@ -1556,8 +1586,17 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
         // A top cell there (solid under air): its leaf holds a surface.
         let there = vec3<i32>(at, cell.z);
         if any((at >> vec2<u32>(2u)) != (cell.xy >> vec2<u32>(2u))) && solid_at(slot, there) && !solid_at(slot, there + vec3<i32>(0, 0, 1)) {
-            let pair = stored_leaf_pair(slot, there);
-            if pair != NONE && (pair & 0xffu) != 0u { material = min(pair & 0xffu, 31u); }
+            let index = stored_leaf(slot, there);
+            if index != NONE {
+                var own = 0u;
+                if slot_details[slot] != 0u { own = leaf_detail(index, there); }
+                let pair = leaf_pair(index);
+                if own != 0u {
+                    material = min(own, 31u);
+                } else if (pair & 0xffu) != 0u {
+                    material = min(pair & 0xffu, 31u);
+                }
+            }
         }
     }
     let smooth_ground = 1.0 - under_refined(key, projected);

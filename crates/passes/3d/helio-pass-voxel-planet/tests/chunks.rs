@@ -589,6 +589,188 @@ fn thousands_of_block_edits_render_exactly() {
     matches_exactly(&gpu, &planet, View::new(eye, forward, [320, 180]), 400);
 }
 
+/// Blocks of many materials over ground with single cells painted: every
+/// pixel whose CPU hit is an edited cell draws that cell's own material, not
+/// its leaf's.
+#[test]
+fn edited_cells_draw_their_own_materials() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let kinds = [material::BRICK, material::PLANKS, material::COBBLE, material::WOOD, material::CLAY, material::SNOW, material::BASALT, material::SAND];
+    let mut edited = std::collections::HashMap::new();
+    let mut cell_brush = |planet: &mut Planet, cell: Cell, op: BrushOp, material: u32| {
+        planet.apply(Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material, height: 0.0 }).unwrap();
+        edited.insert(cell, material);
+    };
+    // A wall of blocks, each cell its own material.
+    for y in 0..24i32 {
+        for x in -16..16 {
+            let (cell, _) = grid.locate(ground + side * (f64::from(x) * 0.1) + fwd * 4.0 + up * (f64::from(y) * 0.1 + 0.55));
+            cell_brush(&mut planet, cell, BrushOp::Add, kinds[((x * 7 + y * 3).rem_euclid(8)) as usize]);
+        }
+    }
+    // Ground cells painted in a checkerboard in front of it.
+    for x in -16..16 {
+        for z in 0..30i32 {
+            if (x + z) % 2 != 0 {
+                continue;
+            }
+            let (c, _) = grid.locate(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 0.5));
+            let cell = Cell::new(c.face, c.i, c.j, planet.column_top(c.face, c.i, c.j, 0) - 1);
+            assert!(planet.solid(cell));
+            cell_brush(&mut planet, cell, BrushOp::Paint, kinds[((x + z * 5).rem_euclid(8)) as usize]);
+        }
+    }
+    let eye = ground - fwd * 2.0 + up * 3.0;
+    let view = View::new(eye, ((ground + fwd * 3.0 + up * 0.8) - eye).normalize().as_vec3(), [320, 180]);
+    let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut wrong) = (0, 0);
+    for y in 0..view.size[1] {
+        for x in 0..view.size[0] {
+            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 50.0) else { continue };
+            let Some(&want) = edited.get(&cpu.cell) else { continue };
+            assert_eq!(planet.material(cpu.cell), want);
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+            compared += 1;
+            if drawn.material != want {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: {:?} drawn {}, edited {want}", cpu.cell, drawn.material);
+                }
+            }
+        }
+    }
+    eprintln!("compared {compared}, wrong {wrong}");
+    assert!(compared > 3000, "{compared} pixels compared");
+    assert_eq!(wrong, 0);
+}
+
+/// How often unedited voxels draw another material than their own: the
+/// leaf rule (a leaf's surface and subsurface bytes) against
+/// `Planet::material`, over level-0 pixels by pixel and by distinct cell,
+/// with the most common confusions. Spots are picked for relief and mixed
+/// top materials (flat grassland always agrees); each is seen from 1.7 m
+/// and 6 m, then with a pit dug in front (natural cells in its walls; a
+/// removal sets no materials). A report, not a gate:
+/// `cargo test --release --test chunks natural_cells -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn natural_cells_against_the_leaf_rule() {
+    let Some(gpu) = gpu() else { return };
+    let natural = Planet::new(PlanetRecipe::default()).unwrap();
+    let grid = *natural.grid();
+    let n = f64::from(grid.cells());
+    let name = |m: u32| if m == 0 || m as usize > material::NAMES.len() { format!("#{m}") } else { material::NAMES[m as usize - 1].to_string() };
+    // Candidate land columns: relief (the greatest top difference over 16
+    // cells) and distinct top materials around each.
+    let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+    let mut steep = Vec::new();
+    let mut mixed = Vec::new();
+    for _ in 0..1500 {
+        let face = (next() % 6) as u8;
+        let (i, j) = ((next() % (n as u64 - 64)) as i32 + 32, (next() % (n as u64 - 64)) as i32 + 32);
+        if natural.column_top(face, i, j, 0) <= 40 {
+            continue;
+        }
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        let mut kinds = std::collections::HashSet::new();
+        for a in (-8..8).step_by(4) {
+            for b in (-8..8).step_by(4) {
+                let top = natural.column_top(face, i + a, j + b, 0);
+                lo = lo.min(top);
+                hi = hi.max(top);
+                kinds.insert(natural.material(Cell::new(face, i + a, j + b, top - 1)));
+            }
+        }
+        steep.push((hi - lo, face, i, j));
+        mixed.push((kinds.len() as i32 * 1000 + hi - lo, face, i, j));
+    }
+    steep.sort_by(|a, b| b.0.cmp(&a.0));
+    mixed.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut spots: Vec<(String, u8, i32, i32)> = steep.iter().take(4).map(|s| (format!("steep {} cells", s.0), s.1, s.2, s.3)).collect();
+    for s in &mixed {
+        if spots.len() < 8 && !spots.iter().any(|t| (t.1, t.2, t.3) == (s.1, s.2, s.3)) {
+            spots.push((format!("{} materials", s.0 / 1000), s.1, s.2, s.3));
+        }
+    }
+    // `Planet::material` with the noise point the generation kernel uses
+    // (the column's domain point, not the cell's volume point): what a
+    // per-voxel store built by the kernel's own rule would hold.
+    let column_point = |planet: &Planet, c: Cell| -> u32 {
+        let field = planet.field();
+        let slope = planet.material_slope(c.face, c.i, c.j);
+        let top_height = planet.column_height(c.face, c.i, c.j, 0);
+        let generated = helio_pass_voxel_planet::terrain::generated_top(&grid, field, c.face, c.i, c.j, 0, top_height);
+        let depth = (generated - 1 - c.k).max(0);
+        let surface = field.surface(helio_pass_voxel_planet::terrain::Column { face: c.face, i: c.i, j: c.j, level: 0 }, top_height) & 0xff;
+        field.ground_material(grid.domain_point(c.face, c.i, c.j, 0), surface, top_height, depth, slope, c.k) & material::ID
+    };
+    let mut confusions: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    let (mut all_px, mut all_wrong_px, mut all_cells, mut all_wrong_cells) = (0, 0, 0, 0);
+    // Pixels whose column-point material differs from the canonical, and
+    // drawn ones differing from the column-point material.
+    let (mut all_point_px, mut all_rule_px) = (0, 0);
+    for (label, face, i, j) in &spots {
+        let dir = grid.direction(*face, f64::from(*i) + 0.5, f64::from(*j) + 0.5);
+        for (lift, pit) in [(1.7, false), (6.0, false), (1.7, true)] {
+            let eye = natural.surface_point(dir, lift);
+            let up = eye.normalize();
+            let side = up.any_orthonormal_vector();
+            let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+            if pit {
+                let ground = natural.surface_point(dir, 0.0) + side * 4.0;
+                planet.apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+            }
+            let view = View::new(eye, (side - up * if lift > 2.0 { 0.6 } else { 0.35 }).normalize().as_vec3(), [320, 180]);
+            let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+            let view_proj = view.view_proj(&planet);
+            let near = 0.7 * grid.voxel_size() / view.pixel_angle();
+            let (mut px, mut wrong_px, mut point_px, mut rule_px) = (0, 0, 0, 0);
+            let mut cells: std::collections::HashMap<Cell, bool> = std::collections::HashMap::new();
+            for y in 0..view.size[1] {
+                for x in 0..view.size[0] {
+                    let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
+                    let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+                    let own = planet.material(cpu.cell);
+                    // Edited cells (a pit's) are not natural.
+                    let column = column_point(&planet, cpu.cell);
+                    point_px += usize::from(column != own);
+                    rule_px += usize::from(drawn.material != column);
+                    px += 1;
+                    let wrong = drawn.material != own;
+                    if wrong {
+                        wrong_px += 1;
+                        *confusions.entry((own, drawn.material)).or_default() += 1;
+                    }
+                    cells.insert(cpu.cell, wrong);
+                }
+            }
+            let wrong_cells = cells.values().filter(|w| **w).count();
+            eprintln!("{label} at {lift} m{}: {wrong_px}/{px} pixels ({:.1}%), {wrong_cells}/{} cells ({:.1}%); column point differs {:.1}%, drawn vs column point {:.1}%", if pit { ", pit" } else { "" }, 100.0 * wrong_px as f64 / px.max(1) as f64, cells.len(), 100.0 * wrong_cells as f64 / cells.len().max(1) as f64, 100.0 * point_px as f64 / px.max(1) as f64, 100.0 * rule_px as f64 / px.max(1) as f64);
+            all_point_px += point_px;
+            all_rule_px += rule_px;
+            all_px += px;
+            all_wrong_px += wrong_px;
+            all_cells += cells.len();
+            all_wrong_cells += wrong_cells;
+        }
+    }
+    eprintln!("ALL: {all_wrong_px}/{all_px} pixels ({:.2}%), {all_wrong_cells}/{all_cells} cells ({:.2}%)", 100.0 * all_wrong_px as f64 / all_px.max(1) as f64, 100.0 * all_wrong_cells as f64 / all_cells.max(1) as f64);
+    eprintln!("ALL: column point differs from canonical {:.2}%, drawn differs from column point {:.2}% of pixels", 100.0 * all_point_px as f64 / all_px.max(1) as f64, 100.0 * all_rule_px as f64 / all_px.max(1) as f64);
+    let mut top: Vec<_> = confusions.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    for ((own, drawn), count) in top.iter().take(12) {
+        eprintln!("  own {} drawn {}: {count} pixels ({:.2}%)", name(*own), name(*drawn), 100.0 * *count as f64 / all_px.max(1) as f64);
+    }
+}
+
 /// Edits sealed under a running world: a crater and a mound too large to
 /// bake, blocks baked between them, then undo across seals. After each
 /// change the kept world matches CPU ray casts exactly.

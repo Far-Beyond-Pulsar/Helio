@@ -39,6 +39,14 @@ const CHUNK_BATCH: usize = 2048;
 /// Chunk slots by default (`HELIO_VOXEL_CHUNKS_SLOTS`), within what the
 /// device can bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
+/// Chunk jobs with per-voxel materials a batch (`cell_materials` slots:
+/// 256 KiB each).
+const DETAIL_JOBS: usize = 32;
+/// Detail pages by default (`HELIO_VOXEL_DETAIL_PAGES`): 4 KiB each, one
+/// for each leaf page holding a leaf whose cells edits gave materials.
+pub const DEFAULT_DETAIL_PAGES: usize = 16384;
+/// Words a detail page (`DETAIL_WORDS` of chunk_generate.wgsl).
+const DETAIL_WORDS: u64 = 1024;
 
 /// `Cull` of chunk_draw.wgsl: two counts, then 65 bins' counts and cursors.
 const CULL_BYTES: u64 = 4 * (2 + 2 * 65);
@@ -140,7 +148,9 @@ struct ChunkJob {
     large: u32,
     /// Its baked bricks' table in `baked_refs`, or NONE.
     baked: u32,
-    _pad: u32,
+    /// Its `cell_materials` slot when edits give its cells materials (its
+    /// leaves get per-voxel materials), or NONE.
+    detail: u32,
 }
 
 
@@ -417,6 +427,8 @@ struct GenBatch {
     baked_refs: Vec<u32>,
     baked_cells: Vec<u32>,
     bricks: FxHashMap<usize, u32>,
+    /// `cell_materials` slots taken.
+    details: u32,
 }
 
 /// `ChunkJob::tile` of a footprint the batch reads from the pool.
@@ -425,6 +437,15 @@ const CACHED: u32 = 1 << 31;
 impl GenBatch {
     fn footprints(&self) -> usize {
         self.computed.len() + self.cached.len()
+    }
+
+    /// Whether `store`'s bricks under chunk `cz` of `tile` give any cell a
+    /// material.
+    fn baked_materials(store: &EditStore, tile: Footprint, cz: i32) -> bool {
+        (0..64).any(|n| {
+            let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + n % 8, cj: tile.cy * 8 + n / 8 };
+            store.column(&key).is_some_and(|column| column.iter().any(|(bk, brick)| (0..8).contains(&(bk - cz * 8)) && brick.cells.iter().any(|c| c.state() >= 2 && c.material() != 0)))
+        })
     }
 
     /// The table of `store`'s bricks under chunk `cz` of `tile`, or NONE.
@@ -467,6 +488,7 @@ fn edit_view(planet: &Planet, version: u64, bricks: Option<std::sync::Arc<classi
     let (faces, large_faces, recent_counts) = analytic_faces(edits);
     EditView {
         grid: *planet.grid(),
+        index: classify::BrushIndex::new(&faces),
         faces,
         large_faces,
         recent_counts,
@@ -666,6 +688,10 @@ pub struct UpdateStats {
     pub cpu_ms: [f64; 6],
     pub out_of_slots: bool,
     pub out_of_leaves: bool,
+    /// A chunk kept its leaves' material pairs for want of detail pages.
+    pub out_of_details: bool,
+    /// Detail pages in use when last read back, of the capacity.
+    pub detail_pages: (u64, u64),
 }
 
 /// How [`ChunkWorld::update`] plans and how much it generates a frame.
@@ -861,6 +887,19 @@ pub struct ChunkWorld {
     /// Chunk slots and leaves this world holds.
     max_chunks: usize,
     leaf_capacity: u64,
+    /// Per-voxel materials (`chunk_generate.wgsl`): a batch's edited cell
+    /// materials, each leaf page's detail page, the pages, their free
+    /// stack and its count; pages this world holds and those free when last
+    /// read back.
+    cell_materials: wgpu::Buffer,
+    detail_pages: wgpu::Buffer,
+    detail_cells: wgpu::Buffer,
+    detail_alloc: wgpu::Buffer,
+    detail_free: wgpu::Buffer,
+    /// Per slot: whether any of its leaf pages has a detail page.
+    slot_details: wgpu::Buffer,
+    detail_capacity: u64,
+    detail_free_seen: u64,
     grid: Grid,
     /// Height over the datum above which nothing is solid (terrain,
     /// overhangs, edits), with a margin: rays rising past it end.
@@ -1222,6 +1261,12 @@ impl ChunkWorld {
                 storage(25, false, c),
                 storage(26, false, c),
                 storage(27, false, c),
+                storage(28, false, c),
+                storage(29, false, c),
+                storage(30, false, c),
+                storage(31, false, c),
+                storage(32, false, c),
+                storage(33, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -1273,6 +1318,9 @@ impl ChunkWorld {
                 storage(13, false, wgpu::ShaderStages::COMPUTE),
                 storage(14, true, all),
                 storage(15, true, all),
+                storage(16, true, all),
+                storage(17, true, all),
+                storage(18, true, all),
             ],
         });
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1439,6 +1487,7 @@ impl ChunkWorld {
         let wanted = std::env::var("HELIO_VOXEL_CHUNKS_SLOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_CHUNKS);
         let max_chunks = wanted.min((binding / 1024) as usize).min((binding / (LEAVES_PER_SLOT * 8)) as usize).max(1024);
         let leaf_capacity = max_chunks as u64 * LEAVES_PER_SLOT;
+        let detail_capacity = std::env::var("HELIO_VOXEL_DETAIL_PAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_DETAIL_PAGES).min((binding / (DETAIL_WORDS * 4)) as usize).max(64) as u64;
         let table_slots = (max_chunks * TABLE_PER_SLOT).next_power_of_two().min((binding / 32).next_power_of_two() as usize / 2);
         let pool_size = FOOTPRINT_POOL.min((binding / (TILE_COLUMNS * 16)) as usize).max(2 * TILE_BATCH);
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
@@ -1569,6 +1618,27 @@ impl ChunkWorld {
             edit_state: EditState::of(edits),
             max_chunks,
             leaf_capacity,
+            cell_materials: buffer("chunk cell materials", DETAIL_JOBS as u64 * TILE_COLUMNS * 64, wgpu::BufferUsages::STORAGE),
+            // No leaf page has a detail page yet.
+            detail_pages: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk detail pages"),
+                contents: bytemuck::cast_slice(&vec![u32::MAX; (leaf_capacity / LEAF_PAGE) as usize]),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            detail_cells: buffer("chunk detail cells", detail_capacity * DETAIL_WORDS * 4, wgpu::BufferUsages::STORAGE),
+            detail_alloc: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk detail allocator"),
+                contents: bytemuck::cast_slice(&[detail_capacity as i32, 0]),
+                usage: s | wgpu::BufferUsages::COPY_SRC,
+            }),
+            detail_free: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk detail free pages"),
+                contents: bytemuck::cast_slice(&(0..detail_capacity as u32).collect::<Vec<u32>>()),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            slot_details: buffer("chunk slot details", max_chunks as u64 * 4, wgpu::BufferUsages::STORAGE),
+            detail_capacity,
+            detail_free_seen: detail_capacity,
             free_pages_seen: leaf_capacity / LEAF_PAGE,
             urgent: FxHashSet::default(),
             hidden: FxHashSet::default(),
@@ -1650,6 +1720,12 @@ impl ChunkWorld {
                 entry(24, &self.leaf_pages),
                 entry(22, baked_refs),
                 entry(23, baked_cells),
+                entry(28, &self.cell_materials),
+                entry(29, &self.detail_pages),
+                entry(30, &self.detail_cells),
+                entry(31, &self.detail_alloc),
+                entry(32, &self.detail_free),
+                entry(33, &self.slot_details),
             ],
         })
     }
@@ -1690,6 +1766,34 @@ impl ChunkWorld {
             return 0;
         }
         let grid = self.grid;
+        let (i, j) = fp.span_half();
+        let shift = fp.level + 1;
+        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let edits = self.edits.clone();
+        let baked = edits.bricks.footprints.contains(&fp);
+        // Each chunk's brushes (from those over the footprint:
+        // `BrushIndex`), and whether edits give its cells materials (its
+        // leaves then get per-voxel materials, a `cell_materials` slot of
+        // the batch's): the chunks up to the first the batch has no slot
+        // for.
+        let near = edits.index.query(fp.face, i, j);
+        let mut details = batch.details as usize;
+        let mut chunks = Vec::with_capacity(n);
+        for &cz in &czs[..n] {
+            let refs: Vec<u32> = near.iter().copied().filter(|&b| brush_meets(&edits.faces[b as usize], fp.face, fp.level, i, j, span(cz))).collect();
+            let materials = refs.iter().any(|&b| {
+                let fb = &edits.faces[b as usize];
+                matches!(fb.op(), 1 | 2) && fb.material() != 0
+            }) || (baked && GenBatch::baked_materials(&edits.baked, fp, cz));
+            if materials && details >= DETAIL_JOBS {
+                break;
+            }
+            details += usize::from(materials);
+            chunks.push((cz, refs, materials));
+        }
+        if chunks.is_empty() {
+            return 0;
+        }
         let Some((pool_slot, cached)) = self.pool.take(fp, self.frame_now) else { return 0 };
         let job = TileJob { face: u32::from(fp.face), level: fp.level, cx: fp.cx, cy: fp.cy, slot: pool_slot, _pad: [0; 3] };
         // A footprint already in this batch is in the pool by now (its
@@ -1708,25 +1812,22 @@ impl ChunkWorld {
                 batch.computed.len() as u32 - 1
             }
         };
-        let (i, j) = fp.span_half();
-        let shift = fp.level + 1;
-        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
-        let edits = self.edits.clone();
-        let baked = edits.bricks.footprints.contains(&fp);
-        for &cz in &czs[..n] {
+        let queued = chunks.len();
+        for (cz, refs, materials) in chunks {
+            let detail = if materials {
+                batch.details += 1;
+                batch.details - 1
+            } else {
+                u32::MAX
+            };
             let key = fp.node(cz);
             let slot = self.free_slots.pop().unwrap();
             self.serial += 1;
             let first = batch.refs.len() as u32;
-            let mut large = 0;
-            for (b, fb) in edits.faces.iter().enumerate() {
-                if brush_meets(fb, fp.face, fp.level, i, j, span(cz)) {
-                    batch.refs.push(b as u32);
-                    large += u32::from(b < edits.large_faces);
-                }
-            }
+            let large = refs.iter().filter(|&&b| (b as usize) < edits.large_faces).count() as u32;
+            batch.refs.extend_from_slice(&refs);
             let baked = if baked { batch.baked_table(&edits.baked, fp, cz) } else { u32::MAX };
-            batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, _pad: 0 });
+            batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, detail });
             // Layers not read back yet: the whole chunk.
             let record = chunk_static(&grid, fp, cz, slot, (0.0, 64.0), 32.0, self.exact_level);
             self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
@@ -1742,8 +1843,8 @@ impl ChunkWorld {
             self.hidden.remove(&key);
             self.events.push(residency::Event::Generated(key));
         }
-        stats.generated_chunks += n;
-        n
+        stats.generated_chunks += queued;
+        queued
     }
 
     /// Follow `planet`'s edits (the recipe unchanged): resident nodes under
@@ -1920,6 +2021,8 @@ impl ChunkWorld {
                         evictions.push(self.remove_resident(key).unwrap().slot);
                         self.events.push(residency::Event::Emptied(key));
                     } else {
+                        // Out of detail pages: its leaves' pairs show.
+                        stats.out_of_details |= w[3] & 16 != 0;
                         let c = self.nodes.get_mut(&key).unwrap();
                         c.z = Some((w[1], w[2]));
                         // Its frame about its columns' mean top (its ground),
@@ -1933,6 +2036,9 @@ impl ChunkWorld {
                 let at = base + r.chunks.len() * 4;
                 if let Some(&free) = words.get(at) {
                     self.free_pages_seen = free.max(0) as u64;
+                }
+                if let Some(&free) = words.get(at + 2) {
+                    self.detail_free_seen = free.max(0) as u64;
                 }
             }
             r.buffer.unmap();
@@ -2178,6 +2284,7 @@ impl ChunkWorld {
                 encoder.copy_buffer_to_buffer(&self.job_results, 0, &readback.buffer, tiles, chunks);
             }
             encoder.copy_buffer_to_buffer(&self.leaf_alloc, 0, &readback.buffer, tiles + chunks, 8);
+            encoder.copy_buffer_to_buffer(&self.detail_alloc, 0, &readback.buffer, tiles + chunks + 8, 8);
             self.pending = Some(readback);
         }
         // Slots evicted now are reused from the next frame.
@@ -2216,6 +2323,7 @@ impl ChunkWorld {
             self.quiet_from = self.worker.as_ref().map_or(0, residency::Worker::reports_sent);
         }
         stats.drawn_chunks = self.drawn_set.list.len();
+        stats.detail_pages = (self.detail_capacity - self.detail_free_seen.min(self.detail_capacity), self.detail_capacity);
         stats.resident_chunks = self.nodes.len();
         stats
     }
@@ -2265,6 +2373,7 @@ impl ChunkWorld {
             cell: crate::grid::Cell::new((key[0] & 0xff) as u8, key[1] * CHUNK + local[0], key[2] * CHUNK + local[1], key[3] * CHUNK + local[2]),
             level: (key[0] >> 8) as u32,
             entered: Some(2 * axis + u32::from(!down)),
+            material: (cell >> 21) & 0xff,
         })
     }
 
@@ -2541,7 +2650,7 @@ impl ChunkWorld {
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.buried), entry(14, &self.leaf_pages), entry(15, &self.leaf_normals)],
+            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.buried), entry(14, &self.leaf_pages), entry(15, &self.leaf_normals), entry(16, &self.detail_pages), entry(17, &self.detail_cells), entry(18, &self.slot_details)],
         });
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();

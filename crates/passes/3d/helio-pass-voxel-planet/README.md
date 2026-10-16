@@ -157,7 +157,12 @@ unrelated history rebuilds the world.
 The `EditLog` keeps an adaptive octree per face whose leaves list, in order,
 only the brushes that can still change a cell inside them: CPU queries (ray
 casts, `surface_point`) cost what is exposed at a point, however long the
-history.
+history. The render thread finds the brushes over a footprint through a
+`BrushIndex` (a loose grid per face).
+
+Cells whose material edits set (add, paint) draw their own material: their
+leaves get per-voxel detail pages; other leaves draw their two materials
+(surface and subsurface). See [Per-voxel materials](docs/chunk-octree.md#per-voxel-materials-2026-10-16).
 
 ### Planet
 

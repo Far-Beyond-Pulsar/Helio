@@ -8,7 +8,7 @@ use super::CHUNK;
 use crate::edit_store::EditStore;
 use crate::edits::{center_half, FaceBrush};
 use crate::grid::Grid;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Cells of its level a node's descendants' surface may lie past its
 /// footprint's band (`EditView::classify`).
@@ -133,6 +133,8 @@ pub struct Class {
 pub struct EditView {
     pub grid: Grid,
     pub faces: Vec<FaceBrush>,
+    /// Where `faces` are (`BrushIndex`).
+    pub index: BrushIndex,
     pub large_faces: usize,
     pub recent_counts: Vec<usize>,
     pub baked: EditStore,
@@ -184,6 +186,79 @@ impl BrickIndex {
     }
 }
 
+/// Where the analytic brushes are on each face: a loose grid of levels
+/// (buckets `2^(BUCKET_LOG2 + n)` half cells wide), each brush in the
+/// smallest level where it spans at most two buckets a side. A query reads,
+/// level by level, the buckets over its rectangle (past `SCAN_BUCKETS` of
+/// them, the level's entries instead), so it costs the brushes near it, not
+/// the whole history's.
+#[derive(Default)]
+pub struct BrushIndex {
+    levels: Vec<FxHashMap<(u8, i64, i64), Vec<u32>>>,
+}
+
+/// The finest buckets: 4096 half cells (204.8 m at 0.1 m voxels).
+const BUCKET_LOG2: u32 = 12;
+/// Buckets a query reads one by one at a level, at most.
+const SCAN_BUCKETS: i64 = 64;
+
+/// `fb`'s half-cell extent along i and j (inclusive).
+fn brush_extent(fb: &FaceBrush) -> ((i64, i64), (i64, i64)) {
+    let w = i64::from(fb.center[3]);
+    let (ci, cj) = (i64::from(fb.center[0]), i64::from(fb.center[1]));
+    ((ci - w, ci + w), (cj - w, cj + w))
+}
+
+impl BrushIndex {
+    pub fn new(faces: &[FaceBrush]) -> Self {
+        let mut levels: Vec<FxHashMap<(u8, i64, i64), Vec<u32>>> = Vec::new();
+        for (n, fb) in faces.iter().enumerate() {
+            let (i, j) = brush_extent(fb);
+            let mut level = 0;
+            while BUCKET_LOG2 + level < 62 && ((i.1 >> (BUCKET_LOG2 + level)) - (i.0 >> (BUCKET_LOG2 + level)) > 1 || (j.1 >> (BUCKET_LOG2 + level)) - (j.0 >> (BUCKET_LOG2 + level)) > 1) {
+                level += 1;
+            }
+            if levels.len() <= level as usize {
+                levels.resize_with(level as usize + 1, FxHashMap::default);
+            }
+            let s = BUCKET_LOG2 + level;
+            for bi in (i.0 >> s)..=(i.1 >> s) {
+                for bj in (j.0 >> s)..=(j.1 >> s) {
+                    levels[level as usize].entry((fb.face(), bi, bj)).or_default().push(n as u32);
+                }
+            }
+        }
+        Self { levels }
+    }
+
+    /// Brushes of `face` whose extent may meet half-cell rectangle `i`, `j`
+    /// (inclusive), in their order. A superset: callers test each exactly
+    /// (`brush_meets`).
+    pub fn query(&self, face: u8, i: (i64, i64), j: (i64, i64)) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (level, buckets) in self.levels.iter().enumerate() {
+            let s = BUCKET_LOG2 + level as u32;
+            let (bi, bj) = ((i.0 >> s, i.1 >> s), (j.0 >> s, j.1 >> s));
+            if (bi.1 - bi.0 + 1).saturating_mul(bj.1 - bj.0 + 1) <= SCAN_BUCKETS {
+                for x in bi.0..=bi.1 {
+                    for y in bj.0..=bj.1 {
+                        out.extend_from_slice(buckets.get(&(face, x, y)).map_or(&[][..], Vec::as_slice));
+                    }
+                }
+            } else {
+                for (&(f, x, y), brushes) in buckets {
+                    if f == face && (bi.0..=bi.1).contains(&x) && (bj.0..=bj.1).contains(&y) {
+                        out.extend_from_slice(brushes);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
 /// Whether `fb` can touch cells of `level` with half-cell bounds `i`, `j`,
 /// `k` (inclusive).
 pub fn brush_meets(fb: &FaceBrush, face: u8, level: u32, i: (i64, i64), j: (i64, i64), k: (i64, i64)) -> bool {
@@ -201,7 +276,7 @@ impl EditView {
     /// still makes the nodes it crosses Mixed, so the cut refines to it).
     fn shapes_over(&self, fp: Footprint) -> impl Iterator<Item = (usize, &FaceBrush)> {
         let (i, j) = fp.span_half();
-        self.faces.iter().enumerate().filter(move |(_, fb)| fb.op() <= 1 && brush_meets(fb, fp.face, 0, i, j, (i64::MIN / 4, i64::MAX / 4)))
+        self.index.query(fp.face, i, j).into_iter().map(|n| (n as usize, &self.faces[n as usize])).filter(move |(_, fb)| fb.op() <= 1 && brush_meets(fb, fp.face, 0, i, j, (i64::MIN / 4, i64::MAX / 4)))
     }
 
     /// Layers [lo, hi) of `fp`'s level where brush `fb`'s surface can be
@@ -312,6 +387,42 @@ impl EditView {
             None if (class.buried.0..=class.buried.1).contains(&cz) => Kind::Buried,
             None if z < class.volume_floor => Kind::Solid,
             None => Kind::Empty,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The index finds exactly the brushes a scan of them all does, in order.
+    #[test]
+    fn the_brush_index_finds_what_a_scan_finds() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let faces: Vec<FaceBrush> = (0..3000)
+            .map(|_| {
+                let face = (next() % 6) as u32;
+                // Sizes from a cell to a continent.
+                let w = 1i32 << (next() % 28);
+                let (ci, cj) = ((next() % (1 << 30)) as i32, (next() % (1 << 30)) as i32);
+                FaceBrush { flags: face | ((next() % 3) as u32) << 4, radius_half: w as u32, k_lo: -100, k_hi: 100, center: [ci, cj, 0, w], ball: [0; 4] }
+            })
+            .collect();
+        let index = BrushIndex::new(&faces);
+        for _ in 0..2000 {
+            let face = (next() % 6) as u8;
+            let w = 1i64 << (next() % 31);
+            let (i0, j0) = ((next() % (1 << 30)) as i64, (next() % (1 << 30)) as i64);
+            let (i, j) = ((i0, i0 + w), (j0, j0 + w));
+            let found: Vec<u32> = index.query(face, i, j).into_iter().filter(|&n| brush_meets(&faces[n as usize], face, 0, i, j, (-1000, 1000))).collect();
+            let scanned: Vec<u32> = (0..faces.len() as u32).filter(|&n| brush_meets(&faces[n as usize], face, 0, i, j, (-1000, 1000))).collect();
+            assert_eq!(found, scanned);
         }
     }
 }

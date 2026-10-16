@@ -61,6 +61,9 @@ pub struct PickHit {
     /// k), `2 axis` stepping down it (`Hit::axis` and its side in chunk_draw.wgsl); `None`
     /// when it started inside. See [`crate::Planet::drawn_hit`].
     pub entered: Option<u32>,
+    /// The material drawn there: the cell's own where edits set it, else
+    /// its leaf's surface or subsurface material.
+    pub material: u32,
 }
 
 /// Pick requests and answers shared between a tool and the pass.

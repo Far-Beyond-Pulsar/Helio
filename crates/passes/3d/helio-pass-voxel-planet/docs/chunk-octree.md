@@ -256,10 +256,75 @@ this repository and an affected frame emailed to NVSDKIssues. Next: try a
 newer driver, a standalone repro if NVIDIA asks for one, and a cheap
 mitigation.
 
+### Per-voxel materials (2026-10-16)
+
+A leaf (4³ cells) draws two materials: its surface's (a vote of the top
+materials of its columns whose top cell is in it), shown by cells under
+air, and its subsurface's (soil or rock by the depth of its centre). Where
+edits set materials (add or paint, including baked cells), each cell now
+keeps its own:
+
+- A chunk job whose brushes or baked bricks set any material gets a
+  `cell_materials` slot (32 a batch; a job past them waits for the next
+  batch). `chunk_columns_main` writes each solid cell's edited material
+  there (0: the terrain's).
+- `chunk_build_main` gives every leaf page holding a leaf with such cells a
+  **detail page** (`detail_pages[leaf page]`, 4 KiB: a byte a cell, 16 words
+  a leaf by its place in the page), off a free stack (16384 pages by
+  default, `HELIO_VOXEL_DETAIL_PAGES`); eviction returns them. Such leaves
+  are never implicit (full under their mid's material). Out of pages, the
+  chunk keeps its leaves' pairs (flag 16; `UpdateStats::out_of_details`).
+- Drawing reads the cell's byte first (0: the leaf's pair), at the hit
+  and in the top face's jittered material sample; `slot_details` skips the
+  lookup in chunks without detail pages. `PickHit::material` reports what
+  is drawn.
+
+The format holds any cell's material, so natural leaves can use it later.
+
+The render thread finds the brushes over a footprint through a
+`BrushIndex` (a loose grid per face, each brush in the smallest level where
+it spans at most two buckets a side) instead of scanning every brush per
+chunk.
+
+Measured:
+
+- `edited_cells_draw_their_own_materials`: a wall of single-cell blocks in
+  eight materials and a checkerboard of painted ground cells. All 16306
+  pixels on edited cells draw the edit's material (5 detail pages). With
+  the lookup disabled, 14610 of them do not.
+- Natural ground against `Planet::material`
+  (`natural_cells_against_the_leaf_rule`, ignored: a report). 906k level-0
+  pixels at eight spots picked for relief and mixed top materials, from
+  1.7 m and 6 m, and with a pit dug in front:
+  - 40.5 % of pixels draw another material than the canonical one; flat
+    grassland 0 %.
+  - Most of that is not the leaf rule. The generation kernel evaluates
+    `ground_material` at the column's domain point; `Planet::material` at
+    the cell's volume point. The snowline's wander and the rock patches
+    are noise of that point, and on a mountain 2 km up the two points'
+    noise is unrelated: 38.8 % of pixels differ between the canonical
+    material and the same rule at the column's point. Whole views flip
+    (snow drawn as stone, dark stone as grass).
+  - Drawn against the rule at the column's point (the leaf rule and the
+    kernel's slope estimate together): 10.7 % of pixels, up to 22 % on
+    steep slopes and in pit walls. That much natural per-voxel leaves
+    would recover.
+- Cost on natural ground (no detail pages), interleaved against the
+  octree before it:
+  - `mountain_slope` hold: primary rays 2.861 ms both (four rounds each).
+    Without the `slot_details` flag, the lookup at every hit cost +0.9 %
+    (2.859 to 2.885 ms).
+  - Cruise flight: chunk columns 5.6 to 5.5 us a chunk, chunk builds 2.8 to
+    2.9, draw p50 3.79 to 3.80 ms; gate mean 1.00 to 1.03 %.
+
 ### Next
 
+- The material contract: the kernel and `Planet::material` evaluate
+  `ground_material` at different points (and estimate slope differently),
+  so a pick, a dig's yield and the drawn colour disagree on 39 % of
+  mountain pixels. Choose one (the cell's volume point is the canonical)
+  and make the other match it bit for bit, then measure the leaf rule
+  alone.
+- Natural per-voxel materials in detail pages where leaves mix materials.
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
 - A footprint's first computation: progressive (parent-seeded) synthesis.
-- The update's CPU: classification is per node on the worker, but the
-  render thread still scans brushes per chunk (`queue_footprint`); index
-  them.
