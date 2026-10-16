@@ -37,9 +37,9 @@ use std::sync::Mutex;
 
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_lens::{
-    bundled_rays, element_kind, ray_map::applied_overscan, user, BundledLens, LensComponent,
-    LensElementComponent, LensRegion, ProjectionModel, FOCUS_AUTO_POINT, FOCUS_MANUAL,
-    MAX_LENS_ELEMENTS,
+    BundledLens, FOCUS_AUTO_POINT, FOCUS_MANUAL, LensComponent, LensElementComponent, LensRegion,
+    MAX_LENS_ELEMENTS, ProjectionModel, bundled_rays, element_kind, ray_map::applied_overscan,
+    user,
 };
 use pulsar_reflection::{ReflectError, ReflectResult, Reflectable, pulsar_type};
 use pulsar_scenedb::gpu::{GpuMirrorHandle, SceneGpuStore};
@@ -141,9 +141,8 @@ pub struct CameraLensSourceRow {
     #[gpu]
     pub words5: [u32; 4],
 }
-const _: () = assert!(
-    std::mem::size_of::<CameraLensSourceRow>() == std::mem::size_of::<LensComponent>()
-);
+const _: () =
+    assert!(std::mem::size_of::<CameraLensSourceRow>() == std::mem::size_of::<LensComponent>());
 
 impl CameraLensSourceRow {
     pub fn of(lens: &LensComponent) -> Self {
@@ -494,7 +493,13 @@ pub struct LensElementProps {
     /// Diopter: distance in metres the region brings into focus; each pixel
     /// there still blurs by its own depth. The filter's power follows the
     /// lens's focus (`D = 1/focus - 1/s`), so focus pulls keep it sharp here.
-    #[property(min = 0.05, max = 1000.0, step = 0.05, label = "Sharp at (m)", category = "Diopter")]
+    #[property(
+        min = 0.05,
+        max = 1000.0,
+        step = 0.05,
+        label = "Sharp at (m)",
+        category = "Diopter"
+    )]
     pub focus_m: f32,
     /// Diopter: how dark the seam is at its centre (0..1).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Diopter")]
@@ -1153,13 +1158,21 @@ impl LensElementProps {
                 props.angle_deg = angle_deg;
                 props.offset = offset;
             }
-            PresetRegion::Ellipse { center, radii, rotation_deg } => {
+            PresetRegion::Ellipse {
+                center,
+                radii,
+                rotation_deg,
+            } => {
                 props.shape = LensRegionShape::Ellipse;
                 (props.center_x, props.center_y) = (center[0], center[1]);
                 (props.radius_x, props.radius_y) = (radii[0], radii[1]);
                 props.angle_deg = rotation_deg;
             }
-            PresetRegion::RadialBand { inner, outer, center } => {
+            PresetRegion::RadialBand {
+                inner,
+                outer,
+                center,
+            } => {
                 props.shape = LensRegionShape::RadialBand;
                 (props.inner_radius, props.outer_radius) = (inner, outer);
                 (props.center_x, props.center_y) = (center[0], center[1]);
@@ -1178,9 +1191,22 @@ impl LensElementProps {
     /// The 16 parameters of a user element, in order.
     fn user_params(&self) -> [f32; 16] {
         [
-            self.user_p0, self.user_p1, self.user_p2, self.user_p3, self.user_p4, self.user_p5,
-            self.user_p6, self.user_p7, self.user_p8, self.user_p9, self.user_p10, self.user_p11,
-            self.user_p12, self.user_p13, self.user_p14, self.user_p15,
+            self.user_p0,
+            self.user_p1,
+            self.user_p2,
+            self.user_p3,
+            self.user_p4,
+            self.user_p5,
+            self.user_p6,
+            self.user_p7,
+            self.user_p8,
+            self.user_p9,
+            self.user_p10,
+            self.user_p11,
+            self.user_p12,
+            self.user_p13,
+            self.user_p14,
+            self.user_p15,
         ]
     }
 
@@ -1266,10 +1292,12 @@ impl LensElementProps {
                 region,
             ),
             LensElementKind::Projection => {
-                let mut row = LensElementComponent::projection(self.projection_model.to_pass(), region);
+                let mut row =
+                    LensElementComponent::projection(self.projection_model.to_pass(), region);
                 match self.projection_model {
                     LensProjectionModel::KannalaBrandt => {
-                        row = row.with_kannala_brandt([self.kb_k1, self.kb_k2, self.kb_k3, self.kb_k4]);
+                        row = row
+                            .with_kannala_brandt([self.kb_k1, self.kb_k2, self.kb_k3, self.kb_k4]);
                     }
                     LensProjectionModel::Panini => {
                         row = row.with_panini(self.panini_distance, self.panini_compression);
@@ -1279,7 +1307,9 @@ impl LensElementProps {
                 row
             }
             LensElementKind::BrownConrady => LensElementComponent::brown_conrady(
-                [self.bc_k1, self.bc_k2, self.bc_k3, self.bc_k4, self.bc_k5, self.bc_k6],
+                [
+                    self.bc_k1, self.bc_k2, self.bc_k3, self.bc_k4, self.bc_k5, self.bc_k6,
+                ],
                 [self.bc_p1, self.bc_p2],
                 region,
             ),
@@ -1294,7 +1324,9 @@ impl LensElementProps {
             LensElementKind::AnamorphicSqueeze => {
                 LensElementComponent::anamorphic_squeeze(self.squeeze.max(0.1), region)
             }
-            LensElementKind::Shift => LensElementComponent::shift(self.shift_x, self.shift_y, region),
+            LensElementKind::Shift => {
+                LensElementComponent::shift(self.shift_x, self.shift_y, region)
+            }
             LensElementKind::Keystone => {
                 LensElementComponent::keystone(self.keystone_x, self.keystone_y, region)
             }
@@ -1388,7 +1420,8 @@ impl LensElementProps {
             }
             LensElementKind::Coma => {
                 use helio_pass_lens::coma;
-                let mut row = LensElementComponent::coma(self.coma_amount, self.coma_length, region);
+                let mut row =
+                    LensElementComponent::coma(self.coma_amount, self.coma_length, region);
                 row.params[coma::EXPONENT] = self.coma_exponent;
                 row.params[coma::SHAPE] = self.coma_shape;
                 row
@@ -1455,7 +1488,11 @@ impl LensElementProps {
                     self.halation_radius,
                     region,
                 )
-                .with_halation_tint([self.halation_tint_r, self.halation_tint_g, self.halation_tint_b]);
+                .with_halation_tint([
+                    self.halation_tint_r,
+                    self.halation_tint_g,
+                    self.halation_tint_b,
+                ]);
                 row.params[halation::TAIL] = self.halation_tail;
                 row
             }
@@ -1661,9 +1698,22 @@ fn kind_fields(kind: LensElementKind) -> &'static [&'static str] {
             "user_transmission",
             "user_focus",
             "user_spectral",
-            "user_p0", "user_p1", "user_p2", "user_p3", "user_p4", "user_p5",
-            "user_p6", "user_p7", "user_p8", "user_p9", "user_p10", "user_p11",
-            "user_p12", "user_p13", "user_p14", "user_p15",
+            "user_p0",
+            "user_p1",
+            "user_p2",
+            "user_p3",
+            "user_p4",
+            "user_p5",
+            "user_p6",
+            "user_p7",
+            "user_p8",
+            "user_p9",
+            "user_p10",
+            "user_p11",
+            "user_p12",
+            "user_p13",
+            "user_p14",
+            "user_p15",
         ],
     }
 }
@@ -1766,11 +1816,25 @@ impl LensPreset {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PresetRegion {
     FullFrame,
-    HalfPlane { angle_deg: f32, offset: f32 },
-    Ellipse { center: [f32; 2], radii: [f32; 2], rotation_deg: f32 },
-    RadialBand { inner: f32, outer: f32, center: [f32; 2] },
+    HalfPlane {
+        angle_deg: f32,
+        offset: f32,
+    },
+    Ellipse {
+        center: [f32; 2],
+        radii: [f32; 2],
+        rotation_deg: f32,
+    },
+    RadialBand {
+        inner: f32,
+        outer: f32,
+        center: [f32; 2],
+    },
     /// One channel (0 red .. 3 alpha) of a layer of the mask array.
-    Mask { layer: u32, channel: u32 },
+    Mask {
+        layer: u32,
+        channel: u32,
+    },
 }
 
 /// One element of a preset: `amount` is the sharp distance in metres for a
@@ -1874,7 +1938,10 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
         focus_distance_m: Some(4.0),
         elements: &[diopter(
             0.6,
-            PresetRegion::HalfPlane { angle_deg: 0.0, offset: 0.0 },
+            PresetRegion::HalfPlane {
+                angle_deg: 0.0,
+                offset: 0.0,
+            },
         )],
     },
     // Left third nearest, centre at the base focus, right third in between.
@@ -1891,11 +1958,17 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
         elements: &[
             diopter(
                 0.5,
-                PresetRegion::HalfPlane { angle_deg: 180.0, offset: 0.3 },
+                PresetRegion::HalfPlane {
+                    angle_deg: 180.0,
+                    offset: 0.3,
+                },
             ),
             diopter(
                 1.1,
-                PresetRegion::HalfPlane { angle_deg: 0.0, offset: 0.3 },
+                PresetRegion::HalfPlane {
+                    angle_deg: 0.0,
+                    offset: 0.3,
+                },
             ),
         ],
     },
@@ -1960,7 +2033,9 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
                 p.mumps_kx1 = -0.04;
                 p.mumps_ky1 = 0.03;
             }),
-            tuned(LensElementKind::AnamorphicSqueeze, FULL, |p| p.squeeze = 2.0),
+            tuned(LensElementKind::AnamorphicSqueeze, FULL, |p| {
+                p.squeeze = 2.0
+            }),
         ],
     },
     // A swirly, soft-cornered vintage portrait lens.
@@ -1989,7 +2064,9 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
                 p.corner_softness_sigma = 0.006;
                 p.corner_softness_start = 0.4;
             }),
-            tuned(LensElementKind::SphericalGlow, FULL, |p| p.glow_amount = 0.15),
+            tuned(LensElementKind::SphericalGlow, FULL, |p| {
+                p.glow_amount = 0.15
+            }),
         ],
     },
     LensPresetData {
@@ -2006,8 +2083,12 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
             tuned(LensElementKind::Projection, FULL, |p| {
                 p.projection_model = LensProjectionModel::Equidistant
             }),
-            tuned(LensElementKind::NaturalVignette, FULL, |p| p.natural_vignette_amount = 0.6),
-            tuned(LensElementKind::LateralCa, FULL, |p| p.lateral_ca_d1 = 0.004),
+            tuned(LensElementKind::NaturalVignette, FULL, |p| {
+                p.natural_vignette_amount = 0.6
+            }),
+            tuned(LensElementKind::LateralCa, FULL, |p| {
+                p.lateral_ca_d1 = 0.004
+            }),
         ],
     },
     // Behind a flat port the view narrows by the water's index and colours
@@ -2031,7 +2112,9 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
                 (p.tint_r, p.tint_g, p.tint_b) = (0.45, 0.85, 1.0);
                 p.color_filter_amount = 0.5;
             }),
-            tuned(LensElementKind::Diffusion, FULL, |p| p.diffusion_strength = 0.1),
+            tuned(LensElementKind::Diffusion, FULL, |p| {
+                p.diffusion_strength = 0.1
+            }),
         ],
     },
     LensPresetData {
@@ -2044,7 +2127,9 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
         tilt_axis_deg: 0.0,
         field_curvature_dpt: 0.0,
         focus_distance_m: None,
-        elements: &[tuned(LensElementKind::ProMist, FULL, |p| p.diffusion_strength = 0.25)],
+        elements: &[tuned(LensElementKind::ProMist, FULL, |p| {
+            p.diffusion_strength = 0.25
+        })],
     },
     LensPresetData {
         preset: LensPreset::BlackProMistEighth,
@@ -2075,14 +2160,19 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
         elements: &[
             tuned(
                 LensElementKind::WaterDrops,
-                PresetRegion::Mask { layer: 0, channel: 3 },
+                PresetRegion::Mask {
+                    layer: 0,
+                    channel: 3,
+                },
                 |p| {
                     p.drops_refraction = 0.03;
                     p.drops_normal_layer = 0;
                     p.drops_defocus = 0.004;
                 },
             ),
-            tuned(LensElementKind::Diffusion, FULL, |p| p.diffusion_strength = 0.08),
+            tuned(LensElementKind::Diffusion, FULL, |p| {
+                p.diffusion_strength = 0.08
+            }),
         ],
     },
     LensPresetData {
@@ -2268,7 +2358,11 @@ impl CameraLensComponent {
         if let Some(distance) = data.focus_distance_m {
             self.focus_distance_m = distance;
         }
-        self.elements = data.elements.iter().map(LensElementProps::from_preset).collect();
+        self.elements = data
+            .elements
+            .iter()
+            .map(LensElementProps::from_preset)
+            .collect();
         self.preset = LensPreset::Custom;
         true
     }
@@ -2311,7 +2405,11 @@ impl CameraLensComponent {
         };
         row.focal_length_mm = lens.focal_length_mm.max(1.0);
         row.f_number = lens.f_number.max(0.5);
-        row.t_stop = if lens.t_stop > 0.0 { lens.t_stop } else { row.f_number };
+        row.t_stop = if lens.t_stop > 0.0 {
+            lens.t_stop
+        } else {
+            row.f_number
+        };
         row.sensor_width_mm = lens.sensor_width_mm.max(1.0);
         row.sensor_height_mm = lens.sensor_height_mm.max(0.0);
         row.focus_distance_m = lens.focus_distance_m.max(0.01);
@@ -2362,7 +2460,9 @@ fn camera_lens_methods() -> Vec<pulsar_reflection::MethodMetadata> {
             |instance: &mut dyn EngineClass, args: Vec<Box<dyn std::any::Any>>| {
                 let index = *args.first()?.downcast_ref::<u32>()? as usize;
                 let preset = *LensPreset::ALL.get(index)?;
-                let lens = instance.as_any_mut().downcast_mut::<CameraLensComponent>()?;
+                let lens = instance
+                    .as_any_mut()
+                    .downcast_mut::<CameraLensComponent>()?;
                 Some(Box::new(lens.bake_preset(preset)))
             },
         ),
@@ -2415,8 +2515,13 @@ static BLOCKS: Mutex<Option<HashMap<usize, ElementBlocks>>> = Mutex::new(None);
 
 fn with_blocks<T>(mirror: &GpuMirrorHandle, f: impl FnOnce(&mut ElementBlocks) -> T) -> T {
     let key = mirror.store() as *const SceneGpuStore as usize;
-    let mut blocks = BLOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    f(blocks.get_or_insert_with(HashMap::new).entry(key).or_default())
+    let mut blocks = BLOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(blocks
+        .get_or_insert_with(HashMap::new)
+        .entry(key)
+        .or_default())
 }
 
 fn camera_lens_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_insert: bool) {
@@ -2424,14 +2529,19 @@ fn camera_lens_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_
     // `ComponentId`, with a pointer to a live value.
     let authored = unsafe { &*(data as *const CameraLensComponent) };
     let (block, aspect) = with_blocks(mirror, |blocks| {
-        let aspect = blocks.overscan.get(&row).map_or(DEFAULT_ASPECT, |(aspect, _)| *aspect);
+        let aspect = blocks
+            .overscan
+            .get(&row)
+            .map_or(DEFAULT_ASPECT, |(aspect, _)| *aspect);
         (blocks.block_of(row), aspect)
     });
     let first = block * LENS_ELEMENT_SLOTS as u32;
     let (mut lens, elements) = authored.to_rows(first);
     // The camera widens its view by this much; the row tells the pass.
     lens.overscan = overscan_of(&lens, &elements, aspect);
-    with_blocks(mirror, |blocks| blocks.overscan.insert(row, (aspect, lens.overscan)));
+    with_blocks(mirror, |blocks| {
+        blocks.overscan.insert(row, (aspect, lens.overscan))
+    });
     pulsar_scenedb::gpu::write_derived_row(
         mirror,
         row,
@@ -2455,7 +2565,10 @@ const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
 fn overscan_of(row: &LensComponent, elements: &[LensElementComponent], aspect: f32) -> f32 {
     let count = (row.element_count as usize).min(elements.len());
     let elements = &elements[..count];
-    let rays = if elements.iter().any(|e| e.kind == element_kind::PRESCRIPTION) {
+    let rays = if elements
+        .iter()
+        .any(|e| e.kind == element_kind::PRESCRIPTION)
+    {
         bundled_rays()
     } else {
         &[]
@@ -2483,13 +2596,18 @@ pub fn camera_lens_view_overscan(world: &pulsar_scenedb::World, view_id: u32, as
         return 1.0;
     };
     // The pass reads the lowest enabled row of the view.
-    let Some((instance, _, lens)) = pulsar_scene_model::attachments::enabled_components::<CameraLensComponent>(world)
-        .filter(|(_, _, lens)| lens.enabled && lens.view_id == view_id)
-        .min_by_key(|(instance, _, _)| instance.index())
+    let Some((instance, _, lens)) =
+        pulsar_scene_model::attachments::enabled_components::<CameraLensComponent>(world)
+            .filter(|(_, _, lens)| lens.enabled && lens.view_id == view_id)
+            .min_by_key(|(instance, _, _)| instance.index())
     else {
         return 1.0;
     };
-    let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { DEFAULT_ASPECT };
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        DEFAULT_ASPECT
+    };
     let row = instance.index();
     let cached = |blocks: &mut ElementBlocks| blocks.overscan.get(&row).copied();
     if let Some((cached_aspect, overscan)) = with_blocks(mirror, cached) {
@@ -2498,10 +2616,18 @@ pub fn camera_lens_view_overscan(world: &pulsar_scenedb::World, view_id: u32, as
         }
     }
     with_blocks(mirror, |blocks| {
-        let overscan = blocks.overscan.get(&row).map_or(1.0, |(_, overscan)| *overscan);
+        let overscan = blocks
+            .overscan
+            .get(&row)
+            .map_or(1.0, |(_, overscan)| *overscan);
         blocks.overscan.insert(row, (aspect, overscan));
     });
-    camera_lens_dispatch(mirror, row, lens as *const CameraLensComponent as *const (), false);
+    camera_lens_dispatch(
+        mirror,
+        row,
+        lens as *const CameraLensComponent as *const (),
+        false,
+    );
     with_blocks(mirror, cached).map_or(1.0, |(_, overscan)| overscan)
 }
 
@@ -2568,7 +2694,10 @@ mod tests {
         lens.quality = LensGatherQuality::High;
         let (row, _) = lens.to_rows(16);
         assert_eq!(row.view_id, 3);
-        assert_eq!((row.focal_length_mm, row.f_number, row.t_stop), (85.0, 1.4, 1.4));
+        assert_eq!(
+            (row.focal_length_mm, row.f_number, row.t_stop),
+            (85.0, 1.4, 1.4)
+        );
         assert!((row.tilt_angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         assert!((row.tilt_axis - std::f32::consts::PI).abs() < 1e-6);
         assert!((row.aperture_rotation - std::f32::consts::FRAC_PI_4).abs() < 1e-6);
@@ -2679,7 +2808,9 @@ mod tests {
                 assert!(preset.data().is_none());
                 continue;
             }
-            let data = preset.data().unwrap_or_else(|| panic!("{preset:?} has no data"));
+            let data = preset
+                .data()
+                .unwrap_or_else(|| panic!("{preset:?} has no data"));
             assert!(!data.name.is_empty());
             assert!(data.elements.len() <= LENS_ELEMENT_SLOTS, "{}", data.name);
             let mut lens = CameraLensComponent::default();
@@ -2687,11 +2818,20 @@ mod tests {
             let (row, elements) = lens.to_rows(0);
             assert_eq!(row.focal_length_mm, data.focal_length_mm, "{}", data.name);
             assert_eq!(row.f_number, data.f_number, "{}", data.name);
-            assert_eq!(row.element_count as usize, data.elements.len(), "{}", data.name);
+            assert_eq!(
+                row.element_count as usize,
+                data.elements.len(),
+                "{}",
+                data.name
+            );
             for element in &elements[..data.elements.len()] {
                 assert_ne!(element.kind, element_kind::NONE, "{}", data.name);
                 assert!(
-                    element.params.iter().chain(&element.region).all(|v| v.is_finite()),
+                    element
+                        .params
+                        .iter()
+                        .chain(&element.region)
+                        .all(|v| v.is_finite()),
                     "{}",
                     data.name
                 );
@@ -2727,9 +2867,19 @@ mod tests {
         let two = LensPreset::SplitDiopter2Way.data().unwrap();
         assert_eq!(two.elements.len(), 1);
         let near = two.elements[0].amount;
-        assert!(near < two.focus_distance_m.unwrap(), "the diopter half is the near one");
-        let lens = CameraLensComponent { preset: LensPreset::SplitDiopter2Way, ..Default::default() };
-        assert_eq!(lens.to_rows(0).1[0].params[0], near, "the row carries the distance");
+        assert!(
+            near < two.focus_distance_m.unwrap(),
+            "the diopter half is the near one"
+        );
+        let lens = CameraLensComponent {
+            preset: LensPreset::SplitDiopter2Way,
+            ..Default::default()
+        };
+        assert_eq!(
+            lens.to_rows(0).1[0].params[0],
+            near,
+            "the row carries the distance"
+        );
 
         let three = LensPreset::SplitDiopter3Way.data().unwrap();
         assert_eq!(three.elements.len(), 2);
@@ -2806,7 +2956,14 @@ mod tests {
         assert_eq!(lens.elements.len(), 1);
 
         let names: Vec<_> = lens.get_properties().iter().map(|p| p.name).collect();
-        for field in ["focal_length_mm", "f_number", "sensor_width_mm", "aperture_blades", "elements", "preset"] {
+        for field in [
+            "focal_length_mm",
+            "f_number",
+            "sensor_width_mm",
+            "aperture_blades",
+            "elements",
+            "preset",
+        ] {
             assert!(names.contains(&field), "{field} is reflected");
         }
     }
@@ -2834,8 +2991,15 @@ mod tests {
 
     /// The row of one element of `kind` with its fields set by `set`, over
     /// the whole frame.
-    fn row_of(kind: LensElementKind, set: impl FnOnce(&mut LensElementProps)) -> LensElementComponent {
-        let mut props = LensElementProps { kind, shape: LensRegionShape::FullFrame, ..Default::default() };
+    fn row_of(
+        kind: LensElementKind,
+        set: impl FnOnce(&mut LensElementProps),
+    ) -> LensElementComponent {
+        let mut props = LensElementProps {
+            kind,
+            shape: LensRegionShape::FullFrame,
+            ..Default::default()
+        };
         set(&mut props);
         let mut lens = CameraLensComponent::default();
         lens.elements = vec![props];
@@ -2848,14 +3012,45 @@ mod tests {
     fn every_element_kind_maps_to_its_pass_kind_id_in_order() {
         use element_kind as k;
         let expected = [
-            k::DIOPTER, k::SWEET_SPOT, k::PUPIL, k::LONGITUDINAL_CA, k::PROJECTION,
-            k::BROWN_CONRADY, k::DIVISION, k::ANAMORPHIC_DISTORTION, k::ANAMORPHIC_SQUEEZE,
-            k::SHIFT, k::KEYSTONE, k::FOCUS_BREATHING, k::PRISM, k::LATERAL_CA, k::FLAT_PORT,
-            k::DOME_PORT, k::NATURAL_VIGNETTE, k::OPTICAL_VIGNETTE, k::MECHANICAL_VIGNETTE,
-            k::ND_FILTER, k::GRADUATED_ND, k::COLOR_FILTER, k::T_STOP_LOSS, k::SPHERICAL_GLOW,
-            k::COMA, k::ASTIGMATISM, k::CORNER_SOFTNESS, k::DIFFUSION, k::PRO_MIST,
-            k::BLACK_PRO_MIST, k::GLIMMERGLASS, k::STAR_FILTER, k::HALATION, k::WATER_DROPS,
-            k::SMEAR, k::FOG, k::DIRT, k::PRESCRIPTION, k::USER,
+            k::DIOPTER,
+            k::SWEET_SPOT,
+            k::PUPIL,
+            k::LONGITUDINAL_CA,
+            k::PROJECTION,
+            k::BROWN_CONRADY,
+            k::DIVISION,
+            k::ANAMORPHIC_DISTORTION,
+            k::ANAMORPHIC_SQUEEZE,
+            k::SHIFT,
+            k::KEYSTONE,
+            k::FOCUS_BREATHING,
+            k::PRISM,
+            k::LATERAL_CA,
+            k::FLAT_PORT,
+            k::DOME_PORT,
+            k::NATURAL_VIGNETTE,
+            k::OPTICAL_VIGNETTE,
+            k::MECHANICAL_VIGNETTE,
+            k::ND_FILTER,
+            k::GRADUATED_ND,
+            k::COLOR_FILTER,
+            k::T_STOP_LOSS,
+            k::SPHERICAL_GLOW,
+            k::COMA,
+            k::ASTIGMATISM,
+            k::CORNER_SOFTNESS,
+            k::DIFFUSION,
+            k::PRO_MIST,
+            k::BLACK_PRO_MIST,
+            k::GLIMMERGLASS,
+            k::STAR_FILTER,
+            k::HALATION,
+            k::WATER_DROPS,
+            k::SMEAR,
+            k::FOG,
+            k::DIRT,
+            k::PRESCRIPTION,
+            k::USER,
         ];
         assert_eq!(LensElementKind::ALL.len(), expected.len());
         for (kind, id) in LensElementKind::ALL.iter().zip(expected) {
@@ -2868,22 +3063,39 @@ mod tests {
     #[test]
     fn ray_map_kinds_carry_their_fields_to_the_right_slots() {
         use helio_pass_lens::{
-            anamorphic_distortion as ad, brown_conrady as bc, dome_port as dp, division as dv,
+            anamorphic_distortion as ad, brown_conrady as bc, division as dv, dome_port as dp,
             keystone as ks, lateral_ca as lca, prism, projection,
         };
-        let r = row_of(LensElementKind::Projection, |p| p.projection_model = LensProjectionModel::Stereographic);
-        assert_eq!(r.params[projection::MODEL], ProjectionModel::Stereographic as u32 as f32);
+        let r = row_of(LensElementKind::Projection, |p| {
+            p.projection_model = LensProjectionModel::Stereographic
+        });
+        assert_eq!(
+            r.params[projection::MODEL],
+            ProjectionModel::Stereographic as u32 as f32
+        );
         let r = row_of(LensElementKind::Projection, |p| {
             p.projection_model = LensProjectionModel::KannalaBrandt;
             (p.kb_k1, p.kb_k2, p.kb_k3, p.kb_k4) = (0.1, 0.2, 0.3, 0.4);
         });
-        assert_eq!(r.params[projection::MODEL], ProjectionModel::KannalaBrandt as u32 as f32);
-        assert_eq!(&r.params[projection::K1..projection::K1 + 4], &[0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(
+            r.params[projection::MODEL],
+            ProjectionModel::KannalaBrandt as u32 as f32
+        );
+        assert_eq!(
+            &r.params[projection::K1..projection::K1 + 4],
+            &[0.1, 0.2, 0.3, 0.4]
+        );
         let r = row_of(LensElementKind::Projection, |p| {
             p.projection_model = LensProjectionModel::Panini;
             (p.panini_distance, p.panini_compression) = (0.7, 0.4);
         });
-        assert_eq!((r.params[projection::PANINI_D], r.params[projection::PANINI_S]), (0.7, 0.4));
+        assert_eq!(
+            (
+                r.params[projection::PANINI_D],
+                r.params[projection::PANINI_S]
+            ),
+            (0.7, 0.4)
+        );
         for (i, model) in LensProjectionModel::ALL.iter().enumerate() {
             let r = row_of(LensElementKind::Projection, |p| p.projection_model = *model);
             assert_eq!(r.params[projection::MODEL], i as f32, "{model:?}");
@@ -2894,21 +3106,35 @@ mod tests {
             (p.bc_k4, p.bc_k5, p.bc_k6) = (0.04, 0.05, 0.06);
             (p.bc_p1, p.bc_p2) = (0.07, 0.08);
         });
-        assert_eq!(&r.params[bc::K1..=bc::P2], &[0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08]);
-        let r = row_of(LensElementKind::Division, |p| (p.division_l1, p.division_l2) = (-0.2, 0.1));
+        assert_eq!(
+            &r.params[bc::K1..=bc::P2],
+            &[0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08]
+        );
+        let r = row_of(LensElementKind::Division, |p| {
+            (p.division_l1, p.division_l2) = (-0.2, 0.1)
+        });
         assert_eq!((r.params[dv::L1], r.params[dv::L2]), (-0.2, 0.1));
         let r = row_of(LensElementKind::AnamorphicDistortion, |p| {
             (p.mumps_kx1, p.mumps_kx2, p.mumps_ky1, p.mumps_ky2) = (0.1, 0.2, 0.3, 0.4);
         });
         assert_eq!(
-            (r.params[ad::KX1], r.params[ad::KX2], r.params[ad::KY1], r.params[ad::KY2]),
+            (
+                r.params[ad::KX1],
+                r.params[ad::KX2],
+                r.params[ad::KY1],
+                r.params[ad::KY2]
+            ),
             (0.1, 0.2, 0.3, 0.4)
         );
         let r = row_of(LensElementKind::AnamorphicSqueeze, |p| p.squeeze = 1.8);
         assert_eq!(r.params[0], 1.8);
-        let r = row_of(LensElementKind::Shift, |p| (p.shift_x, p.shift_y) = (0.1, -0.2));
+        let r = row_of(LensElementKind::Shift, |p| {
+            (p.shift_x, p.shift_y) = (0.1, -0.2)
+        });
         assert_eq!(&r.params[..2], &[0.1, -0.2]);
-        let r = row_of(LensElementKind::Keystone, |p| (p.keystone_x, p.keystone_y) = (0.05, -0.1));
+        let r = row_of(LensElementKind::Keystone, |p| {
+            (p.keystone_x, p.keystone_y) = (0.05, -0.1)
+        });
         assert_eq!((r.params[ks::KX], r.params[ks::KY]), (0.05, -0.1));
         let r = row_of(LensElementKind::FocusBreathing, |p| {
             (p.breathing_per_dpt, p.breathing_reference_dpt) = (-0.04, 0.2);
@@ -2923,7 +3149,10 @@ mod tests {
             p.prism_spin_deg = 180.0;
             p.prism_falloff = 0.5;
         });
-        assert_eq!((r.params[prism::COUNT], r.params[prism::OFFSET]), (5.0, 0.03));
+        assert_eq!(
+            (r.params[prism::COUNT], r.params[prism::OFFSET]),
+            (5.0, 0.03)
+        );
         assert!((r.params[prism::ANGLE] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         assert_eq!(r.params[prism::RING], 1.0);
         assert!((r.params[prism::SPIN] - std::f32::consts::PI).abs() < 1e-6);
@@ -2932,9 +3161,13 @@ mod tests {
         assert_eq!(r.params[prism::COUNT], 8.0, "clamped to the pass's 2..=8");
         assert_eq!(r.params[prism::RING], 0.0);
 
-        let r = row_of(LensElementKind::LateralCa, |p| (p.lateral_ca_d1, p.lateral_ca_d2) = (0.01, -0.02));
+        let r = row_of(LensElementKind::LateralCa, |p| {
+            (p.lateral_ca_d1, p.lateral_ca_d2) = (0.01, -0.02)
+        });
         assert_eq!((r.params[lca::D1], r.params[lca::D2]), (0.01, -0.02));
-        let r = row_of(LensElementKind::FlatPort, |p| (p.port_index, p.port_dispersion) = (1.5, 0.01));
+        let r = row_of(LensElementKind::FlatPort, |p| {
+            (p.port_index, p.port_dispersion) = (1.5, 0.01)
+        });
         assert_eq!((r.params[0], r.params[1]), (1.5, 0.01));
         let r = row_of(LensElementKind::DomePort, |p| {
             p.dome_radius_m = 0.2;
@@ -2944,22 +3177,37 @@ mod tests {
             p.dome_curvature = 0.5;
         });
         assert_eq!(
-            (r.params[dp::RADIUS], r.params[dp::PUPIL_OFFSET], r.params[dp::INDEX]),
+            (
+                r.params[dp::RADIUS],
+                r.params[dp::PUPIL_OFFSET],
+                r.params[dp::INDEX]
+            ),
             (0.2, 0.03, 1.34)
         );
-        assert_eq!((r.params[dp::DISPERSION], r.params[dp::CURVATURE]), (0.007, 0.5));
+        assert_eq!(
+            (r.params[dp::DISPERSION], r.params[dp::CURVATURE]),
+            (0.007, 0.5)
+        );
     }
 
     #[test]
     fn transmission_kinds_carry_their_fields_to_the_right_slots() {
-        use helio_pass_lens::{graduated_nd as gnd, mechanical_vignette as mv, optical_vignette as ov};
-        let r = row_of(LensElementKind::NaturalVignette, |p| p.natural_vignette_amount = 0.4);
+        use helio_pass_lens::{
+            graduated_nd as gnd, mechanical_vignette as mv, optical_vignette as ov,
+        };
+        let r = row_of(LensElementKind::NaturalVignette, |p| {
+            p.natural_vignette_amount = 0.4
+        });
         assert_eq!(r.params[0], 0.4);
         let r = row_of(LensElementKind::OpticalVignette, |p| {
             (p.cats_eye, p.barrel_radius, p.vignette_reference_f_number) = (0.5, 0.9, 2.0);
         });
         assert_eq!(
-            (r.params[ov::CATS_EYE], r.params[ov::BARREL_RADIUS], r.params[ov::REFERENCE_F_NUMBER]),
+            (
+                r.params[ov::CATS_EYE],
+                r.params[ov::BARREL_RADIUS],
+                r.params[ov::REFERENCE_F_NUMBER]
+            ),
             (0.5, 0.9, 2.0)
         );
         let r = row_of(LensElementKind::MechanicalVignette, |p| {
@@ -2973,7 +3221,14 @@ mod tests {
             p.hood_rotation_deg = 90.0;
         });
         assert_eq!(r.params[mv::SHAPE], 1.0, "matte box");
-        assert_eq!((r.params[mv::SIZE_X], r.params[mv::SIZE_Y], r.params[mv::FEATHER]), (0.8, 0.45, 0.02));
+        assert_eq!(
+            (
+                r.params[mv::SIZE_X],
+                r.params[mv::SIZE_Y],
+                r.params[mv::FEATHER]
+            ),
+            (0.8, 0.45, 0.02)
+        );
         assert!((r.params[mv::ROTATION] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         let r = row_of(LensElementKind::NdFilter, |p| p.nd_stops = 3.0);
         assert_eq!(r.params[0], 3.0);
@@ -2984,7 +3239,14 @@ mod tests {
             p.grad_nd_softness = 0.4;
             (p.tint_r, p.tint_g, p.tint_b) = (1.0, 0.8, 0.6);
         });
-        assert_eq!((r.params[gnd::STOPS], r.params[gnd::OFFSET], r.params[gnd::SOFTNESS]), (2.0, 0.1, 0.4));
+        assert_eq!(
+            (
+                r.params[gnd::STOPS],
+                r.params[gnd::OFFSET],
+                r.params[gnd::SOFTNESS]
+            ),
+            (2.0, 0.1, 0.4)
+        );
         assert!((r.params[gnd::ANGLE] - std::f32::consts::PI).abs() < 1e-6);
         assert_eq!(&r.params[gnd::TINT..gnd::TINT + 3], &[1.0, 0.8, 0.6]);
         let r = row_of(LensElementKind::ColorFilter, |p| {
@@ -2998,7 +3260,7 @@ mod tests {
     #[test]
     fn sensor_image_kinds_carry_their_fields_to_the_right_slots() {
         use helio_pass_lens::{
-            astigmatism as astig, coma, corner_softness as cs, dirt, diffusion as df, glow,
+            astigmatism as astig, coma, corner_softness as cs, diffusion as df, dirt, glow,
             halation, smear, star, water_drops as wd,
         };
         let r = row_of(LensElementKind::SphericalGlow, |p| {
@@ -3009,28 +3271,57 @@ mod tests {
             p.glow_tail = 0.4;
         });
         assert_eq!(
-            [r.params[glow::AMOUNT], r.params[glow::REFERENCE_F_NUMBER], r.params[glow::EXPONENT],
-             r.params[glow::RADIUS], r.params[glow::TAIL]],
+            [
+                r.params[glow::AMOUNT],
+                r.params[glow::REFERENCE_F_NUMBER],
+                r.params[glow::EXPONENT],
+                r.params[glow::RADIUS],
+                r.params[glow::TAIL]
+            ],
             [0.2, 2.0, 3.0, 0.02, 0.4]
         );
         let r = row_of(LensElementKind::Coma, |p| {
             (p.coma_amount, p.coma_length, p.coma_exponent, p.coma_shape) = (0.5, 0.1, 2.0, 3.0);
         });
         assert_eq!(
-            [r.params[coma::AMOUNT], r.params[coma::LENGTH], r.params[coma::EXPONENT], r.params[coma::SHAPE]],
+            [
+                r.params[coma::AMOUNT],
+                r.params[coma::LENGTH],
+                r.params[coma::EXPONENT],
+                r.params[coma::SHAPE]
+            ],
             [0.5, 0.1, 2.0, 3.0]
         );
         let r = row_of(LensElementKind::Astigmatism, |p| {
-            (p.astigmatism_amount, p.astigmatism_exponent, p.astigmatism_minor_ratio) = (-0.02, 3.0, 0.3);
+            (
+                p.astigmatism_amount,
+                p.astigmatism_exponent,
+                p.astigmatism_minor_ratio,
+            ) = (-0.02, 3.0, 0.3);
         });
         assert_eq!(
-            [r.params[astig::AMOUNT], r.params[astig::EXPONENT], r.params[astig::MINOR_RATIO]],
+            [
+                r.params[astig::AMOUNT],
+                r.params[astig::EXPONENT],
+                r.params[astig::MINOR_RATIO]
+            ],
             [-0.02, 3.0, 0.3]
         );
         let r = row_of(LensElementKind::CornerSoftness, |p| {
-            (p.corner_softness_sigma, p.corner_softness_exponent, p.corner_softness_start) = (0.03, 1.5, 0.5);
+            (
+                p.corner_softness_sigma,
+                p.corner_softness_exponent,
+                p.corner_softness_start,
+            ) = (0.03, 1.5, 0.5);
         });
-        assert_eq!([r.params[cs::SIGMA], r.params[cs::EXPONENT], r.params[cs::START]], [0.03, 1.5, 0.5]);
+        assert_eq!(
+            [
+                r.params[cs::SIGMA],
+                r.params[cs::EXPONENT],
+                r.params[cs::START]
+            ],
+            [0.03, 1.5, 0.5]
+        );
 
         for kind in [
             LensElementKind::Diffusion,
@@ -3040,16 +3331,32 @@ mod tests {
             LensElementKind::Fog,
         ] {
             let r = row_of(kind, |p| {
-                (p.diffusion_strength, p.diffusion_radius, p.diffusion_tail, p.glint_contrast) =
-                    (0.3, 0.04, 0.6, 0.9);
+                (
+                    p.diffusion_strength,
+                    p.diffusion_radius,
+                    p.diffusion_tail,
+                    p.glint_contrast,
+                ) = (0.3, 0.04, 0.6, 0.9);
             });
             assert_eq!(
-                [r.params[df::STRENGTH], r.params[df::RADIUS], r.params[df::TAIL]],
+                [
+                    r.params[df::STRENGTH],
+                    r.params[df::RADIUS],
+                    r.params[df::TAIL]
+                ],
                 [0.3, 0.04, 0.6],
                 "{kind:?}"
             );
-            let glint = if kind == LensElementKind::Glimmerglass { 0.9 } else { 0.0 };
-            assert_eq!(r.params[df::GLINT], glint, "{kind:?}: glint only on Glimmerglass");
+            let glint = if kind == LensElementKind::Glimmerglass {
+                0.9
+            } else {
+                0.0
+            };
+            assert_eq!(
+                r.params[df::GLINT],
+                glint,
+                "{kind:?}: glint only on Glimmerglass"
+            );
         }
 
         let r = row_of(LensElementKind::StarFilter, |p| {
@@ -3059,31 +3366,56 @@ mod tests {
         });
         assert_eq!((r.params[star::POINTS], r.params[star::LENGTH]), (6.0, 0.3));
         assert!((r.params[star::ROTATION] - std::f32::consts::PI).abs() < 1e-6);
-        assert_eq!((r.params[star::INTENSITY], r.params[star::FALLOFF]), (0.25, 2.0));
+        assert_eq!(
+            (r.params[star::INTENSITY], r.params[star::FALLOFF]),
+            (0.25, 2.0)
+        );
         let r = row_of(LensElementKind::Halation, |p| {
             (p.halation_strength, p.halation_radius, p.halation_tail) = (0.5, 0.03, 0.7);
             (p.halation_tint_r, p.halation_tint_g, p.halation_tint_b) = (1.0, 0.2, 0.1);
         });
-        assert_eq!((r.params[halation::STRENGTH], r.params[halation::RADIUS], r.params[halation::TAIL]), (0.5, 0.03, 0.7));
-        assert_eq!(&r.params[halation::TINT..halation::TINT + 3], &[1.0, 0.2, 0.1]);
+        assert_eq!(
+            (
+                r.params[halation::STRENGTH],
+                r.params[halation::RADIUS],
+                r.params[halation::TAIL]
+            ),
+            (0.5, 0.03, 0.7)
+        );
+        assert_eq!(
+            &r.params[halation::TINT..halation::TINT + 3],
+            &[1.0, 0.2, 0.1]
+        );
 
         let r = row_of(LensElementKind::WaterDrops, |p| {
             (p.drops_refraction, p.drops_normal_layer, p.drops_defocus) = (0.04, 2, 0.006);
         });
         assert_eq!(
-            (r.params[wd::REFRACTION], r.params[wd::NORMAL_LAYER], r.params[wd::DEFOCUS]),
+            (
+                r.params[wd::REFRACTION],
+                r.params[wd::NORMAL_LAYER],
+                r.params[wd::DEFOCUS]
+            ),
             (0.04, 2.0, 0.006)
         );
         let r = row_of(LensElementKind::Smear, |p| {
             (p.smear_strength, p.smear_length, p.smear_angle_deg) = (0.4, 0.05, 90.0);
         });
-        assert_eq!((r.params[smear::STRENGTH], r.params[smear::LENGTH]), (0.4, 0.05));
+        assert_eq!(
+            (r.params[smear::STRENGTH], r.params[smear::LENGTH]),
+            (0.4, 0.05)
+        );
         assert!((r.params[smear::ANGLE] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
         let r = row_of(LensElementKind::Dirt, |p| {
             (p.dirt_strength, p.dirt_radius, p.dirt_loss, p.dirt_tail) = (0.35, 0.04, 0.2, 0.6);
         });
         assert_eq!(
-            [r.params[dirt::STRENGTH], r.params[dirt::RADIUS], r.params[dirt::LOSS], r.params[dirt::TAIL]],
+            [
+                r.params[dirt::STRENGTH],
+                r.params[dirt::RADIUS],
+                r.params[dirt::LOSS],
+                r.params[dirt::TAIL]
+            ],
             [0.35, 0.04, 0.2, 0.6]
         );
     }
@@ -3109,8 +3441,19 @@ mod tests {
         let e = lens.to_rows(0).1[0];
         assert_eq!(e.region_kind, region_kind::MASK);
         let m = &e.region;
-        assert_eq!((m[mask::LAYER], m[mask::CHANNEL], m[mask::INVERT]), (3.0, 1.0, 1.0));
-        assert_eq!((m[mask::SCALE], m[mask::OFFSET], m[mask::OFFSET + 1], m[mask::TILE]), (2.0, 0.25, -0.5, 1.0));
+        assert_eq!(
+            (m[mask::LAYER], m[mask::CHANNEL], m[mask::INVERT]),
+            (3.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            (
+                m[mask::SCALE],
+                m[mask::OFFSET],
+                m[mask::OFFSET + 1],
+                m[mask::TILE]
+            ),
+            (2.0, 0.25, -0.5, 1.0)
+        );
         // A channel past alpha is clamped; a non-mask region leaves the slots alone.
         props.mask_channel = 9;
         lens.elements = vec![props.clone()];
@@ -3123,7 +3466,13 @@ mod tests {
             p.aperture_texture_layer = 4;
             p.aperture_texture_amount = 0.75;
         });
-        assert_eq!((r.params[pupil::TEXTURE_LAYER], r.params[pupil::TEXTURE_AMOUNT]), (4.0, 0.75));
+        assert_eq!(
+            (
+                r.params[pupil::TEXTURE_LAYER],
+                r.params[pupil::TEXTURE_AMOUNT]
+            ),
+            (4.0, 0.75)
+        );
     }
 
     #[test]
@@ -3148,10 +3497,16 @@ mod tests {
         };
         let kinds = |preset: LensPreset| -> Vec<u32> {
             let (row, e) = rows(preset);
-            e[..row.element_count as usize].iter().map(|e| e.kind).collect()
+            e[..row.element_count as usize]
+                .iter()
+                .map(|e| e.kind)
+                .collect()
         };
         use element_kind as k;
-        assert_eq!(kinds(LensPreset::Anamorphic2x), [k::PUPIL, k::ANAMORPHIC_DISTORTION, k::ANAMORPHIC_SQUEEZE]);
+        assert_eq!(
+            kinds(LensPreset::Anamorphic2x),
+            [k::PUPIL, k::ANAMORPHIC_DISTORTION, k::ANAMORPHIC_SQUEEZE]
+        );
         let (_, e) = rows(LensPreset::Anamorphic2x);
         assert_eq!(e[0].params[helio_pass_lens::pupil::SQUEEZE], 2.0);
         assert_eq!(e[2].params[0], 2.0);
@@ -3163,8 +3518,14 @@ mod tests {
         assert_eq!(kinds(LensPreset::BlackProMistEighth), [k::BLACK_PRO_MIST]);
         assert_eq!(rows(LensPreset::BlackProMistEighth).1[0].params[0], 0.125);
         let (_, rain) = rows(LensPreset::RainyLens);
-        assert_eq!((rain[0].kind, rain[0].region_kind), (k::WATER_DROPS, region_kind::MASK));
-        assert_eq!(rows(LensPreset::StarFilter6pt).1[0].params[helio_pass_lens::star::POINTS], 6.0);
+        assert_eq!(
+            (rain[0].kind, rain[0].region_kind),
+            (k::WATER_DROPS, region_kind::MASK)
+        );
+        assert_eq!(
+            rows(LensPreset::StarFilter6pt).1[0].params[helio_pass_lens::star::POINTS],
+            6.0
+        );
         assert_eq!(kinds(LensPreset::FilmHalation), [k::HALATION]);
         let (grad, e) = rows(LensPreset::GradNd3Stop);
         assert_eq!((e[0].kind, e[0].params[0]), (k::GRADUATED_ND, 3.0));
@@ -3179,7 +3540,10 @@ mod tests {
     #[test]
     fn every_kind_and_shape_round_trips_through_json_by_name_and_index() {
         for (i, kind) in LensElementKind::ALL.iter().enumerate() {
-            let props = LensElementProps { kind: *kind, ..Default::default() };
+            let props = LensElementProps {
+                kind: *kind,
+                ..Default::default()
+            };
             let back: LensElementProps =
                 serde_json::from_value(serde_json::to_value(&props).unwrap()).unwrap();
             assert_eq!(back.kind, *kind);
@@ -3219,18 +3583,37 @@ mod tests {
         assert_eq!(e[3].params[0], -0.1);
         // New fields took their defaults, so the element equals one built fresh.
         assert_eq!(lens.elements[0].mask_scale, 1.0);
-        assert_eq!(lens.elements[0].diffusion_strength, LensElementProps::default().diffusion_strength);
+        assert_eq!(
+            lens.elements[0].diffusion_strength,
+            LensElementProps::default().diffusion_strength
+        );
     }
 
     #[test]
     fn the_new_fields_are_reflected_with_categories() {
         let props = LensElementProps::default();
         let fields = props.get_properties();
-        let find = |name: &str| fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} reflected"));
+        let find = |name: &str| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} reflected"))
+        };
         for name in [
-            "projection_model", "bc_k1", "mumps_kx1", "prism_count", "port_index", "grad_nd_stops",
-            "glow_amount", "diffusion_strength", "star_points", "halation_strength",
-            "drops_refraction", "dirt_loss", "mask_layer", "aperture_texture_amount",
+            "projection_model",
+            "bc_k1",
+            "mumps_kx1",
+            "prism_count",
+            "port_index",
+            "grad_nd_stops",
+            "glow_amount",
+            "diffusion_strength",
+            "star_points",
+            "halation_strength",
+            "drops_refraction",
+            "dirt_loss",
+            "mask_layer",
+            "aperture_texture_amount",
         ] {
             find(name);
         }
@@ -3245,9 +3628,14 @@ mod tests {
         for (choice, lens) in LensPrescriptionChoice::ALL.iter().zip(BundledLens::ALL) {
             assert_eq!(choice.bundled(), lens);
             assert_eq!(format!("{choice:?}"), format!("{lens:?}"));
-            let row = row_of(LensElementKind::Prescription, |p| p.prescription_lens = *choice);
+            let row = row_of(LensElementKind::Prescription, |p| {
+                p.prescription_lens = *choice
+            });
             assert_eq!(row.kind, element_kind::PRESCRIPTION);
-            assert_eq!(row.params[helio_pass_lens::prescription::LAYER], lens.layer() as f32);
+            assert_eq!(
+                row.params[helio_pass_lens::prescription::LAYER],
+                lens.layer() as f32
+            );
         }
         let row = row_of(LensElementKind::Prescription, |p| p.psf_amount = 0.4);
         assert_eq!(row.params[helio_pass_lens::prescription::PSF_AMOUNT], 0.4);
@@ -3256,14 +3644,20 @@ mod tests {
         assert_eq!(row.params[helio_pass_lens::prescription::LAYER], 2.0);
         assert_eq!(row.params[helio_pass_lens::prescription::PSF_AMOUNT], 1.0);
         // Over a region, like every element.
-        let row = row_of(LensElementKind::Prescription, |p| p.shape = LensRegionShape::Ellipse);
+        let row = row_of(LensElementKind::Prescription, |p| {
+            p.shape = LensRegionShape::Ellipse
+        });
         assert_eq!(row.region_kind, region_kind::ELLIPSE);
     }
 
     #[test]
     fn a_user_element_carries_its_hooks_and_all_sixteen_parameters() {
         let row = row_of(LensElementKind::User, |_| {});
-        assert_eq!((row.kind, row.flags), (element_kind::USER, 0), "no hook selected is inert");
+        assert_eq!(
+            (row.kind, row.flags),
+            (element_kind::USER, 0),
+            "no hook selected is inert"
+        );
         let row = row_of(LensElementKind::User, |p| {
             p.user_map = true;
             p.user_focus = true;
@@ -3272,12 +3666,23 @@ mod tests {
             p.user_p15 = 9.0;
         });
         assert_eq!(row.flags, user::MAP | user::FOCUS);
-        assert_eq!((row.params[0], row.params[7], row.params[15]), (1.5, -2.0, 9.0));
+        assert_eq!(
+            (row.params[0], row.params[7], row.params[15]),
+            (1.5, -2.0, 9.0)
+        );
         assert_eq!(row.params[1], 0.0);
         let row = row_of(LensElementKind::User, |p| {
-            (p.user_map, p.user_transmission, p.user_focus, p.user_spectral) = (true, true, true, true)
+            (
+                p.user_map,
+                p.user_transmission,
+                p.user_focus,
+                p.user_spectral,
+            ) = (true, true, true, true)
         });
-        assert_eq!(row.flags, user::MAP | user::TRANSMISSION | user::FOCUS | user::SPECTRAL);
+        assert_eq!(
+            row.flags,
+            user::MAP | user::TRANSMISSION | user::FOCUS | user::SPECTRAL
+        );
     }
 
     #[test]
@@ -3285,10 +3690,16 @@ mod tests {
         let mut lens = CameraLensComponent::default();
         lens.preset = LensPreset::DoubleGauss50mmF2Traced;
         let (row, elements) = lens.to_rows(0);
-        assert_eq!((row.focal_length_mm, row.f_number, row.element_count), (50.0, 2.0, 1));
+        assert_eq!(
+            (row.focal_length_mm, row.f_number, row.element_count),
+            (50.0, 2.0, 1)
+        );
         assert_eq!(elements[0].kind, element_kind::PRESCRIPTION);
         assert_eq!(elements[0].region_kind, region_kind::FULL_FRAME);
-        assert_eq!(elements[0].params[helio_pass_lens::prescription::LAYER], 2.0);
+        assert_eq!(
+            elements[0].params[helio_pass_lens::prescription::LAYER],
+            2.0
+        );
     }
 
     #[test]
@@ -3302,14 +3713,20 @@ mod tests {
         assert_eq!(overscan(LensPreset::Standard50mmF2_8, 16.0 / 9.0), 1.0);
         assert_eq!(overscan(LensPreset::ProMistQuarter, 16.0 / 9.0), 1.0);
         // An 8 mm equidistant fisheye reaches far past any frame: capped.
-        assert_eq!(overscan(LensPreset::Fisheye8mm, 1.5), helio_pass_lens::ray_map::APPLIED_OVERSCAN_CAP);
+        assert_eq!(
+            overscan(LensPreset::Fisheye8mm, 1.5),
+            helio_pass_lens::ray_map::APPLIED_OVERSCAN_CAP
+        );
         // The traced double Gauss has barrel distortion at the corners, and
         // the reach follows the aspect (the sensor width spans the image, so
         // a wider image has a narrower view and its corners angle less).
         let square = overscan(LensPreset::DoubleGauss50mmF2Traced, 1.0);
         let wide = overscan(LensPreset::DoubleGauss50mmF2Traced, 16.0 / 9.0);
         assert!(square > 1.0 && wide > 1.0, "{square} {wide}");
-        assert!(wide < square, "a wider image has a narrower view: {wide} vs {square}");
+        assert!(
+            wide < square,
+            "a wider image has a narrower view: {wide} vs {square}"
+        );
         // A disabled lens asks for none.
         let mut lens = CameraLensComponent::default();
         lens.preset = LensPreset::Fisheye8mm;

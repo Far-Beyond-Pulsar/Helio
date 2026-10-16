@@ -154,9 +154,24 @@ pub(crate) fn item_card<V: 'static>(
     };
     let buttons = h_flex()
         .gap_1()
-        .child(button("up", IconName::ArrowUp, "Move up", ListEdit::Up(index)))
-        .child(button("down", IconName::ArrowDown, "Move down", ListEdit::Down(index)))
-        .child(button("remove", IconName::Trash, "Remove", ListEdit::Remove(index)));
+        .child(button(
+            "up",
+            IconName::ArrowUp,
+            "Move up",
+            ListEdit::Up(index),
+        ))
+        .child(button(
+            "down",
+            IconName::ArrowDown,
+            "Move down",
+            ListEdit::Down(index),
+        ))
+        .child(button(
+            "remove",
+            IconName::Trash,
+            "Remove",
+            ListEdit::Remove(index),
+        ));
     v_flex()
         .w_full()
         .gap_1()
@@ -226,7 +241,11 @@ pub struct ReflectedListEditor<T: ReflectedListItem> {
 }
 
 impl<T: ReflectedListItem> ReflectedListEditor<T> {
-    pub fn new(args: &PropertyEditorArgs<'_>, window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
+    pub fn new(
+        args: &PropertyEditorArgs<'_>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
         let value = args
             .current_value
             .downcast_ref::<Vec<T>>()
@@ -234,7 +253,10 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
             .unwrap_or_default();
         let mut editor = Self {
             label: args.display_name.to_string(),
-            id: format!("list-{}-{}-{}", args.id_prefix, args.class_name, args.prop_name),
+            id: format!(
+                "list-{}-{}-{}",
+                args.id_prefix, args.class_name, args.prop_name
+            ),
             current: Arc::new(Mutex::new(value)),
             write_back: args.write_back.clone(),
             items: Vec::new(),
@@ -347,7 +369,11 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
 }
 
 impl<T: ReflectedListItem> gpui::Render for ReflectedListEditor<T> {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
         let value = self.value();
         let cards: Vec<AnyElement> = self
             .items
@@ -371,9 +397,9 @@ impl<T: ReflectedListItem> gpui::Render for ReflectedListEditor<T> {
                 .label(format!("Add {}", T::NOUN))
                 .xsmall()
                 .ghost()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.edit_list(ListEdit::Add, window, cx)
-                }))
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.edit_list(ListEdit::Add, window, cx)),
+                )
         });
         let count = if T::MAX_ITEMS == usize::MAX {
             format!("{} ({})", self.label, value.len())

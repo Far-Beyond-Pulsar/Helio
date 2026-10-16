@@ -450,7 +450,13 @@ pub struct VoxelTerrainComponent {
     /// How much air (1: the preset's; 0: none). It scales every scattering
     /// coefficient of the preset.
     #[serde(default = "default_air_scale")]
-    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Environment", label = "Air density")]
+    #[property(
+        min = 0.0,
+        max = 10.0,
+        step = 0.05,
+        category = "Environment",
+        label = "Air density"
+    )]
     pub air_density: f32,
     /// The sky's colour: the preset's molecular scattering per channel.
     #[serde(default = "default_air_tint")]
@@ -458,7 +464,13 @@ pub struct VoxelTerrainComponent {
     pub air_tint: [f32; 3],
     /// Haze and dust: the preset's aerosol scattering, times this.
     #[serde(default = "default_air_scale")]
-    #[property(min = 0.0, max = 20.0, step = 0.05, category = "Environment", label = "Haze")]
+    #[property(
+        min = 0.0,
+        max = 20.0,
+        step = 0.05,
+        category = "Environment",
+        label = "Haze"
+    )]
     pub air_haze: f32,
 
     /// Renderer appearance JSON, independent of generator data and edits.
@@ -531,7 +543,6 @@ impl VoxelTerrainComponent {
             ..Self::default()
         }
     }
-
 }
 
 // Clone starts with an empty event outbox.
@@ -1535,7 +1546,8 @@ fn edit_terrain_samples(
     let edits = samples
         .iter()
         .map(|s| {
-            let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
+            let p =
+                glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
             super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
         })
         .collect();
@@ -1654,14 +1666,39 @@ mod tests {
         let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
         assert_eq!(restored.planet_radius, 1_737_400.0);
         assert_eq!(restored.air, VoxelAir::Custom, "the authored sky stays");
-        assert_eq!((restored.air_density, restored.air_tint, restored.air_haze), (1.0, [1.0; 3], 1.0));
+        assert_eq!(
+            (restored.air_density, restored.air_tint, restored.air_haze),
+            (1.0, [1.0; 3], 1.0)
+        );
         let saved = serde_json::to_value(&restored).unwrap();
-        for field in ["domain_mode", "chunk_edge_voxels", "max_chunk_lod", "lod_scale", "renderer_id", "material_ids", "bounds_max_x", "payloads"] {
+        for field in [
+            "domain_mode",
+            "chunk_edge_voxels",
+            "max_chunk_lod",
+            "lod_scale",
+            "renderer_id",
+            "material_ids",
+            "bounds_max_x",
+            "payloads",
+        ] {
             assert!(saved.get(field).is_none(), "{field} is not saved");
         }
         let properties = restored.get_properties();
-        for field in ["air", "air_density", "air_tint", "air_haze", "shape", "planet_radius", "voxel_size", "seed", "editable"] {
-            assert!(properties.iter().any(|property| property.name == field), "{field} is a property");
+        for field in [
+            "air",
+            "air_density",
+            "air_tint",
+            "air_haze",
+            "shape",
+            "planet_radius",
+            "voxel_size",
+            "seed",
+            "editable",
+        ] {
+            assert!(
+                properties.iter().any(|property| property.name == field),
+                "{field} is a property"
+            );
         }
     }
 
