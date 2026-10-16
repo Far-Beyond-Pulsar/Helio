@@ -906,6 +906,63 @@ fn natural_cells_against_the_leaf_rule() {
     }
 }
 
+/// What one more edit costs a running world as the history grows: the CPU
+/// of `sync_edits` and of the frame that regenerates what it marked, after
+/// `n` small digs (sealed into the baked store) and after `n` large ones
+/// (kept analytic). A report, not a gate:
+/// `cargo test --release --test chunks edit_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn edit_cost_against_history() {
+    let Some(gpu) = gpu() else { return };
+    let base = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&base, 1, 0.52, 0.48);
+    let ground = base.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let view = ground_view(&base, dir, [320, 180]);
+    for (label, radius, spread) in [("small digs (0.4 m)", 0.4, 0.5), ("large digs (8 m)", 8.0, 9.0)] {
+        for n in [0usize, 100, 1000, 10000] {
+            let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+            let mut next = xorshift(0x2545_f491_4f6c_dd1d);
+            let mut dig = |planet: &mut Planet| {
+                let a = (next() % 2001) as f64 / 1000.0 - 1.0;
+                let b = (next() % 2001) as f64 / 1000.0 - 1.0;
+                let centre = ground + side * (a * 40.0 * spread) + fwd * (b * 40.0 * spread) + up * 6.0;
+                planet.apply(Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+            };
+            for _ in 0..n {
+                dig(&mut planet);
+            }
+            let mut world = World::new(&gpu, &planet);
+            world.settle(&gpu, &planet, &view);
+            // Ten more edits, each synced and its frame run.
+            let (mut sync_ms, mut frame_ms) = (Vec::new(), Vec::new());
+            for _ in 0..10 {
+                dig(&mut planet);
+                let t = std::time::Instant::now();
+                world.sync(&gpu, &planet);
+                sync_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = std::time::Instant::now();
+                world.frame(&gpu, &planet, &view, None);
+                frame_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            sync_ms.sort_by(f64::total_cmp);
+            frame_ms.sort_by(f64::total_cmp);
+            eprintln!(
+                "EDITCOST {label}, history {n}: analytic brushes {}, sealed {}; sync p50 {:.2} max {:.2} ms; frame p50 {:.2} max {:.2} ms",
+                planet.edits().len() - planet.edits().sealed_len(),
+                planet.edits().sealed_len(),
+                sync_ms[5],
+                sync_ms[9],
+                frame_ms[5],
+                frame_ms[9]
+            );
+        }
+    }
+}
+
 /// Edits sealed under a running world: a crater and a mound too large to
 /// bake, blocks baked between them, then undo across seals. After each
 /// change the kept world matches CPU ray casts exactly.

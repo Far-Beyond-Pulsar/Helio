@@ -42,6 +42,11 @@ pub const DEFAULT_CHUNKS: usize = 131072;
 /// Chunk jobs under edits a batch (`cell_materials` slots: `CELL_WORDS`
 /// words a column, 272 KiB each).
 const DETAIL_JOBS: usize = 128;
+/// Levels whose chunks under edits get per-voxel materials: cells of
+/// 0.1-0.2 m at 0.1 m voxels, near the eye. Coarser chunks' leaves keep
+/// their pairs (an edit's top materials vote in them): a dug wall's detail
+/// pages at every level filled a game's pages after some 80 digs 8 m across.
+const DETAIL_LEVELS: u32 = 2;
 /// Words a column of a `cell_materials` slot (`CELL_WORDS` of
 /// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
 const CELL_WORDS: u64 = 17;
@@ -1891,7 +1896,7 @@ impl ChunkWorld {
         let mut chunks = Vec::with_capacity(n);
         for &cz in &czs[..n] {
             let refs: Vec<u32> = near.iter().copied().filter(|&b| brush_meets(&edits.faces[b as usize], fp.face, fp.level, i, j, span(cz))).collect();
-            let edited = !refs.is_empty() || (baked && GenBatch::bricks_under(&edits.baked, fp, cz));
+            let edited = fp.level < DETAIL_LEVELS && (!refs.is_empty() || (baked && GenBatch::bricks_under(&edits.baked, fp, cz)));
             if edited && details >= DETAIL_JOBS {
                 break;
             }

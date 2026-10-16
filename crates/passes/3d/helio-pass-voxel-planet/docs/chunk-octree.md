@@ -397,10 +397,49 @@ chunks a pit's edit covers now draw their surface cells exactly too).
 What is left is unedited leaves' surface vote over mixed columns; the
 commonest, dirt drawn as dark stone (3.1 % of pixels).
 
+Only levels 0 and 1 (`DETAIL_LEVELS`) get these: at every level, ten digs
+8 m across filled a test world's 2048 detail pages; at two, 368. Coarser
+leaves keep their pairs (an edit's top materials vote in them). Out of
+pages, a chunk keeps its pairs (`out_of_details`): 100 large digs around
+the eye fill 2048, a game's world holds 16384.
+
+### Edits against history (2026-10-16)
+
+What one more edit costs a running world after `n` edits
+(`edit_cost_against_history`, ignored: a report; ground view, 10 edits
+each, CPU of `sync_edits` and of the frame that regenerates, GPU waits
+included):
+
+| History | small digs (0.4 m: baked) sync / frame | large digs (8 m: analytic) sync / frame |
+|---|---|---|
+| 0 | 0.24 / 3.3 ms | 0.28 / 3.9 ms |
+| 100 | 0.24 / 3.1 ms | 0.29 / 2.8 ms |
+| 1000 | 0.26 / 4.7 ms | 0.48 / 4.2 ms |
+| 10000 | 0.28 / 3.5 ms | 3.16 / 13.1 ms |
+
+Small brushes are sealed into the baked store and cost what they leave.
+Brushes over `BAKE_RADIUS_HALF` (3.2 m) stay analytic forever: every edit
+re-hashes, re-indexes and re-uploads them all (`sync_edits`), and every
+chunk under them evaluates each in its column kernel. Explosions are
+large brushes, so a long game slows every edit and every chunk.
+
+**Edits on data**, in steps, each with its gate:
+
+1. **Large brushes into data.** A sealed large brush is applied to the
+   resident chunks it touches (a rebuild of their 64-trees from their own
+   cells and the brush, without the terrain program), and kept in the log
+   only for space no resident chunk covered. Gate: the table's 10000 large
+   digs at the cost of 100.
+2. **Edited chunks kept.** Edited level-0 chunks are read back,
+   compressed and kept on the CPU (and in the save), so evicting one costs
+   a copy, not a regeneration from the history; parents re-derived by
+   downsampling.
+3. **Incremental sync.** `sync_edits` appends and indexes the new brush
+   instead of rebuilding the list, the index and the buffer.
+
 ### Next
 
-- Edits on data: an edit changes the stored chunks it touches instead of
-  regenerating them from the field and the whole edit history.
+- Edits on data (above).
 - Natural per-voxel materials where unedited leaves mix materials (5 % of
   their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
