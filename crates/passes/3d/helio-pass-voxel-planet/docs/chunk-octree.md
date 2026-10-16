@@ -215,11 +215,46 @@ About a fifth of the footprints a flight wants come from the pool: most are
 new ground. The rest of a footprint's cost is its first computation.
 
 An intermittent corrupt capture (a sample in a few fixed-step descents
-whose 4x8-pixel tiles, scattered over up to half the frame, show the
-background's haze) is not the octree's: main's chunk trees show it too
-(1 in 7 descents against 1 in 6). Deferred lighting read those tiles'
-depth as sky after the voxel publish wrote it: a race in the engine's
-frame, not in residency. The gate's outliers above 5% are that.
+whose 8x8 and 4x8 pixel blocks, scattered over about a sixth of the frame,
+show the background's haze) is not the octree's: main's chunk trees show
+it too. The voxel publish runs for every pixel and finds a hit for every
+pixel, yet after the frame those blocks of every G-buffer target and of
+depth still hold the G-buffer pass's earlier clear, so lighting takes them
+for sky. Only NVIDIA's Vulkan driver shows it (616.64, RTX 3060): D3D12
+never does, Khronos synchronization validation finds no hazard, and no
+barrier, fence, single command buffer or recording-cache setting changes
+it. It needs the frame to be recorded while the GPU still runs the frame
+before, with generation in it; waiting for the GPU before the voxel pass
+records removes it (at +44% frame time). The gate's outliers above 5% are
+that. See [Known driver issue](#known-driver-issue) below.
+
+### Known driver issue
+
+Lost G-buffer writes on NVIDIA Vulkan, 2026-10-16. Measured with captures
+every 0.25 s (65 a descent; a descent shows it about one time in two):
+
+| Change | Descents with lost blocks |
+|---|---|
+| None (Vulkan) | about 55 % |
+| D3D12 | 0 of 6 |
+| GPU idle before each frame is recorded | 0 of 6 |
+| GPU idle before the voxel pass records | 0 of 8 (frame p50 18 to 26 ms) |
+| GPU idle before submit (recorded while busy) | hit |
+| Recording cache off; serial `finish`; one command buffer | hit |
+| Frame fences (colour output; every stage) | hit |
+| G-buffer cleared by a draw, or by the publish's own pass | hit (blocks hold that clear) |
+| G-buffer not cleared, publish writes every pixel | 0 of 8 |
+| Generation inputs in persistent buffers | hit |
+| Tile ranges reset on the GPU instead of by queue writes | 2 of 7 |
+
+A forum report with the same profile (same driver, Ampere, writes lost
+intermittently, fixed only by waiting for the GPU, barriers no help,
+validation clean): https://forums.developer.nvidia.com/t/382912.
+
+Reported to NVIDIA on 2026-10-16 as bug **6939141**, with repro steps from
+this repository and an affected frame emailed to NVSDKIssues. Next: try a
+newer driver, a standalone repro if NVIDIA asks for one, and a cheap
+mitigation.
 
 ### Next
 
