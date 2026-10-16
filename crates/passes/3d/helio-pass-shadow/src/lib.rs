@@ -21,6 +21,17 @@ const MAX_SHADOW_FACES: usize = helio_pass_shadow_matrix::MAX_SHADOW_FACES;
 /// guaranteed to be ≤ 256 on every wgpu backend (Metal, Vulkan, DX12, WebGPU).
 const FACE_BUF_STRIDE: u64 = 256;
 
+/// Regions of `ShadowDirty`'s per-face draw counts (`face_geom_count_buf`),
+/// each `MAX_SHADOW_FACES` `u32`s.
+const MOVABLE_COUNTS: usize = 0;
+const STATIC_COUNTS: usize = 1;
+const TRANSMISSIVE_COUNTS: usize = 2;
+
+/// Byte offset of `face`'s count in a region of `face_geom_count_buf`.
+fn face_count_offset(region: usize, face: usize) -> u64 {
+    (region * MAX_SHADOW_FACES + face) as u64 * 4
+}
+
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct ShadowPass {
@@ -66,8 +77,10 @@ pub struct ShadowPass {
     /// `array<u32, 256>` — 0 = clean, 1 = dirty (written by ShadowDirtyPass).
     /// Used as indirect draw count for the depth-clear triangle (0 = no clear, 1 = clear).
     face_dirty_buf: Arc<wgpu::Buffer>,
-    /// `array<u32, 256>` — 0 = clean, movable_draw_count = dirty (written by ShadowDirtyPass).
-    /// Used as indirect draw count for movable geometry (`multi_draw_indexed_indirect_count`).
+    /// Per-face draw counts written by ShadowDirtyPass, in movable, static and
+    /// transmissive regions: 0 = clean, the list's live count = dirty. Used as
+    /// the indirect draw count (`multi_draw_indexed_indirect_count`) for faces
+    /// not known to be dirty on the CPU.
     #[allow(dead_code)]
     face_geom_count_buf: Arc<wgpu::Buffer>,
 
@@ -604,6 +617,10 @@ impl RenderPass for ShadowPass {
             }
             updates += layers;
             texels += cost;
+            let face_count = |region| helio_pass_gbuffer::GpuDrawCount {
+                buffer: &self.face_geom_count_buf,
+                offset: face_count_offset(region, face),
+            };
             let mut cmds = ctx.graphics_cmds();
             for is_static in [true, false] {
                 let dynamic_offset = ((face + if static_dirty { 0 } else { MAX_SHADOW_FACES })
@@ -656,6 +673,18 @@ impl RenderPass for ShadowPass {
                     // longer) in it.
                     if is_static {
                         let (max_draws, count) = batch.shadow_static_draws();
+                        // A face not known to be dirty is redrawn only if
+                        // `ShadowDirty` dirtied it on the GPU (a light's
+                        // matrix or a movable caster changed): its per-face
+                        // count is the live count then, else 0. Drawing the
+                        // full list and discarding it in the vertex shader
+                        // ran every static caster's vertices for every
+                        // scheduled face, every frame.
+                        let count = if self.supports_multi_draw_count && !static_dirty {
+                            Some(face_count(STATIC_COUNTS))
+                        } else {
+                            count
+                        };
                         helio_pass_gbuffer::multi_draw_indexed_indirect(
                             &mut pass,
                             batch.shadow_static_indirect,
@@ -668,10 +697,7 @@ impl RenderPass for ShadowPass {
                         let count = if self.supports_multi_draw_count && !static_dirty {
                             // `ShadowDirty`'s per-face count: the live count
                             // when the face's movable casters changed, else 0.
-                            Some(helio_pass_gbuffer::GpuDrawCount {
-                                buffer: &self.face_geom_count_buf,
-                                offset: face as u64 * 4,
-                            })
+                            Some(face_count(MOVABLE_COUNTS))
                         } else {
                             count
                         };
@@ -705,7 +731,12 @@ impl RenderPass for ShadowPass {
                         } else {
                             0
                         },
-                        batch.shadow_transmissive_draws().1,
+                        // As the static layer: a clean face draws no glass.
+                        if self.supports_multi_draw_count && !static_dirty {
+                            Some(face_count(TRANSMISSIVE_COUNTS))
+                        } else {
+                            batch.shadow_transmissive_draws().1
+                        },
                         &vertices.buffer,
                         &slots,
                         &indices.buffer,
@@ -727,7 +758,13 @@ impl RenderPass for ShadowPass {
                 bytemuck::bytes_of(&2u32),
             );
             cmds.clear_buffer(&self.face_dirty_buf, face as u64 * 4, Some(4));
-            cmds.clear_buffer(&self.face_geom_count_buf, face as u64 * 4, Some(4));
+            for region in [MOVABLE_COUNTS, STATIC_COUNTS, TRANSMISSIVE_COUNTS] {
+                cmds.clear_buffer(
+                    &self.face_geom_count_buf,
+                    face_count_offset(region, face),
+                    Some(4),
+                );
+            }
             self.face_static_gen[face] = batch.shadow_static_generation;
             self.face_light_gen[face] = data.per_caster_dirty_gen[face / 6];
             self.face_last_update[face] = self.schedule_frame;

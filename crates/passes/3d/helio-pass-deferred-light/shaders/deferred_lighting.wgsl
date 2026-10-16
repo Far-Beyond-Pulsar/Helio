@@ -230,7 +230,7 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 @group(1) @binding(7) var gbuf_lightmap_uv: texture_2d<f32>;
 // SSS data (Rgba16Float): subsurface_color.rgb, subsurface_radius
 @group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
-// Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(surface_flags)
+// Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, numeric surface_flags
 @group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
 @group(1) @binding(10) var directional_visibility: texture_2d<f32>;
 
@@ -1153,9 +1153,53 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // the stored terrain visibility path instead.
     let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
+    if globals.debug_mode == 32u {
+        if is_stored_voxel {
+            return vec4<f32>(albedo, 1.0);
+        }
+        return vec4<f32>(0.035, 0.035, 0.035, 1.0);
+    }
+    if globals.debug_mode == 33u {
+        if is_stored_voxel {
+            return vec4<f32>(0.12, 0.78, 1.0, 1.0);
+        }
+        return vec4<f32>(1.0, 0.36, 0.08, 1.0);
+    }
     let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel);
     // Combined AO: material AO from G-buffer × screen-space AO.
     let ao_combined  = ao * ssao_factor;
+
+    // Material and G-buffer visualizations return before lighting mixes in
+    // direct or indirect contributions.
+    if globals.debug_mode == 6u {
+        return vec4<f32>(vec3<f32>(roughness), 1.0);
+    }
+    if globals.debug_mode == 7u {
+        return vec4<f32>(vec3<f32>(metallic), 1.0);
+    }
+    if globals.debug_mode == 8u {
+        return vec4<f32>(vec3<f32>(ao), 1.0);
+    }
+    if globals.debug_mode == 9u {
+        let readable_emissive = emissive / (vec3<f32>(1.0) + max(emissive, vec3<f32>(0.0)));
+        return vec4<f32>(readable_emissive, 1.0);
+    }
+    if globals.debug_mode == 12u {
+        return vec4<f32>(vec3<f32>(ao_combined), 1.0);
+    }
+    if globals.debug_mode == 13u {
+        let f0 = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(1.0));
+        return vec4<f32>(f0, 1.0);
+    }
+    if globals.debug_mode == 14u {
+        if voxel_lightmap_uv.x < -1.5 {
+            return vec4<f32>(1.0, 0.0, 1.0, 1.0);
+        }
+        if voxel_lightmap_uv.x < 0.0 {
+            return vec4<f32>(0.12, 0.12, 0.12, 1.0);
+        }
+        return vec4<f32>(fract(voxel_lightmap_uv), 0.0, 1.0);
+    }
 
     // ── Debug mode: bypass lighting ───────────────────────────────────────────
     // Mode 1 (UV Grid) and Mode 2 (Texture Direct) show raw colors without lighting
@@ -1225,13 +1269,45 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let V   = normalize(cameras[0].position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
+    if globals.debug_mode == 19u {
+        let fresnel = F0 + (vec3<f32>(1.0) - F0) * pow(1.0 - NdV, 5.0);
+        return vec4<f32>(fresnel, 1.0);
+    }
+
     // ── SSS / Extra surface data ──────────────────────────────────────────────
     let sss_r        = textureLoad(gbuf_sss, pix, 0);
     let extra_r      = textureLoad(gbuf_extra, pix, 0);
-    let surface_flags = bitcast<u32>(extra_r.a);
+    // Flags are numerically encoded in the G-buffer so the Rgba16Float target
+    // can preserve these small integer values exactly.
+    let surface_flags = u32(round(extra_r.a));
     let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
     let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
     let low_specular   = (surface_flags & SURFACE_FLAG_LOW_SPECULAR) != 0u;
+
+    if globals.debug_mode == 15u {
+        return vec4<f32>(sss_r.rgb, 1.0);
+    }
+    if globals.debug_mode == 16u {
+        return vec4<f32>(
+            clamp(extra_r.r, 0.0, 1.0),
+            clamp(extra_r.g, 0.0, 1.0),
+            fract(extra_r.b / (2.0 * 3.14159265)),
+            1.0,
+        );
+    }
+    if globals.debug_mode == 17u {
+        return vec4<f32>(
+            select(0.0, 1.0, is_anisotropic),
+            select(0.0, 1.0, has_subsurface),
+            select(0.0, 1.0, low_specular),
+            1.0,
+        );
+    }
+    if globals.debug_mode == 18u {
+        let radius = max(sss_r.a, 0.0);
+        let readable_radius = radius / (1.0 + radius);
+        return vec4<f32>(vec3<f32>(readable_radius), 1.0);
+    }
 
     // Anisotropic GGX parameters
     let aniso_ax    = extra_r.r;
@@ -1257,6 +1333,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
     // is handled separately — shadow maps do not occlude it (that is AO's job).
     let voxel_visibility = textureLoad(directional_visibility, pix, 0);
+    if globals.debug_mode == 26u {
+        return vec4<f32>(vec3<f32>(clamp(voxel_visibility.x, 0.0, 1.0)), 1.0);
+    }
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
@@ -1377,6 +1456,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Baked lightmap weight: 1.0 for static objects with valid lightmap, 0.0 otherwise.
     let lm_weight      = select(0.0, 1.0, has_lightmap);
 
+    if globals.debug_mode == 27u {
+        return vec4<f32>(0.0, rc_weight, lm_weight, 1.0);
+    }
+
     // Blend between hemisphere fallback, RC-based GI, and baked lightmap:
     // Priority: lightmap > RC > hemisphere
     // 1. Start with hemisphere (always-on fallback)
@@ -1400,6 +1483,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let indirect_bake = lightmap_indirect;            // no AO on lightmap
     let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
     var color         = lo_final + indirect;
+    if globals.debug_mode == 22u {
+        return vec4<f32>(lo_final, 1.0);
+    }
+    if globals.debug_mode == 23u {
+        return vec4<f32>(indirect, 1.0);
+    }
+    if globals.debug_mode == 24u {
+        return vec4<f32>(color, 1.0);
+    }
+    if globals.debug_mode == 25u {
+        return vec4<f32>(emissive + sss_transmission, 1.0);
+    }
     color        += emissive;               // emissive from G-buffer
     color        += sss_transmission;       // SSS rim glow
     // Water caustics are added by fs_reflection (additive, like reflections).
@@ -1430,8 +1525,18 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     // These modes replace lighting with another diagnostic in fs_main.
     if globals.debug_mode == 1u || globals.debug_mode == 2u
         || globals.debug_mode == 4u || globals.debug_mode == 5u
+        || globals.debug_mode == 6u || globals.debug_mode == 7u
+        || globals.debug_mode == 8u || globals.debug_mode == 9u
         || globals.debug_mode == 10u || globals.debug_mode == 11u
-        || globals.debug_mode == 20u || globals.debug_mode == 21u {
+        || globals.debug_mode == 12u || globals.debug_mode == 13u
+        || globals.debug_mode == 14u || globals.debug_mode == 15u
+        || globals.debug_mode == 16u || globals.debug_mode == 17u
+        || globals.debug_mode == 18u || globals.debug_mode == 19u
+        || globals.debug_mode == 22u || globals.debug_mode == 23u
+        || globals.debug_mode == 24u || globals.debug_mode == 25u
+        || globals.debug_mode == 26u || globals.debug_mode == 27u
+        || globals.debug_mode == 20u || globals.debug_mode == 21u
+        || globals.debug_mode == 32u || globals.debug_mode == 33u {
         return vec4<f32>(0.0);
     }
 

@@ -13,15 +13,15 @@ use engine_class_derive::{
 };
 use helio::PackedVertex;
 use pulsar_reflection::{
-    AnimationSequenceAssetKind, AssetKind, AssetRef, ScenePropsProjector,
-    SkeletalMeshAssetKind, SkeletonAssetKind,
+    AnimationSequenceAssetKind, AssetKind, AssetRef, ScenePropsProjector, SkeletalMeshAssetKind,
+    SkeletonAssetKind,
 };
 use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::mesh_cache::MeshSection;
 use crate::components::{MeshGeometryKey, MeshSectionDraw, StaticMeshDraw};
+use crate::mesh_cache::MeshSection;
 
 pub const SKELETAL_MESH_ASSET_KIND: &str = "skmesh";
 pub const SKELETON_ASSET_KIND: &str = "skeleton";
@@ -100,7 +100,6 @@ pub struct SkeletalMeshComponent {
     #[serde(skip)]
     pub geometry_key: MeshGeometryKey,
 
-
     /// The regular mesh vertex/index payloads are still consumed by Helio's
     /// GPU-driven scene join. Skin influences and the bone palette are read by
     /// the skinned G-buffer vertex path using these per-instance ranges.
@@ -122,7 +121,9 @@ pub struct SkeletalMeshComponent {
     pub gpu_bone_palettes: Vec<[[f32; 4]; 4]>,
 }
 
-fn default_playback_rate() -> f32 { 1.0 }
+fn default_playback_rate() -> f32 {
+    1.0
+}
 
 #[register_scene_props_applier]
 impl ScenePropsProjector for SkeletalMeshComponent {
@@ -189,27 +190,52 @@ impl SkeletalMeshComponent {
 
     fn load_mesh(&mut self, asset: &skeletal_assets::skmesh::SkeletalMeshAsset) {
         self.clear_mesh();
-        let Some(lod) = asset.lod0() else { return; };
-        self.vertices = lod.vertices.iter().map(|v| {
-            let normal = glam::Vec3::from_array(v.normal).normalize_or_zero();
-            PackedVertex::from_components(v.position, normal.to_array(), v.uv, [1.0, 0.0, 0.0], 1.0)
-        }).collect();
+        let Some(lod) = asset.lod0() else {
+            return;
+        };
+        self.vertices = lod
+            .vertices
+            .iter()
+            .map(|v| {
+                let normal = glam::Vec3::from_array(v.normal).normalize_or_zero();
+                PackedVertex::from_components(
+                    v.position,
+                    normal.to_array(),
+                    v.uv,
+                    [1.0, 0.0, 0.0],
+                    1.0,
+                )
+            })
+            .collect();
         self.indices = lod.indices.clone();
-        self.skin_vertices = lod.vertices.iter().map(|v| SkinVertex {
-            joints: v.joints.map(u32::from),
-            weights: v.weights,
-        }).collect();
-        self.mesh_sections = lod.sections.iter().map(|s| MeshSection {
-            first_index: s.first_index,
-            index_count: s.index_count,
-            material_slot: s.material_slot,
-        }).collect();
+        self.skin_vertices = lod
+            .vertices
+            .iter()
+            .map(|v| SkinVertex {
+                joints: v.joints.map(u32::from),
+                weights: v.weights,
+            })
+            .collect();
+        self.mesh_sections = lod
+            .sections
+            .iter()
+            .map(|s| MeshSection {
+                first_index: s.first_index,
+                index_count: s.index_count,
+                material_slot: s.material_slot,
+            })
+            .collect();
         self.bounds_local = bounding_sphere(lod.vertices.iter().map(|v| v.position));
         // SceneDB's keyed mesh pools use this identity to make the geometry
         // resident exactly once per source mesh while poses change separately.
-        let key = asset.id.to_string().bytes().fold(0xcbf29ce484222325u128, |h, b| {
-            (h ^ u128::from(b)).wrapping_mul(0x100000001b3)
-        }).max(1);
+        let key = asset
+            .id
+            .to_string()
+            .bytes()
+            .fold(0xcbf29ce484222325u128, |h, b| {
+                (h ^ u128::from(b)).wrapping_mul(0x100000001b3)
+            })
+            .max(1);
         self.geometry_key = MeshGeometryKey(key);
     }
 
@@ -220,7 +246,11 @@ impl SkeletalMeshComponent {
             self.bone_world_pose.clear();
             return;
         };
-        if mesh.skeleton.as_ref().is_some_and(|id| id.as_str() != skeleton.id.as_str()) {
+        if mesh
+            .skeleton
+            .as_ref()
+            .is_some_and(|id| id.as_str() != skeleton.id.as_str())
+        {
             tracing::warn!(mesh = %mesh.id, skeleton = %skeleton.id, "skeletal mesh and skeleton references do not match");
             self.bone_palette.clear();
             self.gpu_bone_palettes.clear();
@@ -228,18 +258,40 @@ impl SkeletalMeshComponent {
             return;
         }
         let skeleton = skeleton.skeleton();
-        let clip = self.loaded_animation.as_ref()
-            .filter(|animation| animation.skeleton.as_ref().is_none_or(|id| id.as_str() == skeleton_id(self.skeleton.as_ref()).as_deref().unwrap_or("")))
+        let clip = self
+            .loaded_animation
+            .as_ref()
+            .filter(|animation| {
+                animation.skeleton.as_ref().is_none_or(|id| {
+                    id.as_str() == skeleton_id(self.skeleton.as_ref()).as_deref().unwrap_or("")
+                })
+            })
             .map(|animation| &animation.clip);
         let bind_pose = skeletal_assets::animation::AnimationClip::bind_pose();
         let clip = clip.unwrap_or(&bind_pose);
-        let world = skeletal_assets::animation::evaluate_world_transforms(&skeleton, clip, self.elapsed_seconds);
-        self.bone_world_pose = skeleton.bones.iter().map(|bone| {
-            let matrix = world.get(&bone.id).copied().unwrap_or(skeletal_assets::math::Mat4::IDENTITY);
-            glam::Mat4::from_cols_array(&matrix.0).to_cols_array_2d()
-        }).collect();
+        let world = skeletal_assets::animation::evaluate_world_transforms(
+            &skeleton,
+            clip,
+            self.elapsed_seconds,
+        );
+        self.bone_world_pose = skeleton
+            .bones
+            .iter()
+            .map(|bone| {
+                let matrix = world
+                    .get(&bone.id)
+                    .copied()
+                    .unwrap_or(skeletal_assets::math::Mat4::IDENTITY);
+                glam::Mat4::from_cols_array(&matrix.0).to_cols_array_2d()
+            })
+            .collect();
         let palette = skeletal_assets::skinning::joint_matrices(mesh, &world);
-        self.set_palette(palette.iter().map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d()).collect());
+        self.set_palette(
+            palette
+                .iter()
+                .map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d())
+                .collect(),
+        );
     }
 
     /// Replace the evaluated pose with articulated-body transforms in
@@ -252,17 +304,31 @@ impl SkeletalMeshComponent {
             return false;
         };
         if pose.len() != skeleton.bones.len()
-            || pose.iter().flatten().flatten().any(|value| !value.is_finite())
+            || pose
+                .iter()
+                .flatten()
+                .flatten()
+                .any(|value| !value.is_finite())
         {
             return false;
         }
-        let world: HashMap<_, _> = skeleton.bones.iter().zip(&pose).map(|(bone, matrix)| {
-            let flat = std::array::from_fn(|index| matrix[index / 4][index % 4]);
-            (bone.id.clone(), skeletal_assets::math::Mat4(flat))
-        }).collect();
+        let world: HashMap<_, _> = skeleton
+            .bones
+            .iter()
+            .zip(&pose)
+            .map(|(bone, matrix)| {
+                let flat = std::array::from_fn(|index| matrix[index / 4][index % 4]);
+                (bone.id.clone(), skeletal_assets::math::Mat4(flat))
+            })
+            .collect();
         let palette = skeletal_assets::skinning::joint_matrices(mesh, &world);
         self.bone_world_pose = pose;
-        self.set_palette(palette.iter().map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d()).collect());
+        self.set_palette(
+            palette
+                .iter()
+                .map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d())
+                .collect(),
+        );
         self.physics_pose_active = true;
         true
     }
@@ -290,11 +356,24 @@ impl SkeletalMeshComponent {
 
 fn bounding_sphere(positions: impl Iterator<Item = [f32; 3]>) -> [f32; 4] {
     let points: Vec<_> = positions.map(glam::Vec3::from_array).collect();
-    if points.is_empty() { return [0.0, 0.0, 0.0, 0.5]; }
-    let min = points.iter().copied().reduce(glam::Vec3::min).unwrap_or(glam::Vec3::ZERO);
-    let max = points.iter().copied().reduce(glam::Vec3::max).unwrap_or(glam::Vec3::ZERO);
+    if points.is_empty() {
+        return [0.0, 0.0, 0.0, 0.5];
+    }
+    let min = points
+        .iter()
+        .copied()
+        .reduce(glam::Vec3::min)
+        .unwrap_or(glam::Vec3::ZERO);
+    let max = points
+        .iter()
+        .copied()
+        .reduce(glam::Vec3::max)
+        .unwrap_or(glam::Vec3::ZERO);
     let center = (min + max) * 0.5;
-    let radius = points.iter().map(|p| p.distance(center)).fold(0.0, f32::max);
+    let radius = points
+        .iter()
+        .map(|p| p.distance(center))
+        .fold(0.0, f32::max);
     [center.x, center.y, center.z, radius]
 }
 
@@ -303,17 +382,35 @@ fn skeleton_id(reference: Option<&AssetRef<SkeletonAssetKind>>) -> Option<String
 }
 
 fn asset_id_for_ref<K: AssetKind>(reference: Option<&AssetRef<K>>) -> AssetId {
-    let Some(reference) = reference else { return AssetId::ZERO; };
-    let Some(root) = engine_state::get_project_path() else { return AssetId::ZERO; };
+    let Some(reference) = reference else {
+        return AssetId::ZERO;
+    };
+    let Some(root) = engine_state::get_project_path() else {
+        return AssetId::ZERO;
+    };
     let root = PathBuf::from(root);
-    let path = engine_fs::open_project_file_index(&root).ok().flatten()
-        .and_then(|index| index.path_for_asset_id_kind(K::KIND, reference.as_str()).ok().flatten());
+    let path = engine_fs::open_project_file_index(&root)
+        .ok()
+        .flatten()
+        .and_then(|index| {
+            index
+                .path_for_asset_id_kind(K::KIND, reference.as_str())
+                .ok()
+                .flatten()
+        });
     let Some(path) = path else {
-        tracing::warn!(kind = K::KIND, id = reference.as_str(), "skeletal asset id is not indexed in this project");
+        tracing::warn!(
+            kind = K::KIND,
+            id = reference.as_str(),
+            "skeletal asset id is not indexed in this project"
+        );
         return AssetId::ZERO;
     };
     let full_path = root.join(&path);
-    let source = std::fs::canonicalize(&full_path).unwrap_or(full_path).to_string_lossy().into_owned();
+    let source = std::fs::canonicalize(&full_path)
+        .unwrap_or(full_path)
+        .to_string_lossy()
+        .into_owned();
     AssetId::declare(K::KIND, &source)
 }
 
@@ -323,30 +420,45 @@ pub fn register_skeletal_mesh_assets() {
         pulsar_scenedb::register_loader(SKELETAL_MESH_ASSET_KIND, load_skeletal_mesh);
         pulsar_scenedb::register_loader(SKELETON_ASSET_KIND, load_skeleton);
         pulsar_scenedb::register_loader(ANIMATION_SEQUENCE_ASSET_KIND, load_animation_sequence);
-        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(SKELETAL_MESH_ASSET_KIND, bind_skeletal_mesh);
-        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(SKELETON_ASSET_KIND, bind_skeleton);
-        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(ANIMATION_SEQUENCE_ASSET_KIND, bind_animation_sequence);
+        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(
+            SKELETAL_MESH_ASSET_KIND,
+            bind_skeletal_mesh,
+        );
+        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(
+            SKELETON_ASSET_KIND,
+            bind_skeleton,
+        );
+        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(
+            ANIMATION_SEQUENCE_ASSET_KIND,
+            bind_animation_sequence,
+        );
     });
 }
 
 fn load_skeletal_mesh(source: &str) -> Result<AssetPayload, String> {
-    let bytes = engine_fs::virtual_fs::read_file(Path::new(source)).map_err(|e| format!("could not read skeletal mesh '{source}': {e}"))?;
-    let mesh = skeletal_assets::skmesh::SkeletalMeshAsset::decode(&bytes).map_err(|e| format!("could not decode skeletal mesh '{source}': {e}"))?;
+    let bytes = engine_fs::virtual_fs::read_file(Path::new(source))
+        .map_err(|e| format!("could not read skeletal mesh '{source}': {e}"))?;
+    let mesh = skeletal_assets::skmesh::SkeletalMeshAsset::decode(&bytes)
+        .map_err(|e| format!("could not decode skeletal mesh '{source}': {e}"))?;
     Ok(Arc::new(LoadedSkeletalMesh(Arc::new(mesh))))
 }
 
 fn load_skeleton(source: &str) -> Result<AssetPayload, String> {
-    let skeleton = skeletal_assets::assets::load_skeleton_asset(Path::new(source)).map_err(|e| e.to_string())?;
+    let skeleton = skeletal_assets::assets::load_skeleton_asset(Path::new(source))
+        .map_err(|e| e.to_string())?;
     Ok(Arc::new(LoadedSkeleton(Arc::new(skeleton))))
 }
 
 fn load_animation_sequence(source: &str) -> Result<AssetPayload, String> {
-    let animation = skeletal_assets::assets::load_animseq_asset(Path::new(source)).map_err(|e| e.to_string())?;
+    let animation = skeletal_assets::assets::load_animseq_asset(Path::new(source))
+        .map_err(|e| e.to_string())?;
     Ok(Arc::new(LoadedAnimationSequence(Arc::new(animation))))
 }
 
 fn bind_skeletal_mesh(component: &mut SkeletalMeshComponent, view: &AssetView) {
-    if view.id != component.mesh_asset_id { return; }
+    if view.id != component.mesh_asset_id {
+        return;
+    }
     if let Some(loaded) = view.payload::<LoadedSkeletalMesh>() {
         component.load_mesh(&loaded.0);
         component.loaded_mesh = Some(loaded.0.clone());
@@ -358,14 +470,22 @@ fn bind_skeletal_mesh(component: &mut SkeletalMeshComponent, view: &AssetView) {
 }
 
 fn bind_skeleton(component: &mut SkeletalMeshComponent, view: &AssetView) {
-    if view.id != component.skeleton_asset_id { return; }
-    component.loaded_skeleton = view.payload::<LoadedSkeleton>().map(|loaded| loaded.0.clone());
+    if view.id != component.skeleton_asset_id {
+        return;
+    }
+    component.loaded_skeleton = view
+        .payload::<LoadedSkeleton>()
+        .map(|loaded| loaded.0.clone());
     component.refresh_pose();
 }
 
 fn bind_animation_sequence(component: &mut SkeletalMeshComponent, view: &AssetView) {
-    if view.id != component.animation_asset_id { return; }
-    component.loaded_animation = view.payload::<LoadedAnimationSequence>().map(|loaded| loaded.0.clone());
+    if view.id != component.animation_asset_id {
+        return;
+    }
+    component.loaded_animation = view
+        .payload::<LoadedAnimationSequence>()
+        .map(|loaded| loaded.0.clone());
     component.elapsed_seconds = 0.0;
     component.refresh_pose();
 }
@@ -392,7 +512,10 @@ fn decode_skeletal_mesh_component(data: &Value) -> Result<SkeletalMeshComponent,
 }
 
 fn skeletal_mesh_property_written(component: &mut SkeletalMeshComponent, property: Option<&str>) {
-    if matches!(property, None | Some("mesh") | Some("skeleton") | Some("animation")) {
+    if matches!(
+        property,
+        None | Some("mesh") | Some("skeleton") | Some("animation")
+    ) {
         component.attach_assets();
     }
 }
@@ -412,18 +535,22 @@ fn skeletal_mesh_draw_dispatch(
 ) {
     // SAFETY: SceneDB invokes the registration only for this component id.
     let component = unsafe { &*(data as *const SkeletalMeshComponent) };
-    let sections = component.mesh_sections.iter().map(|section| {
-        let surface = crate::mesh_cache::ImportedSurfaceMaterial::default();
-        MeshSectionDraw {
-            first_index: section.first_index,
-            index_count: section.index_count,
-            material_class: 0,
-            graph_hash_lo: 0,
-            graph_hash_hi: 0,
-            _pad: [0; 3],
-            material: crate::components::surface_material(&surface, [u32::MAX; 5]),
-        }
-    }).collect::<Vec<_>>();
+    let sections = component
+        .mesh_sections
+        .iter()
+        .map(|section| {
+            let surface = crate::mesh_cache::ImportedSurfaceMaterial::default();
+            MeshSectionDraw {
+                first_index: section.first_index,
+                index_count: section.index_count,
+                material_class: 0,
+                graph_hash_lo: 0,
+                graph_hash_hi: 0,
+                _pad: [0; 3],
+                material: crate::components::surface_material(&surface, [u32::MAX; 5]),
+            }
+        })
+        .collect::<Vec<_>>();
     let draw = StaticMeshDraw {
         bounds_local: component.bounds_local,
         flags: helio::INSTANCE_FLAG_MOVABLE,

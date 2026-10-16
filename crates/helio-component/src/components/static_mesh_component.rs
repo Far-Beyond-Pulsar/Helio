@@ -794,6 +794,13 @@ impl StaticMeshMaterialSlotsEditor {
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
+        // The inspector pushes the current value every frame. An unchanged
+        // value must not notify: a notify here invalidates this view's whole
+        // ancestor chain (properties panel, dock, app, root), which is a
+        // full UI rebuild per frame.
+        if self.value == *value {
+            return;
+        }
         let same_slots = self.value.slots.len() == value.slots.len()
             && self
                 .value

@@ -39,6 +39,10 @@
 //! sideways every frame (deterministically), so camera-dependent caches are
 //! rebuilt each frame instead of being reused.
 //!
+//! `--shadows` makes every light cast shadows, as the editor's light
+//! components do by default (`cast_shadows: true`); without it no light
+//! requests a shadow map and the shadow allocator never runs.
+//!
 //! `--water` adds a water pool (surface, simulation and caustics).
 //!
 //! `--global-fog` adds a uniform global fog medium, and `--pp-fog` enables
@@ -117,6 +121,7 @@ struct Args {
     water: bool,
     ssr: bool,
     orbit: bool,
+    shadows: bool,
 }
 
 fn parse_args() -> Args {
@@ -143,6 +148,7 @@ fn parse_args() -> Args {
         water: false,
         ssr: false,
         orbit: false,
+        shadows: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -162,6 +168,7 @@ fn parse_args() -> Args {
             "--water" => Some(&mut args.water),
             "--ssr" => Some(&mut args.ssr),
             "--orbit" => Some(&mut args.orbit),
+            "--shadows" => Some(&mut args.shadows),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -338,6 +345,22 @@ fn apply_movability(world: &mut World, mode: &str) {
     }
 }
 
+/// Request a shadow map from every light (`shadow_index` 0, the editor's
+/// `cast_shadows: true`; `u32::MAX` means no shadow).
+fn cast_shadows_from_every_light(world: &mut World) {
+    let entities: Vec<_> = world
+        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .map(|(entity, _)| entity)
+        .collect();
+    for entity in entities {
+        if let Some(light) = world.get::<helio_pass_forward_lit::LightComponent>(entity) {
+            let mut gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+            gpu.shadow_index = 0;
+            update_light(world, entity, gpu);
+        }
+    }
+}
+
 /// An editor-style icon over every point light, as `BillboardComponent` rows.
 fn spawn_light_billboards(world: &mut World) {
     let positions: Vec<[f32; 4]> = world
@@ -446,6 +469,9 @@ fn run(
         "sky" => sky(&mut scene_db.world, aspect),
         other => panic!("unknown scene {other}"),
     };
+    if args.shadows {
+        cast_shadows_from_every_light(&mut scene_db.world);
+    }
     if args.billboards {
         spawn_light_billboards(&mut scene_db.world);
     }
@@ -699,8 +725,10 @@ fn main() {
             .iter()
             .filter(|(name, ..)| !name.starts_with("__"))
             .map(|(name, cpu, gpu)| (*name, median(cpu), median(gpu)))
+            // Passes with no GPU timing (NaN) would break the sort's order.
+            .filter(|(.., gpu)| !gpu.is_nan())
             .collect();
-        rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        rows.sort_by(|a, b| b.2.total_cmp(&a.2));
         for (name, cpu, gpu) in rows.iter().take(15) {
             println!("| {name} | {cpu:.3} | {gpu:.3} |");
         }

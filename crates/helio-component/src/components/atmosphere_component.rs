@@ -139,11 +139,22 @@ impl AtmosphereComponent {
     /// authored sky stays); `VoxelAir::None` is a disabled sky. `density`
     /// scales every coefficient, `tint` the molecular scattering per
     /// channel (the sky's colour), `haze` the aerosols.
-    pub fn for_air(&self, air: crate::VoxelAir, density: f32, tint: [f32; 3], haze: f32) -> Option<Self> {
+    pub fn for_air(
+        &self,
+        air: crate::VoxelAir,
+        density: f32,
+        tint: [f32; 3],
+        haze: f32,
+    ) -> Option<Self> {
         use crate::VoxelAir;
         let preset = match air {
             VoxelAir::Custom => return None,
-            VoxelAir::None => return Some(Self { enabled: false, ..self.clone() }),
+            VoxelAir::None => {
+                return Some(Self {
+                    enabled: false,
+                    ..self.clone()
+                });
+            }
             VoxelAir::Earthlike => Self::from_row(&AtmosphereRow::earth()),
             VoxelAir::Thin => Self::from_row(&AtmosphereRow::mars()),
             VoxelAir::Dense => {
@@ -171,7 +182,10 @@ impl AtmosphereComponent {
             planet_radius_km: self.planet_radius_km,
             sun_angular_radius_deg: self.sun_angular_radius_deg,
             ground_albedo: self.ground_albedo,
-            rayleigh_scattering: times(preset.rayleigh_scattering, tint.map(|t| t.max(0.0) * density)),
+            rayleigh_scattering: times(
+                preset.rayleigh_scattering,
+                tint.map(|t| t.max(0.0) * density),
+            ),
             mie_scattering: preset.mie_scattering.map(|v| v * density * haze),
             mie_absorption: preset.mie_absorption.map(|v| v * density * haze),
             ozone_absorption: preset.ozone_absorption.map(|v| v * density),
@@ -203,17 +217,48 @@ mod tests {
     #[test]
     fn a_worlds_air_derives_its_sky() {
         use crate::VoxelAir;
-        let sky = AtmosphereComponent { placement: AtmospherePlacement::PlanetAtOwner, planet_radius_km: 1737.0, ..Default::default() };
-        assert!(sky.for_air(VoxelAir::Custom, 1.0, [1.0; 3], 1.0).is_none(), "custom keeps the authored sky");
-        assert!(!sky.for_air(VoxelAir::None, 1.0, [1.0; 3], 1.0).unwrap().enabled, "an airless world has no sky");
-        let earth = sky.for_air(VoxelAir::Earthlike, 1.0, [1.0; 3], 1.0).unwrap();
+        let sky = AtmosphereComponent {
+            placement: AtmospherePlacement::PlanetAtOwner,
+            planet_radius_km: 1737.0,
+            ..Default::default()
+        };
+        assert!(
+            sky.for_air(VoxelAir::Custom, 1.0, [1.0; 3], 1.0).is_none(),
+            "custom keeps the authored sky"
+        );
+        assert!(
+            !sky.for_air(VoxelAir::None, 1.0, [1.0; 3], 1.0)
+                .unwrap()
+                .enabled,
+            "an airless world has no sky"
+        );
+        let earth = sky
+            .for_air(VoxelAir::Earthlike, 1.0, [1.0; 3], 1.0)
+            .unwrap();
         assert!(earth.enabled);
-        assert_eq!((earth.placement, earth.planet_radius_km), (AtmospherePlacement::PlanetAtOwner, 1737.0), "the planet stays");
-        assert_eq!(earth.rayleigh_scattering, AtmosphereRow::earth().rayleigh_scattering);
-        let thin = sky.for_air(VoxelAir::Earthlike, 0.5, [1.0, 0.5, 1.0], 2.0).unwrap();
+        assert_eq!(
+            (earth.placement, earth.planet_radius_km),
+            (AtmospherePlacement::PlanetAtOwner, 1737.0),
+            "the planet stays"
+        );
+        assert_eq!(
+            earth.rayleigh_scattering,
+            AtmosphereRow::earth().rayleigh_scattering
+        );
+        let thin = sky
+            .for_air(VoxelAir::Earthlike, 0.5, [1.0, 0.5, 1.0], 2.0)
+            .unwrap();
         assert!((thin.rayleigh_scattering[1] - earth.rayleigh_scattering[1] * 0.25).abs() < 1e-9);
-        assert!((thin.mie_scattering[0] - earth.mie_scattering[0]).abs() < 1e-9, "half the air, twice the haze");
-        assert!(!sky.for_air(VoxelAir::Earthlike, 0.0, [1.0; 3], 1.0).unwrap().enabled, "no air at all");
+        assert!(
+            (thin.mie_scattering[0] - earth.mie_scattering[0]).abs() < 1e-9,
+            "half the air, twice the haze"
+        );
+        assert!(
+            !sky.for_air(VoxelAir::Earthlike, 0.0, [1.0; 3], 1.0)
+                .unwrap()
+                .enabled,
+            "no air at all"
+        );
     }
 
     #[test]

@@ -53,8 +53,14 @@ mod tests {
         shadows.remove("shadow_max_resolution");
         shadows.insert("shadow_bias".into(), serde_json::json!(0.25));
         let decoded = decode_light_component(&json).unwrap();
-        assert_eq!(decoded.shadows.shadow_priority, LightComponent::default().shadows.shadow_priority);
-        assert_eq!(decoded.shadows.shadow_max_resolution, LightComponent::default().shadows.shadow_max_resolution);
+        assert_eq!(
+            decoded.shadows.shadow_priority,
+            LightComponent::default().shadows.shadow_priority
+        );
+        assert_eq!(
+            decoded.shadows.shadow_max_resolution,
+            LightComponent::default().shadows.shadow_max_resolution
+        );
         assert_eq!(decoded.shadows.shadow_bias, 0.25);
         // A whole sub-group missing loads too.
         json.as_object_mut().unwrap().remove("volumetrics");

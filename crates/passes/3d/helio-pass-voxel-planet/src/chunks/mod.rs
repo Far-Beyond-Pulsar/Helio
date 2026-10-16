@@ -215,8 +215,11 @@ struct DrawParams {
     eye_lo: [f32; 4],
     /// Direction to the sun, near plane.
     sun: [f32; 4],
-    /// x: colour by level (1, `HELIO_VOXEL_CHUNKS_LEVELS`) or by primary
-    /// steps (2, `HELIO_VOXEL_CHUNKS_HEAT`, counting builds).
+    /// x: the renderer's debug mode in the low byte (1 UV grid, 32 trace
+    /// cost), the plain colour flag (bit 8), then environment-only voxel
+    /// diagnostics: primary steps' heat (0x200, `HELIO_VOXEL_CHUNKS_HEAT`),
+    /// colour by level (0x400, `HELIO_VOXEL_CHUNKS_LEVELS`; 0x800: the
+    /// left half).
     debug: [u32; 4],
     /// Chunk table slots - 1, base cells per face edge, boxes holding the
     /// eye, frame.
@@ -789,6 +792,9 @@ pub struct ChunkWorld {
     trace_layout: wgpu::BindGroupLayout,
     seed_layout: wgpu::BindGroupLayout,
     resolve_layout: wgpu::BindGroupLayout,
+    /// The UV reference image of debug mode 1 (trace and publish).
+    uv_grid_view: wgpu::TextureView,
+    uv_grid_sampler: wgpu::Sampler,
     seed_outside: wgpu::RenderPipeline,
     seed_inside: wgpu::RenderPipeline,
     /// The draw list built on the GPU (`cull_bin`, `cull_offsets`,
@@ -882,6 +888,8 @@ pub struct ChunkWorld {
     /// Whether draws write the plain colour target (a world drawn alone:
     /// tests, harnesses); a host's gbuffer takes the published surface.
     plain_colour: bool,
+    /// The renderer-wide debug mode, for the voxel debug shading.
+    debug_mode: u32,
     pick_slots: Vec<PickSlot>,
     /// Each slot's chunk key (`chunk_keys`, mirrored).
     slot_keys: Vec<[i32; 4]>,
@@ -1177,6 +1185,45 @@ fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType, visibility:
     }
 }
 
+fn sampler_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry { binding, visibility, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None }
+}
+
+/// The UV reference image (debug mode 1: faces shaded by their UVs), a
+/// repeating, filtered texture.
+fn create_uv_grid(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::TextureView, wgpu::Sampler) {
+    const UV_GRID_BYTES: &[u8] = include_bytes!("../../../../../../assets/UV_Grid_Sm.jpg");
+    let decoded = image::load_from_memory(UV_GRID_BYTES).expect("embedded UV reference image is valid").to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("voxel UV reference image"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        decoded.as_raw(),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+        size,
+    );
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("voxel UV reference sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    (texture.create_view(&Default::default()), sampler)
+}
+
 fn storage_texture(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -1228,7 +1275,12 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
     // Primary rays count in the trace (`COUNT`), in their walks when
     // `counted` (`WCOUNT`; shadow walks do not).
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
-    let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); heat += u32({n} == 1); }}") } else { String::new() };
+    // The primary steps' heat (debug mode 32 and `HELIO_VOXEL_CHUNKS_HEAT`)
+    // counts in every build.
+    let wcount = |n: u32| {
+        let heat = format!("if counted && (voxel_heat_debug() || debug_mode() == 32u) {{ heat += u32({n} == 1); }}");
+        if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}") } else { heat }
+    };
     // The noise library (materials' patches), then the draw.
     let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
@@ -1374,6 +1426,8 @@ impl ChunkWorld {
             entries: &[
                 texture_entry(0, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
                 storage_texture(1, wgpu::TextureFormat::Rg32Uint),
+                texture_entry(25, wgpu::TextureSampleType::Float { filterable: true }, wgpu::ShaderStages::COMPUTE),
+                sampler_entry(26, wgpu::ShaderStages::COMPUTE),
                 storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
                 storage_texture(3, wgpu::TextureFormat::R32Float),
                 wgpu::BindGroupLayoutEntry {
@@ -1411,12 +1465,15 @@ impl ChunkWorld {
             })
         };
         let (cull_bin, cull_offsets, cull_scatter) = (cull("cull_bin"), cull("cull_offsets"), cull("cull_scatter"));
+        let (uv_grid_view, uv_grid_sampler) = create_uv_grid(device, queue);
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk depth resolve"),
             entries: &[
                 texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(25, wgpu::TextureSampleType::Float { filterable: true }, wgpu::ShaderStages::FRAGMENT),
+                sampler_entry(26, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         let layout = |second: &wgpu::BindGroupLayout| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&draw_layout), Some(second)], immediate_size: 0 });
@@ -1566,6 +1623,8 @@ impl ChunkWorld {
             trace_layout,
             seed_layout: seed_layout_1,
             resolve_layout,
+            uv_grid_view,
+            uv_grid_sampler,
             seed_outside,
             seed_inside,
             cull_layout,
@@ -1640,6 +1699,7 @@ impl ChunkWorld {
             buried: buffer("chunk buried hits", BURIED_BYTES, s | wgpu::BufferUsages::COPY_SRC),
             polls_device: true,
             plain_colour: true,
+            debug_mode: 0,
             buried_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk buried hits read", BURIED_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free, bytes: BURIED_BYTES }).collect(),
             feedback: buffer("chunk feedback", FEEDBACK_BYTES, s | wgpu::BufferUsages::COPY_SRC),
             feedback_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk feedback read", FEEDBACK_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free, bytes: 16 }).collect(),
@@ -2426,7 +2486,7 @@ impl ChunkWorld {
             cell: crate::grid::Cell::new((key[0] & 0xff) as u8, key[1] * CHUNK + local[0], key[2] * CHUNK + local[1], key[3] * CHUNK + local[2]),
             level: (key[0] >> 8) as u32,
             entered: Some(2 * axis + u32::from(!down)),
-            material: (cell >> 21) & 0xff,
+            material: (cell >> 21) & 31,
         })
     }
 
@@ -2582,6 +2642,11 @@ impl ChunkWorld {
         self.plain_colour = on;
     }
 
+    /// The renderer-wide debug mode for this voxel world.
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode & 0xff;
+    }
+
     /// Chunks drawn by the last [`Self::update`].
     pub fn chunk_count(&self) -> usize {
         self.drawn_set.list.len()
@@ -2667,10 +2732,10 @@ impl ChunkWorld {
                 let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
                 [
                     (if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
-                        2
+                        0x200
                     } else {
-                        std::env::var("HELIO_VOXEL_CHUNKS_LEVELS").map_or(0, |v| if v == "half" { 3 } else { 1 })
-                    }) | (u32::from(self.plain_colour) << 8),
+                        std::env::var("HELIO_VOXEL_CHUNKS_LEVELS").map_or(0, |v| if v == "half" { 0xc00 } else { 0x400 })
+                    }) | self.debug_mode | (u32::from(self.plain_colour) << 8),
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),
@@ -2759,6 +2824,8 @@ impl ChunkWorld {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view(&targets.colour)) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&exits) },
+                view_entry(25, &self.uv_grid_view),
+                wgpu::BindGroupEntry { binding: 26, resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler) },
             ],
         });
         // Rounds of seed and trace: each resolves the rays that hit in
@@ -2963,6 +3030,8 @@ impl ChunkWorld {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
                 wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&view(&targets.normal)) },
+                view_entry(25, &self.uv_grid_view),
+                wgpu::BindGroupEntry { binding: 26, resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler) },
             ],
         });
 

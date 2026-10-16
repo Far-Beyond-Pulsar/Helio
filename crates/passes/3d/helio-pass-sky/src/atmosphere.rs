@@ -11,7 +11,10 @@
 //! builds the lookup tables: transmittance, multiple scattering, the sky
 //! seen from the camera, the aerial-perspective volume (light scattered
 //! between the camera and each pixel) and the sky's diffuse irradiance as
-//! spherical harmonics. It publishes:
+//! spherical harmonics. The tables that depend only on the row's
+//! parameters (transmittance, multiple scattering and the sky irradiance
+//! table over height and sun angle) are rebuilt only when the rows change;
+//! the camera- and sun-dependent ones every frame. It publishes:
 //!
 //! - `atmosphere_frame` (buffer, `AtmosphereFrame` in
 //!   `shaders/atmosphere_common.wgsl`): planet, sun, irradiance. Deferred
@@ -251,6 +254,9 @@ struct Kernel {
     pipeline: wgpu::ComputePipeline,
     group: Option<wgpu::BindGroup>,
     groups: [u32; 3],
+    /// Reads only the atmosphere's parameters (not the camera, the sun or
+    /// the frame's origin), so its output holds until the rows change.
+    params_only: bool,
 }
 
 /// Resolves the scene's atmosphere and builds its lookup tables (see the
@@ -272,6 +278,10 @@ pub struct AtmospherePass {
     sky_table: wgpu::Buffer,
     rows: helio_core::SceneBufferLiveness,
     active: bool,
+    /// `(epoch, content_generation)` of the atmosphere rows the
+    /// parameter-only tables (transmittance, multiple scattering, the sky
+    /// irradiance table) were last built from; `None` rebuilds them.
+    params_tables: Option<(u64, u64)>,
     /// `HELIO_ATMOSPHERE_TRACE=1`: the resolved frame's head (planet, sun,
     /// illuminance, eye) read back and printed each frame (diagnostics).
     trace: Option<Vec<(u64, wgpu::Buffer)>>,
@@ -350,20 +360,21 @@ impl AtmospherePass {
                     .map(|(e, r)| wgpu::BindGroupEntry { binding: e.binding, resource: r.clone() })
                     .collect::<Vec<_>>(),
             });
-            Kernel { pipeline: pipeline(Some(&layout), entry), group: Some(group), groups }
+            Kernel { pipeline: pipeline(Some(&layout), entry), group: Some(group), groups, params_only: false }
         };
         let view = wgpu::BindingResource::TextureView;
+        let params_only = |kernel: Kernel| Kernel { params_only: true, ..kernel };
         let kernels = vec![
-            kernel(
+            params_only(kernel(
                 "transmittance_lut_kernel",
                 &[(storage_texture(0, d2), view(&transmittance))],
                 [TRANSMITTANCE[0].div_ceil(8), TRANSMITTANCE[1].div_ceil(8), 1],
-            ),
-            kernel(
+            )),
+            params_only(kernel(
                 "multi_scattering_kernel",
                 &[(sampled_texture(1, compute, d2), view(&transmittance)), (storage_texture(2, d2), view(&multi))],
                 [MULTI_SCATTERING.div_ceil(8), MULTI_SCATTERING.div_ceil(8), 1],
-            ),
+            )),
             kernel(
                 "sky_view_kernel",
                 &[
@@ -383,7 +394,7 @@ impl AtmospherePass {
                 [AERIAL.div_ceil(8), AERIAL.div_ceil(8), 1],
             ),
             kernel("irradiance_kernel", &[(sampled_texture(5, compute, d2), view(&sky_view))], [1, 1, 1]),
-            kernel(
+            params_only(kernel(
                 "sky_table_kernel",
                 &[
                     (sampled_texture(1, compute, d2), view(&transmittance)),
@@ -391,7 +402,7 @@ impl AtmospherePass {
                     (buffer_entry(7, compute, storage(false)), sky_table.as_entire_binding()),
                 ],
                 [SKY_TABLE_ENTRIES as u32, 1, 1],
-            ),
+            )),
         ];
         let resolve = pipeline(None, "resolve");
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
@@ -442,6 +453,7 @@ impl AtmospherePass {
                 row.len() >= 112 && row[108..112].iter().any(|&b| b != 0)
             }),
             active: false,
+            params_tables: None,
             trace: std::env::var_os("HELIO_ATMOSPHERE_TRACE").map(|_| Vec::new()),
             frame_index: 0,
         }
@@ -482,6 +494,9 @@ impl RenderPass for AtmospherePass {
             // Consumers read "no atmosphere" from the frame.
             ctx.write_buffer(&self.frame, 0, &[0u8; 16]);
         }
+        if !active {
+            self.params_tables = None;
+        }
         self.active = active;
         let origin = ctx.world_origin.unwrap_or_default();
         let hi = origin.as_vec3();
@@ -518,7 +533,19 @@ impl RenderPass for AtmospherePass {
         pass.set_bind_group(0, self.shared_group.as_ref(), &[]);
         pass.set_pipeline(&self.resolve);
         pass.dispatch_workgroups(1, 1, 1);
+        // The atmosphere's parameters come only from its rows (`resolve`
+        // picks the first enabled one), so the tables built from them alone
+        // are rebuilt only when those rows change.
+        let rows = ctx
+            .scene_buffers
+            .get(BufferKey::of("atmospheres"))
+            .map(|handle| (handle.epoch, handle.content_generation));
+        let rebuild_params_tables = rows.is_none() || self.params_tables != rows;
+        self.params_tables = rows;
         for kernel in &self.kernels {
+            if kernel.params_only && !rebuild_params_tables {
+                continue;
+            }
             pass.set_pipeline(&kernel.pipeline);
             pass.set_bind_group(1, kernel.group.as_ref(), &[]);
             pass.dispatch_workgroups(kernel.groups[0], kernel.groups[1], kernel.groups[2]);

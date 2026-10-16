@@ -3,8 +3,11 @@ use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
+use helio_pass_sky::atmosphere::{
+    ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
+    ATMOSPHERE_SNIPPET,
+};
 use pulsar_scenedb::gpu::BufferKey;
-use helio_pass_sky::atmosphere::{ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES, ATMOSPHERE_SNIPPET};
 
 mod components;
 pub mod gpu_types;
@@ -90,10 +93,19 @@ pub struct DeferredLightPass {
     /// address key can match a new view allocated where a freed one was
     /// (a recreated voxel renderer's sun texture read stale shadows).
     bind_group_1_key: Option<Vec<wgpu::TextureView>>,
-    bind_group_2_key: Option<(usize, [wgpu::TextureView; 6], [wgpu::Sampler; 4], wgpu::Buffer)>,
+    bind_group_2_key: Option<(
+        usize,
+        [wgpu::TextureView; 6],
+        [wgpu::Sampler; 4],
+        wgpu::Buffer,
+    )>,
     bind_group_3_key: Option<[wgpu::Buffer; 2]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
-    reflection_bind_group_2_key: Option<([wgpu::TextureView; 5], [wgpu::Sampler; 2], [wgpu::Buffer; 2])>,
+    reflection_bind_group_2_key: Option<(
+        [wgpu::TextureView; 5],
+        [wgpu::Sampler; 2],
+        [wgpu::Buffer; 2],
+    )>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
     pre_aa_format: wgpu::TextureFormat,
@@ -785,7 +797,11 @@ impl DeferredLightPass {
     }
 
     /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
-    pub fn set_shadow_quality(&mut self, quality: helio_pass_shadow_matrix::ShadowQuality, queue: &wgpu::Queue) {
+    pub fn set_shadow_quality(
+        &mut self,
+        quality: helio_pass_shadow_matrix::ShadowQuality,
+        queue: &wgpu::Queue,
+    ) {
         let config = helio_pass_shadow_matrix::ShadowConfig::from_quality(quality);
         queue.write_buffer(&self.shadow_config_buf, 0, bytemuck::bytes_of(&config));
     }
@@ -835,7 +851,9 @@ impl RenderPass for DeferredLightPass {
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
+        let environment = ctx
+            .registry
+            .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
         let (ambient_color, ambient_intensity) = if let Some(environment) = environment {
             (environment.ambient_color, environment.ambient_intensity)
         } else {
@@ -854,7 +872,10 @@ impl RenderPass for DeferredLightPass {
         // graph (it publishes it from its GiConfig before any pass prepares),
         // not that this pipeline runs HLFS. Only the presence of a real
         // rc_view texture tells us whether there's anything to sample.
-        let has_rc_gi = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("rc_view")).is_some();
+        let has_rc_gi = ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("rc_view"))
+            .is_some();
 
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
@@ -901,12 +922,13 @@ impl RenderPass for DeferredLightPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "DeferredLight")?;
+        let pre_aa_view =
+            resources.read(helio_core::ResourceKey::new("pre_aa"), "DeferredLight")?;
         // Loaded: the graph's background pass has cleared `pre_aa`, and
         // reflections may have sampled it, before lighting covers it.
         let load_op = wgpu::LoadOp::Load;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -926,7 +948,10 @@ impl RenderPass for DeferredLightPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer_opt = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "DeferredLight");
+        let gbuffer_opt = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
+            helio_core::ResourceKey::new("gbuffer"),
+            "DeferredLight",
+        );
         let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "DeferredLight requires published gbuffer resources".to_string(),
@@ -935,19 +960,25 @@ impl RenderPass for DeferredLightPass {
 
         // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
         // when a baked AO texture is present) or fall back to the 1×1 white texture.
-        let ao_view = ctx.registry.get(helio_core::ResourceKey::new("ssao")).unwrap_or(&self.fallback_ao_view);
+        let ao_view = ctx
+            .registry
+            .get(helio_core::ResourceKey::new("ssao"))
+            .unwrap_or(&self.fallback_ao_view);
 
         // Lightmap UVs from GBuffer
         let lightmap_uv_view = ctx
-            .registry.get(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
+            .registry
+            .get(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
 
         // SSS/Extra data from GBuffer
         let sss_view = ctx
-            .registry.get(helio_core::ResourceKey::new("gbuffer_sss"))
+            .registry
+            .get(helio_core::ResourceKey::new("gbuffer_sss"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
         let extra_view = ctx
-            .registry.get(helio_core::ResourceKey::new("gbuffer_extra"))
+            .registry
+            .get(helio_core::ResourceKey::new("gbuffer_extra"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
         let directional_visibility_view = ctx
             .registry
@@ -1000,11 +1031,17 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let reflection_gbuffer_key: Vec<wgpu::TextureView> =
-            [gbuffer.views[1], gbuffer.views[2], gbuffer.views[3], ctx.depth, ao_view, lightmap_uv_view]
-                .into_iter()
-                .cloned()
-                .collect();
+        let reflection_gbuffer_key: Vec<wgpu::TextureView> = [
+            gbuffer.views[1],
+            gbuffer.views[2],
+            gbuffer.views[3],
+            ctx.depth,
+            ao_view,
+            lightmap_uv_view,
+        ]
+        .into_iter()
+        .cloned()
+        .collect();
         if self.reflection_bind_group_1_key.as_ref() != Some(&reflection_gbuffer_key) {
             self.reflection_bind_group_1 =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1030,40 +1067,50 @@ impl RenderPass for DeferredLightPass {
         }
 
         let shadow_view = ctx
-            .registry.get(helio_core::ResourceKey::new("shadow_atlas"))
+            .registry
+            .get(helio_core::ResourceKey::new("shadow_atlas"))
             .unwrap_or(&self.fallback_shadow_view);
         let static_shadow_view = ctx
-            .registry.get(helio_core::ResourceKey::new("static_shadow_atlas"))
+            .registry
+            .get(helio_core::ResourceKey::new("static_shadow_atlas"))
             .unwrap_or(&self.fallback_static_shadow_view);
         let transmittance_view = ctx
-            .registry.get(helio_core::ResourceKey::new("shadow_transmittance"))
+            .registry
+            .get(helio_core::ResourceKey::new("shadow_transmittance"))
             .unwrap_or(&self.fallback_transmittance_view);
         let shadow_sampler = ctx
-            .registry.get(helio_core::ResourceKey::new("shadow_sampler"))
+            .registry
+            .get(helio_core::ResourceKey::new("shadow_sampler"))
             .unwrap_or(&self.fallback_shadow_sampler);
         let rc_view = ctx
-            .registry.get(helio_core::ResourceKey::new("rc_view"))
+            .registry
+            .get(helio_core::ResourceKey::new("rc_view"))
             .unwrap_or(&self.fallback_rc_view);
         // Baked reflection cube array from the probe bake. Falls back to a 1×1
         // black cube array when nothing has been baked, which reads as "no
         // environment" rather than failing to bind.
         let env_view = ctx
-            .registry.get(helio_core::ResourceKey::new("baked_reflection"))
+            .registry
+            .get(helio_core::ResourceKey::new("baked_reflection"))
             .unwrap_or(&self.fallback_env_view);
         let env_sampler = ctx
-            .registry.get(helio_core::ResourceKey::new("baked_reflection_sampler"))
+            .registry
+            .get(helio_core::ResourceKey::new("baked_reflection_sampler"))
             .unwrap_or(&self.fallback_env_sampler);
 
         // Baked lightmap atlas from bake inject pass
         let lightmap_view = ctx
-            .registry.get(helio_core::resource_keys::baked_lightmap())
+            .registry
+            .get(helio_core::resource_keys::baked_lightmap())
             .unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx
-            .registry.get(helio_core::ResourceKey::new("baked_lightmap_sampler"))
+            .registry
+            .get(helio_core::ResourceKey::new("baked_lightmap_sampler"))
             .unwrap_or(&self.fallback_lightmap_sampler);
 
         let caustics_view = ctx
-            .registry.get(helio_core::ResourceKey::new("water_caustics"))
+            .registry
+            .get(helio_core::ResourceKey::new("water_caustics"))
             .unwrap_or(&self.fallback_caustics_view);
         // `"water_volumes"` is resolved fresh from the SceneDB mirror by key,
         // exactly like `"scene_lights"` in `ForwardLitPass` -- no Renderer
@@ -1081,16 +1128,19 @@ impl RenderPass for DeferredLightPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_reflection_captures);
         let ies_view = ctx
-            .registry.get(helio_core::ResourceKey::new("ies_textures"))
+            .registry
+            .get(helio_core::ResourceKey::new("ies_textures"))
             .unwrap_or(&self.fallback_ies_view);
 
         // SSR texture from SsrPass
         let ssr_view = ctx
-            .registry.get(helio_core::ResourceKey::new("ssr_trace"))
+            .registry
+            .get(helio_core::ResourceKey::new("ssr_trace"))
             .unwrap_or(&self.fallback_ssr_view);
         // Planar reflection texture from PlanarReflectionPass
         let planar_view = ctx
-            .registry.get(helio_core::ResourceKey::new("planar_reflection"))
+            .registry
+            .get(helio_core::ResourceKey::new("planar_reflection"))
             .unwrap_or(&self.fallback_planar_view);
 
         let lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
@@ -1098,7 +1148,10 @@ impl RenderPass for DeferredLightPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
-            .registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices())
+            .registry
+            .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
+                helio_core::resource_keys::shadow_matrices(),
+            )
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);
         let scene_key = (
@@ -1221,10 +1274,12 @@ impl RenderPass for DeferredLightPass {
 
         // ── Bind group 3: tile light culling results ──────────────────────────
         let tile_lists = ctx
-            .registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists"))
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists"))
             .unwrap_or(&self.fallback_tile_lists);
         let tile_counts = ctx
-            .registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
             .unwrap_or(&self.fallback_tile_counts);
         let tile_key = [tile_lists.clone(), tile_counts.clone()];
         if self.bind_group_3_key.as_ref() != Some(&tile_key) {
@@ -1259,18 +1314,41 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_SKY_TABLE))
             .unwrap_or(&self.fallback_sky_table);
-        let key_0 = (ctx.camera.clone(), caster_counts.clone(), atmosphere.clone(), sky_table.clone());
+        let key_0 = (
+            ctx.camera.clone(),
+            caster_counts.clone(),
+            atmosphere.clone(),
+            sky_table.clone(),
+        );
         if self.bind_group_0_key.as_ref() != Some(&key_0) {
             self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG0"),
                 layout: &self.bgl_0,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.globals_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: self.shadow_config_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: caster_counts.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 9, resource: atmosphere.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 10, resource: sky_table.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.globals_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.shadow_config_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: caster_counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: atmosphere.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: sky_table.as_entire_binding(),
+                    },
                 ],
             });
             self.bind_group_0_key = Some(key_0);
@@ -1314,6 +1392,26 @@ impl RenderPass for DeferredLightPass {
                 description: "World-space normals remapped to RGB",
             },
             DebugViewDescriptor {
+                name: "Roughness",
+                debug_mode: 6,
+                description: "Material roughness as grayscale",
+            },
+            DebugViewDescriptor {
+                name: "Metallic",
+                debug_mode: 7,
+                description: "Material metallic value as grayscale",
+            },
+            DebugViewDescriptor {
+                name: "Material AO",
+                debug_mode: 8,
+                description: "Per-material ambient occlusion",
+            },
+            DebugViewDescriptor {
+                name: "Emissive",
+                debug_mode: 9,
+                description: "Emissive material contribution",
+            },
+            DebugViewDescriptor {
                 name: "Shadow Heatmap",
                 debug_mode: 10,
                 description: "Shadow factor: white=lit, black=shadowed",
@@ -1323,6 +1421,83 @@ impl RenderPass for DeferredLightPass {
                 debug_mode: 11,
                 description: "Light-space depth projection",
             },
+            DebugViewDescriptor {
+                name: "Combined AO",
+                debug_mode: 12,
+                description: "Material AO multiplied by screen-space AO",
+            },
+            DebugViewDescriptor {
+                name: "Specular F0",
+                debug_mode: 13,
+                description: "Base specular reflectance before Fresnel",
+            },
+            DebugViewDescriptor {
+                name: "Lightmap UV",
+                debug_mode: 14,
+                description:
+                    "Baked lightmap UVs; gray means no lightmap, magenta means virtual geometry",
+            },
+            DebugViewDescriptor {
+                name: "Subsurface Color",
+                debug_mode: 15,
+                description: "Authored subsurface scattering color",
+            },
+            DebugViewDescriptor {
+                name: "Anisotropy",
+                debug_mode: 16,
+                description: "Anisotropic roughness axes and tangent rotation",
+            },
+            DebugViewDescriptor {
+                name: "Surface Flags",
+                debug_mode: 17,
+                description: "Red=anisotropic, green=subsurface, blue=low specular",
+            },
+            DebugViewDescriptor {
+                name: "Subsurface Radius",
+                debug_mode: 18,
+                description: "Subsurface scattering radius as grayscale",
+            },
+            DebugViewDescriptor {
+                name: "Fresnel",
+                debug_mode: 19,
+                description: "Schlick specular Fresnel response at the current view angle",
+            },
+            DebugViewDescriptor {
+                name: "Direct Lighting",
+                debug_mode: 22,
+                description: "Direct light contribution after shadowing",
+            },
+            DebugViewDescriptor {
+                name: "Indirect Lighting",
+                debug_mode: 23,
+                description: "Ambient, radiance-cascade, or baked lightmap diffuse contribution",
+            },
+            DebugViewDescriptor {
+                name: "Lighting Only",
+                debug_mode: 24,
+                description:
+                    "Direct plus indirect diffuse lighting without emissive or subsurface glow",
+            },
+            DebugViewDescriptor {
+                name: "Emissive and SSS",
+                debug_mode: 25,
+                description: "Emissive material output plus subsurface rim transmission",
+            },
+            DebugViewDescriptor {
+                name: "Voxel Sun Visibility",
+                debug_mode: 26,
+                description: "Voxel sun-visibility factor sampled by deferred lighting",
+            },
+            DebugViewDescriptor {
+                name: "GI Blend",
+                debug_mode: 27,
+                description: "Green=runtime radiance-cascade weight, blue=baked lightmap weight",
+            },
+            DebugViewDescriptor {
+                name: "Ray Trace vs Raster",
+                debug_mode: 33,
+                description: "Cyan=voxel ray-traced surfaces, orange=rasterized geometry",
+            },
         ];
         VIEWS
     }
@@ -1331,185 +1506,185 @@ impl RenderPass for DeferredLightPass {
 /// Base lighting, group 1: the G-buffer, screen AO and voxel sun visibility.
 fn base_group_1_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     vec![
-                texture_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Screen-space AO (SSAO result or pre-baked AO). Filterable so the
-                // bilinear sampler can soften the AO at the edges of the screen.
-                texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Lightmap UVs from GBuffer (binding 7, Rg16Float)
-                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
-                // SSS data: subsurface_color.rgb + subsurface_radius (Rgba16Float)
-                texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
-                // Extra surface data: roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(flags) (Rgba16Float)
-                texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(10, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(0, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // Screen-space AO (SSAO result or pre-baked AO). Filterable so the
+        // bilinear sampler can soften the AO at the edges of the screen.
+        texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        // Lightmap UVs from GBuffer (binding 7, Rg16Float)
+        texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+        // SSS data: subsurface_color.rgb + subsurface_radius (Rgba16Float)
+        texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
+        // Extra surface data: roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(flags) (Rgba16Float)
+        texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(10, wgpu::TextureSampleType::Float { filterable: false }),
     ]
 }
 
 /// Base lighting, group 2: lights, shadows, radiance cascades, lightmaps, IES profiles.
 fn base_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     vec![
-                storage_entry(0),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-                storage_entry(4),
-                texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Static shadow atlas (cached, rendered only when Static/Stationary topology changes)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 11,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // Baked lightmap atlas texture
-                texture_entry(12, wgpu::TextureSampleType::Float { filterable: true }),
-                // Baked lightmap sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // IES texture array (binding 18)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 18,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // IES sampler (binding 19)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 19,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                // Coloured shadow transmittance (binding 20) + its sampler (21)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 20,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 21,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+        storage_entry(0),
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            count: None,
+        },
+        storage_entry(4),
+        texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        // Static shadow atlas (cached, rendered only when Static/Stationary topology changes)
+        wgpu::BindGroupLayoutEntry {
+            binding: 11,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // Baked lightmap atlas texture
+        texture_entry(12, wgpu::TextureSampleType::Float { filterable: true }),
+        // Baked lightmap sampler
+        wgpu::BindGroupLayoutEntry {
+            binding: 13,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        // IES texture array (binding 18)
+        wgpu::BindGroupLayoutEntry {
+            binding: 18,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        // IES sampler (binding 19)
+        wgpu::BindGroupLayoutEntry {
+            binding: 19,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        // Coloured shadow transmittance (binding 20) + its sampler (21)
+        wgpu::BindGroupLayoutEntry {
+            binding: 20,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 21,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
     ]
 }
 
 /// Reflection composition, group 1: the G-buffer inputs it reads.
 fn reflection_group_1_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     vec![
-                texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
-                texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+        texture_entry(3, wgpu::TextureSampleType::Float { filterable: false }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
     ]
 }
 
 /// Reflection composition, group 2: environment, SSR, planar reflections and water caustics.
 fn reflection_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     vec![
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::CubeArray,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
-                storage_entry(15),
-                texture_entry(16, wgpu::TextureSampleType::Float { filterable: true }),
-                // Water caustics texture, its sampler and the water volumes
-                // (`water_caustics_light`).
-                texture_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 9,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                storage_entry(10),
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::CubeArray,
+                multisampled: false,
+            },
+            count: None,
+        },
+        texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
+        storage_entry(15),
+        texture_entry(16, wgpu::TextureSampleType::Float { filterable: true }),
+        // Water caustics texture, its sampler and the water volumes
+        // (`water_caustics_light`).
+        texture_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
+        wgpu::BindGroupLayoutEntry {
+            binding: 9,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        storage_entry(10),
     ]
 }
 
@@ -1664,7 +1839,11 @@ fn black_cube_texture(
 fn clear_transmittance_texture(device: &wgpu::Device) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Deferred Fallback Transmittance"),
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,

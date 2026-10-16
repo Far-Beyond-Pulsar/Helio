@@ -27,13 +27,15 @@ pub use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{
     Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource, grid::Shape, terrain,
 };
-use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditBase, VoxelEditJournal};
+use helio_voxel_data::{
+    VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditBase, VoxelEditJournal,
+};
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
 use super::{
-    BlockData, BlockMaterialChange, VoxelAir, VoxelLayerKind, VoxelTerrainComponent, VoxelTerrainLayer,
-    VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape,
+    BlockData, BlockMaterialChange, VoxelAir, VoxelLayerKind, VoxelTerrainComponent,
+    VoxelTerrainLayer, VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape,
 };
 
 /// Base colour (linear 0..1 sRGB-encoded components, as authored) of material
@@ -229,12 +231,21 @@ pub fn journal_planet(recipe: PlanetRecipe, edits: &VoxelEditJournal) -> Result<
 
 /// [`journal_planet`] with only the first `count` edits (not fewer than the
 /// base holds).
-fn journal_planet_to(recipe: PlanetRecipe, edits: &VoxelEditJournal, count: usize) -> Result<Planet, String> {
+fn journal_planet_to(
+    recipe: PlanetRecipe,
+    edits: &VoxelEditJournal,
+    count: usize,
+) -> Result<Planet, String> {
     let mut planet = match edits.base() {
         Some(base) => {
-            let planet = Planet::from_snapshot(recipe, &base.snapshot).map_err(|e| format!("voxel edits: {e}"))?;
+            let planet = Planet::from_snapshot(recipe, &base.snapshot)
+                .map_err(|e| format!("voxel edits: {e}"))?;
             if planet.edits().len() != base.brushes {
-                return Err(format!("voxel edits: the base holds {} edits, its snapshot {}", base.brushes, planet.edits().len()));
+                return Err(format!(
+                    "voxel edits: the base holds {} edits, its snapshot {}",
+                    base.brushes,
+                    planet.edits().len()
+                ));
             }
             planet
         }
@@ -250,14 +261,22 @@ fn journal_planet_to(recipe: PlanetRecipe, edits: &VoxelEditJournal, count: usiz
 /// A base for `edits` folding all but its latest `keep` edits into a
 /// snapshot of the world they left, or `None` when there is nothing more
 /// to fold. [`VoxelEditJournal::compact`] takes it.
-pub fn compact_journal(recipe: PlanetRecipe, edits: &VoxelEditJournal, keep: usize) -> Result<Option<VoxelEditBase>, String> {
+pub fn compact_journal(
+    recipe: PlanetRecipe,
+    edits: &VoxelEditJournal,
+    keep: usize,
+) -> Result<Option<VoxelEditBase>, String> {
     let brushes = edits.len().saturating_sub(keep);
     if brushes <= edits.base_len() {
         return Ok(None);
     }
     let planet = journal_planet_to(recipe, edits, brushes)?;
     let hash = edits.prefix_hash(brushes).expect("after the base");
-    Ok(Some(VoxelEditBase { brushes, hash, snapshot: planet.snapshot().into() }))
+    Ok(Some(VoxelEditBase {
+        brushes,
+        hash,
+        snapshot: planet.snapshot().into(),
+    }))
 }
 
 /// The terrains of `world` with more than [`LISTED_EDITS`] listed edits,
@@ -268,7 +287,13 @@ pub fn journals_to_compact(world: &World) -> Vec<(Entity, PlanetRecipe, VoxelEdi
         .query::<&VoxelTerrainComponent>()
         .into_iter()
         .filter(|(_, c)| c.edits.len() - c.edits.base_len() > LISTED_EDITS && is_generated(c))
-        .filter_map(|(entity, c)| Some((entity, entity_recipe(world, entity, c).ok()?, c.edits.clone())))
+        .filter_map(|(entity, c)| {
+            Some((
+                entity,
+                entity_recipe(world, entity, c).ok()?,
+                c.edits.clone(),
+            ))
+        })
         .collect()
 }
 
@@ -588,20 +613,35 @@ fn terrain_instance(world: &World, entity: Entity) -> Result<Entity, String> {
 
 fn terrain(world: &World, entity: Entity) -> Result<&VoxelTerrainComponent, String> {
     let instance = terrain_instance(world, entity)?;
-    world.get::<VoxelTerrainComponent>(instance).ok_or_else(|| "the object has no voxel terrain".into())
+    world
+        .get::<VoxelTerrainComponent>(instance)
+        .ok_or_else(|| "the object has no voxel terrain".into())
 }
 
-fn terrain_mut(world: &mut World, entity: Entity) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainComponent>, String> {
+fn terrain_mut(
+    world: &mut World,
+    entity: Entity,
+) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainComponent>, String> {
     let instance = terrain_instance(world, entity)?;
-    world.get_mut::<VoxelTerrainComponent>(instance).ok_or_else(|| "the object has no voxel terrain".into())
+    world
+        .get_mut::<VoxelTerrainComponent>(instance)
+        .ok_or_else(|| "the object has no voxel terrain".into())
 }
 
 fn positive(value: f64, what: &str) -> Result<f64, String> {
-    if value.is_finite() && value > 0.0 { Ok(value) } else { Err(format!("{what} must be positive and finite")) }
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(format!("{what} must be positive and finite"))
+    }
 }
 
 fn non_negative(value: f64, what: &str) -> Result<f32, String> {
-    if value.is_finite() && value >= 0.0 { Ok(value as f32) } else { Err(format!("{what} must be zero or more")) }
+    if value.is_finite() && value >= 0.0 {
+        Ok(value as f32)
+    } else {
+        Err(format!("{what} must be zero or more"))
+    }
 }
 
 // Every setting of the world, for scripts (a game's random worlds): the
@@ -625,7 +665,11 @@ impl VoxelTerrainComponent {
             "sphere" | "planet" => VoxelWorldShape::Sphere,
             "plane" => VoxelWorldShape::Plane,
             "infinite_plane" | "infinite" => VoxelWorldShape::InfinitePlane,
-            other => return Err(format!("unknown world shape {other:?} (sphere, plane, infinite_plane)")),
+            other => {
+                return Err(format!(
+                    "unknown world shape {other:?} (sphere, plane, infinite_plane)"
+                ));
+            }
         };
         terrain_mut(world, entity)?.shape = shape;
         Ok(())
@@ -658,7 +702,8 @@ impl VoxelTerrainComponent {
     /// A base voxel's edge in metres, as authored (0.1 to 1).
     #[world_method(category = "Voxel|World")]
     fn set_voxel_size(world: &mut World, entity: Entity, size_m: f64) -> Result<(), String> {
-        terrain_mut(world, entity)?.voxel_size = positive(size_m, "a voxel's size")?.clamp(0.1, 1.0);
+        terrain_mut(world, entity)?.voxel_size =
+            positive(size_m, "a voxel's size")?.clamp(0.1, 1.0);
         Ok(())
     }
 
@@ -683,7 +728,8 @@ impl VoxelTerrainComponent {
 
     #[world_method(category = "Voxel|Environment")]
     fn set_air(world: &mut World, entity: Entity, air: String) -> Result<(), String> {
-        let air = VoxelAir::from_name(&air).ok_or_else(|| format!("unknown air {air:?} ({})", VoxelAir::NAMES.join(", ")))?;
+        let air = VoxelAir::from_name(&air)
+            .ok_or_else(|| format!("unknown air {air:?} ({})", VoxelAir::NAMES.join(", ")))?;
         terrain_mut(world, entity)?.air = air;
         Ok(())
     }
@@ -702,8 +748,18 @@ impl VoxelTerrainComponent {
 
     /// The sky's tint (each channel times the preset's).
     #[world_method(category = "Voxel|Environment")]
-    fn set_air_tint(world: &mut World, entity: Entity, red: f64, green: f64, blue: f64) -> Result<(), String> {
-        let tint = [non_negative(red, "a tint")?, non_negative(green, "a tint")?, non_negative(blue, "a tint")?];
+    fn set_air_tint(
+        world: &mut World,
+        entity: Entity,
+        red: f64,
+        green: f64,
+        blue: f64,
+    ) -> Result<(), String> {
+        let tint = [
+            non_negative(red, "a tint")?,
+            non_negative(green, "a tint")?,
+            non_negative(blue, "a tint")?,
+        ];
         terrain_mut(world, entity)?.air_tint = tint;
         Ok(())
     }
@@ -885,12 +941,32 @@ mod journal_tests {
     /// world as every edit replayed, and keeps taking edits.
     #[test]
     fn compacted_journals_save_and_load_the_same_world() {
-        let recipe = PlanetRecipe { shape: Shape::Plane, plane_size_m: 512.0, ..PlanetRecipe::default() };
-        let ground = Planet::new(recipe.clone()).unwrap().surface_point(DVec3::ZERO, 0.0);
+        let recipe = PlanetRecipe {
+            shape: Shape::Plane,
+            plane_size_m: 512.0,
+            ..PlanetRecipe::default()
+        };
+        let ground = Planet::new(recipe.clone())
+            .unwrap()
+            .surface_point(DVec3::ZERO, 0.0);
         let edit = |n: usize| VoxelBrushEdit {
-            center: (ground + DVec3::new((n % 70) as f64 * 0.13 - 4.0, (n % 9) as f64 * 0.1 - 0.6, (n / 70) as f64 * 0.11 - 4.0)).to_array(),
-            radius: if n % 400 == 3 { 4.0 } else { 0.15 + (n % 4) as f64 * 0.1 },
-            shape: if n % 2 == 0 { VoxelBrushShape::Sphere } else { VoxelBrushShape::Cube },
+            center: (ground
+                + DVec3::new(
+                    (n % 70) as f64 * 0.13 - 4.0,
+                    (n % 9) as f64 * 0.1 - 0.6,
+                    (n / 70) as f64 * 0.11 - 4.0,
+                ))
+            .to_array(),
+            radius: if n % 400 == 3 {
+                4.0
+            } else {
+                0.15 + (n % 4) as f64 * 0.1
+            },
+            shape: if n % 2 == 0 {
+                VoxelBrushShape::Sphere
+            } else {
+                VoxelBrushShape::Cube
+            },
             op: [VoxelBrushOp::Remove, VoxelBrushOp::Add, VoxelBrushOp::Paint][n % 3],
             material: 1 + (n % 9) as u32,
             height: 0.0,
@@ -899,22 +975,37 @@ mod journal_tests {
         let replayed = journal_planet(recipe.clone(), &full).unwrap();
 
         let mut saved = full.clone();
-        let base = compact_journal(recipe.clone(), &saved, LISTED_EDITS).unwrap().expect("old edits to fold");
+        let base = compact_journal(recipe.clone(), &saved, LISTED_EDITS)
+            .unwrap()
+            .expect("old edits to fold");
         assert_eq!(base.brushes, 900);
         assert!(saved.compact(base));
         assert_eq!(saved, full);
-        assert!(compact_journal(recipe.clone(), &saved, LISTED_EDITS).unwrap().is_none(), "nothing more to fold");
+        assert!(
+            compact_journal(recipe.clone(), &saved, LISTED_EDITS)
+                .unwrap()
+                .is_none(),
+            "nothing more to fold"
+        );
         let json = serde_json::to_string(&saved).unwrap();
         let mut loaded: VoxelEditJournal = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.listed().count(), LISTED_EDITS);
 
         let world = journal_planet(recipe.clone(), &loaded).unwrap();
-        assert_eq!((world.edits().len(), world.edits().hash()), (replayed.edits().len(), replayed.edits().hash()));
+        assert_eq!(
+            (world.edits().len(), world.edits().hash()),
+            (replayed.edits().len(), replayed.edits().hash())
+        );
         let g = *world.grid();
         let (cell, _) = g.locate(ground);
         for di in -40..40 {
             for dk in -60..20 {
-                let c = helio_pass_voxel_planet::Cell::new(cell.face, cell.i + di, cell.j + di / 2, cell.k + dk);
+                let c = helio_pass_voxel_planet::Cell::new(
+                    cell.face,
+                    cell.i + di,
+                    cell.j + di / 2,
+                    cell.k + dk,
+                );
                 assert_eq!(world.material(c), replayed.material(c), "{c:?}");
             }
         }
@@ -923,6 +1014,12 @@ mod journal_tests {
         assert!(loaded.starts_with(&full));
         let mut more = full.clone();
         more.push(edit(7));
-        assert_eq!(journal_planet(recipe.clone(), &loaded).unwrap().edits().hash(), journal_planet(recipe, &more).unwrap().edits().hash());
+        assert_eq!(
+            journal_planet(recipe.clone(), &loaded)
+                .unwrap()
+                .edits()
+                .hash(),
+            journal_planet(recipe, &more).unwrap().edits().hash()
+        );
     }
 }

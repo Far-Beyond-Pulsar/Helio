@@ -25,6 +25,10 @@ struct CasterParams {
     camera: [f32; 4],
     tuning: [f32; 4],
 }
+/// Minimum frames between residency solves. The solve is cheap now and a
+/// longer gap only delays new lights getting their maps (shadow pop-in); the
+/// readback in flight already bounds the rate.
+const REBUILD_INTERVAL_FRAMES: u64 = 1;
 const TABLE_BYTES: u64 = std::mem::size_of::<ResidencyTable>() as u64;
 type MapDone = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
 enum Readback {
@@ -64,6 +68,11 @@ pub struct ShadowMatrixPass {
     last_view: [f32; 16],
     last_position: [f32; 4],
     rebuild: bool,
+    /// Decided in `prepare` so the nonce and the dispatch always agree.
+    rebuilding: bool,
+    /// Earliest frame a camera- or retry-driven rebuild may run; a changed
+    /// light set resets it so real edits are never delayed.
+    next_rebuild: u64,
     commit: bool,
     budget: ShadowBudget,
     viewport_height: f32,
@@ -245,6 +254,8 @@ impl ShadowMatrixPass {
             last_view: [0.0; 16],
             last_position: [0.0; 4],
             rebuild: true,
+            rebuilding: false,
+            next_rebuild: 0,
             commit: true,
             budget: ShadowBudget::default(),
             viewport_height: 1080.0,
@@ -360,6 +371,9 @@ impl ShadowMatrixPass {
             }
         }
     }
+    fn rebuild_due(&self) -> bool {
+        self.rebuild && matches!(self.readback, Readback::Idle) && self.frame >= self.next_rebuild
+    }
     fn dispatch(&self, cmds: &mut CommandRecorder<'_>, index: usize, groups: u32) {
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Shadow residency"),
@@ -447,12 +461,14 @@ impl RenderPass for ShadowMatrixPass {
             );
             self.rebuild = true;
             self.commit = true;
+            self.next_rebuild = 0;
         }
         let generation = lights.map(|l| (l.epoch, l.content_generation));
         if generation != self.last_generation {
             self.rebuild = true;
             self.commit = true;
             self.last_generation = generation;
+            self.next_rebuild = 0;
             self.nonce = self.nonce.wrapping_add(1);
             for g in &mut self.generations {
                 *g = g.wrapping_add(1);
@@ -513,7 +529,8 @@ impl RenderPass for ShadowMatrixPass {
         while max_res > 128 && max_res * max_res * 3 > self.budget.update_texels_per_frame {
             max_res /= 2;
         }
-        if self.rebuild && matches!(self.readback, Readback::Idle) {
+        self.rebuilding = self.rebuild_due();
+        if self.rebuilding {
             self.nonce = self.nonce.wrapping_add(1);
         }
         let params = CasterParams {
@@ -560,7 +577,9 @@ impl RenderPass for ShadowMatrixPass {
             self.dispatch(&mut cmds, 3, self.rows.div_ceil(64));
             self.commit = false;
         }
-        if self.rebuild && matches!(self.readback, Readback::Idle) {
+        if self.rebuilding {
+            self.rebuilding = false;
+            self.next_rebuild = self.frame + REBUILD_INTERVAL_FRAMES;
             self.dispatch(&mut cmds, 0, self.rows.div_ceil(64));
             self.dispatch(&mut cmds, 1, 1);
             self.dispatch(&mut cmds, 2, 1);

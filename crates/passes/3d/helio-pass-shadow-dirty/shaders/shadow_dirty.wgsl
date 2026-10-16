@@ -57,8 +57,11 @@ struct ShadowDirtyUniforms {
 @group(0) @binding(3) var<storage, read>          shadow_mats:    array<GpuShadowMatrix>;
 /// Per-face dirty flag (0 = clean, 1 = dirty). Also used as clear-draw count by ShadowPass.
 @group(0) @binding(4) var<storage, read_write>    face_dirty:     array<atomic<u32>>;
-/// Per-face geometry draw count written to drive multi_draw_indexed_indirect_count.
-/// 0 = clean face (no draws), movable_count() = dirty face (draw all movable casters).
+/// Per-face draw counts that drive multi_draw_indexed_indirect_count, in three
+/// MAX_FACES regions: movable, static and transmissive casters. 0 = clean face
+/// (no draws); a dirty face gets the list's live count (draw every caster).
+/// ShadowPass draws a face it does not know to be dirty with these counts, so
+/// a face nothing dirtied runs no vertices at all.
 @group(0) @binding(5) var<storage, read_write>    face_geom_count: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform>                uniforms:       ShadowDirtyUniforms;
 /// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
@@ -74,6 +77,9 @@ struct Previous { bounds:vec4f, hash:vec4u }
 
 /// Live draw calls in `movable_draws` this frame.
 fn movable_count()->u32 { return batch_counts[2]; }
+/// Live static and transmissive shadow-caster draws this frame.
+fn static_count()->u32 { return batch_counts[1]; }
+fn transmissive_count()->u32 { return batch_counts[3]; }
 
 // ── Frustum helpers (Gribb-Hartmann) ─────────────────────────────────────────
 
@@ -124,6 +130,8 @@ fn hash_matrix(m:mat4x4f,h:u32)->u32 {
 fn dirty(face:u32) {
     atomicStore(&face_dirty[face],1u);
     atomicStore(&face_geom_count[face],movable_count());
+    atomicStore(&face_geom_count[MAX_FACES+face],static_count());
+    atomicStore(&face_geom_count[2u*MAX_FACES+face],transmissive_count());
 }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid:vec3u) {
@@ -137,6 +145,15 @@ fn main(@builtin(global_invocation_id) gid:vec3u) {
             let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
             if moved || force_dirty_all {
                 for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty(f);}
+            }
+        }
+        // A face dirtied on an earlier frame and deferred by the shadow
+        // budget is drawn to these counts: keep them this frame's, as the
+        // movable count is kept by dirtying everything when it changes.
+        for(var f=0u;f<count;f++) {
+            if atomicLoad(&face_dirty[f])!=0u {
+                atomicStore(&face_geom_count[MAX_FACES+f],static_count());
+                atomicStore(&face_geom_count[2u*MAX_FACES+f],transmissive_count());
             }
         }
     }

@@ -125,6 +125,24 @@ pub struct DebugViewDescriptor {
     pub description: &'static str,
 }
 
+/// A color scale displayed by the editor for a debug view.
+///
+/// Colors and labels are evenly spaced along the scale, which lets render
+/// passes describe a legend without depending on editor UI types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugViewLegend {
+    pub title: &'static str,
+    pub unit: &'static str,
+    pub stops: &'static [DebugViewLegendStop],
+}
+
+/// One labeled color stop in a [`DebugViewLegend`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugViewLegendStop {
+    pub label: &'static str,
+    pub color: [u8; 3],
+}
+
 /// Supertrait that provides safe `Any`-based downcasting for render passes.
 ///
 /// Blanket-implemented for every `T: 'static`, so no concrete pass needs to
@@ -689,6 +707,14 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// list of debug views that can be cycled at runtime.
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         &[]
+    }
+
+    /// Returns an optional editor color scale for one of this pass's modes.
+    ///
+    /// Passes can override this to expose a reusable floating legend. Modes
+    /// without a scale should keep the default `None`.
+    fn debug_view_legend(&self, _debug_mode: u32) -> Option<DebugViewLegend> {
+        None
     }
 
     /// Declares the inter-pass resources this pass reads and writes.
