@@ -56,7 +56,7 @@ impl View {
 /// parallel fit in a 12 GB GPU (1.1 GB a test with its device; a game's
 /// default world, 2.9 GB, paged eight parallel tests out of device memory
 /// and stalled them).
-const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 2048, footprints: 1024, bricks: 65536 };
+const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 2048, footprints: 1024, bricks: 65536, kept_bytes: 256 << 20 };
 
 struct World {
     chunks: ChunkWorld,
@@ -971,6 +971,82 @@ fn edit_cost_against_history() {
             );
         }
     }
+}
+
+/// Settle `view`, summing the edited chunks restored and generated and the
+/// generation's GPU milliseconds; its hits.
+fn settle_counting(gpu: &Gpu, world: &mut World, planet: &Planet, view: &View) -> (Vec<Option<PickHit>>, (usize, usize), f64, u64) {
+    let started = world.frame;
+    let (mut restored, mut generated, mut gpu_ms) = (0, 0, 0.0);
+    world.chunks.take_timings();
+    loop {
+        let stats = world.frame(gpu, planet, view, None);
+        restored += stats.restored_chunks;
+        generated += stats.generated_edited;
+
+        gpu_ms += world.chunks.take_timings().iter().map(|t| t.generate).sum::<f64>();
+        if world.chunks.settled() {
+            break;
+        }
+        assert!(world.frame - started < 4000, "residency did not settle: {stats:?}");
+    }
+    (world.chunks.read_hits(), (restored, generated), gpu_ms, world.frame - started)
+}
+
+/// Edited chunks the plan evicts are kept (packed, read back) and come
+/// back by copy: a dig site under 2000 large digs, settled, left for a far
+/// view (a world of 9000 chunk slots evicts it), then seen again, draws
+/// every pixel as it did, its edited chunks restored, not generated again
+/// from the field and the history (against a world that keeps nothing).
+#[test]
+fn edited_chunks_come_back_by_copy() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let mut next = xorshift(0x5eed_1234_9876_abcd);
+    for _ in 0..2000 {
+        let a = (next() % 2001) as f64 / 1000.0 - 1.0;
+        let b = (next() % 2001) as f64 / 1000.0 - 1.0;
+        let centre = ground + side * (a * 20.0) + fwd * (b * 20.0 + 12.0) + up * 5.0;
+        planet.apply(Brush { center: centre.to_array(), radius: 8.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    let here = ground_view(&planet, dir, [320, 180]);
+    let far = ground_view(&planet, land(&planet, 4, 0.3, 0.7), [320, 180]);
+    let run = |planet: &Planet, kept_bytes: usize| {
+        let capacity = Capacity { chunks: 9000, kept_bytes, ..TEST_CAPACITY };
+        let mut world = World { chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, capacity), frame: 0 };
+        let (first, ..) = settle_counting(&gpu, &mut world, planet, &here);
+        settle_counting(&gpu, &mut world, planet, &far);
+        let stats = world.frame(&gpu, planet, &far, None);
+        let (again, (restored, generated), gpu_ms, frames) = settle_counting(&gpu, &mut world, planet, &here);
+        let same = first.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+        eprintln!("KEPT {kept_bytes} bytes: {} kept at the far view ({} KiB); back: edited chunks {restored} restored, {generated} generated; {gpu_ms:.2} ms of generation GPU over {frames} frames; {same}/{} pixels as before", stats.kept_chunks, stats.kept_bytes / 1024, first.len());
+        (restored, generated, same, first.len(), world)
+    };
+    let (none, regenerated, ..) = run(&planet, 0);
+    let (restored, generated, same, pixels, mut world) = run(&planet, TEST_CAPACITY.kept_bytes);
+    // An edit over restored chunks shows exactly; left and seen again, the
+    // chunks it changed come back with it.
+    planet.apply(Brush { center: (ground + fwd * 12.0 - up * 2.0).to_array(), radius: 3.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    world.sync(&gpu, &planet);
+    let (compared, mismatched) = compare(&gpu, &mut world, &planet, &here);
+    assert!(compared > 1000 && mismatched * 1000 <= compared, "after the edit: {mismatched}/{compared}");
+    settle_counting(&gpu, &mut world, &planet, &far);
+    let (_, (restored_again, _), ..) = settle_counting(&gpu, &mut world, &planet, &here);
+    let (compared_again, mismatched_again) = compare(&gpu, &mut world, &planet, &here);
+    eprintln!("KEPT after an edit: {mismatched}/{compared}; left and back, {restored_again} restored, {mismatched_again}/{compared_again}");
+    assert!(compared_again > 1000 && mismatched_again * 1000 <= compared_again, "back after the edit: {mismatched_again}/{compared_again}");
+
+    // The edited chunks evicted come back restored (those evicted before
+    // their pack came back, or past a frame's packs, generate again); a
+    // world that keeps nothing generates them all.
+    assert!(restored > 50 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
+    assert!(none == 0 && regenerated > 50, "keeping nothing: {none} restored, {regenerated} generated");
+    assert_eq!(same, pixels, "every pixel as before");
 }
 
 /// Edits sealed under a running world: a crater and a mound too large to

@@ -1194,3 +1194,194 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         }
     }
 }
+
+// ---- Kept chunks (`docs/chunk-octree.md`, "Edited chunks kept") ----
+//
+// An edited chunk the plan evicts is packed before its pages go back
+// (`pack_main`) and read back; a node packed and unedited since is
+// restored into a new slot by copying (`restore_main`), not generated
+// again from the field and the history. A packed chunk: PACK_HEADER words
+// (its `ChunkMeta`, the mask of its pages with detail pages, its size),
+// its mids' words, mid leaves and mid materials (384), then each page's
+// leaves (128 words), materials (32), normals (32), then its detail pages
+// (DETAIL_WORDS each, in page order).
+const PACK_HEADER: u32 = 16u;
+const PACK_LEAVES_AT: u32 = 400u;
+
+// Pack jobs: (slot, -, -, -); the packs; the space used, then each job's
+// (offset or NONE, words).
+@group(1) @binding(0) var<storage, read> pack_jobs: array<vec4<u32>>;
+@group(1) @binding(1) var<storage, read_write> pack_data: array<u32>;
+@group(1) @binding(2) var<storage, read_write> pack_alloc: array<atomic<u32>>;
+// Restore jobs: (slot, its pack's offset in `restore_data`, its result's
+// index in `job_results`, its result flags); the packs.
+@group(1) @binding(3) var<storage, read> restore_jobs: array<vec4<u32>>;
+@group(1) @binding(4) var<storage, read> restore_data: array<u32>;
+
+fn pack_words(pages: u32, details: u32) -> u32 {
+    return PACK_LEAVES_AT + pages * 192u + details * DETAIL_WORDS;
+}
+
+var<workgroup> w_pack: vec4<u32>;
+var<workgroup> w_pack_pages: array<u32, 64>;
+// Each page's detail page (NONE: none) and its place among the packed ones.
+var<workgroup> w_pack_detail: array<u32, 64>;
+var<workgroup> w_pack_index: array<u32, 64>;
+
+// One workgroup a chunk: dispatch (pack jobs), before `evict`.
+@compute @workgroup_size(256)
+fn pack_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {
+    let slot = pack_jobs[wg.x].x;
+    if t == 0u {
+        let header = chunk_meta[slot];
+        var mask = vec2<u32>(0u);
+        var details = 0u;
+        for (var p = 0u; p < header.pages; p++) {
+            let page = leaf_pages[slot * LEAF_PAGES + p];
+            w_pack_pages[p] = page;
+            w_pack_detail[p] = detail_pages[page];
+            w_pack_index[p] = details;
+            if w_pack_detail[p] != NONE {
+                if p < 32u { mask.x |= 1u << p; } else { mask.y |= 1u << (p - 32u); }
+                details += 1u;
+            }
+        }
+        let words = pack_words(header.pages, details);
+        let at = atomicAdd(&pack_alloc[0], words);
+        let ok = at + words <= arrayLength(&pack_data);
+        atomicStore(&pack_alloc[1u + 2u * wg.x], select(NONE, at, ok));
+        atomicStore(&pack_alloc[2u + 2u * wg.x], words);
+        w_pack = vec4<u32>(at, u32(ok), header.pages, 0u);
+        if ok {
+            pack_data[at] = header.root_occ.x;
+            pack_data[at + 1u] = header.root_occ.y;
+            pack_data[at + 2u] = header.root_full.x;
+            pack_data[at + 3u] = header.root_full.y;
+            pack_data[at + 4u] = bitcast<u32>(header.z.x);
+            pack_data[at + 5u] = bitcast<u32>(header.z.y);
+            pack_data[at + 6u] = header.leaves;
+            pack_data[at + 7u] = header.pages;
+            pack_data[at + 8u] = bitcast<u32>(header.top.x);
+            pack_data[at + 9u] = bitcast<u32>(header.top.y);
+            pack_data[at + 10u] = bitcast<u32>(header.top.z);
+            pack_data[at + 11u] = bitcast<u32>(header.top.w);
+            pack_data[at + 12u] = mask.x;
+            pack_data[at + 13u] = mask.y;
+            pack_data[at + 14u] = words;
+            pack_data[at + 15u] = 0u;
+        }
+    }
+    workgroupBarrier();
+    let at = w_pack.x;
+    let pages = w_pack.z;
+    if w_pack.y == 0u { return; }
+    for (var i = t; i < 256u; i += 256u) { pack_data[at + PACK_HEADER + i] = mids[slot * 64u + i / 4u][i % 4u]; }
+    for (var i = t; i < 64u; i += 256u) {
+        pack_data[at + PACK_HEADER + 256u + i] = mid_leaves[slot * 64u + i];
+        pack_data[at + PACK_HEADER + 320u + i] = mid_materials[slot * 64u + i];
+    }
+    let leaves_at = at + PACK_LEAVES_AT;
+    for (var w = t; w < pages * 128u; w += 256u) {
+        let leaf = w_pack_pages[w / 128u] * 64u + (w % 128u) / 2u;
+        pack_data[leaves_at + w] = leaves[leaf][w % 2u];
+    }
+    let materials_at = leaves_at + pages * 128u;
+    let normals_at = materials_at + pages * 32u;
+    for (var w = t; w < pages * 32u; w += 256u) {
+        let word = w_pack_pages[w / 32u] * 32u + w % 32u;
+        pack_data[materials_at + w] = atomicLoad(&leaf_materials[word]);
+        pack_data[normals_at + w] = atomicLoad(&leaf_normals[word]);
+    }
+    let details_at = normals_at + pages * 32u;
+    for (var w = t; w < pages * DETAIL_WORDS; w += 256u) {
+        let p = w / DETAIL_WORDS;
+        if w_pack_detail[p] != NONE {
+            pack_data[details_at + w_pack_index[p] * DETAIL_WORDS + w % DETAIL_WORDS] = detail_cells[w_pack_detail[p] * DETAIL_WORDS + w % DETAIL_WORDS];
+        }
+    }
+}
+
+var<workgroup> w_restore: vec4<u32>;
+var<workgroup> w_restore_pages: array<u32, 64>;
+var<workgroup> w_restore_detail: array<u32, 64>;
+var<workgroup> w_restore_index: array<u32, 64>;
+
+// One workgroup a chunk: dispatch (restore jobs), after `chunk_build_main`.
+// Its pages (and detail pages) come off the free stacks as a build's do;
+// out of leaf pages it stores nothing (flag 8, as a build), out of detail
+// pages its leaves' pairs show (flag 16).
+@compute @workgroup_size(256)
+fn restore_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {
+    let job = restore_jobs[wg.x];
+    let slot = job.x;
+    let at = job.y;
+    if t == 0u {
+        let pages = restore_data[at + 7u];
+        var first = 0u;
+        if pages > 0u { first = take_pages(pages); }
+        let ok = first != NONE;
+        let mask = vec2<u32>(restore_data[at + 12u], restore_data[at + 13u]);
+        var flags = job.w;
+        var details = 0u;
+        var any = 0u;
+        for (var p = 0u; p < pages && ok; p++) {
+            let page = free_pages[first + p];
+            w_restore_pages[p] = page;
+            leaf_pages[slot * LEAF_PAGES + p] = page;
+            var detail = NONE;
+            if bit_at(mask, p) {
+                w_restore_index[p] = details;
+                details += 1u;
+                detail = take_detail();
+                if detail == NONE { flags |= 16u; } else { any = 1u; }
+            }
+            w_restore_detail[p] = detail;
+            detail_pages[page] = detail;
+        }
+        slot_details[slot] = any;
+        let z = vec2<i32>(bitcast<i32>(restore_data[at + 4u]), bitcast<i32>(restore_data[at + 5u]));
+        if ok {
+            chunk_meta[slot] = ChunkMeta(
+                vec2<u32>(restore_data[at], restore_data[at + 1u]),
+                vec2<u32>(restore_data[at + 2u], restore_data[at + 3u]),
+                z,
+                restore_data[at + 6u],
+                pages,
+                bitcast<vec4<f32>>(vec4<u32>(restore_data[at + 8u], restore_data[at + 9u], restore_data[at + 10u], restore_data[at + 11u])),
+            );
+        } else {
+            chunk_meta[slot].leaves = 0u;
+            chunk_meta[slot].pages = 0u;
+            flags |= 8u;
+        }
+        job_results[job.z] = vec4<i32>(i32(slot), z.x, z.y, bitcast<i32>(flags));
+        w_restore = vec4<u32>(u32(ok), pages, 0u, 0u);
+    }
+    workgroupBarrier();
+    if w_restore.x == 0u { return; }
+    let pages = w_restore.y;
+    for (var i = t; i < 256u; i += 256u) { mids[slot * 64u + i / 4u][i % 4u] = restore_data[at + PACK_HEADER + i]; }
+    for (var i = t; i < 64u; i += 256u) {
+        mid_leaves[slot * 64u + i] = restore_data[at + PACK_HEADER + 256u + i];
+        mid_materials[slot * 64u + i] = restore_data[at + PACK_HEADER + 320u + i];
+    }
+    let leaves_at = at + PACK_LEAVES_AT;
+    for (var w = t; w < pages * 128u; w += 256u) {
+        let leaf = w_restore_pages[w / 128u] * 64u + (w % 128u) / 2u;
+        leaves[leaf][w % 2u] = restore_data[leaves_at + w];
+    }
+    let materials_at = leaves_at + pages * 128u;
+    let normals_at = materials_at + pages * 32u;
+    for (var w = t; w < pages * 32u; w += 256u) {
+        let word = w_restore_pages[w / 32u] * 32u + w % 32u;
+        atomicStore(&leaf_materials[word], restore_data[materials_at + w]);
+        atomicStore(&leaf_normals[word], restore_data[normals_at + w]);
+    }
+    let details_at = normals_at + pages * 32u;
+    for (var w = t; w < pages * DETAIL_WORDS; w += 256u) {
+        let p = w / DETAIL_WORDS;
+        if w_restore_detail[p] != NONE {
+            detail_cells[w_restore_detail[p] * DETAIL_WORDS + w % DETAIL_WORDS] = restore_data[details_at + w_restore_index[p] * DETAIL_WORDS + w % DETAIL_WORDS];
+        }
+    }
+}

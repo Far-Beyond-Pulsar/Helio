@@ -47,6 +47,14 @@ const DETAIL_JOBS: usize = 128;
 /// their pairs (an edit's top materials vote in them): a dug wall's detail
 /// pages at every level filled a game's pages after some 80 digs 8 m across.
 const DETAIL_LEVELS: u32 = 2;
+/// Kept chunks (`pack_main`, `restore_main` of chunk_generate.wgsl): words
+/// a frame's packs may take, and packs a frame at most (more evicted
+/// chunks are not kept: they generate again).
+const PACK_WORDS: u64 = 1 << 19;
+const MAX_PACKS: usize = 64;
+/// Bytes a kept chunk counts besides its pack (its entry).
+const KEPT_OVERHEAD: usize = 64;
+
 /// A uniform brick's table entry flag (`UNIFORM_BRICK` of
 /// chunk_generate.wgsl): its cells' one edit in the low 16 bits.
 const UNIFORM_BRICK: u32 = 0x4000_0000;
@@ -104,8 +112,9 @@ const SLOPE_LATTICE: u64 = 1444;
 /// What a [`ChunkWorld`] holds, each within what the device binds: chunk
 /// slots (a chunk's 64-tree and leaves, about 7 KB each), detail pages
 /// (4 KiB each), footprint pool slots (75 KB each, at least two batches')
-/// and cached baked bricks (1 KiB each, before the least recently used are
-/// reused). The default is a game's: 131072 chunks, a world and its device
+/// cached baked bricks (1 KiB each, before the least recently used are
+/// reused) and edited chunks kept on the CPU (bytes, least recently used
+/// dropped). The default is a game's: 131072 chunks, a world and its device
 /// about 2.9 GB of device memory (`HELIO_VOXEL_CHUNKS_SLOTS`,
 /// `HELIO_VOXEL_DETAIL_PAGES`).
 #[derive(Clone, Copy, Debug)]
@@ -115,12 +124,15 @@ pub struct Capacity {
     pub footprints: usize,
     /// Baked bricks kept on the GPU (1 KiB each; `BrickCache`).
     pub bricks: usize,
+    /// Bytes of edited chunks kept on the CPU across eviction (`Kept`; 0:
+    /// none kept, every reload generates).
+    pub kept_bytes: usize,
 }
 
 impl Default for Capacity {
     fn default() -> Self {
         let var = |name: &str, default: usize| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-        Self { chunks: var("HELIO_VOXEL_CHUNKS_SLOTS", DEFAULT_CHUNKS), detail_pages: var("HELIO_VOXEL_DETAIL_PAGES", DEFAULT_DETAIL_PAGES), footprints: FOOTPRINT_POOL, bricks: 65536 }
+        Self { chunks: var("HELIO_VOXEL_CHUNKS_SLOTS", DEFAULT_CHUNKS), detail_pages: var("HELIO_VOXEL_DETAIL_PAGES", DEFAULT_DETAIL_PAGES), footprints: FOOTPRINT_POOL, bricks: 65536, kept_bytes: 256 << 20 }
     }
 }
 
@@ -458,6 +470,8 @@ struct GenBatch {
     baked_refs: Vec<u32>,
     /// `cell_materials` slots taken.
     details: u32,
+    /// Restore jobs the batch carries too (their results follow its jobs').
+    restored: usize,
 }
 
 /// `ChunkJob::tile` of a footprint the batch reads from the pool.
@@ -673,6 +687,15 @@ fn brush_buffer(device: &wgpu::Device, queue: &wgpu::Queue, faces: &[FaceBrush])
     (buffer, capacity)
 }
 
+/// A batch's restore jobs (slot, pack offset, result index, flags), their
+/// packs, and each restored node with its slot and serial.
+#[derive(Default)]
+struct Restores {
+    jobs: Vec<[u32; 4]>,
+    data: Vec<u32>,
+    nodes: Vec<(NodeKey, u32, u64)>,
+}
+
 /// A generated node's chunk.
 struct Resident {
     slot: u32,
@@ -683,6 +706,27 @@ struct Resident {
     /// Whether it was ever drawn (diagnostics: nodes evicted unseen were
     /// generated for nothing).
     shown: bool,
+    /// Whether edits are over it (its chunk is kept when evicted), and its
+    /// last job result's flags.
+    edited: bool,
+    flags: i32,
+}
+
+/// An edited chunk kept across eviction: its packed tree (`pack_main`; none:
+/// it is empty), its job result's flags, the frame it was last restored or
+/// kept.
+struct Kept {
+    pack: Vec<u32>,
+    flags: i32,
+    used: u64,
+}
+
+/// A frame's packs on their way back: each node's slot in the directory
+/// and its result flags.
+struct PackReadback {
+    buffer: wgpu::Buffer,
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    nodes: Vec<(NodeKey, i32)>,
 }
 
 /// What the traces did (counting builds).
@@ -862,6 +906,12 @@ pub struct UpdateStats {
     pub out_of_details: bool,
     /// Detail pages in use when last read back, of the capacity.
     pub detail_pages: (u64, u64),
+    /// Edited chunks restored by copy this frame, those generated (from
+    /// the field and the edits over them), and those kept.
+    pub restored_chunks: usize,
+    pub generated_edited: usize,
+    pub kept_chunks: usize,
+    pub kept_bytes: usize,
 }
 
 /// How [`ChunkWorld::update`] plans and how much it generates a frame.
@@ -1040,6 +1090,20 @@ pub struct ChunkWorld {
     reports_unsent: u64,
     quiet_from: u64,
     evict_pipeline: wgpu::ComputePipeline,
+    /// Kept chunks: packing evicted edited chunks, restoring them.
+    keep_layout: wgpu::BindGroupLayout,
+    pack_pipeline: wgpu::ComputePipeline,
+    restore_pipeline: wgpu::ComputePipeline,
+    pack_data: wgpu::Buffer,
+    pack_alloc: wgpu::Buffer,
+    pack_readbacks: std::collections::VecDeque<PackReadback>,
+    pack_pending: Option<PackReadback>,
+    kept: FxHashMap<NodeKey, Kept>,
+    /// Nodes packed this frame or the last, not edited since (their packs
+    /// are kept when they come back).
+    packed_since: FxHashSet<NodeKey>,
+    kept_bytes: usize,
+    kept_limit: usize,
     /// Chunk table changes scattered (`chunk_table.wgsl`).
     table_layout: wgpu::BindGroupLayout,
     table_pipeline: wgpu::ComputePipeline,
@@ -1525,6 +1589,15 @@ impl ChunkWorld {
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
+        let keep_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk keep"),
+            entries: &[storage(0, true, c), storage(1, false, c), storage(2, false, c), storage(3, true, c), storage(4, true, c)],
+        });
+        let keep_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk keep"), bind_group_layouts: &[Some(&gen_layout), Some(&keep_layout)], immediate_size: 0 });
+        let keep = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(entry), layout: Some(&keep_pipeline_layout), module: &gen_module, entry_point: Some(entry), compilation_options: Default::default(), cache: None })
+        };
+        let (pack_pipeline, restore_pipeline) = (keep("pack_main"), keep("restore_main"));
         let table_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk table"), source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_table.wgsl").into()) });
         let table_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("chunk table"), entries: &[storage(0, true, c), storage(1, false, c)] });
         let table_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1854,6 +1927,17 @@ impl ChunkWorld {
             pick_slots: (0..3).map(|_| PickSlot { buffer: buffer("chunk picks", 256 * MAX_PICKS as u64, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), requests: Vec::new(), sink: None, state: ReachState::Free }).collect(),
             slot_keys: vec![[-1, 0, 0, 0]; max_chunks],
             evict_pipeline,
+            keep_layout,
+            pack_pipeline,
+            restore_pipeline,
+            pack_data: buffer("chunk packs", PACK_WORDS * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
+            pack_alloc: buffer("chunk pack directory", (1 + 2 * MAX_PACKS as u64) * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST),
+            pack_readbacks: Default::default(),
+            pack_pending: None,
+            kept: FxHashMap::default(),
+            packed_since: FxHashSet::default(),
+            kept_bytes: 0,
+            kept_limit: capacity.kept_bytes,
             table_layout,
             table_pipeline,
             free_pages: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1986,6 +2070,86 @@ impl ChunkWorld {
     }
 
     /// A generated node's chunk is resident in `slot`.
+    /// `kept` held for `key`, the least recently used dropped past the
+    /// limit.
+    fn keep(&mut self, key: NodeKey, kept: Kept) {
+        self.kept_bytes += KEPT_OVERHEAD + kept.pack.len() * 4;
+        if let Some(old) = self.kept.insert(key, kept) {
+            self.kept_bytes -= KEPT_OVERHEAD + old.pack.len() * 4;
+        }
+        if self.kept_bytes > self.kept_limit {
+            let mut by_use: Vec<(u64, NodeKey)> = self.kept.iter().map(|(k, v)| (v.used, *k)).collect();
+            by_use.sort_unstable_by_key(|(used, _)| *used);
+            for (_, key) in by_use {
+                if self.kept_bytes <= self.kept_limit * 3 / 4 {
+                    break;
+                }
+                self.drop_kept(key);
+            }
+        }
+    }
+
+    /// What was kept of `key` (and a pack of it on its way back) dropped:
+    /// an edit is over it, or it was generated again.
+    fn drop_kept(&mut self, key: NodeKey) {
+        self.packed_since.remove(&key);
+        if let Some(old) = self.kept.remove(&key) {
+            self.kept_bytes -= KEPT_OVERHEAD + old.pack.len() * 4;
+        }
+    }
+
+    /// `key` restored from what was kept of it into a new slot (a restore
+    /// job of `restores`, its result after the batch's `generated` jobs):
+    /// whether it was.
+    fn restore(&mut self, key: NodeKey, restores: &mut Restores, generated: usize, evictions: &mut Vec<u32>, stats: &mut UpdateStats) -> bool {
+        if generated + restores.jobs.len() >= CHUNK_BATCH || self.free_slots.is_empty() {
+            return false;
+        }
+        let frame = self.frame_now;
+        let Some(kept) = self.kept.get_mut(&key) else { return false };
+        kept.used = frame;
+        if kept.pack.is_empty() {
+            // Empty: the plan learns it again, nothing is generated.
+            self.events.push(residency::Event::Emptied(key));
+            stats.restored_chunks += 1;
+            return true;
+        }
+        let flags = kept.flags;
+        let slot = self.free_slots.pop().unwrap();
+        restores.jobs.push([slot, restores.data.len() as u32, 0, flags as u32]);
+        restores.data.extend_from_slice(&kept.pack);
+        self.serial += 1;
+        restores.nodes.push((key, slot, self.serial));
+        let record = chunk_static(&self.grid, key.footprint(), key.cz, slot, (0.0, 64.0), 32.0, self.exact_level);
+        self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
+        self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&key.table_key()));
+        self.slot_keys[slot as usize] = key.table_key();
+        let shown = self.drawn_set.holds(key);
+        if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown, edited: true, flags }) {
+            evictions.push(old.slot);
+        }
+        stats.shown_chunks += usize::from(shown);
+        stats.restored_chunks += 1;
+        self.changed_nodes.insert(key);
+        self.hidden.remove(&key);
+        self.events.push(residency::Event::Generated(key));
+        true
+    }
+
+    /// The bind group of pack jobs `packs`, or of restore jobs `restores`
+    /// and their packs `data` (`keep_layout`).
+    fn keep_group(&self, packs: &[[u32; 4]], restores: &[[u32; 4]], data: &[u32]) -> wgpu::BindGroup {
+        let init = |label: &str, contents: &[u8]| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage: wgpu::BufferUsages::STORAGE });
+        let packs = init("chunk pack jobs", bytemuck::cast_slice(packs));
+        let restores_buffer = init("chunk restore jobs", bytemuck::cast_slice(restores));
+        let data = init("chunk restore packs", bytemuck::cast_slice(if data.is_empty() { &[0u32][..] } else { data }));
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk keep"),
+            layout: &self.keep_layout,
+            entries: &[entry(0, &packs), entry(1, &self.pack_data), entry(2, &self.pack_alloc), entry(3, &restores_buffer), entry(4, &data)],
+        })
+    }
+
     fn insert_resident(&mut self, key: NodeKey, resident: Resident) -> Option<Resident> {
         let old = self.nodes.insert(key, resident);
         if old.is_none() {
@@ -2012,7 +2176,7 @@ impl ChunkWorld {
         if batch.footprints() >= TILE_BATCH || czs.is_empty() {
             return 0;
         }
-        let room = CHUNK_BATCH.saturating_sub(batch.chunk_jobs.len()).min(czs.len());
+        let room = CHUNK_BATCH.saturating_sub(batch.chunk_jobs.len() + batch.restored).min(czs.len());
         if self.free_slots.len() < room {
             stats.out_of_slots = true;
         }
@@ -2087,6 +2251,8 @@ impl ChunkWorld {
             let large = refs.iter().filter(|&&b| (b as usize) < edits.large_faces).count() as u32;
             batch.refs.extend_from_slice(&refs);
             let baked = if baked { batch.baked_table(&mut self.brick_cache, self.frame_now, &edits.baked, fp, cz) } else { u32::MAX };
+            let under_edits = !refs.is_empty() || baked != u32::MAX;
+            stats.generated_edited += usize::from(under_edits);
             batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, detail });
             // Layers not read back yet: the whole chunk.
             let record = chunk_static(&grid, fp, cz, slot, (0.0, 64.0), 32.0, self.exact_level);
@@ -2095,7 +2261,9 @@ impl ChunkWorld {
             self.slot_keys[slot as usize] = key.table_key();
             readback.chunks.push((key, slot, self.serial));
             let shown = self.drawn_set.holds(key);
-            if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown }) {
+            // Generated again: what was kept of it no longer holds.
+            self.drop_kept(key);
+            if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown, edited: under_edits, flags: 0 }) {
                 evictions.push(old.slot);
             }
             stats.shown_chunks += usize::from(shown);
@@ -2162,6 +2330,14 @@ impl ChunkWorld {
             }
         }
         drop(old);
+        // Baked changes (a seal's bricks) end what was kept under them.
+        let changed: FxHashSet<Footprint> = columns.iter().map(|c| Footprint { face: c.face, level: u32::from(c.level), cx: c.ci >> 3, cy: c.cj >> 3 }).collect();
+        if !changed.is_empty() {
+            let kept: Vec<NodeKey> = self.kept.keys().chain(&self.packed_since).filter(|k| changed.contains(&k.footprint())).copied().collect();
+            for key in kept {
+                self.drop_kept(key);
+            }
+        }
         for column in columns {
             let fp = Footprint { face: column.face, level: u32::from(column.level), cx: column.ci >> 3, cy: column.cj >> 3 };
             for cz in self.footprint_nodes.get(&fp).cloned().unwrap_or_default() {
@@ -2210,6 +2386,11 @@ impl ChunkWorld {
                 (x.end() - x.start() + 1) as u64 * (y.end() - y.start() + 1) as u64
             })
             .sum();
+        // What was kept of nodes under it no longer holds.
+        let kept: Vec<NodeKey> = self.kept.keys().chain(&self.packed_since).filter(|k| inside(k)).copied().collect();
+        for key in kept {
+            self.drop_kept(key);
+        }
         let mut marked: Vec<NodeKey> = Vec::new();
         if footprints > self.footprint_nodes.len() as u64 {
             marked.extend(self.nodes.keys().filter(|k| inside(k)));
@@ -2301,13 +2482,20 @@ impl ChunkWorld {
                         // Nothing to draw. (A chunk solid throughout stays:
                         // its faces are the surface where it lies on a
                         // chunk boundary.)
-                        evictions.push(self.remove_resident(key).unwrap().slot);
+                        let old = self.remove_resident(key).unwrap();
+                        // An edited one is remembered empty (generating it
+                        // again would read the edits over it again).
+                        if old.edited && self.kept_limit > 0 {
+                            self.keep(key, Kept { pack: Vec::new(), flags: w[3], used: frame });
+                        }
+                        evictions.push(old.slot);
                         self.events.push(residency::Event::Emptied(key));
                     } else {
                         // Out of detail pages: its leaves' pairs show.
                         stats.out_of_details |= w[3] & 16 != 0;
                         let c = self.nodes.get_mut(&key).unwrap();
                         c.z = Some((w[1], w[2]));
+                        c.flags = w[3];
                         // Its frame about its columns' mean top (its ground),
                         // else its occupied layers.
                         let surface = (w[3] as u32) >> 16;
@@ -2322,6 +2510,25 @@ impl ChunkWorld {
                 }
                 if let Some(&free) = words.get(at + 2) {
                     self.detail_free_seen = free.max(0) as u64;
+                }
+            }
+            r.buffer.unmap();
+        }
+        while self.pack_readbacks.front().is_some_and(|r| r.ready.load(std::sync::atomic::Ordering::Acquire)) {
+            let r = self.pack_readbacks.pop_front().unwrap();
+            {
+                let data = r.buffer.slice(..).get_mapped_range().unwrap();
+                let words: &[u32] = bytemuck::cast_slice(&data);
+                let data_at = 1 + 2 * MAX_PACKS;
+                for (n, &(key, flags)) in r.nodes.iter().enumerate() {
+                    let (offset, len) = (words[1 + 2 * n], words[2 + 2 * n] as usize);
+                    // Not packed (out of room), or edited or wanted again
+                    // since.
+                    if offset == u32::MAX || self.nodes.contains_key(&key) || !self.packed_since.remove(&key) {
+                        continue;
+                    }
+                    let at = data_at + offset as usize;
+                    self.keep(key, Kept { pack: words[at..at + len].to_vec(), flags, used: frame });
                 }
             }
             r.buffer.unmap();
@@ -2353,8 +2560,14 @@ impl ChunkWorld {
         }
         stats.plan_age = frame.saturating_sub(self.plan_made.0);
         stats.plan_ms = self.plan_made.1;
+        let mut packs: Vec<(NodeKey, u32, i32)> = Vec::new();
         for key in evicted {
             if let Some(old) = self.remove_resident(key) {
+                // An edited chunk, read back and unedited since, is kept.
+                if old.edited && old.z.is_some() && self.kept_limit > 0 && packs.len() < MAX_PACKS && !self.kept.contains_key(&key) && !self.urgent.contains(&key) && !self.stale.contains(&key) {
+                    packs.push((key, old.slot, old.flags));
+                    self.packed_since.insert(key);
+                }
                 evictions.push(old.slot);
                 stats.evicted_unseen += usize::from(!old.shown);
                 stats.evicted_chunks += 1;
@@ -2448,13 +2661,17 @@ impl ChunkWorld {
         let urgent = &self.urgent;
         self.urgent_distance.retain(|k, _| urgent.contains(k));
         // The plan's requests, a footprint's nodes together.
+        let mut restores = Restores::default();
         let requests = std::mem::take(&mut self.plan.requests);
         let mut at = 0;
         while at < requests.len() && !full(&batch) {
             let fp = requests[at].footprint();
             let end = requests[at..].iter().position(|k| k.footprint() != fp).map_or(requests.len(), |n| at + n);
             // Generated since that plan.
-            let czs: Vec<i32> = requests[at..end].iter().filter(|k| !self.nodes.contains_key(k)).map(|k| k.cz).collect();
+            let mut czs: Vec<i32> = requests[at..end].iter().filter(|k| !self.nodes.contains_key(k)).map(|k| k.cz).collect();
+            // Kept nodes come back by copy.
+            czs.retain(|&cz| !self.restore(fp.node(cz), &mut restores, batch.chunk_jobs.len(), &mut evictions, &mut stats));
+            batch.restored = restores.jobs.len();
             if !czs.is_empty() && self.queue_footprint(fp, &czs, &mut batch, &mut readback, &mut evictions, &mut stats) < czs.len() {
                 break;
             }
@@ -2462,6 +2679,12 @@ impl ChunkWorld {
         }
         self.plan.requests = requests;
         let GenBatch { computed, cached, mut chunk_jobs, refs, baked_refs, .. } = batch;
+        // Restored chunks' results follow the generated ones'.
+        let results_at = chunk_jobs.len() as u32;
+        for (n, job) in restores.jobs.iter_mut().enumerate() {
+            job[2] = results_at + n as u32;
+        }
+        readback.chunks.extend(restores.nodes.iter().copied());
         // The batch's footprints: those it computes first (the kernels run
         // over them), then those it reads from the pool.
         let computed_count = computed.len();
@@ -2490,6 +2713,12 @@ impl ChunkWorld {
             usage: wgpu::BufferUsages::STORAGE,
         });
         self.brick_cache.upload(&self.device, &self.queue, encoder);
+        let pack_group = (!packs.is_empty()).then(|| {
+            let jobs: Vec<[u32; 4]> = packs.iter().map(|&(_, slot, _)| [slot, 0, 0, 0]).collect();
+            self.queue.write_buffer(&self.pack_alloc, 0, &vec![0u8; (1 + 2 * MAX_PACKS) * 4]);
+            self.keep_group(&jobs, &[[0; 4]], &[0])
+        });
+        let restore_group = (!restores.jobs.is_empty()).then(|| self.keep_group(&[[0; 4]], &restores.jobs, &restores.data));
         let group = self.gen_group(&refs_buffer, &evictions_buffer, &baked_refs_buffer, &self.brick_cache.buffer);
         if !tile_jobs.is_empty() {
             self.queue.write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
@@ -2510,6 +2739,11 @@ impl ChunkWorld {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile nodes"), timestamp_writes: stamp(Some(0), 8) });
             pass.set_bind_group(0, &group, &[]);
+            if let Some(keep) = &pack_group {
+                pass.set_pipeline(&self.pack_pipeline);
+                pass.set_bind_group(1, keep, &[]);
+                pass.dispatch_workgroups(packs.len() as u32, 1, 1);
+            }
             if !evictions.is_empty() {
                 pass.set_pipeline(&self.evict_pipeline);
                 pass.dispatch_workgroups((evictions.len() as u32).div_ceil(64), 1, 1);
@@ -2556,12 +2790,25 @@ impl ChunkWorld {
                 pass.set_pipeline(&self.chunk_build);
                 pass.dispatch_workgroups(chunk_jobs.len() as u32, 1, 1);
             }
+            if let Some(keep) = &restore_group {
+                pass.set_pipeline(&self.restore_pipeline);
+                pass.set_bind_group(1, keep, &[]);
+                pass.dispatch_workgroups(restores.jobs.len() as u32, 1, 1);
+            }
+        }
+        // The packs back (mapped with the results).
+        if !packs.is_empty() {
+            let directory = (1 + 2 * MAX_PACKS as u64) * 4;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk packs read"), size: directory + PACK_WORDS * 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            encoder.copy_buffer_to_buffer(&self.pack_alloc, 0, &buffer, 0, directory);
+            encoder.copy_buffer_to_buffer(&self.pack_data, 0, &buffer, directory, PACK_WORDS * 4);
+            self.pack_pending = Some(PackReadback { buffer, ready: Default::default(), nodes: packs.iter().map(|&(key, _, flags)| (key, flags)).collect() });
         }
         // Results back: footprints' layers, each chunk's job result, the
         // free leaf pages.
-        if !tile_jobs.is_empty() {
+        if !tile_jobs.is_empty() || !restores.jobs.is_empty() {
             let tiles = (computed_count * 16) as u64;
-            let chunks = (chunk_jobs.len() * 16) as u64;
+            let chunks = ((chunk_jobs.len() + restores.jobs.len()) * 16) as u64;
             readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: tiles + chunks + 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             if tiles > 0 {
                 encoder.copy_buffer_to_buffer(&self.tile_ranges, 0, &readback.buffer, 0, tiles);
@@ -2576,6 +2823,8 @@ impl ChunkWorld {
         // Slots evicted now are reused from the next frame.
         self.free_slots.extend(evictions);
 
+        stats.kept_chunks = self.kept.len();
+        stats.kept_bytes = self.kept_bytes;
         lap(&mut stats, 3);
         // 4. This frame's drawn nodes and the table entries that changed.
         let nodes = &self.nodes;
@@ -2767,6 +3016,15 @@ impl ChunkWorld {
                 }
             });
             self.readbacks.push_back(r);
+        }
+        if let Some(r) = self.pack_pending.take() {
+            let ready = r.ready.clone();
+            r.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_ok() {
+                    ready.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
+            self.pack_readbacks.push_back(r);
         }
     }
 

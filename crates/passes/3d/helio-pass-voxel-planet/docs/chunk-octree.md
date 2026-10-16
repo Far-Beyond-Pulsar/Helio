@@ -427,7 +427,7 @@ large brushes, so a long game slows every edit and every chunk.
 
 1. **Large brushes into data** (done, below). Gate: the table's 10000
    large digs at the cost of 100.
-2. **Edited chunks kept.** Edited level-0 chunks are read back,
+2. **Edited chunks kept** (done, below). Edited level-0 chunks are read back,
    compressed and kept on the CPU (and in the save), so evicting one costs
    a copy, not a regeneration from the history; parents re-derived by
    downsampling.
@@ -478,9 +478,45 @@ frame and lets it downclock):
 What is left grows with the baked data under a heavily dug region (10000
 digs 8 m across lower 720 m of ground by some 40 m), not with the history.
 
+### Edited chunks kept (2026-10-16)
+
+An edited chunk (generated under brushes or baked bricks) the plan evicts
+is packed on the GPU before its pages go back (`pack_main`): its meta,
+mids, mid leaves and materials, then each leaf page's leaves, materials
+and normals, then its detail pages, 12 KB on average. The 64-tree is the
+compression: a chunk's leaves are a few hundred of its 4096 columns' 64
+cells. Packs come back with the frame's results (64 a frame at most, in
+2 MB) and are kept on the CPU (`Capacity::kept_bytes`, 256 MB by default,
+least recently used dropped). An edited chunk that comes out empty is kept
+as such (no pack).
+
+A kept node the plan wants again is restored, not generated
+(`restore_main`, after the builds): new leaf and detail pages off the free
+stacks, its words copied in, its result written as a build's. It needs no
+footprint, no terrain program and no brushes. An empty one is reported
+empty at once (the plan, a few frames behind its results, asked for dug
+chunks it had just found empty, and each was generated again from the
+field and every brush over it). An edit over a kept node (a brush that came
+or went over it, a seal's baked columns under it) drops it, and a node
+generated again drops what was kept of it.
+
+`edited_chunks_come_back_by_copy` (a gate): a site under 2000 digs 8 m
+across, settled, left for a far view (a world of 9000 chunk slots evicts
+it), seen again:
+
+| | edited chunks on return: restored / generated | generation GPU on return | pixels as before |
+|---|---|---|---|
+| keeping nothing | 0 / 534 | 308 ms | all |
+| kept (2.4 MB) | 1041 / 0 | 58 ms | all |
+
+Then a brick mound added over the restored chunks draws exactly (against
+CPU ray casts), and left and seen again, the chunks it changed come back
+with it (940 restored, exact).
+
 ### Next
 
-- Edits on data, step 2: edited chunks kept (above).
+- Edits on data: edited chunks in the save (the kept packs written with
+  the snapshot), so a loaded world restores what its history made.
 - Natural per-voxel materials where unedited leaves mix materials (5 % of
   their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
