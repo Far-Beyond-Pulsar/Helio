@@ -2279,6 +2279,7 @@ dependencies = [
  "glam 0.33.5",
  "helio-core",
  "image",
+ "miniz_oxide",
  "naga",
  "pollster 0.4.0",
  "rustc-hash 2.1.3",

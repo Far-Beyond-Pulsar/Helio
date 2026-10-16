@@ -513,10 +513,28 @@ Then a brick mound added over the restored chunks draws exactly (against
 CPU ray casts), and left and seen again, the chunks it changed come back
 with it (940 restored, exact).
 
+### Kept chunks in the save (2026-10-16)
+
+Before saving, `ChunkWorld::keep_resident` packs the resident edited
+chunks too (as packs fit a frame; `keeping` counts those left), and
+`kept_snapshot` writes every kept chunk: a header (the fingerprint of the
+generation shaders, terrain constants and world, so other generation code
+never loads them, and the history's length and hash), then the chunks
+deflated. `Planet::snapshot_with_chunks` carries them as an opaque section
+of the edit snapshot (version 4; older ones have none), given back by
+`Planet::from_snapshot_with_chunks`; `ChunkWorld::load_kept` keeps them
+before the world's first update, for exactly that history.
+
+`a_loaded_world_restores_its_edited_chunks` (a gate): the dug site saved
+(313 chunks, 316 KiB besides the snapshot's 260; 3.3 MiB undeflated) and
+loaded into a new world: 1172 edited chunks restored and none generated
+(313 without them), 90 ms of generation GPU against 234, every pixel as
+the saved world drew it. Kept chunks of another history are refused.
+
 ### Next
 
-- Edits on data: edited chunks in the save (the kept packs written with
-  the snapshot), so a loaded world restores what its history made.
+- Pulsar's saves write `kept_snapshot` with the edit base snapshot and load
+  it into the renderer's world.
 - Natural per-voxel materials where unedited leaves mix materials (5 % of
   their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).

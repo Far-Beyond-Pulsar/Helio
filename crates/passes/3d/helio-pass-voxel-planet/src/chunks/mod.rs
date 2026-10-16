@@ -54,6 +54,10 @@ const PACK_WORDS: u64 = 1 << 19;
 const MAX_PACKS: usize = 64;
 /// Bytes a kept chunk counts besides its pack (its entry).
 const KEPT_OVERHEAD: usize = 64;
+/// Kept chunks' snapshot (`ChunkWorld::kept_snapshot`): magic, and the pack
+/// format (bump with `pack_main`'s layout).
+const KEPT_MAGIC: [u8; 4] = *b"HVPK";
+const KEPT_FORMAT: u16 = 1;
 
 /// A uniform brick's table entry flag (`UNIFORM_BRICK` of
 /// chunk_generate.wgsl): its cells' one edit in the low 16 bits.
@@ -726,7 +730,8 @@ struct Kept {
 struct PackReadback {
     buffer: wgpu::Buffer,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    nodes: Vec<(NodeKey, i32)>,
+    /// Each node, its result flags, and its serial when packed resident.
+    nodes: Vec<(NodeKey, i32, Option<u64>)>,
 }
 
 /// What the traces did (counting builds).
@@ -1104,6 +1109,11 @@ pub struct ChunkWorld {
     packed_since: FxHashSet<NodeKey>,
     kept_bytes: usize,
     kept_limit: usize,
+    /// Resident edited chunks to pack without evicting them
+    /// (`keep_resident`), and the fingerprint of what made packs
+    /// (`kept_snapshot`).
+    to_pack: Vec<NodeKey>,
+    fingerprint: u64,
     /// Chunk table changes scattered (`chunk_table.wgsl`).
     table_layout: wgpu::BindGroupLayout,
     table_pipeline: wgpu::ComputePipeline,
@@ -1528,6 +1538,14 @@ impl ChunkWorld {
         let program = planet.field().program();
         let wide64 = device.features().contains(wgpu::Features::SHADER_INT64);
         let [(_, gen_source), (_, draw_source)] = shader_sources(planet.grid().is_plane(), &program, wide64, std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some());
+        // What generated packs depend on: the generation shaders, the
+        // terrain's constants and the world (`kept_snapshot`).
+        let fingerprint = {
+            let mut bytes = format!("chunk packs {KEPT_FORMAT} {DETAIL_LEVELS} {}", gen_source).into_bytes();
+            bytes.extend_from_slice(&terrain_bytes(&program));
+            bytes.extend_from_slice(bytemuck::bytes_of(&WorldGpu::new(planet)));
+            crate::record::fnv64(&bytes)
+        };
         let gen_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk generation"), source: wgpu::ShaderSource::Wgsl(gen_source.into()) });
         let c = wgpu::ShaderStages::COMPUTE;
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1938,6 +1956,8 @@ impl ChunkWorld {
             packed_since: FxHashSet::default(),
             kept_bytes: 0,
             kept_limit: capacity.kept_bytes,
+            to_pack: Vec::new(),
+            fingerprint,
             table_layout,
             table_pipeline,
             free_pages: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2520,11 +2540,22 @@ impl ChunkWorld {
                 let data = r.buffer.slice(..).get_mapped_range().unwrap();
                 let words: &[u32] = bytemuck::cast_slice(&data);
                 let data_at = 1 + 2 * MAX_PACKS;
-                for (n, &(key, flags)) in r.nodes.iter().enumerate() {
+                for (n, &(key, flags, serial)) in r.nodes.iter().enumerate() {
                     let (offset, len) = (words[1 + 2 * n], words[2 + 2 * n] as usize);
-                    // Not packed (out of room), or edited or wanted again
-                    // since.
-                    if offset == u32::MAX || self.nodes.contains_key(&key) || !self.packed_since.remove(&key) {
+                    // Not packed (out of room), or edited since, or wanted
+                    // again (evicted) or generated again (resident) since.
+                    let current = match serial {
+                        None => !self.nodes.contains_key(&key),
+                        Some(serial) => self.nodes.get(&key).is_some_and(|c| c.serial == serial),
+                    };
+                    if !self.packed_since.remove(&key) || !current {
+                        continue;
+                    }
+                    if offset == u32::MAX {
+                        // Out of room: a resident one is packed again later.
+                        if serial.is_some() {
+                            self.to_pack.push(key);
+                        }
                         continue;
                     }
                     let at = data_at + offset as usize;
@@ -2560,12 +2591,12 @@ impl ChunkWorld {
         }
         stats.plan_age = frame.saturating_sub(self.plan_made.0);
         stats.plan_ms = self.plan_made.1;
-        let mut packs: Vec<(NodeKey, u32, i32)> = Vec::new();
+        let mut packs: Vec<(NodeKey, u32, i32, Option<u64>)> = Vec::new();
         for key in evicted {
             if let Some(old) = self.remove_resident(key) {
                 // An edited chunk, read back and unedited since, is kept.
                 if old.edited && old.z.is_some() && self.kept_limit > 0 && packs.len() < MAX_PACKS && !self.kept.contains_key(&key) && !self.urgent.contains(&key) && !self.stale.contains(&key) {
-                    packs.push((key, old.slot, old.flags));
+                    packs.push((key, old.slot, old.flags, None));
                     self.packed_since.insert(key);
                 }
                 evictions.push(old.slot);
@@ -2576,6 +2607,15 @@ impl ChunkWorld {
             self.urgent.remove(&key);
             self.stale.remove(&key);
             self.changed_nodes.insert(key);
+        }
+        // Resident edited chunks packed on demand (a save), as room allows.
+        while packs.len() < MAX_PACKS {
+            let Some(key) = self.to_pack.pop() else { break };
+            let Some(c) = self.nodes.get(&key) else { continue };
+            if c.edited && c.z.is_some() && !self.kept.contains_key(&key) && !self.packed_since.contains(&key) && !self.urgent.contains(&key) && !self.stale.contains(&key) {
+                packs.push((key, c.slot, c.flags, Some(c.serial)));
+                self.packed_since.insert(key);
+            }
         }
         // Slots and leaf pages kept free for a frame's generation and
         // more: the least recently visited nodes go when either runs short.
@@ -2714,7 +2754,7 @@ impl ChunkWorld {
         });
         self.brick_cache.upload(&self.device, &self.queue, encoder);
         let pack_group = (!packs.is_empty()).then(|| {
-            let jobs: Vec<[u32; 4]> = packs.iter().map(|&(_, slot, _)| [slot, 0, 0, 0]).collect();
+            let jobs: Vec<[u32; 4]> = packs.iter().map(|&(_, slot, ..)| [slot, 0, 0, 0]).collect();
             self.queue.write_buffer(&self.pack_alloc, 0, &vec![0u8; (1 + 2 * MAX_PACKS) * 4]);
             self.keep_group(&jobs, &[[0; 4]], &[0])
         });
@@ -2802,7 +2842,7 @@ impl ChunkWorld {
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk packs read"), size: directory + PACK_WORDS * 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             encoder.copy_buffer_to_buffer(&self.pack_alloc, 0, &buffer, 0, directory);
             encoder.copy_buffer_to_buffer(&self.pack_data, 0, &buffer, directory, PACK_WORDS * 4);
-            self.pack_pending = Some(PackReadback { buffer, ready: Default::default(), nodes: packs.iter().map(|&(key, _, flags)| (key, flags)).collect() });
+            self.pack_pending = Some(PackReadback { buffer, ready: Default::default(), nodes: packs.iter().map(|&(key, _, flags, serial)| (key, flags, serial)).collect() });
         }
         // Results back: footprints' layers, each chunk's job result, the
         // free leaf pages.
@@ -3487,6 +3527,102 @@ impl ChunkWorld {
     /// Frames whose GPU times came back since the last call.
     pub fn take_timings(&mut self) -> Vec<FrameTimings> {
         std::mem::take(&mut self.timings)
+    }
+
+    /// Pack every resident edited chunk not kept yet (over the next
+    /// updates, as many a frame as packs fit), so [`Self::kept_snapshot`]
+    /// holds the whole world's edited chunks: before saving.
+    pub fn keep_resident(&mut self) {
+        let keys: Vec<NodeKey> = self.nodes.iter().filter(|(k, c)| c.edited && !self.kept.contains_key(k)).map(|(k, _)| *k).collect();
+        self.to_pack = keys;
+    }
+
+    /// Edited chunks [`Self::keep_resident`] still has to pack or read back.
+    pub fn keeping(&self) -> usize {
+        self.to_pack.len() + self.packed_since.len()
+    }
+
+    /// The kept chunks as bytes for an edit snapshot
+    /// (`Planet::snapshot_with_chunks`), valid for `planet`'s edits as this
+    /// world follows them: a header (magic, format, the fingerprint of the
+    /// generation shaders, terrain and world, the history's length and
+    /// hash, the chunk count), then each chunk (node, result flags, its
+    /// pack's length and words) deflated, then a checksum of it all.
+    pub fn kept_snapshot(&self, planet: &Planet) -> Vec<u8> {
+        let edits = planet.edits();
+        let mut out = Vec::new();
+        out.extend_from_slice(&KEPT_MAGIC);
+        out.extend_from_slice(&KEPT_FORMAT.to_le_bytes());
+        for v in [self.fingerprint, edits.len() as u64, edits.hash(), self.kept.len() as u64] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut keys: Vec<&NodeKey> = self.kept.keys().collect();
+        keys.sort_unstable_by_key(|k| (k.face, k.level, k.cx, k.cy, k.cz));
+        let mut body = Vec::new();
+        for key in keys {
+            let kept = &self.kept[key];
+            body.push(key.face);
+            body.push(key.level as u8);
+            for v in [key.cx, key.cy, key.cz, kept.flags, kept.pack.len() as i32] {
+                body.extend_from_slice(&v.to_le_bytes());
+            }
+            body.extend_from_slice(bytemuck::cast_slice(&kept.pack));
+        }
+        out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&body, 6));
+        let sum = crate::record::fnv64(&out);
+        out.extend_from_slice(&sum.to_le_bytes());
+        out
+    }
+
+    /// The chunks of a [`Self::kept_snapshot`] kept, restored by copy when
+    /// wanted: how many. Before the world's first update; refused when the
+    /// bytes were made by other generation code, terrain or world, or for
+    /// another history than `planet`'s.
+    pub fn load_kept(&mut self, planet: &Planet, bytes: &[u8]) -> Result<usize, String> {
+        if bytes.len() < 46 || bytes[..4] != KEPT_MAGIC {
+            return Err("not kept chunks".into());
+        }
+        let (body, sum) = bytes.split_at(bytes.len() - 8);
+        if crate::record::fnv64(body) != u64::from_le_bytes(sum.try_into().unwrap()) {
+            return Err("kept chunks: checksum".into());
+        }
+        let mut at = 4;
+        let mut take = |n: usize| -> Result<&[u8], String> {
+            let out = body.get(at..at + n).ok_or("kept chunks: cut short")?;
+            at += n;
+            Ok(out)
+        };
+        let format = u16::from_le_bytes(take(2)?.try_into().unwrap());
+        let u64_of = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap());
+        let (fingerprint, len, hash, count) = (u64_of(take(8)?), u64_of(take(8)?), u64_of(take(8)?), u64_of(take(8)?));
+        if format != KEPT_FORMAT || fingerprint != self.fingerprint {
+            return Err("kept chunks of other generation code, terrain or world".into());
+        }
+        let edits = planet.edits();
+        if (len, hash) != (edits.len() as u64, edits.hash()) {
+            return Err("kept chunks of another history".into());
+        }
+        let body = miniz_oxide::inflate::decompress_to_vec(&body[at..]).map_err(|e| format!("kept chunks: {e:?}"))?;
+        let mut at = 0;
+        let mut take = |n: usize| -> Result<&[u8], String> {
+            let out = body.get(at..at + n).ok_or("kept chunks: cut short")?;
+            at += n;
+            Ok(out)
+        };
+        let frame = self.frame_now;
+        let mut chunks = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let head = take(22)?;
+            let i32_at = |n: usize| i32::from_le_bytes(head[2 + 4 * n..6 + 4 * n].try_into().unwrap());
+            let key = NodeKey { face: head[0], level: u32::from(head[1]), cx: i32_at(0), cy: i32_at(1), cz: i32_at(2) };
+            let (flags, len) = (i32_at(3), i32_at(4) as usize);
+            let pack: Vec<u32> = take(len * 4)?.chunks(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+            chunks.push((key, Kept { pack, flags, used: frame }));
+        }
+        for (key, kept) in chunks {
+            self.keep(key, kept);
+        }
+        Ok(count as usize)
     }
 
     /// Every resident node generated again (benchmarks: the same work

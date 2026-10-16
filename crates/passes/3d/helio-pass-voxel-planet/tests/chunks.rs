@@ -998,9 +998,10 @@ fn settle_counting(gpu: &Gpu, world: &mut World, planet: &Planet, view: &View) -
 /// view (a world of 9000 chunk slots evicts it), then seen again, draws
 /// every pixel as it did, its edited chunks restored, not generated again
 /// from the field and the history (against a world that keeps nothing).
-#[test]
-fn edited_chunks_come_back_by_copy() {
-    let Some(gpu) = gpu() else { return };
+/// A site under 2000 digs 8 m across, a few metres ahead of the ground at
+/// a land direction: the planet, the direction, and its frame (ground, up,
+/// forward).
+fn dug_site() -> (Planet, DVec3, [DVec3; 3]) {
     let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = land(&planet, 1, 0.52, 0.48);
     let ground = planet.surface_point(dir, 0.0);
@@ -1014,6 +1015,13 @@ fn edited_chunks_come_back_by_copy() {
         let centre = ground + side * (a * 20.0) + fwd * (b * 20.0 + 12.0) + up * 5.0;
         planet.apply(Brush { center: centre.to_array(), radius: 8.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     }
+    (planet, dir, [ground, up, fwd])
+}
+
+#[test]
+fn edited_chunks_come_back_by_copy() {
+    let Some(gpu) = gpu() else { return };
+    let (mut planet, dir, [ground, up, fwd]) = dug_site();
     let here = ground_view(&planet, dir, [320, 180]);
     let far = ground_view(&planet, land(&planet, 4, 0.3, 0.7), [320, 180]);
     let run = |planet: &Planet, kept_bytes: usize| {
@@ -1047,6 +1055,51 @@ fn edited_chunks_come_back_by_copy() {
     assert!(restored > 50 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
     assert!(none == 0 && regenerated > 50, "keeping nothing: {none} restored, {regenerated} generated");
     assert_eq!(same, pixels, "every pixel as before");
+}
+
+/// A saved world's edited chunks come back with it: packed (those resident
+/// too, `keep_resident`) and written into the edit snapshot, a world made
+/// from the loaded snapshot restores them by copy instead of generating
+/// them from the field and the history, and draws every pixel as the saved
+/// world did. Kept chunks of another history are refused.
+#[test]
+fn a_loaded_world_restores_its_edited_chunks() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir, _) = dug_site();
+    let here = ground_view(&planet, dir, [320, 180]);
+    let mut saved = World::new(&gpu, &planet);
+    let (hits, ..) = settle_counting(&gpu, &mut saved, &planet, &here);
+    saved.chunks.keep_resident();
+    for _ in 0..400 {
+        if saved.chunks.keeping() == 0 {
+            break;
+        }
+        saved.frame(&gpu, &planet, &here, None);
+    }
+    assert_eq!(saved.chunks.keeping(), 0, "packing the resident chunks");
+    let chunks = saved.chunks.kept_snapshot(&planet);
+    let snapshot = planet.snapshot_with_chunks(&chunks);
+    let plain = planet.snapshot().len();
+    let (loaded, chunks) = Planet::from_snapshot_with_chunks(PlanetRecipe::default(), &snapshot).unwrap();
+    let mut world = World::new(&gpu, &loaded);
+    let kept = world.chunks.load_kept(&loaded, &chunks).unwrap();
+    let (again, (restored, generated), keeping_ms, _) = settle_counting(&gpu, &mut world, &loaded, &here);
+    let mut cold = World::new(&gpu, &loaded);
+    let (_, (_, regenerated), generating_ms, _) = settle_counting(&gpu, &mut cold, &loaded, &here);
+    let same = hits.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+    eprintln!(
+        "LOADED {kept} kept chunks, {} KiB in the snapshot ({} KiB without); edited chunks {restored} restored, {generated} generated ({regenerated} without them); {keeping_ms:.1} ms of generation GPU ({generating_ms:.1} without); {same}/{} pixels as saved",
+        (snapshot.len() - plain) / 1024,
+        plain / 1024,
+        hits.len()
+    );
+    assert!(kept > 100 && restored > 100, "{kept} kept, {restored} restored");
+    assert!(generated * 4 < restored && regenerated > 100, "edited chunks: {generated} generated with the kept ones, {regenerated} without");
+    assert_eq!(same, hits.len(), "every pixel as saved");
+    // Another history: refused.
+    let mut other = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
+    other.apply(Brush { center: other.surface_point(dir, 0.0).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    assert!(World::new(&gpu, &other).chunks.load_kept(&other, &chunks).is_err());
 }
 
 /// Edits sealed under a running world: a crater and a mound too large to
