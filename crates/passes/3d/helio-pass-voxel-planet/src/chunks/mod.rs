@@ -89,6 +89,26 @@ const SLOPE_STRIDE: u64 = 1156;
 /// Level-4 tops a footprint's slopes read, at most (`SLOPE_LATTICE`: 38x38).
 const SLOPE_LATTICE: u64 = 1444;
 
+/// What a [`ChunkWorld`] holds, each within what the device binds: chunk
+/// slots (a chunk's 64-tree and leaves, about 7 KB each), detail pages
+/// (4 KiB each) and footprint pool slots (75 KB each, at least two
+/// batches'). The default is a game's: 131072 chunks, a world and its
+/// device about 2.9 GB of device memory (`HELIO_VOXEL_CHUNKS_SLOTS`,
+/// `HELIO_VOXEL_DETAIL_PAGES`).
+#[derive(Clone, Copy, Debug)]
+pub struct Capacity {
+    pub chunks: usize,
+    pub detail_pages: usize,
+    pub footprints: usize,
+}
+
+impl Default for Capacity {
+    fn default() -> Self {
+        let var = |name: &str, default: usize| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        Self { chunks: var("HELIO_VOXEL_CHUNKS_SLOTS", DEFAULT_CHUNKS), detail_pages: var("HELIO_VOXEL_DETAIL_PAGES", DEFAULT_DETAIL_PAGES), footprints: FOOTPRINT_POOL }
+    }
+}
+
 /// Footprints whose columns (and lean halos) stay on the GPU across frames,
 /// so a footprint's columns are computed once while it stays in use,
 /// whichever of its nodes are generated when (they were 60-75 % of a
@@ -1238,7 +1258,12 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
 }
 
 impl ChunkWorld {
+    /// A world of the default [`Capacity`].
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet) -> Self {
+        Self::with_capacity(device, queue, planet, Capacity::default())
+    }
+
+    pub fn with_capacity(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, capacity: Capacity) -> Self {
         let program = planet.field().program();
         let wide64 = device.features().contains(wgpu::Features::SHADER_INT64);
         let [(_, gen_source), (_, draw_source)] = shader_sources(planet.grid().is_plane(), &program, wide64, std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some());
@@ -1496,17 +1521,15 @@ impl ChunkWorld {
         let edits = planet.edits();
         let view = std::sync::Arc::new(edit_view(planet, 0, None));
         let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-        // Chunk slots (`HELIO_VOXEL_CHUNKS_SLOTS`) within what the device
-        // binds: the largest per-slot buffer is its mids (1 KiB), and the
-        // leaves are 8 bytes each.
+        // The capacity within what the device binds: the largest per-slot
+        // buffer is its mids (1 KiB), and the leaves are 8 bytes each.
         let limits = device.limits();
         let binding = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
-        let wanted = std::env::var("HELIO_VOXEL_CHUNKS_SLOTS").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_CHUNKS);
-        let max_chunks = wanted.min((binding / 1024) as usize).min((binding / (LEAVES_PER_SLOT * 8)) as usize).max(1024);
+        let max_chunks = capacity.chunks.min((binding / 1024) as usize).min((binding / (LEAVES_PER_SLOT * 8)) as usize).max(1024);
         let leaf_capacity = max_chunks as u64 * LEAVES_PER_SLOT;
-        let detail_capacity = std::env::var("HELIO_VOXEL_DETAIL_PAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_DETAIL_PAGES).min((binding / (DETAIL_WORDS * 4)) as usize).max(64) as u64;
+        let detail_capacity = capacity.detail_pages.min((binding / (DETAIL_WORDS * 4)) as usize).max(64) as u64;
         let table_slots = (max_chunks * TABLE_PER_SLOT).next_power_of_two().min((binding / 32).next_power_of_two() as usize / 2);
-        let pool_size = FOOTPRINT_POOL.min((binding / (TILE_COLUMNS * 16)) as usize).max(2 * TILE_BATCH);
+        let pool_size = capacity.footprints.min((binding / (TILE_COLUMNS * 16)) as usize).max(2 * TILE_BATCH);
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
         let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
         let (materials, detail) = crate::engine::material_table(&planet.field().appearance());

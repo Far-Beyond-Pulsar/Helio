@@ -4,7 +4,7 @@
 mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
-use helio_pass_voxel_planet::chunks::{residency, ChunkWorld, ResidencyConfig};
+use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, ResidencyConfig};
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::{Layer, LayerKind, TerrainLayers};
@@ -51,6 +51,13 @@ impl View {
 }
 
 /// Chunks of one planet and their frame counter.
+/// A test world's capacity: past the chunks the largest view settles with
+/// (12901, the hollowed core; the others 8683 at most), so tests running in
+/// parallel fit in a 12 GB GPU (1.1 GB a test with its device; a game's
+/// default world, 2.9 GB, paged eight parallel tests out of device memory
+/// and stalled them).
+const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 2048, footprints: 1024 };
+
 struct World {
     chunks: ChunkWorld,
     frame: u64,
@@ -58,7 +65,7 @@ struct World {
 
 impl World {
     fn new(gpu: &Gpu, planet: &Planet) -> Self {
-        Self { chunks: ChunkWorld::new(&gpu.device, &gpu.queue, planet), frame: 0 }
+        Self { chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, TEST_CAPACITY), frame: 0 }
     }
 
     /// The planet's edits now (a new world for a history it cannot follow).
