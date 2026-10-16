@@ -74,7 +74,7 @@ solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724
 solid-unreal = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced" }
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 thiserror = "2.0"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }

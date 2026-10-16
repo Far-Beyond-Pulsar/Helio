@@ -22,6 +22,7 @@ log       = { workspace = true }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
 serde_json = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }

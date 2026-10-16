@@ -146,6 +146,9 @@ struct LightmapAtlasRegion {
 @group(1) @binding(2) var                   scene_textures:     binding_array<texture_2d<f32>, 256>;
 @group(1) @binding(3) var                   scene_samplers:     binding_array<sampler, 256>;
 
+@group(2) @binding(0) var uv_reference_texture: texture_2d<f32>;
+@group(2) @binding(1) var uv_reference_sampler: sampler;
+
 struct Vertex {
     @location(0) position:       vec3<f32>,
     @location(1) bitangent_sign: f32,
@@ -511,11 +514,11 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let material = materials[input.material_id];
     let material_tex = material_texture_data(material,input.material_id);
 
-    // DEBUG MODE 1: Show UVs as colors
+    // DEBUG MODE 1: Show the shared UV reference texture across UV0.
     if globals.debug_mode == 1u {
-        let uv = input.tex_coords;
+        let grid = textureSample(uv_reference_texture, uv_reference_sampler, input.tex_coords);
         return GBufferOutput(
-            vec4<f32>(uv.x, uv.y, 0.0, 1.0),
+            vec4<f32>(grid.rgb, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),

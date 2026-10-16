@@ -97,6 +97,12 @@ pub struct GBufferPass {
     pipeline_layout: wgpu::PipelineLayout,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
+    /// Shared UV reference image used by the UV visualization mode.
+    uv_grid_texture: wgpu::Texture,
+    uv_grid_pixels: Vec<u8>,
+    uv_grid_extent: (u32, u32),
+    uv_grid_bind_group: wgpu::BindGroup,
+    uv_grid_uploaded: bool,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<[wgpu::Buffer; 7]>,
@@ -261,11 +267,17 @@ impl GBufferPass {
 
         // ── Bind Group Layout 1: material + textures ──────────────────────────
         let bind_group_layout_1 = create_material_bgl(device, material_binding);
+        let (uv_grid_texture, uv_grid_pixels, uv_grid_extent, uv_grid_bind_group_layout,
+            uv_grid_bind_group) = create_uv_grid(device);
 
         // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GBuffer PL"),
-            bind_group_layouts: &[Some(&bind_group_layout_0), Some(&bind_group_layout_1)],
+            bind_group_layouts: &[
+                Some(&bind_group_layout_0),
+                Some(&bind_group_layout_1),
+                Some(&uv_grid_bind_group_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -322,6 +334,11 @@ impl GBufferPass {
             pipeline_layout,
             bind_group_layout_0,
             bind_group_layout_1,
+            uv_grid_texture,
+            uv_grid_pixels,
+            uv_grid_extent,
+            uv_grid_bind_group,
+            uv_grid_uploaded: false,
             bind_group_0: None,
             bind_group_0_key: None,
             bind_group_1: None,
@@ -611,6 +628,29 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        if !self.uv_grid_uploaded {
+            let (width, height) = self.uv_grid_extent;
+            ctx.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.uv_grid_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &self.uv_grid_pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.uv_grid_uploaded = true;
+        }
         if let Some(pending_coordinate_spaces) = self.pending_coordinate_spaces.as_ref() {
             let mut words = [0.0f32; 32 * 16];
             words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
@@ -833,6 +873,7 @@ impl RenderPass for GBufferPass {
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
+        pass.set_bind_group(2, &self.uv_grid_bind_group, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(
@@ -878,7 +919,7 @@ impl RenderPass for GBufferPass {
             DebugViewDescriptor {
                 name: "UV Visualisation",
                 debug_mode: 1,
-                description: "Show UV coordinates as R=U, G=V",
+                description: "Sample the shared UV reference grid with UV0",
             },
             DebugViewDescriptor {
                 name: "Raw Texture",
@@ -1139,6 +1180,82 @@ impl GBufferPass {
 // Both GBufferPass and TransparentPass need the same material bind group layout.
 // This should be moved to a shared crate (helio-core or a shared pass crate) so neither
 // pass depends on the other for basic infrastructure.
+fn create_uv_grid(
+    device: &wgpu::Device,
+) -> (
+    wgpu::Texture,
+    Vec<u8>,
+    (u32, u32),
+    wgpu::BindGroupLayout,
+    wgpu::BindGroup,
+) {
+    const UV_GRID_BYTES: &[u8] = include_bytes!("../assets/UV_Grid_Sm.jpg");
+    let decoded = image::load_from_memory(UV_GRID_BYTES)
+        .expect("embedded UV reference image is valid")
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("GBuffer UV reference image"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("GBuffer UV reference sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("GBuffer UV reference layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("GBuffer UV reference bind group"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    (texture, decoded.into_raw(), (width, height), layout, bind_group)
+}
+
 pub fn create_material_bgl(
     device: &wgpu::Device,
     material_binding: helio_mats::MaterialBindingConfig,
