@@ -20,6 +20,10 @@ const MAX_SHADOW_FACES: usize = helio_pass_shadow_matrix::MAX_SHADOW_FACES;
 /// Must satisfy `device.limits().min_uniform_buffer_offset_alignment`, which is
 /// guaranteed to be ≤ 256 on every wgpu backend (Metal, Vulkan, DX12, WebGPU).
 const FACE_BUF_STRIDE: u64 = 256;
+/// Faces serviced each frame outside the shadow update budget: those whose
+/// cached static layer is current, so only the GPU's dirty flags decide
+/// whether they draw anything.
+const MAX_UNMETERED_FACES_PER_FRAME: usize = 192;
 
 /// Regions of `ShadowDirty`'s per-face draw counts (`face_geom_count_buf`),
 /// each `MAX_SHADOW_FACES` `u32`s.
@@ -594,6 +598,7 @@ impl RenderPass for ShadowPass {
         candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
         let mut updates = 0u32;
         let mut texels = 0u32;
+        let mut free_visits = 0usize;
         let slots = self
             .draw_slots
             .buffer(
@@ -610,13 +615,29 @@ impl RenderPass for ShadowPass {
             let tile = r.tiles[face % 6];
             let layers = 3;
             let cost = tile.size * tile.size * layers;
-            if updates + layers > data.budget.updates_per_frame
-                || texels + cost > data.budget.update_texels_per_frame
-            {
-                continue;
+            if static_dirty {
+                // A rebuild of the cached static layer: real work known to the
+                // CPU, so it is metered.
+                if updates + layers > data.budget.updates_per_frame
+                    || texels + cost > data.budget.update_texels_per_frame
+                {
+                    continue;
+                }
+                updates += layers;
+                texels += cost;
+            } else {
+                // Anything else is driven by the GPU's own dirty flags
+                // (`ShadowDirty`: a movable caster moved, a light changed): a
+                // clean face runs no vertices, a dirty one redraws only its
+                // dynamic layer. The CPU cannot tell which is which, so
+                // charging these to the budget let clean faces starve the
+                // dirty ones and a moving object's shadow updated in steps.
+                // They are visited every frame, up to a safety cap.
+                if free_visits >= MAX_UNMETERED_FACES_PER_FRAME {
+                    continue;
+                }
+                free_visits += 1;
             }
-            updates += layers;
-            texels += cost;
             let face_count = |region| helio_pass_gbuffer::GpuDrawCount {
                 buffer: &self.face_geom_count_buf,
                 offset: face_count_offset(region, face),
