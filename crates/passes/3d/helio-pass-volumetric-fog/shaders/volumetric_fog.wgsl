@@ -927,6 +927,32 @@ fn shaft_visibility_averaged(light_idx: u32, p: vec3<f32>) -> vec3<f32> {
     return sum * 0.25;
 }
 
+/// Multiple-scattering approximation (Wrenninge, "Art-directable multiple
+/// scattering"; used for production clouds and fog, e.g. Hillaire 2015/2020):
+/// octave n contributes a^n * T^(b^n) * phase(g * c^n), so light that has been
+/// scattered several times still reaches the interior of a dense medium, with a
+/// softer, less forward-peaked lobe. Single scattering alone leaves any thick
+/// self-shadowed volume black at its core. a = b = c = 0.5 conserves energy
+/// (a <= b); the sum is normalised so an unshadowed point (T = 1) keeps its
+/// single-scattering brightness.
+const MS_OCTAVES: u32 = 4u;
+fn multiple_scattering(transmittance: f32, cos_theta: f32, g: f32) -> f32 {
+    let ln_t = log(max(transmittance, 1e-30));
+    var sum = 0.0;
+    var norm = 0.0;
+    var a = 1.0;
+    var b = 1.0;
+    var c = 1.0;
+    for (var n = 0u; n < MS_OCTAVES; n++) {
+        sum += a * exp(ln_t * b) * helio_hg_phase(cos_theta, g * c);
+        norm += a;
+        a *= 0.5;
+        b *= 0.5;
+        c *= 0.5;
+    }
+    return sum / norm;
+}
+
 fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisotropy: f32) -> vec3<f32> {
     let light = lights[light_idx];
 
@@ -991,17 +1017,18 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     }
 
     // cos = 1 looking straight at the light, so g > 0 peaks into the sun.
-    let phase = helio_hg_phase(dot(view_dir, to_light), clamp(anisotropy, -0.95, 0.95));
+    let cos_theta = dot(view_dir, to_light);
+    let g = clamp(anisotropy, -0.95, 0.95);
     // ABI adapter: decay was unused; it now controls geometric fog-shadow
     // strength. Medium absorption remains physical even with geometry opt-out.
     let shadow_strength = finite_clamp(light.god_rays_decay, 0.0, 1.0);
     var vis = vec3<f32>(1.0);
     if shadow_strength > 0.0 { vis = mix(vec3<f32>(1.0), shaft_visibility_averaged(light_idx, p), shadow_strength); }
     if all(vis <= vec3<f32>(0.0)) || atten <= 0.0 { return vec3<f32>(0); }
-    vis *= medium_transmittance(eval_pos, to_light, shadow_distance);
+    let scatter = multiple_scattering(medium_transmittance(eval_pos, to_light, shadow_distance), cos_theta, g);
 
     let radiance = light.color_intensity.rgb * light.color_intensity.w;
-    return radiance * atten * phase * vis
+    return radiance * atten * scatter * vis
         * light.god_rays_weight * light.god_rays_exposure * light.god_rays_density;
 }
 
@@ -1054,6 +1081,44 @@ fn temporal_result(current: vec4<f32>, history: vec4<f32>, blend: f32, rejection
 
 // ── Injection ───────────────────────────────────────────────────────────────
 
+/// The medium averaged over the froxel's volume: 2x2x2 fixed sub-positions.
+/// A hard-edged box sampled once per cell is a binary function, so its outline
+/// becomes a staircase as wide as a froxel; averaging gives partial coverage at
+/// the boundary (a ramp) while staying fully deterministic frame to frame.
+/// Sums are of extensive quantities (scattering, emission, weighted phase), so
+/// the result is the true volume average, not an average of ratios.
+fn medium_averaged(gid: vec3<u32>, dims: vec3<u32>, centre: vec3<f32>, view_depth: f32) -> Medium {
+    var extinction = 0.0;
+    var scattering = vec3<f32>(0.0);
+    var emissive = vec3<f32>(0.0);
+    var phase_weight = 0.0;
+    var anisotropy = 0.0;
+    var smoke = 0.0;
+    for (var k = 0u; k < 8u; k++) {
+        let sub = vec3<f32>(select(0.25, 0.75, (k & 1u) != 0u), select(0.25, 0.75, (k & 2u) != 0u),
+            select(0.25, 0.75, (k & 4u) != 0u));
+        let q = froxel_world_pos((vec2<f32>(gid.xy) + sub.xy) / vec2<f32>(dims.xy),
+            (f32(gid.z) + sub.z) / f32(dims.z));
+        let m = medium_at(q, view_depth);
+        extinction += m.extinction;
+        scattering += m.albedo * m.extinction;
+        emissive += m.emissive;
+        anisotropy += m.anisotropy * m.scattering_weight;
+        phase_weight += m.scattering_weight;
+        smoke += m.smoke * m.extinction;
+    }
+    var result: Medium;
+    result.extinction = extinction * 0.125;
+    if extinction > 0.0 {
+        result.albedo = scattering / extinction;
+        result.smoke = clamp(smoke / extinction, 0.0, 1.0);
+    }
+    result.emissive = emissive * 0.125;
+    result.scattering_weight = phase_weight * 0.125;
+    if phase_weight > 0.0 { result.anisotropy = anisotropy / phase_weight; }
+    return result;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = media_list.grid;
@@ -1088,7 +1153,7 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
-    let medium = medium_at(p, view_depth);
+    let medium = medium_averaged(gid, dims, p, view_depth);
     // This froxel's ray segment (radial = view depth / cos) and half-width.
     let radial_scale = distance(p, cameras[0].position_near.xyz) / max(view_depth, 1e-6);
     sample_t0 = helio_froxel_view_depth_from_slice(f32(gid.z) / f32(dims.z), fog.fog_max_distance) * radial_scale;

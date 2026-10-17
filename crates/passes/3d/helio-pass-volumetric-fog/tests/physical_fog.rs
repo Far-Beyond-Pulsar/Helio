@@ -350,7 +350,9 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
                 (0, &scene.camera),
                 (1, &fog),
                 (2, &globals),
+                (11, &volumes),
                 (12, &indices),
+                (15, &l.buffer),
                 (16, &s.buffer),
                 (17, &legacy),
                 (18, &resolved),
@@ -1065,7 +1067,7 @@ fn smooth_case(local: bool) {
 
 /// Renders `poses` (camera positions looking down -Z, previous-frame matrices
 /// supplied correctly) and returns the four sampled columns of the last frame.
-fn render_columns(poses: &[glam::Vec3], jitter: bool) -> Vec<f32> {
+fn render_columns(poses: &[glam::Vec3], jitter: bool, half: f32) -> Vec<f32> {
     let (device, queue) = gpu();
     let mut scene = scene(device.clone(), queue.clone());
     let (mut world, mirror) = world(&scene);
@@ -1074,8 +1076,8 @@ fn render_columns(poses: &[glam::Vec3], jitter: bool) -> Vec<f32> {
     world.insert(
         entity,
         LocalFogVolumeComponent::new(
-            [-9., -9., -60.],
-            [9., 9., -6.],
+            [-half, -half, -60.],
+            [half, half, -6.],
             GlobalFogComponent { extinction: 0.15, ..Default::default() },
         ),
     );
@@ -1175,8 +1177,8 @@ fn moving_case(jitter: bool) {
     let end = glam::Vec3::new(0.0, 0.0, -14.0);
     let moving: Vec<glam::Vec3> =
         (0..60).map(|i| glam::Vec3::new(0.0, 0.0, -14.0 * i as f32 / 59.0)).collect();
-    let a = render_columns(&moving, jitter);
-    let b = render_columns(&[end; 8], false);
+    let a = render_columns(&moving, jitter, 9.0);
+    let b = render_columns(&[end; 8], false, 9.0);
     let mut worst = (0.0f32, 0usize, 0usize);
     for c in 0..4 {
         let mut line = Vec::new();
@@ -1195,4 +1197,17 @@ fn moving_case(jitter: bool) {
     }
     eprintln!("worst moving-vs-static error {:?}", worst);
     assert!(worst.0 < 0.1, "moving fog differs from the static reference: {worst:?}");
+}
+
+/// A bounded volume farther from the camera than the configured fog range must
+/// still render: the grid range grows to hold it instead of cutting it off.
+#[test]
+fn bounded_volume_beyond_configured_range_is_not_clipped() {
+    // Camera 100 m behind the volume's near face: it spans 106..160 m away,
+    // entirely past the 100 m range the settings request.
+    let columns = render_columns(&[glam::Vec3::new(0.0, 0.0, 100.0); 8], false, 400.0);
+    let last = 3 * 256 + 127;
+    let (radiance, transmittance) = (columns[last * 4], columns[last * 4 + 3]);
+    eprintln!("far volume: radiance {radiance}, transmittance {transmittance}");
+    assert!(radiance > 1e-3 && transmittance < 0.9, "distant volume was clipped by the fog far plane");
 }
