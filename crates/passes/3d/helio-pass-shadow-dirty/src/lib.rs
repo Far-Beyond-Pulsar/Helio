@@ -24,7 +24,10 @@ const WORKGROUP_SIZE: u32 = 64;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadowDirtyUniforms {
     face_count: u32,
-    _pad: [u32; 3],
+    /// Non-zero: track which pages of a face a moved caster touches
+    /// (`ShadowBudget::page_invalidation`). Zero dirties every page.
+    pages: u32,
+    _pad: [u32; 2],
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -56,6 +59,15 @@ pub struct ShadowDirtyPass {
     /// ShadowPass uses these as the `count_buffer` argument to
     /// `multi_draw_indexed_indirect_count`: 0 for a clean face.
     pub face_geom_count_buf: Arc<wgpu::Buffer>,
+
+    /// Per-face 8x8 page mask of the dynamic layer that must be redrawn, two
+    /// `u32`s per face (rows 0-3, then rows 4-7; bit `row * 8 + column`, with
+    /// rows counted up from the bottom of clip space). Accumulates with
+    /// `face_dirty_buf` until `ShadowPass` services the face.
+    pub face_pages_buf: Arc<wgpu::Buffer>,
+
+    /// Whether to track pages (`ShadowBudget::page_invalidation`).
+    pages: bool,
 
     /// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
     light_dirty_buf: Arc<wgpu::Buffer>,
@@ -196,6 +208,17 @@ impl ShadowDirtyPass {
                     },
                     count: None,
                 },
+                // 11: per-face dirty page masks
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -266,6 +289,13 @@ impl ShadowDirtyPass {
             mapped_at_creation: false,
         }));
 
+        let face_pages_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ShadowDirty/FacePages"),
+            size: (MAX_SHADOW_FACES * 8) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
         Self {
             pipeline,
             bgl,
@@ -274,6 +304,8 @@ impl ShadowDirtyPass {
             last_movable_count_buf,
             face_dirty_buf,
             face_geom_count_buf,
+            face_pages_buf,
+            pages: true,
             light_dirty_buf,
             bind_group: None,
             bind_group_key: None,
@@ -304,20 +336,26 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let face_count = ctx
+        let shadow = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
                 helio_core::resource_keys::shadow_matrices(),
-            )
+            );
+        let face_count = shadow
+            .as_ref()
             .map(|s| s.shadow_count)
             .unwrap_or(0)
             .min(MAX_SHADOW_FACES as u32);
+        if let Some(shadow) = &shadow {
+            self.pages = shadow.budget.page_invalidation;
+        }
 
         // The movable caster count, and whether it changed, are GPU-only:
         // see `last_movable_count_buf`.
         let u = ShadowDirtyUniforms {
             face_count,
-            _pad: [0; 3],
+            pages: u32::from(self.pages),
+            _pad: [0; 2],
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -433,6 +471,10 @@ impl RenderPass for ShadowDirtyPass {
                         wgpu::BindGroupEntry {
                             binding: 10,
                             resource: self.last_movable_count_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: self.face_pages_buf.as_entire_binding(),
                         },
                     ],
                 }),

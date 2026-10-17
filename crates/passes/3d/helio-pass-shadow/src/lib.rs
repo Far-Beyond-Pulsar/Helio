@@ -29,6 +29,8 @@ const MAX_UNMETERED_FACES_PER_FRAME: usize = 192;
 /// second word is the `ShadowDirty` bit its layer draws only when set (see
 /// `FACE_REGION_GATES`); `0` draws unconditionally.
 const FACE_REGIONS: usize = 3;
+/// Pages per face (an 8x8 grid): the instances of the depth-clear draw.
+const PAGES_PER_FACE: u32 = 64;
 /// Region 0: ungated (the face's cached static layer is being rebuilt).
 /// Region 1: gated on the dynamic bit. Region 2: gated on the static bit.
 const FACE_REGION_GATES: [u32; FACE_REGIONS] = [0, 1, 2];
@@ -111,6 +113,9 @@ pub struct ShadowPass {
     /// not known to be dirty on the CPU.
     #[allow(dead_code)]
     face_geom_count_buf: Arc<wgpu::Buffer>,
+    /// Per-face 8x8 page masks of the dynamic layer written by ShadowDirtyPass
+    /// (two words per face); a serviced face's words are cleared.
+    face_pages_buf: Arc<wgpu::Buffer>,
 
     /// True when the device supports MULTI_DRAW_INDIRECT_COUNT (Vulkan 1.2+, DX12 tier2).
     /// False on macOS Metal, WASM, and older Vulkan/DX12.  When false the ObjectDirty path
@@ -136,6 +141,7 @@ impl ShadowPass {
         queue: &wgpu::Queue,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
+        face_pages_buf: Arc<wgpu::Buffer>,
         _face_cull_indirect: Arc<wgpu::Buffer>,
         _face_cull_counts: Arc<wgpu::Buffer>,
         atlas_size: u32,
@@ -146,6 +152,7 @@ impl ShadowPass {
             queue,
             face_dirty_buf,
             face_geom_count_buf,
+            face_pages_buf,
             atlas_size,
         )
     }
@@ -154,6 +161,7 @@ impl ShadowPass {
         queue: &wgpu::Queue,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
+        face_pages_buf: Arc<wgpu::Buffer>,
         atlas_size: u32,
     ) -> Self {
         let atlas_layers = 1;
@@ -230,6 +238,13 @@ impl ShadowPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                // binding 7: per-face dirty page masks of the dynamic layer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
@@ -421,6 +436,7 @@ impl ShadowPass {
             compare_sampler,
             face_dirty_buf,
             face_geom_count_buf,
+            face_pages_buf,
             supports_multi_draw_count: device
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
@@ -575,6 +591,7 @@ impl RenderPass for ShadowPass {
                     },
                     wgpu::BindGroupEntry { binding: 5, resource: key[3].as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 6, resource: key[4].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: self.face_pages_buf.as_entire_binding() },
                 ],
             }));
             self.bg_0_key = Some(key);
@@ -702,7 +719,7 @@ impl RenderPass for ShadowPass {
                 pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
                 pass.set_pipeline(&self.depth_clear_pipeline);
                 pass.set_bind_group(0, bg, &[dynamic_offset]);
-                pass.draw(0..3, 0..1);
+                pass.draw(0..6, 0..PAGES_PER_FACE);
                 let disabled = r.flags & if is_static { 16 } else { 32 } != 0;
                 if !disabled {
                     pass.set_pipeline(&self.pipeline);
@@ -800,6 +817,7 @@ impl RenderPass for ShadowPass {
                 bytemuck::bytes_of(&2u32),
             );
             cmds.clear_buffer(&self.face_dirty_buf, face as u64 * 4, Some(4));
+            cmds.clear_buffer(&self.face_pages_buf, face as u64 * 8, Some(8));
             for region in [MOVABLE_COUNTS, STATIC_COUNTS, TRANSMISSIVE_COUNTS] {
                 cmds.clear_buffer(
                     &self.face_geom_count_buf,

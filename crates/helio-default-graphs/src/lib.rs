@@ -333,10 +333,11 @@ fn add_common_early_passes(
     let shadow_dirty_pass = ShadowDirtyPass::new(device, Arc::clone(&shadow_dirty_buf));
     let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
+    let face_pages_buf = Arc::clone(&shadow_dirty_pass.face_pages_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
 
     graph.add_pass(Box::new(ShadowPass::new_tiled(
-        device, queue, face_dirty_buf, face_geom_count_buf, shadow_atlas_size,
+        device, queue, face_dirty_buf, face_geom_count_buf, face_pages_buf, shadow_atlas_size,
     )));
 
     // The black background the sky (the atmosphere composite) and every

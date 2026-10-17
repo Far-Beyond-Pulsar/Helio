@@ -53,6 +53,48 @@ struct FaceIndex {
 @group(0) @binding(3) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
 
 @group(0) @binding(4) var<storage, read> face_dirty: array<u32>;
+/// Per-face 8x8 page masks of the dynamic layer (two words per face; see
+/// `face_pages` in `helio-pass-shadow-dirty/shaders/shadow_dirty.wgsl`).
+@group(0) @binding(7) var<storage, read> face_pages: array<vec2<u32>>;
+
+fn ratio_range(vlo: f32, vhi: f32, wlo: f32, whi: f32) -> vec2f {
+    let lo = select(vlo / wlo, vlo / whi, vlo >= 0.0);
+    let hi = select(vhi / whi, vhi / wlo, vhi >= 0.0);
+    return vec2f(lo, hi);
+}
+
+/// Conservative page mask of a world-space sphere in a face's clip space.
+/// Keep in step with `sphere_pages` in `shadow_dirty.wgsl`.
+fn sphere_pages(m: mat4x4f, center: vec3f, radius: f32) -> vec2u {
+    let c = m * vec4f(center, 1.0);
+    let row0 = vec3f(m[0][0], m[1][0], m[2][0]);
+    let row1 = vec3f(m[0][1], m[1][1], m[2][1]);
+    let row3 = vec3f(m[0][3], m[1][3], m[2][3]);
+    let ew = radius * length(row3);
+    let wlo = c.w - ew;
+    if !(wlo > 1e-4) { return vec2u(0xffffffffu, 0xffffffffu); }
+    let whi = c.w + ew;
+    let ex = radius * length(row0);
+    let ey = radius * length(row1);
+    let xr = ratio_range(c.x - ex, c.x + ex, wlo, whi);
+    let yr = ratio_range(c.y - ey, c.y + ey, wlo, whi);
+    let pad = 0.01;
+    if xr.y < -1.0 - pad || xr.x > 1.0 + pad || yr.y < -1.0 - pad || yr.x > 1.0 + pad {
+        return vec2u(0u);
+    }
+    let g = 8.0;
+    let x0 = u32(clamp(floor((xr.x - pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let x1 = u32(clamp(floor((xr.y + pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let y0 = u32(clamp(floor((yr.x - pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let y1 = u32(clamp(floor((yr.y + pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let cols = ((1u << (x1 - x0 + 1u)) - 1u) << x0;
+    var lo = 0u;
+    var hi = 0u;
+    for (var j = y0; j <= y1; j++) {
+        if j < 4u { lo |= cols << (j * 8u); } else { hi |= cols << ((j - 4u) * 8u); }
+    }
+    return vec2u(lo, hi);
+}
 struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
 @group(0) @binding(5) var<storage, read> skin_vertices: array<SkinVertex>;
 @group(0) @binding(6) var<storage, read> bone_palette: array<mat4x4<f32>>;
@@ -84,6 +126,15 @@ fn vs_main(
         if total > 0.00001 { local_position = (blended * (1.0 / total) * vec4f(position, 1.0)).xyz; }
     }
     let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];
+    if face._pad0 == 1u {
+        // Redrawing only the dirty pages of the dynamic layer: a caster whose
+        // bounds touch none of them has nothing to add, and the rest of its
+        // pixels already hold its depth.
+        let center = (space * vec4f(inst.bounds.xyz, 1.0)).xyz;
+        let radius = inst.bounds.w * max(length(space[0].xyz), max(length(space[1].xyz), length(space[2].xyz)));
+        let touched = sphere_pages(shadow_matrices[face.value].mat, center, radius) & face_pages[face.value];
+        if touched.x == 0u && touched.y == 0u { return vec4f(2, 2, 2, 1); }
+    }
     let world = space * (inst.transform * vec4<f32>(local_position, 1.0));
     return shadow_matrices[face.value].mat * world;
 }

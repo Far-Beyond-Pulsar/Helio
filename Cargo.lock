@@ -2071,10 +2071,12 @@ name = "helio-pass-shadow"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "helio-pass-gbuffer",
  "helio-pass-shadow-matrix",
  "log",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
