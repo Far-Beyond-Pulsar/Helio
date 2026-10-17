@@ -44,8 +44,8 @@ adjusted to the view aspect while staying within this budget. Both tiers share
 the same maximum-resolution allocations and integration output. The economical
 tier reduces lighting to one eighth as many samples, but does not reduce the
 60.75 MiB maximum grid allocation at 16:9. GPU settings changes need no readback
-or synchronous allocation. `light_samples=0` selects 4/12 samples for economical/
-high quality; explicit counts are clamped to 1–32.
+or synchronous allocation. `light_samples=0` selects 16/24 samples for economical/
+high quality; explicit counts are clamped to 8–32. Light-path optical depth through soft-edged media needs this many samples: with 4 the quadrature error forms diagonal creases and stripes.
 
 ## Producer and consumer contract
 

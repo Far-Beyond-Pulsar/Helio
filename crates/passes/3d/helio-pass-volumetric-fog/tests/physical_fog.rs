@@ -415,7 +415,7 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
     let v = sample(&world).0;
     assert_eq!(&v[9..12], &[192., 108., 128.]);
     assert_eq!(v[13], 0.0);
-    assert_eq!(v[15], 12.0);
+    assert_eq!(v[15], 24.0);
     world.remove::<LocalFogVolumeComponent>(local);
     let v = sample(&world).0;
     near(v[3], 0.1, 1e-6);
@@ -945,4 +945,254 @@ fn production_graph_native_fog_black_without_lights_emission_and_disable_clear_h
         &[0., 0., 0., 1.],
         "disabled quality settings produce vacuum"
     );
+}
+
+/// Uniform fog lit by one off-axis point light is a smooth field: the radiance
+/// each depth slice adds along a column must vary smoothly with depth. A dark
+/// stripe per slice (quadrature, history or resampling error) shows up as a
+/// dip in this series, so the test measures its relative roughness.
+#[test]
+fn uniform_fog_scattering_is_smooth_across_depth_slices() {
+    smooth_case(false);
+}
+
+#[test]
+fn local_fog_volume_scattering_is_smooth_across_depth_slices() {
+    smooth_case(true);
+}
+
+fn smooth_case(local: bool) {
+    let (device, queue) = gpu();
+    let mut scene = scene(device.clone(), queue.clone());
+    let (mut world, mirror) = world(&scene);
+    let entity = world.spawn();
+    let settings = world.spawn();
+    if local {
+        world.insert(
+            entity,
+            LocalFogVolumeComponent::new(
+                [-9., -9., -40.],
+                [9., 9., -6.],
+                GlobalFogComponent { extinction: 0.15, ..Default::default() },
+            ),
+        );
+    } else {
+        world.insert(entity, GlobalFogComponent { extinction: 0.02, ..Default::default() });
+    }
+    world.insert(
+        settings,
+        VolumetricFogSettingsComponent { max_distance: 100., ..Default::default() },
+    );
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+@group(0) @binding(0) var fog: texture_3d<f32>;
+@group(0) @binding(1) var<storage, read_write> result: array<vec4<f32>, 1024>;
+@compute @workgroup_size(1) fn main() {
+    let size = textureDimensions(fog);
+    for (var c = 0u; c < 4u; c++) {
+        let xy = vec2<u32>(size.x * (c + 1u) / 8u, size.y * (c + 2u) / 8u);
+        for (var z = 0u; z < min(size.z, 256u); z++) {
+            result[c * 256u + z] = textureLoad(fog, vec3<i32>(vec2<i32>(xy), i32(z)), 0);
+        }
+    }
+}
+"#
+            .into(),
+        ),
+    });
+    let output = buffer(&device, &[0; 16 * 1024], wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let mut light = point_light(0.);
+    for (word, value) in light[..3].iter_mut().zip([6.0f32, 3.0, -12.0]) {
+        *word = value.to_bits();
+    }
+    light[3] = 80f32.to_bits();
+    light[11] = 2000f32.to_bits();
+    let lights = buffer(&device, bytemuck::cast_slice(&light), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+    let mut graph = helio_core::RenderGraph::new_with_external_device(&device, &queue);
+    graph.add_pass(Box::new(VolumetricFogPass::new(&device)));
+    graph.add_pass(Box::new(ReadFog { pipeline: pipeline(&device, &shader, "main"), output: output.clone() }));
+    graph.lock(1280, 720);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 1280, height: 720, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target = target.create_view(&Default::default());
+    let mut columns = Vec::new();
+    for _ in 0..6 {
+        world.flush_gpu_mirror(&queue);
+        let handles = mirror.store().buffer_registry().keys().into_iter().filter_map(|key| {
+            mirror.store().resolve_buffer_handle(key).map(|handle| (key, handle))
+        });
+        scene.projection = SceneBufferProjection::from_handles(handles.chain(std::iter::once((
+            helio_core::BufferKey::of("scene_lights"),
+            helio_core::BufferHandle { buffer: lights.clone(), epoch: 0, row_bytes: 128, content_generation: scene.frame },
+        ))));
+        scene.frame += 1;
+        graph.execute(&mut scene, &target, &target).unwrap();
+        columns = floats(&read(&device, &queue, &output));
+    }
+    let mut worst = 0.0f32;
+    for c in 0..4 {
+        let col = &columns[c * 256 * 4..(c + 1) * 256 * 4];
+        let depth_slices = col.chunks(4).take_while(|t| t[3] > 0.0).count();
+        let delta: Vec<f32> = (1..depth_slices).map(|z| col[z * 4] - col[(z - 1) * 4]).collect();
+        let series: Vec<String> = delta.iter().map(|d| format!("{d:.4}")).collect();
+        eprintln!("column {c}: slices {depth_slices}\n  d = [{}]", series.join(", "));
+        for z in 1..delta.len().saturating_sub(1) {
+            let mean = 0.5 * (delta[z - 1] + delta[z + 1]);
+            // Below ~4e-3 the increment is a few ulps of the half-float running sum.
+            // The volume has hard faces; only judge slices wholly inside it.
+            if delta[z - 1] > 4e-3 && delta[z] > 4e-3 && delta[z + 1] > 4e-3 {
+                let rough = (delta[z] - mean).abs() / delta[z];
+                if rough > worst {
+                    worst = rough;
+                }
+            }
+        }
+    }
+    eprintln!("worst relative roughness {worst}");
+    assert!(columns[127 * 4] > 1e-3, "fog must be lit for the measurement to mean anything");
+    assert!(worst < 0.2, "per-slice scattering is not smooth: worst relative roughness {worst}");
+}
+
+/// Renders `poses` (camera positions looking down -Z, previous-frame matrices
+/// supplied correctly) and returns the four sampled columns of the last frame.
+fn render_columns(poses: &[glam::Vec3], jitter: bool) -> Vec<f32> {
+    let (device, queue) = gpu();
+    let mut scene = scene(device.clone(), queue.clone());
+    let (mut world, mirror) = world(&scene);
+    let entity = world.spawn();
+    let settings = world.spawn();
+    world.insert(
+        entity,
+        LocalFogVolumeComponent::new(
+            [-9., -9., -60.],
+            [9., 9., -6.],
+            GlobalFogComponent { extinction: 0.15, ..Default::default() },
+        ),
+    );
+    world.insert(settings, VolumetricFogSettingsComponent { max_distance: 100., ..Default::default() });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(
+            r#"
+@group(0) @binding(0) var fog: texture_3d<f32>;
+@group(0) @binding(1) var<storage, read_write> result: array<vec4<f32>, 1024>;
+@compute @workgroup_size(1) fn main() {
+    let size = textureDimensions(fog);
+    for (var c = 0u; c < 4u; c++) {
+        let xy = vec2<u32>(size.x * (c + 1u) / 8u, size.y * (c + 2u) / 8u);
+        for (var z = 0u; z < min(size.z, 256u); z++) {
+            result[c * 256u + z] = textureLoad(fog, vec3<i32>(vec2<i32>(xy), i32(z)), 0);
+        }
+    }
+}
+"#
+            .into(),
+        ),
+    });
+    let output = buffer(&device, &[0; 16 * 1024], wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let mut light = point_light(0.);
+    for (word, value) in light[..3].iter_mut().zip([6.0f32, 3.0, -20.0]) {
+        *word = value.to_bits();
+    }
+    light[3] = 80f32.to_bits();
+    light[11] = 2000f32.to_bits();
+    let lights = buffer(&device, bytemuck::cast_slice(&light), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+    let mut graph = helio_core::RenderGraph::new_with_external_device(&device, &queue);
+    graph.add_pass(Box::new(VolumetricFogPass::new(&device)));
+    graph.add_pass(Box::new(ReadFog { pipeline: pipeline(&device, &shader, "main"), output: output.clone() }));
+    graph.lock(1280, 720);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 1280, height: 720, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target = target.create_view(&Default::default());
+    let base_proj = helio_core::depth::perspective(1.0, 16.0 / 9.0, 0.1);
+    let jitter_of = |frame: usize| -> [f32; 2] {
+        if !jitter {
+            return [0.0; 2];
+        }
+        let j = helio_core::temporal::r1_r2_jitter(frame as u64);
+        [j[0] * 2.0 / 1280.0, j[1] * 2.0 / 720.0]
+    };
+    let jittered = |frame: usize| {
+        let j = jitter_of(frame);
+        glam::Mat4::from_translation(glam::Vec3::new(j[0], j[1], 0.0)) * base_proj
+    };
+    let mut previous = jittered(0) * glam::Mat4::from_translation(-poses[0]);
+    let mut columns = Vec::new();
+    for (frame, pos) in poses.iter().enumerate() {
+        let view = glam::Mat4::from_translation(-*pos);
+        let proj = jittered(frame + 1);
+        scene.data = GpuCameraUniforms::new(view, proj, *pos, 0.1, 100.0, frame as u32, jitter_of(frame + 1), previous);
+        scene.data.jitter_frame[3] = f32::from_bits(42);
+        queue.write_buffer(&scene.camera, 0, bytemuck::cast_slice(&[scene.data; 2]));
+        previous = proj * view;
+        world.flush_gpu_mirror(&queue);
+        let handles = mirror.store().buffer_registry().keys().into_iter().filter_map(|key| {
+            mirror.store().resolve_buffer_handle(key).map(|handle| (key, handle))
+        });
+        scene.projection = SceneBufferProjection::from_handles(handles.chain(std::iter::once((
+            helio_core::BufferKey::of("scene_lights"),
+            helio_core::BufferHandle { buffer: lights.clone(), epoch: 0, row_bytes: 128, content_generation: scene.frame },
+        ))));
+        scene.frame += 1;
+        graph.execute(&mut scene, &target, &target).unwrap();
+        columns = floats(&read(&device, &queue, &output));
+    }
+    columns
+}
+
+/// A camera dollying through fog must converge to what a static camera at the
+/// same pose renders. History is only 5% new per frame, so any reprojection
+/// error is locked in as a pattern that slides through the medium.
+#[test]
+fn moving_camera_fog_matches_static_reference() {
+    moving_case(false);
+}
+
+#[test]
+fn moving_camera_fog_with_tsr_jitter_matches_static_reference() {
+    moving_case(true);
+}
+
+fn moving_case(jitter: bool) {
+    let end = glam::Vec3::new(0.0, 0.0, -14.0);
+    let moving: Vec<glam::Vec3> =
+        (0..60).map(|i| glam::Vec3::new(0.0, 0.0, -14.0 * i as f32 / 59.0)).collect();
+    let a = render_columns(&moving, jitter);
+    let b = render_columns(&[end; 8], false);
+    let mut worst = (0.0f32, 0usize, 0usize);
+    for c in 0..4 {
+        let mut line = Vec::new();
+        for z in 0..128 {
+            let i = (c * 256 + z) * 4;
+            let (x, y) = (a[i], b[i]);
+            if y > 0.02 {
+                let rel = (x - y) / y;
+                line.push(format!("{rel:+.2}"));
+                if rel.abs() > worst.0 {
+                    worst = (rel.abs(), c, z);
+                }
+            }
+        }
+        eprintln!("column {c} relative error per slice: [{}]", line.join(", "));
+    }
+    eprintln!("worst moving-vs-static error {:?}", worst);
+    assert!(worst.0 < 0.1, "moving fog differs from the static reference: {worst:?}");
 }

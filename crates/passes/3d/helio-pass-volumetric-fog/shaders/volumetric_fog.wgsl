@@ -208,6 +208,14 @@ const NONE_ROW: u32 = 0xffffffffu;
 var<workgroup> wg_legacy_row: atomic<u32>;
 var<workgroup> wg_exact_row: atomic<u32>;
 var<workgroup> wg_fallback_row: atomic<u32>;
+/// Farthest distance (f32 bits; positive floats order as u32) from the camera to
+/// any active bounded medium.
+var<workgroup> wg_media_far: atomic<u32>;
+
+/// Largest camera distance to the box: the farthest corner.
+fn farthest_corner_distance(camera: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> f32 {
+    return length(max(abs(camera - lo), abs(camera - hi)));
+}
 
 @compute @workgroup_size(256)
 fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
@@ -215,9 +223,24 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
         atomicStore(&wg_legacy_row, NONE_ROW);
         atomicStore(&wg_exact_row, NONE_ROW);
         atomicStore(&wg_fallback_row, NONE_ROW);
+        atomicStore(&wg_media_far, 0u);
     }
     workgroupBarrier();
     let view_id = bitcast<u32>(cameras[0].jitter_frame.w);
+    // Bounded media must never be cut by the grid's far plane: moving away from
+    // a volume would otherwise shear it off slice by slice until nothing is
+    // left. The grid range grows to hold every active volume.
+    let camera_world = cameras[0].position_near.xyz + fog_globals.world_origin.xyz;
+    for (var i = lid; i < arrayLength(&volumes); i += SCAN_THREADS) {
+        if legacy_volume_active(volumes[i]) {
+            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera_world, volumes[i].bounds_min.xyz, volumes[i].bounds_max.xyz)));
+        }
+    }
+    for (var i = lid; i < arrayLength(&local_media); i += SCAN_THREADS) {
+        if local_medium_active(local_media[i]) {
+            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera_world, local_media[i].bounds_min.xyz, local_media[i].bounds_max.xyz)));
+        }
+    }
     for (var i = lid; i < arrayLength(&legacy_media); i += SCAN_THREADS) {
         if legacy_media[i].fog_enabled != 0u { atomicMin(&wg_legacy_row, i); }
     }
@@ -247,7 +270,7 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     media_list.temporal_blend = finite_clamp(fog_globals.temporal_blend, 0.01, 1.0);
     media_list.history_rejection = 0.8;
     media_list.light_max_distance = range;
-    media_list.light_samples = 4u;
+    media_list.light_samples = 16u;
     if selected != 0xffffffffu {
         let s = render_settings[selected];
         quality = min(s.quality, 1u);
@@ -257,7 +280,14 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
         media_list.temporal_blend = finite_clamp(s.temporal_blend, 0.01, 1.0);
         media_list.history_rejection = finite_clamp(s.history_rejection, 0.01, 1.0);
         media_list.light_max_distance = finite_clamp(s.light_max_distance, 0.1, 100000.0);
-        media_list.light_samples = select(clamp(s.light_samples, 1u, 32u), select(4u, 12u, quality == 1u), s.light_samples == 0u);
+        media_list.light_samples = select(clamp(s.light_samples, 8u, 32u), select(16u, 24u, quality == 1u), s.light_samples == 0u);
+    }
+    // Grow (never shrink) the range to the farthest bounded medium, in coarse
+    // geometric steps so it does not change every frame as the camera moves:
+    // a changed range invalidates the whole history.
+    let media_far = bitcast<f32>(atomicLoad(&wg_media_far));
+    if media_far > range {
+        range = min(exp2(ceil(log2(media_far * 1.05) * 2.0) * 0.5), 20000.0);
     }
     range = finite_clamp(range, HELIO_FROXEL_NEAR + 0.01, 100000.0);
     media_list.history_compatible = select(0u, 1u,
@@ -607,7 +637,9 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
         let v = volumes[volume_index(i)];
         if !legacy_volume_active(v) { continue; }
         if any(p < v.bounds_min.xyz) || any(p > v.bounds_max.xyz) { continue; }
-        if view_depth < v.medium.fog_start_distance || view_depth > v.medium.fog_max_distance { continue; }
+        // A bounded volume's box is its extent; its authored max distance is the
+        // grid range (resolve), not a second cutoff that would clip the box.
+        if view_depth < v.medium.fog_start_distance { continue; }
         let edge = min(p - v.bounds_min.xyz, v.bounds_max.xyz - p);
         let fade = smoothstep(0.0, max(v.blend_radius, 0.001), min(edge.x, min(edge.y, edge.z)));
         var shape = fade;
