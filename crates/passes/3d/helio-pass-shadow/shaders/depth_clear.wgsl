@@ -16,7 +16,8 @@ struct Face { value:u32, dynamic:u32, pad0:u32, pad1:u32 }
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
-    if face.dynamic != 0u && dirty[face.value] == 0u { return vec4f(2,2,2,1); }
+    // `dynamic` is the dirty bit this layer is gated on (1 dynamic, 2 static); 0 clears unconditionally.
+    if face.dynamic != 0u && (dirty[face.value] & face.dynamic) == 0u { return vec4f(2,2,2,1); }
     // Classic "giant triangle" trick: three vertices in clip space whose
     // convex hull covers the entire NDC cube [-1,1]² with z = 1.0 (far plane).
     let x = f32((vid << 1u) & 2u) * 2.0 - 1.0;

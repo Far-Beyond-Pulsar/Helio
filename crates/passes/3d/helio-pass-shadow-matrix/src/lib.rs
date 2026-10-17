@@ -465,13 +465,30 @@ impl RenderPass for ShadowMatrixPass {
         }
         let generation = lights.map(|l| (l.epoch, l.content_generation));
         if generation != self.last_generation {
+            // The lights buffer is joined from the scene-wide `Transform`
+            // column, so its `content_generation` moves whenever ANY object
+            // moves, light or not (a gizmo drag moves it every frame).
+            // Treating that as "every light changed" bumped every caster's
+            // generation, which marks every face changed (a full, top
+            // priority rebuild of both layers) and bumped the nonce, which
+            // discards the residency solve in flight. Both starved the
+            // per-frame shadow budget while an object was being dragged, so
+            // its shadow only caught up once it stopped. A moved light is
+            // already caught per caster on the GPU (`light_dirty`, from the
+            // matrix hashes), and added, removed or retuned lights come back
+            // from the re-solve as owner/tile/flag changes, so only the
+            // re-solve is requested here. A reallocation (a new `epoch`)
+            // does invalidate everything.
+            let reallocated = generation.map(|g| g.0) != self.last_generation.map(|g| g.0);
             self.rebuild = true;
             self.commit = true;
             self.last_generation = generation;
             self.next_rebuild = 0;
-            self.nonce = self.nonce.wrapping_add(1);
-            for g in &mut self.generations {
-                *g = g.wrapping_add(1);
+            if reallocated {
+                self.nonce = self.nonce.wrapping_add(1);
+                for g in &mut self.generations {
+                    *g = g.wrapping_add(1);
+                }
             }
         }
         self.poll(ctx.queue);

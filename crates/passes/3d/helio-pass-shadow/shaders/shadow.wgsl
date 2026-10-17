@@ -67,7 +67,8 @@ fn vs_main(
     // on every backend (`helio_pass_gbuffer::draw_slots`).
     @location(15)            slot:     u32,
 ) -> @builtin(position) vec4<f32> {
-    if face._pad0 != 0u && face_dirty[face.value] == 0u { return vec4f(2,2,2,1); }
+    // `_pad0` is the dirty bit this layer is gated on (1 dynamic, 2 static); 0 draws unconditionally.
+    if face._pad0 != 0u && (face_dirty[face.value] & face._pad0) == 0u { return vec4f(2,2,2,1); }
     let inst  = instances[slot];
     var local_position = position;
     if inst.bone_palette_count > 0u {

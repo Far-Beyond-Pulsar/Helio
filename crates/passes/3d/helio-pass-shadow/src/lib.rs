@@ -25,6 +25,30 @@ const FACE_BUF_STRIDE: u64 = 256;
 /// whether they draw anything.
 const MAX_UNMETERED_FACES_PER_FRAME: usize = 192;
 
+/// Regions of the face-index buffer, each `MAX_SHADOW_FACES` slots. The slot's
+/// second word is the `ShadowDirty` bit its layer draws only when set (see
+/// `FACE_REGION_GATES`); `0` draws unconditionally.
+const FACE_REGIONS: usize = 3;
+/// Region 0: ungated (the face's cached static layer is being rebuilt).
+/// Region 1: gated on the dynamic bit. Region 2: gated on the static bit.
+const FACE_REGION_GATES: [u32; FACE_REGIONS] = [0, 1, 2];
+
+/// Dynamic offset into the face-index buffer for one layer of `face`. A face
+/// whose static layer is being rebuilt draws both layers unconditionally;
+/// otherwise each layer draws only if `ShadowDirty` marked that layer, so a
+/// moving movable caster redraws the dynamic layer and leaves the cached
+/// static layer (and glass, which follows it) alone.
+fn face_idx_offset(face: usize, static_dirty: bool, static_layer: bool) -> u32 {
+    let region = if static_dirty {
+        0
+    } else if static_layer {
+        2
+    } else {
+        1
+    };
+    ((region * MAX_SHADOW_FACES + face) as u64 * FACE_BUF_STRIDE) as u32
+}
+
 /// Regions of `ShadowDirty`'s per-face draw counts (`face_geom_count_buf`),
 /// each `MAX_SHADOW_FACES` `u32`s.
 const MOVABLE_COUNTS: usize = 0;
@@ -313,17 +337,17 @@ impl ShadowPass {
 
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
-        let mut face_idx_data = vec![0u8; 2 * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
-        for i in 0..2 * MAX_SHADOW_FACES {
+        let mut face_idx_data = vec![0u8; FACE_REGIONS * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
+        for i in 0..FACE_REGIONS * MAX_SHADOW_FACES {
             let offset = i * FACE_BUF_STRIDE as usize;
             face_idx_data[offset..offset + 4]
                 .copy_from_slice(&((i % MAX_SHADOW_FACES) as u32).to_ne_bytes());
             face_idx_data[offset + 4..offset + 8]
-                .copy_from_slice(&u32::from(i >= MAX_SHADOW_FACES).to_ne_bytes());
+                .copy_from_slice(&FACE_REGION_GATES[i / MAX_SHADOW_FACES].to_ne_bytes());
         }
         let face_idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/FaceIdx"),
-            size: 2 * MAX_SHADOW_FACES as u64 * FACE_BUF_STRIDE,
+            size: (FACE_REGIONS * MAX_SHADOW_FACES) as u64 * FACE_BUF_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -644,9 +668,7 @@ impl RenderPass for ShadowPass {
             };
             let mut cmds = ctx.graphics_cmds();
             for is_static in [true, false] {
-                let dynamic_offset = ((face + if static_dirty { 0 } else { MAX_SHADOW_FACES })
-                    as u64
-                    * FACE_BUF_STRIDE) as u32;
+                let dynamic_offset = face_idx_offset(face, static_dirty, is_static);
                 let view = if is_static {
                     &self.static_face_views[0]
                 } else {
@@ -741,8 +763,7 @@ impl RenderPass for ShadowPass {
                         materials.map(|m| &m.buffer),
                         bg,
                         0,
-                        ((face + if static_dirty { 0 } else { MAX_SHADOW_FACES }) as u64
-                            * FACE_BUF_STRIDE) as u32,
+                        face_idx_offset(face, static_dirty, true),
                         depth,
                         batch.shadow_transmissive_indirect,
                         // Static layer: whether there is glass at all

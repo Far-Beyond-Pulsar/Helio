@@ -127,8 +127,18 @@ fn hash_matrix(m:mat4x4f,h:u32)->u32 {
     for(var c=0u;c<4u;c++){for(var r=0u;r<4u;r++){result=(result^bitcast<u32>(m[c][r]))*16777619u;}}
     return result;
 }
-fn dirty(face:u32) {
-    atomicStore(&face_dirty[face],1u);
+/// `face_dirty` bits: the layer of the shadow atlas that must be redrawn.
+const DIRTY_DYNAMIC: u32 = 1u;
+const DIRTY_STATIC: u32 = 2u;
+/// A movable caster moved, appeared or vanished: only the dynamic layer holds
+/// movable casters, so the cached static layer (and glass) is left alone.
+fn dirty_dynamic(face:u32) {
+    atomicOr(&face_dirty[face],DIRTY_DYNAMIC);
+    atomicStore(&face_geom_count[face],movable_count());
+}
+/// The light itself changed: both layers are drawn from its matrix.
+fn dirty_all(face:u32) {
+    atomicOr(&face_dirty[face],DIRTY_DYNAMIC|DIRTY_STATIC);
     atomicStore(&face_geom_count[face],movable_count());
     atomicStore(&face_geom_count[MAX_FACES+face],static_count());
     atomicStore(&face_geom_count[2u*MAX_FACES+face],transmissive_count());
@@ -143,15 +153,21 @@ fn main(@builtin(global_invocation_id) gid:vec3u) {
         last_movable_count[0]=movable_count();
         for(var caster=0u;caster<(count+5u)/6u;caster++) {
             let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
-            if moved || force_dirty_all {
-                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty(f);}
+            if moved {
+                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty_all(f);}
+            } else if force_dirty_all {
+                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty_dynamic(f);}
             }
         }
         // A face dirtied on an earlier frame and deferred by the shadow
         // budget is drawn to these counts: keep them this frame's, as the
         // movable count is kept by dirtying everything when it changes.
         for(var f=0u;f<count;f++) {
-            if atomicLoad(&face_dirty[f])!=0u {
+            let pending=atomicLoad(&face_dirty[f]);
+            if (pending&DIRTY_DYNAMIC)!=0u {
+                atomicStore(&face_geom_count[f],movable_count());
+            }
+            if (pending&DIRTY_STATIC)!=0u {
                 atomicStore(&face_geom_count[MAX_FACES+f],static_count());
                 atomicStore(&face_geom_count[2u*MAX_FACES+f],transmissive_count());
             }
@@ -180,6 +196,6 @@ fn main(@builtin(global_invocation_id) gid:vec3u) {
         if shadow_mats[f].atlas.z==0.0 {continue;}
         let planes=extract_frustum_planes(shadow_mats[f].mat);
         if sphere_vs_frustum(bounds.xyz,bounds.w,planes)
-            || sphere_vs_frustum(previous.bounds.xyz,previous.bounds.w,planes) {dirty(f);}
+            || sphere_vs_frustum(previous.bounds.xyz,previous.bounds.w,planes) {dirty_dynamic(f);}
     }
 }
