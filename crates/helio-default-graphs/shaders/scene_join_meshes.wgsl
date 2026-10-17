@@ -64,8 +64,9 @@ struct StaticObjectRow {
 struct MeshJoinUniforms {
     instance_rows: u32,
     output_rows: u32,
-    _pad0: u32,
-    _pad1: u32,
+    // Where the per-instance list links start in `link` (after the per-owner heads).
+    link_base: u32,
+    run: u32,
     // The frame's world origin (hi + lo), zero outside camera-relative frames.
     origin_hi: vec4<f32>,
     origin_lo: vec4<f32>,
@@ -86,6 +87,10 @@ struct MeshJoinUniforms {
 @group(0) @binding(12) var<storage, read> sections: array<Section>;
 @group(0) @binding(13) var<storage, read_write> objects_out: array<StaticObjectRow>;
 @group(0) @binding(14) var<storage, read_write> materials_out: array<Material>;
+// Per-owner heads then per-instance links of a linked list of the placed
+// instances each owner carries (`head + 1`, 0 ends the list), rebuilt by every
+// full join so a later moved-owner join can find an owner's instances.
+@group(0) @binding(15) var<storage, read_write> link: array<atomic<u32>>;
 
 /// The owner entity of instance `row` when the instance should draw, else
 /// `NO_OWNER`: attached and enabled, its recorded owner generation matches
@@ -141,6 +146,10 @@ fn cs_join_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
     if row < arrayLength(&palette_handles) { palette = palette_handles[row]; }
     if draws.count == 0u || vertices.count == 0u || indices.count == 0u {
         return;
+    }
+    if owner < u.link_base && u.link_base + row < arrayLength(&link) {
+        let previous = atomicExchange(&link[owner], row + 1u);
+        atomicStore(&link[u.link_base + row], previous);
     }
     // The instance's own generation, offset by one so a live row's
     // identity is never zero.

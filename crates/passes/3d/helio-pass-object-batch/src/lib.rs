@@ -32,6 +32,9 @@ const WG: u32 = 256;
 /// OBJECTS_STRUCTURE_KEY`): moves only when objects are added, removed or
 /// change what they are, not when they move.
 const STRUCTURE_KEY: &str = "scene_objects_structure";
+/// The scene join's list of the object slots a frame that only moved objects
+/// rewrote (`helio_default_graphs::scene_join::OBJECTS_MOVED_KEY`).
+const MOVED_KEY: &str = "scene_objects_moved";
 const SORT_BITS: usize = 32;
 /// Byte offset of the one-workgroup-per-group dispatch size in
 /// `dispatch_args_groups` (see `cs_prepare_groups`).
@@ -222,10 +225,53 @@ fn make_compute_pipeline(
     })
 }
 
+fn make_compute_pipeline_with(
+    device: &wgpu::Device,
+    label: &str,
+    bgls: &[Option<&wgpu::BindGroupLayout>],
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+) -> wgpu::ComputePipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: bgls,
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        module,
+        entry_point: Some(entry_point),
+        compilation_options: Default::default(),
+        cache: None,
+    })
+}
+
 /// One CPU-visible material-class-batched draw range, mirroring the CPU
 /// reference's `(material_class, graph_hash, start, count)` tuple exactly
 /// -- `start`/`count` index the `draw_calls` array, not `instances`.
+/// What [`ObjectBatchPass::frame_for_testing`] recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchRun {
+    /// Nothing the pass reads changed.
+    Skipped,
+    /// The full sort and grouping.
+    Full,
+    /// Only objects moved: every sorted slot's placement re-gathered.
+    Placements,
+    /// Only objects moved, and the join named which: just those re-gathered.
+    Moved,
+}
+
 pub type RangeTuple = (u32, u64, u32, u32);
+
+/// The bind groups of one moved-slot list: for the gather, and for sizing its
+/// dispatch (the latter also holds the indirect arguments as storage, which
+/// the gather itself must not bind).
+struct MovedBinds {
+    gather: wgpu::BindGroup,
+    args: wgpu::BindGroup,
+}
 
 struct BindGroupLayouts {
     gather: wgpu::BindGroupLayout,
@@ -234,6 +280,8 @@ struct BindGroupLayouts {
     scan: wgpu::BindGroupLayout,
     scatter: wgpu::BindGroupLayout,
     final_gather: wgpu::BindGroupLayout,
+    moved: wgpu::BindGroupLayout,
+    moved_args: wgpu::BindGroupLayout,
     group_local_scan: wgpu::BindGroupLayout,
     group_block_scan: wgpu::BindGroupLayout,
     group_write: wgpu::BindGroupLayout,
@@ -253,6 +301,8 @@ struct Pipelines {
     scan: wgpu::ComputePipeline,
     scatter: wgpu::ComputePipeline,
     final_gather: wgpu::ComputePipeline,
+    moved_args: wgpu::ComputePipeline,
+    final_gather_moved: wgpu::ComputePipeline,
     group_local_scan: wgpu::ComputePipeline,
     group_block_scan: wgpu::ComputePipeline,
     group_write: wgpu::ComputePipeline,
@@ -302,6 +352,11 @@ struct ScratchBuffers {
     /// Per `static_objects` row: last drawn transform + identity, for
     /// per-frame motion vectors (see `object_batch.wgsl`'s `PrevRow`).
     prev_rows: wgpu::Buffer,
+    /// Per `static_objects` row: its position in the sorted order, from the
+    /// last full run (see `cs_final_gather`).
+    sorted_position: wgpu::Buffer,
+    /// Dispatch size of the moved-rows gather, derived from the moved list.
+    moved_args: wgpu::Buffer,
 }
 
 impl ScratchBuffers {
@@ -370,6 +425,8 @@ impl ScratchBuffers {
             ),
             shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 16),
             prev_rows: create_storage_buffer(device, "ObjBatch PrevRows", n * PREV_ROW_BYTES),
+            sorted_position: create_storage_buffer(device, "ObjBatch SortedPosition", n * 4),
+            moved_args: create_indirect_buffer(device, "ObjBatch MovedArgs", 16),
         }
     }
 }
@@ -430,6 +487,13 @@ pub struct ObjectBatchPass {
     /// so only the final gather (which copies each object's transform into
     /// its sorted slot) is recorded, not the whole sort.
     transform_only: bool,
+    /// Decided in `prepare`, consumed by `execute`: the placements run can be
+    /// limited to `moved_list`'s slots (see `record_moved_placements`).
+    use_moved: bool,
+    /// The scene join's moved-slot list this frame, when it has one.
+    moved_list: Option<wgpu::Buffer>,
+    /// Bind groups of the moved-slot gather, by list buffer.
+    moved_bgs: Vec<(wgpu::Buffer, MovedBinds)>,
     /// A full run has not been copied for readback yet (the copy trails the
     /// run by a frame; see `poll_and_kick_off`).
     readback_pending: bool,
@@ -508,7 +572,16 @@ impl ObjectBatchPass {
                     bgl_entry_storage(3, cs, false),
                     bgl_entry_storage(4, cs, false),
                     bgl_entry_storage(5, cs, false),
+                    bgl_entry_storage(6, cs, false),
                 ],
+            }),
+            moved: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ObjBatch Moved BGL"),
+                entries: &[bgl_entry_storage(0, cs, true)],
+            }),
+            moved_args: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ObjBatch MovedArgs BGL"),
+                entries: &[bgl_entry_storage(0, cs, true), bgl_entry_storage(1, cs, false)],
             }),
             group_local_scan: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ObjBatch GroupLocalScan BGL"),
@@ -660,6 +733,20 @@ impl ObjectBatchPass {
                 &shader,
                 "cs_final_gather",
             ),
+            moved_args: make_compute_pipeline_with(
+                device,
+                "ObjBatch MovedArgs",
+                &[None, Some(&bgls.moved_args)],
+                &shader,
+                "cs_moved_args",
+            ),
+            final_gather_moved: make_compute_pipeline_with(
+                device,
+                "ObjBatch FinalGatherMoved",
+                &[Some(&bgls.final_gather), Some(&bgls.moved)],
+                &shader,
+                "cs_final_gather_moved",
+            ),
             group_local_scan: make_compute_pipeline(
                 device,
                 "ObjBatch GroupLocalScan",
@@ -796,6 +883,9 @@ impl ObjectBatchPass {
             skip_this_frame: false,
             last_structure: None,
             transform_only: false,
+            use_moved: false,
+            moved_list: None,
+            moved_bgs: Vec::new(),
             readback_pending: false,
             fallback_buf,
             draw_counts: Some(create_draw_counts_buffer(
@@ -848,6 +938,7 @@ impl ObjectBatchPass {
         static_objects: &wgpu::Buffer,
         materials: &wgpu::Buffer,
     ) {
+        self.moved_bgs.clear();
         let s = &self.scratch;
         let cs = wgpu::ShaderStages::COMPUTE;
         let _ = cs;
@@ -931,6 +1022,7 @@ impl ObjectBatchPass {
                 bg_entry(3, &s.instances_out),
                 bg_entry(4, &s.aabbs_out),
                 bg_entry(5, &s.prev_rows),
+                bg_entry(6, &s.sorted_position),
             ],
         }));
 
@@ -1064,10 +1156,46 @@ impl ObjectBatchPass {
         }));
     }
 
-    /// Records the full 8-stage dispatch sequence. Shared by the graph-
-    /// integrated `execute()` and [`Self::run_once_for_testing`] -- same
-    /// "test records identically to the real path" discipline `helio-pass-
-    /// sprite-cull`'s `record`/`run_once_for_testing` split uses.
+    fn moved_binds(&self, device: &wgpu::Device, list: &wgpu::Buffer) -> MovedBinds {
+        MovedBinds {
+            gather: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ObjBatch Moved BG"),
+                layout: &self.bgls.moved,
+                entries: &[bg_entry(0, list)],
+            }),
+            args: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ObjBatch MovedArgs BG"),
+                layout: &self.bgls.moved_args,
+                entries: &[bg_entry(0, list), bg_entry(1, &self.scratch.moved_args)],
+            }),
+        }
+    }
+
+    /// Like `record_placements`, but only for the slots in the scene join's
+    /// moved list: the cost follows how many objects moved, not how many
+    /// there are. The sorted order and groups stand, as for the full
+    /// placements run, and each moved row is re-gathered into the sorted slot
+    /// the last full run gave it (`sorted_position`).
+    fn record_moved_placements(&self, cmds: &mut CommandRecorder<'_>, moved: &MovedBinds) {
+        {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ObjBatch MovedArgs"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.moved_args);
+            pass.set_bind_group(1, &moved.args, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ObjBatch FinalGather (moved)"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.final_gather_moved);
+        pass.set_bind_group(0, self.final_gather_bg.as_ref().unwrap(), &[]);
+        pass.set_bind_group(1, &moved.gather, &[]);
+        pass.dispatch_workgroups_indirect(&self.scratch.moved_args, 0);
+    }
+
     /// A run after objects only moved. The sort order, the groups, the draw
     /// calls and the shadow partitions are all functions of what the objects
     /// are, not where they are, and the last full run left them standing in
@@ -1077,6 +1205,16 @@ impl ObjectBatchPass {
     /// indices the last full run kept. One dispatch instead of the sort's
     /// hundred.
     fn record_placements(&self, cmds: &mut CommandRecorder<'_>) {
+        if self.use_moved {
+            if let Some((_, moved)) = self
+                .moved_list
+                .as_ref()
+                .and_then(|list| self.moved_bgs.iter().find(|(buffer, _)| buffer == list))
+            {
+                self.record_moved_placements(cmds, moved);
+                return;
+            }
+        }
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ObjBatch FinalGather (placements)"),
             timestamp_writes: None,
@@ -1086,6 +1224,10 @@ impl ObjectBatchPass {
         pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
     }
 
+    /// Records the full 8-stage dispatch sequence. Shared by the graph-
+    /// integrated `execute()` and [`Self::run_once_for_testing`] -- same
+    /// "test records identically to the real path" discipline `helio-pass-
+    /// sprite-cull`'s `record`/`run_once_for_testing` split uses.
     fn record(&self, cmds: &mut CommandRecorder<'_>, capacity: u32) {
         cmds.clear_buffer(&self.scratch.gather_count, 0, None);
         cmds.clear_buffer(&self.scratch.group_count, 0, None);
@@ -1399,6 +1541,59 @@ impl ObjectBatchPass {
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
 
+    /// Like [`Self::run_placements_for_testing`] but gathering only the slots
+    /// in `moved_list` (`[total, fresh, slot, ..]`, the scene join's
+    /// `OBJECTS_MOVED_KEY` layout), blocking until the GPU is done.
+    pub fn run_moved_placements_for_testing(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        static_objects: &wgpu::Buffer,
+        materials: &wgpu::Buffer,
+        moved_list: &wgpu::Buffer,
+    ) {
+        self.rebuild_bind_groups(device, static_objects, materials);
+        let binds = self.moved_binds(device, moved_list);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ObjBatch Moved Placements Test Encoder"),
+        });
+        self.record_moved_placements(&mut CommandRecorder::from_encoder(&mut encoder), &binds);
+        queue.submit([encoder.finish()]);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
+    /// One frame of what the graph does with this pass -- `prepare`, then
+    /// what `execute` records -- on `encoder`, returning which kind of run it
+    /// recorded. For tests and benchmarks driving the pass outside a
+    /// `RenderGraph`.
+    pub fn frame_for_testing(
+        &mut self,
+        ctx: &PrepareContext,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> BatchRun {
+        self.prepare(ctx).expect("object batch prepare");
+        if self.skip_this_frame {
+            return BatchRun::Skipped;
+        }
+        let capacity = ctx
+            .scene_buffers
+            .get(BufferKey::of("static_objects"))
+            .map_or(0, |h| {
+                (h.buffer.size() / std::mem::size_of::<StaticObjectComponent>() as u64) as u32
+            });
+        let mut cmds = CommandRecorder::from_encoder(encoder);
+        if !self.transform_only {
+            self.record(&mut cmds, capacity);
+            BatchRun::Full
+        } else if self.use_moved {
+            self.record_placements(&mut cmds);
+            BatchRun::Moved
+        } else {
+            self.record_placements(&mut cmds);
+            BatchRun::Placements
+        }
+    }
+
     /// Runs one step of the asynchronous range/count readback that
     /// `prepare()` performs each frame, for tests driving the pass outside a
     /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
@@ -1560,10 +1755,30 @@ impl RenderPass for ObjectBatchPass {
             self.settled = true;
             // The repeat run after a change stays the kind it was.
         } else {
+            let previous_inputs = self.last_inputs;
             self.last_inputs = Some(inputs);
             self.settled = false;
             self.skip_this_frame = false;
             self.transform_only = placements_only;
+            // The join's moved-slot list covers this change when it was
+            // built for exactly this step of the objects' content (and the
+            // list before it, which settles last frame's movers' motion
+            // vectors, was complete): then only those slots need gathering.
+            let moved = ctx.scene_buffers.get(BufferKey::of(MOVED_KEY));
+            let follows_last = previous_inputs.is_some_and(|last| last[1].wrapping_add(1) == inputs[1]);
+            self.use_moved = placements_only
+                && follows_last
+                && moved.is_some_and(|h| h.content_generation != 0 && h.content_generation == inputs[1]);
+            if let (true, Some(list)) = (self.use_moved, moved) {
+                if !self.moved_bgs.iter().any(|(buffer, _)| *buffer == list.buffer) {
+                    let binds = self.moved_binds(ctx.device, &list.buffer);
+                    if self.moved_bgs.len() >= 4 {
+                        self.moved_bgs.remove(0);
+                    }
+                    self.moved_bgs.push((list.buffer.clone(), binds));
+                }
+                self.moved_list = Some(list.buffer.clone());
+            }
         }
         if !self.skip_this_frame && !self.transform_only {
             self.readback_pending = true;

@@ -481,7 +481,7 @@ pub use profiling::{
     RenderPassTiming, RenderTimingSnapshot,
 };
 pub use scene_input::{
-    BufferHandle, BufferKey, SceneBufferProjection, SceneInput, ENTITY_GENERATIONS_KEY,
+    BufferHandle, BufferKey, FlushedRows, SceneBufferProjection, SceneInput, ENTITY_GENERATIONS_KEY,
 };
 pub use scene_derivation::{
     run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,

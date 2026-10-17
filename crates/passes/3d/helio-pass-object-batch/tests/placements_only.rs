@@ -261,3 +261,94 @@ fn a_placements_run_matches_a_full_run_over_the_moved_rows() {
         "moving objects does not change the grouping a full run finds"
     );
 }
+/// Gathering only the moved slots must leave every output byte-identical to
+/// gathering all of them: instances, bounds, previous transforms and the
+/// motion-vector state a later frame reads.
+#[test]
+fn a_moved_rows_run_is_byte_identical_to_a_placements_run_over_every_row() {
+    let Some((device, queue)) = device() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: object batch moved rows");
+        return;
+    };
+    use wgpu::util::DeviceExt;
+    let mut rng = Rng(0xbeef);
+    let before = rows(&mut rng, 1500);
+    let mut after = before.clone();
+    let mut moved_slots = Vec::new();
+    for (i, row) in after.iter_mut().enumerate() {
+        if rng.next_u32() % 9 == 0 {
+            let (x, y, z) = (rng.unit() * 50.0, rng.unit() * 50.0, rng.unit() * 50.0);
+            row.transform = translation(x, y, z);
+            row.bounds[0] = x;
+            row.bounds[1] = y;
+            row.bounds[2] = z;
+            moved_slots.push(i as u32);
+        }
+    }
+    assert!(moved_slots.len() > 100);
+    let materials = materials();
+    let buffer = |rows: &[StaticObjectComponent]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(rows),
+            usage: wgpu::BufferUsages::STORAGE,
+        })
+    };
+    let materials_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: bytemuck::cast_slice(&materials),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    // `[total, fresh, slots..]`, with a stale slot and a duplicate-free tail
+    // of slots that did not move (they gather to the same bytes).
+    let mut list = vec![moved_slots.len() as u32 + 1, moved_slots.len() as u32 + 1];
+    list.extend_from_slice(&moved_slots);
+    list.push(u32::MAX); // a slot past every row: must be ignored
+    let list_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: bytemuck::cast_slice(&list),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let mut all = ObjectBatchPass::new(&device);
+    all.run_once_for_testing(&device, &queue, &buffer(&before), &materials_buf, before.len() as u32);
+    all.run_placements_for_testing(&device, &queue, &buffer(&after), &materials_buf);
+
+    let mut only_moved = ObjectBatchPass::new(&device);
+    only_moved.run_once_for_testing(&device, &queue, &buffer(&before), &materials_buf, before.len() as u32);
+    only_moved.run_moved_placements_for_testing(
+        &device,
+        &queue,
+        &buffer(&after),
+        &materials_buf,
+        &list_buf,
+    );
+
+    // Two separate full runs may order equal sort keys differently, so slots
+    // are matched by where their object is (unique after the move), not by
+    // index.
+    let live = after.len();
+    let by_position = |instances: &[u8], aabbs: &[u8]| {
+        (0..live)
+            .map(|i| {
+                let slot = &instances[i * STRIDE..(i + 1) * STRIDE];
+                (slot[112..124].to_vec(), (slot.to_vec(), aabbs[i * 32..(i + 1) * 32].to_vec()))
+            })
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    let all_rows = by_position(
+        &read(&device, &queue, all.instances_buffer()),
+        &read(&device, &queue, all.aabbs_buffer()),
+    );
+    let moved_only = by_position(
+        &read(&device, &queue, only_moved.instances_buffer()),
+        &read(&device, &queue, only_moved.aabbs_buffer()),
+    );
+    assert_eq!(all_rows.len(), live, "every object has its own position");
+    assert_eq!(moved_only.len(), live);
+    for (position, (slot, aabb)) in &all_rows {
+        let (other_slot, other_aabb) = &moved_only[position];
+        assert_eq!(slot, other_slot, "instance at {position:?} differs");
+        assert_eq!(aabb, other_aabb, "aabb at {position:?} differs");
+    }
+}
