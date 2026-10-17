@@ -29,6 +29,11 @@ struct CasterParams {
 /// longer gap only delays new lights getting their maps (shadow pop-in); the
 /// readback in flight already bounds the rate.
 const REBUILD_INTERVAL_FRAMES: u64 = 1;
+/// Minimum frames between residency solves when the only reason is that the
+/// lights buffer was rewritten (its generation moves whenever any object
+/// moves, see prepare): a new, removed or retuned light waits at most this
+/// long for its shadow. A camera move or a reallocation still solves at once.
+const GENERATION_REBUILD_INTERVAL_FRAMES: u64 = 8;
 const TABLE_BYTES: u64 = std::mem::size_of::<ResidencyTable>() as u64;
 type MapDone = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
 enum Readback {
@@ -65,6 +70,8 @@ pub struct ShadowMatrixPass {
     frame: u64,
     generations: [u64; MAX_SHADOW_CASTERS],
     last_generation: Option<(u64, u64)>,
+    /// rame when the last residency solve was dispatched.
+    last_solve_frame: u64,
     last_view: [f32; 16],
     last_position: [f32; 4],
     rebuild: bool,
@@ -251,6 +258,7 @@ impl ShadowMatrixPass {
             frame: 0,
             generations: [1; MAX_SHADOW_CASTERS],
             last_generation: None,
+            last_solve_frame: 0,
             last_view: [0.0; 16],
             last_position: [0.0; 4],
             rebuild: true,
@@ -424,6 +432,7 @@ impl RenderPass for ShadowMatrixPass {
         None
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        helio_core::cpu_scope!("ShadowMatrix: prepare");
         let lights = ctx
             .scene_buffers
             .get(helio_core::BufferKey::of("scene_lights"));
@@ -483,15 +492,22 @@ impl RenderPass for ShadowMatrixPass {
             self.rebuild = true;
             self.commit = true;
             self.last_generation = generation;
-            self.next_rebuild = 0;
             if reallocated {
+                self.next_rebuild = 0;
                 self.nonce = self.nonce.wrapping_add(1);
                 for g in &mut self.generations {
                     *g = g.wrapping_add(1);
                 }
+            } else {
+                self.next_rebuild = self
+                    .next_rebuild
+                    .max(self.last_solve_frame + GENERATION_REBUILD_INTERVAL_FRAMES);
             }
         }
-        self.poll(ctx.queue);
+        {
+            helio_core::cpu_scope!("ShadowMatrix: poll residency readback");
+            self.poll(ctx.queue);
+        }
         let camera = &ctx.camera_data;
         let significant = camera
             .view_proj
@@ -586,31 +602,41 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        helio_core::cpu_scope!("ShadowMatrix: execute");
         let mut cmds = ctx.graphics_cmds();
         if self.rows == 0 {
             return Ok(());
         }
         if self.commit {
+            ctx.begin_gpu_scope(&mut cmds, "Shadow Matrix: commit residency");
             self.dispatch(&mut cmds, 3, self.rows.div_ceil(64));
+            ctx.end_gpu_scope(&mut cmds, "Shadow Matrix: commit residency");
             self.commit = false;
         }
         if self.rebuilding {
             self.rebuilding = false;
             self.next_rebuild = self.frame + REBUILD_INTERVAL_FRAMES;
+            self.last_solve_frame = self.frame;
+            ctx.begin_gpu_scope(&mut cmds, "Shadow Matrix: residency solve");
             self.dispatch(&mut cmds, 0, self.rows.div_ceil(64));
             self.dispatch(&mut cmds, 1, 1);
             self.dispatch(&mut cmds, 2, 1);
             cmds.copy_buffer_to_buffer(&self.proposed, 0, &self.staging, 0, TABLE_BYTES);
+            ctx.end_gpu_scope(&mut cmds, "Shadow Matrix: residency solve");
             self.readback = Readback::Copied(self.nonce);
             self.rebuild = false;
         }
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Shadow matrices"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.dispatch_workgroups(self.rows.div_ceil(64), 1, 1);
+        ctx.begin_gpu_scope(&mut cmds, "Shadow Matrix: build matrices");
+        {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Shadow matrices"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.dispatch_workgroups(self.rows.div_ceil(64), 1, 1);
+        }
+        ctx.end_gpu_scope(&mut cmds, "Shadow Matrix: build matrices");
         Ok(())
     }
 }

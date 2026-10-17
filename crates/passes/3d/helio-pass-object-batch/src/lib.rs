@@ -28,6 +28,10 @@ mod readback;
 pub use gpu_types::*;
 
 const WG: u32 = 256;
+/// The scene join's structure marker (`helio_default_graphs::scene_join::
+/// OBJECTS_STRUCTURE_KEY`): moves only when objects are added, removed or
+/// change what they are, not when they move.
+const STRUCTURE_KEY: &str = "scene_objects_structure";
 const SORT_BITS: usize = 32;
 /// Byte offset of the one-workgroup-per-group dispatch size in
 /// `dispatch_args_groups` (see `cs_prepare_groups`).
@@ -417,6 +421,18 @@ pub struct ObjectBatchPass {
     settled: bool,
     /// Decided in `prepare`, consumed by `execute`.
     skip_this_frame: bool,
+    /// The scene join's structure marker (`(epoch, content_generation)`)
+    /// the last recorded run saw. While it is unchanged the sort, the
+    /// grouping and the draw tables stand, and a change in the object rows
+    /// can only be objects that moved.
+    last_structure: Option<(u64, u64)>,
+    /// Decided in `prepare`, consumed by `execute`: only placements changed,
+    /// so only the final gather (which copies each object's transform into
+    /// its sorted slot) is recorded, not the whole sort.
+    transform_only: bool,
+    /// A full run has not been copied for readback yet (the copy trails the
+    /// run by a frame; see `poll_and_kick_off`).
+    readback_pending: bool,
 
     /// Fallback bound in `static_objects`'/`materials`' place before either
     /// has ever been resolved (mirrors every other SceneDB-direct pass's
@@ -778,6 +794,9 @@ impl ObjectBatchPass {
             last_inputs: None,
             settled: false,
             skip_this_frame: false,
+            last_structure: None,
+            transform_only: false,
+            readback_pending: false,
             fallback_buf,
             draw_counts: Some(create_draw_counts_buffer(
                 device,
@@ -1049,6 +1068,24 @@ impl ObjectBatchPass {
     /// integrated `execute()` and [`Self::run_once_for_testing`] -- same
     /// "test records identically to the real path" discipline `helio-pass-
     /// sprite-cull`'s `record`/`run_once_for_testing` split uses.
+    /// A run after objects only moved. The sort order, the groups, the draw
+    /// calls and the shadow partitions are all functions of what the objects
+    /// are, not where they are, and the last full run left them standing in
+    /// this pass's persistent buffers. All that is stale is each sorted
+    /// slot's copy of its object's transform, bounds and previous transform,
+    /// which the final gather rewrites from the live rows through the sorted
+    /// indices the last full run kept. One dispatch instead of the sort's
+    /// hundred.
+    fn record_placements(&self, cmds: &mut CommandRecorder<'_>) {
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ObjBatch FinalGather (placements)"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.final_gather);
+        pass.set_bind_group(0, self.final_gather_bg.as_ref().unwrap(), &[]);
+        pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
+    }
+
     fn record(&self, cmds: &mut CommandRecorder<'_>, capacity: u32) {
         cmds.clear_buffer(&self.scratch.gather_count, 0, None);
         cmds.clear_buffer(&self.scratch.group_count, 0, None);
@@ -1341,6 +1378,27 @@ impl ObjectBatchPass {
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
 
+    /// Runs only the placements update (see `record_placements`) over
+    /// `static_objects`, blocking until the GPU is done: for tests that
+    /// compare it against a full run. A full run must have happened first
+    /// ([`Self::run_once_for_testing`]) over rows that differ from these only
+    /// in where the objects are.
+    pub fn run_placements_for_testing(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        static_objects: &wgpu::Buffer,
+        materials: &wgpu::Buffer,
+    ) {
+        self.rebuild_bind_groups(device, static_objects, materials);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ObjBatch Placements Test Encoder"),
+        });
+        self.record_placements(&mut CommandRecorder::from_encoder(&mut encoder));
+        queue.submit([encoder.finish()]);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
     /// Runs one step of the asynchronous range/count readback that
     /// `prepare()` performs each frame, for tests driving the pass outside a
     /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
@@ -1482,13 +1540,33 @@ impl RenderPass for ObjectBatchPass {
             capacity as u64,
             self.scratch_capacity as u64,
         ];
+        // The scene join's structure marker, when a join feeds this pass:
+        // without one every change is treated as structural.
+        let structure = ctx
+            .scene_buffers
+            .get(BufferKey::of(STRUCTURE_KEY))
+            .map(|h| (h.epoch, h.content_generation));
+        // Only the objects' rows moved (not the materials, capacities or the
+        // structure): same objects, same meshes and materials, same sort
+        // order. Their placements are all that differ.
+        let placements_only = structure.is_some()
+            && structure == self.last_structure
+            && self.last_inputs.is_some_and(|last| {
+                last[0] == inputs[0] && last[1] != inputs[1] && last[2..] == inputs[2..]
+            });
+        self.last_structure = structure;
         if self.last_inputs == Some(inputs) {
             self.skip_this_frame = self.settled;
             self.settled = true;
+            // The repeat run after a change stays the kind it was.
         } else {
             self.last_inputs = Some(inputs);
             self.settled = false;
             self.skip_this_frame = false;
+            self.transform_only = placements_only;
+        }
+        if !self.skip_this_frame && !self.transform_only {
+            self.readback_pending = true;
         }
 
         ctx.write_buffer(
@@ -1509,14 +1587,21 @@ impl RenderPass for ObjectBatchPass {
             );
         }
 
-        self.readback
-            .poll_and_kick_off(
-                ctx.device,
-                ctx.queue,
-                &self.scratch,
-                !self.skip_this_frame,
-                ctx.owns_device,
-            );
+        // The tables read back (counts, ranges) come from the sort and the
+        // grouping, so a run that only moved objects has nothing new to copy,
+        // unless an earlier full run's results are still waiting to be.
+        let kick_off_copy =
+            !self.skip_this_frame && (!self.transform_only || self.readback_pending);
+        let kicked = self.readback.poll_and_kick_off(
+            ctx.device,
+            ctx.queue,
+            &self.scratch,
+            kick_off_copy,
+            ctx.owns_device,
+        );
+        if kicked {
+            self.readback_pending = false;
+        }
         Ok(())
     }
 
@@ -1533,7 +1618,11 @@ impl RenderPass for ObjectBatchPass {
                 })
                 .unwrap_or(0)
         };
-        self.record(&mut ctx.graphics_cmds(), capacity);
+        if self.transform_only {
+            self.record_placements(&mut ctx.graphics_cmds());
+        } else {
+            self.record(&mut ctx.graphics_cmds(), capacity);
+        }
         Ok(())
     }
 }

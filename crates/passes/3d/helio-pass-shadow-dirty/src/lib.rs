@@ -18,6 +18,9 @@ pub const FACE_GEOM_COUNT_REGIONS: usize = 3;
 
 const WORKGROUP_SIZE: u32 = 64;
 
+/// Bytes of one `Changed` entry in the shader (three 16-byte vectors).
+const CHANGED_BYTES: usize = 48;
+
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -33,7 +36,9 @@ struct ShadowDirtyUniforms {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct ShadowDirtyPass {
-    pipeline: wgpu::ComputePipeline,
+    /// `casters`, `detect`, `faces`, `finish` (see `shadow_dirty.wgsl`), run in
+    /// that order.
+    pipelines: [wgpu::ComputePipeline; 4],
     #[allow(dead_code)]
     bgl: wgpu::BindGroupLayout,
 
@@ -75,7 +80,12 @@ pub struct ShadowDirtyPass {
     /// Bind group (lazy; rebuilt whenever the `instances` or `shadow_mats` buffer
     /// pointer changes due to `GrowableBuffer` reallocation).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<[wgpu::Buffer; 6]>,
+    bind_group_key: Option<[wgpu::Buffer; 7]>,
+
+    /// Movable draws whose instances changed this frame (`Changed` in the
+    /// shader), one entry each, and how many.
+    changed_buf: wgpu::Buffer,
+    changed_count_buf: wgpu::Buffer,
 }
 
 impl ShadowDirtyPass {
@@ -208,6 +218,28 @@ impl ShadowDirtyPass {
                     },
                     count: None,
                 },
+                // 12: movable draws that changed this frame
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 13: how many of them
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // 11: per-face dirty page masks
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
@@ -229,14 +261,22 @@ impl ShadowDirtyPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("ShadowDirty Pipeline"),
-            layout: Some(&pl),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = |entry_point: &'static str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry_point),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let pipelines = [
+            pipeline("casters"),
+            pipeline("detect"),
+            pipeline("faces"),
+            pipeline("finish"),
+        ];
 
         // ── Buffers ───────────────────────────────────────────────────────────
 
@@ -296,8 +336,25 @@ impl ShadowDirtyPass {
             mapped_at_creation: false,
         }));
 
+        // One `Changed` (48 bytes) per movable draw slot; grown with the draw
+        // capacity in `execute`.
+        let changed_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ShadowDirty/Changed"),
+            size: (MAX_SHADOW_FACES * CHANGED_BYTES) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let changed_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ShadowDirty/ChangedCount"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
-            pipeline,
+            pipelines,
+            changed_buf,
+            changed_count_buf,
             bgl,
             uniform_buf,
             prev_positions_buf,
@@ -336,6 +393,7 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        helio_core::cpu_scope!("ShadowDirty: prepare");
         let shadow = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
@@ -363,6 +421,7 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        helio_core::cpu_scope!("ShadowDirty: execute");
         let Some(batch) = ctx
             .registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
@@ -392,6 +451,16 @@ impl RenderPass for ShadowDirtyPass {
             });
             self.bind_group_key = None;
         }
+        let changed_required = (u64::from(draw_capacity.max(1)) + 1) * CHANGED_BYTES as u64;
+        if changed_required > self.changed_buf.size() {
+            self.changed_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("ShadowDirty/Changed"),
+                size: changed_required.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            self.bind_group_key = None;
+        }
         let Some(shadow_data) = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
@@ -417,9 +486,11 @@ impl RenderPass for ShadowDirtyPass {
             (*self.light_dirty_buf).clone(),
             coords.coordinate_spaces.clone(),
             batch.draw_counts_gpu.clone(),
+            self.changed_buf.clone(),
         ];
 
         if self.bind_group_key.as_ref() != Some(&key) {
+            helio_core::cpu_scope!("ShadowDirty: rebuild bind group");
             self.bind_group = Some(
                 ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("ShadowDirty BG"),
@@ -476,6 +547,14 @@ impl RenderPass for ShadowDirtyPass {
                             binding: 11,
                             resource: self.face_pages_buf.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 12,
+                            resource: self.changed_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 13,
+                            resource: self.changed_count_buf.as_entire_binding(),
+                        },
                     ],
                 }),
             );
@@ -494,16 +573,31 @@ impl RenderPass for ShadowDirtyPass {
         // produce; threads past this frame's live count return at once.
         // At least one thread, so a change to an empty movable set still
         // passes through the force-dirty path.
-        let thread_count = draw_capacity.max(1);
-        let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
+        let draw_groups = draw_capacity.max(1).div_ceil(WORKGROUP_SIZE);
+        let face_groups = face_count.div_ceil(WORKGROUP_SIZE).max(1);
+        let caster_groups = face_count.div_ceil(6).div_ceil(WORKGROUP_SIZE).max(1);
 
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("ShadowDirty"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, bg, &[]);
-        pass.dispatch_workgroups(workgroups, 1, 1);
+        // The changed-draw list starts empty each frame.
+        cmds.clear_buffer(&self.changed_count_buf, 0, None);
+        ctx.begin_gpu_scope(&mut cmds, "Shadow Dirty: detect");
+        {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ShadowDirty"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(0, bg, &[]);
+            // Dispatches in one pass run in order with their storage writes
+            // visible to the next: casters -> detect -> faces -> finish.
+            for (pipeline, groups) in self
+                .pipelines
+                .iter()
+                .zip([caster_groups, draw_groups, face_groups, 1])
+            {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(groups, 1, 1);
+            }
+        }
+        ctx.end_gpu_scope(&mut cmds, "Shadow Dirty: detect");
         Ok(())
     }
 }

@@ -116,6 +116,12 @@ pub struct SceneJoinKeys {
 pub const OBJECTS_KEY: BufferKey = BufferKey::of("static_objects");
 pub const MATERIALS_KEY: BufferKey = BufferKey::of("materials");
 pub const LIGHTS_KEY: BufferKey = BufferKey::of("scene_lights");
+/// A marker whose `content_generation` moves only when the *structure* of the
+/// object rows changes (objects added, removed, hidden, or their mesh,
+/// material or flags changed), not when objects merely move. The object batch
+/// keeps its sort and grouping while this is unchanged. The name is shared
+/// with `helio-pass-object-batch`, which reads it.
+pub const OBJECTS_STRUCTURE_KEY: BufferKey = BufferKey::of("scene_objects_structure");
 pub const BILLBOARDS_KEY: BufferKey = BufferKey::of("billboard_instances");
 
 #[repr(C)]
@@ -214,7 +220,17 @@ pub struct SceneJoin {
     materials: Output,
     lights: Output,
     billboard_rows: Output,
-    last_mesh_inputs: Option<u64>,
+    /// Signatures of the mesh join's inputs at its last run, split into the
+    /// structure and the placement (see `derive`).
+    last_structure_inputs: Option<u64>,
+    last_placement_inputs: Option<u64>,
+    /// Moves with every structural change; published on `structure_marker`.
+    structure_generation: u64,
+    structure_marker: wgpu::Buffer,
+    /// The buffers the mesh join was last bound to, and the bind group made
+    /// from them.
+    mesh_bind: Option<(Vec<wgpu::Buffer>, wgpu::BindGroup)>,
+    light_bind: Option<(Vec<wgpu::Buffer>, wgpu::BindGroup)>,
     last_light_inputs: Option<u64>,
     reported: Vec<BufferKey>,
 }
@@ -270,7 +286,17 @@ impl SceneJoin {
             materials: Output::new(device, "Scene Join Materials", MATERIAL_ROW_BYTES),
             lights: Output::new(device, "Scene Join Lights", LIGHT_ROW_BYTES),
             billboard_rows: Output::new(device, "Scene Join Billboards", BILLBOARD_ROW_BYTES),
-            last_mesh_inputs: None,
+            last_structure_inputs: None,
+            last_placement_inputs: None,
+            structure_generation: 0,
+            structure_marker: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Scene Join Structure Marker"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            mesh_bind: None,
+            light_bind: None,
             last_light_inputs: None,
             reported: Vec::new(),
         }
@@ -369,11 +395,18 @@ impl SceneDerivation for SceneJoin {
         let output_rows = sections.map_or(0, |h| rows_of(h, MESH_SECTION_ROW_BYTES));
         let grew = self.objects.ensure(ctx.device, output_rows)
             | self.materials.ensure(ctx.device, output_rows);
-        let mesh_inputs = [
+        // What the join's rows are made of splits in two. The *structure*
+        // (which objects exist, their meshes, materials, flags, visibility)
+        // changes rarely and decides how the object batch sorts and groups
+        // them. The *placement* (the shared `Transform` column and the world
+        // origin) changes every frame an object is dragged or simulated, and
+        // only moves numbers inside rows already sorted and grouped. Telling
+        // the two apart is what lets moving one object cost one object's
+        // worth of downstream work instead of re-sorting the scene.
+        let structure_inputs = [
             owners,
             generations,
             hidden,
-            transforms,
             vertex_handles,
             index_handles,
             mesh_bounds,
@@ -383,12 +416,18 @@ impl SceneDerivation for SceneJoin {
             palette_handles,
             sections,
         ];
-        let mesh_signature = signature(
-            &mesh_inputs,
-            &[self.objects.epoch, self.materials.epoch, ox, oy, oz],
+        let structure_signature = signature(
+            &structure_inputs,
+            &[self.objects.epoch, self.materials.epoch],
         );
-        if grew || self.last_mesh_inputs != Some(mesh_signature) {
-            self.last_mesh_inputs = Some(mesh_signature);
+        let placement_signature = signature(&[transforms], &[ox, oy, oz]);
+        let structure_changed =
+            grew || self.last_structure_inputs != Some(structure_signature);
+        let placement_changed = self.last_placement_inputs != Some(placement_signature);
+        if structure_changed || placement_changed {
+            helio_core::cpu_scope!("SceneJoin: meshes");
+            self.last_structure_inputs = Some(structure_signature);
+            self.last_placement_inputs = Some(placement_signature);
             encoder.clear_buffer(&self.objects.buffer, 0, None);
             encoder.clear_buffer(&self.materials.buffer, 0, None);
             if let (
@@ -419,38 +458,71 @@ impl SceneDerivation for SceneJoin {
                         origin_lo,
                     }),
                 );
-                let layout = self.mesh_pipeline.get_bind_group_layout(0);
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Scene Join Meshes"),
-                    layout: &layout,
-                    entries: &[
-                        entry(0, &self.mesh_uniforms),
-                        entry(1, &owners.buffer),
-                        entry(2, &generations.buffer),
-                        entry(3, hidden.map_or(&self.empty, |h| &h.buffer)),
-                        entry(4, &transforms.buffer),
-                        entry(5, &vertex_handles.buffer),
-                        entry(6, &index_handles.buffer),
-                        entry(7, mesh_bounds.map_or(&self.empty, |h| &h.buffer)),
-                        entry(8, mesh_flags.map_or(&self.empty, |h| &h.buffer)),
-                        entry(9, &section_handles.buffer),
-                        entry(10, skin_handles.map_or(&self.empty, |h| &h.buffer)),
-                        entry(11, palette_handles.map_or(&self.empty, |h| &h.buffer)),
-                        entry(12, &sections.buffer),
-                        entry(13, &self.objects.buffer),
-                        entry(14, &self.materials.buffer),
-                    ],
+                // The bind group only depends on which buffers are bound, so
+                // a frame that only moved objects reuses the last one.
+                let bound = [
+                    &owners.buffer,
+                    &generations.buffer,
+                    hidden.map_or(&self.empty, |h| &h.buffer),
+                    &transforms.buffer,
+                    &vertex_handles.buffer,
+                    &index_handles.buffer,
+                    mesh_bounds.map_or(&self.empty, |h| &h.buffer),
+                    mesh_flags.map_or(&self.empty, |h| &h.buffer),
+                    &section_handles.buffer,
+                    skin_handles.map_or(&self.empty, |h| &h.buffer),
+                    palette_handles.map_or(&self.empty, |h| &h.buffer),
+                    &sections.buffer,
+                    &self.objects.buffer,
+                    &self.materials.buffer,
+                ];
+                let reusable = self.mesh_bind.as_ref().is_some_and(|(buffers, _)| {
+                    buffers.iter().zip(bound).all(|(cached, now)| cached == now)
                 });
+                if !reusable {
+                    let layout = self.mesh_pipeline.get_bind_group_layout(0);
+                    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Scene Join Meshes"),
+                        layout: &layout,
+                        entries: &[
+                            entry(0, &self.mesh_uniforms),
+                            entry(1, bound[0]),
+                            entry(2, bound[1]),
+                            entry(3, bound[2]),
+                            entry(4, bound[3]),
+                            entry(5, bound[4]),
+                            entry(6, bound[5]),
+                            entry(7, bound[6]),
+                            entry(8, bound[7]),
+                            entry(9, bound[8]),
+                            entry(10, bound[9]),
+                            entry(11, bound[10]),
+                            entry(12, bound[11]),
+                            entry(13, bound[12]),
+                            entry(14, bound[13]),
+                        ],
+                    });
+                    self.mesh_bind =
+                        Some((bound.iter().map(|b| (*b).clone()).collect(), bind_group));
+                }
+                let bind_group = &self.mesh_bind.as_ref().expect("bound above").1;
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Scene Join Meshes"),
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(&self.mesh_pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_bind_group(0, bind_group, &[]);
                 pass.dispatch_workgroups(instance_rows.div_ceil(WORKGROUP).max(1), 1, 1);
             }
+            // Objects hold placements, so any change moves them. Materials
+            // and the structure marker only follow the structure: consumers
+            // that sort and group on them (`ObjectBatch`) keep their work
+            // across a frame that only moved things.
             self.objects.content_generation += 1;
-            self.materials.content_generation += 1;
+            if structure_changed {
+                self.materials.content_generation += 1;
+                self.structure_generation += 1;
+            }
             recorded = true;
         }
 
@@ -471,6 +543,7 @@ impl SceneDerivation for SceneJoin {
             ],
         );
         if grew || self.last_light_inputs != Some(light_signature) {
+            helio_core::cpu_scope!("SceneJoin: lights");
             self.last_light_inputs = Some(light_signature);
             encoder.clear_buffer(&self.lights.buffer, 0, None);
             if self.billboards {
@@ -490,27 +563,44 @@ impl SceneDerivation for SceneJoin {
                         origin_lo,
                     }),
                 );
-                let layout = self.light_pipeline.get_bind_group_layout(0);
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Scene Join Lights"),
-                    layout: &layout,
-                    entries: &[
-                        entry(0, &self.light_uniforms),
-                        entry(1, &owners.buffer),
-                        entry(2, &generations.buffer),
-                        entry(3, hidden.map_or(&self.empty, |h| &h.buffer)),
-                        entry(4, &transforms.buffer),
-                        entry(5, &sources.buffer),
-                        entry(6, &self.lights.buffer),
-                        entry(7, &self.billboard_rows.buffer),
-                    ],
+                let bound = [
+                    &owners.buffer,
+                    &generations.buffer,
+                    hidden.map_or(&self.empty, |h| &h.buffer),
+                    &transforms.buffer,
+                    &sources.buffer,
+                    &self.lights.buffer,
+                    &self.billboard_rows.buffer,
+                ];
+                let reusable = self.light_bind.as_ref().is_some_and(|(buffers, _)| {
+                    buffers.iter().zip(bound).all(|(cached, now)| cached == now)
                 });
+                if !reusable {
+                    let layout = self.light_pipeline.get_bind_group_layout(0);
+                    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Scene Join Lights"),
+                        layout: &layout,
+                        entries: &[
+                            entry(0, &self.light_uniforms),
+                            entry(1, bound[0]),
+                            entry(2, bound[1]),
+                            entry(3, bound[2]),
+                            entry(4, bound[3]),
+                            entry(5, bound[4]),
+                            entry(6, bound[5]),
+                            entry(7, bound[6]),
+                        ],
+                    });
+                    self.light_bind =
+                        Some((bound.iter().map(|b| (*b).clone()).collect(), bind_group));
+                }
+                let bind_group = &self.light_bind.as_ref().expect("bound above").1;
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Scene Join Lights"),
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(&self.light_pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_bind_group(0, bind_group, &[]);
                 pass.dispatch_workgroups(light_rows.div_ceil(WORKGROUP).max(1), 1, 1);
             }
             self.lights.content_generation += 1;
@@ -522,6 +612,15 @@ impl SceneDerivation for SceneJoin {
             (OBJECTS_KEY, self.objects.handle()),
             (MATERIALS_KEY, self.materials.handle()),
             (LIGHTS_KEY, self.lights.handle()),
+            (
+                OBJECTS_STRUCTURE_KEY,
+                BufferHandle {
+                    buffer: self.structure_marker.clone(),
+                    epoch: self.objects.epoch,
+                    row_bytes: 0,
+                    content_generation: self.structure_generation,
+                },
+            ),
         ];
         if self.billboards {
             buffers.push((BILLBOARDS_KEY, self.billboard_rows.handle()));

@@ -202,6 +202,7 @@ impl RangeReadback {
     }
 
     /// See this module's doc for the full ordering rationale. Never blocks.
+    /// Returns whether a copy was kicked off this call.
     pub fn poll_and_kick_off(
         &mut self,
         device: &wgpu::Device,
@@ -209,7 +210,7 @@ impl RangeReadback {
         scratch: &ScratchBuffers,
         kick_off_copy: bool,
         poll_device: bool,
-    ) {
+    ) -> bool {
         // A shared device is maintained by every `Queue::submit` (see
         // `PrepareContext::owns_device`), which delivers the map callbacks.
         if poll_device {
@@ -307,13 +308,13 @@ impl RangeReadback {
         // just skips kicking off a new copy rather than stomping on a
         // buffer still being read).
         if !kick_off_copy {
-            return;
+            return false;
         }
 
         let slot = self.next;
         self.next = (self.next + 1) % self.gens.len().max(1);
         if self.gens[slot].pending.is_some() {
-            return;
+            return false;
         }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -407,6 +408,7 @@ impl RangeReadback {
             transparent_ready: false,
             forward_ready: false,
         });
+        true
     }
 }
 

@@ -202,36 +202,39 @@ fn dirty_all(face:u32) {
     atomicStore(&face_geom_count[MAX_FACES+face],static_count());
     atomicStore(&face_geom_count[2u*MAX_FACES+face],transmissive_count());
 }
+
+/// A movable draw whose instances changed this frame: the bounds it has now
+/// and the ones it had, kept for `faces` to test against every face's frustum.
+struct Changed { bounds: vec4f, previous: vec4f, has_previous: vec4u }
+@group(0) @binding(12) var<storage, read_write> changed: array<Changed>;
+@group(0) @binding(13) var<storage, read_write> changed_count: array<atomic<u32>>;
+
+fn face_total() -> u32 { return min(uniforms.face_count, arrayLength(&shadow_mats)); }
+
+// The work is four small dispatches in this order, so no thread loops over
+// every face or every caster alone:
+//   casters -> detect -> faces -> finish
+
+/// One thread per light caster (six faces): a moved light dirties both layers
+/// of its faces; a change in the movable caster count dirties every face's
+/// dynamic layer (a caster added or removed shifts every later draw's slot,
+/// and a removed one's silhouette must be erased).
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid:vec3u) {
-    let tid=gid.x;let count=min(uniforms.face_count,arrayLength(&shadow_mats));
-    if tid==0u {
-        // A caster added or removed shifts every later draw's slot, and a
-        // removed one's silhouette must be erased: dirty every face.
-        let force_dirty_all=movable_count()!=last_movable_count[0];
-        last_movable_count[0]=movable_count();
-        for(var caster=0u;caster<(count+5u)/6u;caster++) {
-            let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
-            if moved {
-                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty_all(f);}
-            } else if force_dirty_all {
-                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty_dynamic(f);}
-            }
-        }
-        // A face dirtied on an earlier frame and deferred by the shadow
-        // budget is drawn to these counts: keep them this frame's, as the
-        // movable count is kept by dirtying everything when it changes.
-        for(var f=0u;f<count;f++) {
-            let pending=atomicLoad(&face_dirty[f]);
-            if (pending&DIRTY_DYNAMIC)!=0u {
-                atomicStore(&face_geom_count[f],movable_count());
-            }
-            if (pending&DIRTY_STATIC)!=0u {
-                atomicStore(&face_geom_count[MAX_FACES+f],static_count());
-                atomicStore(&face_geom_count[2u*MAX_FACES+f],transmissive_count());
-            }
-        }
+fn casters(@builtin(global_invocation_id) gid:vec3u) {
+    let caster=gid.x;let count=face_total();
+    if caster*6u>=count {return;}
+    let force_dirty_all=movable_count()!=last_movable_count[0];
+    let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
+    for(var f=caster*6u;f<min(caster*6u+6u,count);f++) {
+        if moved {dirty_all(f);} else if force_dirty_all {dirty_dynamic(f);}
     }
+}
+
+/// One thread per movable draw: hash its instances and, if they changed, add
+/// it to the changed list.
+@compute @workgroup_size(64)
+fn detect(@builtin(global_invocation_id) gid:vec3u) {
+    let tid=gid.x;
     if tid>=min(movable_count(),arrayLength(&movable_draws)) || tid>=arrayLength(&prev_positions) {return;}
     let draw=movable_draws[tid];var hash=draw.instance_count^draw.index_count^draw.first_instance;
     var lo=vec3f(3e38);var hi=vec3f(-3e38);
@@ -250,23 +253,57 @@ fn main(@builtin(global_invocation_id) gid:vec3u) {
     let previous=prev_positions[tid];
     prev_positions[tid]=Previous(bounds,vec4u(hash,0,0,0));
     if previous.hash.x==hash && all(previous.bounds==bounds) {return;}
-    // Test both positions: moving OUT of a tile must erase the old silhouette.
-    for(var f=0u;f<count;f++) {
-        if shadow_mats[f].atlas.z==0.0 {continue;}
-        let planes=extract_frustum_planes(shadow_mats[f].mat);
-        if sphere_vs_frustum(bounds.xyz,bounds.w,planes)
-            || sphere_vs_frustum(previous.bounds.xyz,previous.bounds.w,planes) {
-            // The pages both the old and the new bounds touch: moving out of a
-            // page must erase the old silhouette there. Anything else in the
-            // face keeps its cached depth.
-            var pages=ALL_PAGES;
-            if uniforms.pages!=0u {
-                pages=sphere_pages(shadow_mats[f].mat,bounds.xyz,bounds.w);
-                if previous.bounds.w>0.0 || previous.hash.x!=0u {
-                    pages|=sphere_pages(shadow_mats[f].mat,previous.bounds.xyz,previous.bounds.w);
-                }
-            }
-            dirty_dynamic_pages(f,pages);
+    let slot=atomicAdd(&changed_count[0],1u);
+    if slot<arrayLength(&changed) {
+        let has_previous=select(0u,1u,previous.bounds.w>0.0 || previous.hash.x!=0u);
+        changed[slot]=Changed(bounds,previous.bounds,vec4u(has_previous,0u,0u,0u));
+    }
+}
+
+/// One thread per face: keep a face that was dirtied earlier and deferred by
+/// the shadow budget drawing to this frame's counts, then test every changed
+/// draw against the face's frustum. Test both positions: moving OUT of a tile
+/// must erase the old silhouette.
+@compute @workgroup_size(64)
+fn faces(@builtin(global_invocation_id) gid:vec3u) {
+    let f=gid.x;
+    if f>=face_total() {return;}
+    let pending=atomicLoad(&face_dirty[f]);
+    if (pending&DIRTY_DYNAMIC)!=0u {
+        atomicStore(&face_geom_count[f],movable_count());
+    }
+    if (pending&DIRTY_STATIC)!=0u {
+        atomicStore(&face_geom_count[MAX_FACES+f],static_count());
+        atomicStore(&face_geom_count[2u*MAX_FACES+f],transmissive_count());
+    }
+    let n=min(atomicLoad(&changed_count[0]),arrayLength(&changed));
+    if n==0u || shadow_mats[f].atlas.z==0.0 {return;}
+    let m=shadow_mats[f].mat;
+    let planes=extract_frustum_planes(m);
+    var pages=vec2u(0u);
+    var touched=false;
+    for(var i=0u;i<n;i++) {
+        let c=changed[i];
+        let has_previous=c.has_previous.x!=0u;
+        let now=sphere_vs_frustum(c.bounds.xyz,c.bounds.w,planes);
+        let before=has_previous && sphere_vs_frustum(c.previous.xyz,c.previous.w,planes);
+        if !(now || before) {continue;}
+        touched=true;
+        // The pages both the old and the new bounds touch: moving out of a
+        // page must erase the old silhouette there. Anything else in the face
+        // keeps its cached depth.
+        if uniforms.pages!=0u {
+            pages|=sphere_pages(m,c.bounds.xyz,c.bounds.w);
+            if has_previous {pages|=sphere_pages(m,c.previous.xyz,c.previous.w);}
+        } else {
+            pages=ALL_PAGES;
         }
     }
+    if touched {dirty_dynamic_pages(f,pages);}
+}
+
+/// After every other thread has read the last count: remember this frame's.
+@compute @workgroup_size(1)
+fn finish() {
+    last_movable_count[0]=movable_count();
 }
