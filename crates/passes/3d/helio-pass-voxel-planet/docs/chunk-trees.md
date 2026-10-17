@@ -7,7 +7,10 @@ built and measured, and where it differs: boxes are culled by distance
 bins on the GPU (no Hi-Z), leaves store a material and the heightfield's
 slope (no compressed colour or normal), edits regenerate the tiles they
 touch from the brush log (no edit pass over resident chunks, no readback),
-and the edit log's index is a per-face octree.
+and the edit log's index is a per-face octree. Since 2026-10-15 residency,
+the drawn cut and the walk's lookup are an octree of chunks whose detail
+rays decide ([`chunk-octree.md`](chunk-octree.md)); the tile quadtree,
+surface bands and solid gaps described in the phase results below are gone.
 
 ## Goal
 

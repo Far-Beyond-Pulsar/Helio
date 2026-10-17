@@ -4,7 +4,7 @@
 mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
-use helio_pass_voxel_planet::chunks::{residency, ChunkWorld, ResidencyConfig};
+use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, KeptChunks, ResidencyConfig};
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::{Layer, LayerKind, TerrainLayers};
@@ -44,13 +44,20 @@ impl View {
         2.0 * f64::from((FOV_Y * 0.5).tan()) / f64::from(self.size[1])
     }
     fn config(&self) -> ResidencyConfig {
-        let mut config = ResidencyConfig { tiles_per_frame: 512, generate_ms: None, ..Default::default() };
+        let mut config = ResidencyConfig { footprints_per_frame: 512, generate_ms: None, ..Default::default() };
         config.plan.pixel_angle = self.pixel_angle();
         config
     }
 }
 
 /// Chunks of one planet and their frame counter.
+/// A test world's capacity: past the chunks the largest view settles with
+/// (12901, the hollowed core; the others 8683 at most), so tests running in
+/// parallel fit in a 12 GB GPU (1.1 GB a test with its device; a game's
+/// default world, 2.9 GB, paged eight parallel tests out of device memory
+/// and stalled them).
+const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 2048, footprints: 1024, bricks: 65536, kept_bytes: 256 << 20 };
+
 struct World {
     chunks: ChunkWorld,
     frame: u64,
@@ -58,7 +65,7 @@ struct World {
 
 impl World {
     fn new(gpu: &Gpu, planet: &Planet) -> Self {
-        Self { chunks: ChunkWorld::new(&gpu.device, &gpu.queue, planet), frame: 0 }
+        Self { chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, TEST_CAPACITY), frame: 0 }
     }
 
     /// The planet's edits now (a new world for a history it cannot follow).
@@ -587,6 +594,517 @@ fn thousands_of_block_edits_render_exactly() {
     let eye = ground - fwd * 6.0 + up * 14.0 - side * 3.0;
     let forward = ((ground + fwd * 6.0) - eye).normalize().as_vec3();
     matches_exactly(&gpu, &planet, View::new(eye, forward, [320, 180]), 400);
+}
+
+/// Blocks of many materials over ground with single cells painted: every
+/// pixel whose CPU hit is an edited cell draws that cell's own material, not
+/// its leaf's.
+#[test]
+fn edited_cells_draw_their_own_materials() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let kinds = [material::BRICK, material::PLANKS, material::COBBLE, material::WOOD, material::CLAY, material::SNOW, material::BASALT, material::SAND];
+    let mut edited = std::collections::HashMap::new();
+    let mut cell_brush = |planet: &mut Planet, cell: Cell, op: BrushOp, material: u32| {
+        planet.apply(Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material, height: 0.0 }).unwrap();
+        edited.insert(cell, material);
+    };
+    // A wall of blocks, each cell its own material.
+    for y in 0..24i32 {
+        for x in -16..16 {
+            let (cell, _) = grid.locate(ground + side * (f64::from(x) * 0.1) + fwd * 4.0 + up * (f64::from(y) * 0.1 + 0.55));
+            cell_brush(&mut planet, cell, BrushOp::Add, kinds[((x * 7 + y * 3).rem_euclid(8)) as usize]);
+        }
+    }
+    // Ground cells painted in a checkerboard in front of it.
+    for x in -16..16 {
+        for z in 0..30i32 {
+            if (x + z) % 2 != 0 {
+                continue;
+            }
+            let (c, _) = grid.locate(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 0.5));
+            let cell = Cell::new(c.face, c.i, c.j, planet.column_top(c.face, c.i, c.j, 0) - 1);
+            assert!(planet.solid(cell));
+            cell_brush(&mut planet, cell, BrushOp::Paint, kinds[((x + z * 5).rem_euclid(8)) as usize]);
+        }
+    }
+    let eye = ground - fwd * 2.0 + up * 3.0;
+    let view = View::new(eye, ((ground + fwd * 3.0 + up * 0.8) - eye).normalize().as_vec3(), [320, 180]);
+    let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut wrong) = (0, 0);
+    for y in 0..view.size[1] {
+        for x in 0..view.size[0] {
+            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 50.0) else { continue };
+            let Some(&want) = edited.get(&cpu.cell) else { continue };
+            assert_eq!(planet.material(cpu.cell), want);
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+            compared += 1;
+            if drawn.material != want {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: {:?} drawn {}, edited {want}", cpu.cell, drawn.material);
+                }
+            }
+        }
+    }
+    eprintln!("compared {compared}, wrong {wrong}");
+    assert!(compared > 3000, "{compared} pixels compared");
+    assert_eq!(wrong, 0);
+}
+
+/// Land columns picked for relief and mixed top materials (flat grassland
+/// shows one material everywhere): the `steep` with the greatest top
+/// difference over 16 cells, then the `mixed` with the most distinct top
+/// materials around them, of `candidates` random ones.
+fn varied_spots(planet: &Planet, candidates: usize, steep: usize, mixed: usize) -> Vec<(String, u8, i32, i32)> {
+    let n = planet.grid().cells() as u64;
+    let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+    let (mut by_relief, mut by_kinds) = (Vec::new(), Vec::new());
+    for _ in 0..candidates {
+        let face = (next() % 6) as u8;
+        let (i, j) = ((next() % (n - 64)) as i32 + 32, (next() % (n - 64)) as i32 + 32);
+        if planet.column_top(face, i, j, 0) <= 40 {
+            continue;
+        }
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        let mut kinds = std::collections::HashSet::new();
+        for a in (-8..8).step_by(4) {
+            for b in (-8..8).step_by(4) {
+                let top = planet.column_top(face, i + a, j + b, 0);
+                lo = lo.min(top);
+                hi = hi.max(top);
+                kinds.insert(planet.material(Cell::new(face, i + a, j + b, top - 1)));
+            }
+        }
+        by_relief.push((hi - lo, face, i, j));
+        by_kinds.push((kinds.len() as i32 * 1000 + hi - lo, face, i, j));
+    }
+    by_relief.sort_by(|a, b| b.0.cmp(&a.0));
+    by_kinds.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut spots: Vec<(String, u8, i32, i32)> = by_relief.iter().take(steep).map(|s| (format!("steep {} cells", s.0), s.1, s.2, s.3)).collect();
+    for s in &by_kinds {
+        if spots.len() < steep + mixed && !spots.iter().any(|t| (t.1, t.2, t.3) == (s.1, s.2, s.3)) {
+            spots.push((format!("{} materials", s.0 / 1000), s.1, s.2, s.3));
+        }
+    }
+    spots
+}
+
+/// The surface material of the leaf (4x4x4 cells) holding natural cell `c`
+/// when every one of its 16 columns tops in it with the same canonical
+/// material: what the leaf's vote must draw on its top faces.
+fn uniform_leaf_top(planet: &Planet, c: Cell) -> Option<u32> {
+    let grid = planet.grid();
+    let (li, lj, lk) = (c.i.div_euclid(4) * 4, c.j.div_euclid(4) * 4, c.k.div_euclid(4) * 4);
+    let mut material = None;
+    for a in 0..4 {
+        for b in 0..4 {
+            let (i, j) = (li + a, lj + b);
+            let height = planet.column_height(c.face, i, j, 0);
+            let top = helio_pass_voxel_planet::terrain::generated_top(grid, planet.field(), c.face, i, j, 0, height);
+            if !(lk..lk + 4).contains(&(top - 1)) {
+                return None;
+            }
+            let m = planet.material(Cell::new(c.face, i, j, top - 1));
+            if material.is_some_and(|x| x != m) {
+                return None;
+            }
+            material = Some(m);
+        }
+    }
+    material
+}
+
+/// The drawn material against `Planet::material` over a view's level-0
+/// pixels, as (pixels, wrong): top faces of uniform leaves, other cells
+/// under air, cells under solid ground. Each wrong (canonical, drawn) pair
+/// is counted into `confusions`.
+fn material_agreement(gpu: &Gpu, planet: &Planet, view: &View, confusions: &mut std::collections::HashMap<(u32, u32), usize>) -> [(usize, usize); 3] {
+    let hits = World::new(gpu, planet).settle(gpu, planet, view);
+    let view_proj = view.view_proj(planet);
+    let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
+    let mut counts = [(0, 0); 3];
+    // Uniform leaves by leaf (16 columns' tops each).
+    let mut leaves = std::collections::HashMap::new();
+    for y in 0..view.size[1] {
+        for x in 0..view.size[0] {
+            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+            let c = cpu.cell;
+            let own = planet.material(c);
+            let covered = planet.solid(Cell::new(c.face, c.i, c.j, c.k + 1));
+            // A top face: the ray stepped down k into the cell.
+            let kind = if covered {
+                2
+            } else if drawn.entered == Some(4) && leaves.entry((c.face, c.i.div_euclid(4), c.j.div_euclid(4), c.k.div_euclid(4))).or_insert_with(|| uniform_leaf_top(planet, c)).is_some() {
+                0
+            } else {
+                1
+            };
+            counts[kind].0 += 1;
+            if drawn.material != own {
+                counts[kind].1 += 1;
+                *confusions.entry((own, drawn.material)).or_default() += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Natural ground draws `Planet::material` exactly where the leaf's
+/// materials leave no choice: the top faces of leaves whose 16 columns all
+/// top in them with one material (the generation kernel evaluates
+/// `ground_material` at each cell's volume point, with
+/// `Planet::material_slope`).
+#[test]
+fn uniform_leaves_draw_canonical_materials() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let grid = *planet.grid();
+    let mut confusions = std::collections::HashMap::new();
+    let (mut compared, mut wrong) = (0, 0);
+    for (label, face, i, j) in varied_spots(&planet, 600, 2, 1) {
+        let dir = grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
+        let eye = planet.surface_point(dir, 1.7);
+        let up = eye.normalize();
+        let view = View::new(eye, (up.any_orthonormal_vector() - up * 0.35).normalize().as_vec3(), [320, 180]);
+        let [uniform, ..] = material_agreement(&gpu, &planet, &view, &mut confusions);
+        eprintln!("{label}: {} of {} uniform-leaf top pixels wrong", uniform.1, uniform.0);
+        compared += uniform.0;
+        wrong += uniform.1;
+    }
+    assert!(compared > 2000, "{compared} pixels compared");
+    assert_eq!(wrong, 0, "{confusions:?}");
+}
+
+/// A pit's walls and floor draw `Planet::material` exactly: chunks under
+/// edits give exposed cells their own natural materials where their leaf's
+/// pair would draw them wrong (soil a cell deep drawn as rock).
+#[test]
+fn dug_walls_draw_canonical_materials() {
+    let Some(gpu) = gpu() else { return };
+    let natural = Planet::new(PlanetRecipe::default()).unwrap();
+    let grid = *natural.grid();
+    let radius = 2.5;
+    let (mut compared, mut wrong, mut pages) = (0, 0, 0);
+    let mut confusions: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    for (label, face, i, j) in varied_spots(&natural, 600, 2, 1) {
+        let dir = grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
+        let eye = natural.surface_point(dir, 1.7);
+        let up = eye.normalize();
+        let side = up.any_orthonormal_vector();
+        let centre = natural.surface_point(dir, 0.0) + side * 4.0;
+        let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+        planet.apply(Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let view = View::new(eye, (side - up * 0.35).normalize().as_vec3(), [320, 180]);
+        let mut world = World::new(&gpu, &planet);
+        let hits = world.settle(&gpu, &planet, &view);
+        pages += world.frame(&gpu, &planet, &view, None).detail_pages.0;
+        let view_proj = view.view_proj(&planet);
+        let near = 0.7 * grid.voxel_size() / view.pixel_angle();
+        let (mut n, mut w) = (0, 0);
+        for y in 0..view.size[1] {
+            for x in 0..view.size[0] {
+                let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
+                // The pit's cells: within a cell of its sphere.
+                if (grid.cell_center(cpu.cell) - centre).length() > radius + 2.0 * grid.voxel_size() {
+                    continue;
+                }
+                let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+                let own = planet.material(cpu.cell);
+                n += 1;
+                if drawn.material != own {
+                    w += 1;
+                    *confusions.entry((own, drawn.material)).or_default() += 1;
+                }
+            }
+        }
+        eprintln!("{label}: {w} of {n} pit pixels wrong");
+        compared += n;
+        wrong += w;
+    }
+    eprintln!("detail pages in use, summed over views: {pages}");
+    assert!(compared > 5000, "{compared} pixels compared");
+    assert_eq!(wrong, 0, "{confusions:?}");
+}
+
+/// How often unedited voxels draw another material than their own
+/// (`Planet::material`): over level-0 pixels of views at spots picked for
+/// relief and mixed materials, from 1.7 m and 6 m, then with a pit dug in
+/// front (a removal sets no materials: natural cells in its walls). Split
+/// by what decides the drawn material: top faces of uniform leaves (exact),
+/// other cells under air (the leaf's surface vote), cells under ground
+/// (the leaf's subsurface byte). A report, not a gate:
+/// `cargo test --release --test chunks natural_cells -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn natural_cells_against_the_leaf_rule() {
+    let Some(gpu) = gpu() else { return };
+    let natural = Planet::new(PlanetRecipe::default()).unwrap();
+    let grid = *natural.grid();
+    let name = |m: u32| if m == 0 || m as usize > material::NAMES.len() { format!("#{m}") } else { material::NAMES[m as usize - 1].to_string() };
+    let pct = |(n, w): (usize, usize)| 100.0 * w as f64 / n.max(1) as f64;
+    let sum = |c: &[(usize, usize); 3]| c.iter().fold((0, 0), |a, c| (a.0 + c.0, a.1 + c.1));
+    let mut confusions = std::collections::HashMap::new();
+    let mut all = [(0, 0); 3];
+    for (label, face, i, j) in varied_spots(&natural, 1500, 4, 4) {
+        let dir = grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
+        for (lift, pit) in [(1.7, false), (6.0, false), (1.7, true)] {
+            let eye = natural.surface_point(dir, lift);
+            let up = eye.normalize();
+            let side = up.any_orthonormal_vector();
+            let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+            if pit {
+                let ground = natural.surface_point(dir, 0.0) + side * 4.0;
+                planet.apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+            }
+            let view = View::new(eye, (side - up * if lift > 2.0 { 0.6 } else { 0.35 }).normalize().as_vec3(), [320, 180]);
+            let counts = material_agreement(&gpu, &planet, &view, &mut confusions);
+            let total = sum(&counts);
+            eprintln!(
+                "{label} at {lift} m{}: {}/{} pixels wrong ({:.1}%); uniform tops {:.1}% of {}, other surface {:.1}% of {}, under ground {:.1}% of {}",
+                if pit { ", pit" } else { "" },
+                total.1,
+                total.0,
+                pct(total),
+                pct(counts[0]),
+                counts[0].0,
+                pct(counts[1]),
+                counts[1].0,
+                pct(counts[2]),
+                counts[2].0
+            );
+            for (a, c) in all.iter_mut().zip(counts) {
+                *a = (a.0 + c.0, a.1 + c.1);
+            }
+        }
+    }
+    let total = sum(&all);
+    eprintln!(
+        "ALL: {}/{} pixels wrong ({:.2}%); uniform tops {:.2}% of {}, other surface {:.2}% of {}, under ground {:.2}% of {}",
+        total.1,
+        total.0,
+        pct(total),
+        pct(all[0]),
+        all[0].0,
+        pct(all[1]),
+        all[1].0,
+        pct(all[2]),
+        all[2].0
+    );
+    let mut top: Vec<_> = confusions.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    for ((own, drawn), count) in top.iter().take(12) {
+        eprintln!("  own {} drawn {}: {count} pixels ({:.2}%)", name(*own), name(*drawn), 100.0 * *count as f64 / total.0.max(1) as f64);
+    }
+}
+
+/// What one more edit costs a running world as the history grows: the CPU
+/// of `sync_edits` and of the frame that regenerates what it marked, after
+/// `n` small digs (sealed into the baked store) and after `n` large ones
+/// (kept analytic). A report, not a gate:
+/// `cargo test --release --test chunks edit_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn edit_cost_against_history() {
+    let Some(gpu) = gpu() else { return };
+    let base = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&base, 1, 0.52, 0.48);
+    let ground = base.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let view = ground_view(&base, dir, [320, 180]);
+    for (label, radius, spread) in [("small digs (0.4 m)", 0.4, 0.5), ("large digs (8 m)", 8.0, 9.0)] {
+        for n in [0usize, 100, 1000, 10000] {
+            let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+            let mut next = xorshift(0x2545_f491_4f6c_dd1d);
+            let mut dig = |planet: &mut Planet| {
+                let a = (next() % 2001) as f64 / 1000.0 - 1.0;
+                let b = (next() % 2001) as f64 / 1000.0 - 1.0;
+                let centre = ground + side * (a * 40.0 * spread) + fwd * (b * 40.0 * spread) + up * 6.0;
+                planet.apply(Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+            };
+            for _ in 0..n {
+                dig(&mut planet);
+            }
+            let mut world = World::new(&gpu, &planet);
+            world.settle(&gpu, &planet, &view);
+            // Ten more edits, each synced and its frame run: the update's
+            // CPU, the generation's GPU (`FrameTimings`), the chunks it
+            // generated.
+            let (mut sync_ms, mut frame_ms, mut update_ms, mut gen_ms, mut chunks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            world.chunks.take_timings();
+            for _ in 0..10 {
+                dig(&mut planet);
+                let t = std::time::Instant::now();
+                world.sync(&gpu, &planet);
+                sync_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = std::time::Instant::now();
+                let stats = world.frame(&gpu, &planet, &view, None);
+                frame_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                update_ms.push(stats.cpu_ms.iter().sum::<f64>());
+                chunks.push(stats.generated_chunks as f64);
+                // The frame's GPU times come back with the next frame's.
+                world.frame(&gpu, &planet, &view, None);
+                gen_ms.push(world.chunks.take_timings().iter().map(|t| t.generate).sum::<f64>());
+            }
+            for v in [&mut sync_ms, &mut frame_ms, &mut update_ms, &mut gen_ms, &mut chunks] {
+                v.sort_by(f64::total_cmp);
+            }
+            eprintln!("EDITPARTS history {n}: update CPU p50 {:.2} ms, generation GPU p50 {:.2} ms, chunks p50 {}", update_ms[5], gen_ms[5], chunks[5]);
+            eprintln!(
+                "EDITCOST {label}, history {n}: analytic brushes {}, sealed {}; sync p50 {:.2} max {:.2} ms; frame p50 {:.2} max {:.2} ms",
+                planet.edits().len() - planet.edits().sealed_len(),
+                planet.edits().sealed_len(),
+                sync_ms[5],
+                sync_ms[9],
+                frame_ms[5],
+                frame_ms[9]
+            );
+        }
+    }
+}
+
+/// Settle `view`, summing the edited chunks restored and generated and the
+/// generation's GPU milliseconds; its hits.
+fn settle_counting(gpu: &Gpu, world: &mut World, planet: &Planet, view: &View) -> (Vec<Option<PickHit>>, (usize, usize), f64, u64) {
+    let started = world.frame;
+    let (mut restored, mut generated, mut gpu_ms) = (0, 0, 0.0);
+    world.chunks.take_timings();
+    loop {
+        let stats = world.frame(gpu, planet, view, None);
+        restored += stats.restored_chunks;
+        generated += stats.generated_edited;
+
+        gpu_ms += world.chunks.take_timings().iter().map(|t| t.generate).sum::<f64>();
+        if world.chunks.settled() {
+            break;
+        }
+        assert!(world.frame - started < 4000, "residency did not settle: {stats:?}");
+    }
+    (world.chunks.read_hits(), (restored, generated), gpu_ms, world.frame - started)
+}
+
+/// Edited chunks the plan evicts are kept (packed, read back) and come
+/// back by copy: a dig site under 2000 large digs, settled, left for a far
+/// view (a world of 9000 chunk slots evicts it), then seen again, draws
+/// every pixel as it did, its edited chunks restored, not generated again
+/// from the field and the history (against a world that keeps nothing).
+/// A site under 2000 digs 8 m across, a few metres ahead of the ground at
+/// a land direction: the planet, the direction, and its frame (ground, up,
+/// forward).
+fn dug_site() -> (Planet, DVec3, [DVec3; 3]) {
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let mut next = xorshift(0x5eed_1234_9876_abcd);
+    for _ in 0..2000 {
+        let a = (next() % 2001) as f64 / 1000.0 - 1.0;
+        let b = (next() % 2001) as f64 / 1000.0 - 1.0;
+        let centre = ground + side * (a * 20.0) + fwd * (b * 20.0 + 12.0) + up * 5.0;
+        planet.apply(Brush { center: centre.to_array(), radius: 8.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    (planet, dir, [ground, up, fwd])
+}
+
+#[test]
+fn edited_chunks_come_back_by_copy() {
+    let Some(gpu) = gpu() else { return };
+    let (mut planet, dir, [ground, up, fwd]) = dug_site();
+    let here = ground_view(&planet, dir, [320, 180]);
+    let far = ground_view(&planet, land(&planet, 4, 0.3, 0.7), [320, 180]);
+    let run = |planet: &Planet, kept_bytes: usize| {
+        let capacity = Capacity { chunks: 9000, kept_bytes, ..TEST_CAPACITY };
+        let mut world = World { chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, capacity), frame: 0 };
+        let (first, ..) = settle_counting(&gpu, &mut world, planet, &here);
+        settle_counting(&gpu, &mut world, planet, &far);
+        let stats = world.frame(&gpu, planet, &far, None);
+        let (again, (restored, generated), gpu_ms, frames) = settle_counting(&gpu, &mut world, planet, &here);
+        let same = first.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+        eprintln!("KEPT {kept_bytes} bytes: {} kept at the far view ({} KiB); back: edited chunks {restored} restored, {generated} generated; {gpu_ms:.2} ms of generation GPU over {frames} frames; {same}/{} pixels as before", stats.kept_chunks, stats.kept_bytes / 1024, first.len());
+        (restored, generated, same, first.len(), world)
+    };
+    let (none, regenerated, ..) = run(&planet, 0);
+    let (restored, generated, same, pixels, mut world) = run(&planet, TEST_CAPACITY.kept_bytes);
+    // An edit over restored chunks shows exactly; left and seen again, the
+    // chunks it changed come back with it.
+    planet.apply(Brush { center: (ground + fwd * 12.0 - up * 2.0).to_array(), radius: 3.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    world.sync(&gpu, &planet);
+    let (compared, mismatched) = compare(&gpu, &mut world, &planet, &here);
+    assert!(compared > 1000 && mismatched * 1000 <= compared, "after the edit: {mismatched}/{compared}");
+    settle_counting(&gpu, &mut world, &planet, &far);
+    let (_, (restored_again, _), ..) = settle_counting(&gpu, &mut world, &planet, &here);
+    let (compared_again, mismatched_again) = compare(&gpu, &mut world, &planet, &here);
+    eprintln!("KEPT after an edit: {mismatched}/{compared}; left and back, {restored_again} restored, {mismatched_again}/{compared_again}");
+    assert!(compared_again > 1000 && mismatched_again * 1000 <= compared_again, "back after the edit: {mismatched_again}/{compared_again}");
+
+    // The edited chunks evicted come back restored (those evicted before
+    // their pack came back, or past a frame's packs, generate again); a
+    // world that keeps nothing generates them all.
+    assert!(restored > 50 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
+    assert!(none == 0 && regenerated > 50, "keeping nothing: {none} restored, {regenerated} generated");
+    assert_eq!(same, pixels, "every pixel as before");
+}
+
+/// A saved world's edited chunks come back with it: packed (those resident
+/// too, `keep_resident`) and saved as bytes beside the edit snapshot, a
+/// world made from the loaded snapshot restores them by copy instead of
+/// generating them from the field and the history, and draws every pixel
+/// as the saved world did. Kept chunks of another history, or damaged, are
+/// refused.
+#[test]
+fn a_loaded_world_restores_its_edited_chunks() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir, _) = dug_site();
+    let here = ground_view(&planet, dir, [320, 180]);
+    let mut saved = World::new(&gpu, &planet);
+    let (hits, ..) = settle_counting(&gpu, &mut saved, &planet, &here);
+    saved.chunks.keep_resident();
+    for _ in 0..400 {
+        if saved.chunks.keeping() == 0 {
+            break;
+        }
+        saved.frame(&gpu, &planet, &here, None);
+    }
+    assert_eq!(saved.chunks.keeping(), 0, "packing the resident chunks");
+    let bytes = saved.chunks.kept_chunks(&planet).to_bytes();
+    let snapshot = planet.snapshot();
+    let loaded = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
+    let chunks = KeptChunks::from_bytes(&bytes).unwrap();
+    let mut world = World::new(&gpu, &loaded);
+    let kept = world.chunks.load_kept(&loaded, &chunks).unwrap();
+    let (again, (restored, generated), keeping_ms, _) = settle_counting(&gpu, &mut world, &loaded, &here);
+    let mut cold = World::new(&gpu, &loaded);
+    let (_, (_, regenerated), generating_ms, _) = settle_counting(&gpu, &mut cold, &loaded, &here);
+    let same = hits.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+    eprintln!(
+        "LOADED {kept} kept chunks, {} KiB of them besides the snapshot's {} KiB; edited chunks {restored} restored, {generated} generated ({regenerated} without them); {keeping_ms:.1} ms of generation GPU ({generating_ms:.1} without); {same}/{} pixels as saved",
+        bytes.len() / 1024,
+        snapshot.len() / 1024,
+        hits.len()
+    );
+    assert!(kept > 100 && restored > 100, "{kept} kept, {restored} restored");
+    assert!(generated * 4 < restored && regenerated > 100, "edited chunks: {generated} generated with the kept ones, {regenerated} without");
+    assert_eq!(same, hits.len(), "every pixel as saved");
+    // Another history: refused.
+    let mut other = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
+    other.apply(Brush { center: other.surface_point(dir, 0.0).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    assert!(World::new(&gpu, &other).chunks.load_kept(&other, &chunks).is_err());
+    // Damaged bytes: refused.
+    let mut damaged = bytes.clone();
+    damaged[40] ^= 1;
+    assert!(KeptChunks::from_bytes(&damaged).is_err());
 }
 
 /// Edits sealed under a running world: a crater and a mound too large to

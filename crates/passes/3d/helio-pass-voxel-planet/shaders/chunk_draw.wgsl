@@ -46,6 +46,9 @@ struct DrawParams {
     // grid's own cells (`exact_level`), the eye's squared radius less the
     // planet's (from f64).
     planet: vec4<f32>,
+    // x: the octree's coarsest level; y: nodes fading (none: no switch to
+    // look past).
+    cut: vec4<u32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -100,6 +103,13 @@ struct ChunkMeta {
 // Each stored leaf's ground normal (`chunk_build_main`): two slope bytes
 // (x | y << 8, by angle), 0 where none.
 @group(0) @binding(15) var<storage, read> leaf_normals: array<u32>;
+// Per-voxel materials where edits set them (`chunk_generate.wgsl`): each
+// leaf page's detail page (NONE: none), 1024 words a page, 16 a leaf by its
+// place in the page, word x + 4 y its column's cells (byte z); 0: the
+// leaf's pair decides.
+@group(0) @binding(16) var<storage, read> detail_pages: array<u32>;
+@group(0) @binding(17) var<storage, read> detail_cells: array<u32>;
+@group(0) @binding(18) var<storage, read> slot_details: array<u32>;
 const LEAF_PAGES: u32 = 64u;
 
 // Leaf `index` of chunk `slot` (in its mids' order) in the leaf storage.
@@ -122,23 +132,22 @@ fn palette(m: u32) -> vec4<f32> {
     return materials.m[min(m, 31u)].colour;
 }
 @group(0) @binding(8) var<storage, read> mid_materials: array<u32>;
-// Open addressing (`drawn.rs`): chunks, key (face | level << 8, cx, cy, cz)
-// then (slot, state, 0, 0); the drawn cut's columns, key (.., COLUMN) then
-// (lo, hi, top, state): a drawn tile's layers [lo, hi), the top solid cell
-// under the column (exclusive), and whether a pixel shows it (`choice`).
+// Open addressing (`drawn.rs`): the drawn nodes of the octree's cut and
+// their ancestors, key (face | level << 8, cx, cy, cz) then (slot or -1,
+// state, kind | content lo << 8, content hi): whether a pixel shows it
+// (`choice`), what it holds and the box of its cells anything may occupy.
 // An empty entry's key x is -1.
 @group(0) @binding(10) var<storage, read> chunk_table: array<vec4<i32>>;
 @group(0) @binding(11) var<storage, read> chunk_keys: array<vec4<i32>>;
 // This frame's boxes: chunk slots, those holding the eye first.
 @group(0) @binding(12) var<storage, read> draw_list: array<u32>;
-// Drawn tiles rays reached under the chunks of (through a cave mouth):
-// how many times, then the first ones' keys (face | level << 8, cx, cy),
-// for their whole volume to be generated.
-struct Reach {
+// Buried nodes primary rays met: how many times, then the first ones'
+// keys, for them to be generated.
+struct Buried {
     count: atomic<u32>,
     keys: array<vec4<i32>>,
 }
-@group(0) @binding(13) var<storage, read_write> reach: Reach;
+@group(0) @binding(13) var<storage, read_write> buried: Buried;
 
 // Chunk `slot`'s frame relative to the eye.
 fn chunk_frame(slot: u32) -> ChunkDraw {
@@ -419,9 +428,9 @@ fn leaf_ground(slot: u32, c: vec3<i32>, f: ChunkDraw) -> vec3<f32> {
     return n * inverseSqrt(length2);
 }
 
-// The material pair of the stored leaf holding cell `c` of chunk `slot`
-// (NONE: the leaf is empty, full or past the chunk).
-fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
+// The leaf storage index of the stored leaf holding cell `c` of chunk
+// `slot` (NONE: the leaf is empty, full or past the chunk).
+fn stored_leaf(slot: u32, c: vec3<i32>) -> u32 {
     if any(c < vec3<i32>(0)) || any(c > vec3<i32>(63)) { return NONE; }
     let root = chunk_meta[slot];
     let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
@@ -429,8 +438,29 @@ fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
     let node = mids[slot * 64u + m];
     let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
     if !bit64(node.xy, l) || bit64(node.zw, l) { return NONE; }
-    let index = leaf_at_page(slot, mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l));
+    return leaf_at_page(slot, mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l));
+}
+
+// The material pair of stored leaf `index`.
+fn leaf_pair(index: u32) -> u32 {
     return (leaf_materials[index >> 1u] >> ((index & 1u) * 16u)) & 0xffffu;
+}
+
+// Cell `c`'s own material where edits set it (`detail_pages`), else 0.
+// Leaves holding such cells are always stored.
+fn cell_detail(slot: u32, c: vec3<i32>) -> u32 {
+    if slot_details[slot] == 0u { return 0u; }
+    let index = stored_leaf(slot, c);
+    if index == NONE { return 0u; }
+    return leaf_detail(index, c);
+}
+
+// Cell `c`'s own material in stored leaf `index` (0: none).
+fn leaf_detail(index: u32, c: vec3<i32>) -> u32 {
+    let page = detail_pages[index >> 6u];
+    if page == NONE { return 0u; }
+    let word = detail_cells[page * 1024u + (index & 63u) * 16u + u32((c.x & 3) + ((c.y & 3) << 2u))];
+    return (word >> (u32(c.z & 3) * 8u)) & 0xffu;
 }
 
 // A hit cell's material from its leaf's (or mid's) two (`pair`: what a
@@ -440,20 +470,29 @@ fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
 // lookups in the chunk over (`solid_over`) inside the walk's loop cost the
 // loop registers (+45% on a mountain's primary rays).
 fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
+    let own = cell_detail(slot, c);
+    if own != 0u { return own; }
     return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_over(slot, c));
 }
 
 // Whether the cell over cell `c` of chunk `slot` is solid: in the chunk;
-// over its top layer, in the chunk over it (its tile's next layer), else
-// rock in its tile's solid gap. (Counting a top layer's cells as under air
-// drew the surface's material along every chunk layer a dug wall crosses.)
+// over its top layer, in the node over it at its level (a chunk, or rock).
+// (Counting a top layer's cells as under air drew the surface's material
+// along every chunk layer a dug wall crosses.)
 fn solid_over(slot: u32, c: vec3<i32>) -> bool {
     if c.z < 63 { return solid_at(slot, c + vec3<i32>(0, 0, 1)); }
     let key = chunk_keys[slot];
-    let e = find_entry(vec4<i32>(key.xyz, key.w + 1));
-    if e != NONE { return solid_at(bitcast<u32>(chunk_table[e * 2u + 1u].x), vec3<i32>(c.xy, 0)); }
-    let g = gap_of(key.x, key.yz);
-    return key.w + 1 >= g.x && key.w + 1 < g.y;
+    return solid_in(find_entry(vec4<i32>(key.xyz, key.w + 1)), vec3<i32>(c.xy, 0));
+}
+
+// Whether cell `c` of the node of table entry `e` (NONE: none at that
+// level) is solid: its chunk's cell, or its whole box when it is rock.
+fn solid_in(e: u32, c: vec3<i32>) -> bool {
+    if e == NONE { return false; }
+    let v = chunk_table[e * 2u + 1u];
+    let kind = entry_kind(v);
+    if kind == KIND_SOLID || kind == KIND_BURIED { return true; }
+    return v.x >= 0 && solid_at(bitcast<u32>(v.x), c);
 }
 
 // The first solid cell of chunk `slot` along o + t d from t0 to t1, entering
@@ -833,9 +872,10 @@ fn cell_at(cell: vec3<i32>, frac: vec3<f32>, diff: i32) -> vec3<i32> {
 }
 
 // What a ray meets at a cell: a drawn chunk (`slot`), or air to cross,
-// cells [lo, hi) of `level` (LOST: off the drawn cut; BELOW: under a drawn
-// tile's chunks, lo its tile and level, hi.x its face), in the frame of
-// chunk `frame` when it is finer than the ray's (else NONE).
+// cells [lo, hi) of `level` (LOST: off the drawn cut; ROCK: a Solid node,
+// a hit where the ray enters; BURIED: a Buried node, the same, its key in
+// lo and hi.x), in the frame of chunk `frame` when it is finer than the
+// ray's (else NONE).
 struct Place {
     slot: u32,
     level: i32,
@@ -845,20 +885,21 @@ struct Place {
 }
 
 const LOST: i32 = 99;
-const BELOW: i32 = 98;
-// Rock between a tile's chunks (`drawn::Gap`): a hit where the ray enters.
+const BURIED: i32 = 98;
 const ROCK: i32 = 97;
-// A column entry's layer key (`drawn::COLUMN`).
-const COLUMN: i32 = -2147483647 - 1;
-// A gap entry's layer key (`drawn::GAP`): its solid chunk layers [x, y),
-// z 1 when air (a hollow) lies under the tile's chunks.
-const GAP: i32 = -2147483647;
 
-// Tile `tile` of `tile_key`'s gap (zero: none).
-fn gap_of(tile_key: i32, tile: vec2<i32>) -> vec4<i32> {
-    let e = find_entry(vec4<i32>(tile_key, tile, GAP));
-    if e == NONE { return vec4<i32>(0); }
-    return chunk_table[e * 2u + 1u];
+// A table entry's kind (`drawn::KIND_*`) and content box ([lo, hi) in its
+// node's cells; nothing when lo > hi).
+const KIND_MIXED: i32 = 0;
+const KIND_SOLID: i32 = 1;
+const KIND_BURIED: i32 = 2;
+
+fn entry_kind(v: vec4<i32>) -> i32 {
+    return v.z & 255;
+}
+
+fn unpack_corner(p: i32) -> vec3<i32> {
+    return vec3<i32>(p & 127, (p >> 7u) & 127, (p >> 14u) & 127);
 }
 
 // Cube faces' bases: normal, a, b (`grid::FACE_BASIS`).
@@ -934,117 +975,150 @@ fn lost_at(site: u32) -> Place {
     return Place(NONE, LOST, vec3<i32>(0), vec3<i32>(0), NONE);
 }
 
-// The place at cell `cell` of `level` (at `frac` within it) on `face`, for
-// a pixel of dither `r`: the tile it shows over the column (this level's,
-// else a coarser one where this level shows none, else a finer one under
-// an ancestor's), then the chunk at its layer, an empty layer, or the air
-// over the tile, grown to the coarsest column whose whole subtree lies
-// under the cell. Air comes with a frame (`Place::frame`) when it is finer
-// than the ray's, or on another face (`crossed`).
-fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, crossed: bool) -> Place {
-    // Mostly the next chunk of the same level.
-    let same = find_entry(vec4<i32>(face | (level << 8), cell >> vec3<u32>(6u)));
-    if same != NONE {
-        let v = chunk_table[same * 2u + 1u];
-        if choice(v.y, r) == 1 { return Place(bitcast<u32>(v.x), level, vec3<i32>(0), vec3<i32>(0), NONE); }
+// The drawn chunk next to node `k` of a level along its layers (the
+// frame air in it is crossed in), else NONE.
+fn frame_near(k: vec4<i32>) -> u32 {
+    for (var n = 0; n < 4; n++) {
+        let dz = array<i32, 4>(-1, 1, -2, 2)[n];
+        let e = find_entry(vec4<i32>(k.xyz, k.w + dz));
+        if e != NONE && chunk_table[e * 2u + 1u].x >= 0 { return bitcast<u32>(chunk_table[e * 2u + 1u].x); }
     }
+    return NONE;
+}
+
+// The place at cell `cell` of `level` (at `frac` within it) on `face`, for
+// a pixel of dither `r` (`docs/chunk-octree.md`): the drawn node over the
+// point (up to the first entry of the cut, then finer through ancestors
+// and the coarse side of switches this pixel does not show, coarser over
+// their fine side), then its chunk, rock, or air. A refined node without
+// an entry for the child there is air (an Empty node). Air grows to the
+// largest slab of each ancestor's box its content box leaves empty, up to
+// the coarsest ancestor whose content the point is outside of, and comes
+// with a frame (`Place::frame`) when it is finer than the ray's, or on
+// another face (`crossed`).
+fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, crossed: bool) -> Place {
+    let top = i32(params.cut.x);
     var diff = 0;
-    var way = 0;
-    var turned = false;
-    var through_ancestors = true;
-    var column = vec4<i32>(0);
-    var shown = false;
-    for (var n = 0u; n < 24u; n++) {
-        let c = cell_at(cell, frac, diff);
-        let e = find_entry(vec4<i32>(face | ((level + diff) << 8), c.xy >> vec2<u32>(6u), COLUMN));
-        var go = 2;
-        if e != NONE {
-            column = chunk_table[e * 2u + 1u];
-            go = choice(column.w, r);
-            // Over an ancestor's whole subtree: air whichever tile shows
-            // under it (no search down and climb back up). Not finer than
-            // the ray: an ancestor has no chunk to cross its air in, and in
-            // the ray's coarser cells its top would round.
-            if column.w == 0 && diff >= 0 && c.z >= column.z {
-                go = 1;
-            }
-        }
-        if go == 1 {
-            shown = true;
+    var e = find_entry(vec4<i32>(face | (level << 8), cell >> vec3<u32>(6u)));
+    // Mostly the next chunk of the same level.
+    if e != NONE {
+        let v = chunk_table[e * 2u + 1u];
+        if v.x >= 0 && choice(v.y, r) == 1 { return Place(bitcast<u32>(v.x), level, vec3<i32>(0), vec3<i32>(0), NONE); }
+    }
+    // Up to the cut: a node drawn, or an ancestor of drawn nodes.
+    for (var n = 0u; n < 32u && e == NONE; n++) {
+        if level + diff >= top {
+            // Over the roots' drawn nodes: air (an Empty root).
             break;
         }
-        // Coarser; on the way up, past the ancestors of the hidden side of
-        // a switch across levels.
-        if go == 2 || (go == 0 && way > 0) {
-            if way < 0 {
-                // Down through undrawn ancestors only, to the fine side of a
-                // switch that shows coarser: the tile shown is over where
-                // the search began (a tile refined, then coarsened past).
-                if turned || !through_ancestors { return lost_at(0u); }
-                turned = true;
-                diff = 0;
+        diff += 1;
+        let c = cell_at(cell, frac, diff);
+        e = find_entry(vec4<i32>(face | ((level + diff) << 8), c >> vec3<u32>(6u)));
+    }
+    var empty = e == NONE;
+    // An ancestor found climbing: a coarser node fading in over it may show
+    // here (its finer side has no node over this point).
+    if !empty && params.cut.y > 0u && chunk_table[e * 2u + 1u].y == 0 {
+        var u = diff;
+        for (var n = 0u; n < 32u && level + u < top; n++) {
+            u += 1;
+            let pe = find_entry(vec4<i32>(face | ((level + u) << 8), cell_at(cell, frac, u) >> vec3<u32>(6u)));
+            if pe == NONE { break; }
+            let state = chunk_table[pe * 2u + 1u].y;
+            if state == 0 { continue; }
+            if choice(state, r) == 1 {
+                diff = u;
+                e = pe;
             }
-            if level + diff >= 30 { LOST_WHERE return lost_at(1u); }
-            way = 1;
-            diff += 1;
-        } else {
-            // As deep as the tile shown (old fine tiles under an eye that
-            // jumped up, a switch across many levels).
-            if way > 0 || level + diff <= 0 { return lost_at(2u); }
-            through_ancestors = through_ancestors && column.w == 0;
+            break;
+        }
+    }
+    // Up past ancestors (over the hidden fine side of a switch), down
+    // through them.
+    var way = 0;
+    for (var n = 0u; n < 32u && !empty; n++) {
+        let state = chunk_table[e * 2u + 1u].y;
+        var go = choice(state, r);
+        if state == 0 && way > 0 { go = 2; }
+        if go == 1 { break; }
+        if go == 0 {
+            // Finer: a missing child is air.
+            if level + diff <= 0 || way > 0 { return lost_at(0u); }
             way = -1;
             diff -= 1;
+        } else {
+            if level + diff >= top || way < 0 { return lost_at(1u); }
+            way = 1;
+            diff += 1;
+        }
+        let c = cell_at(cell, frac, diff);
+        e = find_entry(vec4<i32>(face | ((level + diff) << 8), c >> vec3<u32>(6u)));
+        if e == NONE {
+            if way > 0 { return lost_at(2u); }
+            empty = true;
         }
     }
-    if !shown { return lost_at(3u); }
+    let at = level + diff;
     let c = cell_at(cell, frac, diff);
-    let tile = c.xy >> vec2<u32>(6u);
-    let layer = c.z >> 6u;
-    let tile_key = face | ((level + diff) << 8);
-    if c.z >= column.z {
-        var top = column.z;
-        var at = tile;
-        var up = diff;
-        for (var n = 0u; n < 24u && level + up < 30; n++) {
-            let pc = cell_at(cell, frac, up + 1);
-            let pe = find_entry(vec4<i32>(face | ((level + up + 1) << 8), pc.xy >> vec2<u32>(6u), COLUMN));
-            if pe == NONE { break; }
-            let ptop = chunk_table[pe * 2u + 1u].z;
-            if pc.z < ptop { break; }
-            up += 1;
-            top = ptop;
-            at = pc.xy >> vec2<u32>(6u);
+    let node = c >> vec3<u32>(6u);
+    let key = vec4<i32>(face | (at << 8), node);
+    if !empty {
+        let v = chunk_table[e * 2u + 1u];
+        let kind = entry_kind(v);
+        if kind == KIND_SOLID { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0), NONE); }
+        if kind == KIND_BURIED { return Place(NONE, BURIED, key.yzw, vec3<i32>(key.x, 0, 0), NONE); }
+        if v.x >= 0 { return Place(bitcast<u32>(v.x), at, vec3<i32>(0), vec3<i32>(0), NONE); }
+    }
+    // Air: the node's box, grown through its ancestors' empty slabs.
+    var lo = node * 64;
+    var hi = lo + 64;
+    var up = diff;
+    for (var n = 0u; n < 32u && level + up < top; n++) {
+        let pc = cell_at(cell, frac, up + 1);
+        let pnode = pc >> vec3<u32>(6u);
+        let pe = find_entry(vec4<i32>(face | ((level + up + 1) << 8), pnode));
+        if pe == NONE { break; }
+        let pv = chunk_table[pe * 2u + 1u];
+        let clo = unpack_corner(pv.z >> 8u);
+        let chi = unpack_corner(pv.w);
+        let p = pc - pnode * 64;
+        var slab_lo = vec3<i32>(0);
+        var slab_hi = vec3<i32>(64);
+        if any(clo >= chi) {
+        } else if p.z >= chi.z {
+            slab_lo.z = chi.z;
+        } else if p.z < clo.z {
+            slab_hi.z = clo.z;
+        } else if p.x >= chi.x {
+            slab_lo.x = chi.x;
+        } else if p.x < clo.x {
+            slab_hi.x = clo.x;
+        } else if p.y >= chi.y {
+            slab_lo.y = chi.y;
+        } else if p.y < clo.y {
+            slab_hi.y = clo.y;
+        } else {
+            // Inside its content: this level's box is the air.
+            break;
         }
-        // Finer than the ray's frame: crossed in the frame of the tile's top
-        // chunk (in coarser cells the top would round; more than six levels
-        // finer, a tile is under one of them: without a frame, lost).
-        let f = frame_of(up < 0 || crossed, vec4<i32>(tile_key, tile, (column.z - 1) >> 6u));
-        if (crossed || up < -6) && f == NONE && !exact_level(level + up) { return lost_at(4u); }
-        return Place(NONE, level + up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)), f);
+        up += 1;
+        lo = pnode * 64 + slab_lo;
+        hi = pnode * 64 + slab_hi;
     }
-    if layer < column.x {
-        // Under the tile's chunks: air when they hang over a hollow, else
-        // rock, reached through a cave mouth among them.
-        if gap_of(tile_key, tile).z == 0 { return Place(NONE, BELOW, vec3<i32>(tile, level + diff), vec3<i32>(face, 0, 0), NONE); }
-        let f = frame_of(diff < 0 || crossed, vec4<i32>(tile_key, tile, column.x));
-        if (crossed || diff < -6) && f == NONE && !exact_level(level + diff) { return lost_at(5u); }
-        return Place(NONE, level + diff, vec3<i32>(tile * 64, column.x * 64 - (1 << 20)), vec3<i32>(tile * 64 + 64, column.x * 64), f);
-    }
-    let s = find_entry(vec4<i32>(tile_key, tile, layer));
-    if s != NONE { return Place(bitcast<u32>(chunk_table[s * 2u + 1u].x), level + diff, vec3<i32>(0), vec3<i32>(0), NONE); }
-    // A layer among them without a chunk: rock in its solid gap, else air.
-    let g = gap_of(tile_key, tile);
-    if layer >= g.x && layer < g.y { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0), NONE); }
-    let f = frame_of(diff < 0 || crossed, vec4<i32>(tile_key, tile, column.x));
-    if (crossed || diff < -6) && f == NONE && !exact_level(level + diff) { return lost_at(6u); }
-    return Place(NONE, level + diff, vec3<i32>(tile * 64, layer * 64), vec3<i32>(tile * 64 + 64, layer * 64 + 64), f);
+    // Finer than the ray's frame, or across a face: crossed in the frame of
+    // a chunk beside the air's node (more than six levels finer, without
+    // one, lost).
+    var f = NONE;
+    if up < 0 || crossed { f = frame_near(key); }
+    if (crossed || up < -6) && f == NONE && !exact_level(level + up) { return lost_at(4u); }
+    return Place(NONE, level + up, lo, hi, f);
 }
 
 // Chunk `k`'s slot when `wanted` and drawn, else NONE.
 fn frame_of(wanted: bool, k: vec4<i32>) -> u32 {
     if !wanted { return NONE; }
     let e = find_entry(k);
-    if e == NONE { return NONE; }
+    if e == NONE || chunk_table[e * 2u + 1u].x < 0 { return NONE; }
     return bitcast<u32>(chunk_table[e * 2u + 1u].x);
 }
 
@@ -1290,14 +1364,12 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 LOST_PIXEL
                 break;
             }
-            if next.level == BELOW || next.level == ROCK {
-                // Under a tile's chunks, which hold only its surface band:
-                // solid where the ray leaves this box, until the tile's
-                // whole volume (its caves) is generated. Rock between its
-                // chunks is solid as it is.
-                if next.level == BELOW {
-                    let n = atomicAdd(&reach.count, 1u);
-                    if n < arrayLength(&reach.keys) { reach.keys[n] = vec4<i32>(next.hi.x | (next.lo.z << 8u), next.lo.xy, 0); }
+            if next.level == BURIED || next.level == ROCK {
+                // Rock, or the field's volume not generated yet (a Buried
+                // node, reported so it is): a hit where the ray enters.
+                if next.level == BURIED && counted {
+                    let n = atomicAdd(&buried.count, 1u);
+                    if n < arrayLength(&buried.keys) { buried.keys[n] = vec4<i32>(next.hi.x, next.lo); }
                 }
                 return WalkEnd(true, t_prev, slot, vec3<i32>(vec3<u32>(last, last >> 6u, last >> 12u) & vec3<u32>(63u)), (last >> 18u) & 3u, (last >> 20u) & 1u, 0u);
             }
@@ -1372,7 +1444,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         if next.slot != NONE {
             frame = chunk_frame(next.slot);
             key = chunk_keys[next.slot];
-        } else if next.level == LOST || next.level == BELOW || next.level == ROCK {
+        } else if next.level == LOST || next.level == BURIED || next.level == ROCK {
             textureStore(out_exits, p, vec4<f32>(t_prev + 1e-4));
             return;
         } else {
@@ -1434,8 +1506,8 @@ fn resolve_vertex(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32>
 
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
 @group(1) @binding(14) var hit_normal: texture_2d<f32>;
-@group(1) @binding(23) var uv_reference_texture: texture_2d<f32>;
-@group(1) @binding(24) var uv_reference_sampler: sampler;
+@group(1) @binding(25) var uv_reference_texture: texture_2d<f32>;
+@group(1) @binding(26) var uv_reference_sampler: sampler;
 
 // ---- Appearance ----
 
@@ -1493,9 +1565,7 @@ fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
 fn solid_near(slot: u32, key: vec4<i32>, c: vec3<i32>) -> bool {
     if all(c >= vec3<i32>(0)) && all(c <= vec3<i32>(63)) { return solid_at(slot, c); }
     let at = key.yzw * 64 + c;
-    let e = find_entry(vec4<i32>(key.x, at >> vec3<u32>(6u)));
-    if e == NONE { return false; }
-    return solid_at(bitcast<u32>(chunk_table[e * 2u + 1u].x), at & vec3<i32>(63));
+    return solid_in(find_entry(vec4<i32>(key.x, at >> vec3<u32>(6u))), at & vec3<i32>(63));
 }
 
 struct Look {
@@ -1527,8 +1597,17 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
         // A top cell there (solid under air): its leaf holds a surface.
         let there = vec3<i32>(at, cell.z);
         if any((at >> vec2<u32>(2u)) != (cell.xy >> vec2<u32>(2u))) && solid_at(slot, there) && !solid_at(slot, there + vec3<i32>(0, 0, 1)) {
-            let pair = stored_leaf_pair(slot, there);
-            if pair != NONE && (pair & 0xffu) != 0u { material = min(pair & 0xffu, 31u); }
+            let index = stored_leaf(slot, there);
+            if index != NONE {
+                var own = 0u;
+                if slot_details[slot] != 0u { own = leaf_detail(index, there); }
+                let pair = leaf_pair(index);
+                if own != 0u {
+                    material = min(own, 31u);
+                } else if (pair & 0xffu) != 0u {
+                    material = min(pair & 0xffu, 31u);
+                }
+            }
         }
     }
     let smooth_ground = 1.0 - under_refined(key, projected);
@@ -1954,14 +2033,12 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
                 LOST_PIXEL
                 break;
             }
-            if next.level == BELOW || next.level == ROCK {
-                // Under a tile's chunks, which hold only its surface band:
-                // solid where the ray leaves this box, until the tile's
-                // whole volume (its caves) is generated. Rock between its
-                // chunks is solid as it is.
-                if next.level == BELOW {
-                    let n = atomicAdd(&reach.count, 1u);
-                    if n < arrayLength(&reach.keys) { reach.keys[n] = vec4<i32>(next.hi.x | (next.lo.z << 8u), next.lo.xy, 0); }
+            if next.level == BURIED || next.level == ROCK {
+                // Rock, or the field's volume not generated yet (a Buried
+                // node, reported so it is): a hit where the ray enters.
+                if next.level == BURIED && counted {
+                    let n = atomicAdd(&buried.count, 1u);
+                    if n < arrayLength(&buried.keys) { buried.keys[n] = vec4<i32>(next.hi.x, next.lo); }
                 }
                 return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
             }
@@ -2201,4 +2278,57 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     let f = hit_face(v, vec3<f32>(0.0), q, size, t);
     store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
+}
+
+// ---- 5. Ray reports ----
+// Where rays decide detail (`docs/chunk-octree.md`): each 8x8 block of
+// pixels samples one hit a frame (all 64 pixels over 64 frames) and
+// reports the node its level wants there: cells of a pixel, two levels of
+// margin (the prefetch eye, the coarsening hysteresis), the hit's own
+// node at least. The planner marks it and its ancestors seen. A
+// workgroup's 8x8 blocks report each node once.
+
+@group(1) @binding(24) var<storage, read_write> reports: array<vec4<i32>>;
+var<workgroup> w_reports: array<vec4<i32>, 64>;
+
+// The node a hit (`v`: slot and packed cell; distance `t`) at pixel `p`
+// wants.
+fn wanted_node(v: vec2<u32>, t: f32, p: vec2<u32>, size: vec2<u32>) -> vec4<i32> {
+    let key = chunk_keys[v.x];
+    let level = key.x >> 8u;
+    let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
+    let c = cell_frame(v.x, cell);
+    let position = pixel_ray(p, size) * t;
+    let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
+    let frac = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(0.999));
+    let px = length(c.m0.xyz) / max(pixel_width(p, size, t), 1e-6);
+    let n = clamp(i32(ceil(log2(max(px, 1e-3)))) + 2, 0, level);
+    let fine = ((key.yzw * 64 + cell) << vec3<u32>(u32(n))) + vec3<i32>(floor(frac * f32(1 << u32(n))));
+    return vec4<i32>((key.x & 7) | ((level - n) << 8u), fine >> vec3<u32>(6u));
+}
+
+@compute @workgroup_size(8, 8)
+fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let size = textureDimensions(hit_distance);
+    let blocks = (size + 7u) / 8u;
+    var report = vec4<i32>(-1, 0, 0, 0);
+    if all(id.xy < blocks) {
+        // The block's pixel this frame: 37 is odd, so 64 frames visit all.
+        let n = (params.table.w * 37u + id.x * 7u + id.y * 13u) & 63u;
+        let p = id.xy * 8u + vec2<u32>(n & 7u, n >> 3u);
+        if all(p < size) {
+            let v = textureLoad(hit_visibility, vec2<i32>(p), 0).xy;
+            let t = textureLoad(hit_distance, vec2<i32>(p), 0).r;
+            if v.x != NONE && t > 0.0 { report = wanted_node(v, t, p, size); }
+        }
+    }
+    w_reports[li] = report;
+    workgroupBarrier();
+    for (var i = 0u; i < li; i++) {
+        if all(w_reports[i] == report) {
+            report.x = -1;
+            break;
+        }
+    }
+    if all(id.xy < blocks) { reports[id.y * blocks.x + id.x] = report; }
 }

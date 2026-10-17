@@ -8,7 +8,8 @@
 // second mask and store nothing.
 //
 // 1. `tile_columns`: each column's height, surface word and volume extent,
-//    and the tile's range of layers that may hold a surface.
+//    and the footprint's range of layers that may hold a surface, into its
+//    slot of the footprint pool (only for footprints not already there).
 // 2. `chunk_columns`: each column's 64 cells in a chunk as a 64-bit mask
 //    (bit z: layer `64 cz + z`), with volume terms and brushes, and the
 //    material of its highest solid cell.
@@ -21,11 +22,20 @@ const TILE_COLUMNS: u32 = 4096u;
 // Height of a tile column past the face's edge.
 const OUTSIDE: i32 = -2147483647 - 1;
 
+// A footprint of the batch: the ones whose columns it computes come first
+// (`tile_ranges`' count), then those already in the pool.
 struct TileJob {
     face: u32,
     level: u32,
     cx: i32,
     cy: i32,
+    // Its place in the footprint pool (`tile_columns`, `tile_halo`): kept
+    // across frames, so a footprint's columns are computed once while
+    // resident, whichever of its nodes are generated when.
+    slot: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct ChunkJob {
@@ -38,7 +48,9 @@ struct ChunkJob {
     large: u32,
     // Its baked bricks: 8 per brick column (`baked_refs`), or NONE.
     baked: u32,
-    _pad: u32,
+    // Its slot of `cell_materials` when edits set materials in it (its
+    // leaves get per-voxel materials), or NONE.
+    detail: u32,
 }
 
 struct FaceBrush {
@@ -96,6 +108,58 @@ const LEAF_PAGES: u32 = 64u;
 // a brick's 512 cell edits two a word.
 @group(0) @binding(22) var<storage, read> baked_refs: array<u32>;
 @group(0) @binding(23) var<storage, read> baked_cells: array<u32>;
+// Per-voxel materials where edits are (`docs/chunk-octree.md`, "Per-voxel
+// materials"). A chunk job under edits writes each solid cell's edited
+// material (0: none set) into its slot of `cell_materials`: CELL_WORDS a
+// column, cell z in byte z & 3 of word z >> 2, then the column's natural
+// top. `chunk_build_main` gives each exposed cell without one its natural
+// material (`Planet::material`), clears the cells their leaf's pair draws
+// as they are, and gives every leaf page holding a leaf with cells left a
+// detail page (`detail_pages`, by leaf page; NONE: none) of `DETAIL_WORDS`
+// words: 16 a leaf, by the leaf's place in its page, word x + 4 y its
+// column's four cells (byte z). Other leaves read zero there. Pages come off the stack `detail_free` (`detail_alloc`: the
+// free count, the overflow flag) and go back when the chunk is evicted.
+@group(0) @binding(28) var<storage, read_write> cell_materials: array<u32>;
+@group(0) @binding(29) var<storage, read_write> detail_pages: array<u32>;
+@group(0) @binding(30) var<storage, read_write> detail_cells: array<u32>;
+@group(0) @binding(31) var<storage, read_write> detail_alloc: array<atomic<i32>>;
+@group(0) @binding(32) var<storage, read_write> detail_free: array<u32>;
+// Per slot: 1 when any of its leaf pages has a detail page (drawing skips
+// the lookup for the others).
+@group(0) @binding(33) var<storage, read_write> slot_details: array<u32>;
+// Each footprint's material slopes (`Planet::material_slope`), kept with
+// its columns in the pool: for levels up to MATERIAL_SLOPE_LEVEL - 1, the
+// block slopes of the level-4 cells its columns interpolate between, rows
+// of `slope_blocks(level)` from level-4 cell `slope_origin`.
+@group(0) @binding(34) var<storage, read_write> tile_slopes: array<i32>;
+const SLOPE_STRIDE: u32 = 1156u;
+const MATERIAL_SLOPE_LEVEL: u32 = 4u;
+
+// Level-4 block slopes a footprint of `level` keeps along a side.
+fn slope_blocks(level: u32) -> i32 {
+    return (4 << level) + 2;
+}
+
+// The first of them: level-4 cell (4 c << level) - 1 along each axis.
+fn slope_origin(job: TileJob) -> vec2<i32> {
+    return vec2<i32>((4 * job.cx) << job.level, (4 * job.cy) << job.level) - 1;
+}
+const DETAIL_WORDS: u32 = 1024u;
+const CELL_WORDS: u32 = 17u;
+
+// A detail page off the free stack (NONE: none free; the overflow flag is
+// set).
+fn take_detail() -> u32 {
+    var free = atomicLoad(&detail_alloc[0]);
+    for (var tries = 0u; tries < 4096u; tries++) {
+        if free < 1 { break; }
+        let r = atomicCompareExchangeWeak(&detail_alloc[0], free, free - 1);
+        if r.exchanged { return detail_free[u32(free - 1)]; }
+        free = r.old_value;
+    }
+    atomicStore(&detail_alloc[1], 1);
+    return NONE;
+}
 
 // `n` pages off the free stack: the first's place in it (NONE: fewer are
 // free; the overflow flag is set).
@@ -122,7 +186,13 @@ fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
     if n == 0u { return; }
     let at = u32(atomicAdd(&leaf_alloc[0], i32(n)));
     for (var p = 0u; p < n; p++) {
-        free_pages[at + p] = leaf_pages[slot * LEAF_PAGES + p];
+        let page = leaf_pages[slot * LEAF_PAGES + p];
+        free_pages[at + p] = page;
+        let detail = detail_pages[page];
+        if detail != NONE {
+            detail_free[u32(atomicAdd(&detail_alloc[0], 1))] = detail;
+            detail_pages[page] = NONE;
+        }
     }
     chunk_meta[slot].pages = 0u;
     chunk_meta[slot].leaves = 0u;
@@ -151,6 +221,87 @@ fn encode_slope(g: f32) -> u32 {
 }
 
 var<workgroup> w_range: array<atomic<i32>, 4>;
+
+// The level-4 column tops (base layers) of each computed footprint's
+// lattice (`tile_slope_heights_main`): SLOPE_LATTICE a footprint of the
+// batch.
+@group(0) @binding(35) var<storage, read_write> slope_lattice: array<i32>;
+const SLOPE_LATTICE: u32 = 1444u;
+
+// A footprint's lattice: `side` level-4 columns a side from `first`, its
+// macro octaves from `nodes`^2 nodes from node-aligned `origin` (3x3 at
+// levels 0 and 1, up to 5x5 at level 3).
+struct SlopeLattice {
+    first: vec2<i32>,
+    origin: vec2<i32>,
+    side: i32,
+    nodes: u32,
+}
+
+fn slope_lattice_of(job: TileJob) -> SlopeLattice {
+    let side = slope_blocks(job.level) + 4;
+    let first = slope_origin(job) - 2;
+    let origin = first & vec2<i32>(~(NODE_COLUMNS - 1));
+    let reach = (((first + side - 1) & vec2<i32>(~(NODE_COLUMNS - 1))) - origin) / NODE_COLUMNS;
+    return SlopeLattice(first, origin, side, u32(max(reach.x, reach.y)) + 2u);
+}
+
+// The material slopes of each computed footprint below
+// MATERIAL_SLOPE_LEVEL (`Planet::material_slope`), in three dispatches:
+// the lattice's nodes (tiles), its level-4 heights two cells each way of
+// each block (23 x tiles, 64 a workgroup), then the block slopes (19 x
+// tiles).
+@compute @workgroup_size(64)
+fn tile_slope_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.x];
+    if job.level >= MATERIAL_SLOPE_LEVEL { return; }
+    let lattice = slope_lattice_of(job);
+    generation_lattice_nodes(wg.x, job.face, lattice.origin, lattice.nodes, MATERIAL_SLOPE_LEVEL, li);
+}
+
+@compute @workgroup_size(64)
+fn tile_slope_heights_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.y];
+    if job.level >= MATERIAL_SLOPE_LEVEL { return; }
+    let lattice = slope_lattice_of(job);
+    let n = i32(wg.x * 64u + li);
+    if n >= lattice.side * lattice.side { return; }
+    let c = lattice.first + vec2<i32>(n % lattice.side, n / lattice.side);
+    slope_lattice[wg.y * SLOPE_LATTICE + u32(n)] = div_floor(generation_lattice_column(wg.y, lattice.origin, job.face, c.x, c.y, MATERIAL_SLOPE_LEVEL, false).x, world.grid.y);
+}
+
+@compute @workgroup_size(64)
+fn tile_slopes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.y];
+    if job.level >= MATERIAL_SLOPE_LEVEL { return; }
+    let blocks = slope_blocks(job.level);
+    let n = i32(wg.x * 64u + li);
+    if n >= blocks * blocks { return; }
+    let side = blocks + 4;
+    let at = wg.y * SLOPE_LATTICE;
+    let b = vec2<i32>(n % blocks, n / blocks) + 2;
+    let di = abs(slope_lattice[at + u32(b.y * side + b.x + 2)] - slope_lattice[at + u32(b.y * side + b.x - 2)]);
+    let dj = abs(slope_lattice[at + u32((b.y + 2) * side + b.x)] - slope_lattice[at + u32((b.y - 2) * side + b.x)]);
+    tile_slopes[job.slot * SLOPE_STRIDE + u32(n)] = (max(di, dj) << (16u - MATERIAL_SLOPE_LEVEL)) / 32768;
+}
+
+// The material slope of level column (i, j) of footprint `job` (below
+// MATERIAL_SLOPE_LEVEL): `Planet::material_slope` of the base column at
+// its centre, its blocks' slopes interpolated in 32nds.
+fn material_slope(job: TileJob, i: i32, j: i32) -> i32 {
+    let base = (vec2<i32>(i, j) << vec2<u32>(job.level)) + ((1 << job.level) >> 1u);
+    let r = base * 2 + 1 - 16;
+    let a = r >> vec2<u32>(5u);
+    let w = r - (a << vec2<u32>(5u));
+    let blocks = slope_blocks(job.level);
+    let b = a - slope_origin(job);
+    let at = job.slot * SLOPE_STRIDE + u32(b.y * blocks + b.x);
+    let s00 = tile_slopes[at];
+    let s10 = tile_slopes[at + 1u];
+    let s01 = tile_slopes[at + u32(blocks)];
+    let s11 = tile_slopes[at + u32(blocks) + 1u];
+    return ((32 - w.x) * (32 - w.y) * s00 + w.x * (32 - w.y) * s10 + (32 - w.x) * w.y * s01 + w.x * w.y * s11) >> 10u;
+}
 
 // A two-rate field's nodes of each tile (`generation_tile_nodes`), before
 // `tile_columns_main`: dispatch (tiles). Then `tile_halo_main`.
@@ -183,7 +334,7 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         let field = generation_tile_column(wg.y, job.face, i, j, job.level, job.level >= 1u);
         let extent = terrain_extent(domain_point(job.face, i, j, job.level), job.level);
         let top = div_floor(field.x, world.grid.y) >> job.level;
-        tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
+        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
         // The cell under the top holds the surface; the volume may change
         // cells across its extent. Ranges: the volume's, the surface's.
         atomicMin(&w_range[0], top - 1 - extent.x);
@@ -191,7 +342,7 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         atomicMin(&w_range[2], top - 1);
         atomicMax(&w_range[3], top);
     } else {
-        tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
+        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
     }
     workgroupBarrier();
     if li == 0u {
@@ -322,9 +473,14 @@ fn apply_brushes(mask: vec2<u32>, job: ChunkJob, first: u32, end: u32, p: vec3<i
 // The baked edit of cell `z` of the job's column `li` in brick column
 // `column` (`edit_store::CellEdit`: state in bits 0..2, 1 air, 2 solid,
 // 3 paint; material in 8..16).
+// A brick's table entry: NONE (none), UNIFORM_BRICK | the edit of all its
+// cells, or its cells' first word / 256 in `baked_cells`.
+const UNIFORM_BRICK: u32 = 0x40000000u;
+
 fn baked_edit(job: ChunkJob, column: u32, li: u32, z: u32) -> u32 {
     let b = baked_refs[job.baked + column * 8u + (z >> 3u)];
     if b == NONE { return 0u; }
+    if (b & UNIFORM_BRICK) != 0u { return b & 0xffffu; }
     let n = (li & 7u) + 8u * ((li >> 3u) + 8u * (z & 7u));
     return (baked_cells[b * 256u + (n >> 1u)] >> ((n & 1u) * 16u)) & 0xffffu;
 }
@@ -419,7 +575,7 @@ fn tile_halo_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocatio
         workgroupBarrier();
         if lean.x != 0 {
             for (var c = li; c < TILE_COLUMNS; c += 64u) {
-                let column = tile_columns[t * TILE_COLUMNS + c];
+                let column = tile_columns[job.slot * TILE_COLUMNS + c];
                 if column.x != OUTSIDE && column.w > 0 { atomicStore(&w_halo_leaning, 1u); }
             }
         }
@@ -434,7 +590,7 @@ fn tile_halo_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocatio
             let cell = clamp(n * lean.y, vec2<i32>(0), vec2<i32>(last));
             let local = cell - vec2<i32>(job.cx, job.cy) * 64;
             if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) { continue; }
-            let at = t * HALO_SIDE * HALO_SIDE + u32(n.y - first.y) * HALO_SIDE + u32(n.x - first.x);
+            let at = job.slot * HALO_SIDE * HALO_SIDE + u32(n.y - first.y) * HALO_SIDE + u32(n.x - first.x);
             tile_halo[at] = generation_halo_column(t, job.face, cell.x, cell.y, job.level, job.level >= 1u, wg.x * 64u + li).x;
         }
     }
@@ -452,7 +608,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let y = (wg.x >> 3u) * 8u + (li >> 3u);
     let i = tile.cx * 64 + i32(x);
     let j = tile.cy * 64 + i32(y);
-    let column = tile_columns[job.tile * TILE_COLUMNS + y * 64u + x];
+    let column = tile_columns[tile.slot * TILE_COLUMNS + y * 64u + x];
     let at = wg.y * TILE_COLUMNS + y * 64u + x;
     // A leaning surface (overhangs) reads the field on a global lattice:
     // nodes every `spacing` cells from `div_floor(8 ci - reach, spacing)`,
@@ -471,16 +627,19 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         // the same arguments); past the tile's edges, the tile's halo.
         let local = cell - vec2<i32>(tile.cx, tile.cy) * 64;
         if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) {
-            w_lean[li] = tile_columns[job.tile * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
+            w_lean[li] = tile_columns[tile.slot * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
         } else {
             let n = node + vec2<i32>(i32(li & 7u), i32(li >> 3u)) - halo_first(tile, lean);
-            w_lean[li] = tile_halo[job.tile * HALO_SIDE * HALO_SIDE + u32(n.y) * HALO_SIDE + u32(n.x)];
+            w_lean[li] = tile_halo[tile.slot * HALO_SIDE * HALO_SIDE + u32(n.y) * HALO_SIDE + u32(n.x)];
         }
     }
     workgroupBarrier();
     if column.x == OUTSIDE {
         column_masks[at] = vec2<u32>(0u);
         column_materials[at] = M_AIR;
+        if job.detail != NONE {
+            for (var w = 0u; w < 16u; w++) { cell_materials[(job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS + w] = 0u; }
+        }
         return;
     }
     let height = column.x;
@@ -488,6 +647,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let k0 = job.cz * 64;
     var mask = set_bits(vec2<u32>(0u), 0, top - k0, true);
     let p = domain_point(face, i, j, level);
+    // Under edits, the natural top when the volume puts solid cells over
+    // the chunk (`terrain::generated_top`: the first air over the highest).
+    var above_top = OUTSIDE;
     if column.z > 0 || column.w > 0 {
         // Volume terms: the cells the program changes within its extent,
         // stepping over rock caves cannot reach (`terrain_clearance`).
@@ -528,6 +690,16 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
             scan += 1;
         }
+        if job.detail != NONE {
+            for (var s = top + column.w - 1; s >= k0 + 64; s--) {
+                var lean_h = height;
+                if leaning { lean_h = lean_height(volume.overhang, i, j, s, level, height, lean.y, node); }
+                if terrain_density_with(volume, volume_point_half(p, (s << (level + 1u)) + half), level, top, height, lean_h, s) > 0 {
+                    above_top = s + 1;
+                    break;
+                }
+            }
+        }
     }
     // Edits in their order (`planet::Edits`): the large brushes, the baked
     // cells, the recent brushes.
@@ -543,28 +715,22 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     if mask.x != 0u || mask.y != 0u {
         let k = k0 + high;
         let t = vec4<i32>(
-            tile_top(job.tile, max(i32(x) - 1, 0), i32(y), level),
-            tile_top(job.tile, min(i32(x) + 1, 63), i32(y), level),
-            tile_top(job.tile, i32(x), max(i32(y) - 1, 0), level),
-            tile_top(job.tile, i32(x), min(i32(y) + 1, 63), level));
-        // The materials' slope (`Planet::material_slope`): the gradient over
-        // 64 base cells (in the tile), so a terrace step is not a steep
-        // slope (dirt along every contour); 8 per base layer a base cell.
-        let n = max(32 >> level, 1);
-        let xa = min(i32(x) + n, 63);
-        let xb = max(i32(x) - n, 0);
-        let ya = min(i32(y) + n, 63);
-        let yb = max(i32(y) - n, 0);
-        let gx = f32(tile_top(job.tile, xa, i32(y), level) - tile_top(job.tile, xb, i32(y), level)) / f32(max(xa - xb, 1));
-        let gy = f32(tile_top(job.tile, i32(x), ya, level) - tile_top(job.tile, i32(x), yb, level)) / f32(max(ya - yb, 1));
-        let slope = i32(round(max(abs(gx), abs(gy)) * 8.0));
+            tile_top(tile.slot, max(i32(x) - 1, 0), i32(y), level),
+            tile_top(tile.slot, min(i32(x) + 1, 63), i32(y), level),
+            tile_top(tile.slot, i32(x), max(i32(y) - 1, 0), level),
+            tile_top(tile.slot, i32(x), min(i32(y) + 1, 63), level));
+        let slope = column_slope(tile, x, y);
         // The terrain's own top (where its volume put it, under the height
         // field's at caves and overhangs) is surface; a top edits moved
         // lies as deep as it is under the terrain's.
         let natural_high = select(i32(firstLeadingBit(natural.x)), 32 + i32(firstLeadingBit(natural.y)), natural.y != 0u);
         let moved = natural.x == 0u && natural.y == 0u || natural_high != high;
         let depth = select(0, max(top - 1 - k, 0) << level, moved);
-        let ground = ground_material(p, u32(column.y), height, depth, slope, k << level);
+        // Each material at its own cell's volume point and with the
+        // surface word's byte, as `Planet::material` evaluates it.
+        let cell_half = 1 << level;
+        let surface_word = u32(column.y) & 0xffu;
+        let ground = ground_material(volume_point_half(p, (k << (level + 1u)) + cell_half), surface_word, height, depth, slope, k << level);
         let terrain_material = ground & M_ID;
         let surface = edited_material(terrain_material, job, wg.x, li, p, ch, level, k, k0);
         let speck = select(0u, 0x80u, (ground & M_SPECK) != 0u && surface == terrain_material);
@@ -573,18 +739,61 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         var soil = surface;
         var rock = surface;
         if surface == terrain_material {
-            soil = ground_material(p, u32(column.y), height, 1 << level, slope, (top - 2) << level) & M_ID;
+            soil = ground_material(volume_point_half(p, ((top - 2) << (level + 1u)) + cell_half), surface_word, height, 1 << level, slope, (top - 2) << level) & M_ID;
             let deep = (terrain.header.z >> level) + 1;
-            rock = ground_material(p, u32(column.y), height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
+            rock = ground_material(volume_point_half(p, ((top - 1 - deep) << (level + 1u)) + cell_half), surface_word, height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
         }
         let lowest = min(top, min(min(t.x, t.y), min(t.z, t.w)));
         material = (surface & 0x7fu) | speck | ((soil & 0xffu) << 8u) | ((rock & 0xffu) << 16u) | (u32(clamp(lowest - k0 + 128, 0, 255)) << 24u);
     }
     column_materials[at] = material;
+    // Each solid cell's own material where the edits set one, then the
+    // column's natural top (`Planet::material`'s depth counts from it): over
+    // the chunk, else its highest natural cell's in it, else the
+    // heightfield's.
+    if job.detail != NONE {
+        let cells = (job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS;
+        for (var w = 0u; w < 16u; w++) {
+            var word = 0u;
+            for (var b = 0u; b < 4u; b++) {
+                let z = w * 4u + b;
+                if bit_at(mask, z) { word |= edited_material(0u, job, wg.x, li, p, ch, level, k0 + i32(z), k0) << (b * 8u); }
+            }
+            cell_materials[cells + w] = word;
+        }
+        var natural_top = top;
+        if above_top != OUTSIDE {
+            natural_top = above_top;
+        } else if natural.x != 0u || natural.y != 0u {
+            let high = select(i32(firstLeadingBit(natural.x)), 32 + i32(firstLeadingBit(natural.y)), natural.y != 0u);
+            natural_top = select(k0 + high + 1, select(top, k0 + 64, column.z > 0 || column.w > 0), high == 63);
+        }
+        cell_materials[cells + 16u] = bitcast<u32>(natural_top);
+    }
 }
 
-fn tile_top(tile: u32, x: i32, y: i32, level: u32) -> i32 {
-    let h = tile_columns[tile * TILE_COLUMNS + u32(y) * 64u + u32(x)].x;
+// The materials' slope of column (x, y) of footprint `tile`:
+// `Planet::material_slope` (one scale, level-4 relief, whatever level draws
+// it) below MATERIAL_SLOPE_LEVEL. A coarser column spans many base columns:
+// the gradient over 64 base cells (in the tile; eighths of a cell per cell).
+fn column_slope(tile: TileJob, x: u32, y: u32) -> i32 {
+    if tile.level < MATERIAL_SLOPE_LEVEL {
+        return material_slope(tile, tile.cx * 64 + i32(x), tile.cy * 64 + i32(y));
+    }
+    let level = tile.level;
+    let n = max(32 >> level, 1);
+    let xa = min(i32(x) + n, 63);
+    let xb = max(i32(x) - n, 0);
+    let ya = min(i32(y) + n, 63);
+    let yb = max(i32(y) - n, 0);
+    let gx = f32(tile_top(tile.slot, xa, i32(y), level) - tile_top(tile.slot, xb, i32(y), level)) / f32(max(xa - xb, 1));
+    let gy = f32(tile_top(tile.slot, i32(x), ya, level) - tile_top(tile.slot, i32(x), yb, level)) / f32(max(ya - yb, 1));
+    return i32(round(max(abs(gx), abs(gy)) * 8.0));
+}
+
+// The top (level cells) of column (x, y) of the footprint in pool slot `slot`.
+fn tile_top(slot: u32, x: i32, y: i32, level: u32) -> i32 {
+    let h = tile_columns[slot * TILE_COLUMNS + u32(y) * 64u + u32(x)].x;
     return div_floor(select(h, 0, h == OUTSIDE), world.grid.y) >> level;
 }
 
@@ -601,6 +810,65 @@ fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -
     return select(sub, top & 0x7fu, has_top != 0u) | (sub << 8u);
 }
 
+// Leaf `lz` of leaf column (lx, ly) of chunk job `n` (`job`, footprint
+// `tile`), its material pair `pair`: each exposed solid cell's material
+// (its edit's, else `Planet::material`'s natural one), cleared where the
+// pair draws it (the surface's under air, the subsurface's under ground;
+// both at the chunk's top layer; never when the leaf would be `implicit`,
+// drawn with its mid's material), written back to the job's
+// `cell_materials`. Whether any cell is left.
+fn leaf_cells(job: ChunkJob, n: u32, tile: TileJob, lx: u32, ly: u32, lz: u32, pair: u32, implicit: bool) -> bool {
+    let surface = pair & 0xffu;
+    let sub = (pair >> 8u) & 0xffu;
+    var any = false;
+    for (var c = 0u; c < 16u; c++) {
+        let cx = lx * 4u + (c & 3u);
+        let cy = ly * 4u + (c >> 2u);
+        let m = column_masks[n * TILE_COLUMNS + cy * 64u + cx];
+        let cells = (job.detail * TILE_COLUMNS + cy * 64u + cx) * CELL_WORDS;
+        var word = cell_materials[cells + lz];
+        if ((select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
+            continue;
+        }
+        // The columns beside it (past the chunk's sides: air).
+        var west = vec2<u32>(0u);
+        var east = vec2<u32>(0u);
+        var south = vec2<u32>(0u);
+        var north = vec2<u32>(0u);
+        if cx > 0u { west = column_masks[n * TILE_COLUMNS + cy * 64u + cx - 1u]; }
+        if cx < 63u { east = column_masks[n * TILE_COLUMNS + cy * 64u + cx + 1u]; }
+        if cy > 0u { south = column_masks[n * TILE_COLUMNS + (cy - 1u) * 64u + cx]; }
+        if cy < 63u { north = column_masks[n * TILE_COLUMNS + (cy + 1u) * 64u + cx]; }
+        for (var b = 0u; b < 4u; b++) {
+            let z = lz * 4u + b;
+            var own = (word >> (b * 8u)) & 0xffu;
+            if !bit_at(m, z) {
+                continue;
+            }
+            let under_air = z < 63u && !bit_at(m, z + 1u);
+            let exposed = z == 0u || z == 63u || under_air || !bit_at(m, z - 1u) || !bit_at(west, z) || !bit_at(east, z) || !bit_at(south, z) || !bit_at(north, z);
+            if own == 0u && exposed {
+                let level = tile.level;
+                let i = tile.cx * 64 + i32(cx);
+                let j = tile.cy * 64 + i32(cy);
+                let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
+                let k = job.cz * 64 + i32(z);
+                let depth = max(bitcast<i32>(cell_materials[cells + 16u]) - 1 - k, 0) << level;
+                let q = volume_point_half(domain_point(tile.face, i, j, level), (k << (level + 1u)) + (1 << level));
+                own = ground_material(q, u32(column.y) & 0xffu, column.x, depth, column_slope(tile, cx, cy), k << level) & M_ID;
+            }
+            let drawn = !implicit && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
+            if own == 0u || drawn {
+                own = 0u;
+            }
+            word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
+        }
+        cell_materials[cells + lz] = word;
+        any = any || word != 0u;
+    }
+    return any;
+}
+
 var<workgroup> w_occ: array<atomic<u32>, 128>;
 var<workgroup> w_full: array<atomic<u32>, 128>;
 var<workgroup> w_base: array<u32, 64>;
@@ -610,6 +878,10 @@ var<workgroup> w_total: u32;
 var<workgroup> w_pages: array<u32, 64>;
 var<workgroup> w_page_count: u32;
 var<workgroup> w_mid_material: array<atomic<u32>, 64>;
+// Leaf pages holding a leaf with edited materials, and their detail pages.
+var<workgroup> w_detail_need: array<atomic<u32>, 64>;
+var<workgroup> w_detail: array<u32, 64>;
+var<workgroup> w_detail_overflow: atomic<u32>;
 // The column tops' least-squares sums (n, x, y, z, xx, xy, yy, xz, yz),
 // the fitted slope, and the plane's height over it (1/256 cells).
 var<workgroup> w_fit: array<atomic<i32>, 9>;
@@ -631,7 +903,14 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         atomicStore(&w_occ[t], 0u);
         atomicStore(&w_full[t], 0u);
     }
-    if t < 64u { atomicStore(&w_mid_material[t], 0u); }
+    if t < 64u {
+        atomicStore(&w_mid_material[t], 0u);
+        atomicStore(&w_detail_need[t], 0u);
+    }
+    if t == 0u {
+        atomicStore(&w_detail_overflow, 0u);
+        slot_details[job.slot] = 0u;
+    }
     if t < 9u { atomicStore(&w_fit[t], 0); }
     if t == 0u {
         atomicStore(&w_z[0], 64);
@@ -709,7 +988,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let base = job.cz * 64;
     var natural = true;
     for (var c = 0u; c < 16u; c++) {
-        let height = tile_columns[job.tile * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)].x;
+        let height = tile_columns[tile.slot * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)].x;
         if height == OUTSIDE { natural = false; break; }
         let hf = clamp((div_floor(height, world.grid.y) >> tile.level) - base, 0, 64);
         if tops[c] != hf && !(hf == 64 && tops[c] == 64) { natural = false; }
@@ -725,10 +1004,10 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         for (var r = 0u; r < 4u; r++) {
             let row = i32(ly * 4u + r);
             let col = i32(lx * 4u + r);
-            let hx0 = tile_columns[job.tile * TILE_COLUMNS + u32(row) * 64u + u32(x0)].x;
-            let hx1 = tile_columns[job.tile * TILE_COLUMNS + u32(row) * 64u + u32(x1)].x;
-            let hy0 = tile_columns[job.tile * TILE_COLUMNS + u32(y0) * 64u + u32(col)].x;
-            let hy1 = tile_columns[job.tile * TILE_COLUMNS + u32(y1) * 64u + u32(col)].x;
+            let hx0 = tile_columns[tile.slot * TILE_COLUMNS + u32(row) * 64u + u32(x0)].x;
+            let hx1 = tile_columns[tile.slot * TILE_COLUMNS + u32(row) * 64u + u32(x1)].x;
+            let hy0 = tile_columns[tile.slot * TILE_COLUMNS + u32(y0) * 64u + u32(col)].x;
+            let hy1 = tile_columns[tile.slot * TILE_COLUMNS + u32(y1) * 64u + u32(col)].x;
             if hx0 == OUTSIDE || hx1 == OUTSIDE || hy0 == OUTSIDE || hy1 == OUTSIDE { valid = false; }
             g += vec2<f32>(f32(hx1 - hx0) / f32(x1 - x0), f32(hy1 - hy0) / f32(y1 - y0));
         }
@@ -737,18 +1016,25 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             ground = encode_slope(g.x) | (encode_slope(g.y) << 8u);
         }
     }
+    // Leaves (bit lz) holding cells their pair would draw wrong (under
+    // edits: `leaf_cells`).
+    var edited = 0u;
     for (var lz = 0u; lz < 16u; lz++) {
         let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
         let word = m * 2u + (l >> 5u);
         let bit = 1u << (l & 31u);
         if leaf[lz].x != 0u || leaf[lz].y != 0u {
+            let pair = leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile.level);
             atomicOr(&w_occ[word], bit);
-            atomicMax(&w_mid_material[m], leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile_jobs[job.tile].level));
+            atomicMax(&w_mid_material[m], pair);
+            let implicit = leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u;
+            if job.detail != NONE && leaf_cells(job, wg.x, tile, lx, ly, lz, pair, implicit) { edited |= 1u << lz; }
         }
         // A full leaf is implicit (its mid's material) unless a column tops
-        // in it: then it is the surface and keeps its own materials.
-        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u { atomicOr(&w_full[word], bit); }
+        // in it (then it is the surface and keeps its own materials) or
+        // its pair draws cells wrong.
+        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && (((topped | edited) >> lz) & 1u) == 0u { atomicOr(&w_full[word], bit); }
     }
     workgroupBarrier();
     // The tops' plane: its slope by least squares, then lifted over every
@@ -829,6 +1115,8 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if root_occ.x == 0u && root_occ.y == 0u { flags |= 2; }
         if root_full.x == 0xffffffffu && root_full.y == 0xffffffffu { flags |= 4; }
         if overflow { flags |= 8; }
+        // (Flag 16, out of detail pages, is set once the detail pages are
+        // taken below.)
         // The columns' mean top (quarter cells; 0xffff: none), which the
         // chunk's frame is made about.
         let columns = atomicLoad(&w_fit[0]);
@@ -839,9 +1127,43 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     workgroupBarrier();
     let total = workgroupUniformLoad(&w_total);
     if total == 0u { return; }
+    let pages = w_page_count;
+    // Detail pages: one for each leaf page holding a leaf with edited
+    // materials; NONE for the chunk's other pages (they may have been
+    // another chunk's).
+    if job.detail != NONE {
+        for (var lz = 0u; lz < 16u; lz++) {
+            if ((edited >> lz) & 1u) == 0u { continue; }
+            let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
+            let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
+            let mixed = vec2<u32>(atomicLoad(&w_occ[m * 2u]), atomicLoad(&w_occ[m * 2u + 1u])) & ~vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
+            if bit_at(mixed, l) { atomicOr(&w_detail_need[(w_base[m] + rank64(mixed, l)) >> 6u], 1u); }
+        }
+    }
+    workgroupBarrier();
+    if t < pages {
+        var detail = NONE;
+        if atomicLoad(&w_detail_need[t]) != 0u {
+            detail = take_detail();
+            if detail == NONE { atomicStore(&w_detail_overflow, 1u); }
+        }
+        w_detail[t] = detail;
+        detail_pages[w_pages[t]] = detail;
+    }
+    workgroupBarrier();
+    if t == 0u {
+        if atomicLoad(&w_detail_overflow) != 0u { job_results[wg.x].w |= 16; }
+        var any = 0u;
+        for (var p = 0u; p < pages; p++) { any |= u32(w_detail[p] != NONE); }
+        slot_details[job.slot] = any;
+    }
+    // The detail pages cleared (leaves without edited cells read zero).
+    for (var w = t; w < pages * DETAIL_WORDS; w += 256u) {
+        let detail = w_detail[w / DETAIL_WORDS];
+        if detail != NONE { detail_cells[detail * DETAIL_WORDS + (w % DETAIL_WORDS)] = 0u; }
+    }
     // The pages' material bytes from earlier owners, cleared (32 words a
     // page).
-    let pages = w_page_count;
     for (var w = t; w < pages * 32u; w += 256u) {
         atomicStore(&leaf_materials[w_pages[w >> 5u] * 32u + (w & 31u)], 0u);
         atomicStore(&leaf_normals[w_pages[w >> 5u] * 32u + (w & 31u)], 0u);
@@ -861,6 +1183,205 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             if ((topped >> lz) & 1u) != 0u {
                 atomicOr(&leaf_normals[index >> 1u], ground << ((index & 1u) * 16u));
             }
+            // Its cells' edited materials, column by column.
+            let detail = w_detail[order >> 6u];
+            if ((edited >> lz) & 1u) != 0u && detail != NONE {
+                for (var c = 0u; c < 16u; c++) {
+                    let column = (lx * 4u + (c & 3u)) + (ly * 4u + (c >> 2u)) * 64u;
+                    detail_cells[detail * DETAIL_WORDS + (order & 63u) * 16u + c] = cell_materials[(job.detail * TILE_COLUMNS + column) * CELL_WORDS + lz];
+                }
+            }
+        }
+    }
+}
+
+// ---- Kept chunks (`docs/chunk-octree.md`, "Edited chunks kept") ----
+//
+// An edited chunk the plan evicts is packed before its pages go back
+// (`pack_main`) and read back; a node packed and unedited since is
+// restored into a new slot by copying (`restore_main`), not generated
+// again from the field and the history. A packed chunk: PACK_HEADER words
+// (its `ChunkMeta`, the mask of its pages with detail pages, its size),
+// its mids' words, mid leaves and mid materials (384), then each page's
+// leaves (128 words), materials (32), normals (32), then its detail pages
+// (DETAIL_WORDS each, in page order).
+const PACK_HEADER: u32 = 16u;
+const PACK_LEAVES_AT: u32 = 400u;
+
+// Pack jobs: (slot, -, -, -); the packs; the space used, then each job's
+// (offset or NONE, words).
+@group(1) @binding(0) var<storage, read> pack_jobs: array<vec4<u32>>;
+@group(1) @binding(1) var<storage, read_write> pack_data: array<u32>;
+@group(1) @binding(2) var<storage, read_write> pack_alloc: array<atomic<u32>>;
+// Restore jobs: (slot, its pack's offset in `restore_data`, its result's
+// index in `job_results`, its result flags); the packs.
+@group(1) @binding(3) var<storage, read> restore_jobs: array<vec4<u32>>;
+@group(1) @binding(4) var<storage, read> restore_data: array<u32>;
+
+fn pack_words(pages: u32, details: u32) -> u32 {
+    return PACK_LEAVES_AT + pages * 192u + details * DETAIL_WORDS;
+}
+
+var<workgroup> w_pack: vec4<u32>;
+var<workgroup> w_pack_pages: array<u32, 64>;
+// Each page's detail page (NONE: none) and its place among the packed ones.
+var<workgroup> w_pack_detail: array<u32, 64>;
+var<workgroup> w_pack_index: array<u32, 64>;
+
+// One workgroup a chunk: dispatch (pack jobs), before `evict`.
+@compute @workgroup_size(256)
+fn pack_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {
+    let slot = pack_jobs[wg.x].x;
+    if t == 0u {
+        let header = chunk_meta[slot];
+        var mask = vec2<u32>(0u);
+        var details = 0u;
+        for (var p = 0u; p < header.pages; p++) {
+            let page = leaf_pages[slot * LEAF_PAGES + p];
+            w_pack_pages[p] = page;
+            w_pack_detail[p] = detail_pages[page];
+            w_pack_index[p] = details;
+            if w_pack_detail[p] != NONE {
+                if p < 32u { mask.x |= 1u << p; } else { mask.y |= 1u << (p - 32u); }
+                details += 1u;
+            }
+        }
+        let words = pack_words(header.pages, details);
+        let at = atomicAdd(&pack_alloc[0], words);
+        let ok = at + words <= arrayLength(&pack_data);
+        atomicStore(&pack_alloc[1u + 2u * wg.x], select(NONE, at, ok));
+        atomicStore(&pack_alloc[2u + 2u * wg.x], words);
+        w_pack = vec4<u32>(at, u32(ok), header.pages, 0u);
+        if ok {
+            pack_data[at] = header.root_occ.x;
+            pack_data[at + 1u] = header.root_occ.y;
+            pack_data[at + 2u] = header.root_full.x;
+            pack_data[at + 3u] = header.root_full.y;
+            pack_data[at + 4u] = bitcast<u32>(header.z.x);
+            pack_data[at + 5u] = bitcast<u32>(header.z.y);
+            pack_data[at + 6u] = header.leaves;
+            pack_data[at + 7u] = header.pages;
+            pack_data[at + 8u] = bitcast<u32>(header.top.x);
+            pack_data[at + 9u] = bitcast<u32>(header.top.y);
+            pack_data[at + 10u] = bitcast<u32>(header.top.z);
+            pack_data[at + 11u] = bitcast<u32>(header.top.w);
+            pack_data[at + 12u] = mask.x;
+            pack_data[at + 13u] = mask.y;
+            pack_data[at + 14u] = words;
+            pack_data[at + 15u] = 0u;
+        }
+    }
+    workgroupBarrier();
+    let at = w_pack.x;
+    let pages = w_pack.z;
+    if w_pack.y == 0u { return; }
+    for (var i = t; i < 256u; i += 256u) { pack_data[at + PACK_HEADER + i] = mids[slot * 64u + i / 4u][i % 4u]; }
+    for (var i = t; i < 64u; i += 256u) {
+        pack_data[at + PACK_HEADER + 256u + i] = mid_leaves[slot * 64u + i];
+        pack_data[at + PACK_HEADER + 320u + i] = mid_materials[slot * 64u + i];
+    }
+    let leaves_at = at + PACK_LEAVES_AT;
+    for (var w = t; w < pages * 128u; w += 256u) {
+        let leaf = w_pack_pages[w / 128u] * 64u + (w % 128u) / 2u;
+        pack_data[leaves_at + w] = leaves[leaf][w % 2u];
+    }
+    let materials_at = leaves_at + pages * 128u;
+    let normals_at = materials_at + pages * 32u;
+    for (var w = t; w < pages * 32u; w += 256u) {
+        let word = w_pack_pages[w / 32u] * 32u + w % 32u;
+        pack_data[materials_at + w] = atomicLoad(&leaf_materials[word]);
+        pack_data[normals_at + w] = atomicLoad(&leaf_normals[word]);
+    }
+    let details_at = normals_at + pages * 32u;
+    for (var w = t; w < pages * DETAIL_WORDS; w += 256u) {
+        let p = w / DETAIL_WORDS;
+        if w_pack_detail[p] != NONE {
+            pack_data[details_at + w_pack_index[p] * DETAIL_WORDS + w % DETAIL_WORDS] = detail_cells[w_pack_detail[p] * DETAIL_WORDS + w % DETAIL_WORDS];
+        }
+    }
+}
+
+var<workgroup> w_restore: vec4<u32>;
+var<workgroup> w_restore_pages: array<u32, 64>;
+var<workgroup> w_restore_detail: array<u32, 64>;
+var<workgroup> w_restore_index: array<u32, 64>;
+
+// One workgroup a chunk: dispatch (restore jobs), after `chunk_build_main`.
+// Its pages (and detail pages) come off the free stacks as a build's do;
+// out of leaf pages it stores nothing (flag 8, as a build), out of detail
+// pages its leaves' pairs show (flag 16).
+@compute @workgroup_size(256)
+fn restore_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {
+    let job = restore_jobs[wg.x];
+    let slot = job.x;
+    let at = job.y;
+    if t == 0u {
+        let pages = restore_data[at + 7u];
+        var first = 0u;
+        if pages > 0u { first = take_pages(pages); }
+        let ok = first != NONE;
+        let mask = vec2<u32>(restore_data[at + 12u], restore_data[at + 13u]);
+        var flags = job.w;
+        var details = 0u;
+        var any = 0u;
+        for (var p = 0u; p < pages && ok; p++) {
+            let page = free_pages[first + p];
+            w_restore_pages[p] = page;
+            leaf_pages[slot * LEAF_PAGES + p] = page;
+            var detail = NONE;
+            if bit_at(mask, p) {
+                w_restore_index[p] = details;
+                details += 1u;
+                detail = take_detail();
+                if detail == NONE { flags |= 16u; } else { any = 1u; }
+            }
+            w_restore_detail[p] = detail;
+            detail_pages[page] = detail;
+        }
+        slot_details[slot] = any;
+        let z = vec2<i32>(bitcast<i32>(restore_data[at + 4u]), bitcast<i32>(restore_data[at + 5u]));
+        if ok {
+            chunk_meta[slot] = ChunkMeta(
+                vec2<u32>(restore_data[at], restore_data[at + 1u]),
+                vec2<u32>(restore_data[at + 2u], restore_data[at + 3u]),
+                z,
+                restore_data[at + 6u],
+                pages,
+                bitcast<vec4<f32>>(vec4<u32>(restore_data[at + 8u], restore_data[at + 9u], restore_data[at + 10u], restore_data[at + 11u])),
+            );
+        } else {
+            chunk_meta[slot].leaves = 0u;
+            chunk_meta[slot].pages = 0u;
+            flags |= 8u;
+        }
+        job_results[job.z] = vec4<i32>(i32(slot), z.x, z.y, bitcast<i32>(flags));
+        w_restore = vec4<u32>(u32(ok), pages, 0u, 0u);
+    }
+    workgroupBarrier();
+    if w_restore.x == 0u { return; }
+    let pages = w_restore.y;
+    for (var i = t; i < 256u; i += 256u) { mids[slot * 64u + i / 4u][i % 4u] = restore_data[at + PACK_HEADER + i]; }
+    for (var i = t; i < 64u; i += 256u) {
+        mid_leaves[slot * 64u + i] = restore_data[at + PACK_HEADER + 256u + i];
+        mid_materials[slot * 64u + i] = restore_data[at + PACK_HEADER + 320u + i];
+    }
+    let leaves_at = at + PACK_LEAVES_AT;
+    for (var w = t; w < pages * 128u; w += 256u) {
+        let leaf = w_restore_pages[w / 128u] * 64u + (w % 128u) / 2u;
+        leaves[leaf][w % 2u] = restore_data[leaves_at + w];
+    }
+    let materials_at = leaves_at + pages * 128u;
+    let normals_at = materials_at + pages * 32u;
+    for (var w = t; w < pages * 32u; w += 256u) {
+        let word = w_restore_pages[w / 32u] * 32u + w % 32u;
+        atomicStore(&leaf_materials[word], restore_data[materials_at + w]);
+        atomicStore(&leaf_normals[word], restore_data[normals_at + w]);
+    }
+    let details_at = normals_at + pages * 32u;
+    for (var w = t; w < pages * DETAIL_WORDS; w += 256u) {
+        let p = w / DETAIL_WORDS;
+        if w_restore_detail[p] != NONE {
+            detail_cells[w_restore_detail[p] * DETAIL_WORDS + w % DETAIL_WORDS] = restore_data[details_at + w_restore_index[p] * DETAIL_WORDS + w % DETAIL_WORDS];
         }
     }
 }

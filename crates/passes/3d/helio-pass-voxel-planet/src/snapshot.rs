@@ -14,7 +14,9 @@
 //!   (a generator update keeps a world's edits), never onto another grid;
 //! * brush count, history hash, sealed brush count and hash, edit bounds;
 //! * the large brushes, then the recent ones, as brush records (`record`);
-//! * the baked bricks: key, then runs of equal cells;
+//! * the baked bricks: key, then runs of equal cells (version 3: large
+//!   brushes baked at their bake level too; older snapshots have them
+//!   baked on load, under the cells baked after them);
 //! * a checksum of everything before it.
 use crate::edit_store::{Brick, BrickKey, CellEdit, EditStore, BRICK_CELLS};
 use crate::edits::Brush;
@@ -24,7 +26,8 @@ use crate::planet::{Edits, Planet, PlanetRecipe};
 
 const MAGIC: [u8; 4] = *b"HVPS";
 /// Version 2: brush records with the box height (version 1 still reads).
-const VERSION: u16 = 2;
+/// Version 3: large brushes baked at their bake level (`planet::bake_level`).
+const VERSION: u16 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -68,6 +71,7 @@ struct Reader<'a> {
     at: usize,
     /// Journal record size of this snapshot's version.
     record: usize,
+    version: u16,
 }
 
 impl<'a> Reader<'a> {
@@ -119,7 +123,8 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
         return Err(SnapshotError::NotASnapshot);
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    let Some(record) = (version <= VERSION).then(|| record::record_bytes(version)).flatten() else {
+    // Version 3 changed the baked bricks, not the records.
+    let Some(record) = (version <= VERSION).then(|| record::record_bytes(version.min(2))).flatten() else {
         return Err(SnapshotError::UnsupportedVersion(version));
     };
     let snapshot = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -131,7 +136,7 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
     if u64::from_le_bytes(sum.try_into().unwrap()) != record::fnv64(body) {
         return Err(SnapshotError::Corrupt("checksum"));
     }
-    Ok(Reader { bytes: body, at: 16, record })
+    Ok(Reader { bytes: body, at: 16, record, version })
 }
 
 impl Planet {
@@ -204,6 +209,18 @@ impl Planet {
         }
         if r.at != r.bytes.len() {
             return Err(SnapshotError::Corrupt("trailing data"));
+        }
+        if r.version < 3 {
+            // Large brushes were analytic at every level, applied before
+            // the baked cells: baked under them at their bake level, the
+            // latest first, they read the same.
+            let mut changed = Vec::new();
+            for brush in large.iter().rev() {
+                for fb in brush.resolve(&grid).map_err(SnapshotError::Rejected)? {
+                    changed.extend(baked.bake_at(&grid, &fb, brush.op, crate::planet::bake_level(&fb), true));
+                }
+            }
+            baked.rebuild_coarse(changed, grid.levels());
         }
         let edits = Edits::from_parts(planet.grid(), &large, baked, sealed, &recent).map_err(SnapshotError::Rejected)?;
         if (edits.len(), edits.hash()) != (covers.brushes, covers.hash) {

@@ -22,6 +22,11 @@ pub struct ChunkPass {
     /// The planet the world was built for (recipe fingerprint).
     built_for: Option<u64>,
     shown: Option<PlanetFrame>,
+    /// A save's export underway: the resident edited chunks are packing.
+    exporting: bool,
+    /// How the frame's kept chunks went into the last world built: how
+    /// many, or why they were refused.
+    kept_loaded: Option<Result<usize, String>>,
     last_eye: Option<(DVec3, std::time::Instant)>,
     stats: UpdateStats,
     /// Frames whose GPU times came back, until taken.
@@ -49,6 +54,8 @@ impl ChunkPass {
             world: None,
             built_for: None,
             shown: None,
+            exporting: false,
+            kept_loaded: None,
             last_eye: None,
             stats: UpdateStats::default(),
             timings: Vec::new(),
@@ -70,9 +77,18 @@ impl ChunkPass {
     }
 
     /// A host viewport should keep rendering until residency settles.
+    /// A save's export too, until answered.
     pub fn needs_frame(&self) -> bool {
-        let has_source = self.source.try_lock().map_or(true, |s| s.is_some());
-        has_source && self.world.as_ref().is_none_or(|w| !w.settled())
+        let Ok(source) = self.source.try_lock() else { return true };
+        let Some(frame) = source.as_ref() else { return false };
+        let exporting = frame.export.as_ref().is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted));
+        exporting || self.world.as_ref().is_none_or(|w| !w.settled())
+    }
+
+    /// How the frame's kept chunks went into the last world built: how
+    /// many it keeps, or why they were refused (`None`: it had none).
+    pub fn kept_loaded(&self) -> Option<&Result<usize, String>> {
+        self.kept_loaded.as_ref()
     }
 
     /// Whether a planet's chunks are held.
@@ -111,20 +127,22 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} drawn_tiles={} drawn_chunks={} resident_chunks={} fading={} waiting={} generated={} regenerated={} deep={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} drawn_nodes={} drawn_chunks={} resident_chunks={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
             self.settled(),
-            s.drawn_tiles,
+            self.kept_loaded,
+            s.drawn_nodes,
             s.drawn_chunks,
             s.resident_chunks,
-            s.fading_tiles,
+            s.fading_nodes,
             s.requests,
-            s.generated_tiles,
-            s.regenerated_tiles,
-            s.deep_tiles,
+            s.generated_footprints,
+            s.generated_chunks,
+            s.seen,
+            s.reached,
             s.budget,
             s.coarse_share,
             s.worst_px,
-            s.worst.map_or("-".to_string(), |w| format!("{}/{}/{}/{}/exact{}/guess{}/kids{}of{}", w.key.face, w.key.level, w.key.cx, w.key.cy, u8::from(w.exact), w.guess, w.generated, w.children)),
+            s.worst.map_or("-".to_string(), |w| format!("{}/{}/{}/{}/{}/exact{}/guess{}/kids{}of{}", w.key.face, w.key.level, w.key.cx, w.key.cy, w.key.cz, u8::from(w.exact), w.guess, w.generated, w.children)),
             s.plan_age,
             s.plan_ms,
             s.switch_px,
@@ -175,6 +193,8 @@ impl RenderPass for ChunkPass {
         }
         self.built_for = previous.built_for.take();
         self.shown = previous.shown.take();
+        self.exporting = previous.exporting;
+        self.kept_loaded = previous.kept_loaded.take();
         // A graph rebuild must not revert the host's art settings.
         self.appearance = previous.appearance;
         self.world.is_some()
@@ -300,9 +320,28 @@ impl ChunkPass {
             if let Some(appearance) = &self.appearance {
                 world.set_appearance(appearance);
             }
+            self.kept_loaded = frame.kept.as_ref().map(|kept| world.load_kept(&frame.planet, kept));
             self.world = Some(world);
             self.built_for = Some(recipe);
             self.last_eye = None;
+            self.exporting = false;
+        }
+        // A save's export: the resident edited chunks packed (over the
+        // next updates), then all kept chunks answered for this planet.
+        if let (Some(world), Some(export)) = (&mut self.world, &frame.export) {
+            let mut export = export.lock().map_err(|_| {
+                helio_core::Error::InvalidPassConfig("kept chunk export poisoned".into())
+            })?;
+            if !export.wanted {
+                self.exporting = false;
+            } else if !self.exporting {
+                world.keep_resident();
+                self.exporting = true;
+            } else if world.keeping() == 0 {
+                export.answer = Some((frame.planet.clone(), world.kept_chunks(&frame.planet)));
+                export.wanted = false;
+                self.exporting = false;
+            }
         }
         self.shown = Some(frame);
         Ok(())
