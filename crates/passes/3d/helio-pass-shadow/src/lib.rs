@@ -20,6 +20,36 @@ const MAX_SHADOW_FACES: usize = helio_pass_shadow_matrix::MAX_SHADOW_FACES;
 /// Must satisfy `device.limits().min_uniform_buffer_offset_alignment`, which is
 /// guaranteed to be ≤ 256 on every wgpu backend (Metal, Vulkan, DX12, WebGPU).
 const FACE_BUF_STRIDE: u64 = 256;
+/// Faces serviced each frame outside the shadow update budget: those whose
+/// cached static layer is current, so only the GPU's dirty flags decide
+/// whether they draw anything.
+const MAX_UNMETERED_FACES_PER_FRAME: usize = 192;
+
+/// Regions of the face-index buffer, each `MAX_SHADOW_FACES` slots. The slot's
+/// second word is the `ShadowDirty` bit its layer draws only when set (see
+/// `FACE_REGION_GATES`); `0` draws unconditionally.
+const FACE_REGIONS: usize = 3;
+/// Pages per face (an 8x8 grid): the instances of the depth-clear draw.
+const PAGES_PER_FACE: u32 = 64;
+/// Region 0: ungated (the face's cached static layer is being rebuilt).
+/// Region 1: gated on the dynamic bit. Region 2: gated on the static bit.
+const FACE_REGION_GATES: [u32; FACE_REGIONS] = [0, 1, 2];
+
+/// Dynamic offset into the face-index buffer for one layer of `face`. A face
+/// whose static layer is being rebuilt draws both layers unconditionally;
+/// otherwise each layer draws only if `ShadowDirty` marked that layer, so a
+/// moving movable caster redraws the dynamic layer and leaves the cached
+/// static layer (and glass, which follows it) alone.
+fn face_idx_offset(face: usize, static_dirty: bool, static_layer: bool) -> u32 {
+    let region = if static_dirty {
+        0
+    } else if static_layer {
+        2
+    } else {
+        1
+    };
+    ((region * MAX_SHADOW_FACES + face) as u64 * FACE_BUF_STRIDE) as u32
+}
 
 /// Regions of `ShadowDirty`'s per-face draw counts (`face_geom_count_buf`),
 /// each `MAX_SHADOW_FACES` `u32`s.
@@ -41,9 +71,15 @@ pub struct ShadowPass {
     face_light_gen: Vec<u64>,
     face_last_update: Vec<u64>,
     face_strength: Vec<f32>,
+    /// The strength last written to the GPU for each face, and the caster
+    /// generation it was written under: a fade is the only reason to write
+    /// it again, but a residency change rewrites it behind our back.
+    face_strength_written: Vec<(f32, u64)>,
     face_ownership: Vec<(u32, helio_pass_shadow_matrix::ShadowTile)>,
     schedule_frame: u64,
     last_work: (u32, u32),
+    /// Faces serviced last frame: (metered by the budget, unmetered GPU-gated).
+    last_visits: (usize, usize),
 
     /// Depth-clear pipeline — renders a full-screen triangle at z=1.0 with
     /// `DepthCompare::Always` to GPU-clear individual atlas faces before geometry.
@@ -83,6 +119,9 @@ pub struct ShadowPass {
     /// not known to be dirty on the CPU.
     #[allow(dead_code)]
     face_geom_count_buf: Arc<wgpu::Buffer>,
+    /// Per-face 8x8 page masks of the dynamic layer written by ShadowDirtyPass
+    /// (two words per face); a serviced face's words are cleared.
+    face_pages_buf: Arc<wgpu::Buffer>,
 
     /// True when the device supports MULTI_DRAW_INDIRECT_COUNT (Vulkan 1.2+, DX12 tier2).
     /// False on macOS Metal, WASM, and older Vulkan/DX12.  When false the ObjectDirty path
@@ -97,6 +136,12 @@ impl ShadowPass {
         self.last_work
     }
 
+    /// Faces serviced in the last frame: (metered by the update budget,
+    /// unmetered because only the GPU's dirty flags decide their work).
+    pub fn last_face_visits(&self) -> (usize, usize) {
+        self.last_visits
+    }
+
     /// Allocate persistent atlas resources.
     ///
     /// `face_dirty_buf` and `face_geom_count_buf` are shared with `ShadowDirtyPass`
@@ -108,6 +153,7 @@ impl ShadowPass {
         queue: &wgpu::Queue,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
+        face_pages_buf: Arc<wgpu::Buffer>,
         _face_cull_indirect: Arc<wgpu::Buffer>,
         _face_cull_counts: Arc<wgpu::Buffer>,
         atlas_size: u32,
@@ -118,6 +164,7 @@ impl ShadowPass {
             queue,
             face_dirty_buf,
             face_geom_count_buf,
+            face_pages_buf,
             atlas_size,
         )
     }
@@ -126,6 +173,7 @@ impl ShadowPass {
         queue: &wgpu::Queue,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
+        face_pages_buf: Arc<wgpu::Buffer>,
         atlas_size: u32,
     ) -> Self {
         let atlas_layers = 1;
@@ -202,6 +250,13 @@ impl ShadowPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                // binding 7: per-face dirty page masks of the dynamic layer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
@@ -309,17 +364,17 @@ impl ShadowPass {
 
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
-        let mut face_idx_data = vec![0u8; 2 * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
-        for i in 0..2 * MAX_SHADOW_FACES {
+        let mut face_idx_data = vec![0u8; FACE_REGIONS * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
+        for i in 0..FACE_REGIONS * MAX_SHADOW_FACES {
             let offset = i * FACE_BUF_STRIDE as usize;
             face_idx_data[offset..offset + 4]
                 .copy_from_slice(&((i % MAX_SHADOW_FACES) as u32).to_ne_bytes());
             face_idx_data[offset + 4..offset + 8]
-                .copy_from_slice(&u32::from(i >= MAX_SHADOW_FACES).to_ne_bytes());
+                .copy_from_slice(&FACE_REGION_GATES[i / MAX_SHADOW_FACES].to_ne_bytes());
         }
         let face_idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/FaceIdx"),
-            size: 2 * MAX_SHADOW_FACES as u64 * FACE_BUF_STRIDE,
+            size: (FACE_REGIONS * MAX_SHADOW_FACES) as u64 * FACE_BUF_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -372,6 +427,7 @@ impl ShadowPass {
         let static_face_views = Self::create_face_views(&static_atlas, "Static tiles", 1);
         Self {
             last_work: (0, 0),
+            last_visits: (0, 0),
             dynamic_array_view: array_view(&dynamic_atlas),
             face_ownership: vec![(0, Default::default()); MAX_SHADOW_FACES],
             pipeline,
@@ -379,6 +435,7 @@ impl ShadowPass {
             face_light_gen: vec![u64::MAX; MAX_SHADOW_FACES],
             face_last_update: vec![0; MAX_SHADOW_FACES],
             face_strength: vec![0.0; MAX_SHADOW_FACES],
+            face_strength_written: vec![(f32::NAN, u64::MAX); MAX_SHADOW_FACES],
             schedule_frame: 0,
             depth_clear_pipeline,
             static_array_view: Some(array_view(&static_atlas)),
@@ -393,6 +450,7 @@ impl ShadowPass {
             compare_sampler,
             face_dirty_buf,
             face_geom_count_buf,
+            face_pages_buf,
             supports_multi_draw_count: device
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
@@ -468,11 +526,14 @@ impl RenderPass for ShadowPass {
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        helio_core::cpu_scope!("Shadow: prepare");
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        helio_core::cpu_scope!("Shadow: execute");
         self.last_work = (0, 0);
+        self.last_visits = (0, 0);
         let Some(batch) = ctx
             .registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
@@ -517,6 +578,7 @@ impl RenderPass for ShadowPass {
             palette.map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
         ];
         if self.bg_0_key.as_ref() != Some(&key) {
+            helio_core::cpu_scope!("Shadow: rebuild bind group");
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow tiles"),
                 layout: &self.bgl_0,
@@ -547,10 +609,12 @@ impl RenderPass for ShadowPass {
                     },
                     wgpu::BindGroupEntry { binding: 5, resource: key[3].as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 6, resource: key[4].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: self.face_pages_buf.as_entire_binding() },
                 ],
             }));
             self.bg_0_key = Some(key);
         }
+        helio_core::cpu_scope!("Shadow: gather candidates");
         self.schedule_frame += 1;
         self.has_glass = batch.readback_shadow_transmissive_draw_count > 0;
         let mut candidates = Vec::with_capacity(MAX_SHADOW_FACES);
@@ -576,11 +640,15 @@ impl RenderPass for ShadowPass {
                 };
                 self.face_strength[face] +=
                     (target - self.face_strength[face]).clamp(-fade_step, fade_step);
-                ctx.queue.write_buffer(
-                    data.shadow_matrices,
-                    face as u64 * 96 + 76,
-                    bytemuck::bytes_of(&self.face_strength[face]),
-                );
+                let written = (self.face_strength[face], data.per_caster_dirty_gen[slot]);
+                if self.face_strength_written[face] != written {
+                    ctx.queue.write_buffer(
+                        data.shadow_matrices,
+                        face as u64 * 96 + 76,
+                        bytemuck::bytes_of(&self.face_strength[face]),
+                    );
+                    self.face_strength_written[face] = written;
+                }
                 let static_dirty =
                     changed || self.face_static_gen[face] != batch.shadow_static_generation;
                 // Aging guarantees low-priority pending faces are eventually serviced.
@@ -591,9 +659,13 @@ impl RenderPass for ShadowPass {
                 candidates.push((face, static_dirty, urgency));
             }
         }
-        candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+        {
+            helio_core::cpu_scope!("Shadow: rank candidates");
+            candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+        }
         let mut updates = 0u32;
         let mut texels = 0u32;
+        let mut free_visits = 0usize;
         let slots = self
             .draw_slots
             .buffer(
@@ -605,68 +677,109 @@ impl RenderPass for ShadowPass {
             )
             .clone();
         let bg = self.bg_0.as_ref().unwrap();
+
+        // ── Select the faces to service this frame ───────────────────────────
+        helio_core::cpu_scope!("Shadow: select faces");
+        let mut selected: Vec<(usize, bool)> = Vec::with_capacity(candidates.len());
         for (face, static_dirty, _) in candidates {
             let r = &residency.residents[face / 6];
             let tile = r.tiles[face % 6];
             let layers = 3;
             let cost = tile.size * tile.size * layers;
-            if updates + layers > data.budget.updates_per_frame
-                || texels + cost > data.budget.update_texels_per_frame
-            {
-                continue;
+            // Without GPU-side draw counts a face that is not rebuilding its
+            // static layer still draws the whole caster lists (the vertex
+            // shader discards them), so it is real work to the budget.
+            if static_dirty || !self.supports_multi_draw_count {
+                // A rebuild of the cached static layer: real work known to the
+                // CPU, so it is metered.
+                if updates + layers > data.budget.updates_per_frame
+                    || texels + cost > data.budget.update_texels_per_frame
+                {
+                    continue;
+                }
+                updates += layers;
+                texels += cost;
+            } else {
+                // Anything else is driven by the GPU's own dirty flags
+                // (`ShadowDirty`: a movable caster moved, a light changed): a
+                // clean face runs no vertices, a dirty one redraws only its
+                // dynamic layer. The CPU cannot tell which is which, so
+                // charging these to the budget let clean faces starve the
+                // dirty ones and a moving object's shadow updated in steps.
+                // They are visited every frame, up to a safety cap.
+                if free_visits >= MAX_UNMETERED_FACES_PER_FRAME {
+                    continue;
+                }
+                free_visits += 1;
             }
-            updates += layers;
-            texels += cost;
-            let face_count = |region| helio_pass_gbuffer::GpuDrawCount {
-                buffer: &self.face_geom_count_buf,
-                offset: face_count_offset(region, face),
+            selected.push((face, static_dirty));
+        }
+        self.last_visits = (selected.len() - free_visits, free_visits);
+
+        // ── Both depth layers: one render pass each, every selected face's
+        // tile drawn in turn (a viewport and scissor per face), instead of two
+        // passes per face. A clean face costs a few state changes and an empty
+        // multi-draw, no pass boundary. The layers are separate textures, so
+        // they are timed apart.
+        let mut cmds = ctx.graphics_cmds();
+        for is_static in [true, false] {
+            let scope = if is_static {
+                "Shadow: static layer"
+            } else {
+                "Shadow: dynamic layer"
             };
-            let mut cmds = ctx.graphics_cmds();
-            for is_static in [true, false] {
-                let dynamic_offset = ((face + if static_dirty { 0 } else { MAX_SHADOW_FACES })
-                    as u64
-                    * FACE_BUF_STRIDE) as u32;
+            helio_core::cpu_scope!(scope);
+            ctx.begin_gpu_scope(&mut cmds, scope);
+            {
                 let view = if is_static {
                     &self.static_face_views[0]
                 } else {
                     &self.face_views[0]
                 };
-                let mut pass = cmds.begin_render_pass(
-                    &wgpu::RenderPassDescriptor {
-                        label: Some("Budgeted shadow tile"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
+                let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(scope),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
                         }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    },
-                );
-                pass.set_viewport(
-                    tile.x as f32,
-                    tile.y as f32,
-                    tile.size as f32,
-                    tile.size as f32,
-                    0.0,
-                    1.0,
-                );
-                pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
-                pass.set_pipeline(&self.depth_clear_pipeline);
-                pass.set_bind_group(0, bg, &[dynamic_offset]);
-                pass.draw(0..3, 0..1);
-                let disabled = r.flags & if is_static { 16 } else { 32 } != 0;
-                if !disabled {
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                pass.set_vertex_buffer(1, slots.slice(..));
+                pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                for &(face, static_dirty) in &selected {
+                    let r = &residency.residents[face / 6];
+                    let tile = r.tiles[face % 6];
+                    let dynamic_offset = face_idx_offset(face, static_dirty, is_static);
+                    let face_count = |region| helio_pass_gbuffer::GpuDrawCount {
+                        buffer: &self.face_geom_count_buf,
+                        offset: face_count_offset(region, face),
+                    };
+                    pass.set_viewport(
+                        tile.x as f32,
+                        tile.y as f32,
+                        tile.size as f32,
+                        tile.size as f32,
+                        0.0,
+                        1.0,
+                    );
+                    pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
+                    pass.set_pipeline(&self.depth_clear_pipeline);
+                    pass.set_bind_group(0, bg, &[dynamic_offset]);
+                    pass.draw(0..6, 0..PAGES_PER_FACE);
+                    let disabled = r.flags & if is_static { 16 } else { 32 } != 0;
+                    if disabled {
+                        continue;
+                    }
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, bg, &[dynamic_offset]);
-                    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
-                    pass.set_vertex_buffer(1, slots.slice(..));
-                    pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     // With GPU counts, every list is bounded by its capacity
                     // and drawn to this frame's live count, so a caster
                     // spawned or despawned this frame is already (or no
@@ -675,11 +788,10 @@ impl RenderPass for ShadowPass {
                         let (max_draws, count) = batch.shadow_static_draws();
                         // A face not known to be dirty is redrawn only if
                         // `ShadowDirty` dirtied it on the GPU (a light's
-                        // matrix or a movable caster changed): its per-face
-                        // count is the live count then, else 0. Drawing the
-                        // full list and discarding it in the vertex shader
-                        // ran every static caster's vertices for every
-                        // scheduled face, every frame.
+                        // matrix changed): its per-face count is the live
+                        // count then, else 0. Drawing the full list and
+                        // discarding it in the vertex shader ran every static
+                        // caster's vertices for every scheduled face.
                         let count = if self.supports_multi_draw_count && !static_dirty {
                             Some(face_count(STATIC_COUNTS))
                         } else {
@@ -711,40 +823,62 @@ impl RenderPass for ShadowPass {
                     }
                 }
             }
-            {
-                if let Some(depth) = self.static_array_view.as_ref() {
-                    let materials = ctx.scene_buffers.get(BufferKey::of("materials"));
-                    self.transmittance.render_face(
-                        ctx.device,
-                        &mut cmds,
-                        materials.map(|m| &m.buffer),
-                        bg,
-                        0,
-                        ((face + if static_dirty { 0 } else { MAX_SHADOW_FACES }) as u64
-                            * FACE_BUF_STRIDE) as u32,
-                        depth,
-                        batch.shadow_transmissive_indirect,
-                        // Static layer: whether there is glass at all
-                        // follows the readback, like the rest of it.
-                        if r.flags & 16 == 0 && self.has_glass {
-                            batch.shadow_transmissive_draws().0
-                        } else {
-                            0
-                        },
-                        // As the static layer: a clean face draws no glass.
-                        if self.supports_multi_draw_count && !static_dirty {
-                            Some(face_count(TRANSMISSIVE_COUNTS))
-                        } else {
-                            batch.shadow_transmissive_draws().1
-                        },
-                        &vertices.buffer,
-                        &slots,
-                        &indices.buffer,
-                        Some([tile.x, tile.y, tile.size]),
-                    );
+            ctx.end_gpu_scope(&mut cmds, scope);
+        }
+
+        // ── Glass transmittance (follows the static layer) ───────────────────
+        if let Some(depth) = self.static_array_view.as_ref() {
+            helio_core::cpu_scope!("Shadow: transmittance");
+            ctx.begin_gpu_scope(&mut cmds, "Shadow: transmittance");
+            let materials = ctx.scene_buffers.get(BufferKey::of("materials"));
+            for &(face, static_dirty) in &selected {
+                // Glass is cached with the static layer: with none in the
+                // scene, only a rebuild has a stale tile to clear.
+                if !static_dirty && !self.has_glass {
+                    continue;
                 }
+                let r = &residency.residents[face / 6];
+                let tile = r.tiles[face % 6];
+                let face_count = |region| helio_pass_gbuffer::GpuDrawCount {
+                    buffer: &self.face_geom_count_buf,
+                    offset: face_count_offset(region, face),
+                };
+                self.transmittance.render_face(
+                    ctx.device,
+                    &mut cmds,
+                    materials.map(|m| &m.buffer),
+                    bg,
+                    0,
+                    face_idx_offset(face, static_dirty, true),
+                    depth,
+                    batch.shadow_transmissive_indirect,
+                    // Static layer: whether there is glass at all
+                    // follows the readback, like the rest of it.
+                    if r.flags & 16 == 0 && self.has_glass {
+                        batch.shadow_transmissive_draws().0
+                    } else {
+                        0
+                    },
+                    // As the static layer: a clean face draws no glass.
+                    if self.supports_multi_draw_count && !static_dirty {
+                        Some(face_count(TRANSMISSIVE_COUNTS))
+                    } else {
+                        batch.shadow_transmissive_draws().1
+                    },
+                    &vertices.buffer,
+                    &slots,
+                    &indices.buffer,
+                    Some([tile.x, tile.y, tile.size]),
+                );
             }
-            // Activate the matrix only after its matching depth has been rendered.
+            ctx.end_gpu_scope(&mut cmds, "Shadow: transmittance");
+        }
+
+        // ── Activate each serviced face's matrix and retire its dirty state ──
+        // Only after its matching depth has been rendered.
+        helio_core::cpu_scope!("Shadow: activate faces");
+        ctx.begin_gpu_scope(&mut cmds, "Shadow: activate faces");
+        for &(face, static_dirty) in &selected {
             cmds.copy_buffer_to_buffer(
                 desired,
                 face as u64 * 96,
@@ -752,12 +886,17 @@ impl RenderPass for ShadowPass {
                 face as u64 * 96,
                 64,
             );
-            ctx.queue.write_buffer(
-                data.shadow_matrices,
-                face as u64 * 96 + 92,
-                bytemuck::bytes_of(&2u32),
-            );
+            // The "ready" marker only changes when the face was (re)assigned:
+            // a rebuild of its static layer, or its first service.
+            if static_dirty || self.face_last_update[face] == 0 {
+                ctx.queue.write_buffer(
+                    data.shadow_matrices,
+                    face as u64 * 96 + 92,
+                    bytemuck::bytes_of(&2u32),
+                );
+            }
             cmds.clear_buffer(&self.face_dirty_buf, face as u64 * 4, Some(4));
+            cmds.clear_buffer(&self.face_pages_buf, face as u64 * 8, Some(8));
             for region in [MOVABLE_COUNTS, STATIC_COUNTS, TRANSMISSIVE_COUNTS] {
                 cmds.clear_buffer(
                     &self.face_geom_count_buf,
@@ -769,6 +908,7 @@ impl RenderPass for ShadowPass {
             self.face_light_gen[face] = data.per_caster_dirty_gen[face / 6];
             self.face_last_update[face] = self.schedule_frame;
         }
+        ctx.end_gpu_scope(&mut cmds, "Shadow: activate faces");
         self.last_work = (updates, texels);
         Ok(())
     }

@@ -107,7 +107,7 @@ fn vs_main(
     let world = space * (inst.transform * vec4<f32>(local_position, 1.0));
     var out: VsOut;
     out.pos = shadow_matrices[face.value].mat * world;
-    if face._pad0 != 0u && dirty[face.value]==0u {out.pos=vec4f(2,2,2,1);}
+    if face._pad0 != 0u && (dirty[face.value] & face._pad0)==0u {out.pos=vec4f(2,2,2,1);}
     out.material = inst.material_id;
     return out;
 }

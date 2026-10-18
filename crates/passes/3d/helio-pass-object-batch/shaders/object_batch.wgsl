@@ -408,13 +408,9 @@ struct GpuInstanceAabbOut {
 @group(0) @binding(4) var<storage, read_write> aabbs_out: array<GpuInstanceAabbOut>;
 @group(0) @binding(5) var<storage, read_write> prev_rows_fg: array<PrevRow>;
 
-@compute @workgroup_size(WG)
-fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if i >= fu_fg.count {
-        return;
-    }
-    let src = sorted_indices_fg[i];
+@group(0) @binding(6) var<storage, read_write> sorted_position_fg: array<u32>;
+
+fn gather_one(i: u32, src: u32) {
     let row = static_objects_fg[src];
     // Previous-frame transform for motion vectors: last frame's transform
     // of this same object, or this frame's (zero motion) when the row is
@@ -449,6 +445,51 @@ fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
         array<f32, 3>(row.bounds[0] + r, row.bounds[1] + r, row.bounds[2] + r),
         0.0,
     );
+}
+
+@compute @workgroup_size(WG)
+fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= fu_fg.count {
+        return;
+    }
+    let src = sorted_indices_fg[i];
+    sorted_position_fg[src] = i;
+    gather_one(i, src);
+}
+
+// ── Stage 4b: placements of only the moved objects ──────────────────────────
+//
+// The scene join lists the object rows that moved (`[total, fresh, slot, ..]`,
+// this frame's and the previous frame's, which settles their motion vectors).
+// Each is re-gathered into its sorted slot through the position the last full
+// run kept; everything else in the sorted arrays already stands.
+
+@group(1) @binding(0) var<storage, read> moved_list: array<u32>;
+@group(1) @binding(1) var<storage, read_write> moved_args: array<u32>;
+
+@compute @workgroup_size(1)
+fn cs_moved_args() {
+    moved_args[0] = (moved_list[0] + WG - 1u) / WG;
+    moved_args[1] = 1u;
+    moved_args[2] = 1u;
+}
+
+@compute @workgroup_size(WG)
+fn cs_final_gather_moved(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= moved_list[0] {
+        return;
+    }
+    let src = moved_list[2u + gid.x];
+    if src >= arrayLength(&sorted_position_fg) {
+        return;
+    }
+    let i = sorted_position_fg[src];
+    // Rows the last full run did not sort (or stale entries) have no slot.
+    if i >= fu_fg.count || sorted_indices_fg[i] != src {
+        return;
+    }
+    gather_one(i, src);
 }
 
 // ── Stage 5: group boundary detection (two-level scan) ──────────────────────

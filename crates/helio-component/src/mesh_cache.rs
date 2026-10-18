@@ -658,30 +658,86 @@ pub(crate) fn mesh_asset_from_converted_scene(
     mut scene: helio_asset_compat::ConvertedScene,
 ) -> Option<MeshAssetUpload> {
     let mut material_slots: Vec<_> = (0..scene.materials.len())
-        .map(|index| MeshMaterialSlot {
-            source_material: Some(index as u32),
-            name: format!("Material {}", index + 1),
-            material_asset: String::new(),
-            surface: scene
-                .materials
-                .get(index)
-                .map(|material| ImportedSurfaceMaterial {
-                    base_color: material.gpu.base_color,
-                    roughness: material.gpu.roughness_metallic[0],
-                    metallic: material.gpu.roughness_metallic[1],
-                    emissive: [
-                        material.gpu.emissive[0],
-                        material.gpu.emissive[1],
-                        material.gpu.emissive[2],
-                    ],
-                    emissive_intensity: material.gpu.emissive[3],
-                    alpha: material.gpu.base_color[3],
-                })
-                .unwrap_or_default(),
-        })
+        .map(|index| material_slot(&scene.materials, index))
         .collect();
 
     let sectioned = scene.sectioned_mesh.take()?;
+    sectioned_asset(sectioned, &mut material_slots)
+}
+
+/// The mesh material slot for source material `index`.
+fn material_slot(materials: &[helio_asset_compat::ConvertedMaterial], index: usize) -> MeshMaterialSlot {
+    MeshMaterialSlot {
+        source_material: Some(index as u32),
+        name: format!("Material {}", index + 1),
+        material_asset: String::new(),
+        surface: materials
+            .get(index)
+            .map(|material| ImportedSurfaceMaterial {
+                base_color: material.gpu.base_color,
+                roughness: material.gpu.roughness_metallic[0],
+                metallic: material.gpu.roughness_metallic[1],
+                emissive: [
+                    material.gpu.emissive[0],
+                    material.gpu.emissive[1],
+                    material.gpu.emissive[2],
+                ],
+                emissive_intensity: material.gpu.emissive[3],
+                alpha: material.gpu.base_color[3],
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// One mesh of a scene that has several, as its own asset: only the materials
+/// its sections use are slots, in order of first use. Returns the asset and
+/// the source material index of each slot (`None` for a section with no
+/// material).
+pub(crate) fn mesh_asset_from_part(
+    materials: &[helio_asset_compat::ConvertedMaterial],
+    part: &helio_asset_compat::ConvertedSectionedMesh,
+) -> Option<(MeshAssetUpload, Vec<Option<usize>>)> {
+    let mut used: Vec<Option<usize>> = Vec::new();
+    for section in &part.sections {
+        if !used.contains(&section.material_index) {
+            used.push(section.material_index);
+        }
+    }
+    let mut slots: Vec<MeshMaterialSlot> = used
+        .iter()
+        .enumerate()
+        .map(|(position, material)| match material {
+            Some(index) => material_slot(materials, *index),
+            None => MeshMaterialSlot {
+                source_material: None,
+                name: format!("Material {}", position + 1),
+                surface: ImportedSurfaceMaterial::default(),
+                material_asset: String::new(),
+            },
+        })
+        .collect();
+    let remapped = helio_asset_compat::ConvertedSectionedMesh {
+        name: part.name.clone(),
+        vertices: part.vertices.clone(),
+        sections: part
+            .sections
+            .iter()
+            .map(|section| helio_asset_compat::ConvertedMeshSection {
+                indices: section.indices.clone(),
+                material_index: used.iter().position(|m| *m == section.material_index),
+            })
+            .collect(),
+    };
+    let asset = sectioned_asset(remapped, &mut slots)?;
+    Some((asset, used))
+}
+
+/// The asset for `sectioned`, whose sections' `material_index` index
+/// `material_slots` (a section with none gets a new slot).
+fn sectioned_asset(
+    sectioned: helio_asset_compat::ConvertedSectionedMesh,
+    material_slots: &mut Vec<MeshMaterialSlot>,
+) -> Option<MeshAssetUpload> {
     let mut indices = Vec::new();
     let mut sections = Vec::with_capacity(sectioned.sections.len());
     for imported in sectioned.sections {
@@ -716,7 +772,7 @@ pub(crate) fn mesh_asset_from_converted_scene(
     Some(MeshAssetUpload {
         geometry,
         sections,
-        material_slots,
+        material_slots: std::mem::take(material_slots),
     })
 }
 
@@ -825,8 +881,64 @@ pub fn write_static_mesh(
     scene: helio_asset_compat::ConvertedScene,
     native: &Path,
 ) -> Result<PathBuf, String> {
-    let mut upload = mesh_asset_from_converted_scene(scene)
+    let upload = mesh_asset_from_converted_scene(scene)
         .ok_or_else(|| "model contained no sectioned mesh geometry".to_string())?;
+    write_mesh_asset(upload, native)
+}
+
+/// What [`write_mesh_parts`] wrote for one mesh of the source.
+#[derive(Debug)]
+pub struct WrittenPart {
+    /// The mesh's name in the source (`Name_2` for a second instance).
+    pub name: String,
+    pub path: PathBuf,
+    /// The source material behind each material slot of the written mesh
+    /// (`None` for a section the source gave no material).
+    pub source_materials: Vec<Option<usize>>,
+}
+
+/// Write each mesh of a converted scene as its own native `.mesh`, named
+/// `<stem>_<mesh name>.mesh` in `dir`. Node transforms are baked in, so the
+/// parts placed together at the origin rebuild the source model.
+pub fn write_mesh_parts(
+    scene: &helio_asset_compat::ConvertedScene,
+    dir: &Path,
+    stem: &str,
+) -> Result<Vec<WrittenPart>, String> {
+    let mut written: Vec<WrittenPart> = Vec::new();
+    for part in &scene.parts {
+        let Some((upload, source_materials)) = mesh_asset_from_part(&scene.materials, part) else {
+            continue;
+        };
+        let mut file = format!("{stem}_{}", sanitize_file_name(&part.name));
+        // Distinct meshes can share a name; the file must not.
+        let mut suffix = 1;
+        while written.iter().any(|w| w.path == dir.join(format!("{file}.mesh"))) {
+            suffix += 1;
+            file = format!("{stem}_{}_{suffix}", sanitize_file_name(&part.name));
+        }
+        let path = write_mesh_asset(upload, &dir.join(format!("{file}.mesh")))?;
+        written.push(WrittenPart {
+            name: part.name.clone(),
+            path,
+            source_materials,
+        });
+    }
+    if written.is_empty() {
+        return Err("model contained no sectioned mesh geometry".to_string());
+    }
+    Ok(written)
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    if cleaned.is_empty() { "mesh".to_string() } else { cleaned }
+}
+
+fn write_mesh_asset(mut upload: MeshAssetUpload, native: &Path) -> Result<PathBuf, String> {
     carry_over_default_materials(native, &mut upload);
     let content_id = content_id_for_bytes(&upload.geometry);
     std::fs::write(native, encode_asset(&upload, content_id))

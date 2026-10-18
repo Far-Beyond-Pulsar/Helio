@@ -5,6 +5,7 @@
 
 pub mod asset_component;
 pub mod components;
+pub mod cooked_texture;
 pub mod graph_preview;
 pub mod material_assets;
 pub mod material_graph;
@@ -14,6 +15,7 @@ pub mod mesh_thumbnail;
 mod motion_gate;
 mod static_move_watch;
 pub mod texture_assets;
+pub mod texture_detail;
 pub use static_move_watch::StaticMoveWatch;
 pub mod subsystems;
 

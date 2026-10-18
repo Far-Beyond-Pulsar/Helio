@@ -18,6 +18,14 @@ pub struct ShadowBudget {
     pub fade_frames: u32,
     pub max_distance: f32,
     pub hysteresis: f32,
+    /// Page-level invalidation (a quality tier). A moving shadow caster dirties
+    /// only the 8x8 pages of a face's dynamic layer that its old and new
+    /// bounds touch; the dynamic layer clears and redraws just those pages,
+    /// and casters that touch none of them are skipped. Off, a moved caster
+    /// redraws every page of each face it reaches. Cheap to track, so on by
+    /// default; turn it off for targets where the extra vertex work per
+    /// caster is not worth the saved fill.
+    pub page_invalidation: bool,
 }
 impl Default for ShadowBudget {
     fn default() -> Self {
@@ -29,6 +37,7 @@ impl Default for ShadowBudget {
             fade_frames: 12,
             max_distance: 500.0,
             hysteresis: 0.2,
+            page_invalidation: true,
         }
     }
 }

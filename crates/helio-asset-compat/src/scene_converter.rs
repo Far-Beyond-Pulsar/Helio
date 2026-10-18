@@ -144,17 +144,73 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
     )
 }
 
+/// An image file one of a source material's texture slots names, located on
+/// disk.
+#[derive(Debug, Clone)]
+pub struct MaterialImage {
+    pub semantic: TextureSemantic,
+    pub path: std::path::PathBuf,
+}
+
+/// A source material: its name and the image files its texture slots name.
+#[derive(Debug, Clone)]
+pub struct MaterialSource {
+    pub name: String,
+    pub images: Vec<MaterialImage>,
+}
+
+/// The name and located image files of each source material, parallel to
+/// `scene.materials`. Slots whose image is embedded or cannot be found are
+/// left out.
+fn collect_material_sources(scene: &Scene, base_dir: &std::path::Path) -> Vec<MaterialSource> {
+    scene
+        .materials
+        .iter()
+        .map(|material| MaterialSource {
+            name: material.name.clone(),
+            images: [
+                (&material.base_color_texture, TextureSemantic::BaseColor),
+                (&material.normal_texture, TextureSemantic::Normal),
+                (
+                    &material.metallic_roughness_texture,
+                    TextureSemantic::MetallicRoughness,
+                ),
+                (&material.occlusion_texture, TextureSemantic::Occlusion),
+                (&material.emissive_texture, TextureSemantic::Emissive),
+            ]
+            .into_iter()
+            .filter_map(|(slot, semantic)| {
+                let texture = slot.as_ref()?;
+                let path = crate::texture_loader::locate_texture_file(
+                    scene,
+                    texture.texture_index,
+                    base_dir,
+                )?;
+                Some(MaterialImage { semantic, path })
+            })
+            .collect(),
+        })
+        .collect()
+}
+
 /// Converted scene data ready for GPU upload.
 pub struct ConvertedScene {
     pub name: String,
     pub meshes: Vec<ConvertedMesh>,
     pub textures: Vec<TextureUpload>,
     pub materials: Vec<ConvertedMaterial>,
+    /// The source name and image files of each of `materials`.
+    pub material_sources: Vec<MaterialSource>,
     pub lights: Vec<helio::GpuLight>,
     pub cameras: Vec<CameraData>,
     /// Populated instead of `meshes` when [`crate::LoadConfig::merge_meshes`] is true.
     /// One section per unique material; all sections share one vertex buffer.
     pub sectioned_mesh: Option<ConvertedSectionedMesh>,
+    /// Populated alongside `sectioned_mesh` when merging: the same geometry
+    /// split by source mesh and node instance, each part with its node
+    /// transform baked in and its own sections. A scene with several meshes
+    /// has several parts; their sections index the shared `materials`.
+    pub parts: Vec<ConvertedSectionedMesh>,
     /// The skeleton, skin weights and animations, when the source has a skinned
     /// mesh. The static `meshes` / `sectioned_mesh` above are produced as
     /// before either way.
@@ -187,6 +243,13 @@ pub struct ConvertedMesh {
     pub vertices: Vec<PackedVertex>,
     pub indices: Vec<u32>,
     pub material_index: Option<usize>,
+    /// Index of the source mesh this primitive belongs to.
+    pub source_mesh: usize,
+    /// Which node instance of that mesh this is (0 for the first).
+    pub instance: usize,
+    /// The source mesh's name (`Mesh_<n>` when it has none), without a
+    /// primitive suffix.
+    pub source_name: String,
     /// World-space transform accumulated from the scene node hierarchy.
     /// Identity when the source format has no scene graph (or the mesh is
     /// not attached to any node).
@@ -334,7 +397,12 @@ pub fn convert_scene(
         // positions are expressed in the caller's chosen unit system.
         let scale_mat = glam::Mat4::from_scale(config.import_scale);
 
-        for &raw_node_transform in world_transforms {
+        let source_name = if mesh.name.is_empty() {
+            format!("Mesh_{}", mesh_idx)
+        } else {
+            mesh.name.clone()
+        };
+        for (instance, &raw_node_transform) in world_transforms.iter().enumerate() {
             let node_transform = scale_mat * raw_node_transform;
             for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
                 let (vertices, indices) =
@@ -357,6 +425,9 @@ pub fn convert_scene(
                     vertices,
                     indices,
                     material_index: primitive.material_index,
+                    source_mesh: mesh_idx,
+                    instance,
+                    source_name: source_name.clone(),
                     node_transform,
                 });
             }
@@ -367,85 +438,31 @@ pub fn convert_scene(
     // Each mesh's node_transform is baked into its vertex positions/normals/
     // tangents so the merged result can live at IDENTITY.
     if config.merge_meshes && !meshes.is_empty() {
-        // Group sub-meshes by material_index so each material keeps its own
-        // vertex/index buffer.  Sub-meshes within the same group are welded
-        // together with node_transform baked into the vertices.
-        //
-        // We use a Vec of (material_index, bucket_index) to preserve the order
-        // materials are first encountered (important for deterministic output).
-        let mut material_order: Vec<Option<usize>> = Vec::new();
-        let mut group_verts: Vec<Vec<PackedVertex>> = Vec::new();
-        let mut group_indices: Vec<Vec<u32>> = Vec::new();
+        let all: Vec<&ConvertedMesh> = meshes.iter().collect();
+        let sectioned = merge_sectioned(scene.name.clone(), &all);
 
+        // The same geometry per source mesh and node instance, in the order
+        // they first appear.
+        let mut groups: Vec<((usize, usize), Vec<&ConvertedMesh>)> = Vec::new();
         for sub in &meshes {
-            // Find or create the bucket for this material.
-            let bucket = material_order
-                .iter()
-                .position(|&m| m == sub.material_index)
-                .unwrap_or_else(|| {
-                    let idx = material_order.len();
-                    material_order.push(sub.material_index);
-                    group_verts.push(Vec::new());
-                    group_indices.push(Vec::new());
-                    idx
-                });
-
-            let base = group_verts[bucket].len() as u32;
-            let xform = sub.node_transform;
-            let normal_mat = glam::Mat3::from_mat4(xform.inverse().transpose());
-            let tangent_mat = glam::Mat3::from_mat4(xform);
-            let handedness_sign = if xform.determinant() < 0.0 {
-                -1.0_f32
-            } else {
-                1.0
-            };
-
-            for v in &sub.vertices {
-                let pos = xform.transform_point3(glam::Vec3::from(v.position));
-                let norm_raw = unpack_snorm4x8(v.normal);
-                let tan_raw = unpack_snorm4x8(v.tangent);
-                let norm = (normal_mat * glam::Vec3::new(norm_raw[0], norm_raw[1], norm_raw[2]))
-                    .normalize_or_zero();
-                let tan = (tangent_mat * glam::Vec3::new(tan_raw[0], tan_raw[1], tan_raw[2]))
-                    .normalize_or_zero();
-                let mut mv = PackedVertex::from_components(
-                    pos.into(),
-                    norm.into(),
-                    v.tex_coords0,
-                    tan.into(),
-                    v.bitangent_sign * handedness_sign,
-                );
-                mv.tex_coords1 = v.tex_coords1;
-                group_verts[bucket].push(mv);
-            }
-            for &idx in &sub.indices {
-                group_indices[bucket].push(base + idx);
+            let key = (sub.source_mesh, sub.instance);
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, subs)) => subs.push(sub),
+                None => groups.push((key, vec![sub])),
             }
         }
-
-        // Build the ConvertedSectionedMesh: one shared vertex buffer (the union
-        // of all per-bucket vertices, re-indexed so all sections' indices are
-        // absolute into the shared array) plus one ConvertedMeshSection per bucket.
-        let scene_name = scene.name.clone();
-        let mut shared_vertices: Vec<PackedVertex> = Vec::new();
-        let mut sections: Vec<ConvertedMeshSection> = Vec::new();
-
-        for (i, mat_idx) in material_order.into_iter().enumerate() {
-            let base = shared_vertices.len() as u32;
-            // Adjust indices to be absolute into the shared vertex array.
-            let abs_indices: Vec<u32> = group_indices[i].iter().map(|&idx| base + idx).collect();
-            shared_vertices.extend_from_slice(&group_verts[i]);
-            sections.push(ConvertedMeshSection {
-                indices: abs_indices,
-                material_index: mat_idx,
-            });
-        }
-
-        let sectioned = ConvertedSectionedMesh {
-            name: scene_name,
-            vertices: shared_vertices,
-            sections,
-        };
+        let parts: Vec<ConvertedSectionedMesh> = groups
+            .iter()
+            .map(|(_, subs)| {
+                let first = subs[0];
+                let name = if first.instance == 0 {
+                    first.source_name.clone()
+                } else {
+                    format!("{}_{}", first.source_name, first.instance + 1)
+                };
+                merge_sectioned(name, subs)
+            })
+            .collect();
 
         let lights = scene
             .lights
@@ -463,9 +480,11 @@ pub fn convert_scene(
             meshes: vec![],
             textures,
             materials,
+            material_sources: collect_material_sources(scene, base_dir),
             lights,
             cameras,
             sectioned_mesh: Some(sectioned),
+            parts,
             rig: crate::extract_rig(scene, config),
         });
     }
@@ -486,11 +505,83 @@ pub fn convert_scene(
         meshes,
         textures,
         materials,
+        material_sources: collect_material_sources(scene, base_dir),
         lights,
         cameras,
         sectioned_mesh: None,
+        parts: Vec::new(),
         rig: crate::extract_rig(scene, config),
     })
+}
+
+/// Weld `subs` into one sectioned mesh: a section per material, in the order
+/// materials are first met, with each sub-mesh's node transform baked into its
+/// vertex positions, normals and tangents.
+fn merge_sectioned(name: String, subs: &[&ConvertedMesh]) -> ConvertedSectionedMesh {
+    let mut material_order: Vec<Option<usize>> = Vec::new();
+    let mut group_verts: Vec<Vec<PackedVertex>> = Vec::new();
+    let mut group_indices: Vec<Vec<u32>> = Vec::new();
+
+    for sub in subs {
+        // Find or create the bucket for this material.
+        let bucket = material_order
+            .iter()
+            .position(|&m| m == sub.material_index)
+            .unwrap_or_else(|| {
+                let idx = material_order.len();
+                material_order.push(sub.material_index);
+                group_verts.push(Vec::new());
+                group_indices.push(Vec::new());
+                idx
+            });
+
+        let base = group_verts[bucket].len() as u32;
+        let xform = sub.node_transform;
+        let normal_mat = glam::Mat3::from_mat4(xform.inverse().transpose());
+        let tangent_mat = glam::Mat3::from_mat4(xform);
+        let handedness_sign = if xform.determinant() < 0.0 { -1.0_f32 } else { 1.0 };
+
+        for v in &sub.vertices {
+            let pos = xform.transform_point3(glam::Vec3::from(v.position));
+            let norm_raw = unpack_snorm4x8(v.normal);
+            let tan_raw = unpack_snorm4x8(v.tangent);
+            let norm = (normal_mat * glam::Vec3::new(norm_raw[0], norm_raw[1], norm_raw[2]))
+                .normalize_or_zero();
+            let tan = (tangent_mat * glam::Vec3::new(tan_raw[0], tan_raw[1], tan_raw[2]))
+                .normalize_or_zero();
+            let mut mv = PackedVertex::from_components(
+                pos.into(),
+                norm.into(),
+                v.tex_coords0,
+                tan.into(),
+                v.bitangent_sign * handedness_sign,
+            );
+            mv.tex_coords1 = v.tex_coords1;
+            group_verts[bucket].push(mv);
+        }
+        for &idx in &sub.indices {
+            group_indices[bucket].push(base + idx);
+        }
+    }
+
+    // One shared vertex buffer (the union of the buckets), with every
+    // section's indices absolute into it.
+    let mut shared_vertices: Vec<PackedVertex> = Vec::new();
+    let mut sections: Vec<ConvertedMeshSection> = Vec::new();
+    for (i, mat_idx) in material_order.into_iter().enumerate() {
+        let base = shared_vertices.len() as u32;
+        let abs_indices: Vec<u32> = group_indices[i].iter().map(|&idx| base + idx).collect();
+        shared_vertices.extend_from_slice(&group_verts[i]);
+        sections.push(ConvertedMeshSection {
+            indices: abs_indices,
+            material_index: mat_idx,
+        });
+    }
+    ConvertedSectionedMesh {
+        name,
+        vertices: shared_vertices,
+        sections,
+    }
 }
 
 /// Unpack a `pack_snorm4x8` value back to four f32 components in [-1, 1].

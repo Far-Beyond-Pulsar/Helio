@@ -487,17 +487,8 @@ fn owner_view(
     {
         return None;
     }
-    let transform = world.get::<pulsar_scene_model::Transform>(owner)?;
-    let model = glam::Mat4::from_scale_rotation_translation(
-        Vec3::from_array(transform.scale),
-        glam::Quat::from_euler(
-            glam::EulerRot::YXZ,
-            transform.rotation[1].to_radians(),
-            transform.rotation[0].to_radians(),
-            transform.rotation[2].to_radians(),
-        ),
-        Vec3::from_array(transform.position),
-    );
+    // The spline's owner placed in the world, under any parents.
+    let model = pulsar_scene_model::hierarchy_transform::world_matrix_of(world, owner)?;
     let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
     Some((model, selected))
 }

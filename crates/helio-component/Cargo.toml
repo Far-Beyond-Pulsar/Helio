@@ -69,6 +69,9 @@ helio-mats.workspace = true
 # Shader-graph material slots compile at upload time (static_mesh_draw).
 psgc.workspace = true
 image.workspace = true
+# BC7 encoder (Intel ISPC Texture Compressor, prebuilt kernels) for cooked
+# textures; see src/cooked_texture.rs.
+intel_tex_2 = "0.5"
 helio-voxel-data.workspace = true
 helio-asset-compat = { workspace = true }
 skeletal_assets.workspace = true

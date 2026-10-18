@@ -16,6 +16,9 @@ use pulsar_scenedb::gpu::{
 };
 
 fn context() -> Option<EngineGpuContext> {
+    // Creating devices from many tests at once stalls some drivers; take turns.
+    static DEVICE_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _device_creation = DEVICE_CREATION.lock().unwrap_or_else(|p| p.into_inner());
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;

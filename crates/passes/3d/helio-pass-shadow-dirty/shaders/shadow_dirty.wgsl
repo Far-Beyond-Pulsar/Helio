@@ -44,7 +44,8 @@ struct GpuShadowMatrix {
 struct ShadowDirtyUniforms {
     /// Number of active shadow faces (= shadow_count from SceneResources).
     face_count: u32,
-    _pad0: u32,
+    /// Non-zero: track the pages a moved caster touches. Zero: all pages.
+    pages: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -74,6 +75,11 @@ struct Previous { bounds:vec4f, hash:vec4u }
 @group(0) @binding(9) var<storage,read> batch_counts:array<u32>;
 /// The movable count the last dispatch saw. Only invocation 0 touches it.
 @group(0) @binding(10) var<storage,read_write> last_movable_count:array<u32>;
+
+/// Per-face 8x8 page masks of the dynamic layer, two words per face (rows 0-3
+/// then rows 4-7; bit `row * 8 + column`, rows counted up from the bottom of
+/// clip space). `ShadowPass` clears a face's words once it has redrawn it.
+@group(0) @binding(11) var<storage, read_write> face_pages: array<atomic<u32>>;
 
 /// Live draw calls in `movable_draws` this frame.
 fn movable_count()->u32 { return batch_counts[2]; }
@@ -127,36 +133,108 @@ fn hash_matrix(m:mat4x4f,h:u32)->u32 {
     for(var c=0u;c<4u;c++){for(var r=0u;r<4u;r++){result=(result^bitcast<u32>(m[c][r]))*16777619u;}}
     return result;
 }
-fn dirty(face:u32) {
-    atomicStore(&face_dirty[face],1u);
+const PAGE_GRID: u32 = 8u;
+const ALL_PAGES: vec2u = vec2u(0xffffffffu, 0xffffffffu);
+
+/// The NDC interval of `v / w` for `v` in [vlo, vhi] and `w` in [wlo, whi],
+/// `wlo > 0`.
+fn ratio_range(vlo: f32, vhi: f32, wlo: f32, whi: f32) -> vec2f {
+    let lo = select(vlo / wlo, vlo / whi, vlo >= 0.0);
+    let hi = select(vhi / whi, vhi / wlo, vhi >= 0.0);
+    return vec2f(lo, hi);
+}
+
+/// Conservative page mask of the world-space sphere (`center`, `radius`) in
+/// the clip space `m`. The sphere's clip-space extent is bounded by the
+/// radius times the length of each row of `m`, so the NDC rectangle always
+/// contains it. A sphere that may reach the camera plane covers everything.
+/// Keep in step with `sphere_pages` in `helio-pass-shadow/shaders/shadow.wgsl`.
+fn sphere_pages(m: mat4x4f, center: vec3f, radius: f32) -> vec2u {
+    let c = m * vec4f(center, 1.0);
+    let row0 = vec3f(m[0][0], m[1][0], m[2][0]);
+    let row1 = vec3f(m[0][1], m[1][1], m[2][1]);
+    let row3 = vec3f(m[0][3], m[1][3], m[2][3]);
+    let ew = radius * length(row3);
+    let wlo = c.w - ew;
+    if !(wlo > 1e-4) { return ALL_PAGES; }
+    let whi = c.w + ew;
+    let ex = radius * length(row0);
+    let ey = radius * length(row1);
+    let xr = ratio_range(c.x - ex, c.x + ex, wlo, whi);
+    let yr = ratio_range(c.y - ey, c.y + ey, wlo, whi);
+    // Pad by a fraction of a page for rounding at the edges.
+    let pad = 0.01;
+    if xr.y < -1.0 - pad || xr.x > 1.0 + pad || yr.y < -1.0 - pad || yr.x > 1.0 + pad {
+        return vec2u(0u);
+    }
+    let g = f32(PAGE_GRID);
+    let x0 = u32(clamp(floor((xr.x - pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let x1 = u32(clamp(floor((xr.y + pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let y0 = u32(clamp(floor((yr.x - pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let y1 = u32(clamp(floor((yr.y + pad) * 0.5 * g + 0.5 * g), 0.0, g - 1.0));
+    let cols = ((1u << (x1 - x0 + 1u)) - 1u) << x0;
+    var lo = 0u;
+    var hi = 0u;
+    for (var j = y0; j <= y1; j++) {
+        if j < 4u { lo |= cols << (j * 8u); } else { hi |= cols << ((j - 4u) * 8u); }
+    }
+    return vec2u(lo, hi);
+}
+
+/// `face_dirty` bits: the layer of the shadow atlas that must be redrawn.
+const DIRTY_DYNAMIC: u32 = 1u;
+const DIRTY_STATIC: u32 = 2u;
+/// A movable caster moved, appeared or vanished: only the dynamic layer holds
+/// movable casters, so the cached static layer (and glass) is left alone.
+fn dirty_dynamic_pages(face:u32, pages:vec2u) {
+    atomicOr(&face_dirty[face],DIRTY_DYNAMIC);
     atomicStore(&face_geom_count[face],movable_count());
+    atomicOr(&face_pages[face*2u],pages.x);
+    atomicOr(&face_pages[face*2u+1u],pages.y);
+}
+fn dirty_dynamic(face:u32) { dirty_dynamic_pages(face,ALL_PAGES); }
+/// The light itself changed: both layers are drawn from its matrix.
+fn dirty_all(face:u32) {
+    atomicOr(&face_dirty[face],DIRTY_DYNAMIC|DIRTY_STATIC);
+    atomicStore(&face_geom_count[face],movable_count());
+    atomicOr(&face_pages[face*2u],ALL_PAGES.x);
+    atomicOr(&face_pages[face*2u+1u],ALL_PAGES.y);
     atomicStore(&face_geom_count[MAX_FACES+face],static_count());
     atomicStore(&face_geom_count[2u*MAX_FACES+face],transmissive_count());
 }
+
+/// A movable draw whose instances changed this frame: the bounds it has now
+/// and the ones it had, kept for `faces` to test against every face's frustum.
+struct Changed { bounds: vec4f, previous: vec4f, has_previous: vec4u }
+@group(0) @binding(12) var<storage, read_write> changed: array<Changed>;
+@group(0) @binding(13) var<storage, read_write> changed_count: array<atomic<u32>>;
+
+fn face_total() -> u32 { return min(uniforms.face_count, arrayLength(&shadow_mats)); }
+
+// The work is four small dispatches in this order, so no thread loops over
+// every face or every caster alone:
+//   casters -> detect -> faces -> finish
+
+/// One thread per light caster (six faces): a moved light dirties both layers
+/// of its faces; a change in the movable caster count dirties every face's
+/// dynamic layer (a caster added or removed shifts every later draw's slot,
+/// and a removed one's silhouette must be erased).
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid:vec3u) {
-    let tid=gid.x;let count=min(uniforms.face_count,arrayLength(&shadow_mats));
-    if tid==0u {
-        // A caster added or removed shifts every later draw's slot, and a
-        // removed one's silhouette must be erased: dirty every face.
-        let force_dirty_all=movable_count()!=last_movable_count[0];
-        last_movable_count[0]=movable_count();
-        for(var caster=0u;caster<(count+5u)/6u;caster++) {
-            let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
-            if moved || force_dirty_all {
-                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty(f);}
-            }
-        }
-        // A face dirtied on an earlier frame and deferred by the shadow
-        // budget is drawn to these counts: keep them this frame's, as the
-        // movable count is kept by dirtying everything when it changes.
-        for(var f=0u;f<count;f++) {
-            if atomicLoad(&face_dirty[f])!=0u {
-                atomicStore(&face_geom_count[MAX_FACES+f],static_count());
-                atomicStore(&face_geom_count[2u*MAX_FACES+f],transmissive_count());
-            }
-        }
+fn casters(@builtin(global_invocation_id) gid:vec3u) {
+    let caster=gid.x;let count=face_total();
+    if caster*6u>=count {return;}
+    let force_dirty_all=movable_count()!=last_movable_count[0];
+    let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
+    for(var f=caster*6u;f<min(caster*6u+6u,count);f++) {
+        if moved {dirty_all(f);} else if force_dirty_all {dirty_dynamic(f);}
     }
+}
+
+/// One thread per movable draw: hash its instances and, if they changed, add
+/// it to the changed list.
+@compute @workgroup_size(64)
+fn detect(@builtin(global_invocation_id) gid:vec3u) {
+    let tid=gid.x;
     if tid>=min(movable_count(),arrayLength(&movable_draws)) || tid>=arrayLength(&prev_positions) {return;}
     let draw=movable_draws[tid];var hash=draw.instance_count^draw.index_count^draw.first_instance;
     var lo=vec3f(3e38);var hi=vec3f(-3e38);
@@ -175,11 +253,57 @@ fn main(@builtin(global_invocation_id) gid:vec3u) {
     let previous=prev_positions[tid];
     prev_positions[tid]=Previous(bounds,vec4u(hash,0,0,0));
     if previous.hash.x==hash && all(previous.bounds==bounds) {return;}
-    // Test both positions: moving OUT of a tile must erase the old silhouette.
-    for(var f=0u;f<count;f++) {
-        if shadow_mats[f].atlas.z==0.0 {continue;}
-        let planes=extract_frustum_planes(shadow_mats[f].mat);
-        if sphere_vs_frustum(bounds.xyz,bounds.w,planes)
-            || sphere_vs_frustum(previous.bounds.xyz,previous.bounds.w,planes) {dirty(f);}
+    let slot=atomicAdd(&changed_count[0],1u);
+    if slot<arrayLength(&changed) {
+        let has_previous=select(0u,1u,previous.bounds.w>0.0 || previous.hash.x!=0u);
+        changed[slot]=Changed(bounds,previous.bounds,vec4u(has_previous,0u,0u,0u));
     }
+}
+
+/// One thread per face: keep a face that was dirtied earlier and deferred by
+/// the shadow budget drawing to this frame's counts, then test every changed
+/// draw against the face's frustum. Test both positions: moving OUT of a tile
+/// must erase the old silhouette.
+@compute @workgroup_size(64)
+fn faces(@builtin(global_invocation_id) gid:vec3u) {
+    let f=gid.x;
+    if f>=face_total() {return;}
+    let pending=atomicLoad(&face_dirty[f]);
+    if (pending&DIRTY_DYNAMIC)!=0u {
+        atomicStore(&face_geom_count[f],movable_count());
+    }
+    if (pending&DIRTY_STATIC)!=0u {
+        atomicStore(&face_geom_count[MAX_FACES+f],static_count());
+        atomicStore(&face_geom_count[2u*MAX_FACES+f],transmissive_count());
+    }
+    let n=min(atomicLoad(&changed_count[0]),arrayLength(&changed));
+    if n==0u || shadow_mats[f].atlas.z==0.0 {return;}
+    let m=shadow_mats[f].mat;
+    let planes=extract_frustum_planes(m);
+    var pages=vec2u(0u);
+    var touched=false;
+    for(var i=0u;i<n;i++) {
+        let c=changed[i];
+        let has_previous=c.has_previous.x!=0u;
+        let now=sphere_vs_frustum(c.bounds.xyz,c.bounds.w,planes);
+        let before=has_previous && sphere_vs_frustum(c.previous.xyz,c.previous.w,planes);
+        if !(now || before) {continue;}
+        touched=true;
+        // The pages both the old and the new bounds touch: moving out of a
+        // page must erase the old silhouette there. Anything else in the face
+        // keeps its cached depth.
+        if uniforms.pages!=0u {
+            pages|=sphere_pages(m,c.bounds.xyz,c.bounds.w);
+            if has_previous {pages|=sphere_pages(m,c.previous.xyz,c.previous.w);}
+        } else {
+            pages=ALL_PAGES;
+        }
+    }
+    if touched {dirty_dynamic_pages(f,pages);}
+}
+
+/// After every other thread has read the last count: remember this frame's.
+@compute @workgroup_size(1)
+fn finish() {
+    last_movable_count[0]=movable_count();
 }

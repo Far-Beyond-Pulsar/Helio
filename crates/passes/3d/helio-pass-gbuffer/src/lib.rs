@@ -49,6 +49,9 @@ pub use draw_slots::{DrawSlots, DRAW_SLOT_LAYOUT, DRAW_SLOT_LOCATION};
 pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
 pub use object_batch_frame_data::{IndirectDispatchArgs, ObjectBatchFrameData};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
+
+/// Debug mode id of the wireframe view (needs `POLYGON_MODE_LINE`).
+const WIREFRAME_DEBUG_MODE: u32 = 40;
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
@@ -86,6 +89,8 @@ pub struct GBufferPass {
     timing_query: Option<wgpu::QuerySet>,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
+    /// Device supports `POLYGON_MODE_LINE`, so the wireframe debug view is offered.
+    wireframe_supported: bool,
     shader_cache: RadiantShaderCache,
     /// Shared with the renderer and GPU scene — never deep-cloned (see
     /// `SharedTemplateRegistry`). `None` until the first `execute()`.
@@ -328,6 +333,9 @@ impl GBufferPass {
             timing_query: None,
             material_binding,
             pipelines: HashMap::new(),
+            wireframe_supported: device
+                .features()
+                .contains(wgpu::Features::POLYGON_MODE_LINE),
             shader_cache: RadiantShaderCache::new(),
             template_registry: None,
             last_template_keys: Vec::new(),
@@ -911,10 +919,41 @@ impl RenderPass for GBufferPass {
     }
 
     fn set_debug_mode(&mut self, mode: u32) {
+        // Wireframe changes the pipeline's polygon mode, so cached pipelines
+        // must be rebuilt when entering or leaving it.
+        if (mode == WIREFRAME_DEBUG_MODE) != (self.debug_mode == WIREFRAME_DEBUG_MODE) {
+            self.pipelines.clear();
+        }
         self.debug_mode = mode;
     }
 
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        static WIREFRAME_VIEW: DebugViewDescriptor = DebugViewDescriptor {
+            name: "Wireframe",
+            debug_mode: WIREFRAME_DEBUG_MODE,
+            description: "Rasterise geometry as unculled triangle edges",
+        };
+        static VIEWS_WITH_WIREFRAME: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "UV Visualisation",
+                debug_mode: 1,
+                description: "Sample the shared UV reference grid with UV0",
+            },
+            DebugViewDescriptor {
+                name: "Raw Texture",
+                debug_mode: 2,
+                description: "Raw texture sample without material multiply",
+            },
+            DebugViewDescriptor {
+                name: "Geometry Normals",
+                debug_mode: 3,
+                description: "Geometry normals only (skip normal mapping)",
+            },
+            WIREFRAME_VIEW,
+        ];
+        if self.wireframe_supported {
+            return VIEWS_WITH_WIREFRAME;
+        }
         static VIEWS: &[DebugViewDescriptor] = &[
             DebugViewDescriptor {
                 name: "UV Visualisation",
@@ -1002,6 +1041,8 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
+            let wireframe =
+                self.wireframe_supported && self.debug_mode == WIREFRAME_DEBUG_MODE;
             let registered_graph;
             let graph_wgsl = if graph_wgsl.is_empty() && key.graph_hash != 0 {
                 registered_graph = helio_mats::graph_source(key.graph_hash);
@@ -1153,7 +1194,12 @@ impl GBufferPass {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: if wireframe { None } else { Some(wgpu::Face::Back) },
+                    polygon_mode: if wireframe {
+                        wgpu::PolygonMode::Line
+                    } else {
+                        wgpu::PolygonMode::Fill
+                    },
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {

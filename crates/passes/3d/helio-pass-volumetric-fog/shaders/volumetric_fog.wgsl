@@ -94,7 +94,8 @@ struct FogGlobals {
     /// Last frame's camera jitter (NDC), to reproject into its unjittered grid.
     prev_jitter_x: f32,
     prev_jitter_y: f32,
-    _pad2: f32,
+    /// Seconds since the previous frame (smoke history advection).
+    delta_time: f32,
     grid: vec3<u32>,
     enabled: u32,
     // Media are authored in world space; samples are in the frame's
@@ -207,6 +208,14 @@ const NONE_ROW: u32 = 0xffffffffu;
 var<workgroup> wg_legacy_row: atomic<u32>;
 var<workgroup> wg_exact_row: atomic<u32>;
 var<workgroup> wg_fallback_row: atomic<u32>;
+/// Farthest distance (f32 bits; positive floats order as u32) from the camera to
+/// any active bounded medium.
+var<workgroup> wg_media_far: atomic<u32>;
+
+/// Largest camera distance to the box: the farthest corner.
+fn farthest_corner_distance(camera: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> f32 {
+    return length(max(abs(camera - lo), abs(camera - hi)));
+}
 
 @compute @workgroup_size(256)
 fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
@@ -214,9 +223,24 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
         atomicStore(&wg_legacy_row, NONE_ROW);
         atomicStore(&wg_exact_row, NONE_ROW);
         atomicStore(&wg_fallback_row, NONE_ROW);
+        atomicStore(&wg_media_far, 0u);
     }
     workgroupBarrier();
     let view_id = bitcast<u32>(cameras[0].jitter_frame.w);
+    // Bounded media must never be cut by the grid's far plane: moving away from
+    // a volume would otherwise shear it off slice by slice until nothing is
+    // left. The grid range grows to hold every active volume.
+    let camera_world = cameras[0].position_near.xyz + fog_globals.world_origin.xyz;
+    for (var i = lid; i < arrayLength(&volumes); i += SCAN_THREADS) {
+        if legacy_volume_active(volumes[i]) {
+            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera_world, volumes[i].bounds_min.xyz, volumes[i].bounds_max.xyz)));
+        }
+    }
+    for (var i = lid; i < arrayLength(&local_media); i += SCAN_THREADS) {
+        if local_medium_active(local_media[i]) {
+            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera_world, local_media[i].bounds_min.xyz, local_media[i].bounds_max.xyz)));
+        }
+    }
     for (var i = lid; i < arrayLength(&legacy_media); i += SCAN_THREADS) {
         if legacy_media[i].fog_enabled != 0u { atomicMin(&wg_legacy_row, i); }
     }
@@ -246,7 +270,7 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     media_list.temporal_blend = finite_clamp(fog_globals.temporal_blend, 0.01, 1.0);
     media_list.history_rejection = 0.8;
     media_list.light_max_distance = range;
-    media_list.light_samples = 4u;
+    media_list.light_samples = 16u;
     if selected != 0xffffffffu {
         let s = render_settings[selected];
         quality = min(s.quality, 1u);
@@ -256,7 +280,14 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
         media_list.temporal_blend = finite_clamp(s.temporal_blend, 0.01, 1.0);
         media_list.history_rejection = finite_clamp(s.history_rejection, 0.01, 1.0);
         media_list.light_max_distance = finite_clamp(s.light_max_distance, 0.1, 100000.0);
-        media_list.light_samples = select(clamp(s.light_samples, 1u, 32u), select(4u, 12u, quality == 1u), s.light_samples == 0u);
+        media_list.light_samples = select(clamp(s.light_samples, 8u, 32u), select(16u, 24u, quality == 1u), s.light_samples == 0u);
+    }
+    // Grow (never shrink) the range to the farthest bounded medium, in coarse
+    // geometric steps so it does not change every frame as the camera moves:
+    // a changed range invalidates the whole history.
+    let media_far = bitcast<f32>(atomicLoad(&wg_media_far));
+    if media_far > range {
+        range = min(exp2(ceil(log2(media_far * 1.05) * 2.0) * 0.5), 20000.0);
     }
     range = finite_clamp(range, HELIO_FROXEL_NEAR + 0.01, 100000.0);
     media_list.history_compatible = select(0u, 1u,
@@ -514,7 +545,7 @@ fn density_at(p: vec3<f32>, config: FogUniforms) -> f32 {
         density *= exp(-max(h, 0.0) * max(config.fog_height_falloff, 0.0));
     }
     if config.fog_mode == 2u {
-        let advected = p * 0.24 - vec3<f32>(0.10, 0.24, 0.055) * fog_globals.time;
+        let advected = p * SMOKE_SCALE - SMOKE_DRIFT * fog_globals.time;
         let coarse = smoke_noise(advected);
         let detail = smoke_noise(advected * 2.07 + vec3<f32>(coarse * 1.7));
         let billow = smoothstep(0.25, 0.72, coarse * 0.7 + detail * 0.3);
@@ -546,7 +577,15 @@ struct Medium {
     emissive: vec3<f32>,
     anisotropy: f32,
     scattering_weight: f32,
+    /// Extinction-weighted share (0..1) of this sample that is animated smoke.
+    smoke: f32,
 }
+
+/// World-space velocity of the smoke pattern: density_at samples noise at
+/// p * SMOKE_SCALE - SMOKE_DRIFT * time, so features travel at DRIFT / SCALE.
+const SMOKE_SCALE: f32 = 0.24;
+const SMOKE_DRIFT: vec3<f32> = vec3<f32>(0.10, 0.24, 0.055);
+fn smoke_velocity() -> vec3<f32> { return SMOKE_DRIFT / SMOKE_SCALE; }
 
 fn world_config(m: WorldMedium) -> FogUniforms {
     var f: FogUniforms;
@@ -573,6 +612,7 @@ fn add_world_medium(accum: Medium, m: WorldMedium, p: vec3<f32>, shape: f32) -> 
     let d = finite_clamp(m.extinction, 0.0, 10000.0) * profile;
     let scattering = clamp(m.albedo, vec3<f32>(0), vec3<f32>(1)) * d;
     result.extinction += d;
+    if m.mode == 2u { result.smoke += d; }
     result.albedo += scattering;
     result.emissive += max(m.emission, vec3<f32>(0)) * profile;
     // Scattering-weighted phase, not absorption-weighted phase.
@@ -587,6 +627,7 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
     var m: Medium;
     if fog.fog_enabled != 0u && view_depth >= fog.fog_start_distance {
         m.extinction = density_at(p, fog);
+        if fog.fog_mode == 2u { m.smoke = m.extinction; }
         m.albedo = clamp(fog.fog_color, vec3<f32>(0.0), vec3<f32>(1.0)) * m.extinction;
         m.emissive = fog.fog_emissive * m.extinction;
         m.scattering_weight = dot(m.albedo, vec3<f32>(1.0 / 3.0));
@@ -596,7 +637,9 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
         let v = volumes[volume_index(i)];
         if !legacy_volume_active(v) { continue; }
         if any(p < v.bounds_min.xyz) || any(p > v.bounds_max.xyz) { continue; }
-        if view_depth < v.medium.fog_start_distance || view_depth > v.medium.fog_max_distance { continue; }
+        // A bounded volume's box is its extent; its authored max distance is the
+        // grid range (resolve), not a second cutoff that would clip the box.
+        if view_depth < v.medium.fog_start_distance { continue; }
         let edge = min(p - v.bounds_min.xyz, v.bounds_max.xyz - p);
         let fade = smoothstep(0.0, max(v.blend_radius, 0.001), min(edge.x, min(edge.y, edge.z)));
         var shape = fade;
@@ -609,6 +652,7 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
         let d = density_at(p, v.medium) * clamp(v.blend_weight, 0.0, 1.0) * shape;
         // Overlapping media add extinction/scattering, not camera-weighted screen effects.
         m.extinction += d;
+        if v.medium.fog_mode == 2u { m.smoke += d; }
         m.albedo += clamp(v.medium.fog_color, vec3<f32>(0.0), vec3<f32>(1.0)) * d;
         m.emissive += v.medium.fog_emissive * d;
         let weight = dot(clamp(v.medium.fog_color, vec3<f32>(0), vec3<f32>(1)) * d, vec3<f32>(1.0 / 3.0));
@@ -623,7 +667,7 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
         let v = local_media[local_index(i)];
         if local_medium_active(v) { m = add_world_medium(m, v.medium, p, local_shape(p, v)); }
     }
-    if m.extinction > 0.0 { m.albedo /= m.extinction; }
+    if m.extinction > 0.0 { m.albedo /= m.extinction; m.smoke = clamp(m.smoke / m.extinction, 0.0, 1.0); }
     if m.scattering_weight > 0.0 { m.anisotropy /= m.scattering_weight; }
     return m;
 }
@@ -765,10 +809,24 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
 /// One comparison tap, not the PCF/PCSS kernel deferred lighting uses. That is
 /// affordable because it runs once per froxel rather than once per pixel per
 /// step, and the temporal blend averages the result across frames.
-fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> vec3<f32> {
+fn shaft_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
     if textureDimensions(shadow_atlas).x <= 1u { return vec3<f32>(1.0); }
     let light = lights[light_idx];
     if light.shadow_index == NO_SHADOW { return vec3<f32>(1.0); }
+
+    // Fog has no surface normal to offset along, so receivers lying in or near
+    // a caster (the floor under a local volume, a mesh inside it) compare
+    // against their own depth and flip lit/shadowed by quantisation: diagonal
+    // acne stripes that crawl as the sample lattice moves with the camera.
+    // Slide the query toward the light by about one froxel, which keeps a cell
+    // from shadowing itself without visibly detaching shafts from casters.
+    var toward_light: vec3<f32>;
+    if light.light_type == LIGHT_DIRECTIONAL {
+        toward_light = normalize(-light.direction_outer.xyz);
+    } else {
+        toward_light = normalize(light.position_range.xyz - p0);
+    }
+    let p = p0 + toward_light * clamp(max(sample_lateral, 0.03) * 1.25, 0.03, 2.5);
 
     var layer = light.shadow_index;
 
@@ -859,6 +917,42 @@ fn segment_inverse_square(light_pos: vec3<f32>) -> f32 {
     return (atan((sample_t1 - tc) / h) - atan((sample_t0 - tc) / h)) / (h * span);
 }
 
+/// The froxel's stratified shadow taps (set by cs_inject). Unused outside it.
+var<private> sample_taps: array<vec3<f32>, 4>;
+
+fn shaft_visibility_averaged(light_idx: u32, p: vec3<f32>) -> vec3<f32> {
+    if sample_t1 <= sample_t0 { return shaft_visibility(light_idx, p); }
+    var sum = vec3<f32>(0.0);
+    for (var k = 0u; k < 4u; k++) { sum += shaft_visibility(light_idx, sample_taps[k]); }
+    return sum * 0.25;
+}
+
+/// Multiple-scattering approximation (Wrenninge, "Art-directable multiple
+/// scattering"; used for production clouds and fog, e.g. Hillaire 2015/2020):
+/// octave n contributes a^n * T^(b^n) * phase(g * c^n), so light that has been
+/// scattered several times still reaches the interior of a dense medium, with a
+/// softer, less forward-peaked lobe. Single scattering alone leaves any thick
+/// self-shadowed volume black at its core. a = b = c = 0.5 conserves energy
+/// (a <= b); the sum is normalised so an unshadowed point (T = 1) keeps its
+/// single-scattering brightness.
+const MS_OCTAVES: u32 = 4u;
+fn multiple_scattering(transmittance: f32, cos_theta: f32, g: f32) -> f32 {
+    let ln_t = log(max(transmittance, 1e-30));
+    var sum = 0.0;
+    var norm = 0.0;
+    var a = 1.0;
+    var b = 1.0;
+    var c = 1.0;
+    for (var n = 0u; n < MS_OCTAVES; n++) {
+        sum += a * exp(ln_t * b) * helio_hg_phase(cos_theta, g * c);
+        norm += a;
+        a *= 0.5;
+        b *= 0.5;
+        c *= 0.5;
+    }
+    return sum / norm;
+}
+
 fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisotropy: f32) -> vec3<f32> {
     let light = lights[light_idx];
 
@@ -923,17 +1017,18 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     }
 
     // cos = 1 looking straight at the light, so g > 0 peaks into the sun.
-    let phase = helio_hg_phase(dot(view_dir, to_light), clamp(anisotropy, -0.95, 0.95));
+    let cos_theta = dot(view_dir, to_light);
+    let g = clamp(anisotropy, -0.95, 0.95);
     // ABI adapter: decay was unused; it now controls geometric fog-shadow
     // strength. Medium absorption remains physical even with geometry opt-out.
     let shadow_strength = finite_clamp(light.god_rays_decay, 0.0, 1.0);
     var vis = vec3<f32>(1.0);
-    if shadow_strength > 0.0 { vis = mix(vec3<f32>(1.0), shaft_visibility(light_idx, p), shadow_strength); }
+    if shadow_strength > 0.0 { vis = mix(vec3<f32>(1.0), shaft_visibility_averaged(light_idx, p), shadow_strength); }
     if all(vis <= vec3<f32>(0.0)) || atten <= 0.0 { return vec3<f32>(0); }
-    vis *= medium_transmittance(eval_pos, to_light, shadow_distance);
+    let scatter = multiple_scattering(medium_transmittance(eval_pos, to_light, shadow_distance), cos_theta, g);
 
     let radiance = light.color_intensity.rgb * light.color_intensity.w;
-    return radiance * atten * phase * vis
+    return radiance * atten * scatter * vis
         * light.god_rays_weight * light.god_rays_exposure * light.god_rays_density;
 }
 
@@ -986,12 +1081,42 @@ fn temporal_result(current: vec4<f32>, history: vec4<f32>, blend: f32, rejection
 
 // ── Injection ───────────────────────────────────────────────────────────────
 
-/// Interleaved-gradient noise, used to jitter the sample point within its froxel.
-/// Combined with the temporal blend this turns slice banding into noise that
-/// averages out across frames.
-fn ign(pixel: vec2<f32>, frame: u32) -> f32 {
-    let f = pixel + 5.588238 * f32(frame % 64u);
-    return fract(52.9829189 * fract(dot(f, vec2<f32>(0.06711056, 0.00583715))));
+/// The medium averaged over the froxel's volume: 2x2x2 fixed sub-positions.
+/// A hard-edged box sampled once per cell is a binary function, so its outline
+/// becomes a staircase as wide as a froxel; averaging gives partial coverage at
+/// the boundary (a ramp) while staying fully deterministic frame to frame.
+/// Sums are of extensive quantities (scattering, emission, weighted phase), so
+/// the result is the true volume average, not an average of ratios.
+fn medium_averaged(gid: vec3<u32>, dims: vec3<u32>, centre: vec3<f32>, view_depth: f32) -> Medium {
+    var extinction = 0.0;
+    var scattering = vec3<f32>(0.0);
+    var emissive = vec3<f32>(0.0);
+    var phase_weight = 0.0;
+    var anisotropy = 0.0;
+    var smoke = 0.0;
+    for (var k = 0u; k < 8u; k++) {
+        let sub = vec3<f32>(select(0.25, 0.75, (k & 1u) != 0u), select(0.25, 0.75, (k & 2u) != 0u),
+            select(0.25, 0.75, (k & 4u) != 0u));
+        let q = froxel_world_pos((vec2<f32>(gid.xy) + sub.xy) / vec2<f32>(dims.xy),
+            (f32(gid.z) + sub.z) / f32(dims.z));
+        let m = medium_at(q, view_depth);
+        extinction += m.extinction;
+        scattering += m.albedo * m.extinction;
+        emissive += m.emissive;
+        anisotropy += m.anisotropy * m.scattering_weight;
+        phase_weight += m.scattering_weight;
+        smoke += m.smoke * m.extinction;
+    }
+    var result: Medium;
+    result.extinction = extinction * 0.125;
+    if extinction > 0.0 {
+        result.albedo = scattering / extinction;
+        result.smoke = clamp(smoke / extinction, 0.0, 1.0);
+    }
+    result.emissive = emissive * 0.125;
+    result.scattering_weight = phase_weight * 0.125;
+    if phase_weight > 0.0 { result.anisotropy = anisotropy / phase_weight; }
+    return result;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -1006,26 +1131,29 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Jitter within the froxel in all three axes, varying per frame: the
-    // temporal blend then integrates the whole cell (shadow edges, lancet
-    // patterns, smoke detail) instead of point-sampling its centre, which
-    // aliases and crawls whenever the camera moves. Depth uses IGN; X/Y use
-    // the R2 sequence with an independent per-cell (Cranley-Patterson) offset.
-    // A shared offset moves every cell in lockstep, so the residual error forms
-    // a coherent pattern that crawls across the medium each frame (shimmer);
-    // decorrelated, it is fine grain the reconstruction and TSR filter away.
-    let j = ign(vec2<f32>(gid.xy), fog_globals.frame);
-    let cell = hash_word(hash_word(hash_word(2166136261u, gid.x), gid.y), gid.z);
-    let rotation = vec2<f32>(f32(cell & 0xffffu), f32(cell >> 16u)) / 65536.0;
-    let jxy = fract(vec2<f32>(0.7548776662, 0.5698402910) * f32(fog_globals.frame % 4096u) + rotation);
-    let uv = (vec2<f32>(gid.xy) + jxy) / vec2<f32>(dims.xy);
-    let slice_norm = (f32(gid.z) + j) / f32(dims.z);
+    // Deterministic sampling: no per-frame or per-cell randomness, so a static
+    // camera and scene give bit-identical froxels every frame and nothing can
+    // flicker. Medium and phase are evaluated at the froxel centre; shadow
+    // visibility averages four fixed taps spread over the cell (2x2 across the
+    // screen, four depth strata), which replaces the old jitter without its
+    // noise. Far froxels span metres, so a single tap would alias hard.
+    // Moving media (smoke) are handled by advecting the history lookup along
+    // the wind (see smoke_velocity), not by randomising the samples.
+    let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims.xy);
+    let slice_norm = (f32(gid.z) + 0.5) / f32(dims.z);
 
     let p = froxel_world_pos(uv, slice_norm);
     let ray_dir = normalize(p - cameras[0].position_near.xyz);
 
+    for (var k = 0u; k < 4u; k++) {
+        let sub = vec2<f32>(select(0.25, 0.75, (k & 1u) != 0u), select(0.25, 0.75, (k & 2u) != 0u));
+        let dz = 0.125 + 0.25 * f32(k);
+        sample_taps[k] = froxel_world_pos((vec2<f32>(gid.xy) + sub) / vec2<f32>(dims.xy),
+            (f32(gid.z) + dz) / f32(dims.z));
+    }
+
     let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
-    let medium = medium_at(p, view_depth);
+    let medium = medium_averaged(gid, dims, p, view_depth);
     // This froxel's ray segment (radial = view depth / cos) and half-width.
     let radial_scale = distance(p, cameras[0].position_near.xyz) / max(view_depth, 1e-6);
     sample_t0 = helio_froxel_view_depth_from_slice(f32(gid.z) / f32(dims.z), fog.fog_max_distance) * radial_scale;
@@ -1062,8 +1190,14 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
         // it at this frame's jittered position resampled the history at a
         // random sub-froxel offset every frame, which blurred it and kept it
         // changing even in a static scene.
+        // Smoke is the only moving medium. Its pattern at (p, t) equals the
+        // pattern at (p - v*dt, t - dt), so reading history from there is the
+        // fog equivalent of a TSR velocity buffer: the history lines up with the
+        // smoke instead of lagging behind it (ghosting) or being rejected
+        // (noise). Static media have smoke == 0 and read history in place.
         let history_pos = froxel_world_pos((vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims.xy),
-            (f32(gid.z) + 0.5) / f32(dims.z));
+            (f32(gid.z) + 0.5) / f32(dims.z))
+            - smoke_velocity() * (fog_globals.delta_time * medium.smoke);
         let hist = sample_history(history_pos);
         if hist.w >= 0.0 {
             // Reject history at moving smoke edges and after density changes.
@@ -1084,6 +1218,24 @@ fn segment_integral(sigma_t: f32, length: f32) -> f32 {
 }
 
 // ── Integration ─────────────────────────────────────────────────────────────
+
+/// 3x3 tent filter over the screen axes of the scattering grid, as four
+/// bilinear taps at the corners of the centre texel (weights 1-2-1 x 1-2-1).
+/// Any froxel whose history was rejected, or whose single shadow tap is still
+/// converging, carries per-cell noise; this removes the residual cell-scale
+/// static before it is integrated along depth. Depth is not filtered, so fog
+/// never leaks across a surface.
+fn scatter_denoised(uvw: vec3<f32>) -> vec4<f32> {
+    let physical = textureDimensions(scatter_in);
+    let o = 0.5 / vec2<f32>(media_list.grid.xy);
+    var sum = vec4<f32>(0.0);
+    for (var i = 0u; i < 4u; i++) {
+        let d = vec2<f32>(select(-o.x, o.x, (i & 1u) != 0u), select(-o.y, o.y, (i & 2u) != 0u));
+        sum += textureSampleLevel(scatter_in, linear_samp,
+            scatter_coordinates(vec3<f32>(uvw.xy + d, uvw.z), physical), 0.0);
+    }
+    return sum * 0.25;
+}
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1116,7 +1268,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
         prev_depth = depth;
 
         let uvw = vec3<f32>(uv, (f32(z) + 0.5) / f32(dims.z));
-        let s = textureSampleLevel(scatter_in, linear_samp, scatter_coordinates(uvw, textureDimensions(scatter_in)), 0.0);
+        let s = scatter_denoised(uvw);
         let scattering = s.rgb;
         let sigma_t = max(s.a, 0.0);
 

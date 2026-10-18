@@ -1,7 +1,7 @@
 //! Generic scene input boundary used by graph execution.
 
 use crate::GpuCameraUniforms;
-pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey};
+pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey, FlushedRows};
 use pulsar_scenedb::gpu::SceneGpuStore;
 use std::sync::Arc;
 
@@ -17,25 +17,39 @@ pub const ENTITY_GENERATIONS_KEY: BufferKey = BufferKey::of("world_entity_genera
 #[derive(Clone, Default)]
 pub struct SceneBufferProjection {
     entries: Vec<(BufferKey, BufferHandle)>,
+    /// The rows each dirty-tracked buffer received in its last mirror flush.
+    flushed: Vec<(BufferKey, FlushedRows)>,
 }
 
 impl SceneBufferProjection {
     /// Construct a projection from frontend-owned GPU handles, including focused
     /// test fixtures. Handles are owned snapshots and survive buffer replacement.
     pub fn from_handles(entries: impl IntoIterator<Item = (BufferKey, BufferHandle)>) -> Self {
-        Self { entries: entries.into_iter().collect() }
+        Self { entries: entries.into_iter().collect(), flushed: Vec::new() }
     }
 
     pub fn empty() -> Self {
         Self::default()
     }
-
     pub fn from_store(store: &SceneGpuStore, keys: impl IntoIterator<Item = BufferKey>) -> Self {
-        let entries = keys
-            .into_iter()
-            .filter_map(|key| store.resolve_buffer_handle(key).map(|buffer| (key, buffer)))
-            .collect();
-        Self { entries }
+        let mut entries = Vec::new();
+        let mut flushed = Vec::new();
+        for key in keys {
+            if let Some(handle) = store.resolve_buffer_handle(key) {
+                entries.push((key, handle));
+                if let Some(rows) = store.flushed_rows(key) {
+                    flushed.push((key, rows));
+                }
+            }
+        }
+        Self { entries, flushed }
+    }
+
+    /// The rows `key`'s buffer received in its last mirror flush, when SceneDB
+    /// kept them (dirty-tracked columns). A consumer that processed the
+    /// previous `sequence` can visit only these rows instead of all of them.
+    pub fn flushed_rows(&self, key: BufferKey) -> Option<&FlushedRows> {
+        self.flushed.iter().find(|(candidate, _)| *candidate == key).map(|(_, rows)| rows)
     }
 
     /// Snapshot every currently registered SceneDB buffer. Keys remain the
@@ -58,9 +72,17 @@ impl SceneBufferProjection {
     /// Publish `handle` under `key`, replacing any buffer already there.
     /// The frontend adds buffers SceneDB keeps outside its store registry
     /// (the entity-generation mirror); scene derivations add their outputs.
+    ///
+    /// Replacing a buffer drops the flushed-row record kept for it: those
+    /// rows described the frontend's buffer, not the one that now stands in
+    /// for it (a derivation that rewrites a column, e.g. composing parented
+    /// transforms, moves rows the flush never named).
     pub fn insert(&mut self, key: BufferKey, handle: BufferHandle) {
         match self.entries.iter_mut().find(|(candidate, _)| *candidate == key) {
-            Some((_, existing)) => *existing = handle,
+            Some((_, existing)) => {
+                *existing = handle;
+                self.flushed.retain(|(candidate, _)| *candidate != key);
+            }
             None => self.entries.push((key, handle)),
         }
     }

@@ -33,7 +33,9 @@ pub use rig_converter::{
 };
 pub use scene_converter::{
     convert_scene, ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh,
+    MaterialImage, MaterialSource,
 };
+pub use texture_loader::TextureSemantic;
 
 use std::path::Path;
 

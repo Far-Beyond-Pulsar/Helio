@@ -111,7 +111,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE |
         wgpu::Features::PIPELINE_CACHE | // persistent driver-validated pipeline cache
-        wgpu::Features::SHADER_INT64; // hardware wide multiplies (voxel planet fixed-point math)
+        wgpu::Features::SHADER_INT64 | // hardware wide multiplies (voxel planet fixed-point math)
+        wgpu::Features::POLYGON_MODE_LINE; // wireframe debug view
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
         optional |= BINDLESS_MATERIAL_FEATURES;

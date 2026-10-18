@@ -92,14 +92,12 @@ pub fn register_material_assets() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(|| {
         pulsar_scenedb::register_loader(MATERIAL_ASSET_KIND, load_material_asset);
+        // A graph's textures are budgeted by SceneDB's residency cache (see
+        // `LoadedTexture`); the material payload is a graph and handles.
         pulsar_scenedb::register_payload_size(MATERIAL_ASSET_KIND, |payload| match payload
             .downcast_ref::<LoadedMaterial>(
         ) {
-            Some(LoadedMaterial::Graph(graph)) => graph
-                .textures
-                .iter()
-                .map(|(_, _, image)| image.rgba.len())
-                .sum(),
+            Some(LoadedMaterial::Graph(graph)) => graph.textures.len() * 64,
             _ => 0,
         });
         pulsar_scenedb::register_binding::<StaticMeshComponent>(
@@ -206,7 +204,16 @@ fn bind_mesh_material(mesh: &mut StaticMeshComponent, view: &AssetView) {
         return;
     }
     match view.payload::<LoadedMaterial>() {
-        Some(material) => bound.push((view.id, view.version, material)),
+        Some(material) => {
+            // A graph's textures the residency cache dropped start coming back
+            // now, ahead of the scene that will upload them.
+            if let LoadedMaterial::Graph(graph) = &*material {
+                for (_, _, image) in &graph.textures {
+                    image.warm();
+                }
+            }
+            bound.push((view.id, view.version, material))
+        }
         None => tracing::warn!(
             source = view.source,
             state = ?view.state,
@@ -437,10 +444,28 @@ fn compiled_graph(
         .map(|(ordinal, asset)| (asset.clone(), ordinal as u32))
         .collect();
     let mut slots = [helio::GpuMaterial::NO_TEXTURE; 5];
+    // What each image is for decides its format: a colour is stored as sRGB and
+    // a roughness or normal map is not.
+    let uses = crate::material_graph::texture_uses(&graph.graph);
+    let use_of = |asset: &str| {
+        uses.get(asset)
+            .copied()
+            .unwrap_or(crate::cooked_texture::TextureUse::Color)
+    };
+    // A material with several images the store does not hold yet cooks them
+    // side by side on the loader threads, not one after another here.
+    crate::texture_assets::prefetch_missing(
+        graph
+            .textures
+            .iter()
+            .map(|(asset, texture, image)| (*texture, use_of(asset), &**image)),
+        version,
+        mirror,
+    );
     for (asset, texture, image) in &graph.textures {
         // A texture's GPU copy follows the material's version: the material
         // reloads when one of its textures changes.
-        let slot = crate::texture_assets::resident_slot(*texture, version, image, mirror)
+        let slot = crate::texture_assets::resident_slot(*texture, version, image, use_of(asset), mirror)
             .map_err(|error| format!("texture '{asset}': {error}"))?;
         let ordinal = *bindings
             .get(asset)

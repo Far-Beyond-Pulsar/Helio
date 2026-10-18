@@ -624,3 +624,77 @@ fn unchanged_inputs_record_nothing_and_keep_the_outputs() {
     };
     assert_eq!(generation(&first), generation(&second), "outputs unchanged");
 }
+
+/// Moving objects must not read as a change to what the objects are. The
+/// object batch re-sorts the whole scene whenever the materials or the
+/// structure marker move, and the transform column moves every frame an
+/// object is dragged.
+#[test]
+fn moving_objects_moves_the_objects_but_not_the_structure() {
+    let Some((device, queue)) = device() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let scene = base_scene();
+    let mut join = SceneJoin::new(&device, KEYS, false);
+    let generation = |projection: &SceneBufferProjection, key: &'static str| {
+        projection.get(BufferKey::of(key)).unwrap().content_generation
+    };
+    let first = run(&mut join, &device, &queue, &scene, 1);
+    let (objects, materials, structure) = (
+        generation(&first, "static_objects"),
+        generation(&first, "materials"),
+        generation(&first, "scene_objects_structure"),
+    );
+
+    // The same scene, the transform column alone reporting new contents.
+    let derive = |join: &mut SceneJoin, mut projection: SceneBufferProjection| {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let output = join.derive(
+            &SceneDerivationContext {
+                device: &device,
+                queue: &queue,
+                inputs: &projection,
+                world_origin: None,
+            },
+            &mut encoder,
+        );
+        queue.submit([encoder.finish()]);
+        for (key, handle) in output.buffers {
+            projection.insert(key, handle);
+        }
+        projection
+    };
+    let bump = |key: BufferKey| {
+        let mut projection = scene.projection(&device, &queue, 1);
+        let handle = projection.get(key).unwrap().clone();
+        projection.insert(
+            key,
+            BufferHandle {
+                content_generation: 2,
+                ..handle
+            },
+        );
+        projection
+    };
+    // Same buffers as the first run would be ideal, but the harness makes
+    // fresh ones per projection; what matters is the join's own signature of
+    // them, so the unchanged columns keep generation 1 and the same size.
+    let moved = derive(&mut join, bump(KEYS.transforms));
+    assert!(
+        generation(&moved, "static_objects") > objects,
+        "the objects hold placements, so they changed"
+    );
+    assert_eq!(generation(&moved, "materials"), materials, "materials follow the structure");
+    assert_eq!(
+        generation(&moved, "scene_objects_structure"),
+        structure,
+        "moving objects is not a structural change"
+    );
+
+    // And a change to what an object is does move all three.
+    let retargeted = derive(&mut join, bump(KEYS.mesh_flags));
+    assert!(generation(&retargeted, "static_objects") > generation(&moved, "static_objects"));
+    assert!(generation(&retargeted, "materials") > materials);
+    assert!(generation(&retargeted, "scene_objects_structure") > structure);
+}

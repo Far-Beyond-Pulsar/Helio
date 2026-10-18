@@ -104,7 +104,8 @@ struct FogGlobals {
     time: f32,
     /// Last frame's camera jitter (NDC): history lives in its unjittered grid.
     prev_jitter: [f32; 2],
-    _pad: f32,
+    /// Seconds since the previous frame: smoke history is advected by it.
+    delta_time: f32,
     grid: [u32; 3],
     enabled: u32,
     /// The frame's world origin (camera-relative frames): media are authored
@@ -359,7 +360,9 @@ impl VolumetricFogPass {
                 storage_ro(0),
                 uniform(1),
                 uniform(2),
+                storage_ro(11), // bounded media extents grow the grid range
                 storage_rw(12),
+                storage_ro(15),
                 storage_ro(16),
                 storage_ro(17),
                 storage_rw(18),
@@ -770,7 +773,7 @@ impl RenderPass for VolumetricFogPass {
             temporal_blend: self.temporal_blend,
             time: self.time,
             prev_jitter,
-            _pad: 0.0,
+            delta_time: ctx.delta_time.clamp(0.0, 0.25),
             grid: self.grid,
             enabled: self.active as u32,
             world_origin: ctx.world_origin.map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
@@ -897,7 +900,9 @@ impl RenderPass for VolumetricFogPass {
                     (0, camera_buf),
                     (1, &self.fog_uniform_buf),
                     (2, &self.globals_buf),
+                    (11, volumes_buf),
                     (12, &self.active_media_buf),
+                    (15, local_buf),
                     (16, settings_buf),
                     (17, legacy_buf),
                     (18, &self.resolved_fog_buf),
