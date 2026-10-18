@@ -39,7 +39,8 @@ fn sprite_texel(world: &World, entity: Entity) -> Option<[u8; 4]> {
 }
 
 fn texel(image: &LoadedTexture) -> Option<[u8; 4]> {
-    image.rgba.get(..4).map(|t| [t[0], t[1], t[2], t[3]])
+    let rgba = image.rgba().ok()?;
+    rgba.get(..4).map(|t| [t[0], t[1], t[2], t[3]])
 }
 
 fn set_texture(world: &mut World, entity: Entity, path: &str) {

@@ -92,14 +92,12 @@ pub fn register_material_assets() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(|| {
         pulsar_scenedb::register_loader(MATERIAL_ASSET_KIND, load_material_asset);
+        // A graph's textures are budgeted by SceneDB's residency cache (see
+        // `LoadedTexture`); the material payload is a graph and handles.
         pulsar_scenedb::register_payload_size(MATERIAL_ASSET_KIND, |payload| match payload
             .downcast_ref::<LoadedMaterial>(
         ) {
-            Some(LoadedMaterial::Graph(graph)) => graph
-                .textures
-                .iter()
-                .map(|(_, _, image)| image.rgba.len())
-                .sum(),
+            Some(LoadedMaterial::Graph(graph)) => graph.textures.len() * 64,
             _ => 0,
         });
         pulsar_scenedb::register_binding::<StaticMeshComponent>(
