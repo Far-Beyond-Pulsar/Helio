@@ -1,0 +1,424 @@
+//! Cooked textures: the form an image takes before it reaches the GPU.
+//!
+//! A source image is decoded, capped in size, given a full mip chain and, where
+//! the device can sample it, block-compressed to BC7. All of that is expensive
+//! and depends only on the source and a few settings, so the result is one
+//! byte blob that SceneDB's derived-data cache stores on disk
+//! ([`pulsar_scenedb::derive_cached`]) and its residency cache keeps in memory
+//! ([`pulsar_scenedb::Residency`]).
+//!
+//! The sizes that follow for a 2048 x 2048 image:
+//!
+//! | form | bytes |
+//! |---|---|
+//! | RGBA8, one level (what we uploaded before) | 16.0 MiB |
+//! | RGBA8 with mips | 21.3 MiB |
+//! | BC7 with mips | 5.3 MiB |
+//!
+//! # Container
+//!
+//! `"PTX1"`, format code, width, height, level count and each level's byte
+//! length (all little-endian `u32`), then the levels, largest first. A level
+//! is tightly packed rows of texels (RGBA8) or of 4 x 4 blocks (BC7); levels
+//! smaller than a block round up to one. [`CookedTexture::from_bytes`] checks
+//! every length against what the format and dimensions require, so a damaged
+//! or outdated file is refused instead of uploaded.
+
+use intel_tex_2::{bc7, RgbaSurface};
+
+const MAGIC: [u8; 4] = *b"PTX1";
+
+/// The version of what [`cook`] produces. Part of the derived-data key: bump
+/// it when a change here alters the bytes for the same input.
+pub const COOK_VERSION: u32 = 1;
+
+/// How a cooked texture's texels are stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CookFormat {
+    /// Uncompressed `Rgba8UnormSrgb`: works on every device.
+    Rgba8,
+    /// Block-compressed `Bc7RgbaUnormSrgb`: a quarter of the size, needs the
+    /// `TEXTURE_COMPRESSION_BC` feature and a width and height divisible by 4.
+    Bc7,
+}
+
+impl CookFormat {
+    pub const ALL: [CookFormat; 2] = [CookFormat::Rgba8, CookFormat::Bc7];
+
+    fn code(self) -> u32 {
+        match self {
+            CookFormat::Rgba8 => 0,
+            CookFormat::Bc7 => 1,
+        }
+    }
+
+    fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(CookFormat::Rgba8),
+            1 => Some(CookFormat::Bc7),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CookFormat::Rgba8 => "rgba8",
+            CookFormat::Bc7 => "bc7",
+        }
+    }
+
+    pub fn wgpu_format(self) -> wgpu::TextureFormat {
+        match self {
+            CookFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
+            CookFormat::Bc7 => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+        }
+    }
+
+    /// The best format `features` can sample for an image of this size.
+    pub fn best_for(features: wgpu::Features, width: u32, height: u32) -> Self {
+        if features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+            && width % 4 == 0
+            && height % 4 == 0
+        {
+            CookFormat::Bc7
+        } else {
+            CookFormat::Rgba8
+        }
+    }
+}
+
+/// The number of levels in a full mip chain for a `width` x `height` image.
+pub fn mip_level_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
+}
+
+/// Level `level`'s extent in texels.
+fn level_extent(width: u32, height: u32, level: u32) -> (u32, u32) {
+    ((width >> level).max(1), (height >> level).max(1))
+}
+
+fn round_up_4(value: u32) -> u32 {
+    value.div_ceil(4) * 4
+}
+
+/// Bytes of one level of `format` at `(width, height)` texels.
+fn level_bytes(format: CookFormat, width: u32, height: u32) -> usize {
+    match format {
+        CookFormat::Rgba8 => width as usize * height as usize * 4,
+        CookFormat::Bc7 => (round_up_4(width) / 4) as usize * (round_up_4(height) / 4) as usize * 16,
+    }
+}
+
+/// A texture ready to upload: its format, size and every mip level.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CookedTexture {
+    pub format: CookFormat,
+    pub width: u32,
+    pub height: u32,
+    levels: Vec<std::ops::Range<usize>>,
+    bytes: Vec<u8>,
+}
+
+impl CookedTexture {
+    pub fn mip_count(&self) -> u32 {
+        self.levels.len() as u32
+    }
+
+    /// Level `level`'s bytes, in the layout `TextureStore::register_mips`
+    /// takes.
+    pub fn mip(&self, level: u32) -> &[u8] {
+        &self.bytes[self.levels[level as usize].clone()]
+    }
+
+    pub fn mips(&self) -> Vec<&[u8]> {
+        (0..self.mip_count()).map(|level| self.mip(level)).collect()
+    }
+
+    /// Bytes held in memory (what the residency budget counts).
+    pub fn byte_size(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn from_levels(format: CookFormat, width: u32, height: u32, levels: Vec<Vec<u8>>) -> Self {
+        let mut ranges = Vec::with_capacity(levels.len());
+        let mut bytes = Vec::with_capacity(levels.iter().map(Vec::len).sum());
+        for level in &levels {
+            ranges.push(bytes.len()..bytes.len() + level.len());
+            bytes.extend_from_slice(level);
+        }
+        Self { format, width, height, levels: ranges, bytes }
+    }
+
+    /// The container (see the module docs).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(20 + 4 * self.levels.len() + self.bytes.len());
+        out.extend_from_slice(&MAGIC);
+        for value in [self.format.code(), self.width, self.height, self.mip_count()] {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        for level in &self.levels {
+            out.extend_from_slice(&((level.end - level.start) as u32).to_le_bytes());
+        }
+        out.extend_from_slice(&self.bytes);
+        out
+    }
+
+    /// Parse the container, refusing anything whose lengths do not match what
+    /// its format and size require.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let word = |at: usize| -> Result<u32, String> {
+            bytes
+                .get(at..at + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().expect("four bytes")))
+                .ok_or_else(|| "cooked texture is truncated".to_string())
+        };
+        if bytes.get(..4) != Some(&MAGIC) {
+            return Err("not a cooked texture".into());
+        }
+        let format = CookFormat::from_code(word(4)?)
+            .ok_or_else(|| "cooked texture has an unknown format".to_string())?;
+        let (width, height, count) = (word(8)?, word(12)?, word(16)?);
+        if width == 0 || height == 0 || count != mip_level_count(width, height) {
+            return Err("cooked texture has an impossible size".into());
+        }
+        let mut offset = 20 + 4 * count as usize;
+        let mut levels = Vec::with_capacity(count as usize);
+        for level in 0..count {
+            let length = word(20 + 4 * level as usize)? as usize;
+            let (lw, lh) = level_extent(width, height, level);
+            if length != level_bytes(format, lw, lh) {
+                return Err(format!("cooked texture level {level} has the wrong length"));
+            }
+            levels.push(offset - (20 + 4 * count as usize)..offset - (20 + 4 * count as usize) + length);
+            offset += length;
+        }
+        if bytes.len() != offset {
+            return Err("cooked texture has the wrong total length".into());
+        }
+        Ok(Self {
+            format,
+            width,
+            height,
+            levels,
+            bytes: bytes[20 + 4 * count as usize..].to_vec(),
+        })
+    }
+}
+
+/// `srgb8 -> linear` for each byte value.
+fn srgb_to_linear_table() -> [f32; 256] {
+    let mut table = [0.0; 256];
+    for (value, entry) in table.iter_mut().enumerate() {
+        let c = value as f32 / 255.0;
+        *entry = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    }
+    table
+}
+
+/// Linear `[0, 1]` to an sRGB byte, through a table fine enough that the
+/// quantisation sits under one output step.
+struct LinearToSrgb(Vec<u8>);
+
+impl LinearToSrgb {
+    const STEPS: usize = 16384;
+
+    fn new() -> Self {
+        Self(
+            (0..=Self::STEPS)
+                .map(|i| {
+                    let l = i as f32 / Self::STEPS as f32;
+                    let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
+                    (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+                })
+                .collect(),
+        )
+    }
+
+    fn encode(&self, linear: f32) -> u8 {
+        self.0[(linear.clamp(0.0, 1.0) * Self::STEPS as f32 + 0.5) as usize]
+    }
+}
+
+/// The next mip level of an sRGB RGBA8 image: each texel is the average of a
+/// 2 x 2 box taken in linear light (alpha is stored linear and averaged as
+/// is). A source edge that is odd reuses its last row or column.
+fn downsample(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    to_linear: &[f32; 256],
+    to_srgb: &LinearToSrgb,
+) -> (u32, u32, Vec<u8>) {
+    let (new_width, new_height) = ((width / 2).max(1), (height / 2).max(1));
+    let mut out = Vec::with_capacity(new_width as usize * new_height as usize * 4);
+    for y in 0..new_height {
+        let (y0, y1) = ((2 * y).min(height - 1), (2 * y + 1).min(height - 1));
+        for x in 0..new_width {
+            let (x0, x1) = ((2 * x).min(width - 1), (2 * x + 1).min(width - 1));
+            let taps = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
+            let mut sum = [0.0f32; 4];
+            for (tx, ty) in taps {
+                let at = (ty as usize * width as usize + tx as usize) * 4;
+                for channel in 0..3 {
+                    sum[channel] += to_linear[source[at + channel] as usize];
+                }
+                sum[3] += f32::from(source[at + 3]) / 255.0;
+            }
+            for channel in 0..3 {
+                out.push(to_srgb.encode(sum[channel] * 0.25));
+            }
+            out.push((sum[3] * 0.25 * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
+        }
+    }
+    (new_width, new_height, out)
+}
+
+/// `rgba` (`width` x `height`) padded to a multiple of 4 in both directions by
+/// repeating its last row and column, so a partial block encodes cleanly.
+fn pad_to_blocks(rgba: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
+    let (padded_width, padded_height) = (round_up_4(width), round_up_4(height));
+    if (padded_width, padded_height) == (width, height) {
+        return (width, height, rgba.to_vec());
+    }
+    let mut out = Vec::with_capacity(padded_width as usize * padded_height as usize * 4);
+    for y in 0..padded_height {
+        let sy = y.min(height - 1) as usize;
+        for x in 0..padded_width {
+            let sx = x.min(width - 1) as usize;
+            let at = (sy * width as usize + sx) * 4;
+            out.extend_from_slice(&rgba[at..at + 4]);
+        }
+    }
+    (padded_width, padded_height, out)
+}
+
+fn compress_bc7(rgba: &[u8], width: u32, height: u32, opaque: bool) -> Vec<u8> {
+    let (padded_width, padded_height, padded) = pad_to_blocks(rgba, width, height);
+    let surface = RgbaSurface {
+        data: &padded,
+        width: padded_width,
+        height: padded_height,
+        stride: padded_width * 4,
+    };
+    let settings = if opaque {
+        bc7::opaque_fast_settings()
+    } else {
+        bc7::alpha_fast_settings()
+    };
+    bc7::compress_blocks(&settings, &surface)
+}
+
+/// Cook `rgba` (straight-alpha sRGB RGBA8, `width` x `height`) into a full mip
+/// chain in `format`. BC7 needs a width and height divisible by 4; ask
+/// [`CookFormat::best_for`] when the caller is not sure.
+pub fn cook(rgba: &[u8], width: u32, height: u32, format: CookFormat) -> Result<CookedTexture, String> {
+    if width == 0 || height == 0 || rgba.len() != width as usize * height as usize * 4 {
+        return Err("cook was given a buffer that does not match its size".into());
+    }
+    if format == CookFormat::Bc7 && (width % 4 != 0 || height % 4 != 0) {
+        return Err("BC7 needs a width and height divisible by 4".into());
+    }
+    let to_linear = srgb_to_linear_table();
+    let to_srgb = LinearToSrgb::new();
+    let opaque = rgba.chunks_exact(4).all(|texel| texel[3] == 255);
+
+    let mut sources: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba.to_vec())];
+    while sources.len() < mip_level_count(width, height) as usize {
+        let (w, h, last) = sources.last().expect("at least the base level");
+        let next = downsample(last, *w, *h, &to_linear, &to_srgb);
+        sources.push(next);
+    }
+    let levels = sources
+        .into_iter()
+        .map(|(w, h, data)| match format {
+            CookFormat::Rgba8 => data,
+            CookFormat::Bc7 => compress_bc7(&data, w, h, opaque),
+        })
+        .collect();
+    Ok(CookedTexture::from_levels(format, width, height, levels))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(width: u32, height: u32, texel: [u8; 4]) -> Vec<u8> {
+        (0..width * height).flat_map(|_| texel).collect()
+    }
+
+    #[test]
+    fn mip_chains_run_down_to_one_texel() {
+        assert_eq!(mip_level_count(1, 1), 1);
+        assert_eq!(mip_level_count(8, 4), 4);
+        assert_eq!(mip_level_count(2048, 2048), 12);
+        assert_eq!(mip_level_count(5, 3), 3);
+    }
+
+    #[test]
+    fn an_rgba8_chain_has_every_level_at_its_size() {
+        let cooked = cook(&solid(8, 4, [10, 20, 30, 255]), 8, 4, CookFormat::Rgba8).unwrap();
+        assert_eq!(cooked.mip_count(), 4);
+        let sizes: Vec<usize> = (0..4).map(|l| cooked.mip(l).len()).collect();
+        assert_eq!(sizes, [8 * 4 * 4, 4 * 2 * 4, 2 * 1 * 4, 1 * 1 * 4]);
+        assert_eq!(cooked.mip(3), &[10, 20, 30, 255], "a flat image stays flat");
+    }
+
+    #[test]
+    fn averaging_happens_in_linear_light() {
+        // Half black, half white texels: the average is half the *light*, which
+        // is about 188 as an sRGB byte, not 127.
+        let mut checker = Vec::new();
+        for i in 0..4 {
+            checker.extend_from_slice(if i % 2 == 0 { &[0, 0, 0, 255] } else { &[255, 255, 255, 255] });
+        }
+        let cooked = cook(&checker, 2, 2, CookFormat::Rgba8).unwrap();
+        let top = cooked.mip(1);
+        assert!((186..=190).contains(&top[0]), "linear-light average, got {}", top[0]);
+        assert_eq!(top[3], 255);
+    }
+
+    #[test]
+    fn odd_sizes_reuse_their_last_row_and_column() {
+        let cooked = cook(&solid(5, 3, [200, 100, 50, 255]), 5, 3, CookFormat::Rgba8).unwrap();
+        assert_eq!(cooked.mip_count(), 3);
+        assert_eq!(cooked.mip(1).len(), 2 * 1 * 4);
+        assert_eq!(&cooked.mip(2)[..4], &[200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn bc7_levels_are_whole_blocks_and_small_levels_round_up() {
+        let cooked = cook(&solid(16, 16, [80, 160, 240, 255]), 16, 16, CookFormat::Bc7).unwrap();
+        let sizes: Vec<usize> = (0..cooked.mip_count()).map(|l| cooked.mip(l).len()).collect();
+        // 16x16 = 4x4 blocks, then 2x2, 1, and the 2x2, 1x1 tail each one padded block.
+        assert_eq!(sizes, [16 * 16, 4 * 16, 16, 16, 16]);
+        assert!(cooked.byte_size() < 16 * 16 * 4 * 2, "BC7 is a quarter of RGBA8, with mips");
+    }
+
+    #[test]
+    fn bc7_refuses_sizes_that_are_not_whole_blocks() {
+        assert!(cook(&solid(6, 8, [1, 2, 3, 255]), 6, 8, CookFormat::Bc7).is_err());
+        assert_eq!(CookFormat::best_for(wgpu::Features::TEXTURE_COMPRESSION_BC, 6, 8), CookFormat::Rgba8);
+        assert_eq!(CookFormat::best_for(wgpu::Features::TEXTURE_COMPRESSION_BC, 8, 8), CookFormat::Bc7);
+        assert_eq!(CookFormat::best_for(wgpu::Features::empty(), 8, 8), CookFormat::Rgba8);
+    }
+
+    #[test]
+    fn the_container_round_trips_and_refuses_damage() {
+        for format in CookFormat::ALL {
+            let cooked = cook(&solid(8, 8, [9, 8, 7, 255]), 8, 8, format).unwrap();
+            let bytes = cooked.to_bytes();
+            assert_eq!(CookedTexture::from_bytes(&bytes).unwrap(), cooked);
+
+            assert!(CookedTexture::from_bytes(&bytes[..bytes.len() - 1]).is_err(), "truncated");
+            let mut extra = bytes.clone();
+            extra.push(0);
+            assert!(CookedTexture::from_bytes(&extra).is_err(), "trailing bytes");
+            let mut wrong_magic = bytes.clone();
+            wrong_magic[0] = b'X';
+            assert!(CookedTexture::from_bytes(&wrong_magic).is_err());
+            let mut wrong_length = bytes.clone();
+            wrong_length[20] ^= 1; // level 0's recorded length
+            assert!(CookedTexture::from_bytes(&wrong_length).is_err());
+        }
+    }
+}

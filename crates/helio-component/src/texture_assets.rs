@@ -17,36 +17,109 @@
 use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
 use std::sync::Arc;
 
+use crate::cooked_texture::{cook, CookFormat, CookedTexture, COOK_VERSION};
+
 /// The SceneDB asset kind of image files. A texture asset's source is the
 /// file's absolute path, normalized lexically ([`texture_source`]).
 pub const TEXTURE_ASSET_KIND: &str = "texture";
 
-/// A decoded image: what every component showing the file is bound to.
+/// A decoded and cooked image: what every component showing the file is bound
+/// to.
 ///
-/// The texels are rebuildable data, not owned data: they sit in SceneDB's
-/// budgeted residency cache ([`pulsar_scenedb::Residency`]), so what stays in
-/// memory is bounded by the cache budget rather than by how many images
-/// components reference. A dropped image is decoded again from its file the
-/// next time it is needed (a new scene's texture store, a device rebuild).
+/// What reaches the GPU is the image's *cooked* form (see
+/// [`crate::cooked_texture`]): capped in size, with a full mip chain, and
+/// block-compressed where the device can sample it. That form is rebuildable
+/// data, not owned data. It sits in SceneDB's budgeted residency cache
+/// ([`pulsar_scenedb::Residency`]), so what stays in memory is bounded by the
+/// cache budget rather than by how many images components reference, and the
+/// cooked bytes are also kept on disk by SceneDB's derived-data cache
+/// ([`pulsar_scenedb::derive_cached`]), so rebuilding one costs a file read,
+/// not a decode and an encode.
 pub struct LoadedTexture {
     /// Dimensions after the [`max_texture_size`] cap.
     pub width: u32,
     pub height: u32,
-    /// Straight-alpha sRGB RGBA8 texels, row by row from the top left.
-    texels: pulsar_scenedb::Residency<Vec<u8>>,
+    source: std::path::PathBuf,
+    cap: u32,
+    /// One residency per cook format, made the first time a format is asked
+    /// for (a device wants one format; a second device may want the other).
+    cooked: [std::sync::OnceLock<pulsar_scenedb::Residency<CookedTexture>>; 2],
 }
 
 impl LoadedTexture {
-    /// The texels, decoded again from the file if the cache dropped them.
-    /// Hold the result only while using it: the cache can drop its own
-    /// reference, but not yours.
-    pub fn rgba(&self) -> Result<Arc<Vec<u8>>, String> {
-        self.texels.get()
+    /// Load the image file at `path`: read its size, and cook it now in the
+    /// engine's preferred format (see [`set_preferred_cook_format`]). A file
+    /// that cannot be decoded is an error here.
+    pub fn load(path: &std::path::Path) -> Result<Self, String> {
+        decode_image_file(path)
     }
 
-    /// Whether the texels are in memory right now.
+    /// The format to cook for a request of `format`: BC7 needs a width and
+    /// height divisible by 4, so other sizes are cooked uncompressed.
+    fn effective_format(&self, format: CookFormat) -> CookFormat {
+        if format == CookFormat::Bc7 && (self.width % 4 != 0 || self.height % 4 != 0) {
+            CookFormat::Rgba8
+        } else {
+            format
+        }
+    }
+
+    fn residency(&self, format: CookFormat) -> &pulsar_scenedb::Residency<CookedTexture> {
+        let format = self.effective_format(format);
+        let index = match format {
+            CookFormat::Rgba8 => 0,
+            CookFormat::Bc7 => 1,
+        };
+        self.cooked[index].get_or_init(|| {
+            let (path, cap) = (self.source.clone(), self.cap);
+            pulsar_scenedb::Residency::lazy(
+                |cooked: &CookedTexture| cooked.byte_size(),
+                move || cook_from_source(&path, cap, format),
+            )
+        })
+    }
+
+    /// The cooked texture in `format` (or the closest this size allows), read
+    /// from the derived-data cache or cooked again if the residency cache
+    /// dropped it. Hold the result only while using it: the cache can drop its
+    /// own reference, but not yours.
+    pub fn cooked(&self, format: CookFormat) -> Result<Arc<CookedTexture>, String> {
+        self.residency(format).get()
+    }
+
+    /// Start producing the cooked texture on the asset loader threads, so a
+    /// caller about to need several can have them cooked in parallel. A later
+    /// [`Self::cooked`] joins the work in flight.
+    pub fn prefetch(&self, format: CookFormat) -> pulsar_scenedb::Prefetch<CookedTexture> {
+        self.residency(format).prefetch()
+    }
+
+    /// Whether any cooked form is in memory right now.
     pub fn is_resident(&self) -> bool {
-        self.texels.is_resident()
+        self.cooked
+            .iter()
+            .filter_map(std::sync::OnceLock::get)
+            .any(pulsar_scenedb::Residency::is_resident)
+    }
+}
+
+static PREFERRED_FORMAT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The format a texture is cooked in as it loads, before any device has asked
+/// for one: the engine sets it from its device's features. A device that wants
+/// the other format still gets it, cooked on first use.
+pub fn set_preferred_cook_format(format: CookFormat) {
+    let code = match format {
+        CookFormat::Rgba8 => 0,
+        CookFormat::Bc7 => 1,
+    };
+    PREFERRED_FORMAT.store(code, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn preferred_cook_format() -> CookFormat {
+    match PREFERRED_FORMAT.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => CookFormat::Bc7,
+        _ => CookFormat::Rgba8,
     }
 }
 
@@ -200,22 +273,61 @@ fn load_texture_asset(source: &str) -> Result<AssetPayload, String> {
     Ok(Arc::new(decode_image_file(std::path::Path::new(source))?))
 }
 
-/// Read and decode the image file at `path`, scaled down to
-/// [`max_texture_size`]. The decoded texels start out resident in SceneDB's
-/// budgeted cache and are decoded again from the file if it drops them.
+/// Load the image file at `path`: read its size, and cook it now, on this
+/// loader thread, in the format the engine prefers. A file that cannot be
+/// decoded fails the load here, and the derived-data cache is warm before any
+/// scene asks for the texture.
 pub(crate) fn decode_image_file(path: &std::path::Path) -> Result<LoadedTexture, String> {
+    let shown = path.display();
     let cap = max_texture_size();
-    let (width, height, rgba) = decode_rgba(path, cap)?;
-    let path = path.to_path_buf();
-    Ok(LoadedTexture {
+    let (source_width, source_height) = image::ImageReader::open(path)
+        .map_err(|error| format!("could not read '{shown}': {error}"))?
+        .with_guessed_format()
+        .map_err(|error| format!("could not read '{shown}': {error}"))?
+        .into_dimensions()
+        .map_err(|error| format!("could not decode '{shown}': {error}"))?;
+    if source_width == 0 || source_height == 0 {
+        return Err(format!("'{shown}' has empty dimensions"));
+    }
+    let (width, height) = capped_dimensions(source_width, source_height, cap);
+    let texture = LoadedTexture {
         width,
         height,
-        texels: pulsar_scenedb::Residency::with_value(
-            rgba,
-            |texels: &Vec<u8>| texels.len(),
-            move || decode_rgba(&path, cap).map(|(_, _, rgba)| rgba),
-        ),
-    })
+        source: path.to_path_buf(),
+        cap,
+        cooked: Default::default(),
+    };
+    texture.cooked(preferred_cook_format())?;
+    Ok(texture)
+}
+
+/// The cooked texture for `path` at `cap`: read from SceneDB's derived-data
+/// cache when the file and settings are unchanged, cooked and stored when
+/// not. A cache entry that fails its own checks is forgotten and rebuilt.
+fn cook_from_source(path: &std::path::Path, cap: u32, format: CookFormat) -> Result<CookedTexture, String> {
+    let settings = format!("cap={cap};format={}", format.label());
+    let request = pulsar_scenedb::DerivedRequest {
+        kind: TEXTURE_ASSET_KIND,
+        source: path,
+        settings: &settings,
+        version: COOK_VERSION,
+    };
+    let cook_now = || -> Result<CookedTexture, String> {
+        let (width, height, rgba) = decode_rgba(path, cap)?;
+        cook(&rgba, width, height, format)
+    };
+    let bytes = pulsar_scenedb::derive_cached(&request, || cook_now().map(|cooked| cooked.to_bytes()))?;
+    match CookedTexture::from_bytes(&bytes) {
+        Ok(cooked) => Ok(cooked),
+        Err(error) => {
+            tracing::warn!("derived texture for '{}' is unusable ({error}); cooking it again", path.display());
+            // Replace the entry through the cache, so the repair is stored and
+            // the next load is a read.
+            pulsar_scenedb::forget_derived(&request);
+            let bytes = pulsar_scenedb::derive_cached(&request, || cook_now().map(|cooked| cooked.to_bytes()))?;
+            CookedTexture::from_bytes(&bytes)
+        }
+    }
 }
 
 /// Decode `path` to RGBA8 with its larger side at most `cap` (0 = no cap).
@@ -383,11 +495,16 @@ pub(crate) fn resident_slot(
     // Not in this store yet. Another scene on the same device may have
     // uploaded it; otherwise the texels may have to be decoded again, which
     // takes a while. Either way, no lock is held while finding out.
-    let device_key = (Arc::as_ptr(&mirror.store().device_arc()) as usize, id);
+    let device = mirror.store().device_arc();
+    let device_key = (Arc::as_ptr(&device) as usize, id);
     let shared = shared_texture(device_key, version, &texture_store);
-    let rgba = match shared {
+    let cooked = match shared {
         Some(_) => None,
-        None => Some(image.rgba()?),
+        None => Some(image.cooked(CookFormat::best_for(
+            device.features(),
+            image.width,
+            image.height,
+        ))?),
     };
 
     let mut resident = resident()
@@ -404,24 +521,18 @@ pub(crate) fn resident_slot(
     if let Some(old) = resident.remove(&key) {
         let _ = store.unregister(old.slot);
     }
-    let (slot, uploaded) = match (shared, rgba) {
+    let (slot, uploaded) = match (shared, cooked) {
         (Some(texture), _) => (
             store
                 .register_shared(texture)
                 .map_err(|error| format!("could not share a texture: {error:?}"))?,
             None,
         ),
-        (None, Some(rgba)) => {
-            let slot = crate::material_textures::upload_rgba(
-                &mut store,
-                mirror,
-                image.width,
-                image.height,
-                &rgba,
-            )?;
+        (None, Some(cooked)) => {
+            let slot = crate::material_textures::upload_cooked(&mut store, mirror, &cooked)?;
             (slot, store.texture(slot).cloned())
         }
-        (None, None) => unreachable!("texels are fetched whenever nothing is shared"),
+        (None, None) => unreachable!("the cooked texture is fetched whenever nothing is shared"),
     };
     resident.insert(
         key,
@@ -446,6 +557,44 @@ pub(crate) fn resident_slot(
     Ok(slot)
 }
 
+
+/// Start cooking, on the asset loader threads, every texture in `images` that
+/// `mirror`'s store would have to upload at `version`, so the cooks run in
+/// parallel instead of one after another on the thread that is about to need
+/// them. A texture the store already holds, or that another scene on the same
+/// device has uploaded, is left alone: nothing about it would be used. The
+/// `resident_slot` calls that follow join the work in flight.
+pub(crate) fn prefetch_missing<'a>(
+    images: impl IntoIterator<Item = (AssetId, &'a LoadedTexture)>,
+    version: u64,
+    mirror: &pulsar_scenedb::gpu::GpuMirrorHandle,
+) {
+    let Some(texture_store) = mirror.texture_store() else {
+        return;
+    };
+    let device = mirror.store().device_arc();
+    let features = device.features();
+    for (id, image) in images {
+        let key = (Arc::as_ptr(&texture_store) as usize, id);
+        let held = resident()
+            .lock()
+            .ok()
+            .and_then(|resident| resident.get(&key).map(|entry| entry.version == version))
+            .unwrap_or(false);
+        let shared = shared_textures()
+            .lock()
+            .ok()
+            .and_then(|shared| {
+                shared
+                    .get(&(Arc::as_ptr(&device) as usize, id))
+                    .map(|entry| entry.version == version)
+            })
+            .unwrap_or(false);
+        if !held && !shared {
+            drop(image.prefetch(CookFormat::best_for(features, image.width, image.height)));
+        }
+    }
+}
 #[cfg(test)]
 mod residency_tests {
     use super::*;
@@ -484,7 +633,7 @@ mod residency_tests {
     fn dropped_texels_are_decoded_again_identically() {
         let dir = tempfile::tempdir().unwrap();
         let first = decode_image_file(&write_png(dir.path(), "a.png", 64, 64)).unwrap();
-        let before = first.rgba().unwrap();
+        let before = first.cooked(CookFormat::Rgba8).unwrap();
         assert!(first.is_resident());
 
         // A budget below one image makes every newer image evict the older.
@@ -494,7 +643,7 @@ mod residency_tests {
         assert!(second.is_resident());
         assert!(!first.is_resident(), "the older image was dropped for room");
 
-        let again = first.rgba().unwrap();
+        let again = first.cooked(CookFormat::Rgba8).unwrap();
         assert_eq!(*again, *before, "the rebuilt texels match the originals");
         assert!(first.is_resident());
         pulsar_scenedb::set_residency_budget(old_budget);
@@ -513,8 +662,13 @@ mod shared_upload_tests {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&Default::default())).ok()?;
+        // Ask for block compression where the adapter has it, as the editor does.
+        let required_features = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features,
+            ..Default::default()
+        }))
+        .ok()?;
         Some(EngineGpuContext::new(Arc::new(device), Arc::new(queue)))
     }
 
@@ -567,6 +721,16 @@ mod shared_upload_tests {
         );
         let (a, b) = (textures_a.read().unwrap(), textures_b.read().unwrap());
         assert_eq!(a.texture(slot_a), b.texture(slot_b), "one GPU texture");
+        // What reached the GPU is the cooked form: BC7 where the device can
+        // sample it, uncompressed otherwise, and either way the full chain.
+        let expected = if ctx.device().features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+            wgpu::TextureFormat::Bc7RgbaUnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        };
+        let uploaded = a.texture(slot_a).unwrap();
+        assert_eq!(uploaded.format(), expected);
+        assert_eq!(uploaded.mip_level_count(), 4, "an 8x8 image has four levels");
         assert_eq!(a.upload_count(), 1);
         assert_eq!(b.upload_count(), 0, "the second store uploaded nothing");
         drop((a, b));

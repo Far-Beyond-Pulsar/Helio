@@ -100,3 +100,30 @@ pub(crate) fn upload_rgba(
         .register(&device, mirror.queue(), &descriptor, rgba)
         .map_err(|error| format!("could not register texture in SceneDB: {error:?}"))
 }
+
+/// Upload a cooked texture (its full mip chain, in its own format) into
+/// `store`, the texture store of `mirror`'s scene, and return its slot.
+pub(crate) fn upload_cooked(
+    store: &mut TextureStore,
+    mirror: &GpuMirrorHandle,
+    cooked: &crate::cooked_texture::CookedTexture,
+) -> Result<u32, String> {
+    let device = mirror.store().device_arc();
+    let descriptor = wgpu::TextureDescriptor {
+        label: Some("Scene Texture"),
+        size: wgpu::Extent3d {
+            width: cooked.width,
+            height: cooked.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: cooked.mip_count(),
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: cooked.format.wgpu_format(),
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    };
+    store
+        .register_mips(&device, mirror.queue(), &descriptor, &cooked.mips())
+        .map_err(|error| format!("could not register texture in SceneDB: {error:?}"))
+}

@@ -435,6 +435,13 @@ fn compiled_graph(
         .map(|(ordinal, asset)| (asset.clone(), ordinal as u32))
         .collect();
     let mut slots = [helio::GpuMaterial::NO_TEXTURE; 5];
+    // A material with several images the store does not hold yet cooks them
+    // side by side on the loader threads, not one after another here.
+    crate::texture_assets::prefetch_missing(
+        graph.textures.iter().map(|(_, texture, image)| (*texture, &**image)),
+        version,
+        mirror,
+    );
     for (asset, texture, image) in &graph.textures {
         // A texture's GPU copy follows the material's version: the material
         // reloads when one of its textures changes.

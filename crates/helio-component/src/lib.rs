@@ -5,6 +5,7 @@
 
 pub mod asset_component;
 pub mod components;
+pub mod cooked_texture;
 pub mod graph_preview;
 pub mod material_assets;
 pub mod material_graph;
