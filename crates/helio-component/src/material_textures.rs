@@ -119,7 +119,7 @@ pub(crate) fn upload_cooked(
         mip_level_count: cooked.mip_count(),
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: cooked.format.wgpu_format(),
+        format: cooked.wgpu_format(),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     };

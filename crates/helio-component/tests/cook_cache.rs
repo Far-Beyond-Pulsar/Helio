@@ -7,6 +7,7 @@
 //! the residency budget are process-wide.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use helio_component::cooked_texture::{CookFormat, COOK_VERSION};
 use helio_component::texture_assets::{max_texture_size, set_preferred_cook_format, LoadedTexture};
@@ -14,6 +15,10 @@ use pulsar_scenedb::{
     derive_cached, derived_stats, residency_budget, set_derived_cache_dir, set_residency_budget,
     DerivedRequest,
 };
+
+/// The derived-data cache directory, the preferred format and the residency budget
+/// are process-wide, so the tests in this file take turns.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 fn write_png(dir: &Path, name: &str, width: u32, height: u32, seed: u8) -> PathBuf {
     let path = dir.join(name);
@@ -33,6 +38,7 @@ fn cache_files(root: &Path) -> usize {
 
 #[test]
 fn textures_are_cooked_once_rebuilt_from_disk_and_heal_a_bad_entry() {
+    let _turn = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let scratch = tempfile::tempdir().unwrap();
     let cache = scratch.path().join("cache");
     set_derived_cache_dir(Some(cache.clone()));
@@ -109,5 +115,36 @@ fn textures_are_cooked_once_rebuilt_from_disk_and_heal_a_bad_entry() {
     assert_eq!(cooked_odd.format, CookFormat::Rgba8);
     assert_eq!(cooked_odd.mip_count(), 5);
 
+    set_derived_cache_dir(None);
+}
+
+#[test]
+fn warming_an_evicted_texture_brings_it_back_ahead_of_use_and_a_resident_one_is_left_alone() {
+    let _turn = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let scratch = tempfile::tempdir().unwrap();
+    set_derived_cache_dir(Some(scratch.path().join("cache")));
+    set_preferred_cook_format(CookFormat::Rgba8);
+    let kept = LoadedTexture::load(&write_png(scratch.path(), "kept.png", 32, 32, 3)).unwrap();
+
+    // Resident: warming starts nothing.
+    let before = pulsar_scenedb::residency_stats().prefetches;
+    kept.warm();
+    assert_eq!(pulsar_scenedb::residency_stats().prefetches, before, "already in memory");
+
+    // Make the cache drop it.
+    let old_budget = residency_budget();
+    set_residency_budget(1);
+    let _filler = LoadedTexture::load(&write_png(scratch.path(), "filler.png", 32, 32, 9)).unwrap();
+    assert!(!kept.is_resident_in(CookFormat::Rgba8), "evicted for room");
+    set_residency_budget(old_budget);
+
+    // Evicted: warming starts the rebuild, and it finishes without anyone asking.
+    kept.warm();
+    assert_eq!(pulsar_scenedb::residency_stats().prefetches, before + 1);
+    let started = std::time::Instant::now();
+    while !kept.is_resident_in(CookFormat::Rgba8) {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "never came back");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     set_derived_cache_dir(None);
 }

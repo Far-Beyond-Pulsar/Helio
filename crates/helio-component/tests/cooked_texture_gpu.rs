@@ -14,6 +14,9 @@ struct Gpu {
 }
 
 fn gpu() -> Option<Gpu> {
+    // Creating devices from many tests at once stalls some drivers; take turns.
+    static DEVICE_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _device_creation = DEVICE_CREATION.lock().unwrap_or_else(|p| p.into_inner());
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let has_bc = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
@@ -50,7 +53,7 @@ fn sample_levels(gpu: &Gpu, cooked: &CookedTexture) -> Vec<[f32; 4]> {
         mip_level_count: cooked.mip_count(),
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: cooked.format.wgpu_format(),
+        format: cooked.wgpu_format(),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     };
@@ -189,4 +192,76 @@ fn the_top_of_a_bc7_chain_is_the_average_light_of_a_checkerboard() {
     // 1x1 level: half the light, whatever the block does with the contrast below it.
     let top = levels[3];
     assert!(close(top, [0.5, 0.5, 0.5, 1.0], 0.06), "1x1 level read {top:?}");
+}
+
+/// A roughness map, an occlusion map or a normal map holds numbers. They must
+/// come back from the shader as the bytes that went in divided by 255, and not
+/// be bent by an sRGB decode.
+/// Arbitrary numbers, as a roughness or occlusion map might hold.
+const DATA_TEXEL: [u8; 4] = [200, 100, 50, 255];
+/// A unit-length tangent-space normal (0.6, 0, 0.8): a normal map's mips are
+/// renormalised, so the texel must be a real normal for the numbers to stay.
+const NORMAL_TEXEL: [u8; 4] = [204, 128, 230, 255];
+
+fn check_data_numbers(
+    gpu: &Gpu,
+    format: CookFormat,
+    usage: helio_component::cooked_texture::TextureUse,
+    texel: [u8; 4],
+    tolerance: f32,
+) {
+    let cooked = helio_component::cooked_texture::cook_as(&solid(8, 8, texel), 8, 8, format, usage).unwrap();
+    let expected = [
+        f32::from(texel[0]) / 255.0,
+        f32::from(texel[1]) / 255.0,
+        f32::from(texel[2]) / 255.0,
+        1.0,
+    ];
+    let colour_would_read = [
+        srgb_to_linear(texel[0]),
+        srgb_to_linear(texel[1]),
+        srgb_to_linear(texel[2]),
+        1.0,
+    ];
+    let levels = sample_levels(gpu, &cooked);
+    assert_eq!(levels.len(), 4);
+    for (level, sampled) in levels.iter().enumerate() {
+        assert!(
+            close(*sampled, expected, tolerance),
+            "{} {} level {level}: shader read {sampled:?}, expected the raw numbers {expected:?}",
+            format.label(),
+            usage.label()
+        );
+        assert!(
+            !close(*sampled, colour_would_read, 0.05),
+            "{} level {level} was gamma-decoded like a colour: {sampled:?}",
+            format.label()
+        );
+    }
+}
+
+#[test]
+fn data_and_normal_textures_sample_back_as_raw_numbers_uncompressed() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    use helio_component::cooked_texture::TextureUse;
+    check_data_numbers(&gpu, CookFormat::Rgba8, TextureUse::Data, DATA_TEXEL, 0.003);
+    check_data_numbers(&gpu, CookFormat::Rgba8, TextureUse::Normal, NORMAL_TEXEL, 0.003);
+}
+
+#[test]
+fn data_and_normal_textures_sample_back_as_raw_numbers_as_bc7() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    if !gpu.has_bc {
+        eprintln!("adapter has no TEXTURE_COMPRESSION_BC; skipping");
+        return;
+    }
+    use helio_component::cooked_texture::TextureUse;
+    check_data_numbers(&gpu, CookFormat::Bc7, TextureUse::Data, DATA_TEXEL, 0.02);
+    check_data_numbers(&gpu, CookFormat::Bc7, TextureUse::Normal, NORMAL_TEXEL, 0.02);
 }

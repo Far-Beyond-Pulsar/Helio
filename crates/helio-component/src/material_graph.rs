@@ -47,6 +47,69 @@ fn is_texture_sample(kind: &str) -> bool {
     )
 }
 
+/// How each texture the graph samples is used, by the asset path it names:
+/// what the output pin it ends up feeding expects.
+///
+/// A texture feeding `base_color` or `emissive_color` is a colour; one feeding
+/// `normal` is a normal map; one feeding `roughness`, `metallic`,
+/// `ambient_occlusion`, `opacity` or `opacity_mask` is data, numbers that must
+/// not be gamma-decoded. A texture that reaches several pins takes the
+/// strongest use ([`crate::cooked_texture::TextureUse::strongest`]: colour
+/// wins, which is how every texture was treated before uses existed). Only
+/// samples the output depends on are listed, as in [`texture_assets`].
+pub fn texture_uses(
+    graph: &psgc::GraphDescription,
+) -> std::collections::HashMap<String, crate::cooked_texture::TextureUse> {
+    use crate::cooked_texture::TextureUse;
+
+    fn pin_use(pin: &str) -> TextureUse {
+        match pin {
+            "normal" => TextureUse::Normal,
+            "metallic" | "roughness" | "ambient_occlusion" | "opacity" | "opacity_mask" => {
+                TextureUse::Data
+            }
+            // base_color, emissive_color, and anything unknown.
+            _ => TextureUse::Color,
+        }
+    }
+
+    let mut uses: std::collections::HashMap<String, TextureUse> = Default::default();
+    for output in graph.nodes.values().filter(|n| n.node_type == "fragment_output") {
+        for feed in graph.connections.iter().filter(|c| c.target_node == output.id) {
+            let usage = pin_use(&feed.target_pin);
+            let mut seen = std::collections::HashSet::new();
+            let mut pending = vec![feed.source_node.clone()];
+            while let Some(id) = pending.pop() {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(node) = graph.nodes.get(&id) {
+                    if is_texture_sample(&node.node_type) {
+                        if let Some(asset) = node
+                            .properties
+                            .get("texture")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|a| !a.trim().is_empty())
+                        {
+                            uses.entry(asset.to_string())
+                                .and_modify(|existing| *existing = existing.strongest(usage))
+                                .or_insert(usage);
+                        }
+                    }
+                }
+                pending.extend(
+                    graph
+                        .connections
+                        .iter()
+                        .filter(|c| c.target_node == id)
+                        .map(|c| c.source_node.clone()),
+                );
+            }
+        }
+    }
+    uses
+}
+
 /// Bind graph textures through `GpuMaterial` fields before code generation.
 /// The map values are graph-local texture ordinals, not scene texture slots,
 /// so the compiled source and its pipeline key stay independent of residency.
@@ -192,5 +255,68 @@ fn bind_graph_texture_samplers(source: &mut String) {
             );
             search_from = second_comma + 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use crate::cooked_texture::TextureUse;
+    use psgc::{Connection, ConnectionType, GraphDescription, NodeInstance, Position};
+
+    fn node(graph: &mut GraphDescription, id: &str, kind: &str, texture: Option<&str>) {
+        let mut node = NodeInstance::new(id, kind, Position { x: 0.0, y: 0.0 });
+        if let Some(texture) = texture {
+            node.properties.insert("texture".into(), serde_json::json!(texture));
+        }
+        graph.add_node(node);
+    }
+
+    fn connect(graph: &mut GraphDescription, from: &str, to: &str, pin: &str) {
+        graph.add_connection(Connection::new(from, "result", to, pin, ConnectionType::Data));
+    }
+
+    #[test]
+    fn each_texture_takes_the_use_of_the_pin_it_feeds_through_any_chain() {
+        let mut graph = GraphDescription::new("uses");
+        node(&mut graph, "out", "fragment_output", None);
+        // base colour straight from a sample.
+        node(&mut graph, "albedo", "sample_texture", Some("albedo.png"));
+        connect(&mut graph, "albedo", "out", "base_color");
+        // roughness through a channel pick.
+        node(&mut graph, "orm", "sample_texture", Some("orm.png"));
+        node(&mut graph, "green", "component_g", None);
+        connect(&mut graph, "orm", "green", "vec");
+        connect(&mut graph, "green", "out", "roughness");
+        // normal.
+        node(&mut graph, "nrm", "sample_texture", Some("normal.png"));
+        connect(&mut graph, "nrm", "out", "normal");
+        // a sample the output does not depend on is not listed.
+        node(&mut graph, "unused", "sample_texture", Some("unused.png"));
+
+        let uses = texture_uses(&graph);
+        assert_eq!(uses["albedo.png"], TextureUse::Color);
+        assert_eq!(uses["orm.png"], TextureUse::Data);
+        assert_eq!(uses["normal.png"], TextureUse::Normal);
+        assert!(!uses.contains_key("unused.png"));
+    }
+
+    #[test]
+    fn a_texture_feeding_colour_and_data_stays_colour() {
+        let mut graph = GraphDescription::new("shared");
+        node(&mut graph, "out", "fragment_output", None);
+        node(&mut graph, "tex", "sample_texture", Some("both.png"));
+        node(&mut graph, "r", "component_r", None);
+        connect(&mut graph, "tex", "out", "base_color");
+        connect(&mut graph, "tex", "r", "vec");
+        connect(&mut graph, "r", "out", "ambient_occlusion");
+        assert_eq!(texture_uses(&graph)["both.png"], TextureUse::Color);
+    }
+
+    #[test]
+    fn a_graph_with_no_samples_has_no_uses() {
+        let mut graph = GraphDescription::new("empty");
+        node(&mut graph, "out", "fragment_output", None);
+        assert!(texture_uses(&graph).is_empty());
     }
 }

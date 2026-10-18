@@ -17,7 +17,7 @@
 use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
 use std::sync::Arc;
 
-use crate::cooked_texture::{cook, CookFormat, CookedTexture, COOK_VERSION};
+use crate::cooked_texture::{cook_as, CookFormat, CookedTexture, TextureUse, COOK_VERSION};
 
 /// The SceneDB asset kind of image files. A texture asset's source is the
 /// file's absolute path, normalized lexically ([`texture_source`]).
@@ -41,15 +41,18 @@ pub struct LoadedTexture {
     pub height: u32,
     source: std::path::PathBuf,
     cap: u32,
-    /// One residency per cook format, made the first time a format is asked
-    /// for (a device wants one format; a second device may want the other).
-    cooked: [std::sync::OnceLock<pulsar_scenedb::Residency<CookedTexture>>; 2],
+    /// One residency per (cook format, use), made the first time that pair is
+    /// asked for. A device wants one format; a second device may want the
+    /// other; and the same image can be a colour in one material and data in
+    /// another, which are different bytes on the GPU.
+    cooked: [[std::sync::OnceLock<pulsar_scenedb::Residency<CookedTexture>>; 3]; 2],
 }
 
 impl LoadedTexture {
     /// Load the image file at `path`: read its size, and cook it now in the
-    /// engine's preferred format (see [`set_preferred_cook_format`]). A file
-    /// that cannot be decoded is an error here.
+    /// engine's preferred format as a colour (see
+    /// [`set_preferred_cook_format`]). A file that cannot be decoded is an
+    /// error here.
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
         decode_image_file(path)
     }
@@ -64,40 +67,94 @@ impl LoadedTexture {
         }
     }
 
-    fn residency(&self, format: CookFormat) -> &pulsar_scenedb::Residency<CookedTexture> {
+    fn residency(
+        &self,
+        format: CookFormat,
+        usage: TextureUse,
+    ) -> &pulsar_scenedb::Residency<CookedTexture> {
         let format = self.effective_format(format);
-        let index = match format {
+        let row = match format {
             CookFormat::Rgba8 => 0,
             CookFormat::Bc7 => 1,
         };
-        self.cooked[index].get_or_init(|| {
+        let column = match usage {
+            TextureUse::Color => 0,
+            TextureUse::Data => 1,
+            TextureUse::Normal => 2,
+        };
+        self.cooked[row][column].get_or_init(|| {
             let (path, cap) = (self.source.clone(), self.cap);
             pulsar_scenedb::Residency::lazy(
                 |cooked: &CookedTexture| cooked.byte_size(),
-                move || cook_from_source(&path, cap, format),
+                move || cook_from_source(&path, cap, format, usage),
             )
         })
     }
 
-    /// The cooked texture in `format` (or the closest this size allows), read
-    /// from the derived-data cache or cooked again if the residency cache
-    /// dropped it. Hold the result only while using it: the cache can drop its
-    /// own reference, but not yours.
+    /// The cooked colour texture in `format` (or the closest this size
+    /// allows): [`Self::cooked_for`] with [`TextureUse::Color`].
     pub fn cooked(&self, format: CookFormat) -> Result<Arc<CookedTexture>, String> {
-        self.residency(format).get()
+        self.cooked_for(format, TextureUse::Color)
+    }
+
+    /// The cooked texture in `format` for `usage`, read from the derived-data
+    /// cache or cooked again if the residency cache dropped it. Hold the result
+    /// only while using it: the cache can drop its own reference, but not
+    /// yours.
+    pub fn cooked_for(
+        &self,
+        format: CookFormat,
+        usage: TextureUse,
+    ) -> Result<Arc<CookedTexture>, String> {
+        self.residency(format, usage).get()
+    }
+
+    /// Start producing the cooked colour texture on the asset loader threads:
+    /// [`Self::prefetch_for`] with [`TextureUse::Color`].
+    pub fn prefetch(&self, format: CookFormat) -> pulsar_scenedb::Prefetch<CookedTexture> {
+        self.prefetch_for(format, TextureUse::Color)
     }
 
     /// Start producing the cooked texture on the asset loader threads, so a
     /// caller about to need several can have them cooked in parallel. A later
-    /// [`Self::cooked`] joins the work in flight.
-    pub fn prefetch(&self, format: CookFormat) -> pulsar_scenedb::Prefetch<CookedTexture> {
-        self.residency(format).prefetch()
+    /// [`Self::cooked_for`] joins the work in flight.
+    pub fn prefetch_for(
+        &self,
+        format: CookFormat,
+        usage: TextureUse,
+    ) -> pulsar_scenedb::Prefetch<CookedTexture> {
+        self.residency(format, usage).prefetch()
+    }
+
+    /// Whether the cooked colour texture in `format` is in memory right now.
+    pub fn is_resident_in(&self, format: CookFormat) -> bool {
+        self.residency(format, TextureUse::Color).is_resident()
+    }
+
+    /// Ask for every form of this texture that has been used and that the
+    /// residency cache since dropped, in the engine's preferred format, to be
+    /// brought back on the loader threads now, so the read is under way before
+    /// a scene needs to upload it. Forms nobody has asked for are left alone,
+    /// and so are forms already in memory.
+    pub fn warm(&self) {
+        let row = match self.effective_format(preferred_cook_format()) {
+            CookFormat::Rgba8 => 0,
+            CookFormat::Bc7 => 1,
+        };
+        for cell in &self.cooked[row] {
+            if let Some(residency) = cell.get() {
+                if !residency.is_resident() {
+                    drop(residency.prefetch());
+                }
+            }
+        }
     }
 
     /// Whether any cooked form is in memory right now.
     pub fn is_resident(&self) -> bool {
         self.cooked
             .iter()
+            .flatten()
             .filter_map(std::sync::OnceLock::get)
             .any(pulsar_scenedb::Residency::is_resident)
     }
@@ -304,8 +361,13 @@ pub(crate) fn decode_image_file(path: &std::path::Path) -> Result<LoadedTexture,
 /// The cooked texture for `path` at `cap`: read from SceneDB's derived-data
 /// cache when the file and settings are unchanged, cooked and stored when
 /// not. A cache entry that fails its own checks is forgotten and rebuilt.
-fn cook_from_source(path: &std::path::Path, cap: u32, format: CookFormat) -> Result<CookedTexture, String> {
-    let settings = format!("cap={cap};format={}", format.label());
+fn cook_from_source(
+    path: &std::path::Path,
+    cap: u32,
+    format: CookFormat,
+    usage: TextureUse,
+) -> Result<CookedTexture, String> {
+    let settings = format!("cap={cap};format={};use={}", format.label(), usage.label());
     let request = pulsar_scenedb::DerivedRequest {
         kind: TEXTURE_ASSET_KIND,
         source: path,
@@ -314,7 +376,7 @@ fn cook_from_source(path: &std::path::Path, cap: u32, format: CookFormat) -> Res
     };
     let cook_now = || -> Result<CookedTexture, String> {
         let (width, height, rgba) = decode_rgba(path, cap)?;
-        cook(&rgba, width, height, format)
+        cook_as(&rgba, width, height, format, usage)
     };
     let bytes = pulsar_scenedb::derive_cached(&request, || cook_now().map(|cooked| cooked.to_bytes()))?;
     match CookedTexture::from_bytes(&bytes) {
@@ -365,6 +427,9 @@ pub(crate) fn bind_texture(bound: &mut BoundTexture, path: &str, view: &AssetVie
     }
     match view.payload::<LoadedTexture>() {
         Some(image) => {
+            // An image the residency cache dropped starts coming back now, ahead
+            // of the scene that will upload it.
+            image.warm();
             bound.0 = Some(BoundImage {
                 id: view.id,
                 version: view.version,
@@ -398,7 +463,7 @@ pub(crate) fn texture_slot(
         return u32::MAX;
     };
     let current = bound.0.as_ref().expect("image_for found it");
-    match resident_slot(current.id, current.version, image, mirror) {
+    match resident_slot(current.id, current.version, image, TextureUse::Color, mirror) {
         Ok(slot) => slot,
         Err(error) => {
             tracing::warn!("{what} texture '{path}': {error}");
@@ -410,12 +475,16 @@ pub(crate) fn texture_slot(
 struct ResidentTexture {
     owner: std::sync::Weak<std::sync::RwLock<pulsar_scenedb::gpu::TextureStore>>,
     version: u64,
+    /// The detail bias it was uploaded at ([`crate::texture_detail`]).
+    bias: u32,
     slot: u32,
 }
 
-/// Each texture asset's slot in each scene texture store (keyed by the
-/// store's address), with the content version it holds.
-type Residency = std::collections::HashMap<(usize, AssetId), ResidentTexture>;
+/// Each texture's slot in each scene texture store, with the content version
+/// it holds. A texture is keyed by its asset *and* its use, because an image
+/// sampled as a colour and the same image sampled as data are different bytes
+/// on the GPU. The store is keyed by its address.
+type Residency = std::collections::HashMap<(usize, AssetId, TextureUse), ResidentTexture>;
 
 fn resident() -> &'static std::sync::Mutex<Residency> {
     static RESIDENT: std::sync::OnceLock<std::sync::Mutex<Residency>> = std::sync::OnceLock::new();
@@ -426,15 +495,18 @@ fn resident() -> &'static std::sync::Mutex<Residency> {
 /// that device that shows it.
 struct SharedTexture {
     version: u64,
+    bias: u32,
+    /// What the texture would take in full, for the detail budget.
+    native_bytes: u64,
     texture: wgpu::Texture,
     /// The stores holding a clone; the entry goes when none is left.
     users: Vec<std::sync::Weak<std::sync::RwLock<pulsar_scenedb::gpu::TextureStore>>>,
 }
 
-/// One GPU upload per (device, texture asset): a texture is a device
+/// One GPU upload per (device, texture asset, use): a texture is a device
 /// resource, so two scenes on one device (two viewports of a level) show the
 /// same image from the same allocation instead of one private copy each.
-type SharedTextures = std::collections::HashMap<(usize, AssetId), SharedTexture>;
+type SharedTextures = std::collections::HashMap<(usize, AssetId, TextureUse), SharedTexture>;
 
 fn shared_textures() -> &'static std::sync::Mutex<SharedTextures> {
     static SHARED: std::sync::OnceLock<std::sync::Mutex<SharedTextures>> =
@@ -444,8 +516,9 @@ fn shared_textures() -> &'static std::sync::Mutex<SharedTextures> {
 
 /// The shared texture for `key` at `version`, with `store` recorded as a user.
 fn shared_texture(
-    key: (usize, AssetId),
+    key: (usize, AssetId, TextureUse),
     version: u64,
+    bias: u32,
     store: &Arc<std::sync::RwLock<pulsar_scenedb::gpu::TextureStore>>,
 ) -> Option<wgpu::Texture> {
     let mut shared = shared_textures().lock().ok()?;
@@ -456,7 +529,7 @@ fn shared_texture(
         !entry.users.is_empty()
     });
     let entry = shared.get_mut(&key)?;
-    if entry.version != version {
+    if entry.version != version || entry.bias != bias {
         return None;
     }
     let me = Arc::downgrade(store);
@@ -474,19 +547,21 @@ pub(crate) fn resident_slot(
     id: AssetId,
     version: u64,
     image: &LoadedTexture,
+    usage: TextureUse,
     mirror: &pulsar_scenedb::gpu::GpuMirrorHandle,
 ) -> Result<u32, String> {
     let texture_store = mirror
         .texture_store()
         .ok_or_else(|| "SceneDB has no texture store".to_string())?;
-    let key = (Arc::as_ptr(&texture_store) as usize, id);
+    let key = (Arc::as_ptr(&texture_store) as usize, id, usage);
+    let bias = crate::texture_detail::detail_bias();
     {
         let mut resident = resident()
             .lock()
             .map_err(|_| "texture residency lock poisoned".to_string())?;
         resident.retain(|_, entry| entry.owner.strong_count() != 0);
         if let Some(entry) = resident.get(&key) {
-            if entry.version == version {
+            if entry.version == version && entry.bias == bias {
                 return Ok(entry.slot);
             }
         }
@@ -496,22 +571,21 @@ pub(crate) fn resident_slot(
     // uploaded it; otherwise the texels may have to be decoded again, which
     // takes a while. Either way, no lock is held while finding out.
     let device = mirror.store().device_arc();
-    let device_key = (Arc::as_ptr(&device) as usize, id);
-    let shared = shared_texture(device_key, version, &texture_store);
+    let device_key = (Arc::as_ptr(&device) as usize, id, usage);
+    let shared = shared_texture(device_key, version, bias, &texture_store);
     let cooked = match shared {
         Some(_) => None,
-        None => Some(image.cooked(CookFormat::best_for(
-            device.features(),
-            image.width,
-            image.height,
-        ))?),
+        None => Some(image.cooked_for(
+            CookFormat::best_for(device.features(), image.width, image.height),
+            usage,
+        )?),
     };
 
     let mut resident = resident()
         .lock()
         .map_err(|_| "texture residency lock poisoned".to_string())?;
     if let Some(entry) = resident.get(&key) {
-        if entry.version == version {
+        if entry.version == version && entry.bias == bias {
             return Ok(entry.slot);
         }
     }
@@ -529,8 +603,17 @@ pub(crate) fn resident_slot(
             None,
         ),
         (None, Some(cooked)) => {
-            let slot = crate::material_textures::upload_cooked(&mut store, mirror, &cooked)?;
-            (slot, store.texture(slot).cloned())
+            let native_bytes = cooked.byte_size() as u64;
+            let slot = if bias == 0 {
+                crate::material_textures::upload_cooked(&mut store, mirror, &cooked)?
+            } else {
+                crate::material_textures::upload_cooked(
+                    &mut store,
+                    mirror,
+                    &cooked.without_top_mips(bias),
+                )?
+            };
+            (slot, store.texture(slot).cloned().map(|texture| (texture, native_bytes)))
         }
         (None, None) => unreachable!("the cooked texture is fetched whenever nothing is shared"),
     };
@@ -539,20 +622,27 @@ pub(crate) fn resident_slot(
         ResidentTexture {
             owner: Arc::downgrade(&texture_store),
             version,
+            bias,
             slot,
         },
     );
     drop(store);
     drop(resident);
-    if let (Some(texture), Ok(mut shared)) = (uploaded, shared_textures().lock()) {
+    if let (Some((texture, native_bytes)), Ok(mut shared)) = (uploaded, shared_textures().lock()) {
         shared.insert(
             device_key,
             SharedTexture {
                 version,
+                bias,
+                native_bytes,
                 texture,
                 users: vec![Arc::downgrade(&texture_store)],
             },
         );
+        // Fit the detail of what scenes show to the video memory budget; the
+        // next texture bound (or this one, next time) uses the new bias.
+        let native_total = shared.values().map(|entry| entry.native_bytes).sum();
+        crate::texture_detail::rebalance(native_total);
     }
     Ok(slot)
 }
@@ -565,7 +655,7 @@ pub(crate) fn resident_slot(
 /// device has uploaded, is left alone: nothing about it would be used. The
 /// `resident_slot` calls that follow join the work in flight.
 pub(crate) fn prefetch_missing<'a>(
-    images: impl IntoIterator<Item = (AssetId, &'a LoadedTexture)>,
+    images: impl IntoIterator<Item = (AssetId, TextureUse, &'a LoadedTexture)>,
     version: u64,
     mirror: &pulsar_scenedb::gpu::GpuMirrorHandle,
 ) {
@@ -574,24 +664,27 @@ pub(crate) fn prefetch_missing<'a>(
     };
     let device = mirror.store().device_arc();
     let features = device.features();
-    for (id, image) in images {
-        let key = (Arc::as_ptr(&texture_store) as usize, id);
+    for (id, usage, image) in images {
+        let key = (Arc::as_ptr(&texture_store) as usize, id, usage);
         let held = resident()
             .lock()
             .ok()
-            .and_then(|resident| resident.get(&key).map(|entry| entry.version == version))
+            .and_then(|resident| resident.get(&key).map(|entry| entry.version == version && entry.bias == crate::texture_detail::detail_bias()))
             .unwrap_or(false);
         let shared = shared_textures()
             .lock()
             .ok()
             .and_then(|shared| {
                 shared
-                    .get(&(Arc::as_ptr(&device) as usize, id))
-                    .map(|entry| entry.version == version)
+                    .get(&(Arc::as_ptr(&device) as usize, id, usage))
+                    .map(|entry| entry.version == version && entry.bias == crate::texture_detail::detail_bias())
             })
             .unwrap_or(false);
         if !held && !shared {
-            drop(image.prefetch(CookFormat::best_for(features, image.width, image.height)));
+            drop(image.prefetch_for(
+                CookFormat::best_for(features, image.width, image.height),
+                usage,
+            ));
         }
     }
 }
@@ -659,6 +752,9 @@ mod shared_upload_tests {
     use std::sync::RwLock;
 
     fn context() -> Option<EngineGpuContext> {
+        // Creating devices from many tests at once stalls some drivers; take turns.
+        static DEVICE_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _device_creation = DEVICE_CREATION.lock().unwrap_or_else(|p| p.into_inner());
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
@@ -689,8 +785,47 @@ mod shared_upload_tests {
         (handle, textures)
     }
 
+    /// The detail bias is process-wide; tests that upload hold this so one
+    /// test's bias does not change what another uploads.
+    static DETAIL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_same_image_used_as_colour_and_as_data_is_two_gpu_textures_in_two_formats() {
+        let _detail = DETAIL.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(ctx) = context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("both.png");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([10, 20, 30]))
+            .save(&path)
+            .unwrap();
+        let image = decode_image_file(&path).unwrap();
+        let id = AssetId::of(TEXTURE_ASSET_KIND, "colour-and-data-test");
+        let (scene, textures) = scene(&ctx);
+
+        let as_colour = resident_slot(id, 1, &image, TextureUse::Color, &scene).unwrap();
+        let as_data = resident_slot(id, 1, &image, TextureUse::Data, &scene).unwrap();
+        assert_ne!(as_colour, as_data, "two uses, two slots");
+
+        let store = textures.read().unwrap();
+        let (colour, data) = (store.texture(as_colour).unwrap(), store.texture(as_data).unwrap());
+        assert_ne!(colour, data, "two uses, two GPU textures");
+        assert!(colour.format().is_srgb(), "colour is decoded as sRGB: {:?}", colour.format());
+        assert!(!data.format().is_srgb(), "data is not: {:?}", data.format());
+        assert_eq!(store.upload_count(), 2);
+        drop(store);
+
+        // Each use is found again, not uploaded again.
+        assert_eq!(resident_slot(id, 1, &image, TextureUse::Color, &scene).unwrap(), as_colour);
+        assert_eq!(resident_slot(id, 1, &image, TextureUse::Data, &scene).unwrap(), as_data);
+        assert_eq!(textures.read().unwrap().upload_count(), 2);
+    }
+
     #[test]
     fn scenes_on_one_device_share_one_upload_and_a_new_version_breaks_the_share() {
+        let _detail = DETAIL.lock().unwrap_or_else(|p| p.into_inner());
         let Some(ctx) = context() else {
             eprintln!("no GPU adapter; skipping");
             return;
@@ -705,7 +840,7 @@ mod shared_upload_tests {
 
         let (scene_a, textures_a) = scene(&ctx);
         let (scene_b, textures_b) = scene(&ctx);
-        let slot_a = resident_slot(id, 1, &image, &scene_a).unwrap();
+        let slot_a = resident_slot(id, 1, &image, TextureUse::Color, &scene_a).unwrap();
 
         // Drop the CPU copy: if the second scene needed the texels it would
         // have to decode again.
@@ -714,7 +849,7 @@ mod shared_upload_tests {
         let filler = decode_image_file(&path).unwrap();
         assert!(!image.is_resident() && filler.is_resident());
 
-        let slot_b = resident_slot(id, 1, &image, &scene_b).unwrap();
+        let slot_b = resident_slot(id, 1, &image, TextureUse::Color, &scene_b).unwrap();
         assert!(
             !image.is_resident(),
             "the second scene shared the upload and never needed the texels"
@@ -737,7 +872,7 @@ mod shared_upload_tests {
 
         // A new content version is a new upload, not a stale share.
         pulsar_scenedb::set_residency_budget(old_budget);
-        let slot_b2 = resident_slot(id, 2, &image, &scene_b).unwrap();
+        let slot_b2 = resident_slot(id, 2, &image, TextureUse::Color, &scene_b).unwrap();
         let b = textures_b.read().unwrap();
         assert_eq!(b.upload_count(), 1, "version 2 uploaded afresh");
         assert_ne!(
@@ -745,5 +880,52 @@ mod shared_upload_tests {
             b.texture(slot_b2),
             "the scenes no longer show the same texture"
         );
+    }
+
+    #[test]
+    fn a_detail_bias_uploads_fewer_levels_and_a_changed_bias_uploads_again() {
+        let _detail = DETAIL.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(ctx) = context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("detail.png");
+        image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]))
+            .save(&path)
+            .unwrap();
+        let image = decode_image_file(&path).unwrap();
+        let id = AssetId::of(TEXTURE_ASSET_KIND, "detail-bias-test");
+        let (scene, textures) = scene(&ctx);
+
+        crate::texture_detail::set_detail_bias(0);
+        let full = resident_slot(id, 1, &image, TextureUse::Color, &scene).unwrap();
+        let (width, levels) = {
+            let store = textures.read().unwrap();
+            let texture = store.texture(full).unwrap();
+            (texture.width(), texture.mip_level_count())
+        };
+        assert_eq!((width, levels), (16, 5));
+
+        // The same bias finds the texture where it is.
+        assert_eq!(resident_slot(id, 1, &image, TextureUse::Color, &scene).unwrap(), full);
+        assert_eq!(textures.read().unwrap().upload_count(), 1);
+
+        // Over budget: the next bind uploads it again with the top level off.
+        crate::texture_detail::set_detail_bias(1);
+        let smaller = resident_slot(id, 1, &image, TextureUse::Color, &scene).unwrap();
+        {
+            let store = textures.read().unwrap();
+            let texture = store.texture(smaller).unwrap();
+            assert_eq!((texture.width(), texture.mip_level_count()), (8, 4));
+            assert_eq!(store.upload_count(), 2);
+        }
+
+        // Room again: the detail comes back.
+        crate::texture_detail::set_detail_bias(0);
+        let restored = resident_slot(id, 1, &image, TextureUse::Color, &scene).unwrap();
+        let store = textures.read().unwrap();
+        assert_eq!(store.texture(restored).unwrap().width(), 16);
+        assert_eq!(store.upload_count(), 3);
     }
 }
