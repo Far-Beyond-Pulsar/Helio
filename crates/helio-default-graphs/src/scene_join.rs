@@ -77,6 +77,7 @@ pub fn validation_sources() -> Vec<(String, String)> {
     [
         ("scene_join_meshes.wgsl", include_str!("../shaders/scene_join_meshes.wgsl")),
         ("scene_join_lights.wgsl", include_str!("../shaders/scene_join_lights.wgsl")),
+        ("hierarchy_resolve.wgsl", include_str!("../shaders/hierarchy_resolve.wgsl")),
         ("environment_join.wgsl", include_str!("../shaders/environment_join.wgsl")),
     ]
     .into_iter()

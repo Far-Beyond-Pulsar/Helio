@@ -72,9 +72,17 @@ impl SceneBufferProjection {
     /// Publish `handle` under `key`, replacing any buffer already there.
     /// The frontend adds buffers SceneDB keeps outside its store registry
     /// (the entity-generation mirror); scene derivations add their outputs.
+    ///
+    /// Replacing a buffer drops the flushed-row record kept for it: those
+    /// rows described the frontend's buffer, not the one that now stands in
+    /// for it (a derivation that rewrites a column, e.g. composing parented
+    /// transforms, moves rows the flush never named).
     pub fn insert(&mut self, key: BufferKey, handle: BufferHandle) {
         match self.entries.iter_mut().find(|(candidate, _)| *candidate == key) {
-            Some((_, existing)) => *existing = handle,
+            Some((_, existing)) => {
+                *existing = handle;
+                self.flushed.retain(|(candidate, _)| *candidate != key);
+            }
             None => self.entries.push((key, handle)),
         }
     }
