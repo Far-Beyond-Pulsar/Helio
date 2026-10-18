@@ -144,12 +144,63 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
     )
 }
 
+/// An image file one of a source material's texture slots names, located on
+/// disk.
+#[derive(Debug, Clone)]
+pub struct MaterialImage {
+    pub semantic: TextureSemantic,
+    pub path: std::path::PathBuf,
+}
+
+/// A source material: its name and the image files its texture slots name.
+#[derive(Debug, Clone)]
+pub struct MaterialSource {
+    pub name: String,
+    pub images: Vec<MaterialImage>,
+}
+
+/// The name and located image files of each source material, parallel to
+/// `scene.materials`. Slots whose image is embedded or cannot be found are
+/// left out.
+fn collect_material_sources(scene: &Scene, base_dir: &std::path::Path) -> Vec<MaterialSource> {
+    scene
+        .materials
+        .iter()
+        .map(|material| MaterialSource {
+            name: material.name.clone(),
+            images: [
+                (&material.base_color_texture, TextureSemantic::BaseColor),
+                (&material.normal_texture, TextureSemantic::Normal),
+                (
+                    &material.metallic_roughness_texture,
+                    TextureSemantic::MetallicRoughness,
+                ),
+                (&material.occlusion_texture, TextureSemantic::Occlusion),
+                (&material.emissive_texture, TextureSemantic::Emissive),
+            ]
+            .into_iter()
+            .filter_map(|(slot, semantic)| {
+                let texture = slot.as_ref()?;
+                let path = crate::texture_loader::locate_texture_file(
+                    scene,
+                    texture.texture_index,
+                    base_dir,
+                )?;
+                Some(MaterialImage { semantic, path })
+            })
+            .collect(),
+        })
+        .collect()
+}
+
 /// Converted scene data ready for GPU upload.
 pub struct ConvertedScene {
     pub name: String,
     pub meshes: Vec<ConvertedMesh>,
     pub textures: Vec<TextureUpload>,
     pub materials: Vec<ConvertedMaterial>,
+    /// The source name and image files of each of `materials`.
+    pub material_sources: Vec<MaterialSource>,
     pub lights: Vec<helio::GpuLight>,
     pub cameras: Vec<CameraData>,
     /// Populated instead of `meshes` when [`crate::LoadConfig::merge_meshes`] is true.
@@ -463,6 +514,7 @@ pub fn convert_scene(
             meshes: vec![],
             textures,
             materials,
+            material_sources: collect_material_sources(scene, base_dir),
             lights,
             cameras,
             sectioned_mesh: Some(sectioned),
@@ -486,6 +538,7 @@ pub fn convert_scene(
         meshes,
         textures,
         materials,
+        material_sources: collect_material_sources(scene, base_dir),
         lights,
         cameras,
         sectioned_mesh: None,

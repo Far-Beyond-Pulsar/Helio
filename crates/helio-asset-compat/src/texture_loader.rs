@@ -267,6 +267,21 @@ fn convert_sampler(sampler: &Sampler) -> TextureSamplerDesc {
     }
 }
 
+/// The file on disk behind `scene.textures[texture_index]`, found the same
+/// way [`load_texture_upload`] finds it. `None` for an embedded image, an
+/// out-of-range index, or a file that cannot be located.
+pub fn locate_texture_file(
+    scene: &Scene,
+    texture_index: usize,
+    base_dir: &Path,
+) -> Option<PathBuf> {
+    let image = scene.images.get(scene.textures.get(texture_index)?.image_index)?;
+    match &image.source {
+        ImageSource::Uri(path) => resolve_image_path(path, base_dir).ok(),
+        ImageSource::Embedded { .. } => None,
+    }
+}
+
 pub fn load_texture_upload(
     scene: &Scene,
     texture_index: usize,
