@@ -310,9 +310,54 @@ fn resident() -> &'static std::sync::Mutex<Residency> {
     RESIDENT.get_or_init(Default::default)
 }
 
+/// A texture uploaded to a device, shared by every scene texture store on
+/// that device that shows it.
+struct SharedTexture {
+    version: u64,
+    texture: wgpu::Texture,
+    /// The stores holding a clone; the entry goes when none is left.
+    users: Vec<std::sync::Weak<std::sync::RwLock<pulsar_scenedb::gpu::TextureStore>>>,
+}
+
+/// One GPU upload per (device, texture asset): a texture is a device
+/// resource, so two scenes on one device (two viewports of a level) show the
+/// same image from the same allocation instead of one private copy each.
+type SharedTextures = std::collections::HashMap<(usize, AssetId), SharedTexture>;
+
+fn shared_textures() -> &'static std::sync::Mutex<SharedTextures> {
+    static SHARED: std::sync::OnceLock<std::sync::Mutex<SharedTextures>> =
+        std::sync::OnceLock::new();
+    SHARED.get_or_init(Default::default)
+}
+
+/// The shared texture for `key` at `version`, with `store` recorded as a user.
+fn shared_texture(
+    key: (usize, AssetId),
+    version: u64,
+    store: &Arc<std::sync::RwLock<pulsar_scenedb::gpu::TextureStore>>,
+) -> Option<wgpu::Texture> {
+    let mut shared = shared_textures().lock().ok()?;
+    // Forget textures no store holds any more, so a dropped scene's images
+    // can be freed.
+    shared.retain(|_, entry| {
+        entry.users.retain(|user| user.strong_count() != 0);
+        !entry.users.is_empty()
+    });
+    let entry = shared.get_mut(&key)?;
+    if entry.version != version {
+        return None;
+    }
+    let me = Arc::downgrade(store);
+    if !entry.users.iter().any(|user| user.ptr_eq(&me)) {
+        entry.users.push(me);
+    }
+    Some(entry.texture.clone())
+}
+
 /// The slot `image` (content `version` of the texture `id`) holds in
 /// `mirror`'s texture store, uploading it when the store does not hold that
-/// version yet.
+/// version yet. A device that already holds that version for another scene
+/// shares it: no decode, no second upload, no second GPU allocation.
 pub(crate) fn resident_slot(
     id: AssetId,
     version: u64,
@@ -334,9 +379,17 @@ pub(crate) fn resident_slot(
             }
         }
     }
-    // Not uploaded to this store yet. The texels may have to be decoded
-    // again, which takes a while: fetch them with no lock held.
-    let rgba = image.rgba()?;
+
+    // Not in this store yet. Another scene on the same device may have
+    // uploaded it; otherwise the texels may have to be decoded again, which
+    // takes a while. Either way, no lock is held while finding out.
+    let device_key = (Arc::as_ptr(&mirror.store().device_arc()) as usize, id);
+    let shared = shared_texture(device_key, version, &texture_store);
+    let rgba = match shared {
+        Some(_) => None,
+        None => Some(image.rgba()?),
+    };
+
     let mut resident = resident()
         .lock()
         .map_err(|_| "texture residency lock poisoned".to_string())?;
@@ -351,13 +404,25 @@ pub(crate) fn resident_slot(
     if let Some(old) = resident.remove(&key) {
         let _ = store.unregister(old.slot);
     }
-    let slot = crate::material_textures::upload_rgba(
-        &mut store,
-        mirror,
-        image.width,
-        image.height,
-        &rgba,
-    )?;
+    let (slot, uploaded) = match (shared, rgba) {
+        (Some(texture), _) => (
+            store
+                .register_shared(texture)
+                .map_err(|error| format!("could not share a texture: {error:?}"))?,
+            None,
+        ),
+        (None, Some(rgba)) => {
+            let slot = crate::material_textures::upload_rgba(
+                &mut store,
+                mirror,
+                image.width,
+                image.height,
+                &rgba,
+            )?;
+            (slot, store.texture(slot).cloned())
+        }
+        (None, None) => unreachable!("texels are fetched whenever nothing is shared"),
+    };
     resident.insert(
         key,
         ResidentTexture {
@@ -366,6 +431,18 @@ pub(crate) fn resident_slot(
             slot,
         },
     );
+    drop(store);
+    drop(resident);
+    if let (Some(texture), Ok(mut shared)) = (uploaded, shared_textures().lock()) {
+        shared.insert(
+            device_key,
+            SharedTexture {
+                version,
+                texture,
+                users: vec![Arc::downgrade(&texture_store)],
+            },
+        );
+    }
     Ok(slot)
 }
 
@@ -421,5 +498,88 @@ mod residency_tests {
         assert_eq!(*again, *before, "the rebuilt texels match the originals");
         assert!(first.is_resident());
         pulsar_scenedb::set_residency_budget(old_budget);
+    }
+}
+
+#[cfg(test)]
+mod shared_upload_tests {
+    use super::*;
+    use pulsar_scenedb::gpu::{
+        EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore, TextureStore,
+    };
+    use std::sync::RwLock;
+
+    fn context() -> Option<EngineGpuContext> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).ok()?;
+        Some(EngineGpuContext::new(Arc::new(device), Arc::new(queue)))
+    }
+
+    /// A scene's mirror on `ctx`'s device, with a texture store of its own.
+    fn scene(ctx: &EngineGpuContext) -> (GpuMirrorHandle, Arc<RwLock<TextureStore>>) {
+        let store = Arc::new(SceneGpuStore::new(
+            ctx,
+            SceneGpuConfig {
+                classes: vec![],
+                tombstone_headroom: 0,
+                max_cells_metadata: 0,
+            },
+        ));
+        let textures = Arc::new(RwLock::new(TextureStore::new(16)));
+        let handle = GpuMirrorHandle::new(store, Arc::clone(ctx.queue()))
+            .with_texture_store(Arc::clone(&textures))
+            .expect("a texture store on the mirror's device");
+        (handle, textures)
+    }
+
+    #[test]
+    fn scenes_on_one_device_share_one_upload_and_a_new_version_breaks_the_share() {
+        let Some(ctx) = context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared.png");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([10, 20, 30]))
+            .save(&path)
+            .unwrap();
+        let image = decode_image_file(&path).unwrap();
+        let id = AssetId::of(TEXTURE_ASSET_KIND, "shared-upload-test");
+
+        let (scene_a, textures_a) = scene(&ctx);
+        let (scene_b, textures_b) = scene(&ctx);
+        let slot_a = resident_slot(id, 1, &image, &scene_a).unwrap();
+
+        // Drop the CPU copy: if the second scene needed the texels it would
+        // have to decode again.
+        let old_budget = pulsar_scenedb::residency_budget();
+        pulsar_scenedb::set_residency_budget(1);
+        let filler = decode_image_file(&path).unwrap();
+        assert!(!image.is_resident() && filler.is_resident());
+
+        let slot_b = resident_slot(id, 1, &image, &scene_b).unwrap();
+        assert!(
+            !image.is_resident(),
+            "the second scene shared the upload and never needed the texels"
+        );
+        let (a, b) = (textures_a.read().unwrap(), textures_b.read().unwrap());
+        assert_eq!(a.texture(slot_a), b.texture(slot_b), "one GPU texture");
+        assert_eq!(a.upload_count(), 1);
+        assert_eq!(b.upload_count(), 0, "the second store uploaded nothing");
+        drop((a, b));
+
+        // A new content version is a new upload, not a stale share.
+        pulsar_scenedb::set_residency_budget(old_budget);
+        let slot_b2 = resident_slot(id, 2, &image, &scene_b).unwrap();
+        let b = textures_b.read().unwrap();
+        assert_eq!(b.upload_count(), 1, "version 2 uploaded afresh");
+        assert_ne!(
+            textures_a.read().unwrap().texture(slot_a),
+            b.texture(slot_b2),
+            "the scenes no longer show the same texture"
+        );
     }
 }
