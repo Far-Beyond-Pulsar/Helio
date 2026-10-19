@@ -9,6 +9,7 @@
 //! includes.
 
 use super::decorate::Decorator;
+use crate::config::DECORATE_BATCH;
 use helio_pass_voxel_planet::{Brush, Cell, Planet};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -60,7 +61,7 @@ impl Worker {
                 let mut urgent = false;
                 let mut last_sent = Instant::now() - SNAPSHOT_INTERVAL;
                 loop {
-                    let work_left = focus.is_some_and(|f| decorator.next(&planet, f).is_some());
+                    let work_left = focus.is_some_and(|f| decorator.has_work(&planet, f));
                     let wait = if work_left || dirty { Duration::from_millis(1) } else { Duration::from_millis(100) };
                     let mut jobs = Vec::new();
                     match job_rx.recv_timeout(wait) {
@@ -86,17 +87,19 @@ impl Worker {
                             }
                         }
                     }
-                    // One region at a time: player edits are not kept waiting.
-                    if let Some(region) = focus.and_then(|f| decorator.next(&planet, f)) {
+                    // A batch of regions is built in parallel, then applied in
+                    // order; batches stay small so player edits are not kept waiting.
+                    let batch = focus.map(|f| decorator.next_batch(&planet, f, DECORATE_BATCH)).unwrap_or_default();
+                    if !batch.is_empty() {
                         let started = Instant::now();
-                        let brushes = decorator.decorate(&planet, region);
-                        let made = brushes.len();
-                        for brush in brushes {
+                        let built = decorator.decorate_all(&planet, &batch);
+                        let made: usize = built.iter().map(Vec::len).sum();
+                        for brush in built.into_iter().flatten() {
                             if let Err(error) = planet.apply(brush) {
                                 log::warn!("decoration brush rejected: {error}");
                             }
                         }
-                        log::debug!("region {region:?}: {made} brushes in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+                        log::debug!("{} regions: {made} brushes in {:.0} ms", batch.len(), started.elapsed().as_secs_f64() * 1e3);
                         dirty = true;
                     }
                     let interval = if urgent { SNAPSHOT_INTERVAL } else { DECORATION_INTERVAL };

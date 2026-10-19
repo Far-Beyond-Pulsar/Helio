@@ -93,7 +93,7 @@ impl BlockMaterials {
 
     /// Everything the store holds at the base level.
     pub fn fill_all(&mut self, queue: &wgpu::Queue, store: &EditStore) {
-        let mut seen: Vec<ColumnKey> = Vec::new();
+
         for (key, brick) in store.bricks().filter(|(k, _)| k.level == 0) {
             self.write_brick(queue, &key, Some(brick));
             self.columns.entry(key.column()).or_default().push(key.bk);

@@ -2082,7 +2082,9 @@ fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> 
     let t2 = cross(up, t1);
     let range = SKY_RANGE_CELLS * f.cell;
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let turn = f32(params.table.w % 64u) * 0.618034;
+    // Steady shadows hold the rays still (a fixed set, not one turned each frame
+    // for TSR to gather): the sky's light then cannot flicker.
+    let turn = select(f32(params.table.w % 64u) * 0.618034, 0.0, (params.debug.x & 0x1000u) != 0u);
     var open = 0.0;
     var total = 0.0;
     for (var i = 0u; i < SKY_RAYS; i++) {
@@ -2107,7 +2109,7 @@ fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> 
 
 // The pixel 4x4 block `b` samples this frame (16 frames visit them all).
 fn sky_pixel(b: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
-    let turn = (params.table.w * 7u) & 15u;
+    let turn = select((params.table.w * 7u) & 15u, 5u, (params.debug.x & 0x1000u) != 0u);
     return min(b * 4u + vec2<u32>(turn & 3u, turn >> 2u), size - 1u);
 }
 
@@ -2159,6 +2161,19 @@ fn sky_at(p: vec2<i32>, at_hit: vec3<f32>, reach: f32, size: vec2<u32>) -> f32 {
         if s.y > 0.0 && distance(pixel_ray(sky_pixel(vec2<u32>(at), size), size) * s.y, at_hit) <= reach * 2.0 { return s.x; }
     }
     return textureLoad(sky_samples, block, 0).x;
+}
+
+// The renderer's depth before the terrain is drawn: what meshes drew.
+@group(0) @binding(17) var scene_depth: texture_depth_2d;
+
+// Whether a mesh is nearer than the terrain hit at distance `t` of pixel `p`
+// (reversed depth: nearer is greater): its sun is the mesh's own business, not
+// the terrain's shadow over it.
+fn mesh_in_front(p: vec2<i32>, size: vec2<u32>, t: f32) -> bool {
+    if any(textureDimensions(scene_depth) != size) { return false; }
+    let clip = params.view_proj * vec4<f32>(pixel_ray(vec2<u32>(p), size) * t, 1.0);
+    let z = clip.z / clip.w;
+    return textureLoad(scene_depth, p, 0) > z * 1.002;
 }
 
 // The pixel block `b` samples this frame.
@@ -2217,6 +2232,10 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let t = textureLoad(hit_distance, p, 0).r;
+    if mesh_in_front(p, size, t) {
+        textureStore(out_sun, p, vec4<f32>(1.0, sun));
+        return;
+    }
     // Its block's sample, then the nearer neighbours' (towards the pixel's
     // side of its block): the first within four of its cells (or eight
     // pixels' widths: cells under a pixel, a grazing slope) lends its
@@ -2229,9 +2248,12 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let blocks = array<vec2<i32>, 4>(block, block + vec2<i32>(toward.x, 0), block + vec2<i32>(0, toward.y), block + toward);
     var ground = vec3<f32>(0.0);
     var sampled = 0u;
+    // Exact shadows: every hit walks its own sun ray instead of borrowing a
+    // neighbour's sample (which changes with the frame and shimmers).
+    let exact = (params.debug.x & 0x1000u) != 0u;
     for (var b = 0u; b < 4u; b++) {
         let at = blocks[b];
-        if any(at < vec2<i32>(0)) || any(at >= half) { continue; }
+        if exact || any(at < vec2<i32>(0)) || any(at >= half) { continue; }
         let s = textureLoad(sun_samples, at, 0);
         if (s.x & 4u) == 0u || distance(pixel_ray(sample_pixel(vec2<u32>(at), size), size) * bitcast<f32>(s.y), at_hit) > reach { continue; }
         if dot(ground, ground) == 0.0 && s.z != 0u { ground = unpack_unit(s.z); }

@@ -31,7 +31,7 @@ impl Frame {
 /// Offsets of the sample points: across the box at three heights.
 fn samples() -> impl Iterator<Item = (f64, f64, f64)> {
     let r = PLAYER_WIDTH * 0.5 - 0.02;
-    let heights = [0.04, 0.55, 1.1, 1.65, PLAYER_HEIGHT - 0.04];
+    let heights = [0.002, 0.55, 1.1, 1.65, PLAYER_HEIGHT - 0.04];
     heights.into_iter().flat_map(move |h| [(0.0, 0.0), (r, r), (-r, r), (r, -r), (-r, -r), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)].into_iter().map(move |(x, z)| (h, x, z)))
 }
 
@@ -130,7 +130,7 @@ pub fn floor_below(world: &World, feet: DVec3, frame: &Frame, limit: f64) -> Opt
         if world.is_solid(world.cell_at(feet - frame.up * d)) {
             return Some(d);
         }
-        d += 0.1;
+        d += 0.01;
     }
     None
 }

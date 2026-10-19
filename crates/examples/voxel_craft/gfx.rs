@@ -35,6 +35,8 @@ pub struct Gfx {
     /// The renderer's world origin of the last frame.
     pub origin: DVec3,
     size: [u32; 2],
+    previous: Option<Vec<u8>>,
+    luma_frames: u32,
 }
 
 /// Residency settings for chunk trees at a window of height `h`.
@@ -65,6 +67,7 @@ fn tsr_quality() -> helio_pass_tsr::TsrQuality {
     match std::env::var("VOXEL_CRAFT_QUALITY").as_deref() {
         Ok("performance") => helio_pass_tsr::TsrQuality::Performance,
         Ok("quality") => helio_pass_tsr::TsrQuality::Quality,
+        Ok("native") => helio_pass_tsr::TsrQuality::Native,
         Ok("native") => helio_pass_tsr::TsrQuality::Native,
         _ => helio_pass_tsr::TsrQuality::Balanced,
     }
@@ -142,6 +145,7 @@ impl Gfx {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
             pass.set_scene_materials(map, voxel_scene_materials());
+            pass.set_exact_shadows(std::env::var_os("VOXEL_CRAFT_SHARED_SHADOWS").is_none());
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());
@@ -153,7 +157,7 @@ impl Gfx {
             .build(device.clone(), queue.clone(), size[0], size[1], surface_format);
         textures::configure_sampler(&mut renderer);
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size }
+        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size, previous: None, luma_frames: 0 }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -260,7 +264,32 @@ impl Gfx {
         if view.luma {
             let pixels = self.read_pixels(&output.texture);
             let sum: u64 = pixels.chunks(4).map(|p| (u64::from(p[0]) * 3 + u64::from(p[1]) * 6 + u64::from(p[2])) / 10).sum();
-            log::info!("LUMA {:.2}", sum as f64 / (pixels.len() / 4) as f64);
+            let changed = self.previous.as_ref().map_or(0.0, |old| old.chunks(4).zip(pixels.chunks(4)).filter(|(a, b)| (0..3).map(|c| i32::from(a[c]).abs_diff(i32::from(b[c]))).sum::<u32>() > 36).count() as f64 / (pixels.len() / 4) as f64);
+            log::info!("LUMA {:.2} changed {:.4} {}", sum as f64 / (pixels.len() / 4) as f64, changed, self.diagnostics().split(" fading").next().unwrap_or(""));
+            if let Ok(p) = std::env::var("VOXEL_CRAFT_PIXEL") {
+                let v: Vec<usize> = p.split(',').filter_map(|x| x.parse().ok()).collect();
+                if self.luma_frames > 1500 && self.luma_frames < 1530 && v.len() == 2 {
+                    let at = (v[1] * self.size[0] as usize + v[0]) * 4;
+                    log::info!("PIXEL {:?}", &pixels[at..at + 3]);
+                }
+            }
+            self.luma_frames += 1;
+            if self.luma_frames > 5300 && changed > std::env::var("VOXEL_CRAFT_DIFF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.045) && std::env::var_os("VOXEL_CRAFT_DIFF").is_some() {
+                if let Some(old) = &self.previous {
+                    let [w, h] = self.size;
+                    let mut out = pixels.clone();
+                    for (o, (a, b)) in out.chunks_mut(4).zip(old.chunks(4).zip(pixels.chunks(4))) {
+                        if (0..3).map(|c| i32::from(a[c]).abs_diff(i32::from(b[c]))).sum::<u32>() > 36 {
+                            o[0] = 255;
+                            o[1] = 0;
+                            o[2] = 255;
+                        }
+                    }
+                    let _ = image::save_buffer(std::env::var("VOXEL_CRAFT_DIFF").unwrap(), &out, w, h, image::ColorType::Rgba8);
+                    std::process::exit(0);
+                }
+            }
+            self.previous = Some(pixels);
         }
         self.queue.present(output);
     }

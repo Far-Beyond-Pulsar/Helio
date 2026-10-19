@@ -32,6 +32,8 @@ pub struct ChunkPass {
     cpu_ms: [f64; 2],
     /// Voxel materials as the host's scene materials (`set_scene_materials`).
     scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
+    /// Every hit walks its own sun ray (steady shadows).
+    exact_shadows: bool,
 }
 
 impl ChunkPass {
@@ -57,6 +59,7 @@ impl ChunkPass {
             budget_ms: None,
             cpu_ms: [0.0; 2],
             scene: None,
+            exact_shadows: false,
         }
     }
 
@@ -66,6 +69,12 @@ impl ChunkPass {
     /// Devices without texture binding arrays keep the flat appearance.
     pub fn set_scene_materials(&mut self, map: super::scene::VoxelMaterialMap, source: super::scene::SceneMaterialSource) {
         self.scene = Some((map, source));
+    }
+
+    /// Steady shadows: every hit walks its own sun ray instead of sharing
+    /// quarter-resolution samples that change each frame (dearer).
+    pub fn set_exact_shadows(&mut self, on: bool) {
+        self.exact_shadows = on;
     }
 
     /// Back to the flat appearance table.
@@ -421,6 +430,9 @@ impl ChunkPass {
             ctx.frame_num,
             &config,
         );
+        // The depth meshes drew: the sun leaves their pixels alone.
+        world.set_scene_depth(Some(ctx.depth.clone()));
+        world.set_exact_shadows(self.exact_shadows);
         world.draw(
             encoder,
             ctx.frame_num,

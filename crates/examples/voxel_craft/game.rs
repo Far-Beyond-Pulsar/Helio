@@ -96,7 +96,7 @@ impl Game {
             fps: 0.0,
             // Mid-morning.
             time: DAY_SECONDS * 0.08,
-            time_speed: if tour_active { 0.0 } else { 1.0 },
+            time_speed: if tour_active || std::env::var_os("VOXEL_CRAFT_FREEZE").is_some() { 0.0 } else { 1.0 },
             focus: (i32::MIN, i32::MIN),
             sun_axes: (up, e1),
             show_help: true,
@@ -160,9 +160,9 @@ impl Game {
 
         let mut controls = self.input.controls();
         // `VOXEL_CRAFT_WALK=1`: walk forward by itself and log the eye's height each frame.
-        if self.walk {
-            controls.forward = 1.0;
-            log::info!("WALK {:.4} {:.3} ground {}", self.world.planet().grid().height(self.player.eye()), dt * 1e3, self.player.on_ground);
+        if self.walk || std::env::var_os("VOXEL_CRAFT_EYELOG").is_some() {
+            controls.forward = if self.walk { 1.0 } else { 0.0 };
+            log::info!("WALK {:.5} {:.3} ground {} rev {} pos {:.4}", self.world.planet().grid().height(self.player.eye()), dt * 1e3, self.player.on_ground, self.world.revision(), self.player.eye().length());
         }
         self.world.update();
         self.player.update(&self.world, &controls, dt);
@@ -227,7 +227,7 @@ impl Game {
             outline: &outline,
             time: self.started.elapsed().as_secs_f64(),
             screenshot: shot.as_deref(),
-            luma: self.luma && self.total_frames % 2 == 0,
+            luma: self.luma,
         };
         self.gfx.draw(&view);
         self.input.end_frame();
@@ -304,13 +304,17 @@ impl Tour {
     /// Advances the tour by a frame; the path to save this frame to, if it
     /// should be.
     fn step(&mut self, player: &mut Player, settled: bool, quit: &mut bool) -> Option<String> {
+        if self.pose >= usize::MAX / 2 {
+            return None;
+        }
         if self.waited == u32::MAX {
             self.set_pose(player);
         }
         self.waited += 1;
         // A pose is shot once the terrain has settled and the temporal
         // anti-aliasing has had frames to converge (or after a long wait).
-        let ready = (settled && self.waited >= 120) || self.waited >= 900;
+        let minimum: u32 = std::env::var("VOXEL_CRAFT_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+        let ready = (settled && self.waited >= minimum) || self.waited >= minimum.max(900);
         if !ready {
             return None;
         }
@@ -319,7 +323,9 @@ impl Tour {
         self.pose += 1;
         let limit = std::env::var("VOXEL_CRAFT_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(POSES.len());
         if self.pose >= limit.min(POSES.len()) {
-            *quit = true;
+            // `VOXEL_CRAFT_HOLD=1` keeps the last pose running (for LUMA / DIFF).
+            *quit = std::env::var_os("VOXEL_CRAFT_HOLD").is_none();
+            self.pose = usize::MAX / 2;
         } else {
             self.set_pose(player);
         }

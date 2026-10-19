@@ -39,10 +39,11 @@ impl Decorator {
         self.done.len()
     }
 
-    /// The nearest undecorated region around `focus`, if any within reach.
-    pub fn next(&self, planet: &Planet, focus: Cell) -> Option<Region> {
+    /// The undecorated regions around `focus` within reach, nearest first,
+    /// at most `limit` of them.
+    pub fn next_batch(&self, planet: &Planet, focus: Cell, limit: usize) -> Vec<Region> {
         let (cx, cy) = (focus.i.div_euclid(REGION_BLOCKS), focus.j.div_euclid(REGION_BLOCKS));
-        let mut best: Option<(i32, Region)> = None;
+        let mut candidates: Vec<(i32, Region)> = Vec::new();
         for dx in -RADIUS..=RADIUS {
             for dy in -RADIUS..=RADIUS {
                 let region = (focus.face, cx + dx, cy + dy);
@@ -50,20 +51,56 @@ impl Decorator {
                 if d > RADIUS * RADIUS || self.done.contains(&region) {
                     continue;
                 }
-                if !terrain::buildable(planet, region.1 * REGION_BLOCKS + REGION_BLOCKS / 2, region.2 * REGION_BLOCKS + REGION_BLOCKS / 2) {
-                    continue;
-                }
-                if best.is_none_or(|(bd, _)| d < bd) {
-                    best = Some((d, region));
-                }
+                candidates.push((d, region));
             }
         }
-        best.map(|(_, r)| r)
+        candidates.sort_by_key(|&(d, _)| d);
+        let mut out = Vec::new();
+        for (_, region) in candidates {
+            if out.len() >= limit {
+                break;
+            }
+            if terrain::buildable(planet, region.1 * REGION_BLOCKS + REGION_BLOCKS / 2, region.2 * REGION_BLOCKS + REGION_BLOCKS / 2) {
+                out.push(region);
+            }
+        }
+        out
+    }
+
+    /// Whether any region around `focus` is still waiting.
+    pub fn has_work(&self, planet: &Planet, focus: Cell) -> bool {
+        !self.next_batch(planet, focus, 1).is_empty()
+    }
+
+    /// Decorates `regions` in parallel against the same planet state, marking
+    /// them done. The brushes come back per region, in the order given.
+    pub fn decorate_all(&mut self, planet: &Planet, regions: &[Region]) -> Vec<Vec<Brush>> {
+        self.done.extend(regions.iter().copied());
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(regions.len()).max(1);
+        let this = &*self;
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut slots: Vec<(usize, Vec<Brush>)> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&region) = regions.get(n) else { break };
+                            mine.push((n, this.decorate(planet, region)));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            workers.into_iter().flat_map(|w| w.join().expect("decorate thread")).collect()
+        });
+        slots.sort_by_key(|(n, _)| *n);
+        slots.into_iter().map(|(_, b)| b).collect()
     }
 
     /// Decorates `region`: the brushes to apply, in order.
-    pub fn decorate(&mut self, planet: &Planet, region: Region) -> Vec<Brush> {
-        self.done.insert(region);
+    fn decorate(&self, planet: &Planet, region: Region) -> Vec<Brush> {
         let (face, rx, ry) = region;
         let (i0, j0) = (rx * REGION_BLOCKS, ry * REGION_BLOCKS);
         let mut rng = Rng::new(hash(self.seed, i64::from(face), i64::from(rx), i64::from(ry)));

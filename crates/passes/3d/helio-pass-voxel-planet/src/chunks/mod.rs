@@ -826,6 +826,10 @@ pub struct ChunkWorld {
     scene: Option<SceneState>,
     /// Exact materials of edited cells (`blocks.rs`).
     blocks: blocks::BlockMaterials,
+    /// The renderer's depth with only meshes in it (sun shadows skip pixels meshes cover), and a stand-in.
+    scene_depth: Option<wgpu::TextureView>,
+    depth_dummy: wgpu::TextureView,
+    exact_shadows: bool,
     /// The last draw's bind group (its parameters and chunk storage).
     last_group: Option<wgpu::BindGroup>,
     targets: Option<Targets>,
@@ -1512,6 +1516,7 @@ impl ChunkWorld {
                 storage(14, true, all),
                 storage(15, true, all),
                 storage(16, true, all),
+                texture_entry(17, wgpu::TextureSampleType::Depth, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1956,6 +1961,20 @@ impl ChunkWorld {
             publish,
             scene,
             blocks,
+            scene_depth: None,
+            depth_dummy: device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("chunk scene depth stand-in"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default()),
+            exact_shadows: false,
             last_group: None,
             targets: None,
             rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS")
@@ -3596,6 +3615,18 @@ impl ChunkWorld {
     }
 
     /// Whether draws write the plain colour target ([`Targets::colour`]).
+    /// The renderer's depth holding only what meshes drew, for the draws after:
+    /// the sun's shadows then leave the pixels meshes cover to the meshes.
+    pub fn set_scene_depth(&mut self, depth: Option<wgpu::TextureView>) {
+        self.scene_depth = depth;
+    }
+
+    /// Every hit walks its own sun ray (steady shadows) instead of sharing
+    /// quarter-resolution samples that change each frame.
+    pub fn set_exact_shadows(&mut self, on: bool) {
+        self.exact_shadows = on;
+    }
+
     pub fn set_plain_colour(&mut self, on: bool) {
         self.plain_colour = on;
     }
@@ -3736,7 +3767,7 @@ impl ChunkWorld {
                     0
                 };
                 [
-                    self.debug_mode | (u32::from(self.plain_colour) << 8) | local_debug,
+                    self.debug_mode | (u32::from(self.plain_colour) << 8) | local_debug | (u32::from(self.exact_shadows) << 12),
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),
@@ -3782,7 +3813,7 @@ impl ChunkWorld {
         self.queue
             .write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.reach, 0, &[0u8; 16]);
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let make_group = |depth: &wgpu::TextureView| self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
             entries: &[
@@ -3803,9 +3834,12 @@ impl ChunkWorld {
                 entry(14, &self.leaf_pages),
                 entry(15, &self.leaf_normals),
                 entry(16, &self.blocks.buffer),
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(depth) },
             ],
         });
-        self.last_group = Some(group.clone());
+        let group = make_group(self.scene_depth.as_ref().unwrap_or(&self.depth_dummy));
+        // Publish writes that depth: its group must not read it.
+        self.last_group = Some(make_group(&self.depth_dummy));
         let targets = self.targets.as_ref().unwrap();
         let timing = self
             .queries

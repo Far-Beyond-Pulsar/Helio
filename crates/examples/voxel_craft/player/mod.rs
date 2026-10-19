@@ -121,7 +121,8 @@ impl Player {
             let planar = self.velocity - frame.up * vertical;
             let grip = if self.on_ground { 14.0 } else { 2.5 };
             let planar = planar + (wish_planar * speed - planar) * (1.0 - (-grip * dt).exp());
-            let mut vertical = vertical - GRAVITY * dt;
+            // Standing: no fall to undo each frame (that bobs the camera).
+            let mut vertical = if self.on_ground && vertical <= 0.0 { 0.0 } else { vertical - GRAVITY * dt };
             if self.on_ground && controls.jump {
                 vertical = JUMP_SPEED;
                 self.on_ground = false;
@@ -137,7 +138,7 @@ impl Player {
                 self.on_ground = false;
             } else if !moved.stepped {
                 // Walking off an edge: grounded only while a floor is at the soles.
-                self.on_ground = physics::floor_below(world, self.position, &frame, 0.06).is_some() && self.velocity.dot(frame.up) <= 0.0;
+                self.on_ground = physics::floor_below(world, self.position, &frame, 0.05).is_some() && self.velocity.dot(frame.up) <= 0.0;
             }
             if moved.stepped {
                 self.on_ground = true;

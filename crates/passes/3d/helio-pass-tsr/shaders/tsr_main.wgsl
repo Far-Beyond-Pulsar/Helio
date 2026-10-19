@@ -411,7 +411,7 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     // ── Depth-based reprojection → history UV ─────────────────────────────────
     let history = reproject_history(cur_uv, depth_val);
     let history_uv = history.xy;
-    let depth_tolerance = max(0.002,abs(history.w)*0.001) + 1.5*(abs(dpdx(history.w))+abs(dpdy(history.w)));
+    let depth_tolerance = max(0.002,abs(history.w)*0.004) + 1.5*(abs(dpdx(history.w))+abs(dpdy(history.w)));
 
     // If reprojected UV is out of screen, use current frame only
     if history.z <= 0.0 || any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
@@ -421,7 +421,18 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
 
     // ── History sample (Catmull-Rom for quality) ───────────────────────────────
     let depth_pixel = clamp(vec2<i32>(history_uv*out_dims),vec2<i32>(0),vec2<i32>(out_dims)-1);
-    let history_depth = textureLoad(history_depth_tex,depth_pixel,0).r;
+    // The history texel under a silhouette belongs to either side of it, and
+    // the jitter picks one at random each frame: take the closest-matching
+    // depth of the 3x3 around it, so only a surface that was really not there
+    // (a disocclusion) loses its history.
+    var history_depth = textureLoad(history_depth_tex,depth_pixel,0).r;
+    for (var oy = -1; oy <= 1; oy++) {
+        for (var ox = -1; ox <= 1; ox++) {
+            let at = clamp(depth_pixel + vec2<i32>(ox, oy), vec2<i32>(0), vec2<i32>(out_dims) - 1);
+            let candidate = textureLoad(history_depth_tex, at, 0).r;
+            if abs(candidate - history.w) < abs(history_depth - history.w) { history_depth = candidate; }
+        }
+    }
     if !history_depth_matches(history.w,history_depth,depth_tolerance) {
         return TsrOutput(vec4<f32>(apply_cas(current_rgb,cur_uv),output_alpha),current_depth);
     }
@@ -464,8 +475,22 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
         aabb_max += widen;
     }
 
+    // A pixel that has not moved keeps its whole history: the jittered samples
+    // of a static edge cover different parts of the neighbourhood each frame,
+    // and clamping to (or narrowing) what this frame happened to see makes
+    // edges shimmer. Moving pixels still clamp tightly, which is what
+    // prevents ghosts.
+    // The jitter itself shows as up to a pixel of apparent motion.
+    let still = length(velocity * vec2<f32>(textureDimensions(history_frame))) < 1.0;
+    if still {
+        let mid = (aabb_min + aabb_max) * 0.5;
+        let half_extent = (aabb_max - aabb_min) * 0.5 * 1.75 + vec3<f32>(0.02);
+        aabb_min = mid - half_extent;
+        aabb_max = mid + half_extent;
+    }
+
     // Narrow AABB on edges to reduce bleeding across depth discontinuities
-    if (flags & CLASS_EDGE) != 0u {
+    if (flags & CLASS_EDGE) != 0u && !still {
         let avg = (aabb_min + aabb_max) * 0.5;
         let half_extent = (aabb_max - aabb_min) * 0.35;
         aabb_min = avg - half_extent;
@@ -478,8 +503,14 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     // A frame whose nearest sample lies far from this pixel says less about
     // it than the history does (half the weight at the farthest jitter).
     // Reactivity (cuts, coverage) still forces the current frame.
-    let blend = max(compute_blend_factor(flags, local_reactivity, tsr.time_delta, history_tm, n)
+    var blend = max(compute_blend_factor(flags, local_reactivity, tsr.time_delta, history_tm, n)
         * mix(0.5, 1.0, reconstruction.confidence), local_reactivity);
+    // A still pixel integrates the whole jitter sequence: about 1/64 of each
+    // frame, so what the jitter shows of an edge averages out instead of
+    // flickering (disocclusions and cuts keep their fast blend).
+    if still && (flags & CLASS_DISOCCLUSION) == 0u {
+        blend = max(min(blend, 0.016), local_reactivity);
+    }
 
     // ── Blend ─────────────────────────────────────────────────────────────────
     let blended_ycocg = mix(clamped_history, current_tm, blend);
@@ -488,7 +519,9 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
 
     // ── CAS sharpening ────────────────────────────────────────────────────────
     // Only sharpen in areas with enough variance to have recoverable detail.
-    let cas_weight = clamp((n.variance - 0.002) * 10.0, 0.0, 1.0);
+    // The sharpening reads this frame's jittered samples, so on a still pixel it
+    // would put the jitter back into the resolved image.
+    let cas_weight = select(clamp((n.variance - 0.002) * 10.0, 0.0, 1.0), 0.0, still);
     let cas_result = apply_cas(result_linear, cur_uv);
     let output     = mix(result_linear, cas_result, cas_weight);
 
