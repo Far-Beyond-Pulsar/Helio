@@ -1308,7 +1308,8 @@ fn read_sun(gpu: &Gpu, world: &World) -> Vec<bool> {
 /// view (the scene's depth one view depth everywhere, as a mesh pass leaves
 /// it), with a raised ball between it and the sun, is in the sun where a
 /// CPU ray from its point towards the sun reaches the sky, at points before
-/// hits and before the sky alike.
+/// hits and before the sky alike; and sees a point light past the ball
+/// where a CPU ray from its point reaches the light.
 #[test]
 fn terrain_shadows_fall_on_meshes_in_front_of_it() {
     let Some(gpu) = gpu() else { return };
@@ -1352,8 +1353,13 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
     let mut world = World::new(gpu, &planet);
     world.sun = sun.as_vec3();
     world.scene_depth = Some(depth_view);
+    let light = ball + sun * 4.0;
+    world.lights = Some(one_light(gpu, (light - view.eye).as_vec3(), 40.0, view.size));
+    world.chunks.set_steady_shadows(true);
     let hits = world.settle(gpu, &planet, &view);
     let lit = read_sun(gpu, &world);
+    let seen = read_local(gpu, &world);
+    let (mut light_mismatched, mut light_blocked_points) = (0, 0);
 
     let view_proj = view.view_proj(&planet);
     let voxel = planet.grid().voxel_size();
@@ -1382,8 +1388,15 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
                     eprintln!("pixel {x},{y}: gpu lit {}, cpu {blocked:?}", lit[(y * view.size[0] + x) as usize]);
                 }
             }
+            let to = light - point;
+            let light_blocked = planet.raycast(point + to.normalize() * (0.05 * voxel), to.normalize(), to.length() - voxel).is_some();
+            light_blocked_points += usize::from(light_blocked);
+            light_mismatched += usize::from((seen[(y * view.size[0] + x) as usize] & 1 != 0) == light_blocked);
         }
     }
+    eprintln!("the light: {light_blocked_points} blocked, {light_mismatched} mismatched");
+    assert!(light_blocked_points > 50, "{light_blocked_points} wall points blocked from the light");
+    assert!(light_mismatched * 100 <= before_hits + before_sky, "{light_mismatched} mismatched for the light");
     eprintln!("wall points: {before_hits} before hits, {before_sky} before the sky ({shaded_sky} shaded); {shaded} shaded, {sunny} sunny; {mismatched} mismatched");
     assert!(before_hits > 200 && before_sky > 50, "{before_hits} before hits, {before_sky} before the sky");
     assert!(shaded_sky > 10, "{shaded_sky} shaded before the sky");
@@ -1590,6 +1603,19 @@ fn feature_generation_cost() {
     }
 }
 
+/// The local lights each pixel sees past the terrain
+/// (`local_visibility`'s words).
+fn read_local(gpu: &Gpu, world: &World) -> Vec<u32> {
+    let buffer = world.chunks.local_visibility().expect("drawn");
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: buffer.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
+}
+
 /// Helio's lights and tile lists for one point light at `at`
 /// (eye-relative) of range `range`, in every 16 px tile of `size`.
 fn one_light(gpu: &Gpu, at: Vec3, range: f32, size: [u32; 2]) -> [wgpu::Buffer; 3] {
@@ -1629,16 +1655,7 @@ fn terrain_shadows_local_lights() {
     world.lights = Some(one_light(&gpu, (light - eye).as_vec3(), range, view.size));
     world.chunks.set_steady_shadows(true);
     let hits = world.settle(&gpu, &planet, &view);
-    let mask: Vec<u32> = {
-        let buffer = world.chunks.local_visibility().expect("drawn");
-        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: buffer.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
-        gpu.queue.submit([encoder.finish()]);
-        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
-    };
+    let mask = read_local(&gpu, &world);
     let view_proj = view.view_proj(&planet);
     let cell = planet.grid().voxel_size();
     let (mut compared, mut wrong, mut shadowed) = (0, 0, 0);
