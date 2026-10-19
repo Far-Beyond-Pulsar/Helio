@@ -143,6 +143,7 @@ pub fn recipe() -> PlanetRecipe {
             seed: WORLD_SEED,
             settings: serde_json::to_string(&terrain_layers()).expect("terrain layers serialize"),
         },
+        features: crate::world::decorate::features(),
         ..PlanetRecipe::default()
     }
 }

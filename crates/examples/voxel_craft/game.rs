@@ -28,7 +28,6 @@ pub struct Game {
     time: f64,
     time_speed: f64,
     /// The region the world was last told the player is in.
-    focus: (i32, i32),
     /// The sun's path: a great circle through the sky over the spawn.
     sun_axes: (DVec3, DVec3),
     show_help: bool,
@@ -83,8 +82,6 @@ impl Game {
         let world = World::new(planet);
         let mut player = Player::new(spawn);
         player.heading = e2;
-        let cell = world.cell_at(spawn);
-        world.focus(cell);
         let tour_active = std::env::var_os("VOXEL_CRAFT_SHOTS").is_some();
         Self {
             gfx,
@@ -100,7 +97,6 @@ impl Game {
             // Mid-morning.
             time: DAY_SECONDS * 0.08,
             time_speed: if tour_active || std::env::var_os("VOXEL_CRAFT_FREEZE").is_some() { 0.0 } else { 1.0 },
-            focus: (i32::MIN, i32::MIN),
             sun_axes: (up, e1),
             show_help: true,
             total_frames: 0,
@@ -173,14 +169,6 @@ impl Game {
         self.world.update();
         self.player.update(&self.world, &controls, dt);
         self.interaction.update(&mut self.player, &mut self.world, &controls, dt);
-
-        // The world decorates around the player's region.
-        let cell: Cell = self.world.cell_at(self.player.position);
-        let region = (cell.i.div_euclid(REGION_BLOCKS), cell.j.div_euclid(REGION_BLOCKS));
-        if region != self.focus {
-            self.focus = region;
-            self.world.focus(cell);
-        }
 
         self.total_frames += 1;
         // `VOXEL_CRAFT_REPLAY="place:face:i:j:k:Block_Name;break:face:i:j:k;..."` (as printed by
@@ -402,12 +390,11 @@ impl Game {
         };
         let target = self.interaction.target.and_then(|t| self.world.block_at(t.cell)).map_or(String::new(), |b| format!("  |  looking at {}", b.name()));
         self.gfx.window.set_title(&format!(
-            "Voxel Craft  |  {:.0} fps  |  {:02}:{:02}  |  height {:.0} m  |  {} regions  |  {}{}{}{}",
+            "Voxel Craft  |  {:.0} fps  |  {:02}:{:02}  |  height {:.0} m  |  {}{}{}{}",
             self.fps,
             hour as u32,
             ((hour.fract()) * 60.0) as u32,
             height,
-            self.world.regions_loaded(),
             hotbar.join("  "),
             target,
             if self.player.flying { "  |  FLYING" } else { "" },
@@ -438,6 +425,8 @@ const POSES: &[(f64, f64, bool, f64)] = &[
     (90.0, -0.35, true, 0.0),
     (0.0, -0.55, false, 45.0),
     (180.0, 0.05, false, 0.0),
+    // 450 m up, looking out: forests to the horizon (their far canopies).
+    (30.0, -0.22, false, 400.0),
 ];
 
 impl Tour {

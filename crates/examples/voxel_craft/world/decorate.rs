@@ -1,194 +1,147 @@
 //! Decorating the terrain: trees, cacti and structures, as the voxel planet's
-//! features (`helio_pass_voxel_planet::features`).
-//!
-//! The planet is divided into square regions of `REGION_BLOCKS` columns per
-//! face. A region's decoration is a pure function of the world seed, the
-//! region and the terrain (never edits or other regions), so a region
-//! unloaded far behind the player comes back the same when they return,
-//! and what players dig or build applies over it.
+//! features (`helio_pass_voxel_planet::features`): a library of stamps grown
+//! once from the world seed (tree variants of each species, structures with
+//! their foundations, cacti) and spawns saying where each grows (biome by
+//! the ground's surface, height, flatness, forest fields). The planet
+//! evaluates them like its terrain, wherever and at whatever level it is
+//! drawn: nothing is decided around the player or kept in memory, forests
+//! show to the horizon (their far forms), and what players dig or build
+//! applies over them.
 
 use crate::blocks::Block;
-use crate::config::{REGION_BLOCKS, WORLD_SEED};
+use crate::config::WORLD_SEED;
 use crate::structures::Kind;
-use crate::terrain::climate::{forest_density, forest_kind, hash, unit};
-use crate::terrain::{self, Biome};
 use crate::trees::{Rng, Species, Tree};
-use helio_pass_voxel_planet::features::{FeatureCell, Region};
+use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
 use helio_pass_voxel_planet::stamp::Stamp;
 use helio_pass_voxel_planet::terrain::material;
-use helio_pass_voxel_planet::Planet;
 
-/// Chance a region holds a structure.
-const STRUCTURE_CHANCE: f64 = 0.09;
+/// Columns a side of the square each structure, jungle giant, tree and
+/// cactus may stand in (crowns reach past theirs: forests interlock).
+const STRUCTURE_SPACING: u32 = 96;
+const JUNGLE_SPACING: u32 = 16;
+const TREE_SPACING: u32 = 8;
+const CACTUS_SPACING: u32 = 5;
+/// Tree variants grown of each species.
+const VARIANTS: u64 = 6;
+/// Conifers take over from broadleaves above this height (m).
+const TREE_LINE_M: f64 = 55.0;
 
-/// Whether `region` lies where features stand (clear of the face's edges).
-pub fn decorated(planet: &Planet, region: Region) -> bool {
-    terrain::buildable(planet, region.x * REGION_BLOCKS + REGION_BLOCKS / 2, region.y * REGION_BLOCKS + REGION_BLOCKS / 2)
+/// The world's decoration.
+pub fn features() -> FeatureSet {
+    let mut set = FeatureSet::default();
+    let mut rng = Rng::new(WORLD_SEED ^ 0xdec0_7a7e);
+    let add = |set: &mut FeatureSet, stamps: Vec<Stamp>| -> Vec<u32> {
+        let first = set.stamps.len() as u32;
+        set.stamps.extend(stamps);
+        (first..set.stamps.len() as u32).collect()
+    };
+    let structures = |kinds: &[(Kind, usize)], rng: &mut Rng| -> Vec<Stamp> { kinds.iter().flat_map(|&(kind, n)| (0..n).map(|_| structure(kind, rng.u64())).collect::<Vec<_>>()).collect() };
+    let temperate = add(&mut set, structures(&[(Kind::Cottage, 4), (Kind::Tower, 2), (Kind::Ruins, 2), (Kind::Well, 2)], &mut rng));
+    let desert = add(&mut set, structures(&[(Kind::Pyramid, 3), (Kind::Well, 2)], &mut rng));
+    let mountain = add(&mut set, structures(&[(Kind::Ruins, 3)], &mut rng));
+    let jungle = add(&mut set, trees(&[Species::Jungle]));
+    let broadleaf = add(&mut set, trees(&[Species::Oak, Species::Oak, Species::DarkOak]));
+    let birch = add(&mut set, trees(&[Species::Birch]));
+    let conifer = add(&mut set, trees(&[Species::Spruce, Species::Pine]));
+    let cacti = add(&mut set, (2..5).map(|h| {
+        let mut s = Stamp::new();
+        s.fill([0, 0, 0], [0, h - 1, 0], Block::Cactus.material());
+        s
+    }).collect());
+    let lowland = [-1e9, TREE_LINE_M];
+    let structure = |name: &str, stamps: Vec<u32>, surfaces: &[u32], density: f32| Spawn {
+        name: name.into(),
+        stamps,
+        spacing: STRUCTURE_SPACING,
+        density,
+        surfaces: surfaces.to_vec(),
+        max_relief: 7,
+        ..Spawn::default()
+    };
+    let forest = |name: &str, stamps: Vec<u32>, spacing: u32, field_scale_m: f64, field_threshold: f32, leaves: Block| Spawn {
+        name: name.into(),
+        stamps,
+        spacing,
+        density: 0.85,
+        field_scale_m,
+        field_threshold,
+        surfaces: vec![material::GRASS, material::DIRT],
+        heights_m: lowland,
+        max_relief: 3,
+        far_material: leaves.material(),
+        ..Spawn::default()
+    };
+    set.spawns = vec![
+        structure("temperate structures", temperate, &[material::GRASS, material::DIRT, material::CLAY], 0.8),
+        structure("desert structures", desert, &[material::SAND, material::SANDSTONE], 0.8),
+        structure("mountain ruins", mountain, &[material::SNOW, material::STONE, material::GRAVEL], 0.35),
+        Spawn { density: 0.6, ..forest("jungle", jungle, JUNGLE_SPACING, 420.0, 0.35, Block::JungleLeaves) },
+        forest("broadleaf forest", broadleaf, TREE_SPACING, 260.0, -0.1, Block::OakLeaves),
+        forest("birch woods", birch, TREE_SPACING, 300.0, 0.2, Block::BirchLeaves),
+        Spawn { surfaces: vec![material::GRASS, material::DIRT, material::SNOW], heights_m: [TREE_LINE_M, 1e9], ..forest("conifers", conifer, TREE_SPACING, 200.0, -0.3, Block::SpruceLeaves) },
+        Spawn { name: "cacti".into(), stamps: cacti, spacing: CACTUS_SPACING, density: 0.12, surfaces: vec![material::SAND], max_relief: 2, ..Spawn::default() },
+    ];
+    set
 }
 
-/// `region`'s features: its cells.
-pub fn decorate(planet: &Planet, region: Region) -> Vec<FeatureCell> {
-    let seed = WORLD_SEED;
-    let Region { face, x: rx, y: ry } = region;
-    let (i0, j0) = (rx * REGION_BLOCKS, ry * REGION_BLOCKS);
-    let mut rng = Rng::new(hash(seed, i64::from(face), i64::from(rx), i64::from(ry)));
-    // Everything placed, as offsets from the region's first column at layer 0.
-    let mut placed = Stamp::new();
-    // Footprints taken: (i, j, radius).
-    let mut taken: Vec<(i32, i32, i32)> = Vec::new();
-    let grid = *planet.grid();
-
-    // A structure, near the region's middle.
-    if unit(hash(seed ^ 0xabc, i64::from(face), i64::from(rx), i64::from(ry))) < STRUCTURE_CHANCE {
-        let (ci, cj) = (i0 + REGION_BLOCKS / 2 + rng.int(-5, 5), j0 + REGION_BLOCKS / 2 + rng.int(-5, 5));
-        if let Some(g) = terrain::ground(planet, face, ci, cj) {
-            if let Some(kind) = Kind::for_biome(Biome::of(g.material), rng.f64()) {
-                let blueprint = kind.build(rng.u64()).oriented(rng.int(0, 3) as u32, rng.f64() < 0.5);
-                let [hx, hz] = blueprint.half;
-                let reach = hx.max(hz) + 1;
-                // The ground under the footprint's corners and middle.
-                let tops: Vec<i32> = [(0, 0), (hx, hz), (-hx, hz), (hx, -hz), (-hx, -hz)].into_iter().map(|(di, dj)| planet.terrain_top(face, ci + di, cj + dj)).collect();
-                let (low, high) = (*tops.iter().min().unwrap(), *tops.iter().max().unwrap());
-                if high - low <= 7 {
-                    let floor = (tops.iter().sum::<i32>() as f64 / tops.len() as f64).round() as i32;
-                    let (x, z, h) = (ci - i0, cj - j0, reach + 1);
-                    // Clear what stands in the way, set a foundation, build.
-                    placed.hollow([x - h, floor, z - h], [x + h, floor + blueprint.height + 5, z + h]);
-                    placed.fill([x - h + 1, floor - 5, z - h + 1], [x + h - 1, floor - 1, z + h - 1], Block::Cobblestone.material());
-                    placed.place(&blueprint.stamp, [x, floor, z]);
-                    taken.push((ci, cj, reach + 3));
-                }
-            }
-        }
-    }
-
-    // Trees and cacti.
-    let (mid_i, mid_j) = (i0 + REGION_BLOCKS / 2, j0 + REGION_BLOCKS / 2);
-    let density = forest_density(seed, face, mid_i, mid_j);
-    let kind = forest_kind(seed, face, mid_i, mid_j);
-    let attempts = 3 + (density * 22.0) as i32;
-    let mut trunks: Vec<(i32, i32)> = Vec::new();
-    for _ in 0..attempts {
-        let (i, j) = (i0 + rng.int(3, REGION_BLOCKS - 4), j0 + rng.int(3, REGION_BLOCKS - 4));
-        if taken.iter().any(|&(ti, tj, r)| (ti - i).abs() <= r && (tj - j).abs() <= r) {
-            continue;
-        }
-        // Trunks keep apart: close ones would merge their crowns.
-        if trunks.iter().any(|&(ti, tj)| (ti - i).abs() < 4 && (tj - j).abs() < 4) {
-            continue;
-        }
-        let Some(g) = terrain::ground(planet, face, i, j) else { continue };
-        if terrain::relief(planet, face, i, j, 2) > 3 {
-            continue;
-        }
-        // Offsets from the region's first column on the ground's layer.
-        let at = [i - i0, g.cell.k + 1, j - j0];
-        match Biome::of(g.material) {
-            Biome::Desert => {
-                // Cacti on sand, spread thin.
-                if g.material == material::SAND && rng.f64() < 0.08 + density * 0.1 {
-                    placed.fill(at, [at[0], at[1] + rng.int(2, 4) - 1, at[2]], Block::Cactus.material());
-                    trunks.push((i, j));
-                }
-            }
-            Biome::Rock => {}
-            biome => {
-                let height_m = f64::from(g.cell.k) * grid.voxel_size();
-                let Some(species) = pick_species(biome, height_m, kind, density, &mut rng) else { continue };
-                // A trunk of a big tree takes room: keep clear of the rest.
-                let reach = if species == Species::Jungle { 8 } else { 3 };
-                if trunks.iter().any(|&(ti, tj)| (ti - i).abs() < reach && (tj - j).abs() < reach) {
-                    continue;
-                }
-                let mut tree = Tree::grow(species, hash(seed, i64::from(i), i64::from(j), 77)).stamp();
-                // Crowns stop at hillsides: no leaves inside the terrain.
-                let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog].map(Block::material);
-                tree.retain(|p, m| m.is_some_and(|m| logs.contains(&m)) || planet.terrain_top(face, i + p[0], j + p[2]) <= g.cell.k + 1 + p[1]);
-                placed.place(&tree, at);
-                // Dirt under the trunk, as the roots would make it.
-                if g.material == material::GRASS {
-                    placed.set([at[0], at[1] - 1, at[2]], Block::Dirt.material());
-                }
-                trunks.push((i, j));
-            }
-        }
-    }
-    placed.cells_at(face, i0, j0, 0).collect()
+/// `VARIANTS` trees of each of `species`, standing on dirt (the roots).
+fn trees(species: &[Species]) -> Vec<Stamp> {
+    species
+        .iter()
+        .enumerate()
+        .flat_map(|(n, &s)| (0..VARIANTS).map(move |v| (n as u64, s, v)))
+        .map(|(n, s, v)| {
+            let mut stamp = Tree::grow(s, WORLD_SEED ^ (n << 32) ^ (v * 0x9e37_79b9) ^ s as u64).stamp();
+            stamp.set([0, -1, 0], Block::Dirt.material());
+            stamp
+        })
+        .collect()
 }
 
-/// The tree a column grows, if any.
-fn pick_species(biome: Biome, height_m: f64, kind: f64, density: f64, rng: &mut Rng) -> Option<Species> {
-    // Sparse where the forest field is thin; none on open meadows.
-    if rng.f64() > 0.35 + density {
-        return None;
-    }
-    if biome == Biome::Snow || height_m > 55.0 {
-        return Some(if rng.f64() < 0.65 { Species::Spruce } else { Species::Pine });
-    }
-    Some(match kind {
-        k if k < 0.30 => {
-            if rng.f64() < 0.18 {
-                Species::DarkOak
-            } else {
-                Species::Oak
-            }
-        }
-        k if k < 0.55 => {
-            if rng.f64() < 0.7 {
-                Species::Birch
-            } else {
-                Species::Oak
-            }
-        }
-        k if k < 0.78 => {
-            if rng.f64() < 0.4 {
-                Species::Jungle
-            } else {
-                Species::Oak
-            }
-        }
-        _ => {
-            if rng.f64() < 0.55 {
-                Species::Spruce
-            } else {
-                Species::Birch
-            }
-        }
-    })
+/// A structure on its site: the room it needs cleared (its footprint and
+/// a margin, five layers over it), a cobble foundation under it, the
+/// building on the first layer over the ground.
+fn structure(kind: Kind, seed: u64) -> Stamp {
+    let blueprint = kind.build(seed);
+    let [hx, hz] = blueprint.half;
+    let h = hx.max(hz) + 2;
+    let mut stamp = Stamp::new();
+    stamp.hollow([-h, 0, -h], [h, blueprint.height + 5, h]);
+    stamp.fill([-h + 1, -5, -h + 1], [h - 1, -1, h - 1], Block::Cobblestone.material());
+    stamp.place(&blueprint.stamp, [0, 0, 0]);
+    stamp
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::terrain::recipe::recipe;
-    use helio_pass_voxel_planet::{BrushOp, BrushShape, Cell};
+    use helio_pass_voxel_planet::{BrushOp, BrushShape, Cell, Planet};
 
-    /// A region's features are a function of the seed and the terrain: the
-    /// same brushes when decided again, after its neighbours' features loaded
-    /// and players dug over it, and after it was unloaded and loaded back.
+    /// The decoration is a valid feature set of the world: trees grow
+    /// around the middle of a face (their cells read as their blocks), and
+    /// a dig through one reads as dug.
     #[test]
-    fn regions_come_out_the_same_whenever_they_are_decided() {
+    fn trees_grow_and_dig_like_ground() {
         let mut planet = Planet::new(recipe()).unwrap();
-        let n = planet.grid().cells() / REGION_BLOCKS;
-        let centre = Region { face: 2, x: n / 2, y: n / 2 };
-        let around = centre.around(2, n + 1);
-        let decide = |planet: &Planet, r: Region| {
-            let mut cells = decorate(planet, r);
-            cells.sort_by_key(|(c, m)| (c.i, c.j, c.k, *m));
-            cells
-        };
-        let first: Vec<Vec<FeatureCell>> = around.iter().map(|r| decide(&planet, *r)).collect();
-        assert!(first.iter().map(Vec::len).sum::<usize>() > 0, "nothing grows around the centre");
-        for (region, brushes) in around.iter().zip(&first) {
-            planet.load_features(region.key(), brushes.clone()).unwrap();
+        let n = planet.grid().cells();
+        let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog].map(Block::material);
+        let mut trunk = None;
+        'search: for i in (n / 2 - 200..n / 2 + 200).step_by(3) {
+            for j in (n / 2 - 200..n / 2 + 200).step_by(3) {
+                let top = planet.terrain_top(2, i, j);
+                for k in top..top + 3 {
+                    if logs.contains(&planet.material(Cell::new(2, i, j, k))) && planet.solid(Cell::new(2, i, j, k)) {
+                        trunk = Some(Cell::new(2, i, j, k));
+                        break 'search;
+                    }
+                }
+            }
         }
+        let trunk = trunk.expect("no tree grows near the face's middle");
         let grid = *planet.grid();
-        let at = Cell::new(2, centre.x * REGION_BLOCKS + 16, centre.y * REGION_BLOCKS + 16, planet.terrain_top(2, centre.x * REGION_BLOCKS + 16, centre.y * REGION_BLOCKS + 16));
-        planet.apply(helio_pass_voxel_planet::Brush { center: grid.cell_center(at).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-        for (region, brushes) in around.iter().zip(&first) {
-            assert_eq!(&decide(&planet, *region), brushes, "{region:?} decided again");
-        }
-        planet.unload_features(centre.key());
-        assert_eq!(decide(&planet, centre), first[0]);
+        planet.apply(helio_pass_voxel_planet::Brush { center: grid.cell_center(trunk).to_array(), radius: 0.5, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        assert!(!planet.solid(trunk));
     }
 }

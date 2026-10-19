@@ -47,11 +47,4 @@ impl Blueprint {
         self.height = self.height.max(a[1].max(b[1]) + 1);
         self.stamp.walls(a, b, block.material());
     }
-
-    /// The blueprint turned by `quarter_turns` about the vertical, and mirrored
-    /// in x when `mirror`.
-    pub fn oriented(&self, quarter_turns: u32, mirror: bool) -> Blueprint {
-        let half = if quarter_turns % 2 == 1 { [self.half[1], self.half[0]] } else { self.half };
-        Blueprint { stamp: self.stamp.oriented(quarter_turns, mirror), half, height: self.height }
-    }
 }

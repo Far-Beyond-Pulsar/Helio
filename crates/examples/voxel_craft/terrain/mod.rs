@@ -1,6 +1,5 @@
 //! The terrain: its recipe, surface queries and biomes.
 
-pub mod climate;
 pub mod recipe;
 
 use helio_pass_voxel_planet::terrain::material;
@@ -14,16 +13,6 @@ pub struct Ground {
     pub cell: Cell,
     /// The material id of the block.
     pub material: u32,
-}
-
-/// Faces' edge margin (cells): features keep this far from a cube edge, where
-/// a column's neighbours would be on another face.
-pub const EDGE_MARGIN: i32 = 80;
-
-/// Whether `(i, j)` is far enough from the face's edges to build on.
-pub fn buildable(planet: &Planet, i: i32, j: i32) -> bool {
-    let n = planet.grid().cells();
-    i >= EDGE_MARGIN && j >= EDGE_MARGIN && i < n - EDGE_MARGIN && j < n - EDGE_MARGIN
 }
 
 /// The terrain's top block of column `(i, j)` of `face`.

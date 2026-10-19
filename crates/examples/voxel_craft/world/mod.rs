@@ -1,7 +1,7 @@
-//! The world the game sees: a voxel planet with edits applied off-thread,
-//! block queries that include edits not yet in the latest snapshot, and
-//! the decoration (trees, structures: the planet's features) that streams
-//! in around the player and out behind them.
+//! The world the game sees: a voxel planet with edits applied off-thread
+//! and block queries that include edits not yet in the latest snapshot. Its
+//! decoration (trees, structures) is the planet's features (`decorate`),
+//! part of its recipe.
 
 pub mod decorate;
 pub mod edits;
@@ -71,16 +71,6 @@ impl World {
             self.pending.insert(e.cell, (ticket, e.block));
         }
         self.worker.submit(Job::Edit(Batch { ticket, brushes }));
-    }
-
-    /// Tells the worker where the player is: what is decorated follows.
-    pub fn focus(&self, cell: Cell) {
-        self.worker.submit(Job::Focus(cell));
-    }
-
-    /// Regions whose features are loaded (in the latest snapshot).
-    pub fn regions_loaded(&self) -> usize {
-        self.snapshot.edits().features.len()
     }
 
     pub fn is_solid(&self, cell: Cell) -> bool {

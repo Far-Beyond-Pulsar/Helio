@@ -8,19 +8,6 @@ pub const VOXEL_M: f64 = 1.0;
 /// Seed of the terrain and of every placed feature.
 pub const WORLD_SEED: u64 = 7;
 
-/// Side of the square regions features (trees, structures) are decided in, in
-/// blocks. Each region is generated from its own hash of the world seed, so a
-/// region always comes out the same wherever it is generated from.
-pub const REGION_BLOCKS: i32 = 32;
-/// Regions decorated around the player, as a radius in regions (1.5 km:
-/// about 7000 regions, 56 KB of feature bricks each).
-pub const REGION_RADIUS: i32 = 48;
-/// Regions further than this past the radius are unloaded (their features
-/// come back the same when the player returns).
-pub const REGION_KEEP: i32 = 8;
-/// Regions the world worker decorates in parallel per pass.
-pub const DECORATE_BATCH: usize = 64;
-
 /// Walking, running and flying speeds (m/s).
 pub const WALK_SPEED: f64 = 4.3;
 pub const SPRINT_SPEED: f64 = 6.6;

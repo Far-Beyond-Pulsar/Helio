@@ -36,7 +36,7 @@ block pixels instead of smooth magnification).
 | `config.rs` | tunables |
 | `blocks.rs` | the block palette: voxel material ids, faces, emission |
 | `terrain/` | the planet recipe (layer stack and material rules), biomes, hash noise |
-| `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` decides each region's trees and structures |
+| `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` is the decoration: tree, cactus and structure stamps and the spawns that place them |
 | `trees/` | tree generators: oak, dark oak, birch, spruce, pine, jungle giant (as voxel stamps) |
 | `structures/` | blueprints (voxel stamps of this game's blocks): cottage, tower, ruins, well, pyramid |
 | `textures/` | block tiles to Helio scene materials; composes grass and leaves |
@@ -64,13 +64,14 @@ block pixels instead of smooth magnification).
   (`world/worker.rs`): the renderer draws the latest, physics reads it plus
   the player's pending edits so a break or placement is felt at once.
 * **Decoration** is the voxel planet's *features*
-  (`helio_pass_voxel_planet::features`): each 32 x 32 column region's trees
-  and structures are decided from the world seed, the region and the terrain
-  alone, placed as voxel stamps (`helio_pass_voxel_planet::stamp`), loaded
-  nearest the player first and unloaded far behind them. They are not edits:
-  saves and undo never hold them, memory stays bounded however far the player
-  travels, and a region comes back the same when they return, with whatever
-  they dug or built over it.
+  (`helio_pass_voxel_planet::features`, `world/decorate.rs`): a library of
+  stamps (tree variants grown per species, structures with their
+  foundations, cacti) and spawns placing them by biome, height, flatness and
+  forest fields. They are part of the planet's recipe and evaluated like its
+  terrain, on the GPU for drawing and on the CPU for physics and picks:
+  nothing streams around the player, memory does not grow with the area,
+  forests show to the horizon as their canopies, and what the player digs
+  or builds applies over them.
 
 ## Credits and licenses
 

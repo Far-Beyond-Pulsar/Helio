@@ -1,0 +1,102 @@
+# Features: procedural content as part of the terrain
+
+Trees, rocks, ruins and buildings standing on a planet, generated like the
+terrain: a function of the world's definition evaluated wherever and at
+whatever level a chunk is generated, on the GPU for drawing and identically
+on the CPU for queries, picks and physics. Nothing is loaded around a
+viewer, nothing is kept in memory past the chunks drawn and their
+footprints, and a forest shows to the horizon at the terrain's cost.
+
+## Why not regions loaded as data
+
+The first version (`features` as region stores, 2026-10-19) loaded each
+region's cells on the CPU around the player. It was bounded by a radius
+(memory grew with the area: ~56 KB a 32-column region, 4.3 GB for 4 km),
+needed a host thread to decide and load regions, and showed nothing past its
+radius. The terrain has none of these limits because it is evaluated, not
+stored. Features are made the same.
+
+## Model
+
+A planet's recipe holds a **feature set** (`FeatureSet`), part of the world's
+definition (its fingerprint; saves keep the recipe):
+
+- **Stamps**: voxel models (`stamp::Stamp`: material ids 1 to 127 or air at
+  offsets from an anchor), compiled to dense cells and summed-volume counts
+  of air and each material (a box's count in eight reads).
+- **Spawns** (rules, data): which stamps grow where, from the widest
+  spacing to the narrowest (structures, then trees, then rocks):
+  - a placement grid: one candidate per `spacing` x `spacing` base columns,
+    jittered by a hash of the world seed, the spawn and the square within
+    the square's middle half (neighbours' anchors keep half a spacing
+    apart);
+  - a density (a share of candidates by hash) and a noise field of the
+    world (`field_scale_m`, `field_threshold`);
+  - ground rules: the materials it grows on, the heights, the most relief
+    between its anchor's ground and its footprint's corners, how deep it
+    sinks;
+  - its stamps (variants chosen by hash), turned and mirrored by hash;
+  - its **far form** (below): material and canopy height.
+
+A candidate's ground is the terrain's height over its column (the
+generator's height function) and its ground material the terrain's rules
+at its top cell on level ground (slope 0: a column's own inputs, the same
+at every level). Features read the terrain alone, never edits, so every
+chunk and every query sees the same placements; edits apply over them.
+
+**Overlap and exclusion.** A spawn's own placements overlap where their
+stamps reach past their squares: a forest's crowns interlock. A candidate
+whose footprint (its stamp's reach each way) meets an earlier spawn's
+placement does not grow: a tree never grows through a house. A base cell
+is what the last placement holding it makes of it (spawns in order, a
+spawn's squares by row then column).
+
+## Levels
+
+- **Near levels** (cells at most half the spacing, and level 0): the
+  stamps. A coarse cell sums the cells the placements' stamps fill and
+  clear in its box: solid with the most common material from half its base
+  cells (majorities, as the terrain's coarse levels are), else air from
+  half, else the terrain's. The spawns drawn at a level are a prefix of the
+  set (spawns go widest first).
+- **Far levels**: a spawn with a far form draws as a canopy over the area
+  it grows in, as a mountain is drawn by its envelope: a level column whose
+  ground its rules accept (its field at the column's middle, or past the
+  field's scale the field's majority; heights; ground material) holds the
+  canopy's layers from its ground up, a cell solid where they fill half of
+  it. Cells taller than twice the canopy keep its colour: a covered
+  column's natural top is drawn in the far material, so a forest shows to
+  the horizon. Near stamps stand over far forms where both apply.
+
+## Pipeline
+
+GPU (`chunk_generate.wgsl`):
+
+1. `tile_columns_main`: the terrain's columns.
+2. **`tile_features_main`** (a footprint a workgroup, spawn by spawn): the
+   near spawns' candidates over the footprint and the margin later spawns'
+   exclusion reads (`CompiledFeatures::layout`), with their level-0 ground
+   heights and materials, into the footprint's pool slot
+   (`tile_placements`, kept while the footprint is); its measured ranges
+   raised over the placements reaching its columns and its far forms'
+   canopies (classification and residency see trees as terrain).
+3. `chunk_columns_main`: after the terrain's mask and before the edits,
+   `feature_column`: the far canopy, then each placement within reach in
+   order (base cells) or their sums (coarse cells); their materials into
+   the chunk's cells, and the column marked so `chunk_build_main` stores
+   them as it does edited cells.
+
+CPU (`Planet`): `sample_kind` / `material` / walks evaluate the same
+placements and stamps over a cell (`FeatureEval`, each square's placement
+cached), then the far forms (`CompiledFeatures::far_cover`).
+
+Tests pin CPU and GPU: features render exactly against CPU ray casts at
+level 0, draw their stamps' materials, and every coarse hit (near stamps
+and far canopies) is solid on the CPU.
+
+## Costs
+
+A footprint keeps `CompiledFeatures::stride` squares (8 bytes each). A
+candidate costs one height evaluation, plus four with a relief rule, once
+per footprint while it stays in the pool; a chunk column scans the squares
+within its spawns' reach.

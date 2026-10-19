@@ -1,13 +1,16 @@
 //! Chunk trees against the canonical CPU planet: the WGSL terrain programs
 //! bit for bit, and drawn hits near the eye (level 0) against exact CPU ray
-//! casts, over natural terrain, caves, overhangs, planes and edits.
+//! casts, over natural terrain, caves, overhangs, planes, features and
+//! edits.
 mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
 use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, KeptChunks, ResidencyConfig};
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
+use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::{Layer, LayerKind, TerrainLayers};
+use helio_pass_voxel_planet::stamp::Stamp;
 use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe, TerrainSource};
 
@@ -1238,61 +1241,6 @@ fn sealed_edits_render_exactly_under_a_running_world() {
     check(&planet);
 }
 
-/// Features (trees from stamps, two regions) draw exactly under a running
-/// world as they load, under a dig through one of them, and as a region
-/// unloads.
-#[test]
-fn features_render_exactly_as_they_load_and_unload() {
-    let Some(gpu) = gpu() else { return };
-    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
-    let dir = land(&planet, 1, 0.52, 0.48);
-    let grid = *planet.grid();
-    let up = dir.normalize();
-    let side = up.any_orthonormal_vector();
-    let fwd = up.cross(side);
-    let ground = planet.surface_point(dir, 0.0);
-    // The scene in cells.
-    let v = grid.voxel_size();
-    let mut tree = helio_pass_voxel_planet::stamp::Stamp::new();
-    tree.fill([-3, 7, -3], [3, 11, 3], material::GRASS);
-    tree.fill([0, 0, 0], [0, 9, 0], material::BRICK);
-    // Trees of a region on the ground along `side`, `offset` along `fwd`.
-    let region = |planet: &Planet, offset: f64| -> Vec<(helio_pass_voxel_planet::Cell, Option<u32>)> {
-        (-2..=2)
-            .flat_map(|n| {
-                let at = ground + side * (f64::from(n) * 9.0 * v) + fwd * offset;
-                let (cell, _) = grid.locate(at);
-                let k = planet.column_top(cell.face, cell.i, cell.j, 0);
-                tree.oriented(n as u32, n % 2 == 0).cells_at(cell.face, cell.i, cell.j, k).collect::<Vec<_>>()
-            })
-            .collect()
-    };
-    let eye = ground + up * (35.0 * v) - fwd * (50.0 * v);
-    let view = View::new(eye, (ground - eye).normalize().as_vec3(), [320, 180]);
-    let mut world = World::new(gpu, &planet);
-    let mut check = |planet: &Planet, what: &str| {
-        world.sync(gpu, planet);
-        let (compared, mismatched) = compare(gpu, &mut world, planet, &view);
-        assert!(compared > 400, "{what}: {compared} compared");
-        assert_eq!(mismatched, 0, "{what}");
-    };
-    check(&planet, "bare");
-    let (near, far) = (region(&planet, 0.0), region(&planet, 6.0 * v));
-    planet.load_features(1, near).unwrap();
-    planet.load_features(2, far).unwrap();
-    check(&planet, "loaded");
-    // A dig through the trees: under them in the history or not, edits
-    // apply over features.
-    planet.apply(Brush { center: (ground + up * (6.0 * v)).to_array(), radius: 6.0 * v, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-    for n in 0..200 {
-        planet.apply(Brush { center: (ground + side * ((f64::from(n % 40) - 20.0) * v) + up * (9.0 * v)).to_array(), radius: 0.5 * v, shape: BrushShape::Cube, op: BrushOp::Add, material: material::STONE, height: 0.0 }).unwrap();
-    }
-    assert!(planet.edits().sealed_len() > 0);
-    check(&planet, "dug");
-    planet.unload_features(1);
-    check(&planet, "region 1 unloaded");
-}
-
 /// From orbit (300 km up) every pixel is drawn as the planet's shape
 /// allows: a hit wherever the ray meets the sphere 20 km below the datum,
 /// sky wherever it misses the sphere 20 km above it (no relief reaches
@@ -1462,5 +1410,177 @@ fn picks_report_the_drawn_hit() {
         let [x, y] = pixels[r.id as usize];
         let drawn = hits[(y * 320 + x) as usize];
         assert_eq!(r.hit.map(|h| (h.cell, h.level)), drawn.map(|h| (h.cell, h.level)), "pixel {x},{y}");
+    }
+}
+
+/// Huts, trees and boulders (`features`): spawns widest first, each spacing
+/// at least its stamps' footprint.
+fn forest() -> FeatureSet {
+    let mut hut = Stamp::new();
+    hut.fill([-4, -1, -4], [4, 6, 4], material::PLANKS);
+    hut.hollow([-3, 0, -3], [3, 5, 3]);
+    hut.hollow([0, 0, -4], [1, 2, -4]);
+    hut.fill([-4, 7, -4], [4, 7, 4], material::BRICK);
+    let mut tree = Stamp::new();
+    tree.fill([-3, 9, -3], [3, 13, 3], material::LEAVES);
+    tree.fill([-2, 14, -2], [2, 15, 2], material::LEAVES);
+    tree.fill([0, 0, 0], [0, 11, 0], material::WOOD);
+    let mut boulder = Stamp::new();
+    boulder.fill([-1, -1, -1], [1, 1, 1], material::BASALT);
+    boulder.set([0, 2, 0], material::BASALT);
+    FeatureSet {
+        stamps: vec![hut, tree, boulder],
+        spawns: vec![
+            Spawn { name: "huts".into(), stamps: vec![0], spacing: 48, density: 0.5, max_relief: 4, sink: 1, ..Spawn::default() },
+            Spawn { name: "trees".into(), stamps: vec![1], spacing: 16, density: 0.8, field_scale_m: 30.0, field_threshold: -0.4, max_relief: 3, far_material: material::LEAVES, ..Spawn::default() },
+            Spawn { name: "boulders".into(), stamps: vec![2], spacing: 8, density: 0.15, sink: 1, ..Spawn::default() },
+        ],
+    }
+}
+
+/// A forest's planet and a land direction on it.
+fn forest_planet() -> (Planet, DVec3) {
+    let planet = Planet::new(PlanetRecipe { features: forest(), ..PlanetRecipe::default() }).unwrap();
+    let dir = land(&planet, 2, 0.31, 0.62);
+    (planet, dir)
+}
+
+/// Features render exactly as the CPU places them: standing among trees,
+/// huts and boulders, and from a treetop.
+#[test]
+fn features_render_exactly() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir) = forest_planet();
+    let grid = *planet.grid();
+    let (c, _) = grid.locate(planet.surface_point(dir, 0.0));
+    let feature_cells = (-60..60).flat_map(|d| [(d, 0), (0, d)]).filter(|&(a, b)| {
+        let top = planet.column_top(c.face, c.i + a, c.j + b, 0);
+        (top..top + 16).any(|k| matches!(planet.features_at(0, c.face, c.i + a, c.j + b, k), Some(Some(_))))
+    });
+    assert!(feature_cells.count() > 20, "few features near the view");
+    matches_exactly(&gpu, &planet, ground_view(&planet, dir, [320, 180]), 5000);
+    let eye = planet.surface_point(dir, 3.0);
+    let up = eye.normalize();
+    matches_exactly(&gpu, &planet, View::new(eye, (up.any_orthonormal_vector() - up * 0.6).normalize().as_vec3(), [320, 180]), 5000);
+}
+
+/// Every pixel whose CPU hit is a feature's cell draws its stamp's
+/// material at level 0.
+#[test]
+fn feature_cells_draw_their_own_materials() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir) = forest_planet();
+    let eye = planet.surface_point(dir, 2.5);
+    let up = eye.normalize();
+    let view = View::new(eye, (up.any_orthonormal_vector() - up * 0.3).normalize().as_vec3(), [320, 180]);
+    let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut wrong) = (0, 0);
+    let mut seen = std::collections::BTreeSet::new();
+    for y in 0..view.size[1] {
+        for x in 0..view.size[0] {
+            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 40.0) else { continue };
+            let c = cpu.cell;
+            let Some(Some(want)) = planet.features_at(0, c.face, c.i, c.j, c.k) else { continue };
+            assert_eq!(planet.material(c), want);
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == c) else { continue };
+            compared += 1;
+            seen.insert(want);
+            if drawn.material != want {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: {c:?} drawn {}, stamp {want}", drawn.material);
+                }
+            }
+        }
+    }
+    eprintln!("compared {compared}, wrong {wrong}, materials {seen:?}");
+    assert!(compared > 2000 && seen.len() >= 3, "{compared} pixels, materials {seen:?}");
+    assert_eq!(wrong, 0);
+}
+
+/// Coarse levels draw features' cells as the CPU makes them: from 60 m up
+/// near stamps and the forest's first far levels (levels 1 and 2), from
+/// 400 m the far canopy (levels 3 to 5): every hit on a cell features
+/// decide is solid there for the CPU too.
+#[test]
+fn coarse_feature_cells_are_the_cpu_cells() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir) = forest_planet();
+    for (height, down, levels) in [(60.0, 0.8, 1..3), (400.0, 0.35, 3..6)] {
+        coarse_features_match(&gpu, &planet, dir, height, down, levels);
+    }
+}
+
+fn coarse_features_match(gpu: &Gpu, planet: &Planet, dir: DVec3, height: f64, down: f64, levels: std::ops::Range<u32>) {
+    let eye = planet.surface_point(dir, height);
+    let up = eye.normalize();
+    let view = View::new(eye, (up.any_orthonormal_vector() - up * down).normalize().as_vec3(), [480, 270]);
+    let hits = World::new(gpu, planet).settle(gpu, planet, &view);
+    let mut by_level = [0usize; 8];
+    let mut drawn = [0usize; 12];
+    for h in hits.iter().flatten() {
+        drawn[(h.level as usize).min(11)] += 1;
+    }
+    let mut wrong = 0;
+    for h in hits.iter().flatten().filter(|h| (1..8).contains(&h.level)) {
+        let c = h.cell;
+        if planet.features_at(h.level, c.face, c.i, c.j, c.k).is_none() {
+            continue;
+        }
+        by_level[h.level as usize] += 1;
+        if planet.sample_kind(h.level, c.face, c.i, c.j, c.k).0 != 1 {
+            wrong += 1;
+            if wrong < 8 {
+                eprintln!("level {} {c:?} drawn, air on the CPU", h.level);
+            }
+        }
+    }
+    eprintln!("{height} m up: hits by level {drawn:?}, on feature cells {by_level:?}, wrong {wrong}");
+    assert!(levels.clone().all(|l| by_level[l as usize] > 100), "{height} m up: {by_level:?}");
+    assert_eq!(wrong, 0);
+}
+
+/// What features cost to generate (`cargo test --release --test chunks
+/// feature_generation_cost -- --ignored --nocapture`): the bare planet's
+/// and the forest's views settled, generated again in full three times,
+/// the GPU's time a tile and a chunk by stage, and the footprints'
+/// placements' memory.
+#[test]
+#[ignore]
+fn feature_generation_cost() {
+    let Some(gpu) = gpu() else { return };
+    let (forest, dir) = forest_planet();
+    let bare = Planet::new(PlanetRecipe::default()).unwrap();
+    let f = forest.features();
+    eprintln!("placements: {} squares a footprint, {:.1} MB over {} footprints", f.stride, (f.stride * 8 * TEST_CAPACITY.footprints) as f64 / 1048576.0, TEST_CAPACITY.footprints);
+    for (name, planet) in [("bare", &bare), ("forest", &forest)] {
+        for (height, down) in [(2.0, 0.3), (60.0, 0.8), (400.0, 0.35)] {
+            let eye = planet.surface_point(dir, height);
+            let up = eye.normalize();
+            let view = View::new(eye, (up.any_orthonormal_vector() - up * down).normalize().as_vec3(), [480, 270]);
+            let mut world = World::new(&gpu, planet);
+            world.settle(&gpu, planet, &view);
+            world.chunks.take_timings();
+            for _ in 0..3 {
+                world.chunks.regenerate_all();
+                world.settle(&gpu, planet, &view);
+            }
+            let t = world.chunks.take_timings();
+            let (tiles, chunks) = (t.iter().map(|f| f.tiles).sum::<usize>().max(1) as f64, t.iter().map(|f| f.chunks).sum::<usize>().max(1) as f64);
+            let stage = |k: usize| t.iter().map(|f| f.stages[k]).sum::<f64>() * 1e3;
+            let part = |k: usize| t.iter().map(|f| f.tile_stages[k]).sum::<f64>() * 1e3 / tiles;
+            eprintln!(
+                "COST {name} {height} m: {tiles} tiles {chunks} chunks: tiles {:.1} us/tile (nodes {:.1}, columns {:.1}, halos {:.1}, features {:.1}), chunk columns {:.2} us/chunk, builds {:.2} us/chunk; {:.1} MB resident",
+                stage(0) / tiles,
+                part(0),
+                part(1),
+                part(2),
+                part(3),
+                stage(1) / chunks,
+                stage(2) / chunks,
+                world.chunks.resident_bytes() as f64 / 1048576.0
+            );
+        }
     }
 }

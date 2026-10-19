@@ -355,10 +355,11 @@ fn generation_node_word(slot: u32) -> i32 {{
     return hi.x + hi.y + hi.z + hi.w + ((lo.x + lo.y + lo.z + lo.w) >> 8u);
 }}
 
-// The column's nodes from tile `tile`'s, when there: its first node within
-// the tile's ring.
-fn gen_tile_nodes(tile: u32, i: i32, j: i32) -> bool {{
+// The column's nodes from tile `tile`'s, when there: a column of the
+// tile's level, its first node within the tile's ring.
+fn gen_tile_nodes(tile: u32, i: i32, j: i32, level: u32) -> bool {{
     let job = tile_jobs[tile];
+    if job.level != level {{ return false; }}
     let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
     let n = (first - vec2<i32>(job.cx, job.cy) * 64) / NODE_COLUMNS + 1;
     if any(n < vec2<i32>(0)) || any(n >= vec2<i32>(i32(TILE_NODES) - 1)) {{ return false; }}
@@ -377,14 +378,15 @@ fn gen_point_nodes(face: u32, i: i32, j: i32, level: u32, scratch: u32) {{
 
 // A column of tile `tile` (within its ring).
 fn generation_tile_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
-    if terrain_has_nodes(level + u32(world.grid.w)) {{ _ = gen_tile_nodes(tile, i, j); }}
+    if terrain_has_nodes(level + u32(world.grid.w)) {{ _ = gen_tile_nodes(tile, i, j, level); }}
     return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
 }}
 
-// A column near tile `tile`: its nodes from the tile's when there, else
-// its own four (scratch node `scratch`, one per lane).
+// A column near tile `tile` (or of another level: features read level-0
+// ground): its nodes from the tile's when there, else its own four
+// (scratch node `scratch`, one per lane).
 fn generation_halo_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool, scratch: u32) -> vec2<i32> {{
-    if terrain_has_nodes(level + u32(world.grid.w)) && !gen_tile_nodes(tile, i, j) {{ gen_point_nodes(face, i, j, level, scratch); }}
+    if terrain_has_nodes(level + u32(world.grid.w)) && !gen_tile_nodes(tile, i, j, level) {{ gen_point_nodes(face, i, j, level, scratch); }}
     return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
 }}
 

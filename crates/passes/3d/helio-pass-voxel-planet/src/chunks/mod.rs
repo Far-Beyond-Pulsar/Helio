@@ -63,6 +63,9 @@ const KEPT_FORMAT: u16 = 1;
 /// A uniform brick's table entry flag (`UNIFORM_BRICK` of
 /// chunk_generate.wgsl): its cells' one edit in the low 16 bits.
 const UNIFORM_BRICK: u32 = 0x4000_0000;
+/// Words a chunk job's column bits take (`FEATURE_JOB_WORDS` of
+/// chunk_generate.wgsl).
+const FEATURE_JOB_WORDS: u64 = 128;
 /// Words a column of a `cell_materials` slot (`CELL_WORDS` of
 /// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
 const CELL_WORDS: u64 = 17;
@@ -116,7 +119,9 @@ const SLOPE_LATTICE: u64 = 1444;
 
 /// What a [`ChunkWorld`] holds, each within what the device binds: chunk
 /// slots (a chunk's 64-tree and leaves, about 7 KB each), detail pages
-/// (4 KiB each), footprint pool slots (75 KB each, at least two batches')
+/// (4 KiB each), footprint pool slots (75 KB each and the features'
+/// placements, `CompiledFeatures::stride` squares of 8 bytes; at least two
+/// batches')
 /// cached baked bricks (1 KiB each, before the least recently used are
 /// reused) and edited chunks kept on the CPU (bytes, least recently used
 /// dropped). The default is a game's: 131072 chunks, a world and its device
@@ -856,14 +861,14 @@ pub struct FrameTimings {
     /// chunk builds.
     pub stages: [f64; 3],
     /// The first stage's parts: eviction and the tiles' nodes, their
-    /// columns, their halos.
-    pub tile_stages: [f64; 3],
+    /// columns, their halos, their features' placements.
+    pub tile_stages: [f64; 4],
 }
 
 /// Timestamps a frame writes: generation start, tile halos end, seed start
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
-/// tile nodes end, tile columns end.
-const QUERIES: u32 = 10;
+/// tile nodes end, tile columns end, tile features end.
+const QUERIES: u32 = 11;
 
 /// `Buried`'s size: a count and 4095 keys.
 const BURIED_BYTES: u64 = 16 * 4096;
@@ -1085,6 +1090,7 @@ pub struct ChunkWorld {
     tile_slope_nodes: wgpu::ComputePipeline,
     tile_slope_heights: wgpu::ComputePipeline,
     tile_slopes: wgpu::ComputePipeline,
+    tile_features: wgpu::ComputePipeline,
     chunk_columns: wgpu::ComputePipeline,
     chunk_build: wgpu::ComputePipeline,
     draw_layout: wgpu::BindGroupLayout,
@@ -1139,6 +1145,13 @@ pub struct ChunkWorld {
     // the batch's lattices of level-4 tops they come from.
     tile_slope_data: wgpu::Buffer,
     slope_lattice: wgpu::Buffer,
+    // The world's features (`CompiledFeatures::gpu_words`), each
+    // footprint's placements (the set's stride of squares a footprint),
+    // and the batch's chunk jobs' columns features changed (a bit each).
+    feature_set: wgpu::Buffer,
+    tile_placements: wgpu::Buffer,
+    job_features: wgpu::Buffer,
+    has_features: bool,
     tile_ranges: wgpu::Buffer,
     chunk_jobs: wgpu::Buffer,
     column_masks: wgpu::Buffer,
@@ -1699,6 +1712,9 @@ impl ChunkWorld {
                 storage(33, false, c),
                 storage(34, false, c),
                 storage(35, false, c),
+                storage(36, true, c),
+                storage(37, false, c),
+                storage(38, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -1718,6 +1734,7 @@ impl ChunkWorld {
         let tile_slope_nodes = compute("tile_slope_nodes_main");
         let tile_slope_heights = compute("tile_slope_heights_main");
         let tile_slopes = compute("tile_slopes_main");
+        let tile_features = compute("tile_features_main");
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
@@ -1994,7 +2011,9 @@ impl ChunkWorld {
         let leaf_capacity = max_chunks as u64 * LEAVES_PER_SLOT;
         let detail_capacity = capacity.detail_pages.min((binding / (DETAIL_WORDS * 4)) as usize).max(64) as u64;
         let table_slots = (max_chunks * TABLE_PER_SLOT).next_power_of_two().min((binding / 32).next_power_of_two() as usize / 2);
-        let pool_size = capacity.footprints.min((binding / (TILE_COLUMNS * 16)) as usize).max(2 * TILE_BATCH);
+        let features = planet.features();
+        let placement_stride = features.stride as u64 * 8;
+        let pool_size = capacity.footprints.min((binding / (TILE_COLUMNS * 16)) as usize).min((binding / placement_stride.max(1)) as usize).max(2 * TILE_BATCH);
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
         let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
         let (materials, detail, shade) = crate::engine::material_table(&planet.field().appearance());
@@ -2021,6 +2040,7 @@ impl ChunkWorld {
             tile_slope_nodes,
             tile_slope_heights,
             tile_slopes,
+            tile_features,
             chunk_columns,
             chunk_build,
             draw_layout,
@@ -2067,6 +2087,10 @@ impl ChunkWorld {
             tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, wgpu::BufferUsages::STORAGE),
             tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, wgpu::BufferUsages::STORAGE),
             slope_lattice: buffer("chunk slope lattices", TILE_BATCH as u64 * SLOPE_LATTICE * 4, wgpu::BufferUsages::STORAGE),
+            feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk features"), contents: bytemuck::cast_slice(&features.gpu_words()), usage: wgpu::BufferUsages::STORAGE }),
+            tile_placements: buffer("chunk footprint placements", (pool_size as u64 * placement_stride).max(8), wgpu::BufferUsages::STORAGE),
+            job_features: buffer("chunk job features", CHUNK_BATCH as u64 * FEATURE_JOB_WORDS * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
+            has_features: !features.is_empty(),
             // Four words a tile, then the batch's tile count.
             tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
             chunk_jobs: buffer("chunk jobs", (CHUNK_BATCH * 32) as u64, s),
@@ -2177,9 +2201,11 @@ impl ChunkWorld {
             stale: FxHashSet::default(),
             grid: *planet.grid(),
             ceiling: planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN,
+            // The terrain's heights, its features standing over and sunk
+            // under them.
             height_layers: (
-                (planet.min_terrain_height() / planet.grid().voxel_size()).floor() as i32 - 64,
-                (planet.max_terrain_height() / planet.grid().voxel_size()).ceil() as i32 + 64,
+                (planet.min_terrain_height() / planet.grid().voxel_size()).floor() as i32 - 64 - planet.features().below,
+                (planet.max_terrain_height() / planet.grid().voxel_size()).ceil() as i32 + 64 + planet.features().above,
             ),
             worker: None,
             plan: Default::default(),
@@ -2233,6 +2259,9 @@ impl ChunkWorld {
                 entry(26, &self.tile_halo_data),
                 entry(34, &self.tile_slope_data),
                 entry(35, &self.slope_lattice),
+                entry(36, &self.feature_set),
+                entry(37, &self.tile_placements),
+                entry(38, &self.job_features),
                 entry(4, &self.tile_ranges),
                 entry(5, &self.chunk_jobs),
                 entry(6, &self.column_masks),
@@ -2487,10 +2516,7 @@ impl ChunkWorld {
         // unseal.
         let bricks = if state.sealed == self.edit_state.sealed {
             self.edits.bricks.clone()
-        } else if state.sealed.sealed > self.edit_state.sealed.sealed || (state.sealed.sealed == self.edit_state.sealed.sealed && state.sealed.hash == self.edit_state.sealed.hash) {
-            // A seal, or features loaded or unloaded: the index marks the
-            // columns changed (a column whose features went stays marked,
-            // which only costs a classification).
+        } else if state.sealed.sealed > self.edit_state.sealed.sealed {
             std::sync::Arc::new(self.edits.bricks.extended(planet.grid(), &edits.baked, columns.iter().copied()))
         } else {
             std::sync::Arc::new(classify::BrickIndex::new(planet.grid(), &edits.baked))
@@ -3011,6 +3037,9 @@ impl ChunkWorld {
         }
         if !chunk_jobs.is_empty() {
             self.queue.write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
+            if self.has_features {
+                encoder.clear_buffer(&self.job_features, 0, Some(chunk_jobs.len() as u64 * FEATURE_JOB_WORDS * 4));
+            }
         }
         // A pass per kernel, each timed (`QUERIES`).
         let stamp = |begin: Option<u32>, end: u32| {
@@ -3055,6 +3084,15 @@ impl ChunkWorld {
             pass.set_bind_group(0, &group, &[]);
             if computed_count > 0 {
                 pass.set_pipeline(&self.tile_halo);
+                pass.dispatch_workgroups((computed_count as u32).min(crate::engine::HALO_GROUPS), 1, 1);
+            }
+        }
+        {
+            // After the halos: both use the lanes' scratch nodes.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile features"), timestamp_writes: stamp(None, 10) });
+            pass.set_bind_group(0, &group, &[]);
+            if computed_count > 0 && self.has_features {
+                pass.set_pipeline(&self.tile_features);
                 pass.dispatch_workgroups((computed_count as u32).min(crate::engine::HALO_GROUPS), 1, 1);
             }
         }
@@ -3253,8 +3291,8 @@ impl ChunkWorld {
                     let data = slot.buffer.slice(..).get_mapped_range().unwrap();
                     let t: &[u64] = bytemuck::cast_slice(&data);
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
-                    let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
-                    let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1])];
+                    let stages = [ms(t[0], t[10]), ms(t[10], t[5]), ms(t[5], t[6])];
+                    let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1]), ms(t[1], t[10])];
                     let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
                     // Footprints computed and chunks generated are measured
                     // apart: with the footprint pool a frame may generate

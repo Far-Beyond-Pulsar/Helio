@@ -7,7 +7,6 @@ mod blueprint;
 pub use blueprint::Blueprint;
 
 use crate::blocks::Block;
-use crate::terrain::Biome;
 use crate::trees::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,20 +19,6 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The kind of structure a region of `biome` gets from `roll` (0..1), if any.
-    pub fn for_biome(biome: Biome, roll: f64) -> Option<Kind> {
-        match biome {
-            Biome::Temperate => Some(match roll {
-                r if r < 0.38 => Kind::Cottage,
-                r if r < 0.62 => Kind::Tower,
-                r if r < 0.82 => Kind::Ruins,
-                _ => Kind::Well,
-            }),
-            Biome::Desert => Some(if roll < 0.55 { Kind::Pyramid } else { Kind::Well }),
-            Biome::Snow | Biome::Rock => (roll < 0.4).then_some(Kind::Ruins),
-        }
-    }
-
     pub fn build(self, seed: u64) -> Blueprint {
         let mut rng = Rng::new(seed);
         match self {

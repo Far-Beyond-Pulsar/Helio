@@ -1,24 +1,41 @@
-//! Stamps: small voxel models placed on a planet (a tree, a house, a
-//! well), cells of material ids or air around an anchor, and the brushes
-//! that place them.
+//! Stamps: small voxel models (a tree, a house, a well), cells of material
+//! ids or air around an anchor. Features place them procedurally
+//! (`crate::features`, turned and mirrored by each placement); an edit
+//! places one as brushes ([`Stamp::brushes`]).
 //!
 //! Offsets are `[x, y, z]` with +y up the planet's radial axis and `y = 0`
 //! the layer the anchor is in; x runs along the face's i axis and z along
-//! its j axis. A stamp is turned and mirrored about the vertical before it
-//! is placed ([`Stamp::oriented`]).
+//! its j axis.
 //!
-//! Placing one is a few hundred brushes, not one a cell: vertical runs of a
-//! material (a trunk, a wall) become one box brush ([`run_brushes`]), and
-//! every brush is history the planet keeps and renderers follow.
+//! Placing one as edits is a few hundred brushes, not one a cell: vertical
+//! runs of a material (a trunk, a wall) become one box brush
+//! ([`run_brushes`]), and every brush is history the planet keeps and
+//! renderers follow.
 
 use crate::edits::{Brush, BrushOp, BrushShape};
 use crate::grid::{Cell, Grid};
 use rustc_hash::FxHashMap;
 
 /// Cells of material ids (`Some`) or air (`None`) at offsets from an anchor.
+/// Serialized as its cells in order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stamp {
     cells: FxHashMap<[i32; 3], Option<u32>>,
+}
+
+impl serde::Serialize for Stamp {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut cells: Vec<([i32; 3], Option<u32>)> = self.cells().collect();
+        cells.sort_unstable();
+        serde::Serialize::serialize(&cells, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Stamp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let cells: Vec<([i32; 3], Option<u32>)> = serde::Deserialize::deserialize(deserializer)?;
+        Ok(Self { cells: cells.into_iter().collect() })
+    }
 }
 
 impl Stamp {
@@ -92,33 +109,6 @@ impl Stamp {
         let mut cells = self.cells.keys();
         let first = *cells.next()?;
         Some(cells.fold((first, first), |(lo, hi), p| (min3(lo, *p), max3(hi, *p))))
-    }
-
-    /// Keeps the cells `keep` says to (by offset and what is there).
-    pub fn retain(&mut self, mut keep: impl FnMut([i32; 3], Option<u32>) -> bool) {
-        self.cells.retain(|p, m| keep(*p, *m));
-    }
-
-    /// The stamp turned by `quarter_turns` about the vertical (x towards
-    /// z), after mirroring x when `mirror`.
-    pub fn oriented(&self, quarter_turns: u32, mirror: bool) -> Stamp {
-        let turn = |p: [i32; 3]| {
-            let [mut x, y, mut z] = p;
-            if mirror {
-                x = -x;
-            }
-            for _ in 0..quarter_turns % 4 {
-                (x, z) = (-z, x);
-            }
-            [x, y, z]
-        };
-        Stamp { cells: self.cells.iter().map(|(p, m)| (turn(*p), *m)).collect() }
-    }
-
-    /// Its cells with its origin at cell `(i, j, k)` of `face` (what a
-    /// region's features are: [`crate::Planet::load_features`]).
-    pub fn cells_at(&self, face: u8, i: i32, j: i32, k: i32) -> impl Iterator<Item = (Cell, Option<u32>)> + '_ {
-        self.cells.iter().map(move |(p, m)| (Cell::new(face, i + p[0], j + p[2], k + p[1]), *m))
     }
 
     /// The brushes that place the stamp with its origin at cell `(i, j, k)`
@@ -213,7 +203,6 @@ mod tests {
         house.hollow([0, 0, -2], [0, 1, -2]);
         house.fill([-2, 0, -1], [2, 3, 1], 7);
         house.hollow([-2, 0, -1], [2, 3, 1]);
-        let house = house.oriented(1, true);
         let brushes = house.brushes(&grid, face, i, j, k);
         assert!(brushes.len() * 2 < house.len(), "{} brushes for {} cells", brushes.len(), house.len());
         for brush in brushes {
@@ -226,16 +215,5 @@ mod tests {
                 assert_eq!(planet.material(cell), m, "{p:?}");
             }
         }
-    }
-
-    #[test]
-    fn turns_and_mirrors_keep_the_cells() {
-        let mut s = Stamp::new();
-        s.set([2, 0, 1], 3);
-        s.clear([-1, 4, 0]);
-        assert_eq!(s.oriented(1, false).get([-1, 0, 2]), Some(Some(3)));
-        assert_eq!(s.oriented(4, false), s);
-        assert_eq!(s.oriented(0, true).get([-2, 0, 1]), Some(Some(3)));
-        assert_eq!(s.oriented(2, false).get([1, 4, 0]), Some(None));
     }
 }
