@@ -56,10 +56,10 @@ helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
 helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-lens = { workspace = true }
+helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 
 [dev-dependencies]
 pollster = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 glam = { workspace = true }
 serde_json = { workspace = true }
-helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }

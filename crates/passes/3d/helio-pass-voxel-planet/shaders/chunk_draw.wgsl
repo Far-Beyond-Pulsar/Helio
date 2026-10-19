@@ -1621,6 +1621,25 @@ fn level_colour(level: u32) -> vec3<f32> {
     return colours[level & 7u];
 }
 
+// The hit `position`'s place in cell `cell`, as the cell's own coordinates
+// in [0, 1]^3.
+fn voxel_in_cell(c: ChunkDraw, cell: vec3<i32>, position: vec3<f32>) -> vec3<f32> {
+    let frame_position = vec3<f32>(c.i0.w, c.i1.w, c.i2.w)
+        + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
+    return clamp(frame_position - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// A voxel material's surface from the host's scene materials (textures
+// through Helio's material table); `valid` is false where the host maps none.
+struct SceneSurface {
+    albedo: vec3<f32>,
+    roughness: f32,
+    emissive: vec3<f32>,
+    valid: bool,
+}
+
+SCENE_MATERIALS
+
 // Helio's gbuffer (`engine::GBUFFER_FORMATS`).
 struct GOut {
     @location(0) albedo: vec4<f32>,
@@ -1655,7 +1674,17 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let look = surface_look(v.x, cell, axis, sign, material, position, pixel_m, vec2<u32>(pixel.xy));
     let f0 = 0.03;
     var out: GOut;
-    out.albedo = vec4<f32>(look.albedo, 1.0);
+    var albedo = look.albedo;
+    var roughness = palette(material).w;
+    var emissive = vec3<f32>(0.0);
+    let level = u32(chunk_keys[v.x].x >> 8u) & 31u;
+    let scene = scene_surface(material, axis, sign, level, voxel_in_cell(c, cell, position), pixel_m);
+    if scene.valid {
+        albedo = scene.albedo;
+        roughness = scene.roughness;
+        emissive = scene.emissive;
+    }
+    out.albedo = vec4<f32>(albedo, 1.0);
     if debug_mode() == 32u {
         let h = f32((v.y >> 26u) & 63u) * 3.0 / 64.0;
         let cost = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
@@ -1670,8 +1699,8 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
         out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0);
     }
     out.normal = vec4<f32>(normal, f0);
-    out.orm = vec4<f32>(look.ao * shading.w, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
-    out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
+    out.orm = vec4<f32>(look.ao * shading.w, clamp(roughness, 0.04, 1.0), 0.0, f0);
+    out.emissive = vec4<f32>(emissive, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).
     out.lightmap_uv = vec2<f32>(-1.0, -2.0);
     out.sss = vec4<f32>(0.0);

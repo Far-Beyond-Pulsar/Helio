@@ -2041,3 +2041,22 @@ fn build_forward_graph_internal(
 
     graph
 }
+
+/// Reads the frame's scene materials (Helio's material rows and descriptor-
+/// indexed texture table) for `ChunkPass::set_scene_materials`, so voxel
+/// terrain is textured by the same `MaterialComponent`s as meshes.
+pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneMaterialSource {
+    use helio_pass_voxel_planet::chunks::scene::SceneMaterialInputs;
+    Box::new(|ctx| {
+        let textures = ctx
+            .registry
+            .read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "VoxelPlanet")?;
+        let materials = ctx.scene_buffers.get(pulsar_scenedb::gpu::BufferKey::of("materials"))?;
+        Some(SceneMaterialInputs {
+            materials: &materials.buffer,
+            texture_views: textures.texture_views,
+            samplers: textures.samplers,
+            version: (textures.version, materials.epoch as u64),
+        })
+    })
+}

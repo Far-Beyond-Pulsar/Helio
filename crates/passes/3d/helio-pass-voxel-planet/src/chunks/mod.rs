@@ -12,6 +12,7 @@
 mod drawn;
 pub mod pass;
 pub mod residency;
+pub mod scene;
 
 use crate::edit_store::{ColumnKey, EditStore};
 use crate::edits::{center_half, FaceBrush};
@@ -769,6 +770,19 @@ impl Default for ResidencyConfig {
     }
 }
 
+/// Publishing with the host's scene materials (`scene`).
+struct SceneState {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    /// Entries of the texture table the pipeline was built for.
+    capacity: u32,
+    map: wgpu::Buffer,
+    /// The map the buffer holds.
+    map_written: Option<scene::VoxelMaterialMap>,
+    /// The bind group of the inputs' version.
+    group: std::sync::Mutex<Option<((u64, u64), wgpu::BindGroup)>>,
+}
+
 /// Chunk trees of one planet: resident chunks, their GPU storage and the
 /// draw.
 pub struct ChunkWorld {
@@ -807,6 +821,8 @@ pub struct ChunkWorld {
     shadow_fallback_layout: wgpu::BindGroupLayout,
     shadow_fallback: wgpu::ComputePipeline,
     publish: wgpu::RenderPipeline,
+    /// Publish with the host's scene materials (devices with binding arrays).
+    scene: Option<SceneState>,
     /// The last draw's bind group (its parameters and chunk storage).
     last_group: Option<wgpu::BindGroup>,
     targets: Option<Targets>,
@@ -1361,7 +1377,8 @@ pub fn shader_sources(
             },
         )
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
-        .replace("PLANE_WORLD", if plane { "true" } else { "false" });
+        .replace("PLANE_WORLD", if plane { "true" } else { "false" })
+        .replace("SCENE_MATERIALS", scene::STUB);
     [
         (
             "chunk generation",
@@ -1468,7 +1485,7 @@ impl ChunkWorld {
 
         let draw_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk draw"),
-            source: wgpu::ShaderSource::Wgsl(draw_source.into()),
+            source: wgpu::ShaderSource::Wgsl(draw_source.clone().into()),
         });
         let all =
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
@@ -1786,6 +1803,57 @@ impl ChunkWorld {
             multiview_mask: None,
             cache: None,
         });
+        let scene = scene::texture_capacity(device).map(|capacity| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("chunk draw (scene materials)"),
+                source: wgpu::ShaderSource::Wgsl(scene::scene_source(&draw_source, capacity).into()),
+            });
+            let layout_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk scene materials"),
+                entries: &scene::layout_entries(capacity),
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&draw_layout), Some(&resolve_layout), Some(&layout_2)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("chunk gbuffer (scene materials)"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("resolve_vertex"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: depth(helio_core::depth::NEARER),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("publish"),
+                    compilation_options: Default::default(),
+                    targets: &crate::engine::GBUFFER_FORMATS.map(|format| {
+                        Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })
+                    }),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            SceneState {
+                pipeline,
+                layout: layout_2,
+                capacity,
+                map: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("chunk scene material map"),
+                    size: std::mem::size_of::<scene::VoxelMaterialMap>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                map_written: None,
+                group: std::sync::Mutex::new(None),
+            }
+        });
 
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -1880,6 +1948,7 @@ impl ChunkWorld {
             shadow_fallback_layout,
             shadow_fallback,
             publish,
+            scene,
             last_group: None,
             targets: None,
             rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS")
@@ -4134,6 +4203,34 @@ impl ChunkWorld {
         gbuffer: [&wgpu::TextureView; 8],
         depth: &wgpu::TextureView,
     ) {
+        self.publish_scene(encoder, gbuffer, depth, None);
+    }
+
+    /// Whether the device can draw voxel materials with scene materials
+    /// (and how long its texture table must be).
+    pub fn scene_texture_capacity(&self) -> Option<u32> {
+        self.scene.as_ref().map(|s| s.capacity)
+    }
+
+    /// Voxel materials show the scene material rows of `map` (written to the
+    /// GPU when it changes).
+    pub fn set_material_map(&mut self, map: &scene::VoxelMaterialMap) {
+        let Some(scene) = &mut self.scene else { return };
+        if scene.map_written.as_ref() != Some(map) {
+            self.queue.write_buffer(&scene.map, 0, bytemuck::bytes_of(map));
+            scene.map_written = Some(*map);
+        }
+    }
+
+    /// `publish`, textured by the host's scene materials where `inputs` are
+    /// given and the device supports it.
+    pub fn publish_scene(
+        &self,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        gbuffer: [&wgpu::TextureView; 8],
+        depth: &wgpu::TextureView,
+        inputs: Option<scene::SceneMaterialInputs<'_>>,
+    ) {
         let Some(targets) = &self.targets else { return };
         let Some(group) = &self.last_group else {
             return;
@@ -4177,9 +4274,42 @@ impl ChunkWorld {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.publish);
-        pass.set_bind_group(0, group, &[]);
-        pass.set_bind_group(1, &resolve_group, &[]);
+        // The host's scene materials, when the map is written and the table
+        // is the length the pipeline was built for.
+        let scene = self.scene.as_ref().zip(inputs).filter(|(s, i)| {
+            s.map_written.is_some() && i.texture_views.len() == s.capacity as usize && i.samplers.len() == s.capacity as usize
+        });
+        let scene_group = scene.as_ref().map(|(s, i)| {
+            let mut cached = s.group.lock().unwrap();
+            if cached.as_ref().map(|(version, _)| *version) != Some(i.version) {
+                let entries = vec![
+                    wgpu::BindGroupEntry { binding: 0, resource: s.map.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: i.materials.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureViewArray(i.texture_views) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::SamplerArray(i.samplers) },
+                ];
+                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("chunk scene materials"),
+                    layout: &s.layout,
+                    entries: &entries,
+                });
+                *cached = Some((i.version, group));
+            }
+            cached.as_ref().map(|(_, g)| g.clone()).unwrap()
+        });
+        match (&scene, &scene_group) {
+            (Some((s, _)), Some(group_2)) => {
+                pass.set_pipeline(&s.pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.set_bind_group(1, &resolve_group, &[]);
+                pass.set_bind_group(2, group_2, &[]);
+            }
+            _ => {
+                pass.set_pipeline(&self.publish);
+                pass.set_bind_group(0, group, &[]);
+                pass.set_bind_group(1, &resolve_group, &[]);
+            }
+        }
         pass.draw(0..3, 0..1);
     }
 

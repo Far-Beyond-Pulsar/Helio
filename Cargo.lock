@@ -1063,6 +1063,7 @@ dependencies = [
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-volumetric-fog",
+ "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "helio-xr",
  "image",
@@ -1074,6 +1075,7 @@ dependencies = [
  "rusqlite",
  "salva3d",
  "scenedb-inspector-agent",
+ "serde_json",
  "wgpu",
  "winit",
 ]

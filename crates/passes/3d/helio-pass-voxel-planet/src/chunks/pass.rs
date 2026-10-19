@@ -30,6 +30,8 @@ pub struct ChunkPass {
     budget_ms: Option<f64>,
     /// The last frame's CPU milliseconds: prepare, execute.
     cpu_ms: [f64; 2],
+    /// Voxel materials as the host's scene materials (`set_scene_materials`).
+    scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
 }
 
 impl ChunkPass {
@@ -54,7 +56,21 @@ impl ChunkPass {
             timings: Vec::new(),
             budget_ms: None,
             cpu_ms: [0.0; 2],
+            scene: None,
         }
+    }
+
+    /// Voxel materials shown as the host's scene materials: `map` says which
+    /// scene rows each material uses, `source` reads the frame's material
+    /// table from the context (see `helio_default_graphs::voxel_scene_materials`).
+    /// Devices without texture binding arrays keep the flat appearance.
+    pub fn set_scene_materials(&mut self, map: super::scene::VoxelMaterialMap, source: super::scene::SceneMaterialSource) {
+        self.scene = Some((map, source));
+    }
+
+    /// Back to the flat appearance table.
+    pub fn clear_scene_materials(&mut self) {
+        self.scene = None;
     }
 
     /// The host's art settings; whether they changed.
@@ -144,6 +160,7 @@ const READS: &[&str] = &[
     "gbuffer_sss",
     "gbuffer_extra",
     "gbuffer_velocity",
+    "material_textures",
 ];
 const WRITES: &[&str] = &[
     "gbuffer",
@@ -367,6 +384,10 @@ impl ChunkPass {
         };
         self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
+        let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
+        if let Some((map, _)) = &self.scene {
+            world.set_material_map(map);
+        }
         let mut cmds = ctx.graphics_cmds();
         let encoder = &mut cmds;
         // Generation keeps its pace per second at any frame rate: a frame
@@ -410,7 +431,7 @@ impl ChunkPass {
             frame.sun,
             [ctx.width, ctx.height],
         );
-        world.publish(encoder, gbuffer, ctx.depth);
+        world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);
         if let Some(picks) = &frame.picks {
             world.copy_picks(encoder, picks);
         }
