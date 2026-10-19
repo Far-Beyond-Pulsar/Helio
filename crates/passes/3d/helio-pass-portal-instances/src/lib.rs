@@ -68,7 +68,8 @@ pub struct PortalInstancePass {
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<PortalBindGroupKey>,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<u64>,
+    /// `(material texture version, materials buffer epoch)` bind group 1 was built for.
+    bind_group_1_version: Option<(u64, u64)>,
 
     draw_count: u32,
 }
@@ -595,14 +596,18 @@ impl RenderPass for PortalInstancePass {
         else {
             return Ok(());
         };
-        let needs_rebuild = self.bind_group_1_version != Some(material_textures.version)
+        // The material rows are the scene join's output, which reallocates as meshes
+        // load: bind group 1 must follow the buffer, not only the texture set (the
+        // main G-buffer pass keys on the same pair).
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map_or(0, |handle| handle.epoch);
+        let needs_rebuild = self.bind_group_1_version
+            != Some((material_textures.version, materials_epoch))
             || self.bind_group_1.is_none();
         if needs_rebuild {
-            let materials_buf = ctx
-                .scene_buffers
-                .get(BufferKey::of("materials"))
-                .map(|handle| &handle.buffer)
-                .unwrap_or(batch.instances);
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -624,7 +629,7 @@ impl RenderPass for PortalInstancePass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(material_textures.version);
+            self.bind_group_1_version = Some((material_textures.version, materials_epoch));
         }
 
         let vertices = &vertices_handle.buffer;
