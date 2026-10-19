@@ -100,10 +100,9 @@ impl PortalInstancePass {
         let shader_source = portal_shader_source(material_binding);
 
         let shader = helio_core::shader::module(device, "PortalInstance Shader", &*shader_source);
-        let base_shader = helio_core::shader::source_text(
-            "PortalInstance Shader",
-            helio_core::include_wgsl!("../shaders/gbuffer_portal.wgsl"),
-        );
+        // The raw text, for filling in material graphs (the registered, hot-reloadable
+        // module above is the default pipeline's).
+        let base_shader: Cow<'static, str> = Cow::Borrowed(include_str!("../shaders/gbuffer_portal.wgsl"));
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalInstance/ScreenSize"),
