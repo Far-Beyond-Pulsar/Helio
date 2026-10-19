@@ -491,7 +491,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.normal = vec4<f32>(N, specular_f0.r);
     out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
-    out.lightmap_uv = vec2<f32>(-1.0, -1.0);
+    // x = -1 reads as "no lightmap"; y carries the chain so lighting can shade this
+    // pixel in the content's own world (-3 - chain index, below the -1/-2 tags).
+    out.lightmap_uv = vec2<f32>(-1.0, -3.0 - f32(input.chain_idx));
     out.sss = vec4<f32>(0.0);
     out.extra = vec4<f32>(0.0);
     out.velocity = vec4<f32>(compute_velocity(input),0.0,0.0);

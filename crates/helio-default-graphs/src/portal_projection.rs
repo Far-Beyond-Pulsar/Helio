@@ -33,6 +33,15 @@ pub use helio_core::{
 pub const PORTAL_VIEW_ROW_BYTES: u64 = std::mem::size_of::<PortalViewComponent>() as u64;
 /// One chain handle: `offset` and `count` into the payload pool, `u32` each.
 pub const PORTAL_CHAIN_HANDLE_ROW_BYTES: u64 = 8;
+/// One chain's content-from-host matrix (`mat4x4<f32>`).
+pub const PORTAL_CHAIN_UNMAP_ROW_BYTES: u64 = 64;
+/// Per chain: the matrix taking a point in the host world back into the world
+/// of the content that chain shows. Lighting uses it to shade a portal pixel in
+/// the content's own world (its sun, sky, reflections and lights), not the host's.
+/// Chains the unmap table holds. Fixed, since lighting binds it as a uniform of
+/// exactly this size.
+pub const PORTAL_CHAIN_UNMAP_CAPACITY: u64 = 256 * PORTAL_CHAIN_UNMAP_ROW_BYTES;
+pub const PORTAL_CHAIN_UNMAP_KEY: BufferKey = BufferKey::of("portal_chain_unmap");
 
 #[derive(Default)]
 struct Rows {
@@ -43,6 +52,8 @@ struct Rows {
     handles: Vec<[u32; 2]>,
     /// Every chain's portal view indices, back to back.
     pool: Vec<u32>,
+    /// Per chain, host world -> content world (column-major).
+    unmaps: Vec<[f32; 16]>,
 }
 
 /// Where the host hands the derivation its rows. Cloning shares them.
@@ -52,20 +63,42 @@ pub struct PortalProjectionInput(Arc<Mutex<Rows>>);
 impl PortalProjectionInput {
     /// Make `frame` the portals to draw. Unchanged rows do not count as a
     /// change, so a still scene uploads nothing.
-    pub fn set(&self, frame: &PortalProjectionFrame) {
+    ///
+    /// `spaces` is the host's coordinate-space table (slot -> matrix) that the
+    /// views index; it gives each chain the matrix back into its content's world.
+    pub fn set(&self, frame: &PortalProjectionFrame, spaces: &[glam::Mat4]) {
         let mut handles = Vec::with_capacity(frame.portal_chains.len());
         let mut pool = Vec::new();
         for chain in &frame.portal_chains {
             handles.push([pool.len() as u32, chain.portals.len() as u32]);
             pool.extend_from_slice(&chain.portals);
         }
+        // Host world -> content world: undo each stage's placement, outermost first.
+        let unmaps: Vec<[f32; 16]> = frame
+            .portal_chains
+            .iter()
+            .map(|chain| {
+                let mut unmap = glam::Mat4::IDENTITY;
+                for &portal in &chain.portals {
+                    let slot = frame.portal_views[portal as usize].coordinate_space as usize;
+                    let space = spaces.get(slot).copied().unwrap_or(glam::Mat4::IDENTITY);
+                    unmap = space.inverse() * unmap;
+                }
+                unmap.to_cols_array()
+            })
+            .collect();
         let mut rows = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        if rows.views == frame.portal_views && rows.handles == handles && rows.pool == pool {
+        if rows.views == frame.portal_views
+            && rows.handles == handles
+            && rows.pool == pool
+            && rows.unmaps == unmaps
+        {
             return;
         }
         rows.views = frame.portal_views.clone();
         rows.handles = handles;
         rows.pool = pool;
+        rows.unmaps = unmaps;
         rows.generation += 1;
     }
 
@@ -78,6 +111,7 @@ impl PortalProjectionInput {
         rows.views.clear();
         rows.handles.clear();
         rows.pool.clear();
+        rows.unmaps.clear();
         rows.generation += 1;
     }
 }
@@ -89,10 +123,10 @@ struct Upload {
 }
 
 impl Upload {
-    fn new(device: &wgpu::Device, label: &'static str) -> Self {
+    fn new(device: &wgpu::Device, label: &'static str, capacity: u64) -> Self {
         Self {
-            buffer: Self::allocate(device, label, 16),
-            capacity: 16,
+            buffer: Self::allocate(device, label, capacity),
+            capacity,
             epoch: 0,
         }
     }
@@ -101,7 +135,7 @@ impl Upload {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: bytes.max(16),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
     }
@@ -134,6 +168,7 @@ pub struct PortalProjection {
     views: Upload,
     handles: Upload,
     pool: Upload,
+    unmaps: Upload,
     uploaded: u64,
     live: bool,
 }
@@ -142,9 +177,10 @@ impl PortalProjection {
     pub fn new(device: &wgpu::Device, input: PortalProjectionInput) -> Self {
         Self {
             input,
-            views: Upload::new(device, "Portal Views"),
-            handles: Upload::new(device, "Portal Chain Handles"),
-            pool: Upload::new(device, "Portal Chain Payload"),
+            views: Upload::new(device, "Portal Views", 16),
+            handles: Upload::new(device, "Portal Chain Handles", 16),
+            pool: Upload::new(device, "Portal Chain Payload", 16),
+            unmaps: Upload::new(device, "Portal Chain Unmap", PORTAL_CHAIN_UNMAP_CAPACITY),
             uploaded: 0,
             live: false,
         }
@@ -170,6 +206,8 @@ impl SceneDerivation for PortalProjection {
                     .write(ctx, "Portal Chain Handles", bytemuck::cast_slice(&rows.handles));
                 self.pool
                     .write(ctx, "Portal Chain Payload", bytemuck::cast_slice(&rows.pool));
+                self.unmaps
+                    .write(ctx, "Portal Chain Unmap", bytemuck::cast_slice(&rows.unmaps));
                 self.uploaded = rows.generation;
             }
             (rows.generation, rows.views.is_empty())
@@ -190,6 +228,10 @@ impl SceneDerivation for PortalProjection {
                 (
                     BufferKey::of(PORTAL_CHAIN_PORTAL_POOL_BUFFER),
                     self.pool.handle(4, generation),
+                ),
+                (
+                    PORTAL_CHAIN_UNMAP_KEY,
+                    self.unmaps.handle(PORTAL_CHAIN_UNMAP_ROW_BYTES, generation),
                 ),
             ];
         }

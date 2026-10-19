@@ -153,6 +153,24 @@ struct ShadowCasterCounts {
 // The sky over each surface (`AtmosphereFrame` docs, `SKY_TABLE_*`).
 @group(0) @binding(10) var<uniform> atmosphere_sky_table: array<vec4<f32>, 2304>;
 
+// Per portal chain, the matrix taking a point of the host world back into the
+// world of the content that chain shows (`portal_chain_unmap`). A portal pixel
+// is drawn at a transformed copy of its content, so it is lit where the content
+// really is: with that world's lights, sun and sky, not the host's. A uniform
+// for the same reason as the atmosphere: the fragment stage is at its
+// storage-buffer limit.
+@group(0) @binding(11) var<uniform> portal_unmap: array<mat4x4<f32>, 256>;
+
+// The chain a portal pixel belongs to, or -1. The portal G-buffer pass tags its
+// pixels (-1, -3 - chain); (-1, -2) is the stored voxel tag and (-2, -2) the VG
+// sentinel.
+fn portal_chain_of(lightmap_uv: vec2<f32>) -> i32 {
+    if lightmap_uv.x > -1.5 && lightmap_uv.x < -0.5 && lightmap_uv.y < -2.5 {
+        return min(i32(round(-3.0 - lightmap_uv.y)), 255);
+    }
+    return -1;
+}
+
 // The sky's irradiance / pi at a surface `from_camera` (km, relative to the
 // camera) with normal `n`: its own sky, by its altitude and sun angle, not
 // the eye's (`sky_table_kernel`). Above the atmosphere the planet's glow
@@ -289,6 +307,9 @@ const CAPTURE_SHAPE_BOX:    u32 = 1u;
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
 const MAX_LIGHTS_PER_TILE: u32 = 64u;
+// A portal pixel walks the scene's lights instead of its tile's list (the list
+// is of the host world's view); only its footprint pays.
+const PORTAL_MAX_LIGHTS: u32 = 256u;
 @group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
 @group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
 // cluster bindings removed - GPU-driven architecture
@@ -1138,7 +1159,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     let albedo    = albedo_a.rgb;
     let alpha     = albedo_a.a;
-    let N         = normalize(normal_r.xyz);
+    let N_host    = normalize(normal_r.xyz);
     let ao        = orm_r.r;
     let roughness = orm_r.g;
     let metallic  = orm_r.b;
@@ -1213,7 +1234,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(albedo, alpha);
     }
     if globals.debug_mode == 5u {
-        return vec4<f32>(N * 0.5 + 0.5, 1.0);
+        return vec4<f32>(N_host * 0.5 + 0.5, 1.0);
     }
 
     // ── VG flag: VG pass writes a (-2, -2) sentinel into gbuf_lightmap_uv ─────
@@ -1228,7 +1249,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let uv_01       = in.clip_pos.xy / screen_size;
     let ndc_xy      = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
     let world_h     = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
-    let world_pos   = world_h.xyz / world_h.w;
+    let world_pos_host = world_h.xyz / world_h.w;
+
+    // A portal pixel is shaded where its content really is: back through the chain.
+    let portal_chain = portal_chain_of(lightmap_uv);
+    let in_portal    = portal_chain >= 0;
+    var world_pos = world_pos_host;
+    var N         = N_host;
+    var eye       = cameras[0].position_near.xyz;
+    if in_portal {
+        let unmap = portal_unmap[portal_chain];
+        world_pos = (unmap * vec4<f32>(world_pos_host, 1.0)).xyz;
+        N         = normalize((unmap * vec4<f32>(N_host, 0.0)).xyz);
+        eye       = (unmap * vec4<f32>(eye, 1.0)).xyz;
+    }
 
     // ── Debug mode 10: shadow factor heatmap ──────────────────────────────────
     // Shows shadow_factor() per light averaged across all lights.
@@ -1266,7 +1300,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
     let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
-    let V   = normalize(cameras[0].position_near.xyz - world_pos);
+    let V   = normalize(eye - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
     if globals.debug_mode == 19u {
@@ -1341,9 +1375,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
         let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
         let tile_idx = tile_y * globals.num_tiles_x + tile_x;
-        let tile_light_count = tile_light_counts[tile_idx];
-        for (var i = 0u; i < tile_light_count; i++) {
-            let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
+        var light_pass_count = tile_light_counts[tile_idx];
+        if in_portal {
+            light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS);
+        }
+        for (var i = 0u; i < light_pass_count; i++) {
+            var light_idx = i;
+            if !in_portal {
+                light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
+            }
             let light = lights[light_idx];
             if light.light_type != 0u {
                 let dist = length(light.position_range.xyz - world_pos);
@@ -1378,7 +1418,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                     transmit = light_transmittance(light_idx, world_pos, N);
                 }
             }
-            if light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
+            if !in_portal && light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
                 if dot(normalize(voxel_visibility.yzw), light_direction) > 0.99999 {
                     sf *= clamp(voxel_visibility.x, 0.0, 1.0);
@@ -1442,7 +1482,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // horizon included, cosine-convolved.
     var hemi: vec3<f32>;
     if atmosphere.planet.w > 0.5 {
-        hemi = atmosphere_local_irradiance((world_pos - cameras[0].position_near.xyz) * 0.001, N) * albedo;
+        hemi = atmosphere_local_irradiance((world_pos - eye) * 0.001, N) * albedo;
     } else {
         let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
         let ground_color = sky_color * 0.15;
@@ -1543,7 +1583,7 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     let normal_r = textureLoad(gbuf_normal, pix, 0);
     let orm_r = textureLoad(gbuf_orm, pix, 0);
     let emissive_r = textureLoad(gbuf_emissive, pix, 0);
-    let N = normalize(normal_r.xyz);
+    let N_host = normalize(normal_r.xyz);
     let roughness = orm_r.g;
     let F0 = clamp(
         vec3<f32>(normal_r.w, orm_r.a, emissive_r.a),
@@ -1560,8 +1600,21 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
 
     let ndc_xy = vec2<f32>(screen_uv.x * 2.0 - 1.0, 1.0 - screen_uv.y * 2.0);
     let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
-    let world_pos = world_h.xyz / world_h.w;
-    let V = normalize(cameras[0].position_near.xyz - world_pos);
+    let world_pos_host = world_h.xyz / world_h.w;
+
+    // A portal pixel reflects its content's world, seen from where the eye is in it.
+    let portal_chain = portal_chain_of(lightmap_uv);
+    let in_portal = portal_chain >= 0;
+    var world_pos = world_pos_host;
+    var N = N_host;
+    var eye = cameras[0].position_near.xyz;
+    if in_portal {
+        let unmap = portal_unmap[portal_chain];
+        world_pos = (unmap * vec4<f32>(world_pos_host, 1.0)).xyz;
+        N = normalize((unmap * vec4<f32>(N_host, 0.0)).xyz);
+        eye = (unmap * vec4<f32>(eye, 1.0)).xyz;
+    }
+    let V = normalize(eye - world_pos);
     let NdV = max(dot(N, V), 0.0);
     let F_ibl = fresnel_schlick_roughness(NdV, F0, roughness);
     let R = reflect(-V, N);
@@ -1574,12 +1627,13 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         spec_ind = env_sample * (F0 * env_brdf.x + env_brdf.y);
     }
 
-    if globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
+    // Screen-space hits are of the host's view; a portal pixel has none of its own.
+    if !in_portal && globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
         spec_ind = mix(spec_ind, ssr_hit.rgb * F_ibl, ssr_hit.a);
     }
 
     let planar_hit = textureLoad(planar_tex, pix, 0);
-    if globals.enable_reflections != 0u && planar_hit.a > 0.0 {
+    if !in_portal && globals.enable_reflections != 0u && planar_hit.a > 0.0 {
         spec_ind = mix(spec_ind, planar_hit.rgb * F_ibl, planar_hit.a);
     }
 
