@@ -1351,10 +1351,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(vec3<f32>(readable_radius), 1.0);
     }
 
-    // Per-surface work: walk only this pixel's clustered light list, applying
-    // the same authored range, inverse-square/range falloff, spot cone, and
-    // N·L rejection used by the real lighting path below. This is deliberately
-    // diagnostic-only so normal rendering pays none of this extra work.
+    // Per-surface work is displayed as a scalar heat map. Do not shade this
+    // diagnostic with light intensity, N·L, or material response: those create
+    // shape contrast that obscures the work being measured.
     if globals.debug_mode == 28u || globals.debug_mode == 29u || globals.debug_mode == 34u {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
         let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
@@ -1362,46 +1361,38 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         var light_pass_count = tile_light_counts[tile_idx];
         if in_portal { light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS); }
 
-        var effective_lights = 0.0;
+        var affecting_lights = 0.0;
         var shadow_work = 0.0;
         for (var i = 0u; i < light_pass_count; i++) {
             var light_idx = i;
             if !in_portal { light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]; }
             let light = lights[light_idx];
-            var L: vec3<f32>;
-            var attenuation = 1.0;
-            if light.light_type == 0u {
-                L = normalize(-light.direction_outer.xyz);
-            } else {
+            if light.light_type != 0u {
                 let to_light = light.position_range.xyz - world_pos;
                 let dist = length(to_light);
                 let range = max(light.position_range.w, 1e-4);
                 if dist >= range { continue; }
-                L = to_light / max(dist, 1e-4);
-                let normalized_dist = dist / range;
-                attenuation = (1.0 / (dist * dist + 1e-4)) * max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
-                if light.light_type == 2u {
-                    attenuation *= smoothstep(light.direction_outer.w, light.inner_angle, dot(-L, light.direction_outer.xyz));
-                }
             }
-            let ndl = max(dot(N, L), 0.0);
-            if ndl <= 0.0 { continue; }
-            let radiance = max(max(light.color_intensity.xyz.r, light.color_intensity.xyz.g), light.color_intensity.xyz.b)
-                * max(light.color_intensity.w, 0.0) * attenuation * ndl;
-            effective_lights += clamp(radiance, 0.0, 1.0);
+            // Count light shader work, not its brightness. Point and spot
+            // influence is bounded by the authored range; directional lights
+            // affect every surface. Spot-cone attenuation still costs work and
+            // therefore does not darken pixels outside the cone.
+            affecting_lights += 1.0;
             if light.shadow_index != 0xffffffffu && !is_vg && !in_portal { shadow_work += 1.0; }
         }
 
         if globals.debug_mode == 28u {
-            return vec4<f32>(complexity_color(effective_lights / 8.0), 1.0);
+            return vec4<f32>(complexity_color(affecting_lights / 8.0), 1.0);
         }
 
         let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
         let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
-        var material_work = 1.0 + 0.45 * (1.0 - roughness) + 0.35 * metallic;
+        // Count shader features, not their authored values (roughness,
+        // metallic, and lighting response do not change the execution path).
+        var material_work = 1.0;
         material_work += select(0.0, 1.8, is_anisotropic) + select(0.0, 1.2, has_subsurface);
         material_work += select(0.0, 0.4, has_lightmap) + select(0.0, 0.6, is_vg);
-        let surface_work = 2.0 + material_work * 2.0 + effective_lights * 1.6 + shadow_work * 1.1;
+        let surface_work = 2.0 + material_work * 2.0 + affecting_lights * 1.6 + shadow_work * 1.1;
         var normalized_cost = surface_work / 32.0;
         if globals.debug_mode == 34u {
             // Scale the per-surface estimate with the latest completed GPU

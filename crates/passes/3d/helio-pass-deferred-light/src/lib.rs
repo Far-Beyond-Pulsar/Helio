@@ -1,7 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{
-    DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+    DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
+    RenderPass, Result as HelioResult,
 };
 use helio_pass_sky::atmosphere::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
@@ -1552,17 +1553,17 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "Light Complexity",
                 debug_mode: 28,
-                description: "Per-surface light work weighted by attenuation radius, spot cone, and facing",
+                description: "Scalar heat map of directional lights and local lights within their attenuation radii",
             },
             DebugViewDescriptor {
                 name: "Shader Complexity",
                 debug_mode: 29,
-                description: "Per-surface material and lighting work estimate from the active shading features",
+                description: "Scalar heat map of per-surface light and material shader work, without lighting contrast",
             },
             DebugViewDescriptor {
-                name: "GPU-Timed Shader Cost",
+                name: "GPU-Time-Weighted Shader Cost",
                 debug_mode: 34,
-                description: "Per-surface cost estimate scaled by the last measured GPU time for deferred lighting",
+                description: "Per-surface work heat map weighted by the last measured DeferredLight pass time; GPU timestamps are pass-wide",
             },
             DebugViewDescriptor {
                 name: "Ray Trace vs Raster",
@@ -1571,6 +1572,37 @@ impl RenderPass for DeferredLightPass {
             },
         ];
         VIEWS
+    }
+
+    fn debug_view_legend(&self, debug_mode: u32) -> Option<DebugViewLegend> {
+        static COLORS: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "25%", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "50%", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "75%", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "100%+", color: [255, 0, 0] },
+        ];
+        static LIGHTS: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "2", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "4", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "6", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "8+", color: [255, 0, 0] },
+        ];
+        static WORK: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "8", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "16", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "24", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "32+", color: [255, 0, 0] },
+        ];
+
+        match debug_mode {
+            28 => Some(DebugViewLegend { title: "Light complexity", unit: "lights", stops: LIGHTS }),
+            29 => Some(DebugViewLegend { title: "Shader complexity", unit: "work units", stops: WORK }),
+            34 => Some(DebugViewLegend { title: "GPU-time-weighted shader cost", unit: "normalized", stops: COLORS }),
+            _ => None,
+        }
     }
 }
 
