@@ -455,6 +455,7 @@ impl ChunkPass {
             near,
             frame.sun,
             [ctx.width, ctx.height],
+            Some(ctx.depth),
         );
         world.publish(encoder, gbuffer, ctx.depth);
         if let Some(picks) = &frame.picks {

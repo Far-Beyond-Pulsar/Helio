@@ -62,11 +62,24 @@ const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 16384, f
 struct World {
     chunks: ChunkWorld,
     frame: u64,
+    /// The direction to the sun (eye-relative).
+    sun: Vec3,
+    /// The meshes' depth the draws shade (none: no meshes).
+    scene_depth: Option<wgpu::TextureView>,
 }
 
 impl World {
     fn new(gpu: &Gpu, planet: &Planet) -> Self {
-        Self { chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, TEST_CAPACITY), frame: 0 }
+        Self::with_capacity(gpu, planet, TEST_CAPACITY)
+    }
+
+    fn with_capacity(gpu: &Gpu, planet: &Planet, capacity: Capacity) -> Self {
+        Self {
+            chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, capacity),
+            frame: 0,
+            sun: Vec3::new(0.3, 0.8, 0.4).normalize(),
+            scene_depth: None,
+        }
     }
 
     /// The planet's edits now (a new world for a history it cannot follow).
@@ -94,7 +107,7 @@ impl World {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
         let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, config);
-        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, Vec3::new(0.3, 0.8, 0.4).normalize(), view.size);
+        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, self.sun, view.size, self.scene_depth.as_ref());
         if let Some(picks) = picks {
             self.chunks.copy_picks(&mut recorder, picks);
         }
@@ -1036,7 +1049,7 @@ fn edited_chunks_come_back_by_copy() {
     let far = ground_view(&planet, land(&planet, 4, 0.3, 0.7), [320, 180]);
     let run = |planet: &Planet, kept_bytes: usize| {
         let capacity = Capacity { chunks: 9000, kept_bytes, ..TEST_CAPACITY };
-        let mut world = World { chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, capacity), frame: 0 };
+        let mut world = World::with_capacity(gpu, planet, capacity);
         let (first, ..) = settle_counting(&gpu, &mut world, planet, &here);
         settle_counting(&gpu, &mut world, planet, &far);
         let stats = world.frame(&gpu, planet, &far, None);
@@ -1258,6 +1271,116 @@ fn orbital_view_has_complete_coverage() {
     }
     assert!(ground > hits.len() / 3, "{ground} ground pixels");
     assert_eq!(wrong, 0);
+}
+
+/// The sun at each pixel (`directional_visibility`'s x): lit (1) or not.
+fn read_sun(gpu: &Gpu, world: &World) -> Vec<bool> {
+    let targets = world.chunks.targets().expect("drawn");
+    let [w, h] = [targets.sun.width(), targets.sun.height()];
+    let row = (w * 8).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        targets.sun.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
+    // x as f16: lit is 1.0 (0x3c00), shaded 0.
+    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+        let at = (y * row + x * 8) as usize;
+        u16::from_le_bytes([bytes[at], bytes[at + 1]]) >= 0x3800
+    }).collect()
+}
+
+/// Terrain shades the meshes in front of it: a mesh wall across a ground
+/// view (the scene's depth one view depth everywhere, as a mesh pass leaves
+/// it), with a raised ball between it and the sun, is in the sun where a
+/// CPU ray from its point towards the sun reaches the sky, at points before
+/// hits and before the sky alike.
+#[test]
+fn terrain_shadows_fall_on_meshes_in_front_of_it() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let view = ground_view(&planet, land(&planet, 4, 0.37, 0.61), [320, 180]);
+    let forward = view.forward.as_dvec3();
+    let up = planet.grid().up(view.eye);
+    let side = up.cross(forward).normalize();
+    // Half way up, across the view and away from the eye.
+    let sun = (up * 0.5 + side * 0.75 + forward * 0.4).normalize();
+    // The wall 12 m out, its depth the reversed depth's near / w; the ball
+    // 6 m behind its point 4.5 m over the eye's line, towards the sun.
+    let wall_m = 12.0f32;
+    let ball = view.eye + forward * f64::from(wall_m) + up * 4.5 + sun * 6.0;
+    planet.apply(Brush { center: ball.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh wall depth"),
+        size: wgpu::Extent3d { width: view.size[0], height: view.size[1], depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let depth_view = depth.create_view(&Default::default());
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mesh wall"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &depth_view,
+            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(view.near / wall_m), store: wgpu::StoreOp::Store }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    gpu.queue.submit([encoder.finish()]);
+    let mut world = World::new(gpu, &planet);
+    world.sun = sun.as_vec3();
+    world.scene_depth = Some(depth_view);
+    let hits = world.settle(gpu, &planet, &view);
+    let lit = read_sun(gpu, &world);
+
+    let view_proj = view.view_proj(&planet);
+    let voxel = planet.grid().voxel_size();
+    let (mut before_hits, mut before_sky, mut shaded, mut sunny, mut shaded_sky, mut mismatched) = (0, 0, 0, 0, 0, 0);
+    for y in (0..view.size[1]).step_by(4) {
+        for x in (0..view.size[0]).step_by(4) {
+            let dir = view.pixel_dir(view_proj, x, y);
+            let t = f64::from(wall_m) / dir.dot(forward);
+            let hit = hits[(y * view.size[0] + x) as usize];
+            if hit.is_some_and(|h| h.distance <= t) {
+                continue;
+            }
+            let point = view.eye + dir * t;
+            // From just off the point, as the walk starts.
+            let blocked = planet.raycast(point + sun * (0.05 * voxel), sun, 600.0);
+            // A ray grazing a voxel's corner: either answer.
+            if blocked.is_some_and(|b| b.distance < voxel) {
+                continue;
+            }
+            if hit.is_some() { before_hits += 1 } else { before_sky += 1 }
+            if blocked.is_some() { shaded += 1 } else { sunny += 1 }
+            if hit.is_none() && blocked.is_some() { shaded_sky += 1 }
+            if lit[(y * view.size[0] + x) as usize] == blocked.is_some() {
+                mismatched += 1;
+                if mismatched < 8 {
+                    eprintln!("pixel {x},{y}: gpu lit {}, cpu {blocked:?}", lit[(y * view.size[0] + x) as usize]);
+                }
+            }
+        }
+    }
+    eprintln!("wall points: {before_hits} before hits, {before_sky} before the sky ({shaded_sky} shaded); {shaded} shaded, {sunny} sunny; {mismatched} mismatched");
+    assert!(before_hits > 200 && before_sky > 50, "{before_hits} before hits, {before_sky} before the sky");
+    assert!(shaded_sky > 10, "{shaded_sky} shaded before the sky");
+    assert!(shaded > 100 && sunny > 100, "{shaded} shaded, {sunny} sunny");
+    assert!(mismatched * 100 <= before_hits + before_sky, "{mismatched} mismatched");
 }
 
 /// Tools ask for the terrain hit under a view point (the editor's brush):

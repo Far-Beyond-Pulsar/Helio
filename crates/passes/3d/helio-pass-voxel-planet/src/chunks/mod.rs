@@ -1074,6 +1074,8 @@ pub struct ChunkWorld {
     /// The UV reference image of debug mode 1 (trace and publish).
     uv_grid_view: wgpu::TextureView,
     uv_grid_sampler: wgpu::Sampler,
+    /// The scene depth of a draw given none: no meshes (1x1, cleared).
+    no_scene_depth: wgpu::TextureView,
     seed_outside: wgpu::RenderPipeline,
     seed_inside: wgpu::RenderPipeline,
     /// The draw list built on the GPU (`cull_bin`, `cull_offsets`,
@@ -1784,6 +1786,17 @@ impl ChunkWorld {
         };
         let (cull_bin, cull_offsets, cull_scatter) = (cull("cull_bin"), cull("cull_offsets"), cull("cull_scatter"));
         let (uv_grid_view, uv_grid_sampler) = create_uv_grid(device, queue);
+        // Zeroed: the reversed depth's far, no mesh anywhere.
+        let no_scene_depth = view(&device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chunk no scene depth"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }));
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk depth resolve"),
             entries: &[
@@ -1823,11 +1836,13 @@ impl ChunkWorld {
             compilation_options: Default::default(),
             cache: None,
         });
-        // Sun shadows: samples a 2x2 block, then every hit.
+        // Sun shadows: samples a 2x2 block, then every hit, and the meshes
+        // in front of the hits (by the scene's depth).
         let hits = [
             texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
             texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
         ];
+        let scene_depth = texture_entry(27, wgpu::TextureSampleType::Depth, wgpu::ShaderStages::COMPUTE);
         let shadow_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk sun samples"),
             entries: &[hits[0], hits[1], storage_texture(9, wgpu::TextureFormat::Rgba32Uint)],
@@ -1844,6 +1859,7 @@ impl ChunkWorld {
                 storage(12, false, wgpu::ShaderStages::COMPUTE),
                 storage_texture(13, wgpu::TextureFormat::Rgba16Float),
                 texture_entry(16, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
+                scene_depth,
             ],
         });
         let sky_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1853,7 +1869,7 @@ impl ChunkWorld {
         // The fallbacks' walks: their workgroups are the dispatch's.
         let shadow_fallback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk shadow fallbacks"),
-            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE), storage_texture(13, wgpu::TextureFormat::Rgba16Float)],
+            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE), storage_texture(13, wgpu::TextureFormat::Rgba16Float), scene_depth],
         });
         let compute = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1944,6 +1960,7 @@ impl ChunkWorld {
             resolve_layout,
             uv_grid_view,
             uv_grid_sampler,
+            no_scene_depth,
             seed_outside,
             seed_inside,
             cull_layout,
@@ -3268,7 +3285,7 @@ impl ChunkWorld {
     /// `size` pixels into [`Self::targets`], timing it as draw number
     /// `frame` ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2]) {
+    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>) {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
@@ -3438,7 +3455,9 @@ impl ChunkWorld {
             pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
         }
         {
-            // 4. Sun shadows: samples, then every hit.
+            // 4. Sun shadows: samples, then every hit, and meshes before
+            // their hits (`scene_depth`: the meshes', the frame's size).
+            let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
             let (distance, visibility, samples, colour, normal, sky) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour), view(&targets.normal), view(&targets.sky_samples));
             let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
@@ -3448,7 +3467,7 @@ impl ChunkWorld {
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth)],
             });
             let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sky samples"),
@@ -3458,7 +3477,7 @@ impl ChunkWorld {
             let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow fallbacks"),
                 layout: &self.shadow_fallback_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks), view_entry(13, &normal)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks), view_entry(13, &normal), view_entry(27, scene_depth)],
             });
             // No fallbacks yet.
             self.queue.write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));

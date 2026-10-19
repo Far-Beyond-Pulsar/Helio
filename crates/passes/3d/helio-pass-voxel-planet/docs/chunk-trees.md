@@ -678,6 +678,28 @@ the climb up the tops for air, the frame).
   ray (2.66 vs 2.64 a pixel) and no faster, even with a cone 20 times wider.
   The cut near a hit is about as coarse as the cone allows there.
 
+## Terrain shadows on meshes (2026-10-19)
+
+The sun visibility was the terrain hit's at every pixel: a mesh in front
+of the terrain took the shade of the ground behind it, one against the sky
+was always lit. The shadow pass now reads the scene's depth before the
+chunks publish theirs (the meshes'); a pixel whose mesh is nearer than
+its hit, or has only the sky behind, is listed with the fallbacks and
+walks from the mesh point towards the sun. The walk starts at the node of
+the cut the point is in: placed in the frame of the hit's chunk behind it,
+exact to its cells (a twentieth of a cell off the point, off the ground a
+mesh stands on), or, without a hit finer than the exact levels, at the
+exact level's node over it (`Walk::key`, planet-centred: within half a
+metre on an Earth).
+
+`terrain_shadows_fall_on_meshes_in_front_of_it`: a mesh wall 12 m out with
+a raised ball between it and the sun, 754 wall points (107 before the
+sky) against CPU casts from each: 323 shaded, none wrong. The mountain
+hold (no meshes) is unchanged: primary 3.06 ms, shadows 1.72 ms. Mesh
+pixels walk at full resolution, one walk each; not yet measured in a
+scene full of meshes (the terrain's 2x2 sampling is the next step if they
+cost).
+
 ## Solid gaps (2026-10-12)
 
 A tile's chunks held one range of layers: rock under the lowest, air in

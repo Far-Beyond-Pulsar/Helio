@@ -1146,10 +1146,13 @@ fn to_frame(a: vec3<i32>, diff: i32, key: vec4<i32>, up: bool) -> vec3<i32> {
 }
 
 // A walk through the drawn cut: the chunk whose frame it is in (its last)
-// and the box it crosses in that frame's cells, the chunk itself (`real`)
-// or air.
+// and its key, and the box it crosses in that frame's cells, the chunk
+// itself (`real`) or air. With the key of an exact level and not `real`,
+// it starts at the node of the cut where the ray starts, on that key's face
+// (the slot's frame unused).
 struct Walk {
     slot: u32,
+    key: vec4<i32>,
     lo: vec3<i32>,
     hi: vec3<i32>,
     real: bool,
@@ -1185,7 +1188,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
         b = dir.y;
     }
     var frame = chunk_frame(start.slot);
-    var key = chunk_keys[start.slot];
+    var key = start.key;
     var cube_lo = start.lo;
     var cube_hi = start.hi;
     var real = start.real;
@@ -1202,7 +1205,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     // cells, over its neighbours'): the drawn cut there.
     var exact = exact_level(key.x >> 8u);
     var place = exact;
-    if exact {
+    if exact && real {
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
@@ -1457,7 +1460,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), cube_lo, cube_hi, real), vec3<f32>(0.0), dir, t_prev, 1e30, r, 128u, true, id.xy);
+    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), vec3<f32>(0.0), dir, t_prev, 1e30, r, 128u, true, id.xy);
     if !end.hit {
         // Unresolved: the next round seeds the boxes beyond (none past
         // the ceiling: the sky).
@@ -1950,7 +1953,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
         b = dir.y;
     }
     var frame = chunk_frame(start.slot);
-    var key = chunk_keys[start.slot];
+    var key = start.key;
     var cube_lo = start.lo;
     var cube_hi = start.hi;
     var real = start.real;
@@ -2071,7 +2074,7 @@ fn skip_along(f: Face, dir: vec3<f32>) -> f32 {
 // Whether the hit at pixel `q` (distance `t`, face `f`) is in the sun.
 fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, skip_along(f, params.sun.xyz), 1e30, fade_dither(q), 96u, false, q);
+    let end = walk(Walk(slot, chunk_keys[slot], vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, skip_along(f, params.sun.xyz), 1e30, fade_dither(q), 96u, false, q);
     return select(1.0, 0.0, end.hit);
 }
 
@@ -2098,7 +2101,7 @@ fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> 
         if ceiling { dir = normalize(around - up * 0.02); }
         else if dot(dir, f.normal) <= 0.0 { continue; }
         total += 1.0;
-        let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, dir, skip_along(f, dir), range, fade_dither(q), 24u, false, q);
+        let end = walk(Walk(slot, chunk_keys[slot], vec3<i32>(0), vec3<i32>(64), true), org, dir, skip_along(f, dir), range, fade_dither(q), 24u, false, q);
         open += select(1.0, smoothstep(0.5, 1.0, end.t / range), end.hit && end.t < range);
     }
     return select(1.0, open / total, total > 0.0);
@@ -2210,6 +2213,86 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
 
+// The scene's depth before the chunks publish theirs: the meshes'
+// (reversed, 0 where none).
+@group(1) @binding(27) var scene_depth: texture_depth_2d;
+
+// A listed pixel whose mesh walks, not its hit (`shadow_fallback`).
+const MESH_PIXEL: u32 = 0x8000u;
+
+// The mesh point at pixel `q` (eye-relative), w 1; w 0 where no mesh.
+fn mesh_point(q: vec2<u32>, size: vec2<u32>) -> vec4<f32> {
+    let d = textureLoad(scene_depth, vec2<i32>(q), 0);
+    if !(d > 0.0) { return vec4<f32>(0.0); }
+    let ndc = vec2<f32>((f32(q.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(q.y) + 0.5) / f32(size.y) * 2.0);
+    let h = params.inverse_view_proj * vec4<f32>(ndc, d, 1.0);
+    return vec4<f32>(h.xyz / h.w, 1.0);
+}
+
+// Whether the mesh point `org` (eye-relative) at pixel `q` is in the sun: a
+// walk from the node of the cut it is in, placed in the frame of the chunk
+// of `v` (the hit behind it) to its cells' precision; without a hit finer
+// than the exact levels, from the exact level's node over it
+// (planet-centred: to half a metre on an Earth).
+fn mesh_sun_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>) -> f32 {
+    let r = fade_dither(q);
+    var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
+    var t0 = 0.0;
+    if v.x != NONE && !exact_level(chunk_keys[v.x].x >> 8u) {
+        let key = chunk_keys[v.x];
+        let frame = chunk_frame(v.x);
+        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
+        var face = key.x & 7;
+        let level = key.x >> 8u;
+        var cell = key.yzw * 64 + vec3<i32>(floor(o));
+        var frac = clamp(fract(o), vec3<f32>(0.0), vec3<f32>(0.999));
+        // Past a face's edge: the face across it (past a corner, or a
+        // plane's edge, nothing to shade it).
+        let n = i32(params.table.y >> u32(level));
+        let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
+        if crossed {
+            if PLANE_WORLD { return 1.0; }
+            let across = across_edge(face, cell, frac, n);
+            if !across.ok { return 1.0; }
+            face = across.face;
+            cell = across.cell;
+            frac = across.frac;
+        }
+        let at = place_at(face, level, cell, frac, r, crossed);
+        if at.slot != NONE {
+            start = Walk(at.slot, chunk_keys[at.slot], vec3<i32>(0), vec3<i32>(64), true);
+        } else if at.level == ROCK || at.level == BURIED {
+            return 0.0;
+        } else if at.level == LOST {
+            return 1.0;
+        } else if exact_level(at.level) {
+            start = Walk(v.x, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
+        } else {
+            let f = select(v.x, at.frame, at.frame != NONE);
+            let fk = chunk_keys[f];
+            start = Walk(f, fk, to_frame(at.lo, at.level - (fk.x >> 8u), fk, true), clip_to_face(to_frame(at.hi, at.level - (fk.x >> 8u), fk, false), fk), false);
+        }
+        // Off the surface a mesh stands on: a twentieth of the hit's cell.
+        t0 = 0.05 * length(frame.m0.xyz);
+    } else {
+        if PLANE_WORLD { return 1.0; }
+        // The face the point is over (planet-centred).
+        let c = params.up.xyz * params.up.w + org;
+        let a = abs(c);
+        var normal = vec3<i32>(0, 0, select(-1, 1, c.z > 0.0));
+        if a.x >= a.y && a.x >= a.z {
+            normal = vec3<i32>(select(-1, 1, c.x > 0.0), 0, 0);
+        } else if a.y >= a.z {
+            normal = vec3<i32>(0, select(-1, 1, c.y > 0.0), 0);
+        }
+        let level = min(i32(params.planet.z), i32(params.cut.x));
+        if !exact_level(level) { return 1.0; }
+        start.key = vec4<i32>(face_with_normal(normal) | (level << 8u), 0, 0, 0);
+    }
+    let end = walk(start, org, params.sun.xyz, t0, 1e30, r, 96u, false, q);
+    return select(1.0, 0.0, end.hit);
+}
+
 @compute @workgroup_size(8, 8)
 fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
@@ -2217,6 +2300,14 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = vec2<i32>(id.xy);
     let sun = params.sun.xyz;
     let v = textureLoad(hit_visibility, p, 0).xy;
+    // A mesh in front of the hit (or the sky): its own walk, listed.
+    let mesh = mesh_point(id.xy, size);
+    if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
+        let n = atomicAdd(&fallbacks.count, 1u);
+        fallbacks.pixels[n] = id.x | MESH_PIXEL | (id.y << 16u);
+        atomicMax(&fallback_groups[0], n / 64u + 1u);
+        return;
+    }
     if v.x == NONE {
         textureStore(out_sun, p, vec4<f32>(1.0, sun));
         return;
@@ -2267,14 +2358,19 @@ fn store_sun(p: vec2<i32>, v: vec2<u32>, f: Face, lit: f32) {
     }
 }
 
-// The listed hits' own walks: dispatched indirectly, 64 a workgroup.
+// The listed hits' and meshes' own walks: dispatched indirectly, 64 a
+// workgroup.
 @compute @workgroup_size(64)
 fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= atomicLoad(&fallbacks.count) { return; }
     let packed = fallbacks.pixels[id.x];
-    let q = vec2<u32>(packed & 0xffffu, packed >> 16u);
+    let q = vec2<u32>(packed & 0x7fffu, packed >> 16u);
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    if (packed & MESH_PIXEL) != 0u {
+        textureStore(out_sun, vec2<i32>(q), vec4<f32>(mesh_sun_walk(q, mesh_point(q, size).xyz, v), params.sun.xyz));
+        return;
+    }
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     let f = hit_face(v, vec3<f32>(0.0), q, size, t);
     store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
