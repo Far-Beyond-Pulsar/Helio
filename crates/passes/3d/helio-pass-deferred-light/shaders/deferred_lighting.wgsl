@@ -53,8 +53,8 @@ struct Globals {
     // over it. Scalars, not vec3<u32>: a vec3 would align the tail to 16 and
     // desync the struct from its Rust mirror.
     enable_env_reflections: u32,
+    measured_lighting_ms: f32,
     _pad_0: u32,
-    _pad_1: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -169,6 +169,14 @@ fn portal_chain_of(lightmap_uv: vec2<f32>) -> i32 {
         return min(i32(round(-3.0 - lightmap_uv.y)), 255);
     }
     return -1;
+}
+
+fn complexity_color(value: f32) -> vec3<f32> {
+    let t = clamp(value, 0.0, 1.0);
+    if t < 0.25 { return mix(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 1.0), t * 4.0); }
+    if t < 0.5 { return mix(vec3<f32>(0.0, 1.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), (t - 0.25) * 4.0); }
+    if t < 0.75 { return mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), (t - 0.5) * 4.0); }
+    return mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), (t - 0.75) * 4.0);
 }
 
 // The sky's irradiance / pi at a surface `from_camera` (km, relative to the
@@ -1343,6 +1351,66 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(vec3<f32>(readable_radius), 1.0);
     }
 
+    // Per-surface work: walk only this pixel's clustered light list, applying
+    // the same authored range, inverse-square/range falloff, spot cone, and
+    // N·L rejection used by the real lighting path below. This is deliberately
+    // diagnostic-only so normal rendering pays none of this extra work.
+    if globals.debug_mode == 28u || globals.debug_mode == 29u || globals.debug_mode == 34u {
+        let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
+        let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
+        let tile_idx = tile_y * globals.num_tiles_x + tile_x;
+        var light_pass_count = tile_light_counts[tile_idx];
+        if in_portal { light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS); }
+
+        var effective_lights = 0.0;
+        var shadow_work = 0.0;
+        for (var i = 0u; i < light_pass_count; i++) {
+            var light_idx = i;
+            if !in_portal { light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]; }
+            let light = lights[light_idx];
+            var L: vec3<f32>;
+            var attenuation = 1.0;
+            if light.light_type == 0u {
+                L = normalize(-light.direction_outer.xyz);
+            } else {
+                let to_light = light.position_range.xyz - world_pos;
+                let dist = length(to_light);
+                let range = max(light.position_range.w, 1e-4);
+                if dist >= range { continue; }
+                L = to_light / max(dist, 1e-4);
+                let normalized_dist = dist / range;
+                attenuation = (1.0 / (dist * dist + 1e-4)) * max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
+                if light.light_type == 2u {
+                    attenuation *= smoothstep(light.direction_outer.w, light.inner_angle, dot(-L, light.direction_outer.xyz));
+                }
+            }
+            let ndl = max(dot(N, L), 0.0);
+            if ndl <= 0.0 { continue; }
+            let radiance = max(max(light.color_intensity.xyz.r, light.color_intensity.xyz.g), light.color_intensity.xyz.b)
+                * max(light.color_intensity.w, 0.0) * attenuation * ndl;
+            effective_lights += clamp(radiance, 0.0, 1.0);
+            if light.shadow_index != 0xffffffffu && !is_vg && !in_portal { shadow_work += 1.0; }
+        }
+
+        if globals.debug_mode == 28u {
+            return vec4<f32>(complexity_color(effective_lights / 8.0), 1.0);
+        }
+
+        let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
+        let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
+        var material_work = 1.0 + 0.45 * (1.0 - roughness) + 0.35 * metallic;
+        material_work += select(0.0, 1.8, is_anisotropic) + select(0.0, 1.2, has_subsurface);
+        material_work += select(0.0, 0.4, has_lightmap) + select(0.0, 0.6, is_vg);
+        let surface_work = 2.0 + material_work * 2.0 + effective_lights * 1.6 + shadow_work * 1.1;
+        var normalized_cost = surface_work / 32.0;
+        if globals.debug_mode == 34u {
+            // Scale the per-surface estimate with the latest completed GPU
+            // timestamp for DeferredLight; no CPU wall-clock approximation.
+            normalized_cost *= max(globals.measured_lighting_ms, 0.01) / 2.0;
+        }
+        return vec4<f32>(complexity_color(normalized_cost), 1.0);
+    }
+
     // Anisotropic GGX parameters
     let aniso_ax    = extra_r.r;
     let aniso_ay    = extra_r.g;
@@ -1576,7 +1644,9 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 24u || globals.debug_mode == 25u
         || globals.debug_mode == 26u || globals.debug_mode == 27u
         || globals.debug_mode == 20u || globals.debug_mode == 21u
-        || globals.debug_mode == 32u || globals.debug_mode == 33u {
+        || globals.debug_mode == 28u || globals.debug_mode == 29u
+        || globals.debug_mode == 32u || globals.debug_mode == 33u
+        || globals.debug_mode == 34u {
         return vec4<f32>(0.0);
     }
 

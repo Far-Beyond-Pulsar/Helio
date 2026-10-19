@@ -65,7 +65,8 @@ struct DeferredGlobals {
     /// reflections from the image. This is the switch that does.
     enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
-    _pad: [u32; 2],
+    measured_lighting_ms: f32,
+    _pad: u32,
 }
 
 pub struct DeferredLightPass {
@@ -146,6 +147,8 @@ pub struct DeferredLightPass {
     fallback_ies_view: wgpu::TextureView,
     ies_sampler: wgpu::Sampler,
     pub debug_mode: u32,
+    /// Most recently completed GPU duration for this pass.
+    measured_lighting_ms: f32,
     /// Whether the environment cubemap contributes indirect specular.
     pub enable_env_reflections: bool,
 }
@@ -808,6 +811,7 @@ impl DeferredLightPass {
             fallback_ies_view,
             ies_sampler,
             debug_mode: 0,
+            measured_lighting_ms: 0.0,
             enable_env_reflections: false,
         }
     }
@@ -824,6 +828,15 @@ impl DeferredLightPass {
 
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
+    }
+
+    pub fn set_measured_lighting_ms(&mut self, milliseconds: f32) -> bool {
+        let milliseconds = milliseconds.max(0.0);
+        if (self.measured_lighting_ms - milliseconds).abs() < 0.001 {
+            return false;
+        }
+        self.measured_lighting_ms = milliseconds;
+        true
     }
 
     /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
@@ -939,7 +952,8 @@ impl RenderPass for DeferredLightPass {
             },
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
-            _pad: [0; 2],
+            measured_lighting_ms: self.measured_lighting_ms,
+            _pad: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1347,7 +1361,10 @@ impl RenderPass for DeferredLightPass {
         let portal_unmap = ctx
             .scene_buffers
             .get(BufferKey::of("portal_chain_unmap"))
-            .map_or_else(|| self.fallback_portal_unmap.clone(), |handle| handle.buffer.clone());
+            .map_or_else(
+                || self.fallback_portal_unmap.clone(),
+                |handle| handle.buffer.clone(),
+            );
         let key_0 = [
             ctx.camera.clone(),
             caster_counts.clone(),
@@ -1531,6 +1548,21 @@ impl RenderPass for DeferredLightPass {
                 name: "GI Blend",
                 debug_mode: 27,
                 description: "Green=runtime radiance-cascade weight, blue=baked lightmap weight",
+            },
+            DebugViewDescriptor {
+                name: "Light Complexity",
+                debug_mode: 28,
+                description: "Per-surface light work weighted by attenuation radius, spot cone, and facing",
+            },
+            DebugViewDescriptor {
+                name: "Shader Complexity",
+                debug_mode: 29,
+                description: "Per-surface material and lighting work estimate from the active shading features",
+            },
+            DebugViewDescriptor {
+                name: "GPU-Timed Shader Cost",
+                debug_mode: 34,
+                description: "Per-surface cost estimate scaled by the last measured GPU time for deferred lighting",
             },
             DebugViewDescriptor {
                 name: "Ray Trace vs Raster",

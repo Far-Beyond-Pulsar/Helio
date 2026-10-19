@@ -8,11 +8,31 @@
 //! that owns them).
 
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult};
+use helio_core::{
+    PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult,
+};
 use pulsar_scenedb::gpu::BufferKey;
+
+/// Short world-anchored text rendered by the portal editor overlay.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PortalDebugText {
+    pub world_position: [f32; 3],
+    pub text: String,
+    pub color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GlyphInstance {
+    world_position: [f32; 4],
+    color: [f32; 4],
+    bitmap: [u32; 2],
+    screen_offset: [f32; 2],
+}
 
 pub struct PortalEditorOverlayPass {
     pipeline: wgpu::RenderPipeline,
+    glyph_pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<[wgpu::Buffer; 2]>,
@@ -21,11 +41,19 @@ pub struct PortalEditorOverlayPass {
     /// behavior for callers that do not provide projection counts.
     active_portal_count: Option<u32>,
     editor_mode: bool,
+    debug_texts: Vec<PortalDebugText>,
+    glyph_buffer: wgpu::Buffer,
+    glyph_count: u32,
+    fallback_portal_views: wgpu::Buffer,
 }
 
 impl PortalEditorOverlayPass {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let shader = helio_core::shader::module(device, "PortalEditorOverlay Shader", helio_core::include_wgsl!("../shaders/portal_editor_overlay.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "PortalEditorOverlay Shader",
+            helio_core::include_wgsl!("../shaders/portal_editor_overlay.wgsl"),
+        );
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PortalEditorOverlay BGL"),
@@ -50,6 +78,16 @@ impl PortalEditorOverlayPass {
                     },
                     count: None,
                 }, // portal_views
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }, // debug_glyphs
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -114,15 +152,65 @@ impl PortalEditorOverlayPass {
             multiview_mask: None,
             cache: None,
         });
+        let glyph_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("PortalEditorGlyph Pipeline"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_glyph_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_glyph_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::COLOR,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         Self {
             pipeline,
+            glyph_pipeline,
             bgl,
             bind_group: None,
             bind_group_key: None,
             portal_count: 0,
             active_portal_count: None,
             editor_mode: false,
+            debug_texts: Vec::new(),
+            glyph_buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Portal Editor Glyphs"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            glyph_count: 0,
+            fallback_portal_views: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Portal Editor Empty Views"),
+                size: 144,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
         }
     }
 
@@ -140,6 +228,15 @@ impl PortalEditorOverlayPass {
 
     pub fn is_editor_mode(&self) -> bool {
         self.editor_mode
+    }
+
+    /// Replace the world-anchored labels shown alongside the portal checker.
+    pub fn set_debug_texts(&mut self, texts: Vec<PortalDebugText>) -> bool {
+        if self.debug_texts == texts {
+            return false;
+        }
+        self.debug_texts = texts;
+        true
     }
 }
 
@@ -192,10 +289,12 @@ impl RenderPass for PortalEditorOverlayPass {
         let depth_view = if pre_aa.is_some() {
             depth
         } else {
-            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
+            resources
+                .get(helio_core::ResourceKey::new("full_res_depth"))
+                .unwrap_or(depth)
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -221,26 +320,50 @@ impl RenderPass for PortalEditorOverlayPass {
         })
     }
 
-    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Growable SceneDB storage exposes capacity, not live portal rows.
         // An absent active count therefore means no authored/projected
         // portals, not "draw the whole reserve".
         self.portal_count = self.active_portal_count.unwrap_or(0);
+        let glyphs = self
+            .debug_texts
+            .iter()
+            .flat_map(|text| make_glyphs(text))
+            .collect::<Vec<_>>();
+        self.glyph_count = glyphs.len().min(u32::MAX as usize) as u32;
+        if !glyphs.is_empty() {
+            let bytes = bytemuck::cast_slice(&glyphs);
+            if bytes.len() as u64 > self.glyph_buffer.size() {
+                self.glyph_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Portal Editor Glyphs"),
+                    size: (bytes.len() as u64).next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.bind_group = None;
+                self.bind_group_key = None;
+            }
+            ctx.queue.write_buffer(&self.glyph_buffer, 0, bytes);
+        }
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if !self.editor_mode || self.portal_count == 0 {
+        if !self.editor_mode || (self.portal_count == 0 && self.glyph_count == 0) {
             return Ok(());
         }
         let Some(mut pass) = ctx.render_cmds() else {
             return Ok(());
         };
-        let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
+        let portal_views = ctx.scene_buffers.get(BufferKey::of("portal_views"));
+        if self.portal_count > 0 && portal_views.is_none() {
             return Ok(());
-        };
+        }
 
-        let key = [ctx.camera.clone(), portal_views.buffer.clone()];
+        let portal_view_buffer = portal_views
+            .map(|views| &views.buffer)
+            .unwrap_or(&self.fallback_portal_views);
+        let key = [ctx.camera.clone(), portal_view_buffer.clone()];
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalEditorOverlay BG"),
@@ -252,7 +375,11 @@ impl RenderPass for PortalEditorOverlayPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: portal_views.buffer.as_entire_binding(),
+                        resource: portal_view_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.glyph_buffer.as_entire_binding(),
                     },
                 ],
             }));
@@ -261,10 +388,115 @@ impl RenderPass for PortalEditorOverlayPass {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.draw(0..6, 0..self.portal_count);
+        if self.portal_count > 0 {
+            pass.draw(0..6, 0..self.portal_count);
+        }
+        if self.glyph_count > 0 {
+            pass.set_pipeline(&self.glyph_pipeline);
+            pass.draw(0..6, 0..self.glyph_count);
+        }
 
         Ok(())
     }
 }
 
+fn make_glyphs(text: &PortalDebugText) -> impl Iterator<Item = GlyphInstance> + '_ {
+    text.text
+        .chars()
+        .enumerate()
+        .map(move |(index, character)| {
+            let rows = glyph_rows(character.to_ascii_uppercase());
+            let mut bitmap = [0u32; 2];
+            for (y, row) in rows.into_iter().enumerate() {
+                for x in 0..5 {
+                    if row & (1 << (4 - x)) != 0 {
+                        let bit = y * 5 + x;
+                        bitmap[bit / 32] |= 1 << (bit % 32);
+                    }
+                }
+            }
+            GlyphInstance {
+                world_position: [
+                    text.world_position[0],
+                    text.world_position[1],
+                    text.world_position[2],
+                    1.0,
+                ],
+                color: text.color,
+                bitmap,
+                screen_offset: [index as f32 * 0.055, 0.0],
+            }
+        })
+}
 
+fn glyph_rows(character: char) -> [u8; 7] {
+    match character {
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+        ],
+        '6' => [
+            0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+        ],
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'C' => [
+            0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'I' => [
+            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b11001, 0b10101, 0b10011, 0b10011, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        ' ' => [0; 7],
+        '!' => [
+            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
+        _ => [
+            0b11111, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100,
+        ],
+    }
+}

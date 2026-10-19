@@ -36,8 +36,16 @@ struct GpuPortalView {
     _pad:              u32,
 }
 
+struct GlyphInstance {
+    world_position: vec4<f32>,
+    color: vec4<f32>,
+    bitmap: vec2<u32>,
+    screen_offset: vec2<f32>,
+}
+
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> portal_views: array<GpuPortalView>;
+@group(0) @binding(2) var<storage, read> debug_glyphs: array<GlyphInstance>;
 
 const LOCAL_CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
@@ -82,4 +90,49 @@ fn fs_main(input: OverlayOutput) -> @location(0) vec4<f32> {
         discard;
     }
     return vec4<f32>(0.0, 0.0, 0.0, DARKEN_ALPHA);
+}
+
+struct GlyphOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) color: vec4<f32>,
+    @location(2) @interpolate(flat) bitmap: vec2<u32>,
+}
+
+const GLYPH_CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+);
+const GLYPH_CELL: f32 = 0.008;
+
+@vertex
+fn vs_glyph_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> GlyphOutput {
+    let glyph = debug_glyphs[instance_index];
+    let uv = GLYPH_CORNERS[vertex_index];
+    let forward = normalize(cameras[0].forward_far.xyz);
+    let right = normalize(cross(forward, vec3<f32>(0.0, 1.0, 0.0)));
+    let up = normalize(cross(right, forward));
+    let local = vec2<f32>(glyph.screen_offset.x + uv.x * 5.0 * GLYPH_CELL,
+                          glyph.screen_offset.y - uv.y * 7.0 * GLYPH_CELL);
+    let world = glyph.world_position.xyz + right * local.x + up * local.y;
+    var out: GlyphOutput;
+    out.clip_position = cameras[0].view_proj * vec4<f32>(world, 1.0);
+    out.uv = uv;
+    out.color = glyph.color;
+    out.bitmap = glyph.bitmap;
+    return out;
+}
+
+@fragment
+fn fs_glyph_main(input: GlyphOutput) -> @location(0) vec4<f32> {
+    let pixel = vec2<u32>(min(vec2<f32>(4.0, 6.0), floor(input.uv * vec2<f32>(5.0, 7.0))));
+    let bit = pixel.y * 5u + pixel.x;
+    var set = false;
+    if bit < 32u {
+        set = ((input.bitmap.x >> bit) & 1u) != 0u;
+    } else {
+        set = ((input.bitmap.y >> (bit - 32u)) & 1u) != 0u;
+    }
+    if !set { discard; }
+    return input.color;
 }
