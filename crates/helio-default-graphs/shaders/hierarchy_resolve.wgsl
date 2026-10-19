@@ -6,7 +6,8 @@ const MAX_DEPTH: u32 = 64u;
 
 struct ResolveUniforms {
     rows: u32,
-    _pad0: u32,
+    // 1.0, unknown to the compiler: `pair_add`'s guard.
+    one: f32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -34,12 +35,15 @@ fn linear_part(t: ObjectTransform) -> mat3x3<f32> {
 
 /// `a + b` for f32 pairs (`hi + lo` each), renormalised: the sum's f32 and
 /// what that drops (two-sum), so world positions keep their precision.
+/// Each rounding is kept through `u.one`: a driver reassociating floats
+/// folds `(s + lo) - s` to `lo` and the dropped part to zero (NVIDIA's
+/// Vulkan driver did, half a metre on a planet).
 fn pair_add(a_hi: vec3<f32>, a_lo: vec3<f32>, b_hi: vec3<f32>, b_lo: vec3<f32>) -> array<vec3<f32>, 2> {
-    let s = a_hi + b_hi;
-    let b_virtual = s - a_hi;
+    let s = (a_hi + b_hi) * u.one;
+    let b_virtual = (s - a_hi) * u.one;
     let error = (a_hi - (s - b_virtual)) + (b_hi - b_virtual);
     let lo = error + a_lo + b_lo;
-    let hi = s + lo;
+    let hi = (s + lo) * u.one;
     return array<vec3<f32>, 2>(hi, lo - (hi - s));
 }
 

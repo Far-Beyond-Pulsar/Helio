@@ -43,7 +43,9 @@ pub struct HierarchyResolveKeys {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     rows: u32,
-    _pad: [u32; 3],
+    /// 1.0 (the shader's guard against reassociated floats).
+    one: f32,
+    _pad: [u32; 2],
 }
 
 /// See the module doc.
@@ -178,7 +180,8 @@ impl SceneDerivation for HierarchyResolve {
                 0,
                 bytemuck::bytes_of(&Uniforms {
                     rows,
-                    _pad: [0; 3],
+                    one: 1.0,
+                    _pad: [0; 2],
                 }),
             );
             let bound = [
