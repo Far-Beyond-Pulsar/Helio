@@ -93,7 +93,7 @@ fn cs_join_moved(@builtin(global_invocation_id) gid: vec3<u32>) {
     let t = transforms[owner];
     let rotation = object_rotation(t);
     let scale = object_scale(t);
-    let position = relative_position(object_position(t), u.origin_hi.xyz, u.origin_lo.xyz);
+    let position = object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
     let c0 = rotation[0] * scale.x;
     let c1 = rotation[1] * scale.y;
     let c2 = rotation[2] * scale.z;

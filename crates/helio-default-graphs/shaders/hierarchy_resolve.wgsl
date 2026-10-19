@@ -32,10 +32,21 @@ fn linear_part(t: ObjectTransform) -> mat3x3<f32> {
     return mat3x3<f32>(r[0] * s.x, r[1] * s.y, r[2] * s.z);
 }
 
-/// The nearest shear-free `ObjectTransform` to `lin` placed at `offset`, with
-/// `rotation` as YXZ Euler angles in degrees (the inverse of
+/// `a + b` for f32 pairs (`hi + lo` each), renormalised: the sum's f32 and
+/// what that drops (two-sum), so world positions keep their precision.
+fn pair_add(a_hi: vec3<f32>, a_lo: vec3<f32>, b_hi: vec3<f32>, b_lo: vec3<f32>) -> array<vec3<f32>, 2> {
+    let s = a_hi + b_hi;
+    let b_virtual = s - a_hi;
+    let error = (a_hi - (s - b_virtual)) + (b_hi - b_virtual);
+    let lo = error + a_lo + b_lo;
+    let hi = s + lo;
+    return array<vec3<f32>, 2>(hi, lo - (hi - s));
+}
+
+/// The nearest shear-free `ObjectTransform` to `lin` placed at `hi + lo`,
+/// with `rotation` as YXZ Euler angles in degrees (the inverse of
 /// `object_rotation`).
-fn decompose(lin: mat3x3<f32>, offset: vec3<f32>) -> ObjectTransform {
+fn decompose(lin: mat3x3<f32>, hi: vec3<f32>, lo: vec3<f32>) -> ObjectTransform {
     var sx = length(lin[0]);
     let sy = length(lin[1]);
     let sz = length(lin[2]);
@@ -60,7 +71,8 @@ fn decompose(lin: mat3x3<f32>, offset: vec3<f32>) -> ObjectTransform {
         yaw = atan2(-r[0][2], r[0][0]);
     }
     var out: ObjectTransform;
-    out.position = array<f32, 3>(offset.x, offset.y, offset.z);
+    out.position_hi = array<f32, 3>(hi.x, hi.y, hi.z);
+    out.position_lo = array<f32, 3>(lo.x, lo.y, lo.z);
     out.rotation = array<f32, 3>(pitch * to_deg, yaw * to_deg, roll * to_deg);
     out.scale = array<f32, 3>(sx, sy, sz);
     return out;
@@ -79,7 +91,10 @@ fn cs_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var lin = linear_part(own);
-    var offset = object_position(own);
+    // The position so far, as an f32 pair: a parent on a planet is far from
+    // the world's origin, its children near it.
+    var hi = position_hi(own);
+    var lo = position_lo(own);
     for (var depth = 0u; depth < MAX_DEPTH; depth = depth + 1u) {
         if parent == 0u {
             break;
@@ -90,9 +105,11 @@ fn cs_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let up = local_transforms[at];
         let up_lin = linear_part(up);
-        offset = up_lin * offset + object_position(up);
+        let sum = pair_add(up_lin * hi, up_lin * lo, position_hi(up), position_lo(up));
+        hi = sum[0];
+        lo = sum[1];
         lin = up_lin * lin;
         parent = parent_of(at);
     }
-    world_transforms[index] = decompose(lin, offset);
+    world_transforms[index] = decompose(lin, hi, lo);
 }
