@@ -2,7 +2,7 @@ use super::*;
 use std::sync::Arc;
 
 #[test]
-fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
+fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
@@ -134,9 +134,8 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
         assert!((f32::from_bits(words[0]) - expected[0]).abs() < 1e-6);
         assert!((f32::from_bits(words[1]) - expected[1]).abs() < 1e-6);
         assert_eq!(words[3], u32::from(index == 0));
-        assert_eq!(words[4], time.to_bits());
-        assert_eq!(words[6], previous_uv[0].to_bits());
-        assert_eq!(words[7], previous_uv[1].to_bits());
+        assert_eq!(words[4], previous_uv[0].to_bits());
+        assert_eq!(words[5], previous_uv[1].to_bits());
         // Reset uses the current view; subsequent unchanged-origin frames
         // upload the preceding raw view exactly.
         let expected_view = if index == 0 { camera.view } else { previous_view };
@@ -175,8 +174,11 @@ fn resolved_view_publication_follows_resize() {
             .get(helio_core::ResourceKey::new("tsr_color"))
             .unwrap();
         assert_eq!(published, &pass.output_view);
-        assert_eq!(pass.history_depth.size(), pass.output_texture.size());
-        assert_eq!(pass.output_depth.size(), pass.output_texture.size());
+        for history in &pass.histories {
+            for texture in [&history.color, &history.depth, &history.state, &history.noise] {
+                assert_eq!(texture.size(), pass.output_texture.size());
+            }
+        }
         if size.is_some() {
             assert_ne!(published, &old);
         }
@@ -195,7 +197,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(format!("{source}\n\
-                @group(0) @binding(9) var<storage,read_write> answer: vec4<f32>;\n\
+                @group(0) @binding(15) var<storage,read_write> answer: vec4<f32>;\n\
                 @compute @workgroup_size(1) fn probe() {{\n\
                   let raster_uv=vec2<f32>(0.4,0.6)+cameras[0].jitter_frame.xy*vec2<f32>(0.5,-0.5);\n\
                   answer=reproject_history(raster_uv,0.5);\n\
@@ -270,7 +272,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
                             resource: params.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
-                            binding: 9,
+                            binding: 15,
                             resource: output.as_entire_binding(),
                         },
                     ],
@@ -319,7 +321,7 @@ fn depth_history_rejects_disocclusion_and_invalid_samples() {
             source: wgpu::ShaderSource::Wgsl(
                 format!(
                     "{source}\n\
-            @group(0) @binding(9) var<storage,read_write> verdicts: array<u32,6>;\n\
+            @group(0) @binding(15) var<storage,read_write> verdicts: array<u32,6>;\n\
             @compute @workgroup_size(1) fn test_depth() {{\n\
                 verdicts[0]=u32(history_depth_matches(10.0,10.0,0.02));\n\
                 verdicts[1]=u32(history_depth_matches(10.0,10.009,0.02));\n\
@@ -356,7 +358,7 @@ fn depth_history_rejects_disocclusion_and_invalid_samples() {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[wgpu::BindGroupEntry {
-                binding: 9,
+                binding: 15,
                 resource: output.as_entire_binding(),
             }],
         });
