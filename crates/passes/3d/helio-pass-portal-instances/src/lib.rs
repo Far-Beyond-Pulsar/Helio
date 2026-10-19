@@ -38,7 +38,7 @@ mod mask;
 pub use mask::PortalMaskPass;
 
 mod editor_overlay;
-pub use editor_overlay::PortalEditorOverlayPass;
+pub use editor_overlay::{PortalDebugText, PortalEditorOverlayPass};
 
 use bytemuck::{Pod, Zeroable};
 
