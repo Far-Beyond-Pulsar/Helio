@@ -127,7 +127,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} drawn_nodes={} drawn_chunks={} resident_chunks={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
             self.settled(),
             self.kept_loaded,
             s.kept_chunks,
@@ -135,6 +135,8 @@ impl ChunkPass {
             s.drawn_nodes,
             s.drawn_chunks,
             s.resident_chunks,
+            s.evicted_chunks,
+            s.evictions_deferred,
             s.fading_nodes,
             s.requests,
             s.generated_footprints,

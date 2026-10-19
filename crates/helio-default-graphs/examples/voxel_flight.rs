@@ -346,6 +346,7 @@ fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::Resid
             max_distance: 400_000.0,
             prefetch_seconds: 0.5,
             keep_frames: 120,
+            release_frames: ResidencyConfig::default().plan.release_frames,
             // `HELIO_VOXEL_MOTION_FLOW`: pixels a frame of motion per extra
             // pixel a cell may cover (16; 0: none), up to
             // `HELIO_VOXEL_MOTION_MAX` (3).

@@ -962,6 +962,9 @@ pub struct UpdateStats {
     /// the first time (diagnostics: what generation was for).
     pub evicted_unseen: usize,
     pub shown_chunks: usize,
+    /// Edited chunks the plan evicted left resident past the frame's packs
+    /// (evicted, kept, by a later plan).
+    pub evictions_deferred: usize,
     /// Drawn nodes (Solid and Buried ones too), those fading in or out of
     /// a switch between levels, and drawn chunks.
     pub drawn_nodes: usize,
@@ -1028,9 +1031,12 @@ impl Default for ResidencyConfig {
     /// (two in view where none did, two out of view past a 20 degree guard;
     /// up to three where the eye's motion sweeps the image 32 pixels a
     /// frame; a 45 degree view 1080 pixels tall), 400 km out, half a second
-    /// of prefetch, buried nodes generated where they hold the eye; up to
-    /// 256 footprints and 3 ms of generation a frame.
+    /// of prefetch, buried nodes generated where they hold the eye, chunks
+    /// unvisited for 600 frames released (`HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`;
+    /// 0: only when slots run short); up to 256 footprints and 3 ms of
+    /// generation a frame.
     fn default() -> Self {
+        let release_frames = std::env::var("HELIO_VOXEL_CHUNKS_RELEASE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
         Self {
             plan: residency::PlanConfig {
                 pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / 1080.0,
@@ -1043,6 +1049,7 @@ impl Default for ResidencyConfig {
                 max_distance: 400_000.0,
                 prefetch_seconds: 0.5,
                 keep_frames: 120,
+                release_frames,
                 motion_flow: 16.0,
                 motion_max: 3.0,
                 near_cells: 2.0,
@@ -2680,9 +2687,18 @@ impl ChunkWorld {
         stats.plan_ms = self.plan_made.1;
         let mut packs: Vec<(NodeKey, u32, i32, Option<u64>)> = Vec::new();
         for key in evicted {
+            // An edited chunk to keep past this frame's packs stays resident
+            // (the planner told so: it is evicted again, packed, by a later
+            // plan) rather than lost to generating again from the history.
+            // An edited chunk, read back and unedited since, is kept.
+            let keep = self.kept_limit > 0 && self.nodes.get(&key).is_some_and(|c| c.edited && c.z.is_some()) && !self.kept.contains_key(&key) && !self.urgent.contains(&key) && !self.stale.contains(&key);
+            if keep && packs.len() >= MAX_PACKS {
+                self.events.push(residency::Event::Generated(key));
+                stats.evictions_deferred += 1;
+                continue;
+            }
             if let Some(old) = self.remove_resident(key) {
-                // An edited chunk, read back and unedited since, is kept.
-                if old.edited && old.z.is_some() && self.kept_limit > 0 && packs.len() < MAX_PACKS && !self.kept.contains_key(&key) && !self.urgent.contains(&key) && !self.stale.contains(&key) {
+                if keep {
                     packs.push((key, old.slot, old.flags, None));
                     self.packed_since.insert(key);
                 }

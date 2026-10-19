@@ -12,8 +12,8 @@
 //! generated, so nothing is ever missing: detail arrives as whole nodes
 //! replacing their parent. The cut covers the whole world: roots are
 //! always visited, and nodes the eye cannot see are drawn as they are.
-//! Generated nodes stay resident until chunk slots run short; then the
-//! nodes no plan has visited for longest are evicted.
+//! Generated nodes no plan has visited for `release_frames` are evicted,
+//! and when chunk slots run short, those no plan has visited for longest.
 //!
 //! Pure CPU logic over node keys, ranges and edits, run on a [`Worker`]
 //! thread; the GPU work lives in `chunks`.
@@ -50,6 +50,12 @@ pub struct PlanConfig {
     /// Bookkeeping of nodes not generated (wanted once, or found empty) is
     /// dropped after this many frames unvisited.
     pub keep_frames: u64,
+    /// Generated nodes no plan has visited for this many frames are
+    /// released (`MAX_RELEASE` a plan, least recently visited first), so
+    /// residency follows the cut rather than the eye's history; a cut
+    /// that comes back within them finds its chunks (0: released only
+    /// when chunk slots run short).
+    pub release_frames: u64,
     /// Where the eye's motion sweeps a node's image by `flow` pixels a
     /// frame, its cells may cover `1 + flow / motion_flow` times
     /// `lod_pixels`, at most `motion_max` (0: no motion allowance).
@@ -601,14 +607,18 @@ impl Planner {
         }
     }
 
-    /// Bookkeeping not visited for `keep_frames` dropped, and when chunk
-    /// slots run short, up to `need` generated nodes evicted, least
-    /// recently visited first (never one visited in the last `IDLE_FRAMES`:
+    /// Bookkeeping not visited for `keep_frames` dropped, and generated
+    /// nodes evicted, least recently visited first: those unvisited for
+    /// `release_frames` (`MAX_RELEASE` at most), and when chunk slots run
+    /// short, `need` at least (never one visited in the last `IDLE_FRAMES`:
     /// it may still be fading out).
     pub fn evict(&mut self, frame: u64, need: usize) -> Vec<NodeKey> {
         let keep = self.config.keep_frames;
         self.nodes.retain(|_, n| (n.generated && !n.empty) || n.used + keep >= frame);
         let mut evicted = Vec::new();
+        let idle = IDLE_FRAMES.max(self.config.release_frames);
+        let released = if self.config.release_frames > 0 { self.nodes.values().filter(|n| n.generated && !n.empty && n.used + idle < frame).count().min(MAX_RELEASE) } else { 0 };
+        let need = need.max(released);
         if need > 0 {
             let mut old: Vec<(u64, NodeKey)> = self.nodes.iter().filter(|(_, n)| n.generated && !n.empty && n.used + IDLE_FRAMES < frame).map(|(k, n)| (n.used, *k)).collect();
             if old.len() > need {
@@ -774,6 +784,10 @@ impl Worker {
 /// between levels (`drawn::FADE_FRAMES`) and a plan's lag.
 const IDLE_FRAMES: u64 = 32;
 
+/// Nodes released for age a plan at most (`PlanConfig::release_frames`):
+/// a flight's trail goes over some frames, not in one.
+const MAX_RELEASE: usize = 4096;
+
 /// Requests a plan lists at most (more than a frame generates).
 pub const MAX_REQUESTS: usize = 4096;
 
@@ -806,6 +820,7 @@ mod tests {
             max_distance: 400_000.0,
             prefetch_seconds: 0.5,
             keep_frames: 60,
+            release_frames: 0,
             motion_flow: 0.0,
             motion_max: 1.0,
             near_cells: 2.0,
@@ -944,6 +959,47 @@ mod tests {
         assert_eq!(evicted.len(), fine);
         let drawn: FxHashSet<NodeKey> = here.drawn.iter().map(|d| d.0).collect();
         assert!(evicted.iter().all(|k| !drawn.contains(k)));
+    }
+
+    /// With `release_frames`, nodes the cut left go once that old without
+    /// pressure, a plan's `MAX_RELEASE` at a time, never one the plan drew;
+    /// what is left is about what a fresh planner settles with there.
+    #[test]
+    fn nodes_the_cut_left_are_released_by_age() {
+        let (grid, eye, _) = setup();
+        let release = 200;
+        let mut planner = Planner::new(&grid, (-2000, 2000), PlanConfig { release_frames: release, ..config() }, no_edits(&grid));
+        let resident = |p: &Planner| p.nodes.values().filter(|n| n.generated && !n.empty).count();
+        let mut frame = 0;
+        settle(&grid, eye, None, &mut planner, &mut frame);
+        let far = eye + eye.normalize() * 200_000.0;
+        let here = settle(&grid, far, None, &mut planner, &mut frame);
+        let before = resident(&planner);
+        frame += 1;
+        planner.plan(&grid, far, DVec3::ZERO, None, frame);
+        assert!(planner.evict(frame, 0).is_empty(), "nothing released before {release} frames");
+        frame += release;
+        planner.plan(&grid, far, DVec3::ZERO, None, frame);
+        let mut released = Vec::new();
+        loop {
+            let batch = planner.evict(frame, 0);
+            assert!(batch.len() <= MAX_RELEASE);
+            if batch.is_empty() {
+                break;
+            }
+            released.extend(batch);
+        }
+        let drawn: FxHashSet<NodeKey> = here.drawn.iter().map(|d| d.0).collect();
+        assert!(released.iter().all(|k| !drawn.contains(k)));
+        assert!(released.iter().any(|k| k.level == 0), "the first eye's fine nodes released");
+        let (_, _, mut fresh) = setup();
+        let mut fresh_frame = 0;
+        settle(&grid, far, None, &mut fresh, &mut fresh_frame);
+        // What is left the plan visits (a band refined in passing may stay
+        // refined), within a fifth of a fresh cut's.
+        assert!(planner.nodes.values().all(|n| !n.generated || n.empty || n.used + release >= frame));
+        let (left, wanted) = (resident(&planner), resident(&fresh));
+        assert!(left * 5 <= wanted * 6, "{before} resident, {left} after release, {wanted} fresh");
     }
 
     /// In view but met by no ray: a level coarser; met: as fine as wanted.
