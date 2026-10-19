@@ -1640,6 +1640,40 @@ struct SceneSurface {
 
 SCENE_MATERIALS
 
+// Edited cells' exact materials (`chunks/blocks.rs`): a table of 8x8x8 bricks
+// keyed by face and brick, one byte a cell; 0 is none.
+@group(0) @binding(16) var<storage, read> block_bricks: array<u32>;
+const BLOCK_CAPACITY: u32 = 131072u;
+const BLOCK_PROBES: u32 = 64u;
+
+fn block_hash(face: u32, bi: i32, bj: i32, bk: i32) -> u32 {
+    var h = (face * 0x9e3779b1u) ^ (bitcast<u32>(bi) * 0x85ebca77u) ^ (bitcast<u32>(bj) * 0xc2b2ae3du) ^ (bitcast<u32>(bk) * 0x27d4eb2fu);
+    h ^= h >> 15u;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 13u;
+    return h;
+}
+
+// The material an edit gave base cell (i, j, k) of `face`, or 0.
+fn block_material(face: u32, i: i32, j: i32, k: i32) -> u32 {
+    let bi = i >> 3u;
+    let bj = j >> 3u;
+    let bk = k >> 3u;
+    let start = block_hash(face, bi, bj, bk);
+    for (var p = 0u; p < BLOCK_PROBES; p++) {
+        let e = (start + p) & (BLOCK_CAPACITY - 1u);
+        let at = e * 4u;
+        let f = block_bricks[at];
+        if f == 0u { return 0u; }
+        if f == face + 1u && bitcast<i32>(block_bricks[at + 1u]) == bi && bitcast<i32>(block_bricks[at + 2u]) == bj && bitcast<i32>(block_bricks[at + 3u]) == bk {
+            let local = u32(i & 7) + 8u * (u32(j & 7) + 8u * u32(k & 7));
+            let word = block_bricks[BLOCK_CAPACITY * 4u + e * 128u + (local >> 2u)];
+            return (word >> ((local & 3u) * 8u)) & 0xffu;
+        }
+    }
+    return 0u;
+}
+
 // Helio's gbuffer (`engine::GBUFFER_FORMATS`).
 struct GOut {
     @location(0) albedo: vec4<f32>,
@@ -1665,12 +1699,18 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let c = chunk_frame(v.x);
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
-    let material = (v.y >> 21u) & 31u;
+    var material = (v.y >> 21u) & 31u;
     let shading = textureLoad(hit_normal, p, 0);
     let normal = shading.xyz;
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
     let pixel_m = pixel_width(vec2<u32>(pixel.xy), size, t);
+    // An edited base cell shows the material it was given, not its leaf's pair.
+    let chunk = chunk_keys[v.x];
+    if (chunk.x >> 8u) == 0 {
+        let own = block_material(u32(chunk.x & 7), chunk.y * 64 + cell.x, chunk.z * 64 + cell.y, chunk.w * 64 + cell.z);
+        if own != 0u { material = min(own, 31u); }
+    }
     let look = surface_look(v.x, cell, axis, sign, material, position, pixel_m, vec2<u32>(pixel.xy));
     let f0 = 0.03;
     var out: GOut;

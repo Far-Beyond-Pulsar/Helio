@@ -1291,3 +1291,16 @@ mod scaling {
         }
     }
 }
+
+impl Planet {
+    /// Seals every recent brush into the baked store, so renderers that read
+    /// edits cell by cell (`ChunkWorld`'s block materials) see all of them.
+    pub fn seal_all(&mut self) -> Result<(), String> {
+        let n = self.edits.recent.len();
+        if n > 0 {
+            self.seal(n)?;
+            self.revision += 1;
+        }
+        Ok(())
+    }
+}

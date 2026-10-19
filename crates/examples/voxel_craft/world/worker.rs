@@ -101,6 +101,8 @@ impl Worker {
                     }
                     let interval = if urgent { SNAPSHOT_INTERVAL } else { DECORATION_INTERVAL };
                     if dirty && last_sent.elapsed() >= interval {
+                        // Edits sealed into the baked store are what the renderer reads cell by cell.
+                        let _ = planet.seal_all();
                         let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()), regions: decorator.regions_done() };
                         if result_tx.send(snapshot).is_err() {
                             break;
