@@ -833,6 +833,7 @@ impl RenderPass for OcclusionCullPass {
                     indirect: &segments.indirect_buf,
                     counts: segments.counts_supported.then_some(&segments.counts_buf),
                     segments: segments.segments(),
+                    table: &segments.table_buf,
                 },
             },
             "OcclusionCull",

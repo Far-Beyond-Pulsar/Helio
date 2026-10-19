@@ -15,7 +15,7 @@
 //! [`BufferHandle::content_generation`] moves exactly when the derivation
 //! rewrote them, so passes that skip unchanged inputs keep working.
 
-use crate::{BufferHandle, BufferKey, SceneBufferProjection};
+use crate::{BufferHandle, BufferKey, FlushedRows, SceneBufferProjection};
 use std::sync::Arc;
 
 /// What a derivation sees: the device and queue, and the frame's scene
@@ -35,6 +35,11 @@ pub struct SceneDerivationContext<'a> {
 #[derive(Default)]
 pub struct SceneDerivationOutput {
     pub buffers: Vec<(BufferKey, BufferHandle)>,
+    /// The rows of a published buffer that changed this frame, for a later
+    /// derivation that visits only those (the same record SceneDB keeps for
+    /// its dirty-tracked columns). Applied after `buffers`, so it survives
+    /// the flush-record reset that replacing a buffer causes.
+    pub flushed: Vec<(BufferKey, FlushedRows)>,
     pub recorded: bool,
 }
 
@@ -85,6 +90,9 @@ pub fn run_scene_derivations(
         recorded |= output.recorded;
         for (key, handle) in output.buffers {
             projection.insert(key, handle);
+        }
+        for (key, rows) in output.flushed {
+            projection.set_flushed_rows(key, rows);
         }
     }
     recorded.then(|| encoder.finish())

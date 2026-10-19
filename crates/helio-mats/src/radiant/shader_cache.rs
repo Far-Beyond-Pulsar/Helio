@@ -79,6 +79,39 @@ impl RadiantShaderCache {
         self.modules.get(&key).unwrap()
     }
 
+    /// [`Self::get_or_compile`] for a pass with its own shader `base` (see
+    /// `RadiantTemplate::build_shader_source_on`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_or_compile_on(
+        &mut self,
+        device: &wgpu::Device,
+        key: RadiantShaderKey,
+        template: &super::template::RadiantTemplate,
+        base: &str,
+        graph_wgsl: &str,
+        material_binding: crate::material::MaterialBindingConfig,
+        label: &str,
+    ) -> &wgpu::ShaderModule {
+        if !self.modules.contains_key(&key) {
+            let source = template.build_shader_source_on(base, graph_wgsl, material_binding.max_textures);
+            let source = if material_binding.uses_binding_arrays() {
+                source
+            } else {
+                super::template::RadiantTemplate::apply_webgpu_fixups(
+                    &source,
+                    material_binding.max_textures,
+                )
+            };
+            #[allow(clippy::disallowed_methods)]
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            self.insert(key, module);
+        }
+        self.modules.get(&key).unwrap()
+    }
+
     pub fn len(&self) -> usize {
         self.modules.len()
     }

@@ -493,4 +493,4 @@ pub use traits::{
     AsAny, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, MaybeSend, MaybeSync,
     RenderPass,
 };
-pub use frame_inputs::{CoordinateSpacesFrameData, RenderFrameInputs};
+pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};

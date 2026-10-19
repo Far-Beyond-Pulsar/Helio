@@ -557,19 +557,23 @@ impl Renderer {
         self.graph_rebuild_hook = Some(Arc::new(hook));
     }
 
-    /// Forward portal/sublevel coordinate spaces through the generic graph
-    /// input seam. The owning pass uploads its own GPU table during prepare.
+    /// Set the coordinate-space table through the generic graph input seam
+    /// (the non-identity tail: slot 0 is the world and implicit). The host owns
+    /// the one table: every producer of spaces (rigid frames, sublevel
+    /// placements, portal projections) takes its slots from the host's
+    /// [`helio_core::CoordinateSpaceAllocator`], and the host hands the result
+    /// here. The owning pass uploads its GPU table during prepare.
     pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
         self.coordinate_spaces.clear();
         self.coordinate_spaces.extend_from_slice(spaces);
         self.apply_coordinate_spaces();
     }
 
-    /// Upload a resolver-generated portal projection frame while preserving
-    /// the renderer's existing coordinate-space seam. The frame owns slot
-    /// zero as identity and this facade accepts the non-identity tail because
-    /// The graph broadcasts the frame to whichever pass families consume it;
-    /// the renderer does not need to know their concrete types.
+    /// Upload a resolver-generated portal projection frame built with its own
+    /// table (`PortalProjectionBridge::build`): its spaces become the table.
+    /// A host that shares the table with other producers builds with
+    /// `build_into` and calls [`Self::set_coordinate_spaces`] and
+    /// [`Self::set_portal_projection_counts`] instead.
     pub fn set_portal_projection_frame(
         &mut self,
         frame: &helio_pass_portal_cull::PortalProjectionFrame,
@@ -577,10 +581,16 @@ impl Renderer {
         self.coordinate_spaces.clear();
         self.coordinate_spaces
             .extend_from_slice(frame.renderer_coordinate_spaces());
-        self.portal_projection_counts = Some((
+        self.set_portal_projection_counts(
             frame.counts.portal_view_count,
             frame.counts.portal_chain_count,
-        ));
+        );
+    }
+
+    /// The live portal view and chain counts of a projection whose spaces the
+    /// host placed in the table itself.
+    pub fn set_portal_projection_counts(&mut self, portal_views: u32, portal_chains: u32) {
+        self.portal_projection_counts = Some((portal_views, portal_chains));
         self.apply_coordinate_spaces();
     }
 

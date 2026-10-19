@@ -87,6 +87,13 @@ impl SceneBufferProjection {
         }
     }
 
+    /// Record `rows` as the rows `key`'s buffer received this frame, for a
+    /// buffer a derivation published (see `SceneDerivationOutput::flushed`).
+    pub fn set_flushed_rows(&mut self, key: BufferKey, rows: FlushedRows) {
+        self.flushed.retain(|(candidate, _)| *candidate != key);
+        self.flushed.push((key, rows));
+    }
+
     /// Changes whenever SceneDB reports new contents (`content_generation`)
     /// or a reallocation (`epoch`) in any buffer here -- "did anything in the
     /// scene change" with no GPU readback. Independent of entry order.

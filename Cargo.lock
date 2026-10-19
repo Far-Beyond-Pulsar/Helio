@@ -2015,6 +2015,7 @@ dependencies = [
  "helio-pass-gbuffer",
  "helio-pass-portal-cull",
  "log",
+ "naga",
  "pulsar_scenedb",
  "wgpu",
 ]

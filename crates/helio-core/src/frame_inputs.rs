@@ -28,3 +28,17 @@ pub struct CoordinateSpacesFrameData<'a> {
     pub coordinate_spaces: &'a wgpu::Buffer,
     pub coordinate_spaces_prev: &'a wgpu::Buffer,
 }
+
+/// Hands out slots in the coordinate-space table.
+///
+/// Several producers put spaces in one table: the scene's rigid frames,
+/// placed sublevels, and portal projections (the matrix mapping a portal's
+/// target into its source). They must not number the table independently, so
+/// whoever owns the table (the host) implements this and each producer asks it
+/// for its slots.
+pub trait CoordinateSpaceAllocator {
+    /// The slot of `matrix` (a space-to-world transform; slot 0 is the world and
+    /// is never handed out), reusing the slot of an equal matrix already given
+    /// out. `None` when the table is full.
+    fn space_for(&mut self, matrix: glam::Mat4) -> Option<u32>;
+}

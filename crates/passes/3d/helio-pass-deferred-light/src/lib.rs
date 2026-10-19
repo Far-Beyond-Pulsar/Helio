@@ -9,6 +9,10 @@ use helio_pass_sky::atmosphere::{
 };
 use pulsar_scenedb::gpu::BufferKey;
 
+/// The chain unmap table (`portal_unmap`): 256 chains of one `mat4x4<f32>`, a
+/// uniform because the fragment stage is at its storage-buffer limit.
+const PORTAL_UNMAP_BYTES: u64 = 256 * 64;
+
 mod components;
 pub mod gpu_types;
 pub use components::{ReflectionCaptureComponent, MAX_REFLECTION_CAPTURES};
@@ -75,9 +79,10 @@ pub struct DeferredLightPass {
     /// A zeroed `AtmosphereFrame`: no atmosphere, bound until one publishes.
     fallback_atmosphere: wgpu::Buffer,
     fallback_sky_table: wgpu::Buffer,
-    /// `(camera, shadow caster counts, atmosphere)` `bind_group_0` was
+    fallback_portal_unmap: wgpu::Buffer,
+    /// `(camera, shadow caster counts, atmosphere, sky table, portal unmap)` `bind_group_0` was
     /// built against.
-    bind_group_0_key: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
+    bind_group_0_key: Option<[wgpu::Buffer; 5]>,
     bgl_1: wgpu::BindGroupLayout,
     bgl_2: wgpu::BindGroupLayout,
     bgl_3: wgpu::BindGroupLayout,
@@ -261,7 +266,27 @@ impl DeferredLightPass {
                     },
                     count: None,
                 },
+                // Per portal chain: host world -> the world of the content it
+                // shows (`portal_unmap` in the shader).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(PORTAL_UNMAP_BYTES),
+                    },
+                    count: None,
+                },
             ],
+        });
+        // Bound until portals publish their chains; never read then, because only
+        // portal pixels index it.
+        let fallback_portal_unmap = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DeferredLight Portal Unmap Fallback"),
+            size: PORTAL_UNMAP_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
         });
         let fallback_atmosphere = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DeferredLight No Atmosphere"),
@@ -347,6 +372,10 @@ impl DeferredLightPass {
                 wgpu::BindGroupEntry {
                     binding: 10,
                     resource: fallback_sky_table.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: fallback_portal_unmap.as_entire_binding(),
                 },
             ],
         });
@@ -734,6 +763,7 @@ impl DeferredLightPass {
             shadow_config_buf,
             bgl_0,
             fallback_shadow_caster_counts,
+            fallback_portal_unmap,
             fallback_atmosphere,
             fallback_sky_table,
             bind_group_0_key: None,
@@ -1314,12 +1344,17 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_SKY_TABLE))
             .unwrap_or(&self.fallback_sky_table);
-        let key_0 = (
+        let portal_unmap = ctx
+            .scene_buffers
+            .get(BufferKey::of("portal_chain_unmap"))
+            .map_or_else(|| self.fallback_portal_unmap.clone(), |handle| handle.buffer.clone());
+        let key_0 = [
             ctx.camera.clone(),
             caster_counts.clone(),
             atmosphere.clone(),
             sky_table.clone(),
-        );
+            portal_unmap.clone(),
+        ];
         if self.bind_group_0_key.as_ref() != Some(&key_0) {
             self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG0"),
@@ -1348,6 +1383,10 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: sky_table.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: portal_unmap.as_entire_binding(),
                     },
                 ],
             });

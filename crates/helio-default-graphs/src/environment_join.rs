@@ -764,9 +764,10 @@ impl SceneDerivation for EnvironmentJoin {
             .map(|source| self.input(inputs, source.key(&keys), source.row_bytes()))
             .collect();
         let mut recorded = false;
-        let (origin_hi, origin_lo) = crate::scene_join::origin_pair(ctx.world_origin);
+        let join_origin = crate::scene_join::join_origin(ctx);
+        let (origin_hi, origin_lo) = crate::scene_join::origin_pair(join_origin);
         let water_phase = water_phase(ctx.world_origin);
-        let origin_key = crate::scene_join::origin_bits(ctx.world_origin)
+        let origin_key = crate::scene_join::origin_bits(join_origin)
             .iter()
             .fold(0u64, |key, bits| key.rotate_left(21) ^ bits);
         for table in &mut self.tables {
@@ -902,6 +903,7 @@ impl SceneDerivation for EnvironmentJoin {
                 .iter()
                 .map(|table| (table.spec.key, table.handle()))
                 .collect(),
+            flushed: Vec::new(),
             recorded,
         }
     }

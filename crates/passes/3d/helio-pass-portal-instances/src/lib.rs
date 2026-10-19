@@ -24,7 +24,10 @@
 //! )); // immediately after PortalMaskPass, before FoliageGBufferPass/VirtualGeometryPass
 //! ```
 
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
+
+use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey, RadiantTemplateRegistry};
+use helio_pass_portal_cull::SharedPortalSegments;
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -54,7 +57,17 @@ pub struct PortalInstancePass {
     /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
     draw_slots: helio_pass_gbuffer::DrawSlots,
     material_binding: helio_mats::MaterialBindingConfig,
+    /// Draws materials without a graph (and every group until the segments exist).
     pipeline: wgpu::RenderPipeline,
+    /// One pipeline per material graph, built when its segment first draws: the
+    /// same surface evaluation as the G-buffer's pipeline for that graph.
+    graph_pipelines: HashMap<u64, wgpu::RenderPipeline>,
+    shader_cache: RadiantShaderCache,
+    pipeline_layout: wgpu::PipelineLayout,
+    /// The portal shader before any material graph is filled in.
+    base_shader: Cow<'static, str>,
+    /// Where the portal draw reads its per-material records (`PortalCullPass`).
+    segments: SharedPortalSegments,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
 
@@ -68,7 +81,8 @@ pub struct PortalInstancePass {
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<PortalBindGroupKey>,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<u64>,
+    /// `(material texture version, materials buffer epoch)` bind group 1 was built for.
+    bind_group_1_version: Option<(u64, u64)>,
 
     draw_count: u32,
 }
@@ -79,12 +93,16 @@ impl PortalInstancePass {
         portal_indirect_buf: Arc<wgpu::Buffer>,
         portal_compacted_indices_buf: Arc<wgpu::Buffer>,
         portal_compacted_chains_buf: Arc<wgpu::Buffer>,
+        segments: SharedPortalSegments,
     ) -> Self {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
 
         let shader_source = portal_shader_source(material_binding);
 
         let shader = helio_core::shader::module(device, "PortalInstance Shader", &*shader_source);
+        // The raw text, for filling in material graphs (the registered, hot-reloadable
+        // module above is the default pipeline's).
+        let base_shader: Cow<'static, str> = Cow::Borrowed(include_str!("../shaders/gbuffer_portal.wgsl"));
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalInstance/ScreenSize"),
@@ -129,11 +147,39 @@ impl PortalInstancePass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = Self::create_pipeline(device, &pipeline_layout, &shader);
+
+        Self {
+            draw_slots: Default::default(),
+            material_binding,
+            pipeline,
+            graph_pipelines: HashMap::new(),
+            shader_cache: RadiantShaderCache::new(),
+            pipeline_layout,
+            base_shader,
+            segments,
+            bind_group_layout_0,
+            bind_group_layout_1,
+            screen_buf,
+            portal_indirect_buf,
+            portal_compacted_indices_buf,
+            portal_compacted_chains_buf,
+            bind_group_0: None,
+            bind_group_0_key: None,
+            bind_group_1: None,
+            bind_group_1_version: None,
+            draw_count: 0,
+        }
+    }
+}
+
+impl PortalInstancePass {
+    fn create_pipeline(device: &wgpu::Device, pipeline_layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("PortalInstance Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 // Shared mesh vertex buffer layout — identical to GBufferPass
@@ -176,7 +222,7 @@ impl PortalInstancePass {
                 }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[
@@ -253,24 +299,38 @@ impl PortalInstancePass {
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
-        });
+        })
+    }
 
-        Self {
-            draw_slots: Default::default(),
-            material_binding,
-            pipeline,
-            bind_group_layout_0,
-            bind_group_layout_1,
-            screen_buf,
-            portal_indirect_buf,
-            portal_compacted_indices_buf,
-            portal_compacted_chains_buf,
-            bind_group_0: None,
-            bind_group_0_key: None,
-            bind_group_1: None,
-            bind_group_1_version: None,
-            draw_count: 0,
+    /// The pipeline drawing materials with `graph_hash` (0: none).
+    fn pipeline_for(&mut self, device: &wgpu::Device, graph_hash: u64) -> &wgpu::RenderPipeline {
+        if graph_hash == 0 {
+            return &self.pipeline;
         }
+        if !self.graph_pipelines.contains_key(&graph_hash) {
+            let graph = helio_mats::graph_source(graph_hash);
+            let registry = RadiantTemplateRegistry::new();
+            let template = registry
+                .get(0)
+                .expect("Default PBR template (class 0) missing");
+            let key = RadiantShaderKey {
+                template_id: 0,
+                graph_hash,
+                feature_flags: 0,
+            };
+            let module = self.shader_cache.get_or_compile_on(
+                device,
+                key,
+                template,
+                &self.base_shader,
+                graph.as_deref().unwrap_or(""),
+                self.material_binding,
+                "PortalInstance Graph Shader",
+            );
+            let pipeline = Self::create_pipeline(device, &self.pipeline_layout, module);
+            self.graph_pipelines.insert(graph_hash, pipeline);
+        }
+        &self.graph_pipelines[&graph_hash]
     }
 }
 
@@ -337,10 +397,12 @@ impl RenderPass for PortalInstancePass {
         // Written by helio-pass-portal-mask, which must run before this pass.
         builder.read("portal_mask");
         builder.read("object_batch");
+        // The G-buffer's draw segments, whose layout the portal segments follow.
+        builder.read("culled_batch");
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "portal_mask", "object_batch", "material_textures"]
+        &["gbuffer", "portal_mask", "object_batch", "culled_batch", "material_textures"]
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -595,14 +657,18 @@ impl RenderPass for PortalInstancePass {
         else {
             return Ok(());
         };
-        let needs_rebuild = self.bind_group_1_version != Some(material_textures.version)
+        // The material rows are the scene join's output, which reallocates as meshes
+        // load: bind group 1 must follow the buffer, not only the texture set (the
+        // main G-buffer pass keys on the same pair).
+        let materials_handle = ctx.scene_buffers.get(BufferKey::of("materials"));
+        let materials_buf = materials_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(batch.instances);
+        let materials_epoch = materials_handle.map_or(0, |handle| handle.epoch);
+        let needs_rebuild = self.bind_group_1_version
+            != Some((material_textures.version, materials_epoch))
             || self.bind_group_1.is_none();
         if needs_rebuild {
-            let materials_buf = ctx
-                .scene_buffers
-                .get(BufferKey::of("materials"))
-                .map(|handle| &handle.buffer)
-                .unwrap_or(batch.instances);
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -624,7 +690,7 @@ impl RenderPass for PortalInstancePass {
                 layout: &self.bind_group_layout_1,
                 entries: &entries,
             }));
-            self.bind_group_1_version = Some(material_textures.version);
+            self.bind_group_1_version = Some((material_textures.version, materials_epoch));
         }
 
         let vertices = &vertices_handle.buffer;
@@ -645,11 +711,48 @@ impl RenderPass for PortalInstancePass {
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
 
-        // One indirect command per draw group (mesh+material), same shape
-        // as the plain non-portal G-buffer pass — every chain's surviving
-        // instances for a given group are already merged into that group's
-        // single indirect command by PortalCullPass's `finalize` step.
-        // The GPU count is this frame's live group count; the `_count` draw
+        let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> =
+            ctx.registry.get(helio_core::ResourceKey::new("culled_batch"));
+        // The packed records exist once the cull has laid them out like the
+        // G-buffer's (it sizes the portal segment buffers to follow its table).
+        let packed_fit = {
+            let shared = self.segments.lock().unwrap_or_else(|p| p.into_inner());
+            culled.as_ref().is_some_and(|culled| {
+                shared.indirect.size() >= culled.segments.indirect.size()
+                    && culled.segments.counts.is_none_or(|c| shared.counts.size() >= c.size())
+            })
+        };
+        let packed = culled
+            .as_ref()
+            .filter(|culled| packed_fit && !culled.segments.is_empty() && batch.range_slot_capacity != 0);
+        if let Some(culled) = packed {
+            // One draw per material key, with that key's pipeline: a duplicate is
+            // shaded by its own material (`PortalCullPass` packed the records per
+            // segment, laid out by the G-buffer's own segment table).
+            let segments = Arc::clone(&self.segments);
+            let shared = segments.lock().unwrap_or_else(|p| p.into_inner());
+            for (index, segment) in culled.segments.in_bucket(helio_pass_gbuffer::ShadingBucket::Opaque) {
+                pass.set_pipeline(self.pipeline_for(ctx.device, segment.graph_hash));
+                let count = culled.segments.counts.map(|_| helio_pass_gbuffer::GpuDrawCount {
+                    buffer: &shared.counts,
+                    offset: index as u64 * 4,
+                });
+                helio_pass_gbuffer::multi_draw_indexed_indirect(
+                    &mut pass,
+                    &shared.indirect,
+                    segment.first,
+                    segment.capacity,
+                    count,
+                );
+            }
+            return Ok(());
+        }
+
+        // Before the segments exist (the first frames), draw every group with the
+        // default pipeline. One indirect command per draw group (mesh+material):
+        // every chain's surviving instances for a group are already merged into
+        // that group's single indirect command by PortalCullPass's `finalize`
+        // step. The GPU count is this frame's live group count; the `_count` draw
         // clamps it to this maximum, matching the capacity clamp here.
         let (_, draw_count) = batch.all_draws();
         let indirect_draw_count = self.draw_count.min(PORTAL_DRAW_CAPACITY);
@@ -697,3 +800,58 @@ mod tests {
 }
 
 
+
+#[cfg(test)]
+mod material_tests {
+    use helio_mats::radiant::RadiantTemplateRegistry;
+
+    /// What a Radiant material graph compiles to (the shape `material_graph.rs`
+    /// produces): declarations, then the body that fills the surface.
+    const GRAPH: &str = "/*RADIANT_GRAPH_DECLARATIONS*/\n\
+        struct PulsarGraphOutput { base_color: vec4<f32>, roughness: f32, metallic: f32, ambient_occlusion: f32, emissive_color: vec4<f32>, normal: vec3<f32>, opacity: f32 }\n\
+        fn pulsar_material_graph(material: GpuMaterial, input: VertexOutput) -> PulsarGraphOutput {\n\
+            var o: PulsarGraphOutput;\n\
+            o.base_color = vec4<f32>(input.world_normal * 0.5 + 0.5, 1.0);\n\
+            o.roughness = 0.4; o.metallic = 0.0; o.ambient_occlusion = 1.0;\n\
+            o.emissive_color = vec4<f32>(0.0); o.normal = vec3<f32>(0.0); o.opacity = 1.0;\n\
+            return o;\n\
+        }\n\
+        /*RADIANT_GRAPH_BODY*/\n\
+        let graph_surface = pulsar_material_graph(material, input);\n\
+        albedo = graph_surface.base_color;\n\
+        roughness = graph_surface.roughness;";
+
+    fn validate(source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|error| panic!("{}", error.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    }
+
+    #[test]
+    fn a_graph_material_compiles_into_the_portal_shader() {
+        let registry = RadiantTemplateRegistry::new();
+        let template = registry.get(0).expect("default template");
+        let base = include_str!("../shaders/gbuffer_portal.wgsl");
+        let plain = template.build_shader_source_on(base, "", 256);
+        validate(&plain);
+        let graph = template.build_shader_source_on(base, GRAPH, 256);
+        assert!(graph.contains("pulsar_material_graph(material, input)"));
+        assert!(!graph.contains("// RADIANT_OVERRIDE_SURFACE"));
+        validate(&graph);
+    }
+
+    #[test]
+    fn the_built_in_material_classes_compile_into_the_portal_shader() {
+        let registry = RadiantTemplateRegistry::new();
+        let base = include_str!("../shaders/gbuffer_portal.wgsl");
+        for class in registry.keys() {
+            let template = registry.get(class).unwrap();
+            validate(&template.build_shader_source_on(base, "", 256));
+        }
+    }
+}

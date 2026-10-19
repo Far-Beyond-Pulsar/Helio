@@ -158,6 +158,20 @@ pub(crate) fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
 pub(crate) fn origin_bits(origin: Option<glam::DVec3>) -> [u64; 3] {
     origin.map_or([u64::MAX; 3], |o| [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()])
 }
+/// Published (as an empty marker buffer) by `HierarchyResolve` when the
+/// transform rows it republishes are already relative to the frame's world
+/// origin. Joins then must not subtract the origin a second time.
+pub const TRANSFORMS_ORIGIN_RELATIVE_KEY: BufferKey = BufferKey::of("transforms_origin_relative");
+
+/// The world origin a join subtracts from the transform rows it reads: the
+/// frame's, unless the rows were already made origin-relative upstream.
+pub(crate) fn join_origin(ctx: &SceneDerivationContext<'_>) -> Option<glam::DVec3> {
+    if ctx.inputs.contains(TRANSFORMS_ORIGIN_RELATIVE_KEY) {
+        None
+    } else {
+        ctx.world_origin
+    }
+}
 
 /// A buffer the join owns and publishes.
 struct Output {
@@ -537,6 +551,7 @@ impl SceneJoin {
         ctx: &SceneDerivationContext<'_>,
         encoder: &mut wgpu::CommandEncoder,
         rows: &helio_core::FlushedRows,
+        dispatch_args: Option<&wgpu::Buffer>,
         transforms: &BufferHandle,
         section_handles: &BufferHandle,
         mesh_bounds: Option<&BufferHandle>,
@@ -548,7 +563,7 @@ impl SceneJoin {
         self.moved.current = next;
         self.moved.previous_complete = true;
         self.moved.run = self.moved.run.wrapping_add(1).max(1);
-        let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
+        let (origin_hi, origin_lo) = origin_pair(join_origin(ctx));
         ctx.queue.write_buffer(
             &self.moved.uniforms,
             0,
@@ -605,7 +620,11 @@ impl SceneJoin {
         });
         pass.set_pipeline(join);
         pass.set_bind_group(0, plain, &[]);
-        pass.dispatch_workgroups(rows.count.div_ceil(WORKGROUP), 1, 1);
+        match dispatch_args {
+            // The moved list was built on the GPU: its size is not known here.
+            Some(args) => pass.dispatch_workgroups_indirect(args, 0),
+            None => pass.dispatch_workgroups(rows.count.div_ceil(WORKGROUP), 1, 1),
+        }
         drop(pass);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Scene Join Moved Finish"),
@@ -699,7 +718,7 @@ impl SceneDerivation for SceneJoin {
         let owners = self.input(inputs, keys.owners, OWNER_ROW_BYTES);
         let generations = self.input(inputs, keys.generations, GENERATION_ROW_BYTES);
         let hidden = self.input(inputs, keys.hidden, HIDDEN_ROW_BYTES);
-        let transforms = self.input(inputs, keys.transforms, TRANSFORM_ROW_BYTES);
+        let world_transforms = self.input(inputs, keys.transforms, TRANSFORM_ROW_BYTES);
         let vertex_handles = self.input(inputs, keys.vertex_handles, HANDLE_ROW_BYTES);
         let index_handles = self.input(inputs, keys.index_handles, HANDLE_ROW_BYTES);
         let mesh_bounds = self.input(inputs, keys.mesh_bounds, MESH_BOUNDS_ROW_BYTES);
@@ -709,9 +728,24 @@ impl SceneDerivation for SceneJoin {
         let palette_handles = self.input(inputs, keys.palette_handles, HANDLE_ROW_BYTES);
         let sections = self.input(inputs, keys.mesh_sections, MESH_SECTION_ROW_BYTES);
         let sources = self.input(inputs, keys.light_sources, LIGHT_SOURCE_ROW_BYTES);
+        // Meshes are placed from rows composed only up to their nearest rigid
+        // frame (and tagged with that frame's space) when a hierarchy resolve
+        // ran ahead of this join; otherwise from the plain transform rows, in the
+        // world space. Lights and the rest read the world rows.
+        let placement_key = if inputs.contains(crate::hierarchy_resolve::LOCAL_PLACEMENT_KEY) {
+            crate::hierarchy_resolve::LOCAL_PLACEMENT_KEY
+        } else {
+            keys.transforms
+        };
+        let transforms = if placement_key == keys.transforms {
+            world_transforms
+        } else {
+            self.input(inputs, placement_key, TRANSFORM_ROW_BYTES)
+        };
+        let spaces = self.input(inputs, crate::hierarchy_resolve::OBJECT_SPACE_KEY, 4);
         let mut recorded = false;
-        let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
-        let [ox, oy, oz] = origin_bits(ctx.world_origin);
+        let (origin_hi, origin_lo) = origin_pair(join_origin(ctx));
+        let [ox, oy, oz] = origin_bits(join_origin(ctx));
 
         // ── Meshes ──────────────────────────────────────────────────────
         let instance_rows = section_handles.map_or(0, |h| rows_of(h, HANDLE_ROW_BYTES));
@@ -738,6 +772,7 @@ impl SceneDerivation for SceneJoin {
             skin_handles,
             palette_handles,
             sections,
+            spaces,
         ];
         let structure_signature = signature(
             &structure_inputs,
@@ -754,7 +789,18 @@ impl SceneDerivation for SceneJoin {
             // Only some owners' transforms moved since the last run, which
             // SceneDB's flush reports row by row: rewrite just their objects.
             let mut moved_ran: Option<bool> = None;
-            let flushed = transforms.and_then(|_| inputs.flushed_rows(keys.transforms));
+            let flushed = transforms.and_then(|_| inputs.flushed_rows(placement_key));
+            // A hierarchy resolve ahead of this join builds its own moved list on
+            // the GPU (its count is not known here, so the dispatch is indirect).
+            // It is only usable when it describes the rows being read.
+            let resolved = inputs.get(crate::hierarchy_resolve::HIERARCHY_MOVED_ARGS_KEY);
+            let gpu_list = resolved
+                .filter(|args| {
+                    args.content_generation != 0
+                        && transforms.is_some_and(|t| args.content_generation == t.content_generation)
+                })
+                .map(|args| &args.buffer);
+            let list_unusable = resolved.is_some() && gpu_list.is_none();
             let placement_now = transforms.map(|t| PlacementState {
                 epoch: t.epoch,
                 content_generation: t.content_generation,
@@ -772,9 +818,11 @@ impl SceneDerivation for SceneJoin {
                         && last.origin == now.origin
                         && last.content_generation.wrapping_add(1) == now.content_generation
                         && rows.count > 0
+                        && !list_unusable
                         // A large share of the scene moving is cheaper (and
                         // simpler) as one pass over all of it.
-                        && u64::from(rows.count) * 4 <= u64::from(instance_rows) =>
+                        && (gpu_list.is_some()
+                            || u64::from(rows.count) * 4 <= u64::from(instance_rows)) =>
                 {
                     Some(rows)
                 }
@@ -785,7 +833,15 @@ impl SceneDerivation for SceneJoin {
                 (moved_rows, transforms, section_handles)
             {
                 moved_ran =
-                    Some(self.record_moved(ctx, encoder, rows, transforms, section_handles, mesh_bounds));
+                    Some(self.record_moved(
+                        ctx,
+                        encoder,
+                        rows,
+                        gpu_list,
+                        transforms,
+                        section_handles,
+                        mesh_bounds,
+                    ));
             } else {
             self.moved.link_built = false;
             self.moved.previous_complete = false;
@@ -842,6 +898,7 @@ impl SceneDerivation for SceneJoin {
                         &self.objects.buffer,
                         &self.materials.buffer,
                         &self.moved.link,
+                        spaces.map_or(&self.empty, |h| &h.buffer),
                     ];
                     let reusable = self.mesh_bind.as_ref().is_some_and(|(buffers, _)| {
                         buffers.iter().zip(bound).all(|(cached, now)| cached == now)
@@ -868,6 +925,7 @@ impl SceneDerivation for SceneJoin {
                                 entry(13, bound[12]),
                                 entry(14, bound[13]),
                                 entry(15, bound[14]),
+                                entry(16, bound[15]),
                             ],
                         });
                         self.mesh_bind =
@@ -904,7 +962,7 @@ impl SceneDerivation for SceneJoin {
         let light_rows = sources.map_or(0, |h| rows_of(h, LIGHT_SOURCE_ROW_BYTES));
         let grew = self.lights.ensure(ctx.device, light_rows)
             | (self.billboards && self.billboard_rows.ensure(ctx.device, light_rows));
-        let light_inputs = [owners, generations, hidden, transforms, sources];
+        let light_inputs = [owners, generations, hidden, world_transforms, sources];
         let light_signature = signature(
             &light_inputs,
             &[
@@ -924,7 +982,7 @@ impl SceneDerivation for SceneJoin {
                 encoder.clear_buffer(&self.billboard_rows.buffer, 0, None);
             }
             if let (Some(owners), Some(generations), Some(transforms), Some(sources)) =
-                (owners, generations, transforms, sources)
+                (owners, generations, world_transforms, sources)
             {
                 ctx.queue.write_buffer(
                     &self.light_uniforms,
@@ -1008,6 +1066,10 @@ impl SceneDerivation for SceneJoin {
         if self.billboards {
             buffers.push((BILLBOARDS_KEY, self.billboard_rows.handle()));
         }
-        SceneDerivationOutput { buffers, recorded }
+        SceneDerivationOutput {
+            buffers,
+            flushed: Vec::new(),
+            recorded,
+        }
     }
 }

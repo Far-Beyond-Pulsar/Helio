@@ -1,8 +1,38 @@
 // Composes each object's world transform from its parent chain (see
 // `hierarchy_resolve.rs`). Prepended with scene_join_common.wgsl, which
-// supplies `ObjectTransform` and `object_rotation`.
+// supplies `ObjectTransform` (positions as f32 pairs), `object_rotation`,
+// `object_scale`, `position_hi` and `position_lo`.
+//
+// Output rows are relative to the frame's world origin (`origin_hi + origin_lo`,
+// zero outside camera-relative frames): chains compose in f32 pairs and the
+// origin comes off pair-wise last, so an object 6371 km out keeps its
+// millimetres whichever of its ancestors are far from the origin.
+//
+// Two results per row:
+// - world: the transform composed through every ancestor, relative to the
+//   frame's world origin. What lights, environment volumes and anything else
+//   that is not frame-aware read.
+// - placement: the transform composed only up to the nearest *rigid frame*
+//   ancestor (not including it), plus that frame's slot (the object's space).
+//   Objects drawn through the coordinate-space table read this: a frame moving
+//   does not change it. For objects with no frame above, placement == world.
+//
+// Entry points:
+// - `cs_resolve`: every row (a full resolve).
+// - `cs_mark_transform` / `cs_mark_parent` / `cs_mark_frame`: for each row of a
+//   flushed-row list `[count, rows..]`, set the changed bit for what was
+//   written (1 = transform, 2 = parent link, 4 = frame slot).
+// - `cs_resolve_moved`: world rows are recomposed where the row or any ancestor
+//   changed; placement rows (and the moved list `[count, rows..]`) where the row
+//   or any ancestor up to its frame changed. The rest keep last frame's result.
+// - `cs_finish`: sizes the moved-owner join's dispatch from the moved list.
 
 const MAX_DEPTH: u32 = 64u;
+const WORKGROUP: u32 = 64u;
+
+const BIT_TRANSFORM: u32 = 1u;
+const BIT_PARENT: u32 = 2u;
+const BIT_FRAME: u32 = 4u;
 
 struct ResolveUniforms {
     rows: u32,
@@ -10,6 +40,8 @@ struct ResolveUniforms {
     one: f32,
     _pad1: u32,
     _pad2: u32,
+    origin_hi: vec4<f32>,
+    origin_lo: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: ResolveUniforms;
@@ -17,13 +49,35 @@ struct ResolveUniforms {
 @group(0) @binding(1) var<storage, read> local_transforms: array<ObjectTransform>;
 /// Per object: the parent's entity index plus one, zero for none.
 @group(0) @binding(2) var<storage, read> parents: array<u32>;
+/// World-space (origin-relative) result, for readers that are not frame-aware.
 @group(0) @binding(3) var<storage, read_write> world_transforms: array<ObjectTransform>;
+/// `[count, rows..]`: the rows a column's last flush wrote.
+@group(0) @binding(4) var<storage, read> flushed: array<u32>;
+/// One word per row: which columns changed (`BIT_*`).
+@group(0) @binding(5) var<storage, read_write> changed: array<atomic<u32>>;
+/// `[count, rows..]`: the rows whose placement was recomposed this frame.
+@group(0) @binding(6) var<storage, read_write> moved: array<atomic<u32>>;
+/// Dispatch arguments for the moved-owner join.
+@group(0) @binding(7) var<storage, read_write> args: array<u32>;
+/// Per object: its frame slot when it is a rigid frame, else zero.
+@group(0) @binding(8) var<storage, read> frames: array<u32>;
+/// Frame-relative result: composed up to (not including) the nearest frame.
+@group(0) @binding(9) var<storage, read_write> placement: array<ObjectTransform>;
+/// Per object: the slot of its nearest frame ancestor, zero for the world.
+@group(0) @binding(10) var<storage, read_write> spaces: array<u32>;
 
 fn parent_of(index: u32) -> u32 {
     if index >= arrayLength(&parents) {
         return 0u;
     }
     return parents[index];
+}
+
+fn frame_slot(index: u32) -> u32 {
+    if index >= arrayLength(&frames) {
+        return 0u;
+    }
+    return frames[index];
 }
 
 /// The linear part of a transform: rotation * scale.
@@ -82,23 +136,35 @@ fn decompose(lin: mat3x3<f32>, hi: vec3<f32>, lo: vec3<f32>) -> ObjectTransform 
     return out;
 }
 
-@compute @workgroup_size(64)
-fn cs_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let index = gid.x;
-    if index >= u.rows {
-        return;
-    }
+struct Composed {
+    transform: ObjectTransform,
+    /// The frame slot composition stopped at, zero if it reached the world.
+    space: u32,
+}
+
+/// Row `index`'s transform composed up its parent chain, its position in
+/// f32 pairs. With `stop_at_frames` the chain ends below the nearest rigid
+/// frame (the result is relative to it, no origin removed); otherwise it
+/// runs to the world and is relative to the world origin (removed pair-wise
+/// last, exact however far the chain's members are from it).
+fn compose_row(index: u32, stop_at_frames: bool) -> Composed {
     let own = local_transforms[index];
     var parent = parent_of(index);
+    let origin_hi = -u.origin_hi.xyz;
+    let origin_lo = -u.origin_lo.xyz;
     if parent == 0u {
-        world_transforms[index] = own;
-        return;
+        var root = own;
+        let p = pair_add(position_hi(own), position_lo(own), origin_hi, origin_lo);
+        root.position_hi = array<f32, 3>(p[0].x, p[0].y, p[0].z);
+        root.position_lo = array<f32, 3>(p[1].x, p[1].y, p[1].z);
+        return Composed(root, 0u);
     }
     var lin = linear_part(own);
     // The position so far, as an f32 pair: a parent on a planet is far from
     // the world's origin, its children near it.
     var hi = position_hi(own);
     var lo = position_lo(own);
+    var space = 0u;
     for (var depth = 0u; depth < MAX_DEPTH; depth = depth + 1u) {
         if parent == 0u {
             break;
@@ -106,6 +172,15 @@ fn cs_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         let at = parent - 1u;
         if at >= u.rows {
             break;
+        }
+        if stop_at_frames {
+            let slot = frame_slot(at);
+            if slot != 0u {
+                // Relative to this frame: its own transform lives in the frame
+                // table.
+                space = slot;
+                break;
+            }
         }
         let up = local_transforms[at];
         let up_lin = linear_part(up);
@@ -115,5 +190,129 @@ fn cs_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         lin = up_lin * lin;
         parent = parent_of(at);
     }
-    world_transforms[index] = decompose(lin, hi, lo);
+    if space == 0u {
+        let p = pair_add(hi, lo, origin_hi, origin_lo);
+        hi = p[0];
+        lo = p[1];
+    }
+    return Composed(decompose(lin, hi, lo), space);
+}
+
+@compute @workgroup_size(64)
+fn cs_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if index >= u.rows {
+        return;
+    }
+    world_transforms[index] = compose_row(index, false).transform;
+    let local = compose_row(index, true);
+    placement[index] = local.transform;
+    spaces[index] = local.space;
+}
+
+fn mark(row_slot: u32, bit: u32) {
+    if row_slot >= flushed[0] {
+        return;
+    }
+    let row = flushed[1u + row_slot];
+    if row < u.rows && row < arrayLength(&changed) {
+        atomicOr(&changed[row], bit);
+    }
+}
+
+@compute @workgroup_size(64)
+fn cs_mark_transform(@builtin(global_invocation_id) gid: vec3<u32>) {
+    mark(gid.x, BIT_TRANSFORM);
+}
+
+@compute @workgroup_size(64)
+fn cs_mark_parent(@builtin(global_invocation_id) gid: vec3<u32>) {
+    mark(gid.x, BIT_PARENT);
+}
+
+@compute @workgroup_size(64)
+fn cs_mark_frame(@builtin(global_invocation_id) gid: vec3<u32>) {
+    mark(gid.x, BIT_FRAME);
+}
+
+/// Whether row `index` or any ancestor (through frames) changed: the world row
+/// depends on all of them.
+fn chain_changed_world(index: u32) -> bool {
+    if atomicLoad(&changed[index]) != 0u {
+        return true;
+    }
+    var parent = parent_of(index);
+    for (var depth = 0u; depth < MAX_DEPTH; depth = depth + 1u) {
+        if parent == 0u {
+            break;
+        }
+        let at = parent - 1u;
+        if at >= u.rows {
+            break;
+        }
+        if atomicLoad(&changed[at]) != 0u {
+            return true;
+        }
+        parent = parent_of(at);
+    }
+    return false;
+}
+
+/// Whether the placement row of `index` changed: the row itself, or an
+/// ancestor below its nearest frame. A frame's own transform and parent link do
+/// not matter (they live in the frame table); whether it is a frame does.
+fn chain_changed_local(index: u32) -> bool {
+    if atomicLoad(&changed[index]) != 0u {
+        return true;
+    }
+    var parent = parent_of(index);
+    for (var depth = 0u; depth < MAX_DEPTH; depth = depth + 1u) {
+        if parent == 0u {
+            break;
+        }
+        let at = parent - 1u;
+        if at >= u.rows {
+            break;
+        }
+        let bits = atomicLoad(&changed[at]);
+        if frame_slot(at) != 0u {
+            return (bits & BIT_FRAME) != 0u;
+        }
+        if bits != 0u {
+            return true;
+        }
+        parent = parent_of(at);
+    }
+    return false;
+}
+
+@compute @workgroup_size(64)
+fn cs_resolve_moved(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if index >= u.rows {
+        return;
+    }
+    if !chain_changed_world(index) {
+        return;
+    }
+    world_transforms[index] = compose_row(index, false).transform;
+    if !chain_changed_local(index) {
+        return;
+    }
+    let local = compose_row(index, true);
+    placement[index] = local.transform;
+    spaces[index] = local.space;
+    let at = atomicAdd(&moved[0], 1u);
+    if 1u + at < arrayLength(&moved) {
+        atomicStore(&moved[1u + at], index);
+    }
+}
+
+@compute @workgroup_size(1)
+fn cs_finish() {
+    let count = min(atomicLoad(&moved[0]), arrayLength(&moved) - 1u);
+    atomicStore(&moved[0], count);
+    args[0] = (count + WORKGROUP - 1u) / WORKGROUP;
+    args[1] = 1u;
+    args[2] = 1u;
 }
