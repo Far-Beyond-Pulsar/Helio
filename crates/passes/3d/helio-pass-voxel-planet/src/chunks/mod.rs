@@ -13,6 +13,7 @@ mod drawn;
 pub mod pass;
 pub mod residency;
 pub mod scene;
+mod blocks;
 
 use crate::edit_store::{ColumnKey, EditStore};
 use crate::edits::{center_half, FaceBrush};
@@ -823,6 +824,8 @@ pub struct ChunkWorld {
     publish: wgpu::RenderPipeline,
     /// Publish with the host's scene materials (devices with binding arrays).
     scene: Option<SceneState>,
+    /// Exact materials of edited cells (`blocks.rs`).
+    blocks: blocks::BlockMaterials,
     /// The last draw's bind group (its parameters and chunk storage).
     last_group: Option<wgpu::BindGroup>,
     targets: Option<Targets>,
@@ -1508,6 +1511,7 @@ impl ChunkWorld {
                 storage(13, false, wgpu::ShaderStages::COMPUTE),
                 storage(14, true, all),
                 storage(15, true, all),
+                storage(16, true, all),
             ],
         });
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1915,6 +1919,8 @@ impl ChunkWorld {
         let chunk_table = buffer("chunk table", (TABLE_SLOTS * 32) as u64, s);
         queue.write_buffer(&chunk_table, 0, bytemuck::cast_slice(drawn_set.table()));
         let (uv_grid_view, uv_grid_sampler) = create_uv_grid(device, queue);
+        let mut blocks = blocks::BlockMaterials::new(device);
+        blocks.fill_all(queue, &planet.edits().baked);
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -1949,6 +1955,7 @@ impl ChunkWorld {
             shadow_fallback,
             publish,
             scene,
+            blocks,
             last_group: None,
             targets: None,
             rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS")
@@ -2632,6 +2639,7 @@ impl ChunkWorld {
         let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else {
             return false;
         };
+        self.blocks.sync(&self.queue, &edits.baked, &columns);
         let (faces, large_faces, recent_counts) = analytic_faces(edits);
         // Brushes in one list and not the other.
         let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
@@ -3794,6 +3802,7 @@ impl ChunkWorld {
                 entry(13, &self.reach),
                 entry(14, &self.leaf_pages),
                 entry(15, &self.leaf_normals),
+                entry(16, &self.blocks.buffer),
             ],
         });
         self.last_group = Some(group.clone());

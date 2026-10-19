@@ -181,9 +181,9 @@ impl Game {
         if std::env::var_os("VOXEL_CRAFT_PALETTE").is_some() && self.tour.is_some() {
             if self.total_frames == 300 {
                 let here = self.world.cell_at(self.player.position);
-                let edits: Vec<_> = Block::ALL.iter().enumerate().map(|(n, b)| crate::world::edits::BlockEdit::set(Cell::new(here.face, here.i + (n as i32 % 8) * 2 - 7, here.j + 12, here.k + 3 + (n as i32 / 8) * 3), *b)).collect();
+                let edits: Vec<_> = Block::ALL.iter().enumerate().map(|(n, b)| crate::world::edits::BlockEdit::set(Cell::new(here.face, here.i + (n as i32 % 8) * 2 - 7, here.j + 12, here.k + 60 + (n as i32 / 8) * 3), *b)).collect();
                 self.world.edit(&edits);
-                let start = Cell::new(here.face, here.i, here.j + 12, here.k + 6);
+                let start = Cell::new(here.face, here.i, here.j + 12, here.k + 63);
                 let along = self.world.cell_centre(Cell::new(start.face, start.i, start.j + 1, start.k)) - self.world.cell_centre(start);
                 self.player.flying = true;
                 self.player.position = self.world.cell_centre(Cell::new(start.face, start.i, start.j - 12, start.k)) - self.player.position.normalize() * 1.62;
@@ -200,10 +200,14 @@ impl Game {
                         log::info!("TRUNK {:?} at {:?} is {:?}, drawn material {}", block, cell, self.world.block_at(cell), block.material());
                         let target = self.world.cell_centre(cell);
                         let up = target.normalize();
-                        let side = up.any_orthonormal_vector();
+                        let along = (self.world.cell_centre(Cell::new(cell.face, cell.i, cell.j + 1, cell.k)) - target).normalize();
+                        for back in 1..=3 {
+                            let c = Cell::new(cell.face, cell.i, cell.j - back, cell.k);
+                            log::info!("TRUNK in front: {:?} -> {:?}", c, self.world.block_at(c));
+                        }
                         self.player.flying = true;
-                        self.player.position = target + side * 4.0 + up * 0.5 - up * 1.62;
-                        self.player.heading = -side;
+                        self.player.position = target - along * 4.0 - up * 1.12;
+                        self.player.heading = along;
                         self.player.pitch = 0.0;
                         self.player.velocity = DVec3::ZERO;
                     }
