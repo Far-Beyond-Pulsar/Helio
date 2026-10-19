@@ -46,6 +46,7 @@ struct GlyphInstance {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> portal_views: array<GpuPortalView>;
 @group(0) @binding(2) var<storage, read> debug_glyphs: array<GlyphInstance>;
+@group(0) @binding(3) var<storage, read> ghost_vertices: array<vec4<f32>>;
 
 const LOCAL_CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
@@ -103,20 +104,20 @@ const GLYPH_CORNERS: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
     vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
     vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
 );
-const GLYPH_CELL: f32 = 0.008;
+// Screen-space text stays legible at any camera distance. These NDC units
+// make a glyph about 18 px tall in a typical editor viewport.
+const GLYPH_WIDTH: f32 = 0.018;
+const GLYPH_HEIGHT: f32 = 0.026;
 
 @vertex
 fn vs_glyph_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> GlyphOutput {
     let glyph = debug_glyphs[instance_index];
     let uv = GLYPH_CORNERS[vertex_index];
-    let forward = normalize(cameras[0].forward_far.xyz);
-    let right = normalize(cross(forward, vec3<f32>(0.0, 1.0, 0.0)));
-    let up = normalize(cross(right, forward));
-    let local = vec2<f32>(glyph.screen_offset.x + uv.x * 5.0 * GLYPH_CELL,
-                          glyph.screen_offset.y - uv.y * 7.0 * GLYPH_CELL);
-    let world = glyph.world_position.xyz + right * local.x + up * local.y;
+    let local = vec2<f32>(glyph.screen_offset.x + uv.x * GLYPH_WIDTH,
+                          glyph.screen_offset.y - uv.y * GLYPH_HEIGHT);
+    let clip = cameras[0].view_proj * vec4<f32>(glyph.world_position.xyz, 1.0);
     var out: GlyphOutput;
-    out.clip_position = cameras[0].view_proj * vec4<f32>(world, 1.0);
+    out.clip_position = clip + vec4<f32>(local * clip.w, 0.0, 0.0);
     out.uv = uv;
     out.color = glyph.color;
     out.bitmap = glyph.bitmap;
@@ -133,6 +134,20 @@ fn fs_glyph_main(input: GlyphOutput) -> @location(0) vec4<f32> {
     } else {
         lit_bit = ((input.bitmap.y >> (bit - 32u)) & 1u) != 0u;
     }
-    if !lit_bit { discard; }
-    return input.color;
+    if lit_bit {
+        return input.color;
+    }
+    // A dark backing preserves contrast over both bright portal contents and
+    // the checker overlay, so the link number remains readable.
+    return vec4<f32>(0.015, 0.02, 0.035, 0.82);
+}
+
+@vertex
+fn vs_ghost_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    return cameras[0].view_proj * vec4<f32>(ghost_vertices[vertex_index].xyz, 1.0);
+}
+
+@fragment
+fn fs_ghost_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.10, 0.86, 1.0, 0.28);
 }

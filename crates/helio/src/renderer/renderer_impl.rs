@@ -448,6 +448,12 @@ impl Renderer {
             .is_some_and(|pass| pass.set_debug_texts(texts))
     }
 
+    /// Set transient portal-through geometry for the editor diagnostics view.
+    pub fn set_portal_debug_geometry(&mut self, vertices: Vec<[f64; 3]>) -> bool {
+        self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
+            .is_some_and(|pass| pass.set_ghost_vertices(vertices))
+    }
+
     /// Pass the latest asynchronous DeferredLight timestamp to its cost view.
     pub fn set_deferred_light_timing_ms(&mut self, milliseconds: f32) -> bool {
         self.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>()
