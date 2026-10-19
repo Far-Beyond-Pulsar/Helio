@@ -1248,7 +1248,9 @@ fn pack_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_ind
         }
         let words = pack_words(header.pages, details);
         let at = atomicAdd(&pack_alloc[0], words);
-        let ok = at + words <= arrayLength(&pack_data);
+        // Within the buffer without wrapping (the counter runs on past it).
+        let room = arrayLength(&pack_data);
+        let ok = words <= room && at <= room - words;
         atomicStore(&pack_alloc[1u + 2u * wg.x], select(NONE, at, ok));
         atomicStore(&pack_alloc[2u + 2u * wg.x], words);
         w_pack = vec4<u32>(at, u32(ok), header.pages, 0u);

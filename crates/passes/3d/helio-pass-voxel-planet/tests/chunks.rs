@@ -77,13 +77,22 @@ impl World {
 
     /// One frame: residency, the draw, `picks` copied; its residency.
     fn frame(&mut self, gpu: &Gpu, planet: &Planet, view: &View, picks: Option<&SharedPicks>) -> helio_pass_voxel_planet::chunks::UpdateStats {
+        self.frame_picked(gpu, planet, view, &view.config(), picks)
+    }
+
+    /// One frame with residency `config`.
+    fn frame_with(&mut self, gpu: &Gpu, planet: &Planet, view: &View, config: &ResidencyConfig) -> helio_pass_voxel_planet::chunks::UpdateStats {
+        self.frame_picked(gpu, planet, view, config, None)
+    }
+
+    fn frame_picked(&mut self, gpu: &Gpu, planet: &Planet, view: &View, config: &ResidencyConfig, picks: Option<&SharedPicks>) -> helio_pass_voxel_planet::chunks::UpdateStats {
         let view_proj = view.view_proj(planet);
         let tan_y = f64::from((FOV_Y * 0.5).tan());
         let tan_x = tan_y * f64::from(view.size[0]) / f64::from(view.size[1]);
         let cone = residency::View { forward: view.forward.as_dvec3(), cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos() };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
-        let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, &view.config());
+        let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, config);
         self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, Vec3::new(0.3, 0.8, 0.4).normalize(), view.size);
         if let Some(picks) = picks {
             self.chunks.copy_picks(&mut recorder, picks);
@@ -1055,6 +1064,58 @@ fn edited_chunks_come_back_by_copy() {
     assert!(restored > 50 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
     assert!(none == 0 && regenerated > 50, "keeping nothing: {none} restored, {regenerated} generated");
     assert_eq!(same, pixels, "every pixel as before");
+}
+
+/// Without slot pressure, chunks the cut left are released once unvisited
+/// for `release_frames`: the dug site left for a far view goes (more edited
+/// chunks a plan than a frame packs: the rest wait resident for later
+/// frames' packs), residency falls to the far view's own, and the site
+/// seen again comes back by copy, every pixel as before.
+#[test]
+fn edited_chunks_released_by_age_come_back_by_copy() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir, _) = dug_site();
+    let here = ground_view(&planet, dir, [320, 180]);
+    let far = ground_view(&planet, land(&planet, 4, 0.3, 0.7), [320, 180]);
+    let release = 300;
+    let mut config = here.config();
+    config.plan.release_frames = release;
+    let mut world = World::new(&gpu, &planet);
+    let settle = |world: &mut World, view: &View, config: &ResidencyConfig| -> (Vec<Option<PickHit>>, (usize, usize)) {
+        let started = world.frame;
+        let (mut restored, mut generated) = (0, 0);
+        loop {
+            let stats = world.frame_with(&gpu, &planet, view, config);
+            restored += stats.restored_chunks;
+            generated += stats.generated_edited;
+            if world.chunks.settled() {
+                return (world.chunks.read_hits(), (restored, generated));
+            }
+            assert!(world.frame - started < 4000, "residency did not settle: {stats:?}");
+        }
+    };
+    let (first, _) = settle(&mut world, &here, &config);
+    let (_, _) = settle(&mut world, &far, &config);
+    let settled_far = world.frame(&gpu, &planet, &far, None).resident_chunks;
+    let (mut evicted, mut deferred, mut stats) = (0, 0, None);
+    for _ in 0..release + 200 {
+        let s = world.frame_with(&gpu, &planet, &far, &config);
+        evicted += s.evicted_chunks;
+        deferred += s.evictions_deferred;
+        stats = Some(s);
+    }
+    let stats = stats.unwrap();
+    let mut fresh = World::new(&gpu, &planet);
+    let (_, _) = settle(&mut fresh, &far, &config);
+    let wanted = fresh.frame(&gpu, &planet, &far, None).resident_chunks;
+    eprintln!("RELEASE far view: {settled_far} resident settled, {} after {} frames ({evicted} evicted, {deferred} deferred to later packs), {} kept; a fresh world {wanted}", stats.resident_chunks, release + 200, stats.kept_chunks);
+    let (again, (restored, generated)) = settle(&mut world, &here, &config);
+    let same = first.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+    eprintln!("RELEASE back: edited chunks {restored} restored, {generated} generated; {same}/{} pixels as before", first.len());
+    assert!(stats.resident_chunks * 5 <= wanted * 6, "{} resident after release, a fresh world {wanted}", stats.resident_chunks);
+    assert!(deferred > 0 && stats.kept_chunks > 200, "edited chunks kept: {} ({deferred} deferred)", stats.kept_chunks);
+    assert!(restored > 500 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
+    assert_eq!(same, first.len(), "every pixel as before");
 }
 
 /// A saved world's edited chunks come back with it: packed (those resident

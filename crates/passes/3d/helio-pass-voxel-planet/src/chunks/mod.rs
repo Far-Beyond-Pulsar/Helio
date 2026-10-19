@@ -2645,7 +2645,7 @@ impl ChunkWorld {
                     if !self.packed_since.remove(&key) || !current {
                         continue;
                     }
-                    if offset == u32::MAX {
+                    if offset == u32::MAX || u64::from(offset) + len as u64 > PACK_WORDS {
                         // Out of room: a resident one is packed again later.
                         if serial.is_some() {
                             self.to_pack.push(key);
