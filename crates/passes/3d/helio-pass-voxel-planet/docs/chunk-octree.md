@@ -587,4 +587,9 @@ Measured:
 ### Next
 
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
+  Measured 2026-10-19 in the editor (voxel_planet.level, 3 m and 40 m
+  views): refining nothing until rays meet it changed nothing (22.3k
+  against 22.7k resident, 15.2k against 15.4k drawn); the open views have
+  little hidden ground, and `unseen_pixels` (2) covers it. Measure again
+  on views that hide much (a valley floor, a cave, a city).
 - A footprint's first computation: progressive (parent-seeded) synthesis.
