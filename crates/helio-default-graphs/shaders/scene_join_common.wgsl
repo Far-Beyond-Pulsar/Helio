@@ -12,10 +12,13 @@ struct Owner {
     enabled: u32,
 }
 
-/// An object's world transform (`Transform`, 36 bytes), keyed by the
-/// object entity. `rotation` is YXZ Euler angles in degrees.
+/// An object's world transform (`TransformRow`, 48 bytes), keyed by the
+/// object entity: its f64 position as an f32 pair (`position_hi`, the
+/// nearest f32; `position_lo`, what that drops), so a position on a
+/// planet keeps its millimetres; `rotation` is YXZ Euler angles in degrees.
 struct ObjectTransform {
-    position: array<f32, 3>,
+    position_hi: array<f32, 3>,
+    position_lo: array<f32, 3>,
     rotation: array<f32, 3>,
     scale: array<f32, 3>,
 }
@@ -40,14 +43,25 @@ fn object_rotation(t: ObjectTransform) -> mat3x3<f32> {
     return ry * rx * rz;
 }
 
-fn object_position(t: ObjectTransform) -> vec3<f32> {
-    return vec3<f32>(t.position[0], t.position[1], t.position[2]);
+fn position_hi(t: ObjectTransform) -> vec3<f32> {
+    return vec3<f32>(t.position_hi[0], t.position_hi[1], t.position_hi[2]);
 }
 
-/// `position` relative to the world origin `hi + lo` (an f32 pair of the
-/// f64 origin). Subtracting `hi` first is exact for positions near it.
-fn relative_position(position: vec3<f32>, hi: vec3<f32>, lo: vec3<f32>) -> vec3<f32> {
-    return (position - hi) - lo;
+fn position_lo(t: ObjectTransform) -> vec3<f32> {
+    return vec3<f32>(t.position_lo[0], t.position_lo[1], t.position_lo[2]);
+}
+
+/// The object's world position, rounded to f32 (for passes that draw in
+/// world space).
+fn object_position(t: ObjectTransform) -> vec3<f32> {
+    return position_hi(t) + position_lo(t);
+}
+
+/// The object's position relative to the world origin `hi + lo` (the f64
+/// origin's f32 pair), part by part: near the origin `position_hi - hi` is
+/// exact, so the offset keeps the f64 position's precision.
+fn object_relative(t: ObjectTransform, hi: vec3<f32>, lo: vec3<f32>) -> vec3<f32> {
+    return (position_hi(t) - hi) + (position_lo(t) - lo);
 }
 
 fn object_scale(t: ObjectTransform) -> vec3<f32> {

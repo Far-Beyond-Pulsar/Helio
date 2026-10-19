@@ -179,7 +179,7 @@ fn write_layer(row: u32, output: u32) {
 /// origin for a `RELATIVE` table, in world space otherwise.
 fn placed_position(t: ObjectTransform) -> vec3<f32> {
     if (u.flags & RELATIVE) != 0u {
-        return relative_position(object_position(t), u.origin_hi.xyz, u.origin_lo.xyz);
+        return object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
     }
     return object_position(t);
 }
@@ -363,8 +363,9 @@ fn write_sprite_placement(row: u32, output: u32) {
     let t = transforms[owners[row].owner_index];
     let scale = abs(object_scale(t));
     let roll = t.rotation[2] * 0.017453292519943295;
-    rows_out[output] = bitcast<u32>(t.position[0]);
-    rows_out[output + 1u] = bitcast<u32>(t.position[1]);
+    let position = object_position(t);
+    rows_out[output] = bitcast<u32>(position.x);
+    rows_out[output + 1u] = bitcast<u32>(position.y);
     rows_out[output + 2u] = bitcast<u32>(bitcast<f32>(rows_out[output + 2u]) * scale.x);
     rows_out[output + 3u] = bitcast<u32>(bitcast<f32>(rows_out[output + 3u]) * scale.y);
     rows_out[output + 4u] = bitcast<u32>(bitcast<f32>(rows_out[output + 4u]) + roll);

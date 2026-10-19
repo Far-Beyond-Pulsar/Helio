@@ -20,9 +20,10 @@
 //! # Precision
 //!
 //! World rows are published **relative to the frame's world origin** (the same
-//! hi/lo pair the joins use): the topmost ancestor's position has the origin
-//! removed before anything is added to it, so a nested object far from the
-//! origin keeps the precision of its offset, not of its distance. The
+//! hi/lo pair the joins use): positions are f32 pairs (the frontend's f64),
+//! chains compose in pair arithmetic and the origin comes off pair-wise last,
+//! so an object far from the origin keeps its millimetres whichever of its
+//! ancestors are far. The
 //! derivation says so by publishing [`TRANSFORMS_ORIGIN_RELATIVE_KEY`], which
 //! makes the joins skip their own origin subtraction. Placement rows inside a
 //! frame are relative to the frame and small; the frame's own (f64) position
@@ -64,7 +65,7 @@ pub const FRAME_ROW_BYTES: u64 = 4;
 /// Its `content_generation` equals the placement buffer's, so a join can tell
 /// the list belongs to the rows it is reading.
 pub const HIERARCHY_MOVED_ARGS_KEY: BufferKey = BufferKey::of("hierarchy_moved_args");
-/// Each object composed only up to its nearest rigid frame (36-byte transform
+/// Each object composed only up to its nearest rigid frame (48-byte transform
 /// rows, like the world rows). Equal to the world rows for objects in no frame.
 pub const LOCAL_PLACEMENT_KEY: BufferKey = BufferKey::of("Transform::placement");
 /// Each object's space: the slot of its nearest rigid frame ancestor, `0` for
@@ -90,7 +91,9 @@ pub struct HierarchyResolveKeys {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     rows: u32,
-    _pad: [u32; 3],
+    /// 1.0 (the shader's guard against reassociated floats).
+    one: f32,
+    _pad: [u32; 2],
     origin_hi: [f32; 4],
     origin_lo: [f32; 4],
 }
@@ -438,7 +441,8 @@ impl SceneDerivation for HierarchyResolve {
                 0,
                 bytemuck::bytes_of(&Uniforms {
                     rows,
-                    _pad: [0; 3],
+                    one: 1.0,
+                    _pad: [0; 2],
                     origin_hi,
                     origin_lo,
                 }),

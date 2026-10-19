@@ -53,12 +53,25 @@ struct Owner {
     enabled: u32,
 }
 
+/// The frontend's `TransformRow`: the f64 position as an f32 pair.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Transform {
-    position: [f32; 3],
+    position_hi: [f32; 3],
+    position_lo: [f32; 3],
     rotation: [f32; 3],
     scale: [f32; 3],
+}
+
+impl Transform {
+    /// At `position`, split as the frontend splits it: the nearest f32,
+    /// then what that drops.
+    fn at(position: [f64; 3], rotation: [f32; 3], scale: [f32; 3]) -> Self {
+        let p = glam::DVec3::from_array(position);
+        let hi = p.as_vec3();
+        let lo = (p - hi.as_dvec3()).as_vec3();
+        Self { position_hi: hi.to_array(), position_lo: lo.to_array(), rotation, scale }
+    }
 }
 
 const WATER_WORDS: usize = (WATER_VOLUME_SOURCE_ROW_BYTES / 4) as usize;
@@ -92,7 +105,7 @@ fn scene(device: &wgpu::Device, queue: &wgpu::Queue, far: Transform) -> SceneBuf
         ),
         (KEYS.generations, bytemuck::cast_slice(&[3u32]).to_vec(), 4),
         (KEYS.hidden, bytemuck::cast_slice(&[0u32]).to_vec(), 4),
-        (KEYS.transforms, bytemuck::bytes_of(&far).to_vec(), 36),
+        (KEYS.transforms, bytemuck::bytes_of(&far).to_vec(), std::mem::size_of::<Transform>() as u64),
         (
             KEYS.water_volumes,
             bytemuck::cast_slice(&water).to_vec(),
@@ -181,11 +194,9 @@ fn camera_relative_frames_place_water_and_decals_relative_to_the_world_origin() 
         eprintln!("skipping: no GPU adapter available");
         return;
     };
-    let far = Transform {
-        position: [1000.0, 6_371_002.5, -300.0],
-        rotation: [0.0; 3],
-        scale: [1.0; 3],
-    };
+    let far_position = [1000.0, 6_371_002.371, -300.0];
+    let far = Transform::at(far_position, [0.0; 3], [1.0; 3]);
+    let far_world = glam::Vec3::from_array(far.position_hi) + glam::Vec3::from_array(far.position_lo);
     let inputs = scene(&device, &queue, far);
     let mut join = EnvironmentJoin::new(&device, KEYS);
 
@@ -199,7 +210,7 @@ fn camera_relative_frames_place_water_and_decals_relative_to_the_world_origin() 
         "world-space water has no phase"
     );
     let world_to_decal = glam::Mat4::from_cols_slice(&decal[..16]);
-    let center = world_to_decal.transform_point3(glam::Vec3::from_array(far.position));
+    let center = world_to_decal.transform_point3(far_world);
     assert!(
         center.length() < 1e-3,
         "the decal box is centred on its owner: {center}"
@@ -209,17 +220,12 @@ fn camera_relative_frames_place_water_and_decals_relative_to_the_world_origin() 
     // small offsets where world space is 0.5 m out.
     let origin = glam::DVec3::new(1000.25, 6_371_000.125, -290.0);
     let (water, decal) = derive(&mut join, &device, &queue, &inputs, Some(origin));
-    let offset = (glam::Vec3::from_array(far.position).as_dvec3() - origin).as_vec3();
-    assert_eq!(offset, glam::Vec3::new(-0.25, 2.375, -10.0));
-    assert_eq!(
-        &water[0..3],
-        &(offset - glam::Vec3::new(2.0, 1.0, 3.0)).to_array()
-    );
-    assert_eq!(
-        &water[4..7],
-        &(offset + glam::Vec3::new(2.0, 1.0, 3.0)).to_array()
-    );
-    assert_eq!(water[7], offset.y + 0.5, "surface height");
+    let offset = (glam::DVec3::from_array(far_position) - origin).as_vec3();
+    assert!((offset - glam::Vec3::new(-0.25, 2.246, -10.0)).abs().max_element() < 1e-6, "{offset}");
+    let near = |a: &[f32], b: glam::Vec3| (glam::Vec3::from_slice(a) - b).abs().max_element() < 1e-5;
+    assert!(near(&water[0..3], offset - glam::Vec3::new(2.0, 1.0, 3.0)), "{:?}", &water[0..3]);
+    assert!(near(&water[4..7], offset + glam::Vec3::new(2.0, 1.0, 3.0)), "{:?}", &water[4..7]);
+    assert!((water[7] - (offset.y + 0.5)).abs() < 1e-5, "surface height");
     // The waves tile the world every 270 m: 1000.25 and -290 into it.
     assert_eq!(&water[60..62], &[190.25, 250.0], "world phase");
     let world_to_decal = glam::Mat4::from_cols_slice(&decal[..16]);

@@ -211,9 +211,9 @@ pub trait TerrainField: Send + Sync + 'static {
     /// surface word ([`Self::surface`]), `top_height` its column's top
     /// ([`HEIGHT_ONE`] units, a whole number of voxel layers), `depth` the
     /// cells below the column top (0 is the exposed top cell), `slope` the
-    /// ground slope across the cell's 8x8 column block in eighths of a cell
-    /// per cell, and `layer` the cell's layer index (0 is the layer just
-    /// above the datum).
+    /// ground slope in eighths of a cell per cell (`Planet::material_slope`),
+    /// and `layer` the cell's layer index (0 is the layer just above the
+    /// datum); `p` is the cell's volume point.
     fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
     /// Surface word (8 bits) of `column`, whose height is `height`
     /// (`terrain_surface` in WGSL, stored per column cell at generation):

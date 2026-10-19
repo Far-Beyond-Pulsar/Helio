@@ -45,9 +45,10 @@ pub const OWNER_ROW_BYTES: u64 = 12;
 pub const GENERATION_ROW_BYTES: u64 = 4;
 /// An object's hidden flag (`u32`, zero = visible).
 pub const HIDDEN_ROW_BYTES: u64 = 4;
-/// An object's transform: position, YXZ Euler rotation in degrees, scale
-/// (three `[f32; 3]`).
-pub const TRANSFORM_ROW_BYTES: u64 = 36;
+/// An object's transform (the frontend's `TransformRow`): its f64 position
+/// as an f32 pair (`hi`, the nearest f32, then `lo`, what that drops), YXZ
+/// Euler rotation in degrees, scale (four `[f32; 3]`).
+pub const TRANSFORM_ROW_BYTES: u64 = 48;
 /// A var-len handle: `offset`, `count` (u32 each).
 pub const HANDLE_ROW_BYTES: u64 = 8;
 /// A mesh instance's local bounding sphere `[center.xyz, radius]`.

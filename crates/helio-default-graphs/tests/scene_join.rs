@@ -47,12 +47,25 @@ struct Owner {
     enabled: u32,
 }
 
+/// The frontend's `TransformRow`: the f64 position as an f32 pair.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Transform {
-    position: [f32; 3],
+    position_hi: [f32; 3],
+    position_lo: [f32; 3],
     rotation: [f32; 3],
     scale: [f32; 3],
+}
+
+impl Transform {
+    /// At `position`, split as the frontend splits it: the nearest f32,
+    /// then what that drops.
+    fn at(position: [f64; 3], rotation: [f32; 3], scale: [f32; 3]) -> Self {
+        let p = glam::DVec3::from_array(position);
+        let hi = p.as_vec3();
+        let lo = (p - hi.as_dvec3()).as_vec3();
+        Self { position_hi: hi.to_array(), position_lo: lo.to_array(), rotation, scale }
+    }
 }
 
 #[repr(C)]
@@ -195,7 +208,7 @@ fn model_of(t: &Transform) -> glam::Mat4 {
             t.rotation[0].to_radians(),
             t.rotation[2].to_radians(),
         ),
-        glam::Vec3::from_array(t.position),
+        glam::Vec3::from_array(t.position_hi) + glam::Vec3::from_array(t.position_lo),
     )
 }
 
@@ -210,11 +223,7 @@ fn base_scene() -> Scene {
     let mut scene = Scene {
         buffers: Vec::new(),
     };
-    let transform = Transform {
-        position: [1.0, 2.0, 3.0],
-        rotation: [30.0, 45.0, 10.0],
-        scale: [2.0, 1.0, 0.5],
-    };
+    let transform = Transform::at([1.0, 2.0, 3.0], [30.0, 45.0, 10.0], [2.0, 1.0, 0.5]);
     scene.put(
         KEYS.transforms,
         &[
@@ -332,11 +341,7 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
         &queue,
         &out.get(BufferKey::of("materials")).unwrap().buffer,
     );
-    let transform = Transform {
-        position: [1.0, 2.0, 3.0],
-        rotation: [30.0, 45.0, 10.0],
-        scale: [2.0, 1.0, 0.5],
-    };
+    let transform = Transform::at([1.0, 2.0, 3.0], [30.0, 45.0, 10.0], [2.0, 1.0, 0.5]);
     let model = model_of(&transform);
     let center = model.transform_point3(glam::Vec3::new(0.5, 0.0, 0.0));
     for (slot, (first, count, base)) in [(0u32, (0u32, 12u32, 0.1f32)), (1, (12, 24, 0.2))] {
@@ -461,12 +466,10 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
         return;
     };
     let mut scene = base_scene();
-    // 6_371_002.5 is an f32 (0.5 m steps up there); the origin is not.
-    let far = Transform {
-        position: [1.0, 6_371_002.5, 3.0],
-        rotation: [30.0, 45.0, 10.0],
-        scale: [2.0, 1.0, 0.5],
-    };
+    // On a planet: 6_371_002.371 is no f32 (0.5 m steps up there), nor is
+    // the origin.
+    let far_position = [1.0, 6_371_002.371, 3.0];
+    let far = Transform::at(far_position, [30.0, 45.0, 10.0], [2.0, 1.0, 0.5]);
     scene.put(
         KEYS.transforms,
         &[
@@ -480,21 +483,18 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
     let mut join = SceneJoin::new(&device, KEYS, true);
     let out = run_at(&mut join, &device, &queue, &scene, 1, Some(origin));
 
-    // The exact offset: what f64 arithmetic gives, to the f32 rounding of a
-    // small number, where a world-space position would be 0.5 m out.
-    let offset = (glam::Vec3::from_array(far.position).as_dvec3() - origin).as_vec3();
-    assert_eq!(offset, glam::Vec3::new(0.25, 2.375, 5.0));
+    // The f64 offset to the f32 rounding of a small number (a millimetre's
+    // millionths), where an f32 world position would be 0.5 m out.
+    let offset = (glam::DVec3::from_array(far_position) - origin).as_vec3();
+    assert!((offset - glam::Vec3::new(0.25, 2.246, 5.0)).abs().max_element() < 1e-6, "{offset}");
     let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
     );
     let model = glam::Mat4::from_cols_array_2d(&objects[0].transform);
-    assert_eq!(model.w_axis.truncate(), offset, "model translation");
-    let relative = Transform {
-        position: offset.to_array(),
-        ..far
-    };
+    assert!((model.w_axis.truncate() - offset).abs().max_element() < 1e-6, "model translation {}", model.w_axis);
+    let relative = Transform::at(offset.as_dvec3().to_array(), far.rotation, far.scale);
     let center = model_of(&relative).transform_point3(glam::Vec3::new(0.5, 0.0, 0.0));
     assert!(close(&objects[0].bounds[..3], &center.to_array()), "bounds centre");
 
@@ -503,13 +503,14 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
         &queue,
         &out.get(BufferKey::of("scene_lights")).unwrap().buffer,
     );
-    assert_eq!(&lights[2].position_range[..3], &offset.to_array(), "light position");
+    assert!((glam::Vec3::from_slice(&lights[2].position_range[..3]) - offset).abs().max_element() < 1e-6, "light position");
     let billboards: Vec<[f32; 12]> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("billboard_instances")).unwrap().buffer,
     );
-    assert_eq!(&billboards[2][..3], &far.position, "the billboard stays in world space");
+    let world = glam::Vec3::from_array(far.position_hi) + glam::Vec3::from_array(far.position_lo);
+    assert_eq!(&billboards[2][..3], &world.to_array(), "the billboard stays in world space");
 
     // A moved origin moves every position, though no input row changed.
     let moved = origin + glam::DVec3::new(0.0, 1.0, 0.0);
@@ -520,7 +521,7 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
     );
     let model = glam::Mat4::from_cols_array_2d(&objects[0].transform);
-    assert_eq!(model.w_axis.y, offset.y - 1.0);
+    assert!((model.w_axis.y - (offset.y - 1.0)).abs() < 1e-6, "{}", model.w_axis.y);
 }
 
 #[test]

@@ -488,7 +488,8 @@ fn owner_view(
         return None;
     }
     // The spline's owner placed in the world, under any parents.
-    let model = pulsar_scene_model::hierarchy_transform::world_matrix_of(world, owner)?;
+    // Lines draw in world space (f32).
+    let model = pulsar_scene_model::hierarchy_transform::world_matrix_of(world, owner)?.as_mat4();
     let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
     Some((model, selected))
 }
@@ -895,7 +896,7 @@ mod tests {
             let frames = 20;
             let start = std::time::Instant::now();
             for frame in 0..frames {
-                world.get_mut::<Transform>(owners[0]).unwrap().position = [frame as f32, 0.0, 0.0];
+                world.get_mut::<Transform>(owners[0]).unwrap().position = [f64::from(frame), 0.0, 0.0];
                 lines.poll(&world).expect("the owner moved");
             }
             let poll = start.elapsed() / frames;
