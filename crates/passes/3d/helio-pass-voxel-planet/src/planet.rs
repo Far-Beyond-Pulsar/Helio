@@ -343,8 +343,9 @@ impl Edits {
     }
 }
 
-/// A base column's features with the baked edits `own` over them.
-fn compose(features: Vec<(i32, Brick)>, own: Option<&Arc<Column>>) -> Column {
+/// A base column's features with the baked edits `own` over them (a
+/// brick only one of them holds shared).
+fn compose(features: Vec<(i32, Arc<Brick>)>, own: Option<&Arc<Column>>) -> Column {
     let empty = Vec::new();
     let own = own.map_or(&empty, |c| &**c);
     let mut out: Column = Vec::with_capacity(features.len() + own.len());
@@ -352,14 +353,15 @@ fn compose(features: Vec<(i32, Brick)>, own: Option<&Arc<Column>>) -> Column {
     loop {
         let next = match (f.peek(), o.peek()) {
             (Some((fk, _)), Some((ok, _))) if fk == ok => {
-                let ((bk, mut brick), (_, over)) = (f.next().unwrap(), o.next().unwrap());
+                let ((bk, under), (_, over)) = (f.next().unwrap(), o.next().unwrap());
+                let mut brick = (*under).clone();
                 for (cell, over) in brick.cells.iter_mut().zip(over.cells.iter()) {
                     *cell = cell.then_edit(*over);
                 }
                 (!brick.is_unchanged()).then(|| (bk, Arc::new(brick)))
             }
             (Some((fk, _)), Some((ok, _))) if ok < fk => o.next().map(|(bk, b)| (*bk, Arc::clone(b))),
-            (Some(_), _) => f.next().map(|(bk, b)| (bk, Arc::new(b))),
+            (Some(_), _) => f.next(),
             (None, Some(_)) => o.next().map(|(bk, b)| (*bk, Arc::clone(b))),
             (None, None) => break,
         };
@@ -550,18 +552,24 @@ impl Planet {
         }
     }
 
-    /// Loads region `key`'s features (`crate::features`): `brushes` stand
-    /// on the terrain, under every edit, until the region is unloaded; a
-    /// region loaded again replaces what it held. The host decides them
-    /// from the seed and the terrain alone, so a region reloaded far later
-    /// comes out the same.
-    pub fn load_features(&mut self, key: u64, brushes: Vec<Brush>) -> Result<(), String> {
+    /// Loads region `key`'s features (`crate::features`): `cells` (base
+    /// cells of a material, or air) stand on the terrain, under every edit,
+    /// until the region is unloaded; a region loaded again replaces what it
+    /// held. The host decides them from the seed and the terrain alone, so
+    /// a region reloaded far later comes out the same.
+    pub fn load_features(&mut self, key: u64, cells: Vec<crate::features::FeatureCell>) -> Result<(), String> {
         let before = self.edits.baked_state();
-        for brush in &brushes {
-            self.reach(brush);
+        let voxel = self.grid.voxel_size();
+        for (cell, material) in &cells {
+            let r = self.grid.radial(self.grid.cell_center(*cell));
+            if material.is_some() {
+                self.edit_top = self.edit_top.max(r + voxel);
+            } else {
+                self.edit_bottom = self.edit_bottom.min(r - voxel);
+            }
         }
         let edits = &mut self.edits;
-        let columns = edits.features.load(&self.grid, key, brushes.into(), &edits.large)?;
+        let columns = edits.features.load(&self.grid, key, cells.into(), &edits.large)?;
         let columns = edits.recompose(&self.grid, std::iter::empty(), columns);
         edits.changed(before, columns, true);
         self.revision += 1;
@@ -1440,9 +1448,8 @@ mod tests {
     }
 
     /// Random brushes in a 40-cell block: `n` of them from `seed`, every
-    /// `large`th one too large to bake (0: none), additions only when
-    /// `add_only` (features).
-    fn random_brushes(p: &Planet, seed: u64, n: usize, large: usize, add_only: bool) -> Vec<Brush> {
+    /// `large`th one too large to bake.
+    fn random_brushes(p: &Planet, seed: u64, n: usize, large: usize) -> Vec<Brush> {
         let g = *p.grid();
         let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
         let top = p.column_top(face, i0 + 20, j0 + 20, 0);
@@ -1455,12 +1462,36 @@ mod tests {
         (0..n)
             .map(|n| {
                 let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 8 + (next() * 20.0) as i32);
-                let radius = if large > 0 && n % large == large / 2 { 4.0 } else { 0.05 + next() * 0.6 };
+                let radius = if n % large == large / 2 { 4.0 } else { 0.05 + next() * 0.6 };
                 let shape = if next() < 0.5 { BrushShape::Sphere } else { BrushShape::Cube };
-                let op = if add_only { BrushOp::Add } else { ops[(next() * 3.0) as usize] };
+                let op = ops[(next() * 3.0) as usize];
                 Brush { center: g.cell_center(cell).to_array(), radius, shape, op, material: 1 + (next() * 20.0) as u32, height: 0.0 }
             })
             .collect()
+    }
+
+    /// Random feature cells in the 40-cell block (some air): `n` from
+    /// `seed`, around the ground.
+    fn random_cells(p: &Planet, seed: u64, n: usize) -> Vec<crate::features::FeatureCell> {
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
+        let top = p.column_top(face, i0 + 20, j0 + 20, 0);
+        let mut seed = seed;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        (0..n)
+            .map(|_| {
+                let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 6 + (next() * 16.0) as i32);
+                (cell, (next() > 0.15).then(|| 1 + (next() * 20.0) as u32))
+            })
+            .collect()
+    }
+
+    /// `cells` as the edits that make them (a cell each).
+    fn cell_edits(p: &Planet, cells: &[crate::features::FeatureCell]) -> Vec<Brush> {
+        cells.iter().map(|(cell, m)| crate::stamp::cell_brush(p.grid(), *cell, *m)).collect()
     }
 
     /// `a` and `b` read the same in the 40-cell block, at levels 0 to
@@ -1490,9 +1521,9 @@ mod tests {
     #[test]
     fn features_read_under_edits_whenever_they_load() {
         let base = heightfield(PlanetRecipe::default());
-        let trees = random_brushes(&base, 0x7ee5, 120, 0, true);
-        let rocks = random_brushes(&base, 0x60c4, 60, 0, true);
-        let edits = random_brushes(&base, 0xd16, 400, 90, false);
+        let trees = random_cells(&base, 0x7ee5, 1200);
+        let rocks = random_cells(&base, 0x60c4, 600);
+        let edits = random_brushes(&base, 0xd16, 400, 90);
         let apply = |p: &mut Planet, brushes: &[Brush]| {
             for b in brushes {
                 p.apply(*b).unwrap();
@@ -1500,8 +1531,8 @@ mod tests {
         };
         // The reference: features as the first edits, region 1 then 2.
         let mut reference = base.clone();
-        apply(&mut reference, &trees);
-        apply(&mut reference, &rocks);
+        apply(&mut reference, &cell_edits(&base, &trees));
+        apply(&mut reference, &cell_edits(&base, &rocks));
         apply(&mut reference, &edits);
         let mut before = base.clone();
         before.load_features(2, rocks.clone()).unwrap();
@@ -1519,7 +1550,7 @@ mod tests {
 
         // One region unloaded: the other's under the edits.
         let mut rocks_only = base.clone();
-        apply(&mut rocks_only, &rocks);
+        apply(&mut rocks_only, &cell_edits(&base, &rocks));
         apply(&mut rocks_only, &edits);
         after.unload_features(1);
         same_cells(&rocks_only, &after, 1, "region 1 unloaded");
@@ -1562,8 +1593,8 @@ mod tests {
     #[test]
     fn undo_takes_large_brushes_off_features() {
         let base = heightfield(PlanetRecipe::default());
-        let trees = random_brushes(&base, 0x7ee5, 120, 0, true);
-        let edits = random_brushes(&base, 0xd16, 300, 40, false);
+        let trees = random_cells(&base, 0x7ee5, 1200);
+        let edits = random_brushes(&base, 0xd16, 300, 40);
         let mut p = base.clone();
         p.load_features(1, trees.clone()).unwrap();
         for b in &edits {
@@ -1574,7 +1605,7 @@ mod tests {
             p.undo().unwrap();
         }
         let mut reference = base.clone();
-        for b in trees.iter().chain(&edits[..edits.len() - undone]) {
+        for b in cell_edits(&base, &trees).iter().chain(&edits[..edits.len() - undone]) {
             reference.apply(*b).unwrap();
         }
         same_cells(&reference, &p, 1, "undone");

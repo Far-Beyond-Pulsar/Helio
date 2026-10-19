@@ -90,12 +90,14 @@ impl Regions {
         // Built side by side against the same terrain, then loaded in order.
         let started = Instant::now();
         let built = parallel(&next, |r| decorate::decorate(planet, *r));
-        for (region, brushes) in next.iter().zip(built) {
-            if let Err(error) = planet.load_features(region.key(), brushes) {
+        let decided = started.elapsed().as_secs_f64() * 1e3;
+        let cells: usize = built.iter().map(Vec::len).sum();
+        for (region, cells) in next.iter().zip(built) {
+            if let Err(error) = planet.load_features(region.key(), cells) {
                 log::warn!("features of {region:?} rejected: {error}");
             }
         }
-        log::debug!("{} regions loaded in {:.0} ms ({} loaded)", next.len(), started.elapsed().as_secs_f64() * 1e3, planet.edits().features.len());
+        log::debug!("{} regions ({cells} cells): decided in {decided:.0} ms, loaded in {:.0} ms ({} loaded, {} feature bricks, {:?} baked bricks)", next.len(), started.elapsed().as_secs_f64() * 1e3 - decided, planet.edits().features.len(), planet.edits().features.bricks(), planet.edits().baked.brick_counts());
         true
     }
 

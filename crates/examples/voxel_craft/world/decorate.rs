@@ -13,10 +13,10 @@ use crate::structures::Kind;
 use crate::terrain::climate::{forest_density, forest_kind, hash, unit};
 use crate::terrain::{self, Biome};
 use crate::trees::{Rng, Species, Tree};
-use helio_pass_voxel_planet::features::Region;
-use helio_pass_voxel_planet::stamp::{column_box, Stamp};
+use helio_pass_voxel_planet::features::{FeatureCell, Region};
+use helio_pass_voxel_planet::stamp::Stamp;
 use helio_pass_voxel_planet::terrain::material;
-use helio_pass_voxel_planet::{Brush, Planet};
+use helio_pass_voxel_planet::Planet;
 
 /// Chance a region holds a structure.
 const STRUCTURE_CHANCE: f64 = 0.09;
@@ -26,13 +26,14 @@ pub fn decorated(planet: &Planet, region: Region) -> bool {
     terrain::buildable(planet, region.x * REGION_BLOCKS + REGION_BLOCKS / 2, region.y * REGION_BLOCKS + REGION_BLOCKS / 2)
 }
 
-/// `region`'s features: the brushes that place them, in order.
-pub fn decorate(planet: &Planet, region: Region) -> Vec<Brush> {
+/// `region`'s features: its cells.
+pub fn decorate(planet: &Planet, region: Region) -> Vec<FeatureCell> {
     let seed = WORLD_SEED;
     let Region { face, x: rx, y: ry } = region;
     let (i0, j0) = (rx * REGION_BLOCKS, ry * REGION_BLOCKS);
     let mut rng = Rng::new(hash(seed, i64::from(face), i64::from(rx), i64::from(ry)));
-    let mut brushes = Vec::new();
+    // Everything placed, as offsets from the region's first column at layer 0.
+    let mut placed = Stamp::new();
     // Footprints taken: (i, j, radius).
     let mut taken: Vec<(i32, i32, i32)> = Vec::new();
     let grid = *planet.grid();
@@ -50,11 +51,11 @@ pub fn decorate(planet: &Planet, region: Region) -> Vec<Brush> {
                 let (low, high) = (*tops.iter().min().unwrap(), *tops.iter().max().unwrap());
                 if high - low <= 7 {
                     let floor = (tops.iter().sum::<i32>() as f64 / tops.len() as f64).round() as i32;
-                    let columns = 2 * reach + 3;
+                    let (x, z, h) = (ci - i0, cj - j0, reach + 1);
                     // Clear what stands in the way, set a foundation, build.
-                    brushes.push(column_box(&grid, face, ci, cj, floor, columns, blueprint.height + 6, None));
-                    brushes.push(column_box(&grid, face, ci, cj, floor - 5, columns - 2, 5, Some(Block::Cobblestone.material())));
-                    brushes.extend(blueprint.stamp.brushes(&grid, face, ci, cj, floor));
+                    placed.hollow([x - h, floor, z - h], [x + h, floor + blueprint.height + 5, z + h]);
+                    placed.fill([x - h + 1, floor - 5, z - h + 1], [x + h - 1, floor - 1, z + h - 1], Block::Cobblestone.material());
+                    placed.place(&blueprint.stamp, [x, floor, z]);
                     taken.push((ci, cj, reach + 3));
                 }
             }
@@ -67,7 +68,6 @@ pub fn decorate(planet: &Planet, region: Region) -> Vec<Brush> {
     let kind = forest_kind(seed, face, mid_i, mid_j);
     let attempts = 3 + (density * 22.0) as i32;
     let mut trunks: Vec<(i32, i32)> = Vec::new();
-    let mut growth = Stamp::new();
     for _ in 0..attempts {
         let (i, j) = (i0 + rng.int(3, REGION_BLOCKS - 4), j0 + rng.int(3, REGION_BLOCKS - 4));
         if taken.iter().any(|&(ti, tj, r)| (ti - i).abs() <= r && (tj - j).abs() <= r) {
@@ -87,7 +87,7 @@ pub fn decorate(planet: &Planet, region: Region) -> Vec<Brush> {
             Biome::Desert => {
                 // Cacti on sand, spread thin.
                 if g.material == material::SAND && rng.f64() < 0.08 + density * 0.1 {
-                    growth.fill(at, [at[0], at[1] + rng.int(2, 4) - 1, at[2]], Block::Cactus.material());
+                    placed.fill(at, [at[0], at[1] + rng.int(2, 4) - 1, at[2]], Block::Cactus.material());
                     trunks.push((i, j));
                 }
             }
@@ -104,17 +104,16 @@ pub fn decorate(planet: &Planet, region: Region) -> Vec<Brush> {
                 // Crowns stop at hillsides: no leaves inside the terrain.
                 let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog].map(Block::material);
                 tree.retain(|p, m| m.is_some_and(|m| logs.contains(&m)) || planet.terrain_top(face, i + p[0], j + p[2]) <= g.cell.k + 1 + p[1]);
-                growth.place(&tree, at);
+                placed.place(&tree, at);
                 // Dirt under the trunk, as the roots would make it.
                 if g.material == material::GRASS {
-                    growth.set([at[0], at[1] - 1, at[2]], Block::Dirt.material());
+                    placed.set([at[0], at[1] - 1, at[2]], Block::Dirt.material());
                 }
                 trunks.push((i, j));
             }
         }
     }
-    brushes.extend(growth.brushes(&grid, face, i0, j0, 0));
-    brushes
+    placed.cells_at(face, i0, j0, 0).collect()
 }
 
 /// The tree a column grows, if any.
@@ -173,7 +172,12 @@ mod tests {
         let n = planet.grid().cells() / REGION_BLOCKS;
         let centre = Region { face: 2, x: n / 2, y: n / 2 };
         let around = centre.around(2, n + 1);
-        let first: Vec<Vec<Brush>> = around.iter().map(|r| decorate(&planet, *r)).collect();
+        let decide = |planet: &Planet, r: Region| {
+            let mut cells = decorate(planet, r);
+            cells.sort_by_key(|(c, m)| (c.i, c.j, c.k, *m));
+            cells
+        };
+        let first: Vec<Vec<FeatureCell>> = around.iter().map(|r| decide(&planet, *r)).collect();
         assert!(first.iter().map(Vec::len).sum::<usize>() > 0, "nothing grows around the centre");
         for (region, brushes) in around.iter().zip(&first) {
             planet.load_features(region.key(), brushes.clone()).unwrap();
@@ -182,9 +186,9 @@ mod tests {
         let at = Cell::new(2, centre.x * REGION_BLOCKS + 16, centre.y * REGION_BLOCKS + 16, planet.terrain_top(2, centre.x * REGION_BLOCKS + 16, centre.y * REGION_BLOCKS + 16));
         planet.apply(helio_pass_voxel_planet::Brush { center: grid.cell_center(at).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         for (region, brushes) in around.iter().zip(&first) {
-            assert_eq!(&decorate(&planet, *region), brushes, "{region:?} decided again");
+            assert_eq!(&decide(&planet, *region), brushes, "{region:?} decided again");
         }
         planet.unload_features(centre.key());
-        assert_eq!(decorate(&planet, centre), first[0]);
+        assert_eq!(decide(&planet, centre), first[0]);
     }
 }

@@ -115,6 +115,12 @@ impl Stamp {
         Stamp { cells: self.cells.iter().map(|(p, m)| (turn(*p), *m)).collect() }
     }
 
+    /// Its cells with its origin at cell `(i, j, k)` of `face` (what a
+    /// region's features are: [`crate::Planet::load_features`]).
+    pub fn cells_at(&self, face: u8, i: i32, j: i32, k: i32) -> impl Iterator<Item = (Cell, Option<u32>)> + '_ {
+        self.cells.iter().map(move |(p, m)| (Cell::new(face, i + p[0], j + p[2], k + p[1]), *m))
+    }
+
     /// The brushes that place the stamp with its origin at cell `(i, j, k)`
     /// of `face`: its air first (so it clears what stands there), then its
     /// materials, vertical runs as one brush each.

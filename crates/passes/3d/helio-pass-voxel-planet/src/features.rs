@@ -3,21 +3,22 @@
 //!
 //! A host decides what stands in a region of the world (from the seed and
 //! the terrain alone, so a region comes out the same whenever it is
-//! decided) and hands the planet that region's brushes
+//! decided) and hands the planet that region's cells
 //! ([`crate::Planet::load_features`]). They are not edits: the history,
 //! undo and saves never hold them, and a region unloaded far from every
 //! viewer gives its memory back. They read as part of the world, under
 //! every edit: what a player digs or builds applies over them, whenever the
 //! region was loaded.
 //!
-//! Each region bakes its brushes into a store of its own (base cells, as
-//! edits bake), with the large analytic brushes applied over it as they
+//! Each region's cells go into a store of its own (base cells, as edits
+//! bake), with the large analytic brushes applied over it as they
 //! apply over the terrain. A column's features are the loaded regions'
 //! bricks composed in key order; the planet composes them under its baked
 //! edits (`planet::Edits`).
 
-use crate::edit_store::{Brick, BrickKey, ColumnKey, EditStore};
+use crate::edit_store::{Brick, BrickKey, CellEdit, ColumnKey, EditStore};
 use crate::edits::{Brush, EditLog};
+use crate::grid::Cell;
 use crate::grid::Grid;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
@@ -62,10 +63,13 @@ impl Region {
     }
 }
 
-/// A loaded region: its brushes and what they baked.
+/// A feature cell: a base cell and its material, or air (`None`).
+pub type FeatureCell = (Cell, Option<u32>);
+
+/// A loaded region: its cells and their store.
 #[derive(Clone)]
 struct Loaded {
-    brushes: Arc<[Brush]>,
+    cells: Arc<[FeatureCell]>,
     store: EditStore,
 }
 
@@ -112,35 +116,40 @@ impl Features {
     }
 
     /// Base column `key`'s features: the regions' bricks composed in key
-    /// order (`None`: no region holds it).
-    pub(crate) fn column(&self, key: &ColumnKey) -> Option<Vec<(i32, Brick)>> {
+    /// order, a brick one region alone holds shared (`None`: no region
+    /// holds it).
+    pub(crate) fn column(&self, key: &ColumnKey) -> Option<Vec<(i32, Arc<Brick>)>> {
         let regions = self.columns.get(key)?;
-        let mut out: Vec<(i32, Brick)> = Vec::new();
+        let mut out: Vec<(i32, Arc<Brick>)> = Vec::new();
         for id in regions {
             let Some(column) = self.regions[id].store.column(key) else { continue };
             for (bk, brick) in column.iter() {
                 match out.binary_search_by_key(bk, |(b, _)| *b) {
                     Ok(at) => {
-                        let under = &mut out[at].1;
+                        let under = Arc::make_mut(&mut out[at].1);
                         for (cell, over) in under.cells.iter_mut().zip(brick.cells.iter()) {
                             *cell = cell.then_edit(*over);
                         }
                     }
-                    Err(at) => out.insert(at, (*bk, (**brick).clone())),
+                    Err(at) => out.insert(at, (*bk, Arc::clone(brick))),
                 }
             }
         }
         Some(out)
     }
 
-    /// Loads region `key` with `brushes` (replacing what it held), the large
-    /// brushes `large` applied over them. The base columns it changed.
-    pub(crate) fn load(&mut self, grid: &Grid, key: u64, brushes: Arc<[Brush]>, large: &EditLog) -> Result<Vec<ColumnKey>, String> {
+    /// Loads region `key` with `cells` (replacing what it held; later
+    /// cells win where it names one twice), the large brushes `large`
+    /// applied over them. The base columns it changed.
+    pub(crate) fn load(&mut self, grid: &Grid, key: u64, cells: Arc<[FeatureCell]>, large: &EditLog) -> Result<Vec<ColumnKey>, String> {
+        let mut bricks: FxHashMap<BrickKey, Brick> = FxHashMap::default();
+        for (cell, material) in cells.iter() {
+            let brick = bricks.entry(BrickKey::of_cell(cell.face, 0, cell.i, cell.j, cell.k)).or_default();
+            brick.cells[Brick::index(cell.i, cell.j, cell.k)] = material.map_or(CellEdit::AIR, CellEdit::solid);
+        }
         let mut store = EditStore::default();
-        for brush in brushes.iter() {
-            for fb in brush.resolve(grid)? {
-                store.bake(grid, &fb, brush.op);
-            }
+        for (key, brick) in bricks {
+            store.set(key, Some(brick));
         }
         for brush in large.brushes() {
             for fb in brush.resolve(grid)? {
@@ -160,7 +169,7 @@ impl Features {
         changed.extend(columns);
         changed.sort_unstable();
         changed.dedup();
-        self.regions.insert(key, Loaded { brushes, store });
+        self.regions.insert(key, Loaded { cells, store });
         self.version += 1;
         Ok(changed)
     }
@@ -207,10 +216,10 @@ impl Features {
     /// Every region baked again under the large brushes `large` (after an
     /// undo changed them). The base columns they held before and after.
     pub(crate) fn rebake(&mut self, grid: &Grid, large: &EditLog) -> Result<Vec<ColumnKey>, String> {
-        let regions: Vec<(u64, Arc<[Brush]>)> = self.regions.iter().map(|(k, r)| (*k, Arc::clone(&r.brushes))).collect();
+        let regions: Vec<(u64, Arc<[FeatureCell]>)> = self.regions.iter().map(|(k, r)| (*k, Arc::clone(&r.cells))).collect();
         let mut changed = Vec::new();
-        for (key, brushes) in regions {
-            changed.extend(self.load(grid, key, brushes, large)?);
+        for (key, cells) in regions {
+            changed.extend(self.load(grid, key, cells, large)?);
         }
         changed.sort_unstable();
         changed.dedup();

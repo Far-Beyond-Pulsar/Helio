@@ -1257,13 +1257,13 @@ fn features_render_exactly_as_they_load_and_unload() {
     tree.fill([-3, 7, -3], [3, 11, 3], material::GRASS);
     tree.fill([0, 0, 0], [0, 9, 0], material::BRICK);
     // Trees of a region on the ground along `side`, `offset` along `fwd`.
-    let region = |planet: &Planet, offset: f64| -> Vec<Brush> {
+    let region = |planet: &Planet, offset: f64| -> Vec<(helio_pass_voxel_planet::Cell, Option<u32>)> {
         (-2..=2)
             .flat_map(|n| {
                 let at = ground + side * (f64::from(n) * 9.0 * v) + fwd * offset;
                 let (cell, _) = grid.locate(at);
                 let k = planet.column_top(cell.face, cell.i, cell.j, 0);
-                tree.oriented(n as u32, n % 2 == 0).brushes(&grid, cell.face, cell.i, cell.j, k)
+                tree.oriented(n as u32, n % 2 == 0).cells_at(cell.face, cell.i, cell.j, k).collect::<Vec<_>>()
             })
             .collect()
     };
