@@ -37,6 +37,11 @@ pub struct PortalProjectionConfig {
     pub max_chain_depth: usize,
     pub max_chains: Option<usize>,
     pub max_coordinate_spaces: Option<usize>,
+    /// The first coordinate-space slot portal projections may use. Slots below
+    /// it are reserved (for the scene's rigid frames, which share the table;
+    /// see `Renderer::set_frame_spaces`) and hold identity in the frame
+    /// returned here. `1` (the default) reserves nothing.
+    pub first_slot: u32,
 }
 
 impl Default for PortalProjectionConfig {
@@ -45,6 +50,7 @@ impl Default for PortalProjectionConfig {
             max_chain_depth: 3,
             max_chains: None,
             max_coordinate_spaces: None,
+            first_slot: 1,
         }
     }
 }
@@ -194,6 +200,9 @@ impl From<ResolutionError> for ProjectionError {
 pub struct PortalProjectionFrame {
     /// Full coordinate-space table. Slot zero is always identity.
     pub coordinate_spaces: Vec<Mat4>,
+    /// The first slot this projection owns (see
+    /// `PortalProjectionConfig::first_slot`); the slots below are placeholders.
+    pub first_slot: u32,
     /// Dense view rows. Their indices are the IDs stored in chain rows.
     pub portal_views: Vec<PortalViewComponent>,
     /// Dense chain rows. Each `portals[]` entry indexes `portal_views`.
@@ -430,7 +439,10 @@ impl PortalProjectionBridge {
             );
         }
 
-        let mut coordinate_spaces = vec![Mat4::IDENTITY];
+        // Slot 0 is the world; slots up to `first_slot` belong to the scene's rigid
+        // frames and are filled in by the renderer when it layers the tables.
+        let first_slot = self.config.first_slot.max(1);
+        let mut coordinate_spaces = vec![Mat4::IDENTITY; first_slot as usize];
         let mut coordinate_space_indices = HashMap::<[u32; 16], u32>::new();
         coordinate_space_indices.insert(matrix_key(Mat4::IDENTITY), IDENTITY_COORDINATE_SPACE_SLOT);
         let mut portal_views = Vec::with_capacity(projections.len());
@@ -505,6 +517,7 @@ impl PortalProjectionBridge {
 
         Ok(PortalProjectionFrame {
             coordinate_spaces,
+            first_slot,
             portal_views,
             portal_chains,
             occurrence_indices,
@@ -609,6 +622,53 @@ mod tests {
             .unwrap();
         assert_eq!(frame.portal_views.len(), 2);
         assert_eq!(frame.coordinate_spaces.len(), 3);
+    }
+
+    #[test]
+    fn slots_below_first_slot_are_left_for_the_scenes_frames() {
+        let mut world = pulsar_scenedb::World::new();
+        let a = world.spawn();
+        let b = world.spawn();
+        let mut resolver = SubLevelResolver::new();
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (
+                        a,
+                        PortalComponent::new(
+                            Some(b),
+                            Mat4::from_translation(glam::vec3(2.0, 0.0, 0.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                    (
+                        b,
+                        PortalComponent::new(
+                            Some(a),
+                            Mat4::from_translation(glam::vec3(-2.0, 0.0, 0.0)),
+                            [1.0, 1.0],
+                        ),
+                    ),
+                ],
+            ),
+        );
+        // Three frames own slots 1..=3; the projection starts at slot 4.
+        let frame = PortalProjectionBridge::with_config(PortalProjectionConfig {
+            first_slot: 4,
+            ..PortalProjectionConfig::default()
+        })
+        .unwrap()
+        .build(&resolver)
+        .unwrap();
+        assert_eq!(frame.first_slot, 4);
+        assert_eq!(frame.coordinate_spaces.len(), 6, "world, 3 reserved, 2 projections");
+        assert!(frame.coordinate_spaces[1..4].iter().all(|m| *m == Mat4::IDENTITY));
+        assert!(
+            frame.portal_views.iter().all(|view| view.coordinate_space >= 4),
+            "no view uses a slot reserved for frames"
+        );
     }
 
     #[test]

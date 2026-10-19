@@ -91,6 +91,9 @@ struct MeshJoinUniforms {
 // instances each owner carries (`head + 1`, 0 ends the list), rebuilt by every
 // full join so a later moved-owner join can find an owner's instances.
 @group(0) @binding(15) var<storage, read_write> link: array<atomic<u32>>;
+// Per object: the space (coordinate-space slot of its nearest rigid frame) it is
+// drawn in, zero for the world. Absent (a zero-length buffer) outside a hierarchy.
+@group(0) @binding(16) var<storage, read> spaces: array<u32>;
 
 /// The owner entity of instance `row` when the instance should draw, else
 /// `NO_OWNER`: attached and enabled, its recorded owner generation matches
@@ -198,6 +201,18 @@ fn cs_join_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
     var flags = 0u;
     if row < arrayLength(&mesh_flags) {
         flags = mesh_flags[row];
+    }
+    // The space this object is drawn in (instance flags bits 8-15, see
+    // `helio_pass_object_batch::set_coordinate_space`): its nearest rigid frame.
+    if owner < arrayLength(&spaces) {
+        flags = (flags & ~0xFF00u) | ((spaces[owner] & 0xFFu) << 8u);
+        // Static means "never moves": inside a rigid frame an object is fixed only
+        // relative to the frame, and the frame moves, so caches that key on a
+        // fixed world transform (static shadow casters, ray-tracing instances)
+        // must treat it as movable.
+        if spaces[owner] != 0u {
+            flags = flags | 8u; // INSTANCE_FLAG_MOVABLE
+        }
     }
 
     for (var s = 0u; s < draws.count; s = s + 1u) {

@@ -145,6 +145,27 @@ pub struct GBufferPass {
     /// CPU-side projection input staged by the generic graph interface and
     /// uploaded during `prepare()` with the current frame queue.
     pending_coordinate_spaces: Option<Vec<glam::Mat4>>,
+    /// The table last uploaded (`COORDINATE_SPACE_SLOTS * 16` words), which becomes
+    /// the previous-frame table when the next one arrives.
+    last_coordinate_words: Option<Vec<f32>>,
+    /// `coordinate_spaces_prev` differs from `coordinate_spaces` and must be
+    /// brought level next frame (a table that stops changing has no motion).
+    coordinate_prev_stale: bool,
+}
+
+/// Coordinate-space slots backed by GPU storage (slot 0 is the identity). An
+/// instance carries its space id in 8 bits of its flags, so 256 is the most.
+pub const COORDINATE_SPACE_SLOTS: usize = 256;
+
+/// The table as GPU words: slot 0 identity, then `spaces` (the non-identity
+/// tail) from slot 1.
+fn coordinate_space_words(spaces: &[glam::Mat4]) -> Vec<f32> {
+    let mut words = vec![0.0f32; COORDINATE_SPACE_SLOTS * 16];
+    words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
+    for (slot, space) in spaces.iter().take(COORDINATE_SPACE_SLOTS - 1).enumerate() {
+        words[(slot + 1) * 16..(slot + 2) * 16].copy_from_slice(&space.to_cols_array());
+    }
+    words
 }
 
 impl GBufferPass {
@@ -302,7 +323,7 @@ impl GBufferPass {
             mapped_at_creation: false,
         });
 
-        let mut coordinate_space_words = vec![0.0f32; 32 * 16];
+        let mut coordinate_space_words = vec![0.0f32; COORDINATE_SPACE_SLOTS * 16];
         coordinate_space_words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
         let coordinate_spaces = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Coordinate Spaces (space_id 0 = identity)"),
@@ -361,6 +382,8 @@ impl GBufferPass {
             fallback_material_textures,
             fallback_skeletal_storage,
             pending_coordinate_spaces: None,
+            last_coordinate_words: None,
+            coordinate_prev_stale: false,
         }
     }
 
@@ -398,12 +421,7 @@ impl GBufferPass {
     /// always world space; additional slots map authored target geometry into
     /// the source portal that displays it.
     pub fn set_coordinate_spaces(&self, queue: &wgpu::Queue, spaces: &[glam::Mat4]) {
-        let mut words = [0.0f32; 32 * 16];
-        words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
-        for (slot, space) in spaces.iter().take(31).enumerate() {
-            words[(slot + 1) * 16..(slot + 2) * 16]
-                .copy_from_slice(&space.to_cols_array());
-        }
+        let words = coordinate_space_words(spaces);
         queue.write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
         queue.write_buffer(
             &self.coordinate_spaces_prev,
@@ -659,21 +677,31 @@ impl RenderPass for GBufferPass {
             );
             self.uv_grid_uploaded = true;
         }
-        if let Some(pending_coordinate_spaces) = self.pending_coordinate_spaces.as_ref() {
-            let mut words = [0.0f32; 32 * 16];
-            words[..16].copy_from_slice(&glam::Mat4::IDENTITY.to_cols_array());
-            for (slot, space) in pending_coordinate_spaces.iter().take(31).enumerate() {
-                words[(slot + 1) * 16..(slot + 2) * 16]
-                    .copy_from_slice(&space.to_cols_array());
-            }
+        if let Some(pending_coordinate_spaces) = self.pending_coordinate_spaces.take() {
+            let words = coordinate_space_words(&pending_coordinate_spaces);
+            // The previous frame's table is what was uploaded before this one
+            // (the first upload has no history: still frames).
+            let previous = self.last_coordinate_words.as_deref().unwrap_or(&words);
             ctx.queue
                 .write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
             ctx.queue.write_buffer(
                 &self.coordinate_spaces_prev,
                 0,
-                bytemuck::cast_slice(&words),
+                bytemuck::cast_slice(previous),
             );
-            self.pending_coordinate_spaces = None;
+            self.coordinate_prev_stale = previous != words.as_slice();
+            self.last_coordinate_words = Some(words);
+        } else if self.coordinate_prev_stale {
+            // The table held still since the last upload: a space that stopped
+            // moving has no motion, so the history catches up.
+            if let Some(words) = self.last_coordinate_words.as_ref() {
+                ctx.queue.write_buffer(
+                    &self.coordinate_spaces_prev,
+                    0,
+                    bytemuck::cast_slice(words),
+                );
+            }
+            self.coordinate_prev_stale = false;
         }
         // Read per-scene values from the frame registry so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).

@@ -70,15 +70,15 @@ pub const INSTANCE_COORDINATE_SPACE_SHIFT: u32 = 8;
 
 /// Mask for the 8-bit coordinate-space id within [`GpuInstanceData::flags`].
 ///
-/// 256 values are encodable; [`MAX_COORDINATE_SPACES`] (32) are actually
-/// backed by GPU storage, which is enough headroom that running out is not a
+/// 256 values are encodable and [`MAX_COORDINATE_SPACES`] (256) are
+/// backed by GPU storage (slot 0 is the world, so 255 frames); running out is not a
 /// realistic concern.
 pub const INSTANCE_COORDINATE_SPACE_MASK: u32 = 0xFF << INSTANCE_COORDINATE_SPACE_SHIFT;
 
 /// Number of coordinate-space slots backed by GPU storage. Slot 0 is always
 /// the identity (world space). Mirrors `MAX_COORDINATE_SPACES` in
 /// `coordinate_spaces.wgsl` / every shader that binds the buffer — keep in sync.
-pub const MAX_COORDINATE_SPACES: u32 = 32;
+pub const MAX_COORDINATE_SPACES: u32 = 256;
 
 /// Packs `space` (a coordinate-space slot, see [`INSTANCE_COORDINATE_SPACE_SHIFT`])
 /// into `flags`, replacing whatever coordinate-space id was previously set.
