@@ -12,9 +12,14 @@
 //! brick i, j, k; face 0 is an empty entry) then `CAPACITY` bricks of 128
 //! words (four cells' bytes each, `x + 8 (y + 8 z)`), the brick of table entry
 //! `e` at `CAPACITY * 4 + e * 128`.
+//!
+//! A world's worth of edits arrives at once (a decorated region is tens of
+//! thousands of bricks): changes queue and [`BlockMaterials::flush`] uploads a
+//! budget of them each frame, so a frame never waits on thousands of writes.
 
-use crate::edit_store::{BrickKey, ColumnKey, EditStore};
+use crate::edit_store::{Brick, BrickKey, ColumnKey, EditStore};
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 /// Bricks the table holds (a power of two).
 pub const CAPACITY: usize = 1 << 17;
@@ -35,8 +40,10 @@ pub struct BlockMaterials {
     pub buffer: wgpu::Buffer,
     /// The table as the GPU has it.
     keys: Vec<[i32; 4]>,
-    /// The base level's bricks (their heights) the GPU has, by column.
+    /// The base level's bricks (their heights) the GPU has or is to get, by column.
     columns: FxHashMap<ColumnKey, Vec<i32>>,
+    /// Bricks to write: the latest state of each (`None`: now empty).
+    pending: FxHashMap<BrickKey, Option<Arc<Brick>>>,
     warned: bool,
 }
 
@@ -49,7 +56,7 @@ impl BlockMaterials {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { buffer, keys: vec![[0; 4]; CAPACITY], columns: FxHashMap::default(), warned: false }
+        Self { buffer, keys: vec![[0; 4]; CAPACITY], columns: FxHashMap::default(), pending: FxHashMap::default(), warned: false }
     }
 
     /// The table entry of a brick, adding it if it is new.
@@ -69,7 +76,7 @@ impl BlockMaterials {
         None
     }
 
-    fn write_brick(&mut self, queue: &wgpu::Queue, key: &BrickKey, brick: Option<&crate::edit_store::Brick>) {
+    fn write_brick(&mut self, queue: &wgpu::Queue, key: &BrickKey, brick: Option<&Brick>) {
         let Some((e, new)) = self.entry(key) else {
             if !self.warned {
                 eprintln!("chunk block materials: table full, edited cells beyond it show their leaf material");
@@ -92,39 +99,51 @@ impl BlockMaterials {
     }
 
     /// Everything the store holds at the base level.
-    pub fn fill_all(&mut self, queue: &wgpu::Queue, store: &EditStore) {
-
+    pub fn fill_all(&mut self, store: &EditStore) {
         for (key, brick) in store.bricks().filter(|(k, _)| k.level == 0) {
-            self.write_brick(queue, &key, Some(brick));
+            self.pending.insert(key, Some(brick.clone()));
             self.columns.entry(key.column()).or_default().push(key.bk);
         }
     }
 
     /// Follows `store`'s changes in `changed` columns: their bricks are
-    /// written again, and bricks they no longer hold are cleared.
-    pub fn sync(&mut self, queue: &wgpu::Queue, store: &EditStore, changed: &[ColumnKey]) {
+    /// queued to be written again, and bricks they no longer hold to be cleared.
+    pub fn sync(&mut self, store: &EditStore, changed: &[ColumnKey]) {
         let mut done: rustc_hash::FxHashSet<ColumnKey> = Default::default();
         for column in changed.iter().filter(|c| c.level == 0) {
             if !done.insert(*column) {
                 continue;
             }
-            let now = store.column(column);
             let before = self.columns.remove(column).unwrap_or_default();
             let mut heights: Vec<i32> = Vec::new();
-            if let Some(now) = now {
+            if let Some(now) = store.column(column) {
                 for (bk, brick) in now.iter() {
                     let key = BrickKey { face: column.face, level: 0, bi: column.ci, bj: column.cj, bk: *bk };
-                    self.write_brick(queue, &key, Some(brick));
+                    self.pending.insert(key, Some(brick.clone()));
                     heights.push(*bk);
                 }
             }
             for bk in before.into_iter().filter(|bk| !heights.contains(bk)) {
                 let key = BrickKey { face: column.face, level: 0, bi: column.ci, bj: column.cj, bk };
-                self.write_brick(queue, &key, None);
+                self.pending.insert(key, None);
             }
             if !heights.is_empty() {
                 self.columns.insert(*column, heights);
             }
         }
+    }
+
+    /// Writes up to `budget` queued bricks to the GPU; how many are left.
+    pub fn flush(&mut self, queue: &wgpu::Queue, budget: usize) -> usize {
+        if self.pending.is_empty() {
+            return 0;
+        }
+        let keys: Vec<BrickKey> = self.pending.keys().take(budget).copied().collect();
+        for key in keys {
+            if let Some(brick) = self.pending.remove(&key) {
+                self.write_brick(queue, &key, brick.as_deref());
+            }
+        }
+        self.pending.len()
     }
 }

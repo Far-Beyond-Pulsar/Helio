@@ -28,47 +28,69 @@ const RADIUS: i32 = REGION_RADIUS;
 pub struct Decorator {
     seed: u64,
     done: HashSet<Region>,
+    /// Where the outward scan for undecorated regions stands: the focus
+    /// region it started from and the square ring it has reached (rings
+    /// inside it are all done), so a scan never starts over from the player.
+    scan: Option<(Region, i32)>,
 }
 
 impl Decorator {
     pub fn new() -> Self {
-        Self { seed: WORLD_SEED, done: HashSet::new() }
+        Self { seed: WORLD_SEED, done: HashSet::new(), scan: None }
     }
 
     pub fn regions_done(&self) -> usize {
         self.done.len()
     }
 
-    /// The undecorated regions around `focus` within reach, nearest first,
-    /// at most `limit` of them.
-    pub fn next_batch(&self, planet: &Planet, focus: Cell, limit: usize) -> Vec<Region> {
-        let (cx, cy) = (focus.i.div_euclid(REGION_BLOCKS), focus.j.div_euclid(REGION_BLOCKS));
-        let mut candidates: Vec<(i32, Region)> = Vec::new();
-        for dx in -RADIUS..=RADIUS {
-            for dy in -RADIUS..=RADIUS {
-                let region = (focus.face, cx + dx, cy + dy);
-                let d = dx * dx + dy * dy;
-                if d > RADIUS * RADIUS || self.done.contains(&region) {
-                    continue;
-                }
-                candidates.push((d, region));
-            }
-        }
-        candidates.sort_by_key(|&(d, _)| d);
+    /// The undecorated regions around `focus` within reach, nearest rings
+    /// first, at most `limit` of them. The scan resumes from the ring it
+    /// reached (it only starts over when the player moves to another region),
+    /// so a world-sized radius costs nothing until the rings are walked.
+    pub fn next_batch(&mut self, planet: &Planet, focus: Cell, limit: usize) -> Vec<Region> {
+        let centre = (focus.face, focus.i.div_euclid(REGION_BLOCKS), focus.j.div_euclid(REGION_BLOCKS));
+        // Past the face's own width there is nothing to decorate.
+        let reach = RADIUS.min(planet.grid().cells() / REGION_BLOCKS + 1);
+        let mut ring = match self.scan {
+            Some((from, ring)) if from == centre => ring,
+            _ => 0,
+        };
         let mut out = Vec::new();
-        for (_, region) in candidates {
+        while ring <= reach && out.len() < limit {
+            let mut visit = |dx: i32, dy: i32, out: &mut Vec<Region>| {
+                if dx * dx + dy * dy > RADIUS * RADIUS || out.len() >= limit {
+                    return;
+                }
+                let region = (centre.0, centre.1 + dx, centre.2 + dy);
+                if !self.done.contains(&region) && terrain::buildable(planet, region.1 * REGION_BLOCKS + REGION_BLOCKS / 2, region.2 * REGION_BLOCKS + REGION_BLOCKS / 2) {
+                    out.push(region);
+                }
+            };
+            // The cells of the square ring at Chebyshev distance `ring`.
+            if ring == 0 {
+                visit(0, 0, &mut out);
+            } else {
+                for k in -ring..=ring {
+                    visit(k, -ring, &mut out);
+                    visit(k, ring, &mut out);
+                }
+                for k in (-ring + 1)..ring {
+                    visit(-ring, k, &mut out);
+                    visit(ring, k, &mut out);
+                }
+            }
+            // A ring that filled the batch may have more left for the next call.
             if out.len() >= limit {
                 break;
             }
-            if terrain::buildable(planet, region.1 * REGION_BLOCKS + REGION_BLOCKS / 2, region.2 * REGION_BLOCKS + REGION_BLOCKS / 2) {
-                out.push(region);
-            }
+            ring += 1;
         }
+        self.scan = Some((centre, ring));
         out
     }
 
     /// Whether any region around `focus` is still waiting.
-    pub fn has_work(&self, planet: &Planet, focus: Cell) -> bool {
+    pub fn has_work(&mut self, planet: &Planet, focus: Cell) -> bool {
         !self.next_batch(planet, focus, 1).is_empty()
     }
 

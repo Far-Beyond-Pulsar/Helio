@@ -44,7 +44,7 @@ pub struct Worker {
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(60);
 /// While only decorating (no player edit waiting), snapshots are rarer: each
 /// one makes the renderer regenerate the tiles the new edits touch.
-const DECORATION_INTERVAL: Duration = Duration::from_millis(700);
+const DECORATION_INTERVAL: Duration = Duration::from_millis(2500);
 
 impl Worker {
     /// Starts the thread; it owns `planet`.
@@ -89,27 +89,31 @@ impl Worker {
                     }
                     // A batch of regions is built in parallel, then applied in
                     // order; batches stay small so player edits are not kept waiting.
+                    let scan_started = Instant::now();
                     let batch = focus.map(|f| decorator.next_batch(&planet, f, DECORATE_BATCH)).unwrap_or_default();
+                    let scan_ms = scan_started.elapsed().as_secs_f64() * 1e3;
                     if !batch.is_empty() {
                         let started = Instant::now();
                         let built = decorator.decorate_all(&planet, &batch);
                         let made: usize = built.iter().map(Vec::len).sum();
-                        for brush in built.into_iter().flatten() {
-                            if let Err(error) = planet.apply(brush) {
-                                log::warn!("decoration brush rejected: {error}");
-                            }
+                        let built_ms = started.elapsed().as_secs_f64() * 1e3;
+                        let all: Vec<Brush> = built.into_iter().flatten().collect();
+                        if let Err(error) = planet.apply_baked(&all) {
+                            log::warn!("decoration rejected: {error}");
                         }
-                        log::debug!("{} regions: {made} brushes in {:.0} ms", batch.len(), started.elapsed().as_secs_f64() * 1e3);
+                        log::debug!("{} regions: {made} brushes, scan {scan_ms:.0} ms, built in {built_ms:.0} ms, all in {:.0} ms", batch.len(), started.elapsed().as_secs_f64() * 1e3);
                         dirty = true;
                     }
                     let interval = if urgent { SNAPSHOT_INTERVAL } else { DECORATION_INTERVAL };
                     if dirty && last_sent.elapsed() >= interval {
                         // Edits sealed into the baked store are what the renderer reads cell by cell.
+                        let snap_started = Instant::now();
                         let _ = planet.seal_all();
                         let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()), regions: decorator.regions_done() };
                         if result_tx.send(snapshot).is_err() {
                             break;
                         }
+                        log::debug!("snapshot in {:.0} ms", snap_started.elapsed().as_secs_f64() * 1e3);
                         dirty = false;
                         urgent = false;
                         last_sent = Instant::now();

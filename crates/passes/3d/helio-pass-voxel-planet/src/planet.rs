@@ -1304,3 +1304,61 @@ impl Planet {
         Ok(())
     }
 }
+
+impl Planet {
+    /// Applies `brushes` straight into the baked store, as sealed edits: many
+    /// small brushes (a world's trees, a structure) in one pass instead of one
+    /// at a time through the recent log and its seals. They cannot be undone
+    /// (the undo history is dropped), and the renderer follows them as one
+    /// change of the baked store.
+    pub fn apply_baked(&mut self, brushes: &[Brush]) -> Result<(), String> {
+        if brushes.is_empty() {
+            return Ok(());
+        }
+        // Whatever is recent goes in first, so the order of history holds.
+        self.seal_all()?;
+        let before = self.edits.baked_state();
+        let large = self.edits.large.clone();
+        let mut resolved = Vec::with_capacity(brushes.len());
+        for brush in brushes {
+            resolved.push(brush.resolve(&self.grid)?);
+        }
+        let edits = &mut self.edits;
+        edits.baked.begin_record();
+        let mut changed = Vec::new();
+        let mut hash = edits.sealed_hash;
+        for (brush, faces) in brushes.iter().zip(&resolved) {
+            if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
+                for fb in faces {
+                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
+                }
+            } else {
+                for fb in faces {
+                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
+                }
+                edits.large.push(&self.grid, *brush)?;
+            }
+            hash = crate::edits::brush_hash(hash, brush);
+            // A cube brush reaches sqrt(3) radii from its centre.
+            let reach = brush.radius * 1.7321 + self.grid.voxel_size();
+            let centre = self.grid.radial(DVec3::from_array(brush.center));
+            match brush.op {
+                crate::edits::BrushOp::Add => self.edit_top = self.edit_top.max(centre + reach),
+                crate::edits::BrushOp::Remove => self.edit_bottom = self.edit_bottom.min(centre - reach),
+                _ => {}
+            }
+        }
+        let edits = &mut self.edits;
+        edits.baked.rebuild_coarse(changed, self.grid.levels());
+        let store = edits.baked.end_record();
+        edits.sealed_count += brushes.len();
+        edits.sealed_hash = hash;
+        // History that can be undone ends here.
+        edits.undo_seals.clear();
+        let _ = large;
+        let columns: Vec<ColumnKey> = store.columns().collect();
+        edits.changed(before, columns.into_iter());
+        self.revision += 1;
+        Ok(())
+    }
+}

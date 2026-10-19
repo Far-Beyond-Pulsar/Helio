@@ -1925,7 +1925,7 @@ impl ChunkWorld {
         queue.write_buffer(&chunk_table, 0, bytemuck::cast_slice(drawn_set.table()));
         let (uv_grid_view, uv_grid_sampler) = create_uv_grid(device, queue);
         let mut blocks = blocks::BlockMaterials::new(device);
-        blocks.fill_all(queue, &planet.edits().baked);
+        blocks.fill_all(&planet.edits().baked);
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -2658,7 +2658,7 @@ impl ChunkWorld {
         let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else {
             return false;
         };
-        self.blocks.sync(&self.queue, &edits.baked, &columns);
+        self.blocks.sync(&edits.baked, &columns);
         let (faces, large_faces, recent_counts) = analytic_faces(edits);
         // Brushes in one list and not the other.
         let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
@@ -2791,6 +2791,8 @@ impl ChunkWorld {
         let grid = self.grid;
         let eye_at = Eye::new(&grid, eye);
         self.claim_timing(frame);
+        // A bounded share of the edited cells' exact materials each frame.
+        self.blocks.flush(&self.queue, 1200);
         let mut stats = UpdateStats::default();
         if self.worker.is_none() {
             self.worker = Some(residency::Worker::spawn(
