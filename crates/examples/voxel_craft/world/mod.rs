@@ -24,14 +24,12 @@ pub struct World {
     /// batch and what the cell is (`None`: air).
     pending: HashMap<Cell, (u64, Option<Block>)>,
     snapshot_ticket: u64,
-    /// Bumped whenever the snapshot changes (the pass syncs by difference).
-    revision: u64,
 }
 
 impl World {
     pub fn new(planet: Planet) -> Self {
         let snapshot = Arc::new(planet.clone());
-        Self { snapshot, worker: Worker::spawn(planet), next_ticket: 1, pending: HashMap::new(), snapshot_ticket: 0, revision: 0 }
+        Self { snapshot, worker: Worker::spawn(planet), next_ticket: 1, pending: HashMap::new(), snapshot_ticket: 0 }
     }
 
     /// The latest finished planet, for drawing and for queries.
@@ -39,23 +37,13 @@ impl World {
         &self.snapshot
     }
 
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
     /// Takes finished snapshots from the worker. Call once a frame.
     pub fn update(&mut self) {
         if let Some(done) = self.worker.latest() {
             self.snapshot = done.planet;
             self.snapshot_ticket = done.ticket;
-            self.revision += 1;
             self.pending.retain(|_, (ticket, _)| *ticket > done.ticket);
         }
-    }
-
-    /// Edits not yet in the snapshot.
-    pub fn pending_edits(&self) -> usize {
-        self.pending.len()
     }
 
     /// Applies `edits` (off-thread); queries see them immediately.

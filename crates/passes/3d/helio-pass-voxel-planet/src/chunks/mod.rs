@@ -1,4 +1,4 @@
-//! Chunk trees in an octree (`docs/chunk-trees.md`, `docs/chunk-octree.md`):
+//! Chunk trees in an octree (`docs/chunk-octree.md`):
 //! generation of chunk trees from the terrain contract, residency for a
 //! moving eye and primary visibility.
 //!
@@ -37,8 +37,8 @@ const TILE_COLUMNS: u64 = 4096;
 pub(crate) const TILE_BATCH: usize = 512;
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
-/// Chunk slots by default (`HELIO_VOXEL_CHUNKS_SLOTS`), within what the
-/// device can bind.
+/// Chunk slots by default (`Capacity::chunks`), within what the device can
+/// bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
 /// Chunk jobs of `DETAIL_LEVELS` a batch (`cell_materials` slots:
 /// `CELL_WORDS` words a column, 272 KiB each).
@@ -69,7 +69,7 @@ const FEATURE_JOB_WORDS: u64 = 128;
 /// Words a column of a `cell_materials` slot (`CELL_WORDS` of
 /// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
 const CELL_WORDS: u64 = 17;
-/// Detail pages by default (`HELIO_VOXEL_DETAIL_PAGES`): 4 KiB each, one
+/// Detail pages by default (`Capacity::detail_pages`): 4 KiB each, one
 /// for each leaf page (of `DETAIL_LEVELS`) holding a leaf whose cells its
 /// pair would draw wrong.
 pub const DEFAULT_DETAIL_PAGES: usize = 16384;
@@ -125,8 +125,9 @@ const SLOPE_LATTICE: u64 = 1444;
 /// cached baked bricks (1 KiB each, before the least recently used are
 /// reused) and edited chunks kept on the CPU (bytes, least recently used
 /// dropped). The default is a game's: 131072 chunks, a world and its device
-/// about 2.9 GB of device memory (`HELIO_VOXEL_CHUNKS_SLOTS`,
-/// `HELIO_VOXEL_DETAIL_PAGES`).
+/// about 2.9 GB of device memory. `counters` builds the draw with trace
+/// counters (`take_counts`, `pixel_trace`, `lost_where`: diagnostics, and
+/// a fragment shader with side effects, slower).
 #[derive(Clone, Copy, Debug)]
 pub struct Capacity {
     pub chunks: usize,
@@ -137,12 +138,12 @@ pub struct Capacity {
     /// Bytes of edited chunks kept on the CPU across eviction (`Kept`; 0:
     /// none kept, every reload generates).
     pub kept_bytes: usize,
+    pub counters: bool,
 }
 
 impl Default for Capacity {
     fn default() -> Self {
-        let var = |name: &str, default: usize| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-        Self { chunks: var("HELIO_VOXEL_CHUNKS_SLOTS", DEFAULT_CHUNKS), detail_pages: var("HELIO_VOXEL_DETAIL_PAGES", DEFAULT_DETAIL_PAGES), footprints: FOOTPRINT_POOL, bricks: 65536, kept_bytes: 256 << 20 }
+        Self { chunks: DEFAULT_CHUNKS, detail_pages: DEFAULT_DETAIL_PAGES, footprints: FOOTPRINT_POOL, bricks: 65536, kept_bytes: 256 << 20, counters: false }
     }
 }
 
@@ -249,10 +250,9 @@ struct DrawParams {
     /// Direction to the sun, near plane.
     sun: [f32; 4],
     /// x: the renderer's debug mode in the low byte (1 UV grid, 32 trace
-    /// cost), the plain colour flag (bit 8), then environment-only voxel
-    /// diagnostics: primary steps' heat (0x200, `HELIO_VOXEL_CHUNKS_HEAT`),
-    /// colour by level (0x400, `HELIO_VOXEL_CHUNKS_LEVELS`; 0x800: the
-    /// left half); steady shadows (0x1000).
+    /// cost, 33 levels, 34 levels over the left half), the plain colour
+    /// flag (bit 8), steady shadows (0x1000); y: a counting build; z, w:
+    /// the debug pixel (`set_debug_pixel`).
     debug: [u32; 4],
     /// Chunk table slots - 1, base cells per face edge, boxes holding the
     /// eye, frame.
@@ -299,7 +299,7 @@ struct Frame {
 /// meet at the planet's centre, lean `32 x cell / radius` a cell from it
 /// per cell of height: about the ground neighbours agree to a twentieth of
 /// a cell, about a 64-cell chunk's middle they parted by cells where the
-/// ground lay far below it (docs/chunk-trees.md).
+/// ground lay far below it (docs/chunk-octree.md).
 fn chunk_frame(grid: &Grid, tile: Footprint, cz: i32, z: f64) -> Frame {
     let s = f64::from(1u32 << tile.level);
     let half = f64::from(CHUNK / 2) * s;
@@ -1036,11 +1036,10 @@ impl Default for ResidencyConfig {
     /// up to three where the eye's motion sweeps the image 32 pixels a
     /// frame; a 45 degree view 1080 pixels tall), 400 km out, half a second
     /// of prefetch, buried nodes generated where they hold the eye, chunks
-    /// unvisited for 600 frames released (`HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`;
-    /// 0: only when slots run short); up to 256 footprints and 3 ms of
+    /// unvisited for 600 frames released; up to 256 footprints and 3 ms of
     /// generation a frame.
     fn default() -> Self {
-        let release_frames = std::env::var("HELIO_VOXEL_CHUNKS_RELEASE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(600);
+        let release_frames = 600;
         Self {
             plan: residency::PlanConfig {
                 pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / 1080.0,
@@ -1132,7 +1131,10 @@ pub struct ChunkWorld {
     last_group: Option<wgpu::BindGroup>,
     targets: Option<Targets>,
     /// Rounds of seed and trace per draw.
+    /// The primary trace's repeats a draw (`set_trace_rounds`: timing it).
     rounds: u32,
+    /// The pixel whose boxes counting builds record (`set_debug_pixel`).
+    debug_pixel: Option<[u32; 2]>,
     world: wgpu::Buffer,
     terrain: wgpu::Buffer,
     tile_jobs: wgpu::Buffer,
@@ -1209,6 +1211,8 @@ pub struct ChunkWorld {
     plain_colour: bool,
     /// The renderer-wide debug mode, for the voxel debug shading.
     debug_mode: u32,
+    /// Built with trace counters (`Capacity::counters`).
+    counting: bool,
     pick_slots: Vec<PickSlot>,
     /// Each slot's chunk key (`chunk_keys`, mirrored).
     slot_keys: Vec<[i32; 4]>,
@@ -1616,10 +1620,10 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
     // Primary rays count in the trace (`COUNT`), in their walks when
     // `counted` (`WCOUNT`; shadow walks do not).
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
-    // The primary steps' heat (debug mode 32 and `HELIO_VOXEL_CHUNKS_HEAT`)
+    // The primary steps' heat (debug mode 32)
     // counts in every build.
     let wcount = |n: u32| {
-        let heat = format!("if counted && (voxel_heat_debug() || debug_mode() == 32u) {{ heat += u32({n} == 1); }}");
+        let heat = format!("if counted && debug_mode() == 32u {{ heat += u32({n} == 1); }}");
         if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}") } else { heat }
     };
     // The noise library (materials' patches), then the draw.
@@ -1652,7 +1656,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("PLANE_WORLD", if plane { "true" } else { "false" })
         .replace("SCENE_MATERIALS", scene::STUB);
-    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
+    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\nconst FEATURE_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS, crate::engine::FEATURE_GROUPS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
 impl ChunkWorld {
@@ -1664,7 +1668,7 @@ impl ChunkWorld {
     pub fn with_capacity(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, capacity: Capacity) -> Self {
         let program = planet.field().program();
         let wide64 = device.features().contains(wgpu::Features::SHADER_INT64);
-        let [(_, gen_source), (_, draw_source)] = shader_sources(planet.grid().is_plane(), &program, wide64, std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some());
+        let [(_, gen_source), (_, draw_source)] = shader_sources(planet.grid().is_plane(), &program, wide64, capacity.counters);
         // What generated packs depend on: the generation shaders, the
         // terrain's constants and the world (`kept_chunks`).
         let fingerprint = {
@@ -2072,7 +2076,8 @@ impl ChunkWorld {
             steady_shadows: false,
             last_group: None,
             targets: None,
-            rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
+            rounds: 1,
+            debug_pixel: None,
             world,
             terrain,
             tile_jobs: buffer("chunk tile jobs", (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64, s),
@@ -2081,7 +2086,7 @@ impl ChunkWorld {
             // rings, and the 8 a column's node words read past the last.
             tile_node_data: buffer(
                 "chunk tile nodes",
-                (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + 8) * u64::from(crate::engine::node_words(&program).max(1)) * 4,
+                (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + u64::from(crate::engine::FEATURE_GROUPS) * planet.features().lattice_nodes as u64 + 8) * u64::from(crate::engine::node_words(&program)) * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
             tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, wgpu::BufferUsages::STORAGE),
@@ -2131,6 +2136,7 @@ impl ChunkWorld {
             polls_device: true,
             plain_colour: true,
             debug_mode: 0,
+            counting: capacity.counters,
             buried_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk buried hits read", BURIED_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free, bytes: BURIED_BYTES }).collect(),
             feedback: buffer("chunk feedback", FEEDBACK_BYTES, s | wgpu::BufferUsages::COPY_SRC),
             feedback_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk feedback read", FEEDBACK_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free, bytes: 16 }).collect(),
@@ -3088,12 +3094,11 @@ impl ChunkWorld {
             }
         }
         {
-            // After the halos: both use the lanes' scratch nodes.
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile features"), timestamp_writes: stamp(None, 10) });
             pass.set_bind_group(0, &group, &[]);
             if computed_count > 0 && self.has_features {
                 pass.set_pipeline(&self.tile_features);
-                pass.dispatch_workgroups((computed_count as u32).min(crate::engine::HALO_GROUPS), 1, 1);
+                pass.dispatch_workgroups((computed_count as u32).min(crate::engine::FEATURE_GROUPS), 1, 1);
             }
         }
         {
@@ -3402,6 +3407,16 @@ impl ChunkWorld {
         self.debug_mode = mode & 0xff;
     }
 
+    /// Repeats of the primary trace a draw (1: none; timing the trace).
+    pub fn set_trace_rounds(&mut self, rounds: u32) {
+        self.rounds = rounds.max(1);
+    }
+
+    /// The pixel whose boxes a counting build records (`pixel_trace`).
+    pub fn set_debug_pixel(&mut self, pixel: Option<[u32; 2]>) {
+        self.debug_pixel = pixel;
+    }
+
     /// Chunks drawn by the last [`Self::update`].
     pub fn chunk_count(&self) -> usize {
         self.drawn_set.list.len()
@@ -3483,19 +3498,12 @@ impl ChunkWorld {
             eye_hi,
             eye_lo,
             sun: sun.normalize().extend(near).to_array(),
-            debug: {
-                let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
-                [
-                    (if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
-                        0x200
-                    } else {
-                        std::env::var("HELIO_VOXEL_CHUNKS_LEVELS").map_or(0, |v| if v == "half" { 0xc00 } else { 0x400 })
-                    }) | self.debug_mode | (u32::from(self.plain_colour) << 8) | (u32::from(self.steady_shadows) << 12),
-                    u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
-                    pixel.first().copied().unwrap_or(u32::MAX),
-                    pixel.get(1).copied().unwrap_or(u32::MAX),
-                ]
-            },
+            debug: [
+                self.debug_mode | (u32::from(self.plain_colour) << 8) | (u32::from(self.steady_shadows) << 12),
+                u32::from(self.counting),
+                self.debug_pixel.map_or(u32::MAX, |p| p[0]),
+                self.debug_pixel.map_or(u32::MAX, |p| p[1]),
+            ],
             table: [self.drawn_set.mask(), self.face_cells, drawn, frame as u32],
             eye_domain: {
                 let d = (eye / crate::grid::DOMAIN_UNIT).floor();
@@ -3779,12 +3787,6 @@ impl ChunkWorld {
     /// and depth (Depth32Float, tested against what is there).
     pub fn publish(&self, encoder: &mut helio_core::CommandRecorder<'_>, gbuffer: [&wgpu::TextureView; 8], depth: &wgpu::TextureView) {
         self.publish_scene(encoder, gbuffer, depth, None);
-    }
-
-    /// Whether the device can draw voxel materials with scene materials, and
-    /// the length its texture table must be.
-    pub fn scene_texture_capacity(&self) -> Option<u32> {
-        self.scene.as_ref().map(|s| s.capacity)
     }
 
     /// Voxel materials show the scene material rows of `map` (written to the

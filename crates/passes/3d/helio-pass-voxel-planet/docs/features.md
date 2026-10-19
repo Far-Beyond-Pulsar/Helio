@@ -7,15 +7,6 @@ on the CPU for queries, picks and physics. Nothing is loaded around a
 viewer, nothing is kept in memory past the chunks drawn and their
 footprints, and a forest shows to the horizon at the terrain's cost.
 
-## Why not regions loaded as data
-
-The first version (`features` as region stores, 2026-10-19) loaded each
-region's cells on the CPU around the player. It was bounded by a radius
-(memory grew with the area: ~56 KB a 32-column region, 4.3 GB for 4 km),
-needed a host thread to decide and load regions, and showed nothing past its
-radius. The terrain has none of these limits because it is evaluated, not
-stored. Features are made the same.
-
 ## Model
 
 A planet's recipe holds a **feature set** (`FeatureSet`), part of the world's

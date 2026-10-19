@@ -125,7 +125,7 @@ fn bake_cost_against_history() {
                         store.bake(&grid, fb, brush.op);
                     } else {
                         store.apply_over(&grid, fb, brush.op);
-                        store.bake_at(&grid, fb, brush.op, bake_level(fb), false);
+                        store.bake_at(&grid, fb, brush.op, bake_level(fb));
                     }
                 }
                 ms.push(t.elapsed().as_secs_f64() * 1e3);

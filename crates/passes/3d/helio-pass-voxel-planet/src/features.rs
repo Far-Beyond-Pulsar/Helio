@@ -12,8 +12,10 @@
 //! candidate grows where its hash passes the spawn's density, its noise
 //! field passes its threshold, its ground's material (the terrain's rules
 //! at its top cell on level ground), height and relief (across its
-//! footprint's corners) suit it, its footprint (its stamp's reach each way)
-//! lies on the face, and its footprint meets no earlier spawn's placement.
+//! footprint's corners) suit it, and its footprint (its stamp's reach each
+//! way) lies on the face: a raw candidate. It is placed unless its
+//! footprint meets an earlier spawn's raw candidate (exclusion reads raw
+//! candidates, never placements, so it does not chain from spawn to spawn).
 //! Spawns go from the widest spacing to the narrowest (structures before
 //! trees before rocks). Its stamp, turn and mirror are hashed too; its
 //! anchor is the layer over its ground, less the spawn's sink.
@@ -64,6 +66,11 @@ pub const MAX_SPACING: u32 = 1024;
 pub const NEAR_LEVELS: u32 = 10;
 /// Most placement squares a footprint keeps (8 bytes each).
 pub const MAX_FOOTPRINT_SQUARES: usize = 16384;
+/// Most level-0 terrain nodes a footprint's candidates read (each
+/// `tile_features_main` workgroup keeps a lattice of them).
+pub const MAX_LATTICE_NODES: usize = 4096;
+/// Base columns between the terrain's nodes (`engine::NODE_COLUMNS`).
+const NODE_COLUMNS: i64 = 16;
 pub const MAX_STAMP_HEIGHT: i32 = 96;
 /// Most distinct materials in one stamp (coarse cells count each).
 pub const MAX_STAMP_MATERIALS: usize = 6;
@@ -269,16 +276,22 @@ pub struct CompiledFeatures {
     pub above: i32,
     pub below: i32,
     /// Each near level's placement squares ([`Self::layout`]), and the most
-    /// any footprint keeps.
+    /// any footprint keeps; the most level-0 nodes a footprint's lattice
+    /// holds.
     pub levels: Vec<LevelLayout>,
     pub stride: usize,
+    pub lattice_nodes: usize,
 }
 
 /// A level's near spawns (a prefix of the set) and, for each, where its
-/// squares lie in a footprint's placements.
+/// squares lie in a footprint's placements; the columns past a footprint
+/// its candidates read heights of (their anchors and footprints' corners),
+/// and the nodes a side of the level-0 lattice over them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LevelLayout {
     pub spawns: Vec<SquareGrid>,
+    pub reach: i32,
+    pub lattice: u32,
 }
 
 /// A spawn's squares in a footprint's placements: from `offset`, `side` x
@@ -357,8 +370,8 @@ impl CompiledFeatures {
             if n > 0 && s.spacing > set.spawns[n - 1].spacing {
                 return Err(format!("spawn {} is wider than the spawn before it: spawns go from the widest spacing to the narrowest", s.name));
             }
-            if s.stamps.len() > 256 {
-                return Err(format!("spawn {} has more than 256 stamps", s.name));
+            if s.stamps.len() > 128 {
+                return Err(format!("spawn {} has more than 128 stamps", s.name));
             }
             let mut surfaces = 0u64;
             for &m in &s.surfaces {
@@ -408,11 +421,15 @@ impl CompiledFeatures {
                 cover: ((1.0 - (-f64::from(s.density.clamp(0.0, 1.0)) * area / f64::from(s.spacing * s.spacing)).exp()) * 65_536.0).round() as u32,
             });
         }
-        let mut features = Self { stamps, spawns, above: above.max(0), below: below.max(0), levels: Vec::new(), stride: 0 };
+        let mut features = Self { stamps, spawns, above: above.max(0), below: below.max(0), levels: Vec::new(), stride: 0, lattice_nodes: 0 };
         features.levels = (0..NEAR_LEVELS).map(|level| features.layout(level)).collect();
         features.stride = features.levels.iter().map(|l| l.spawns.last().map_or(0, |g| (g.offset + g.side * g.side) as usize)).max().unwrap_or(0);
+        features.lattice_nodes = features.levels.iter().filter(|l| !l.spawns.is_empty()).map(|l| (l.lattice * l.lattice) as usize).max().unwrap_or(0);
         if features.stride > MAX_FOOTPRINT_SQUARES {
             return Err(format!("the spawns' placements take {} squares a footprint, more than {MAX_FOOTPRINT_SQUARES}: fewer spawns of narrow spacing", features.stride));
+        }
+        if features.lattice_nodes > MAX_LATTICE_NODES {
+            return Err(format!("a footprint's candidates read {} terrain nodes, more than {MAX_LATTICE_NODES}: spawns reach too far", features.lattice_nodes));
         }
         Ok(features)
     }
@@ -480,11 +497,12 @@ impl CompiledFeatures {
         (2 * (b - a) >= 1i64 << level).then_some(Some(material))
     }
 
-    /// Where a footprint of `level` keeps its near spawns' placements: each
-    /// spawn's squares whose placements may reach the footprint's columns
-    /// (its reach past them) or meet a later near spawn's candidates there
-    /// (their exclusion: as far as those candidates reach, and its own reach
-    /// past that), one after another.
+    /// Where a footprint of `level` keeps its near spawns' candidates: each
+    /// spawn's squares whose candidates may reach the footprint's columns
+    /// (its reach past them) or meet those of a later spawn that may (their
+    /// exclusion: a later candidate reaching the footprint stands a spacing
+    /// and its reach twice past it, and this spawn's reach past that), one
+    /// after another.
     fn layout(&self, level: u32) -> LevelLayout {
         let near = self.near(level);
         let width = 64i64 << level;
@@ -492,7 +510,7 @@ impl CompiledFeatures {
         let mut margins = vec![0i64; near];
         for s in (0..near).rev() {
             let (spacing, reach) = (i64::from(self.spawns[s].spacing), i64::from(self.spawns[s].reach));
-            margins[s] = (s + 1..near).map(|t| margins[t] + i64::from(self.spawns[t].spacing) + i64::from(self.spawns[t].reach) + reach).fold(reach, i64::max);
+            margins[s] = (s + 1..near).map(|t| i64::from(self.spawns[t].spacing - self.spawns[t].inset) + 2 * i64::from(self.spawns[t].reach) + reach).fold(reach, i64::max);
             spawns[s] = SquareGrid { offset: 0, side: ((width + 2 * margins[s] - 1) / spacing + 2) as u32, margin: margins[s] as i32 };
         }
         let mut offset = 0;
@@ -500,14 +518,20 @@ impl CompiledFeatures {
             g.offset = offset;
             offset += g.side * g.side;
         }
-        LevelLayout { spawns }
+        // Anchors lie in squares meeting their grid's margin, an inset
+        // inside them, their footprints' corners a reach (at least a
+        // column) past them.
+        let reach = (0..near).map(|s| { let sp = &self.spawns[s]; margins[s] + i64::from(sp.spacing - sp.inset + sp.reach.max(1)) }).max().unwrap_or(0);
+        let lattice = if near == 0 { 0 } else { ((width + 2 * reach) / NODE_COLUMNS + 3) as u32 };
+        LevelLayout { spawns, reach: reach as i32, lattice }
     }
 
     /// The set as `chunk_generate.wgsl` reads it (`feature_*`): a header
     /// (spawn count, where spawns, stamps and levels start, the footprint
-    /// stride), 24 words a spawn, 16 a stamp, `4 (1 + MAX_SPAWNS)` a near
-    /// level (the spawns whose placements it keeps and the mask of those it
-    /// draws, then each spawn's offset, side, margin), then
+    /// stride, the lattice nodes), 24 words a spawn, 16 a stamp,
+    /// `4 (1 + MAX_SPAWNS)` a near level (the spawns whose placements it
+    /// keeps, the mask of those it draws, its lattice's reach and side, then
+    /// each spawn's offset, side, margin), then
     /// spawns' stamp lists, stamps' cells (four codes a word) and their
     /// summed counts.
     pub fn gpu_words(&self) -> Vec<u32> {
@@ -517,7 +541,7 @@ impl CompiledFeatures {
         let levels_at = stamps_at + 16 * self.stamps.len();
         let mut data = levels_at + 4 * (1 + MAX_SPAWNS) * NEAR_LEVELS as usize;
         let mut w = vec![0u32; data];
-        w[..5].copy_from_slice(&[self.spawns.len() as u32, spawns_at as u32, stamps_at as u32, levels_at as u32, self.stride as u32]);
+        w[..6].copy_from_slice(&[self.spawns.len() as u32, spawns_at as u32, stamps_at as u32, levels_at as u32, self.stride as u32, self.lattice_nodes as u32]);
         let mut tail: Vec<u32> = Vec::new();
         let put = |tail: &mut Vec<u32>, words: &[u32]| {
             let at = data + tail.len();
@@ -570,6 +594,8 @@ impl CompiledFeatures {
             let at = levels_at + 4 * (1 + MAX_SPAWNS) * level;
             w[at] = l.spawns.len() as u32;
             w[at + 1] = (0..l.spawns.len()).filter(|&s| self.drawn(s, level as u32)).fold(0, |m, s| m | 1 << s);
+            w[at + 2] = l.reach as u32;
+            w[at + 3] = l.lattice;
             for (s, g) in l.spawns.iter().enumerate() {
                 w[at + 4 * (1 + s)..at + 4 * (1 + s) + 3].copy_from_slice(&[g.offset, g.side, g.margin as u32]);
             }
@@ -580,10 +606,9 @@ impl CompiledFeatures {
         w
     }
 
-    /// Spawn `s`'s candidate on square `(gx, gy)` of `face`, if it grows
-    /// (`exclude`: whether an earlier spawn's placement meets a footprint,
-    /// columns `[i0, i1)` x `[j0, j1)`).
-    pub fn candidate(&self, s: usize, grid: &Grid, top: &dyn Fn(u8, i32, i32) -> (i32, i32), face: u8, gx: i32, gy: i32, exclude: &mut dyn FnMut(u8, [i32; 2], [i32; 2]) -> bool) -> Option<Placement> {
+    /// Spawn `s`'s raw candidate on square `(gx, gy)` of `face`: where its
+    /// own rules let it grow (exclusion aside).
+    pub fn candidate(&self, s: usize, grid: &Grid, top: &dyn Fn(u8, i32, i32) -> (i32, i32), face: u8, gx: i32, gy: i32) -> Option<Placement> {
         let sp = &self.spawns[s];
         let h = hash3(gx, gy, i32::from(face), sp.seed);
         if (h >> 16) >= sp.density {
@@ -623,16 +648,13 @@ impl CompiledFeatures {
                 return None;
             }
         }
-        let (fi, fj) = placement.footprint(self);
-        if exclude(face, fi, fj) {
-            return None;
-        }
         Some(placement)
     }
 }
 
-/// Placements decided so far, by spawn, face and square.
-pub type PlacementCache = rustc_hash::FxHashMap<(u32, u8, i32, i32), Option<Placement>>;
+/// Squares decided so far, by spawn, face and square: the raw candidate and
+/// whether it is placed.
+pub type PlacementCache = rustc_hash::FxHashMap<(u32, u8, i32, i32), (Option<Placement>, Option<bool>)>;
 
 /// Feature evaluation over a planet's terrain (the CPU's; the GPU lists a
 /// footprint's placements).
@@ -649,45 +671,56 @@ impl<'a> FeatureEval<'a> {
         Self { features, grid, top, cache }
     }
 
-    /// Spawn `s`'s placement on square `(gx, gy)` of `face`, if any.
-    pub fn placement(&mut self, s: usize, face: u8, gx: i32, gy: i32) -> Option<Placement> {
+    /// Spawn `s`'s raw candidate on square `(gx, gy)` of `face`, if any.
+    fn raw(&mut self, s: usize, face: u8, gx: i32, gy: i32) -> Option<Placement> {
         let key = (s as u32, face, gx, gy);
-        if let Some(p) = self.cache.get(&key) {
-            return *p;
+        if let Some(&(p, _)) = self.cache.get(&key) {
+            return p;
         }
-        let features = self.features;
-        let (grid, top) = (self.grid, self.top);
-        let mut exclude = |face: u8, i: [i32; 2], j: [i32; 2]| (0..s).any(|e| self.meets(e, face, i, j));
-        let p = features.candidate(s, grid, top, face, gx, gy, &mut exclude);
-        self.cache.insert(key, p);
+        let p = self.features.candidate(s, self.grid, self.top, face, gx, gy);
+        self.cache.insert(key, (p, None));
         p
     }
 
-    /// Whether a placement of spawn `s` has its footprint meet columns
+    /// Spawn `s`'s placement on square `(gx, gy)` of `face`, if any: its raw
+    /// candidate unless an earlier spawn's meets its footprint.
+    pub fn placement(&mut self, s: usize, face: u8, gx: i32, gy: i32) -> Option<Placement> {
+        let p = self.raw(s, face, gx, gy)?;
+        let key = (s as u32, face, gx, gy);
+        let placed = match self.cache.get(&key).and_then(|e| e.1) {
+            Some(placed) => placed,
+            None => {
+                let (fi, fj) = p.footprint(self.features);
+                let placed = !(0..s).any(|e| self.raw_meets(e, face, fi, fj));
+                self.cache.insert(key, (Some(p), Some(placed)));
+                placed
+            }
+        };
+        placed.then_some(p)
+    }
+
+    /// Whether a raw candidate of spawn `s` has its footprint meet columns
     /// `[i0, i1)` x `[j0, j1)`.
-    fn meets(&mut self, s: usize, face: u8, i: [i32; 2], j: [i32; 2]) -> bool {
+    fn raw_meets(&mut self, s: usize, face: u8, i: [i32; 2], j: [i32; 2]) -> bool {
         let features = self.features;
-        self.placements_near(s, face, i, j).iter().any(|p| {
+        self.squares_near(s, i, j).into_iter().filter_map(|(gx, gy)| self.raw(s, face, gx, gy)).any(|p| {
             let (fi, fj) = p.footprint(features);
             fi[0] < i[1] && fi[1] > i[0] && fj[0] < j[1] && fj[1] > j[0]
         })
     }
 
-    /// Spawn `s`'s placements of the squares that may reach base columns
-    /// `[i0, i1)` x `[j0, j1)` (within its reach of them), by row then
-    /// column.
-    pub fn placements_near(&mut self, s: usize, face: u8, i: [i32; 2], j: [i32; 2]) -> Vec<Placement> {
+    /// Spawn `s`'s squares that may reach base columns `[i0, i1)` x
+    /// `[j0, j1)` (within its reach of them), by row then column.
+    fn squares_near(&self, s: usize, i: [i32; 2], j: [i32; 2]) -> Vec<(i32, i32)> {
         let (spacing, r) = (self.features.spawns[s].spacing, self.features.spawns[s].reach);
         let g = |v: i32| v.div_euclid(spacing);
-        let mut out = Vec::new();
-        for gy in g(j[0] - r)..=g(j[1] - 1 + r) {
-            for gx in g(i[0] - r)..=g(i[1] - 1 + r) {
-                if let Some(p) = self.placement(s, face, gx, gy) {
-                    out.push(p);
-                }
-            }
-        }
-        out
+        (g(j[0] - r)..=g(j[1] - 1 + r)).flat_map(|gy| (g(i[0] - r)..=g(i[1] - 1 + r)).map(move |gx| (gx, gy))).collect()
+    }
+
+    /// Spawn `s`'s placements of the squares that may reach base columns
+    /// `[i0, i1)` x `[j0, j1)`, by row then column.
+    pub fn placements_near(&mut self, s: usize, face: u8, i: [i32; 2], j: [i32; 2]) -> Vec<Placement> {
+        self.squares_near(s, i, j).into_iter().filter_map(|(gx, gy)| self.placement(s, face, gx, gy)).collect()
     }
 
     /// What the features make of base cell `(i, j, k)` of `face` (the last

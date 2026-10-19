@@ -1,4 +1,4 @@
-// Chunk trees (docs/chunk-trees.md): primary visibility.
+// Chunk octree (docs/chunk-octree.md): primary visibility.
 //
 // 1. Seed (raster): every visible chunk draws its box; a fragment writes
 //    only the box's index. Boxes do not overlap, so along a ray their
@@ -12,10 +12,10 @@
 //    nodes of 16^3 cells, their 4^3 leaves of 4^3 cells, a leaf's cells.
 //    An empty child is crossed in one step to its exit; a full child is a
 //    hit where the ray enters it. A ray leaving its chunk without a hit
-//    continues by the drawn cut (`chunk_table`): the drawn tile over the
-//    column it enters, its chunk there, or air: an empty layer, or the
-//    column over the tile's chunks, as coarse as the cut's tops allow; past
-//    a cube face's edge, on the face across it.
+//    continues by the drawn cut (`chunk_table`, `place_at`): the drawn node
+//    over the point it enters, its chunk there, rock, or air (the largest
+//    slab of its ancestors' boxes their content boxes leave empty); past a
+//    cube face's edge, on the face across it.
 //    Output: visibility (chunk slot; cell, face), the hit's distance and a
 //    plain colour.
 // 3. Resolve (raster): the hits' exact depth, for meshes and later passes;
@@ -1115,14 +1115,6 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     return Place(NONE, level + up, lo, hi, f);
 }
 
-// Chunk `k`'s slot when `wanted` and drawn, else NONE.
-fn frame_of(wanted: bool, k: vec4<i32>) -> u32 {
-    if !wanted { return NONE; }
-    let e = find_entry(k);
-    if e == NONE || chunk_table[e * 2u + 1u].x < 0 { return NONE; }
-    return bitcast<u32>(chunk_table[e * 2u + 1u].x);
-}
-
 // Box corner `hi` in the cells of chunk `key`, kept on its face: a coarse
 // tile can reach past the face's edge (its columns there are empty), and a
 // ray crossing them would skip what lies across the edge.
@@ -1488,7 +1480,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if debug_mode() == 1u {
         let uv = voxel_face_uv(c, end.cell, end.axis, dir * end.t);
         colour = textureSampleLevel(uv_reference_texture, uv_reference_sampler, uv, 0.0).rgb / light;
-    } else if voxel_heat_debug() || debug_mode() == 32u {
+    } else if debug_mode() == 32u {
         // Steps: red to 64, yellow to 128, white to 192.
         let h = f32(heat) / 64.0;
         colour = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0)) / light;
@@ -1658,23 +1650,18 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
     return Look(albedo, ao);
 }
 
-// Renderer-wide debug mode (`params.debug.x` & 0xff): 32 is voxel trace cost.
-// High bits keep environment-only chunk diagnostics from colliding with
-// registered viewport modes such as UV visualization.
+// Renderer-wide debug mode (`params.debug.x` & 0xff): 32 the voxel trace's
+// cost, 33 the levels drawn, 34 the levels over the left half.
 fn debug_mode() -> u32 {
     return params.debug.x & 0xffu;
 }
 
-fn voxel_heat_debug() -> bool {
-    return (params.debug.x & 0x200u) != 0u;
-}
-
 fn voxel_levels_debug() -> bool {
-    return (params.debug.x & 0x400u) != 0u;
+    return debug_mode() == 33u || debug_mode() == 34u;
 }
 
 fn voxel_levels_half_debug() -> bool {
-    return (params.debug.x & 0x800u) != 0u;
+    return debug_mode() == 34u;
 }
 
 // Whether the walks write the plain colour target (bit 8 of

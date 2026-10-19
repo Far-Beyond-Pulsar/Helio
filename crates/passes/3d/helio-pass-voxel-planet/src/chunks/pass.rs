@@ -79,11 +79,6 @@ impl ChunkPass {
         self.scene = Some((map, source));
     }
 
-    /// Back to the appearance table's colours.
-    pub fn clear_scene_materials(&mut self) {
-        self.scene = None;
-    }
-
     /// Steady shadows: every hit walks its own sun ray and the sky rays hold
     /// still, instead of samples that move each frame (dearer; nothing
     /// shimmers where TSR cannot gather them).

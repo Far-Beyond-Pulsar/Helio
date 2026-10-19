@@ -6,8 +6,10 @@
 //!   built-in one (ordered layer stacks, interpreted by [`landform`]).
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
-//! * `chunks` — chunk trees (docs/chunk-trees.md): GPU residency, drawing
-//!   and lighting, and the Helio pass.
+//! * [`features`] — procedural content (trees, rocks, buildings) generated
+//!   like the terrain (docs/features.md), from [`stamp`] models.
+//! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
+//!   residency, drawing and lighting, and the Helio pass.
 //! * `engine` — what hosts share with the pass (frames, picks) and the
 //!   terrain half of the shaders, checked against the CPU field.
 pub mod edit_store;

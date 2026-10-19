@@ -5,8 +5,7 @@ planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, editable everywhere and at any scale, and drawn from **chunk trees**:
 64³-cell chunks generated on the GPU, streamed as a cut of an octree per
 cube face that rays decide, and rasterized as boxes that rays enter only
-inside one chunk ([`docs/chunk-trees.md`](docs/chunk-trees.md),
-[`docs/chunk-octree.md`](docs/chunk-octree.md)).
+inside one chunk ([`docs/chunk-octree.md`](docs/chunk-octree.md)).
 
 This document maps the system for people who will work on it: what each part
 does, which invariants hold it together, how to measure it and how to extend
@@ -18,7 +17,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 1. [Goals](#goals)
 2. [Crate map](#crate-map)
 3. [Data model](#data-model)
-4. [Chunk trees](#chunk-trees)
+4. [Chunk octree](#chunk-octree)
 5. [Invariants and decisions](#invariants-and-decisions)
 6. [Measuring](#measuring)
 7. [Tests](#tests)
@@ -44,24 +43,28 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 |---|---|
 | `src/grid.rs` | The canonical grid: equal-angle cube sphere (or plane), cells, levels, faces, exact cell walking maths. |
 | `src/noise.rs`, `shaders/noise.wgsl`, `shaders/wide64.wgsl` | Bit-exact integer noise (Q16 and fine Q24), with hardware 64-bit products where the device has them. The only noise terrain may use. |
-| `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL). Registry, material ids, `check_field`, `lean_height`. |
+| `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL), and the program contract (module docs). Registry, material ids, `check_field`, `lean_height`. |
 | `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, desert, flat), validation and compilation. |
-| `src/landform.rs`, `shaders/landform.wgsl`, `src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): octaves, layer composition, craters, erosion, caves, overhangs and material styles; coarse levels' ridge means. |
+| `src/landform.rs`, `shaders/landform.wgsl`, `src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): the two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)), octaves, layer composition, craters, erosion, caves, overhangs and material styles; coarse levels' ridge means. |
 | `shaders/world.wgsl`, `shaders/material_state.wgsl` | Grid mapping, layer quantization and material ids shared by generation and terrain programs. |
+| `src/features.rs` | Features: procedural content (trees, rocks, buildings) from the recipe's `FeatureSet`, generated like the terrain wherever a cell is asked for, on CPU and GPU bit for bit ([`docs/features.md`](docs/features.md)). |
+| `src/stamp.rs` | Stamps: small voxel models of material cells around an anchor, placed by features or as edits (`Stamp::brushes`). |
 | `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution (`FaceBrush`), the ordered `EditLog` and its spatial index. |
 | `src/edit_store.rs` | Baked edits: what sealed brushes did to each cell, in sparse 8³ bricks with majority-built coarser levels. |
 | `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`; `Edits` (large, baked and recent brushes, sealing, undo). |
 | `src/record.rs`, `src/snapshot.rs` | Saving edits: snapshots of what the edits left (large and recent brushes as records, baked bricks), and recipe fingerprints. Hosts keep the brush journal itself (`helio_voxel_data::VoxelEditJournal`). |
-| `src/chunks/mod.rs` | `ChunkWorld`: chunk generation jobs, GPU storage (slots, leaf pool, materials), edit sync, the draw (seed raster, trace, sun and sky light, gbuffer publish), picks, timings. |
+| `src/chunks/mod.rs` | `ChunkWorld`: chunk generation jobs, GPU storage (slots, leaf pages, detail pages, the footprint pool), edit sync, kept chunks, the draw (seed raster, trace, sun and sky light, gbuffer publish), picks, timings. |
 | `src/chunks/classify.rs` | Nodes and footprints; what a node holds (Mixed, Buried, Empty, Solid) from its footprint's ranges and the edits over it. |
-| `src/chunks/residency.rs` | The planner (on a worker thread): which nodes are drawn, generated next and evicted for a moving eye, from distance and what rays met. |
+| `src/chunks/residency.rs` | The planner (on a worker thread): which nodes are drawn, generated next and released for a moving eye, from distance and what rays met. |
 | `src/chunks/drawn.rs` | The drawn cut: drawn nodes, their ancestors' content boxes and level fades, uploaded as the changes of each frame. |
 | `src/chunks/pass.rs` | `ChunkPass`, the render-graph pass hosts add: reads a `PlanetFrame`, writes Helio's gbuffer and `directional_visibility`. |
+| `src/chunks/scene.rs`, `shaders/scene_materials.wgsl` | Voxel materials drawn with the host's scene materials (Helio material rows and textures for each material's top, side and bottom faces), on devices with texture binding arrays. |
 | `src/engine.rs` | What hosts share with the pass (`PlanetFrame`, picks, appearance) and the terrain half of the shaders (`terrain_source`), checked by `verify_field`. |
-| `shaders/chunk_generate.wgsl` | Footprint columns, chunk columns (field, volume terms, lean, edits, materials), 64-tree build, eviction. |
+| `shaders/chunk_generate.wgsl` | Footprint columns (two-rate nodes, material slopes, lean halos, feature placements), chunk columns (field, volume terms, lean, features, edits, materials), 64-tree build, eviction, packing and restoring kept chunks. |
 | `shaders/chunk_draw.wgsl` | The cut walk, chunk tracing, fades, sun shadows, sky visibility, appearance, gbuffer publish and ray reports. |
 | `shaders/chunk_table.wgsl` | Scatters a frame's chunk-table changes. |
 | `tests/chunks.rs` | GPU correctness against the CPU planet (see [Tests](#tests)). |
+| `tests/wide_products.rs`, `tests/bake_cost.rs` | Hardware and limb wide products agree; what baking a brush costs as the history grows (a report). |
 | `../../../helio-default-graphs/examples/voxel_flight.rs` | The flight harness: held views, flights, digs, picks, captures. |
 
 ## Data model
@@ -91,11 +94,14 @@ face's angle frame; spheres: a stable quadratic).
 
 ### Terrain field
 
-A generator is a pure function of a column: `height(p, level)` in integer
-millimetres and `ground_material(p, top_height, depth, slope, layer)`.
-It exists twice, in Rust (`TerrainField`) and WGSL (`TerrainProgram`), and the
-two must return equal integers for every input. That is the contract that lets
-the CPU ray cast what the GPU draws.
+A generator is a pure function of a column: `height(column)` in integer
+millimetres, an 8-bit surface word, and
+`ground_material(p, surface, top_height, depth, slope, layer)`. It exists
+twice, in Rust (`TerrainField`) and WGSL (`TerrainProgram`), and the two must
+return equal integers for every input. That is the contract that lets the CPU
+ray cast what the GPU draws. A column is two-rate: its largest octaves are
+evaluated at nodes every 16 columns of its level and blended exactly
+([`docs/two-rate-field.md`](docs/two-rate-field.md)).
 
 - All arithmetic is wrapping integer maths on the shared noise library.
   `noise_fine` / `mul_fine` (Q24, exact wide products) exist because Q16 noise at
@@ -112,7 +118,7 @@ the CPU ray cast what the GPU draws.
   sequences in noise.wgsl between `// wide:begin` and `// wide:end`; on
   devices with `SHADER_INT64` that region is replaced by wide64.wgsl's
   native `u64` products, with the same bits (`tests/wide_products.rs`).
-- Every world is an ordered layer stack (`layers.rs`): Warp, Continents,
+- The built-in generator runs an ordered layer stack (`layers.rs`): Warp, Continents,
   Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, each with
   a mask (everywhere, land, above deep sea), plus caves, overhangs and a
   material style (Earthlike, Lunar, Layered, Rules). The stack is data,
@@ -149,10 +155,12 @@ A planet's `Edits` hold every brush in three layers, applied in order:
 batches; memory follows what the edits left, not how many there were, and the
 latest seals stay undoable. A history hash identifies every state, so a
 `ChunkWorld` syncs by difference: changed brushes regenerate the nodes they
-touch first (drawn ones, nearest first, within the frame's budget: a small
-dig shows the frame it is made, a blast's far and hidden nodes follow over
-the next frames), changed baked columns regenerate as budget allows, and an
-unrelated history rebuilds the world.
+touch first (coarsest, then drawn ones nearest first, within the frame's
+budget: a small dig shows the frame it is made, a blast's far and hidden
+nodes follow over the next frames), changed baked columns regenerate as
+budget allows, and an unrelated history rebuilds the world. Edited chunks
+the plan evicts are packed and kept on the CPU (and in saves), so they come
+back by copy.
 
 The `EditLog` keeps an adaptive octree per face whose leaves list, in order,
 only the brushes that can still change a cell inside them: CPU queries (ray
@@ -160,9 +168,19 @@ casts, `surface_point`) cost what is exposed at a point, however long the
 history. The render thread finds the brushes over a footprint through a
 `BrushIndex` (a loose grid per face).
 
-Cells whose material edits set (add, paint) draw their own material: their
-leaves get per-voxel detail pages; other leaves draw their two materials
-(surface and subsurface). See [Per-voxel materials](docs/chunk-octree.md#per-voxel-materials-2026-10-16).
+Near the eye (levels 0 and 1) every cell draws its own canonical material,
+natural or set by edits: leaves whose two materials (surface and
+subsurface) would draw a cell wrong get per-voxel detail pages. Coarser
+leaves draw their two materials. See
+[Materials](docs/chunk-octree.md#materials).
+
+### Features
+
+A recipe's `FeatureSet` (stamps and the spawns that place them) is part of
+the world's definition: placements are a function of the seed and the
+terrain, evaluated wherever a cell is asked for, at any level, on CPU and
+GPU bit for bit. Near levels draw the stamps, far levels a spawn's canopy.
+Edits apply over them. See [`docs/features.md`](docs/features.md).
 
 ### Planet
 
@@ -174,10 +192,10 @@ for near planes) and `ground_height(eye)` (height above the ground below,
 used for camera speed). Gameplay, physics and the editor use these; they
 never touch the GPU.
 
-## Chunk trees
+## Chunk octree
 
-[`docs/chunk-trees.md`](docs/chunk-trees.md) has the design and every
-phase's measurements. In short, a frame of `ChunkPass`:
+[`docs/chunk-octree.md`](docs/chunk-octree.md) has the design. In short, a
+frame of `ChunkPass`:
 
 1. **Residency** (`ChunkWorld::update`). The planner thread visits the
    octree from the roots (every coarsest node from the planet's centre to
@@ -193,12 +211,13 @@ phase's measurements. In short, a frame of `ChunkPass`:
    wanted nodes within a GPU budget (`generate_ms`, against the measured
    cost of a footprint's columns and of a chunk), a footprint's nodes
    together: footprint columns (field height, surface word, volume
-   extent; kept in a pool across frames), then each chunk's columns as 64-bit masks (volume terms, lean,
-   large brushes, baked cells, recent brushes, materials), then the
-   chunk's 64-tree into the leaf pool. Results come back a frame later:
-   empty chunks are freed, measured footprints reclassify their nodes.
-   Generated nodes stay resident until slots or leaf pages run short; then
-   the least recently visited go.
+   extent, feature placements; kept in a pool across frames), then each
+   chunk's columns as 64-bit masks (volume terms, lean, features, large
+   brushes, baked cells, recent brushes, materials), then the chunk's
+   64-tree into leaf pages. Results come back a frame later: empty chunks
+   are freed, measured footprints reclassify their nodes. Nodes no plan
+   visited for `release_frames` (600) are released, and when slots or leaf
+   pages run short the least recently visited go.
 2. **The drawn cut** (`drawn.rs`). The chunk table holds every drawn node
    and every ancestor of one, with its kind and the box its content may
    occupy (an ancestor's: the union of its children's); Empty nodes have
@@ -311,13 +330,20 @@ unit tests, `tests/chunks.rs`, `tests/wide_products.rs`) and
 - Edits: brushes, flat-topped boxes, a 600 m shaft at its bottom and half
   way up, a 3 km crater's floor, 18 000 block edits, and sealed edits with
   undo under a running world.
-- Solid gaps: a hall dug 300 m under the ground and a world's hollowed core,
-  seen from inside, with no chunks in the rock over them.
+- Underground: a hall dug 300 m under the ground and a world's hollowed
+  core, seen from inside, with no chunks in the rock over them.
+- Materials: edited cells, dug walls and uniform leaves draw
+  `Planet::material`; edited chunks come back by copy after eviction and
+  from a save.
+- Features render exactly and draw their stamps' materials; coarse
+  feature cells are solid on the CPU.
+- Terrain shadows fall on meshes in front of it.
 - Coverage from orbit; picks report the drawn hit.
-- Residency: the planner (a cut once over every point, nodes refined by
-  their own distance, parents drawn until every Mixed child exists,
-  eviction by pressure, rays deciding detail), the drawn set (fades, the
-  search a ray makes, content boxes); both shaders validate (naga).
+- Residency: the planner (a cut once over every point, bands switching
+  as one, nodes refined by their own distance, parents drawn until every
+  Mixed child exists, eviction by pressure and release by age, rays
+  deciding detail, prefetch), the drawn set (fades, the search a ray
+  makes, content boxes); both shaders validate (naga).
 - Graph: the pass builds, settles from any first eye, holds still views
   settled, drops its world with the source and resizes; appearance edits
   show in one frame; the atmosphere follows the eye and sun.
@@ -326,13 +352,27 @@ unit tests, `tests/chunks.rs`, `tests/wide_products.rs`) and
 
 **A terrain generator.** Implement `TerrainGenerator` (id, version, info with
 an optional settings-component name) returning a `TerrainField` and its
-`TerrainProgram` (WGSL defining `TerrainConstants`, `terrain_height`,
-`ground_material`, plus the constants' bytes). A program may also define
-`terrain_surface(p, level, height) -> u32`, an 8-bit surface word per column
-passed to `ground_material` (what materials need besides height: the
-erosion term, fresh ejecta). Volumetric generators also define
-`terrain_extent` and `terrain_density` (and `TerrainField::extent`,
-`density`, `volume_bounds`), leaning ones `terrain_lean` and
+`TerrainProgram`: WGSL plus the bytes of its `TerrainConstants` uniform. The
+full contract is in `terrain.rs`'s module docs. The program defines:
+
+- `TerrainConstants` and `ground_material(p, surface, top_height, depth,
+  slope, layer) -> u32`.
+- The two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)):
+  `TERRAIN_NODE_WORDS` (words a node carries, at least 1),
+  `terrain_has_nodes(level)`, `terrain_node(p, level)` (evaluate the node
+  at domain point `p`), `terrain_node_word(slot)` (a word of the node just
+  evaluated) and `terrain_column_nodes(p, level, display) -> vec2<i32>`
+  (the column's height and surface word, reading the bilinear blend of its
+  four nodes' words through the engine's `generation_node_word(slot)`).
+  A program without large octaves says `terrain_has_nodes` false.
+  `TerrainField::height` must blend the same way (it takes a `Column`).
+- Optionally `terrain_surface(p, level, height) -> u32`, the 8-bit surface
+  word alone, for shading (0 without). The surface word is what materials
+  need besides height (the erosion term, fresh ejecta), so shading never
+  runs the generator per pixel.
+
+Volumetric generators also define `terrain_extent` and `terrain_density`
+(and `TerrainField::extent`, `density`, `volume_bounds`), leaning ones `terrain_lean` and
 `terrain_lean_offset` (`TerrainField::lean`, `lean_offset`), and optionally
 `terrain_clearance` (cells a column's scan may step over below the lean
 band). A density is the signed distance from the cell centre to the surface
@@ -358,8 +398,12 @@ linear. When it returns `true`, reset temporal history to show the change
 in an idle viewport.
 
 **A brush shape.** Extend `BrushShape`, its per-face resolution (culling
-extent, height bounds) and `FaceBrush::contains` in `edits.rs`, and
-`brush_cells` in `chunk_generate.wgsl`.
+extent, height bounds) and `FaceBrush::contains` in `edits.rs`,
+`EditView::surface_bands` in `chunks/classify.rs`, and `brush_cells` and
+`brush_holds` in `chunk_generate.wgsl`.
+
+**Features.** Add stamps and spawns to the recipe's `FeatureSet`; no code
+changes. See [`docs/features.md`](docs/features.md).
 
 ## Known limits and open work
 

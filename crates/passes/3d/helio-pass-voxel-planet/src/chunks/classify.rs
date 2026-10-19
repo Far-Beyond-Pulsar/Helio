@@ -114,7 +114,7 @@ impl Ranges {
 }
 
 /// A footprint's nodes by layer: Mixed in `mixed` (chunk layers,
-/// inclusive), Buried in `buried`, else uniform (`EditView::uniform_solid`).
+/// inclusive), Buried in `buried`, else uniform ([`EditView::kind`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Class {
     pub mixed: Vec<(i32, i32)>,

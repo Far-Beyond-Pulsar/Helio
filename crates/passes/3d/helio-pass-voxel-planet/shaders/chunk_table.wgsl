@@ -1,4 +1,4 @@
-// Chunk table updates (docs/chunk-trees.md, `chunks/drawn.rs`): the
+// Chunk table updates (docs/chunk-octree.md, `chunks/drawn.rs`): the
 // entries that changed, uploaded at once and scattered into the table.
 // Change n is changes[3n] (x: the entry's index), its key, its value.
 

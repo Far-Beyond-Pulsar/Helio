@@ -60,7 +60,7 @@ impl View {
 /// parallel fit in a 12 GB GPU (1.2 GB a test; a game's
 /// default world, 2.9 GB, paged eight parallel tests out of device memory
 /// and stalled them).
-const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 16384, footprints: 1024, bricks: 65536, kept_bytes: 256 << 20 };
+const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 16384, footprints: 1024, bricks: 65536, kept_bytes: 256 << 20, counters: false };
 
 struct World {
     chunks: ChunkWorld,

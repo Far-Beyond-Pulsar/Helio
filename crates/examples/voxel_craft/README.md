@@ -22,9 +22,31 @@ cargo run -p examples --release --bin voxel_craft
 | Esc | release the mouse (Esc again quits) |
 
 Environment: `VOXEL_CRAFT_QUALITY=performance|balanced|quality|native`,
-`VOXEL_CRAFT_LOD` (cells per pixel, default 1.2), `VOXEL_CRAFT_DISTANCE`
+`VOXEL_CRAFT_LOD` (cells per pixel, default 0.6), `VOXEL_CRAFT_DISTANCE`
 (view distance in metres, default 12 000), `VOXEL_CRAFT_PIXELATED=1` (crisp
 block pixels instead of smooth magnification).
+
+### Screenshot tour
+
+`VOXEL_CRAFT_SHOTS=<dir>` is the example's render check: with nobody at the
+keyboard, it holds the time of day at mid-morning, poses the camera at the
+spawn in nine views (looking ahead, to the side, up and down; two third-person
+views; from 45 m up looking down; behind; and from 400 m up looking out to
+the horizon), saves each as `<dir>/shot_NN.png` and quits after the last.
+A pose is shot once the planet pass reports the view settled and at least
+`VOXEL_CRAFT_WAIT` frames have passed (default 120, for the temporal
+anti-aliasing to converge), or after 900 frames regardless.
+
+```
+VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
+```
+
+* `VOXEL_CRAFT_POSES=<n>`: shoot only the first `n` poses.
+* `VOXEL_CRAFT_WAIT=<frames>`: the minimum frames before each shot.
+* `VOXEL_CRAFT_TRUNK=1`: at frame 700, move the camera 4 m in front of the
+  nearest tree log (within 45 blocks) and log that log and the blocks in
+  front of it, so the next shot looks at a trunk (pair it with
+  `VOXEL_CRAFT_POSES=1 VOXEL_CRAFT_WAIT=800`).
 
 ## Layout
 

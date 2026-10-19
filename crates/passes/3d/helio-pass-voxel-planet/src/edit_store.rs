@@ -327,7 +327,7 @@ impl EditStore {
         let cj = i64::from(fb.center[1]) / 2;
         let (k0, k1) = (i64::from(fb.k_lo) / 2 - 1, i64::from(fb.k_hi) / 2 + 1);
         let ([i0, i1], [j0, j1]) = (clamp_to_face(grid, 0, ci - r, ci + r), clamp_to_face(grid, 0, cj - r, cj + r));
-        self.bake_box(grid, fb, op, 0, [i0, j0, k0], [i1, j1, k1], false)
+        self.bake_box(grid, fb, op, 0, [i0, j0, k0], [i1, j1, k1])
     }
 
     /// Apply a brush to the cells already baked (a brush that stays analytic
@@ -368,29 +368,26 @@ impl EditStore {
                 (!bricks.is_empty()).then_some(Stack { bi: column.ci, bj: column.cj, x: [0, b], y: [0, b], bricks })
             })
             .collect();
-        self.bake_stacks(&Footprint::new(grid, fb), 0, &stacks, op, false)
+        self.bake_stacks(&Footprint::new(grid, fb), 0, &stacks, op)
     }
 
     /// Bake a large brush at `level` directly (its bake level: a level whose
     /// cells it spans at most `BAKE_RADIUS_HALF` half cells of; coarser ones
     /// follow by majority). Each cell of `level` whose centre it holds takes
-    /// the brush after its baked edit; `under`: only unchanged cells, as if
-    /// the brush came before every baked edit (loading snapshots written
-    /// when large brushes stayed analytic, applied before baked cells).
-    /// Returns the bricks it changed.
-    pub fn bake_at(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, under: bool) -> Vec<BrickKey> {
+    /// the brush after its baked edit. Returns the bricks it changed.
+    pub fn bake_at(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32) -> Vec<BrickKey> {
         let r = (fb.extent_cells() >> level) + 1;
         let ci = (i64::from(fb.center[0]) / 2) >> level;
         let cj = (i64::from(fb.center[1]) / 2) >> level;
         let (k0, k1) = ((i64::from(fb.k_lo) / 2 >> level) - 1, (i64::from(fb.k_hi) / 2 >> level) + 1);
         let ([i0, i1], [j0, j1]) = (clamp_to_face(grid, level, ci - r, ci + r), clamp_to_face(grid, level, cj - r, cj + r));
-        self.bake_box(grid, fb, op, level, [i0, j0, k0], [i1, j1, k1], under)
+        self.bake_box(grid, fb, op, level, [i0, j0, k0], [i1, j1, k1])
     }
 
     /// Bake `fb` into every cell of `level` inside the inclusive cell box
     /// `[lo, hi]` whose centre it holds. Returns the bricks it changed.
     #[allow(clippy::too_many_arguments)]
-    fn bake_box(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, lo: [i64; 3], hi: [i64; 3], under: bool) -> Vec<BrickKey> {
+    fn bake_box(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, lo: [i64; 3], hi: [i64; 3]) -> Vec<BrickKey> {
         let b = i64::from(BRICK);
         // The box's cells of brick coordinate `v` on `axis`, in brick cells.
         let clip = |axis: usize, v: i64| [(lo[axis] - v * b).clamp(0, b), (hi[axis] + 1 - v * b).clamp(0, b)];
@@ -405,13 +402,13 @@ impl EditStore {
                 }
             }
         }
-        self.bake_stacks(&Footprint::new(grid, fb), level, &stacks, op, under)
+        self.bake_stacks(&Footprint::new(grid, fb), level, &stacks, op)
     }
 
     /// Apply a brush to the cells of each stack it holds (the stacks built
     /// side by side); bricks it holds no cell of are left alone. Returns the
     /// bricks it reached.
-    fn bake_stacks(&mut self, footprint: &Footprint, level: u32, stacks: &[Stack], op: BrushOp, under: bool) -> Vec<BrickKey> {
+    fn bake_stacks(&mut self, footprint: &Footprint, level: u32, stacks: &[Stack], op: BrushOp) -> Vec<BrickKey> {
         let material = footprint.fb.material();
         let face = footprint.fb.face();
         let store = &*self;
@@ -430,9 +427,7 @@ impl EditStore {
                     while bits != 0 {
                         let cell = &mut brick.cells[z * 64 + bits.trailing_zeros() as usize];
                         bits &= bits - 1;
-                        if !under || cell.is_unchanged() {
-                            *cell = cell.then(op, material);
-                        }
+                        *cell = cell.then(op, material);
                     }
                 }
                 bricks.push((s.bk, (!brick.is_unchanged()).then(|| Arc::new(brick))));
@@ -782,7 +777,7 @@ mod tests {
     /// Cell by cell over the box a bake visits, with the containment test
     /// generation uses: what [`EditStore::bake`] (`base`) and
     /// [`EditStore::bake_at`] must produce.
-    fn bake_cell_by_cell(store: &mut EditStore, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, under: bool, base: bool) -> Vec<BrickKey> {
+    fn bake_cell_by_cell(store: &mut EditStore, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, base: bool) -> Vec<BrickKey> {
         let face = fb.face();
         let r = if base { fb.extent_cells() } else { (fb.extent_cells() >> level) + 1 };
         let ci = (i64::from(fb.center[0]) / 2) >> level;
@@ -804,9 +799,7 @@ mod tests {
                     let key = BrickKey::of_cell(face, level, i, j, k);
                     let brick = touched.entry(key).or_insert_with(|| store.brick(&key).map_or_else(Brick::default, |b| (**b).clone()));
                     let cell = &mut brick.cells[Brick::index(i, j, k)];
-                    if !under || cell.is_unchanged() {
-                        *cell = cell.then(op, fb.material());
-                    }
+                    *cell = cell.then(op, fb.material());
                 }
             }
         }
@@ -913,14 +906,13 @@ mod tests {
                 let Ok(resolved) = brush.resolve(grid) else { continue };
                 for fb in &resolved {
                     let (mut a, mut b) = if fb.radius_half <= crate::planet::BAKE_RADIUS_HALF {
-                        (fast.bake(grid, fb, op), bake_cell_by_cell(&mut exact, grid, fb, op, 0, false, true))
+                        (fast.bake(grid, fb, op), bake_cell_by_cell(&mut exact, grid, fb, op, 0, true))
                     } else {
                         let level = crate::planet::bake_level(fb);
-                        let under = brush_index % 6 == 5;
                         let mut a = fast.apply_over(grid, fb, op);
                         let mut b = apply_over_cell_by_cell(&mut exact, grid, fb, op);
-                        a.extend(fast.bake_at(grid, fb, op, level, under));
-                        b.extend(bake_cell_by_cell(&mut exact, grid, fb, op, level, under, false));
+                        a.extend(fast.bake_at(grid, fb, op, level));
+                        b.extend(bake_cell_by_cell(&mut exact, grid, fb, op, level, false));
                         (a, b)
                     };
                     a.sort_unstable();

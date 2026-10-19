@@ -101,7 +101,7 @@ impl FaceBrush {
     }
     /// Exact containment of a level cell centre: `center_half` in half cells
     /// (cubes), `point` its volume point (balls, computed on demand); exact
-    /// 64-bit squares (`brush_contains` in WGSL).
+    /// 64-bit squares (`brush_holds` in chunk_generate.wgsl).
     pub fn contains(&self, center_half: [i32; 3], point: impl FnOnce() -> IVec3) -> bool {
         if self.shape() == SHAPE_CUBE {
             // A box: the radius across, its own range vertically.
@@ -829,9 +829,9 @@ mod tree {
     }
 
     /// Where a long editing session dug, a column's list holds the surfaces
-    /// left exposed, not the history: the old tile index gave every column
-    /// under a dig every brush over it, and a few hundred strokes filled the
-    /// GPU's edit words and stalled generation.
+    /// left exposed, not the history: after four passes of a 2 km dig (400
+    /// brushes over the same line), no column along it lists more than 32
+    /// brushes at levels 0, 2, 4, 6 or 8.
     #[test]
     fn a_long_dig_leaves_short_column_lists() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();

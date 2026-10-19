@@ -34,11 +34,6 @@ pub struct Game {
     total_frames: u64,
     tour: Option<Tour>,
     pub quit: bool,
-    luma: bool,
-    walk: bool,
-    edit_started: Option<Instant>,
-    edit_two: bool,
-    pending_places: Vec<Vec<crate::world::edits::BlockEdit>>,
 }
 
 /// A grassy, level place to start on.
@@ -82,7 +77,7 @@ impl Game {
         let world = World::new(planet);
         let mut player = Player::new(spawn);
         player.heading = e2;
-        let tour_active = std::env::var_os("VOXEL_CRAFT_SHOTS").is_some();
+        let tour = std::env::var("VOXEL_CRAFT_SHOTS").ok().map(Tour::new);
         Self {
             gfx,
             world,
@@ -96,19 +91,13 @@ impl Game {
             fps: 0.0,
             // Mid-morning.
             time: DAY_SECONDS * 0.08,
-            time_speed: if tour_active || std::env::var_os("VOXEL_CRAFT_FREEZE").is_some() { 0.0 } else { 1.0 },
+            // A tour keeps the sun where it is: shots compare.
+            time_speed: if tour.is_some() { 0.0 } else { 1.0 },
             sun_axes: (up, e1),
             show_help: true,
             total_frames: 0,
-            tour: std::env::var("VOXEL_CRAFT_SHOTS").ok().map(Tour::new),
-            // A tour keeps the sun where it is: shots compare.
-            // (set below)
+            tour,
             quit: false,
-            luma: std::env::var_os("VOXEL_CRAFT_LUMA").is_some(),
-            walk: std::env::var_os("VOXEL_CRAFT_WALK").is_some(),
-            edit_started: None,
-            edit_two: false,
-            pending_places: Vec::new(),
         }
     }
 
@@ -160,162 +149,12 @@ impl Game {
             self.player.hotbar = (self.player.hotbar as i32 - scroll.signum() as i32).rem_euclid(n) as usize;
         }
 
-        let mut controls = self.input.controls();
-        // `VOXEL_CRAFT_WALK=1`: walk forward by itself and log the eye's height each frame.
-        if self.walk || std::env::var_os("VOXEL_CRAFT_EYELOG").is_some() {
-            controls.forward = if self.walk { 1.0 } else { 0.0 };
-            log::info!("WALK {:.5} {:.3} ground {} rev {} pos {:.4}", self.world.planet().grid().height(self.player.eye()), dt * 1e3, self.player.on_ground, self.world.revision(), self.player.eye().length());
-        }
+        let controls = self.input.controls();
         self.world.update();
         self.player.update(&self.world, &controls, dt);
         self.interaction.update(&mut self.player, &mut self.world, &controls, dt);
 
         self.total_frames += 1;
-        // `VOXEL_CRAFT_REPLAY="place:face:i:j:k:Block_Name;break:face:i:j:k;..."` (as printed by
-        // the game): stand near the first edit, wait for the world to be decorated
-        // (`VOXEL_CRAFT_WAIT` frames), apply them one at a time like a player, and look.
-        if let Ok(script) = std::env::var("VOXEL_CRAFT_REPLAY") {
-            let steps: Vec<&str> = script.split(';').filter(|s| !s.is_empty()).collect();
-            let parse = |s: &str| -> Option<(bool, Cell, Option<Block>)> {
-                let f: Vec<&str> = s.split(':').collect();
-                let place = f.first()? == &"place";
-                let cell = Cell::new(f.get(1)?.parse().ok()?, f.get(2)?.parse().ok()?, f.get(3)?.parse().ok()?, f.get(4)?.parse().ok()?);
-                let block = if place { let name = f.get(5)?.to_string(); Block::ALL.iter().copied().find(|b| b.name().replace(' ', "_") == name) } else { None };
-                Some((place, cell, block))
-            };
-            let start: u64 = std::env::var("VOXEL_CRAFT_REPLAY_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-            if self.total_frames == start {
-                if let Some((_, cell, _)) = steps.first().and_then(|s| parse(s)) {
-                    let up = self.world.cell_centre(cell).normalize();
-                    let side = up.any_orthonormal_vector();
-                    self.player.flying = true;
-                    self.player.position = self.world.cell_centre(cell) + side * 5.0 + up * 3.5 - up * 1.62;
-                    self.player.heading = -side;
-                    self.player.pitch = -0.4;
-                    self.player.velocity = DVec3::ZERO;
-                    for dj in -6..=2 {
-                        let row: Vec<String> = (-8..=8).map(|di| {
-                            let c = Cell::new(cell.face, cell.i + di, cell.j + dj, cell.k);
-                            self.world.block_at(c).map(|b| b.name().chars().take(2).collect::<String>()).unwrap_or("..".into())
-                        }).collect();
-                        println!("CPU j{:+} {}", dj, row.join(" "));
-                    }
-                }
-            }
-            if self.total_frames > start && (self.total_frames - start) % 90 == 0 {
-                let n = ((self.total_frames - start) / 90 - 1) as usize;
-                if let Some((place, cell, block)) = steps.get(n).and_then(|s| parse(s)) {
-                    let edit = if place { crate::world::edits::BlockEdit::set(cell, block.unwrap_or(Block::Cobblestone)) } else { crate::world::edits::BlockEdit::clear(cell) };
-                    self.world.edit(&[edit]);
-                    println!("REPLAY {n}: {}", steps[n]);
-                }
-            }
-        }
-        // `VOXEL_CRAFT_EDITTEST=1`: place five different blocks in a row, time how long until
-        // the world has them, and look at them.
-        if std::env::var_os("VOXEL_CRAFT_EDITTEST").is_some() {
-            if self.total_frames == 700 {
-                let here = self.world.cell_at(self.player.position);
-                if std::env::var("VOXEL_CRAFT_EDITTEST").as_deref() == Ok("4") {
-                    // Dig pits in the ground, then place blocks in them and against their walls, in two steps like a player.
-                    let mut dig = Vec::new();
-                    for a in -3..=3 {
-                        let (i, j) = (here.i + a * 4, here.j + 6);
-                        let top = self.world.planet().column_top(here.face, i, j, 0);
-                        for d in 1..=2 {
-                            dig.push(crate::world::edits::BlockEdit::clear(Cell::new(here.face, i, j, top - d)));
-                        }
-                    }
-                    self.world.edit(&dig);
-                    self.pending_places = (-3..=3).map(|a| {
-                        let (i, j) = (here.i + a * 4, here.j + 6);
-                        let top = self.world.planet().column_top(here.face, i, j, 0);
-                        let types = [Block::Glowstone, Block::OakPlanks, Block::Bricks, Block::Sand, Block::Cobblestone, Block::Snow, Block::StoneBricks];
-                        vec![crate::world::edits::BlockEdit::set(Cell::new(here.face, i, j, top - 2), types[(a + 3) as usize]), crate::world::edits::BlockEdit::set(Cell::new(here.face, i + 1, j, top - 1), types[(a + 4).rem_euclid(7) as usize])]
-                    }).collect();
-                    let c = Cell::new(here.face, here.i, here.j + 11, here.k + 9);
-                    let along = self.world.cell_centre(Cell::new(here.face, here.i, here.j + 1, here.k)) - self.world.cell_centre(here);
-                    self.player.flying = true;
-                    self.player.position = self.world.cell_centre(c);
-                    self.player.heading = along.normalize();
-                    self.player.pitch = -0.9;
-                    self.player.velocity = DVec3::ZERO;
-                    self.edit_two = true;
-                } else if std::env::var("VOXEL_CRAFT_EDITTEST").as_deref() == Ok("3") {
-                    // A grid of different blocks on the ground wherever it is, seen from above.
-                    let types = [Block::Glowstone, Block::OakPlanks, Block::Bricks, Block::Sand, Block::Cobblestone, Block::Snow];
-                    let mut edits = Vec::new();
-                    for a in -4..=4 {
-                        for b in 1..=8 {
-                            let (i, j) = (here.i + a * 3, here.j + b * 3);
-                            let k = self.world.planet().column_top(here.face, i, j, 0);
-                            edits.push(crate::world::edits::BlockEdit::set(Cell::new(here.face, i, j, k), types[((a + 4 + b) as usize) % types.len()]));
-                        }
-                    }
-                    self.world.edit(&edits);
-                    let c = Cell::new(here.face, here.i, here.j + 14, here.k + 14);
-                    let along = self.world.cell_centre(Cell::new(here.face, here.i, here.j + 1, here.k)) - self.world.cell_centre(here);
-                    self.player.flying = true;
-                    self.player.position = self.world.cell_centre(c);
-                    self.player.heading = along.normalize();
-                    self.player.pitch = -1.0;
-                    self.player.velocity = DVec3::ZERO;
-                    self.edit_started = Some(Instant::now());
-                    self.edit_two = true;
-                } else if std::env::var("VOXEL_CRAFT_EDITTEST").as_deref() == Ok("2") {
-                    let c = |di: i32, dk: i32| Cell::new(here.face, here.i + di, here.j + 3, here.k + dk);
-                    let edits = vec![
-                        crate::world::edits::BlockEdit::set(c(0, 0), Block::Glowstone),
-                        crate::world::edits::BlockEdit::set(c(3, 0), Block::Cobblestone),
-                        crate::world::edits::BlockEdit::set(c(3, 1), Block::Cobblestone),
-                        crate::world::edits::BlockEdit::set(c(3, 2), Block::Cobblestone),
-                        crate::world::edits::BlockEdit::set(c(-3, 0), Block::Sand),
-                        crate::world::edits::BlockEdit::set(c(-4, 0), Block::Bricks),
-                    ];
-                    self.world.edit(&edits);
-                    let along = self.world.cell_centre(Cell::new(here.face, here.i, here.j + 1, here.k)) - self.world.cell_centre(here);
-                    self.player.heading = along.normalize();
-                    self.player.pitch = -0.35;
-                    self.edit_started = Some(Instant::now());
-                    self.edit_two = true;
-                }
-                if !self.edit_two {
-                let blocks = [Block::Glowstone, Block::OakPlanks, Block::StoneBricks, Block::Bricks, Block::Sand];
-                let edits: Vec<_> = blocks.iter().enumerate().map(|(n, b)| crate::world::edits::BlockEdit::set(Cell::new(here.face, here.i + n as i32 * 2 - 4, here.j + 5, here.k), *b)).collect();
-                self.world.edit(&edits);
-                self.edit_started = Some(Instant::now());
-                let along = self.world.cell_centre(Cell::new(here.face, here.i, here.j + 1, here.k)) - self.world.cell_centre(here);
-                self.player.heading = along.normalize();
-                self.player.pitch = -0.25;
-                }
-            }
-            if self.total_frames > 700 && self.total_frames % 20 == 0 {
-                if let Some(next) = self.pending_places.pop() {
-                    self.world.edit(&next);
-                }
-            }
-            if let Some(t) = self.edit_started {
-                if self.world.pending_edits() == 0 {
-                    log::info!("EDIT in world after {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
-                    self.edit_started = None;
-                }
-            }
-        }
-        // `VOXEL_CRAFT_PALETTE=1`: every block in a row, for checking the textures.
-        if std::env::var_os("VOXEL_CRAFT_PALETTE").is_some() && self.tour.is_some() {
-            if self.total_frames == 300 {
-                let here = self.world.cell_at(self.player.position);
-                let edits: Vec<_> = Block::ALL.iter().enumerate().map(|(n, b)| crate::world::edits::BlockEdit::set(Cell::new(here.face, here.i + (n as i32 % 8) * 2 - 7, here.j + 12, here.k + 60 + (n as i32 / 8) * 3), *b)).collect();
-                self.world.edit(&edits);
-                let start = Cell::new(here.face, here.i, here.j + 12, here.k + 63);
-                let along = self.world.cell_centre(Cell::new(start.face, start.i, start.j + 1, start.k)) - self.world.cell_centre(start);
-                self.player.flying = true;
-                self.player.position = self.world.cell_centre(Cell::new(start.face, start.i, start.j - 12, start.k)) - self.player.position.normalize() * 1.62;
-                self.player.heading = along.normalize();
-                self.player.pitch = 0.0;
-                self.player.velocity = DVec3::ZERO;
-            }
-        }
         if let Some(t) = &self.tour {
             if t.trunk && self.total_frames == 700 {
                 let here = self.world.cell_at(self.player.position);
@@ -339,15 +178,7 @@ impl Game {
                 }
             }
         }
-        let mut shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, self.gfx.settled(), &mut self.quit));
-        // `VOXEL_CRAFT_REPLAY_SHOTS=<dir>`: a shot 60 frames after each replay step (and before the first).
-        if let (Ok(dir), Ok(_)) = (std::env::var("VOXEL_CRAFT_REPLAY_SHOTS"), std::env::var("VOXEL_CRAFT_REPLAY")) {
-            let start: u64 = std::env::var("VOXEL_CRAFT_REPLAY_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-            if self.total_frames >= start + 30 && (self.total_frames - start) % 90 == 60 && (self.total_frames - start) / 90 <= 3 {
-                let _ = std::fs::create_dir_all(&dir);
-                shot = Some(format!("{dir}/step_{:02}.png", (self.total_frames - start) / 90));
-            }
-        }
+        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, self.gfx.settled(), &mut self.quit));
         let (eye, look) = self.player.camera(&self.world);
         let outline = self.interaction.outline(&self.world);
         let view = View {
@@ -359,7 +190,6 @@ impl Game {
             outline: &outline,
             time: self.started.elapsed().as_secs_f64(),
             screenshot: shot.as_deref(),
-            luma: self.luma,
         };
         self.gfx.draw(&view);
         self.input.end_frame();
@@ -457,8 +287,7 @@ impl Tour {
         self.pose += 1;
         let limit = std::env::var("VOXEL_CRAFT_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(POSES.len());
         if self.pose >= limit.min(POSES.len()) {
-            // `VOXEL_CRAFT_HOLD=1` keeps the last pose running (for LUMA / DIFF).
-            *quit = std::env::var_os("VOXEL_CRAFT_HOLD").is_none();
+            *quit = true;
             self.pose = usize::MAX / 2;
         } else {
             self.set_pose(player);
@@ -468,7 +297,6 @@ impl Tour {
 
     fn set_pose(&mut self, player: &mut Player) {
         let (turn, pitch, third, lift) = POSES[self.pose];
-        let _ = (turn, pitch, third, lift);
         let frame = player.frame();
         let (s, c) = turn.to_radians().sin_cos();
         player.heading = frame.forward * c + frame.right * s;

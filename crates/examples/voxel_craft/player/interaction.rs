@@ -37,7 +37,6 @@ impl Interaction {
         let Some(target) = self.target else { return };
 
         if controls.mine && self.cooldown == 0.0 {
-            println!("EDIT break {}:{}:{}:{}  (was {:?}, player at {:?})", target.cell.face, target.cell.i, target.cell.j, target.cell.k, world.block_at(target.cell).map(|b| b.name()), world.cell_at(player.position));
             world.edit(&[BlockEdit::clear(target.cell)]);
             self.cooldown = BREAK_INTERVAL;
         }
@@ -53,7 +52,6 @@ impl Interaction {
             // Not into the player's own body.
             let frame: Frame = player.frame();
             if !occupies(world, player.position, &frame, target.front) {
-                println!("EDIT place {}:{}:{}:{}:{}  (against {}:{}:{}:{} = {:?}, player at {:?})", target.front.face, target.front.i, target.front.j, target.front.k, block.name().replace(' ', "_"), target.cell.face, target.cell.i, target.cell.j, target.cell.k, world.block_at(target.cell).map(|b| b.name()), world.cell_at(player.position));
                 world.edit(&[BlockEdit::set(target.front, block)]);
                 self.cooldown = 0.12;
             }

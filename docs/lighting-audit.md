@@ -412,8 +412,8 @@ fallback (`helio-pass-deferred-light/src/lib.rs:1023-1028`); nothing captures th
 2. **Unresolved relief (P1).** Slope normals for sub-pixel steps exist (`hit_face`), but the lost
    micro-relief is not turned into roughness or micro-shadowing, so the terminator and low-sun terrain
    look flat and too bright at distance (and differ from near terrain). The generator knows its octave
-   table: sigma^2 = sum of unresolved octaves' slope variance (as `docs/research-aaa-planet-terrain.md:300-320`
-   already derives); add it to alpha^2 and apply a Smith-G micro-shadowing factor to the diffuse term
+   table: sigma^2 = sum over unresolved octaves k of (m_k c A_k / lambda_k)^2 (m_k the local amplitude
+   modulation: region masks, erosion fade; c the noise's RMS-slope constant); add it to alpha^2 and apply a Smith-G micro-shadowing factor to the diffuse term
    (LEAN/LEADR, Dupuy et al. 2013; Bruneton & Neyret 2010 for the geometry-to-BRDF hand-off).
 3. **Albedo prefiltering (P2).** Noise contributions fade with footprint (good) but toward `t = 0.52`
    through a piecewise palette mapping, so the far colour is f(E[t]) rather than E[f(t)]; precompute the

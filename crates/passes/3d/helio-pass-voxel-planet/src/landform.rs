@@ -1718,33 +1718,13 @@ mod tests {
         TerrainLayers::earth().compile(grid, 7).unwrap().0
     }
 
-    #[test]
-    #[ignore = "measurement"]
-    fn noise_distribution_quantiles() {
-        let mut v: Vec<i32> = Vec::new();
-        let mut rng = 0x1234_5678_9abc_def0u64;
-        let mut next = || {
-            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
-        };
-        for _ in 0..400_000 {
-            let p = IVec3::new((next() % 1_000_000) as i32, (next() % 1_000_000) as i32, (next() % 1_000_000) as i32);
-            v.push(noise(p, 10, next() as u32));
-        }
-        v.sort_unstable();
-        let q = |f: f64| f64::from(v[((v.len() - 1) as f64 * f) as usize]) / f64::from(ONE);
-        let mean = v.iter().map(|x| f64::from(*x)).sum::<f64>() / v.len() as f64;
-        let sd = (v.iter().map(|x| (f64::from(*x) - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt() / f64::from(ONE);
-        let near = v.iter().filter(|x| x.abs() < ONE / 20).count() as f64 / v.len() as f64;
-        eprintln!("sd {sd:.4}; q50 {:.4} q75 {:.4} q90 {:.4} q95 {:.4} q99 {:.4}; P(|n| < 0.05) {near:.4}", q(0.5), q(0.75), q(0.9), q(0.95), q(0.99));
-    }
-
     /// Caves and overhangs change cells only inside the declared extent;
     /// without them the stack is a pure heightfield.
     #[test]
     fn caves_and_overhangs_stay_inside_their_extent() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let v2 = TerrainLayers::earth().field(&grid, 7).unwrap();
-        let v1 = TerrainLayers::earth().heightfield().field(&grid, 7).unwrap();
+        let volume = TerrainLayers::earth().field(&grid, 7).unwrap();
+        let heightfield = TerrainLayers::earth().heightfield().field(&grid, 7).unwrap();
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
             rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
@@ -1754,16 +1734,16 @@ mod tests {
             let face = (next() % 6) as u8;
             let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
             let p = grid.domain_point(face, i, j, 0);
-            let height = v2.height(crate::terrain::Column { face, i, j, level: 0 });
+            let height = volume.height(crate::terrain::Column { face, i, j, level: 0 });
             let top = top_cells(&grid, height, 0);
-            assert_eq!(v1.extent(p, 0), (0, 0));
-            let (below, above) = v2.extent(p, 0);
+            assert_eq!(heightfield.extent(p, 0), (0, 0));
+            let (below, above) = volume.extent(p, 0);
             volumetric += usize::from(below + above > 0);
             for _ in 0..24 {
                 // Inside and around the extent.
                 let k = top - below - 4 + (next() % (below + above + 8) as u64) as i32;
-                let kind = generated_kind(&grid, &v2, face, i, j, k, 0, height);
-                assert_eq!(generated_kind(&grid, &v1, face, i, j, k, 0, height), u32::from(k < top));
+                let kind = generated_kind(&grid, &volume, face, i, j, k, 0, height);
+                assert_eq!(generated_kind(&grid, &heightfield, face, i, j, k, 0, height), u32::from(k < top));
                 if k < top - below || k >= top + above {
                     assert_eq!(kind, u32::from(k < top), "outside the extent the heightfield holds");
                 }

@@ -1,6 +1,6 @@
 //! Voxel planet terrain in Helio's renderer, drawn from chunk trees
-//! (docs/chunk-trees.md): held views with GPU timings, streaming flights,
-//! digging, picks and captures.
+//! (helio-pass-voxel-planet's docs/chunk-octree.md): held views with GPU
+//! timings, streaming flights, digging, picks and captures.
 //!
 //! cargo run -p helio-default-graphs --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
@@ -25,7 +25,12 @@
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
-//! `_LOOK=exposure,contrast,saturation`, `_DEBUG=<mode>`.
+//! `_LOOK=exposure,contrast,saturation`, `_DEBUG=<mode>` (the renderer's;
+//! the voxel draw's 32 trace cost, 33 levels, 34 levels over the left half).
+//!
+//! Diagnostics of worlds the harness drives itself ([`harness_world`]):
+//! `HELIO_VOXEL_CHUNKS_COUNT` (trace counters), `_ROUNDS=n` (the primary
+//! trace repeated, for timing), `_DEBUG_PIXEL=x,y` (that pixel's boxes).
 //!
 //! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead
 //! of the GPU): waiting for every frame lets the driver lower its clocks,
@@ -401,6 +406,25 @@ fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::Ch
 /// then draw it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` with pipelined
 /// frames and print the median primary time (`CHUNKHOLD`). With
 /// `HELIO_VOXEL_CHUNKS_PNG=<path>` the colour target is saved.
+/// A chunk world as the harness drives it: built with trace counters with
+/// `HELIO_VOXEL_CHUNKS_COUNT`, its primary trace repeated
+/// `HELIO_VOXEL_CHUNKS_ROUNDS` times a draw, recording
+/// `HELIO_VOXEL_CHUNKS_DEBUG_PIXEL=x,y`'s boxes, drawn in
+/// `HELIO_VOXEL_FLIGHT_DEBUG`'s mode (32 trace cost, 33 levels, 34 levels
+/// over the left half).
+fn harness_world(flight: &Flight) -> helio_pass_voxel_planet::chunks::ChunkWorld {
+    use helio_pass_voxel_planet::chunks::{Capacity, ChunkWorld};
+    let capacity = Capacity { counters: std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some(), ..Capacity::default() };
+    let mut world = ChunkWorld::with_capacity(&flight.device, &flight.queue, &flight.planet, capacity);
+    world.set_trace_rounds(std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1));
+    let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+    world.set_debug_pixel((pixel.len() == 2).then(|| [pixel[0], pixel[1]]));
+    if let Some(mode) = std::env::var("HELIO_VOXEL_FLIGHT_DEBUG").ok().and_then(|v| v.parse().ok()) {
+        world.set_debug_mode(mode);
+    }
+    world
+}
+
 fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
@@ -408,7 +432,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     // in hold mode).
     let mut internal = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Internal));
     let mut scope = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Validation));
-    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let mut world = harness_world(flight);
     let mut frame = 0u64;
     let seconds = chunk_settle(flight, &mut world, eye, forward, &mut frame);
     eprintln!("CHUNKS settled {view} in {seconds:.2} s ({frame} frames): {} chunks drawn, {:.1} MB", world.chunk_count(), world.resident_bytes() as f64 / 1048576.0);
@@ -424,7 +448,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     if let Some(rounds) = std::env::var("HELIO_VOXEL_GEN_BENCH").ok().and_then(|v| v.parse::<u32>().ok()) {
         let config = chunk_config(h, 512);
         let view_cone = view_cone(flight, forward);
-        let mut step = |world: &mut ChunkWorld, frame: &mut u64| {
+        let step = |world: &mut ChunkWorld, frame: &mut u64| {
             let mut encoder = flight.device.create_command_encoder(&Default::default());
             world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view_cone), *frame, &config);
             world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h], None);
@@ -602,7 +626,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
     let mut planet = (*flight.planet).clone();
-    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let mut world = harness_world(flight);
     let mut frame = 0u64;
     chunk_settle(flight, &mut world, eye, forward, &mut frame);
     let up = up_for(eye);
@@ -1280,10 +1304,9 @@ fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
 /// primary time and the CPU update time. `HELIO_VOXEL_CHUNKS_PNG=<prefix>`
 /// saves a frame each second.
 fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
-    use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
     let config = chunk_config(h, 64);
-    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let mut world = harness_world(flight);
     let up = ground.normalize();
     let mut budgets = Vec::new();
     let mut phases = [0.0f64; 6];

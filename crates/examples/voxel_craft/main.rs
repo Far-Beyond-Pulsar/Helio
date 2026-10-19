@@ -17,8 +17,9 @@
 //! Esc release the mouse.
 //!
 //! Environment: `VOXEL_CRAFT_QUALITY` (performance|balanced|quality|native),
-//! `VOXEL_CRAFT_LOD` (cells per pixel, 1.2), `VOXEL_CRAFT_DISTANCE` (view
-//! distance in metres), `VOXEL_CRAFT_PIXELATED=1` (crisp block pixels).
+//! `VOXEL_CRAFT_LOD` (cells per pixel, 0.6), `VOXEL_CRAFT_DISTANCE` (view
+//! distance in metres), `VOXEL_CRAFT_PIXELATED=1` (crisp block pixels);
+//! `VOXEL_CRAFT_SHOTS=<dir>` runs the screenshot tour (see the README).
 //!
 //! Layout: `terrain/` the planet's recipe and biomes, `world/` edits, the
 //! worker thread and decoration, `trees/` and `structures/` the generators,

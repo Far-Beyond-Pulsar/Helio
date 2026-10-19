@@ -39,11 +39,6 @@ impl VoxelMaterialMap {
     pub fn set(&mut self, material: u32, top: u32, side: u32, bottom: u32) {
         self.faces[material as usize % SLOTS] = [top, side, bottom, 0];
     }
-
-    /// Voxel material `material` shows scene material row `row` on every face.
-    pub fn set_all(&mut self, material: u32, row: u32) {
-        self.set(material, row, row, row);
-    }
 }
 
 /// A frame's scene material resources, borrowed from the host's context.

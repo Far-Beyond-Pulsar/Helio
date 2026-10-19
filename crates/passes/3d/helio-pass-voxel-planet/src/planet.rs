@@ -29,7 +29,6 @@ pub struct PlanetRecipe {
     pub voxel_size_m: f64,
     pub terrain: TerrainSource,
     /// Procedural content standing on the terrain (`crate::features`).
-    #[serde(skip_serializing_if = "FeatureSet::is_empty")]
     pub features: FeatureSet,
 }
 
@@ -58,13 +57,8 @@ impl PlanetRecipe {
             Shape::Sphere => (self.radius_m, 0.0),
             _ => (0.0, self.plane_size_m),
         };
-        let mut key = serde_json::json!([self.version, self.shape, radius, plane, self.voxel_size_m,
-            self.terrain.generator, self.terrain.version, self.terrain.seed, settings]);
-        // Features are part of the ground (a world without keeps its
-        // fingerprint).
-        if !self.features.is_empty() {
-            key.as_array_mut().expect("an array").push(serde_json::to_value(&self.features).expect("features serialize"));
-        }
+        let key = serde_json::json!([self.version, self.shape, radius, plane, self.voxel_size_m,
+            self.terrain.generator, self.terrain.version, self.terrain.seed, settings, self.features]);
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         for byte in key.to_string().bytes() {
             h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
@@ -439,31 +433,6 @@ impl Planet {
         self.revision += 1;
         Ok(id)
     }
-    /// Apply `brushes` straight into the baked store as one seal: many small
-    /// brushes at once, not through the recent log one by one. Recent
-    /// brushes are sealed first (history keeps its order). Neither these
-    /// brushes nor any before them can be undone afterwards (an undo would
-    /// restore bricks from under them); renderers follow them as one change
-    /// of the baked store.
-    pub fn apply_sealed(&mut self, brushes: &[Brush]) -> Result<(), String> {
-        if brushes.is_empty() {
-            return Ok(());
-        }
-        let recent = self.edits.recent.len();
-        if recent > 0 {
-            self.seal(recent)?;
-        }
-        let before = self.edits.baked_state();
-        let store = self.bake(brushes)?;
-        let edits = &mut self.edits;
-        edits.sealed_count += brushes.len();
-        edits.sealed_hash = brushes.iter().fold(edits.sealed_hash, crate::edits::brush_hash);
-        edits.undo_seals.clear();
-        let columns = changed_columns(&store, &edits.baked);
-        edits.changed(before, columns, true);
-        self.revision += 1;
-        Ok(())
-    }
 
     /// Bake `brushes` into the baked store in order (large ones over the
     /// cells already baked, at their bake level and into the large layer):
@@ -481,7 +450,7 @@ impl Planet {
             } else {
                 for fb in faces {
                     changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
-                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb), false));
+                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb)));
                 }
                 edits.large.push(&self.grid, *brush).expect("resolved above");
             }
@@ -1327,45 +1296,6 @@ mod tests {
             p.undo().unwrap_or_else(|| panic!("undo {n} of 400: {} undoable, {} recent, {} sealed", p.edits().undoable(), p.edits().recent.len(), p.edits().sealed_len()));
         }
         applied.truncate(applied.len() - 400);
-        assert_eq!(p.edits().hash(), crate::edits::history_hash(&applied));
-        check_replay(&p, &applied, face, i0, j0, top);
-    }
-
-    /// A batch applied sealed (a region's decoration) reads exactly as its
-    /// brushes applied one by one, between brushes applied before and after
-    /// it; the history hash is the same, and nothing up to it is undoable.
-    #[test]
-    fn a_sealed_batch_reads_as_its_brushes_applied_in_order() {
-        let mut p = heightfield(PlanetRecipe::default());
-        let g = *p.grid();
-        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
-        let top = p.column_top(face, i0 + 20, j0 + 20, 0);
-        let mut seed = 0x51ed_270bu64;
-        let mut next = move || {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
-            (seed >> 33) as f64 / (1u64 << 31) as f64
-        };
-        let ops = [BrushOp::Remove, BrushOp::Add, BrushOp::Paint];
-        let mut brush = |n: usize| {
-            let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 16 + (next() * 24.0) as i32);
-            // Every 40th brush is too large to bake.
-            let radius = if n % 40 == 7 { 4.0 } else { 0.05 + next() * 0.6 };
-            let shape = if next() < 0.5 { BrushShape::Sphere } else { BrushShape::Cube };
-            Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32, height: 0.0 }
-        };
-        let before: Vec<Brush> = (0..30).map(&mut brush).collect();
-        let batch: Vec<Brush> = (30..630).map(&mut brush).collect();
-        let after: Vec<Brush> = (630..660).map(&mut brush).collect();
-        for b in &before {
-            p.apply(*b).unwrap();
-        }
-        p.apply_sealed(&batch).unwrap();
-        assert_eq!(p.edits().undoable(), 0, "nothing up to the batch undoes");
-        for b in &after {
-            p.apply(*b).unwrap();
-        }
-        let applied: Vec<Brush> = before.iter().chain(&batch).chain(&after).copied().collect();
-        assert_eq!(p.edits().len(), applied.len());
         assert_eq!(p.edits().hash(), crate::edits::history_hash(&applied));
         check_replay(&p, &applied, face, i0, j0, top);
     }
