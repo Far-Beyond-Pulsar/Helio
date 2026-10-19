@@ -20,6 +20,7 @@ use crate::components::{
 use crate::resolver::{
     PortalOccurrence, PortalProjection, ResolutionError, ResolvedPortalChain, SubLevelResolver,
 };
+use helio_core::CoordinateSpaceAllocator;
 use helio_pass_gbuffer::SubLevelIndex;
 
 /// The coordinate-space slot reserved for root/world coordinates.
@@ -37,11 +38,6 @@ pub struct PortalProjectionConfig {
     pub max_chain_depth: usize,
     pub max_chains: Option<usize>,
     pub max_coordinate_spaces: Option<usize>,
-    /// The first coordinate-space slot portal projections may use. Slots below
-    /// it are reserved (for the scene's rigid frames, which share the table;
-    /// see `Renderer::set_frame_spaces`) and hold identity in the frame
-    /// returned here. `1` (the default) reserves nothing.
-    pub first_slot: u32,
 }
 
 impl Default for PortalProjectionConfig {
@@ -50,7 +46,6 @@ impl Default for PortalProjectionConfig {
             max_chain_depth: 3,
             max_chains: None,
             max_coordinate_spaces: None,
-            first_slot: 1,
         }
     }
 }
@@ -139,6 +134,8 @@ pub enum ProjectionError {
         requested: usize,
         maximum: usize,
     },
+    /// The host's coordinate-space table has no free slot.
+    CoordinateSpacesFull,
     ChainCapacity {
         requested: usize,
         maximum: usize,
@@ -163,6 +160,7 @@ impl fmt::Display for ProjectionError {
                 f,
                 "portal projection needs {requested} coordinate-space slots; maximum is {maximum}"
             ),
+            Self::CoordinateSpacesFull => write!(f, "the coordinate-space table is full"),
             Self::ChainCapacity { requested, maximum } => write!(
                 f,
                 "portal projection produced {requested} chains; maximum is {maximum}"
@@ -200,9 +198,6 @@ impl From<ResolutionError> for ProjectionError {
 pub struct PortalProjectionFrame {
     /// Full coordinate-space table. Slot zero is always identity.
     pub coordinate_spaces: Vec<Mat4>,
-    /// The first slot this projection owns (see
-    /// `PortalProjectionConfig::first_slot`); the slots below are placeholders.
-    pub first_slot: u32,
     /// Dense view rows. Their indices are the IDs stored in chain rows.
     pub portal_views: Vec<PortalViewComponent>,
     /// Dense chain rows. Each `portals[]` entry indexes `portal_views`.
@@ -334,11 +329,15 @@ impl PortalProjectionBridge {
         self.config
     }
 
+    /// Build a projection frame with its own coordinate-space table
+    /// (`PortalProjectionFrame::coordinate_spaces`), numbered from slot 1.
+    /// Use [`Self::build_into`] when the scene's other spaces (rigid frames)
+    /// share the table.
     pub fn build(
         &self,
         resolver: &SubLevelResolver,
     ) -> Result<PortalProjectionFrame, ProjectionError> {
-        self.build_with_visibility(resolver, None, None)
+        self.build_local(resolver, None, None)
     }
 
     /// Build a projection frame after pruning recursive branches against the
@@ -350,7 +349,7 @@ impl PortalProjectionBridge {
         resolver: &SubLevelResolver,
         view_projection: Mat4,
     ) -> Result<PortalProjectionFrame, ProjectionError> {
-        self.build_with_visibility(resolver, Some(view_projection), None)
+        self.build_local(resolver, Some(view_projection), None)
     }
 
     /// Build a visible projection frame with the camera position available
@@ -361,7 +360,62 @@ impl PortalProjectionBridge {
         view_projection: Mat4,
         camera_position: glam::Vec3,
     ) -> Result<PortalProjectionFrame, ProjectionError> {
-        self.build_with_visibility(resolver, Some(view_projection), Some(camera_position))
+        self.build_local(resolver, Some(view_projection), Some(camera_position))
+    }
+
+    /// [`Self::build`], taking its coordinate-space slots from `spaces` (the
+    /// host's one table, shared with the scene's rigid frames) instead of
+    /// numbering its own. The returned frame's `coordinate_spaces` holds only
+    /// the world; the matrices live in the host's table.
+    pub fn build_into(
+        &self,
+        resolver: &SubLevelResolver,
+        spaces: &mut dyn CoordinateSpaceAllocator,
+    ) -> Result<PortalProjectionFrame, ProjectionError> {
+        self.build_with_visibility(resolver, None, None, spaces)
+    }
+
+    /// [`Self::build_visible_from_camera`] with the host's table.
+    pub fn build_visible_from_camera_into(
+        &self,
+        resolver: &SubLevelResolver,
+        view_projection: Mat4,
+        camera_position: glam::Vec3,
+        spaces: &mut dyn CoordinateSpaceAllocator,
+    ) -> Result<PortalProjectionFrame, ProjectionError> {
+        self.build_with_visibility(
+            resolver,
+            Some(view_projection),
+            Some(camera_position),
+            spaces,
+        )
+    }
+
+    /// Build with a table of this frame's own (the `build*` methods).
+    fn build_local(
+        &self,
+        resolver: &SubLevelResolver,
+        view_projection: Option<Mat4>,
+        camera_position: Option<glam::Vec3>,
+    ) -> Result<PortalProjectionFrame, ProjectionError> {
+        let mut local = LocalSpaces {
+            matrices: vec![Mat4::IDENTITY],
+            slots: HashMap::from([(matrix_key(Mat4::IDENTITY), IDENTITY_COORDINATE_SPACE_SLOT)]),
+            maximum: self.config.max_coordinate_spaces,
+        };
+        let mut frame = self
+            .build_with_visibility(resolver, view_projection, camera_position, &mut local)
+            .map_err(|error| match (error, self.config.max_coordinate_spaces) {
+                (ProjectionError::CoordinateSpacesFull, Some(maximum)) => {
+                    ProjectionError::CoordinateSpaceCapacity {
+                        requested: local.matrices.len() + 1,
+                        maximum,
+                    }
+                }
+                (error, _) => error,
+            })?;
+        frame.coordinate_spaces = local.matrices;
+        Ok(frame)
     }
 
     fn build_with_visibility(
@@ -369,6 +423,7 @@ impl PortalProjectionBridge {
         resolver: &SubLevelResolver,
         view_projection: Option<Mat4>,
         camera_position: Option<glam::Vec3>,
+        spaces: &mut dyn CoordinateSpaceAllocator,
     ) -> Result<PortalProjectionFrame, ProjectionError> {
         let occurrences = resolver.resolve_portals()?;
         let mut all_occurrences = BTreeMap::<RuntimePortalKey, PortalOccurrence>::new();
@@ -439,35 +494,14 @@ impl PortalProjectionBridge {
             );
         }
 
-        // Slot 0 is the world; slots up to `first_slot` belong to the scene's rigid
-        // frames and are filled in by the renderer when it layers the tables.
-        let first_slot = self.config.first_slot.max(1);
-        let mut coordinate_spaces = vec![Mat4::IDENTITY; first_slot as usize];
-        let mut coordinate_space_indices = HashMap::<[u32; 16], u32>::new();
-        coordinate_space_indices.insert(matrix_key(Mat4::IDENTITY), IDENTITY_COORDINATE_SPACE_SLOT);
+        let mut highest_slot = IDENTITY_COORDINATE_SPACE_SLOT;
         let mut portal_views = Vec::with_capacity(projections.len());
         let mut view_indices_by_occurrence = BTreeMap::<RuntimePortalKey, Vec<u32>>::new();
         for (index, projection) in projections.iter().enumerate() {
-            let matrix = projection.target_to_source;
-            let key = matrix_key(matrix);
-            let coordinate_space = if let Some(&slot) = coordinate_space_indices.get(&key) {
-                slot
-            } else {
-                if self
-                    .config
-                    .max_coordinate_spaces
-                    .is_some_and(|maximum| coordinate_spaces.len() >= maximum)
-                {
-                    return Err(ProjectionError::CoordinateSpaceCapacity {
-                        requested: coordinate_spaces.len() + 1,
-                        maximum: self.config.max_coordinate_spaces.unwrap(),
-                    });
-                }
-                let slot = coordinate_spaces.len() as u32;
-                coordinate_spaces.push(matrix);
-                coordinate_space_indices.insert(key, slot);
-                slot
-            };
+            let coordinate_space = spaces
+                .space_for(projection.target_to_source)
+                .ok_or(ProjectionError::CoordinateSpacesFull)?;
+            highest_slot = highest_slot.max(coordinate_space);
             let mut view = projection.to_portal_view(coordinate_space);
             if !direct_projection_keys.contains(&PortalProjectionKey::from_projection(projection)) {
                 view._pad = PortalViewComponent::FLAG_MASK_HIDDEN;
@@ -511,13 +545,12 @@ impl PortalProjectionBridge {
         let counts = PortalProjectionCountsComponent {
             portal_view_count: portal_views.len() as u32,
             portal_chain_count: portal_chains.len() as u32,
-            coordinate_space_count: coordinate_spaces.len() as u32,
+            coordinate_space_count: highest_slot + 1,
             _pad: 0,
         };
 
         Ok(PortalProjectionFrame {
-            coordinate_spaces,
-            first_slot,
+            coordinate_spaces: vec![Mat4::IDENTITY],
             portal_views,
             portal_chains,
             occurrence_indices,
@@ -530,6 +563,30 @@ impl PortalProjectionBridge {
 
 fn matrix_key(matrix: Mat4) -> [u32; 16] {
     matrix.to_cols_array().map(f32::to_bits)
+}
+
+/// The table a `build*` call numbers for itself: slot 0 is the world, then
+/// each distinct matrix in order of first use.
+struct LocalSpaces {
+    matrices: Vec<Mat4>,
+    slots: HashMap<[u32; 16], u32>,
+    maximum: Option<usize>,
+}
+
+impl CoordinateSpaceAllocator for LocalSpaces {
+    fn space_for(&mut self, matrix: Mat4) -> Option<u32> {
+        let key = matrix_key(matrix);
+        if let Some(&slot) = self.slots.get(&key) {
+            return Some(slot);
+        }
+        if self.maximum.is_some_and(|maximum| self.matrices.len() >= maximum) {
+            return None;
+        }
+        let slot = self.matrices.len() as u32;
+        self.matrices.push(matrix);
+        self.slots.insert(key, slot);
+        Some(slot)
+    }
 }
 
 fn chain_sort_key(chain: &ResolvedPortalChain) -> Vec<PortalProjectionKey> {
@@ -625,7 +682,26 @@ mod tests {
     }
 
     #[test]
-    fn slots_below_first_slot_are_left_for_the_scenes_frames() {
+    fn a_host_allocator_shares_its_table_with_the_projection() {
+        // The host owns one table. Three rigid frames already hold slots 1..=3;
+        // the projection asks it for its spaces instead of numbering its own.
+        struct Host {
+            matrices: Vec<Mat4>,
+        }
+        impl CoordinateSpaceAllocator for Host {
+            fn space_for(&mut self, matrix: Mat4) -> Option<u32> {
+                if let Some(slot) = self.matrices.iter().position(|m| *m == matrix) {
+                    return Some(slot as u32);
+                }
+                self.matrices.push(matrix);
+                Some(self.matrices.len() as u32 - 1)
+            }
+        }
+        let frame_matrix = |x: f32| Mat4::from_translation(glam::vec3(x, 100.0, 0.0));
+        let mut host = Host {
+            matrices: vec![Mat4::IDENTITY, frame_matrix(1.0), frame_matrix(2.0), frame_matrix(3.0)],
+        };
+
         let mut world = pulsar_scenedb::World::new();
         let a = world.spawn();
         let b = world.spawn();
@@ -654,21 +730,19 @@ mod tests {
                 ],
             ),
         );
-        // Three frames own slots 1..=3; the projection starts at slot 4.
-        let frame = PortalProjectionBridge::with_config(PortalProjectionConfig {
-            first_slot: 4,
-            ..PortalProjectionConfig::default()
-        })
-        .unwrap()
-        .build(&resolver)
-        .unwrap();
-        assert_eq!(frame.first_slot, 4);
-        assert_eq!(frame.coordinate_spaces.len(), 6, "world, 3 reserved, 2 projections");
-        assert!(frame.coordinate_spaces[1..4].iter().all(|m| *m == Mat4::IDENTITY));
+        let frame = PortalProjectionBridge::new(1)
+            .unwrap()
+            .build_into(&resolver, &mut host)
+            .unwrap();
+
+        assert_eq!(host.matrices.len(), 6, "world, 3 frames, 2 projection spaces");
+        assert_eq!(host.matrices[1], frame_matrix(1.0), "the frames are untouched");
+        assert_eq!(frame.coordinate_spaces, vec![Mat4::IDENTITY], "the host owns the matrices");
         assert!(
             frame.portal_views.iter().all(|view| view.coordinate_space >= 4),
-            "no view uses a slot reserved for frames"
+            "no view uses a slot a frame holds"
         );
+        assert_eq!(frame.counts.coordinate_space_count, 6);
     }
 
     #[test]

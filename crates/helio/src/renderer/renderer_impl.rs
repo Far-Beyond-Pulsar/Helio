@@ -106,12 +106,6 @@ pub struct Renderer {
     /// sublevel instances. Kept on Renderer so graph rebuilds cannot reset
     /// the G-buffer's table back to identity.
     pub(crate) coordinate_spaces: Vec<glam::Mat4>,
-    /// The two sources of the table above, layered by `recompose_spaces`: the
-    /// scene's rigid frames (slots `1..`) and a portal projection's own slots
-    /// (from `portal_first_slot` on).
-    pub(crate) frame_spaces: Vec<glam::Mat4>,
-    pub(crate) portal_spaces: Vec<glam::Mat4>,
-    pub(crate) portal_first_slot: u32,
     /// Active dense portal projection counts supplied by the resolver bridge.
     /// Growable SceneDB buffers are capacity-sized, so passes must not infer
     /// active rows from their allocation size.
@@ -563,55 +557,40 @@ impl Renderer {
         self.graph_rebuild_hook = Some(Arc::new(hook));
     }
 
-    /// Set the whole coordinate-space table through the generic graph input
-    /// seam (the non-identity tail: slot 0 is the world and implicit). This
-    /// replaces both the frames and any portal projection; callers that have
-    /// both use [`Self::set_frame_spaces`] and
-    /// [`Self::set_portal_projection_frame`] so neither erases the other.
+    /// Set the coordinate-space table through the generic graph input seam
+    /// (the non-identity tail: slot 0 is the world and implicit). The host owns
+    /// the one table: every producer of spaces (rigid frames, sublevel
+    /// placements, portal projections) takes its slots from the host's
+    /// [`helio_core::CoordinateSpaceAllocator`], and the host hands the result
+    /// here. The owning pass uploads its GPU table during prepare.
     pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
-        self.frame_spaces.clear();
-        self.frame_spaces.extend_from_slice(spaces);
-        self.portal_spaces.clear();
-        self.portal_first_slot = 1;
-        self.recompose_spaces();
+        self.coordinate_spaces.clear();
+        self.coordinate_spaces.extend_from_slice(spaces);
+        self.apply_coordinate_spaces();
     }
 
-    /// Set the matrices of the scene's rigid frames (the non-identity tail:
-    /// element `i` is slot `i + 1`), leaving any portal projection's slots
-    /// alone. A portal projection built after this must start its slots past the
-    /// frames (`PortalProjectionConfig::first_slot`).
-    pub fn set_frame_spaces(&mut self, spaces: &[glam::Mat4]) {
-        self.frame_spaces.clear();
-        self.frame_spaces.extend_from_slice(spaces);
-        self.recompose_spaces();
-    }
-
-    /// Upload a resolver-generated portal projection frame while preserving
-    /// the renderer's existing coordinate-space seam. The frame owns slot
-    /// zero as identity and this facade accepts the non-identity tail; the
-    /// slots below the frame's `first_slot` keep whatever
-    /// [`Self::set_frame_spaces`] put there.
+    /// Upload a resolver-generated portal projection frame built with its own
+    /// table (`PortalProjectionBridge::build`): its spaces become the table.
+    /// A host that shares the table with other producers builds with
+    /// `build_into` and calls [`Self::set_coordinate_spaces`] and
+    /// [`Self::set_portal_projection_counts`] instead.
     pub fn set_portal_projection_frame(
         &mut self,
         frame: &helio_pass_portal_cull::PortalProjectionFrame,
     ) {
-        self.portal_spaces.clear();
-        self.portal_spaces
+        self.coordinate_spaces.clear();
+        self.coordinate_spaces
             .extend_from_slice(frame.renderer_coordinate_spaces());
-        self.portal_first_slot = frame.first_slot.max(1);
-        self.portal_projection_counts = Some((
+        self.set_portal_projection_counts(
             frame.counts.portal_view_count,
             frame.counts.portal_chain_count,
-        ));
-        self.recompose_spaces();
+        );
     }
 
-    fn recompose_spaces(&mut self) {
-        self.coordinate_spaces = merge_spaces(
-            &self.frame_spaces,
-            &self.portal_spaces,
-            self.portal_first_slot,
-        );
+    /// The live portal view and chain counts of a projection whose spaces the
+    /// host placed in the table itself.
+    pub fn set_portal_projection_counts(&mut self, portal_views: u32, portal_chains: u32) {
+        self.portal_projection_counts = Some((portal_views, portal_chains));
         self.apply_coordinate_spaces();
     }
 
@@ -907,77 +886,5 @@ mod camera_identity_tests {
         zoomed.proj = helio_core::depth::perspective(0.5, 16.0 / 9.0, 0.1);
         assert!(CameraIdentity::of(&still) != CameraIdentity::of(&moved));
         assert!(CameraIdentity::of(&still) != CameraIdentity::of(&zoomed));
-    }
-}
-
-/// Layer a portal projection's slots over the scene's rigid frames. Both are
-/// the non-identity tail (element `i` is slot `i + 1`). Slots below
-/// `portal_first_slot` come from `frames`; slots from it on come from
-/// `portal`; anything unclaimed is identity.
-pub(crate) fn merge_spaces(
-    frames: &[glam::Mat4],
-    portal: &[glam::Mat4],
-    portal_first_slot: u32,
-) -> Vec<glam::Mat4> {
-    let first = portal_first_slot.max(1) as usize;
-    let mut merged: Vec<glam::Mat4> = frames.iter().take(first - 1).copied().collect();
-    for (index, space) in portal.iter().enumerate() {
-        let slot = index + 1;
-        if slot < first {
-            continue;
-        }
-        if merged.len() < slot {
-            merged.resize(slot, glam::Mat4::IDENTITY);
-        }
-        merged[index] = *space;
-    }
-    // Frames past the portal's range (none, if the host reserved enough) keep
-    // their slots too.
-    for (index, space) in frames.iter().enumerate().skip(first - 1) {
-        if index >= portal.len() || index + 1 < first {
-            if merged.len() <= index {
-                merged.resize(index + 1, glam::Mat4::IDENTITY);
-            }
-            merged[index] = *space;
-        }
-    }
-    merged
-}
-
-#[cfg(test)]
-mod merge_spaces_tests {
-    use super::merge_spaces;
-    use glam::{Mat4, Vec3};
-
-    fn at(x: f32) -> Mat4 {
-        Mat4::from_translation(Vec3::new(x, 0.0, 0.0))
-    }
-
-    #[test]
-    fn frames_alone_pass_through() {
-        assert_eq!(merge_spaces(&[at(1.0), at(2.0)], &[], 1), vec![at(1.0), at(2.0)]);
-    }
-
-    #[test]
-    fn a_portal_projection_alone_passes_through() {
-        assert_eq!(merge_spaces(&[], &[at(5.0), at(6.0)], 1), vec![at(5.0), at(6.0)]);
-    }
-
-    #[test]
-    fn portals_start_past_the_frames_and_neither_erases_the_other() {
-        // Two frames own slots 1 and 2; the projection starts at slot 3 and its
-        // own placeholders for slots 1 and 2 are identity.
-        let merged = merge_spaces(
-            &[at(1.0), at(2.0)],
-            &[Mat4::IDENTITY, Mat4::IDENTITY, at(30.0), at(40.0)],
-            3,
-        );
-        assert_eq!(merged, vec![at(1.0), at(2.0), at(30.0), at(40.0)]);
-    }
-
-    #[test]
-    fn unclaimed_slots_are_identity() {
-        let merged = merge_spaces(&[at(1.0)], &[Mat4::IDENTITY, Mat4::IDENTITY, at(9.0)], 3);
-        assert_eq!(merged, vec![at(1.0), Mat4::IDENTITY, at(9.0)]);
     }
 }

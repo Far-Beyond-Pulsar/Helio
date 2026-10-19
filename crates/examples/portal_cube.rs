@@ -324,7 +324,6 @@ impl ApplicationHandler for App {
             max_chain_depth: PORTAL_RECURSION_DEPTH,
             max_chains: chain_budget,
             max_coordinate_spaces: None,
-            first_slot: 1,
         })
         .expect("portal_cube projection depth");
         let initial_position = if std::env::var("CUBE_CLOSEUP").is_ok() {
