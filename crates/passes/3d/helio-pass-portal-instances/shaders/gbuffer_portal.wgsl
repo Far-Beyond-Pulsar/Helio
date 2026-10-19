@@ -22,10 +22,9 @@ enable wgpu_binding_array;
 //! of world space directly; (2) a depth-side and ray-through-aperture test at
 //! every composed stage;
 //! and (3) the `portal_mask`
-//! screen-space gate (see below). Debug-visualization modes, lightmap
-//! sampling, and the Radiant material graph override hook are not reachable
-//! here — a portal duplicate always renders through the plain default PBR
-//! path.
+//! screen-space gate (see below). Debug-visualization modes and lightmap
+//! sampling are not reachable here. Materials are: surface evaluation is the
+//! G-buffer's (`radiant_eval_surface`, filled in per material key).
 //!
 //! # Why the depth-side tests and screen-space mask
 //!
@@ -186,6 +185,7 @@ struct VertexOutput {
     @location(6) prev_clip_position: vec4<f32>,
     @location(7) @interpolate(flat) chain_idx: u32,
     @location(8) pre_portal_position: vec3<f32>,
+    @location(9) lightmap_uv:        vec2<f32>,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -277,6 +277,7 @@ fn vs_main(v: Vertex, @location(15) instance_index: u32, @builtin(vertex_index) 
     out.prev_clip_position = prev_clip;
     out.chain_idx          = chain_idx;
     out.pre_portal_position = pre_portal_position;
+    out.lightmap_uv        = vec2<f32>(-1.0, -1.0);
     return out;
 }
 
@@ -420,6 +421,111 @@ fn material_texture_data(material: GpuMaterial, id: u32) -> MaterialTextureData 
         material_slot(NO_TEXTURE),material_slot(NO_TEXTURE),vec4<f32>(1.0,1.0,0.0,0.0));
 }
 
+// ── Surface evaluation ──────────────────────────────────────────────────────
+//
+// The same surface evaluation as `gbuffer.wgsl`, so a portal duplicate draws
+// with the material the real object does: the default PBR path, or this
+// pipeline's material template and Radiant graph (`radiant_eval_surface` and
+// its override markers are filled in per material key, like the G-buffer's).
+// Graph `time` nodes read 0 here: this pass has no globals.
+
+struct SurfaceData {
+    albedo:              vec4<f32>,
+    normal:              vec3<f32>,
+    ao:                  f32,
+    roughness:           f32,
+    metallic:            f32,
+    specular_f0:         vec3<f32>,
+    emissive:            vec3<f32>,
+    alpha:               f32,
+    flags:               u32,
+    subsurface_color:    vec3<f32>,
+    subsurface_radius:   f32,
+    roughness_aniso_x:   f32,
+    roughness_aniso_y:   f32,
+    aniso_rotation:      f32,
+}
+
+const FLAG_HAS_CLEAR_COAT: u32 = 1u << 4u;
+const FLAG_HAS_SUBSURFACE: u32 = 1u << 5u;
+const FLAG_HAS_ANISOTROPY: u32 = 1u << 6u;
+const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
+const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
+const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
+const MATERIAL_WORKFLOW_METALLIC: u32 = 0u;
+
+fn default_pbr_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
+    let uv = input.tex_coords;
+    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+    let albedo = material.base_color * base_sample;
+    let alpha = albedo.a;
+
+    let N_geom = normalize(input.world_normal);
+
+    var N: vec3<f32>;
+    if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
+        let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
+        let B = cross(N_geom, T) * input.bitangent_sign;
+        var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
+        norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);
+        N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
+    } else {
+        N = N_geom;
+    }
+
+    let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
+    let occlusion_sample = sample_texture(material_tex.occlusion, uv, vec4<f32>(1.0));
+    let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
+
+    var ao: f32 = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
+    var roughness: f32 = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
+    var metallic: f32 = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
+    var specular_f0: vec3<f32> = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
+    var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
+
+    return SurfaceData(albedo, N, ao, roughness, metallic, specular_f0, emissive, alpha,
+                       0u, vec3<f32>(0.0), 0.0, 0.0, 0.0, 0.0);
+}
+
+fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
+    var s = default_pbr_surface(material, material_tex, input);
+
+    var albedo: vec4<f32> = s.albedo;
+    var N: vec3<f32> = s.normal;
+    var ao: f32 = s.ao;
+    var roughness: f32 = s.roughness;
+    var metallic: f32 = s.metallic;
+    var specular_f0: vec3<f32> = s.specular_f0;
+    var emissive: vec3<f32> = s.emissive;
+    var alpha: f32 = s.alpha;
+    var surface_flags: u32 = s.flags;
+    var subsurface_color: vec3<f32> = s.subsurface_color;
+    var subsurface_radius: f32 = s.subsurface_radius;
+    var roughness_aniso_x: f32 = s.roughness_aniso_x;
+    var roughness_aniso_y: f32 = s.roughness_aniso_y;
+    var aniso_rotation: f32 = s.aniso_rotation;
+
+    // RADIANT_OVERRIDE_SURFACE
+    // RADIANT_OVERRIDE_END
+
+    s.albedo = albedo;
+    s.normal = N;
+    s.ao = ao;
+    s.roughness = roughness;
+    s.metallic = metallic;
+    s.specular_f0 = specular_f0;
+    s.emissive = emissive;
+    s.alpha = alpha;
+    s.flags = surface_flags;
+    s.subsurface_color = subsurface_color;
+    s.subsurface_radius = subsurface_radius;
+    s.roughness_aniso_x = roughness_aniso_x;
+    s.roughness_aniso_y = roughness_aniso_y;
+    s.aniso_rotation = aniso_rotation;
+
+    return s;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     let chain = portal_chain_handles[input.chain_idx];
@@ -458,44 +564,23 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
 
     let material = materials[input.material_id];
     let material_tex = material_texture_data(material,input.material_id);
-    let uv = input.tex_coords;
 
-    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
-    let albedo = material.base_color * base_sample;
-    if albedo.a <= 0.001 || albedo.a < material_tex.params.z { discard; }
+    let surface = radiant_eval_surface(material, material_tex, input);
 
-    let N_geom = normalize(input.world_normal);
-    var N: vec3<f32>;
-    if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
-        let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
-        let B = cross(N_geom, T) * input.bitangent_sign;
-        var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
-        norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);
-        N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
-    } else {
-        N = N_geom;
-    }
-
-    let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
-    let occlusion_sample = sample_texture(material_tex.occlusion, uv, vec4<f32>(1.0));
-    let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
-
-    let ao = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
-    let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
-    let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
-    let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
-    let emissive = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
+    // Alpha test
+    if surface.alpha <= 0.001 || surface.alpha < material_tex.params.z { discard; }
 
     var out: GBufferOutput;
-    out.albedo = vec4<f32>(albedo.rgb, albedo.a);
-    out.normal = vec4<f32>(N, specular_f0.r);
-    out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
-    out.emissive = vec4<f32>(emissive, specular_f0.b);
+    out.albedo = vec4<f32>(surface.albedo.rgb, surface.alpha);
+    out.normal = vec4<f32>(surface.normal, surface.specular_f0.r);
+    out.orm = vec4<f32>(surface.ao, surface.roughness, surface.metallic, surface.specular_f0.g);
+    out.emissive = vec4<f32>(surface.emissive, surface.specular_f0.b);
     // x = -1 reads as "no lightmap"; y carries the chain so lighting can shade this
     // pixel in the content's own world (-3 - chain index, below the -1/-2 tags).
     out.lightmap_uv = vec2<f32>(-1.0, -3.0 - f32(input.chain_idx));
-    out.sss = vec4<f32>(0.0);
-    out.extra = vec4<f32>(0.0);
+    out.sss = vec4<f32>(surface.subsurface_color, surface.subsurface_radius);
+    out.extra = vec4<f32>(surface.roughness_aniso_x, surface.roughness_aniso_y,
+                          surface.aniso_rotation, f32(surface.flags));
     out.velocity = vec4<f32>(compute_velocity(input),0.0,0.0);
     return out;
 }

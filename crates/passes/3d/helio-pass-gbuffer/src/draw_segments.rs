@@ -53,6 +53,9 @@ pub struct DrawSegments<'a> {
     /// `None` when the device lacks `MULTI_DRAW_INDIRECT_COUNT`.
     pub counts: Option<&'a wgpu::Buffer>,
     pub segments: &'a [DrawSegment],
+    /// The GPU segment table (`GpuSegment` rows, one per segment), for passes that
+    /// compact their own indirect records into the same segments.
+    pub table: &'a wgpu::Buffer,
 }
 
 impl<'a> DrawSegments<'a> {

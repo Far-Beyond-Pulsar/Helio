@@ -52,6 +52,10 @@
 
 use std::sync::Arc;
 
+mod segments;
+pub use segments::{PortalSegmentBuffers, SharedPortalSegments};
+use segments::PortalCompaction;
+
 mod portal_math;
 pub use portal_math::{
     crossing_detected, plane_signed_distance, portal_pose_facing, PortalPair, PortalPose,
@@ -123,6 +127,11 @@ pub struct PortalCullPass {
     /// `select` claims write slots from.
     portal_stats_buf: wgpu::Buffer,
 
+    /// Packs the surviving records per material key for the portal draw.
+    compaction: PortalCompaction,
+    /// The packed records `PortalInstancePass` draws (see `segments`).
+    pub segments: SharedPortalSegments,
+
     bind_group: Option<wgpu::BindGroup>,
     /// (camera, instances, draw_calls, coordinate_spaces, portal_views,
     /// chain_handles, chain_portals, compacted_chains, batch GPU counts)
@@ -177,6 +186,8 @@ impl PortalCullPass {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let segments = PortalSegmentBuffers::shared(device);
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PortalCull BGL"),
@@ -238,6 +249,8 @@ impl PortalCullPass {
             portal_compacted_indices_buf,
             portal_compacted_chains_buf,
             portal_stats_buf,
+            compaction: PortalCompaction::new(device, Arc::clone(&segments)),
+            segments,
             bind_group: None,
             bind_group_key: None,
             draw_capacity: 0,
@@ -277,6 +290,9 @@ impl RenderPass for PortalCullPass {
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.read("object_batch");
+        // The G-buffer's draw segments (OcclusionCull publishes them), whose layout the
+        // portal draw segments follow.
+        builder.read("culled_batch");
     }
 
     fn render_pass_descriptor<'a>(
@@ -330,6 +346,7 @@ impl RenderPass for PortalCullPass {
                 self.chain_count,
             );
         }
+        eprintln!("CULL-EXEC cap={} chains={}", self.draw_capacity, self.chain_count);
         if self.draw_capacity == 0 || self.chain_count == 0 {
             return Ok(());
         }
@@ -449,6 +466,16 @@ impl RenderPass for PortalCullPass {
             pass.set_pipeline(&self.finalize_pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(draw_workgroups.div_ceil(64), 1, 1);
+        }
+        drop(cmds);
+
+        // Pack the survivors per material key, for the portal draw's pipelines.
+        let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> =
+            ctx.registry.get(helio_core::ResourceKey::new("culled_batch"));
+        eprintln!("CULL-CHECK culled={} ", culled.is_some());
+        if let Some(culled) = culled {
+            let indirect = Arc::clone(&self.portal_indirect_buf);
+            self.compaction.record(ctx, &batch, &culled.segments, &indirect);
         }
 
         Ok(())

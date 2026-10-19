@@ -422,12 +422,13 @@ fn add_geometry_passes(
     // check and depth self-occlusion both have something correct to test
     // against. See helio-pass-portal-instances' shaders for why this exists.
     if config.enable_portals {
-        if let Some((indirect_buf, compacted_buf, compacted_chains_buf)) =
+        if let Some((indirect_buf, compacted_buf, compacted_chains_buf, portal_segments)) =
             graph.find_pass::<PortalCullPass>().map(|p| {
                 (
                     Arc::clone(&p.portal_indirect_buf),
                     Arc::clone(&p.portal_compacted_indices_buf),
                     Arc::clone(&p.portal_compacted_chains_buf),
+                    Arc::clone(&p.segments),
                 )
             })
         {
@@ -437,6 +438,7 @@ fn add_geometry_passes(
                 indirect_buf,
                 compacted_buf,
                 compacted_chains_buf,
+                portal_segments,
             )));
         }
     }

@@ -105,6 +105,54 @@ impl RadiantTemplate {
         }
     }
 
+    /// This template's surface function, with any helpers declared beside it,
+    /// as it differs from the default G-buffer shader. `None` for the default
+    /// template (nothing differs) and for a template of another shape.
+    fn surface_override(&self) -> Option<String> {
+        let base = base_gbuffer_source();
+        let marker = "fn radiant_eval_surface";
+        let start = base.find(marker)?;
+        let open = start + base[start..].find('{')?;
+        let mut depth = 1u32;
+        let mut end = open + 1;
+        for byte in base.as_bytes()[open + 1..].iter() {
+            end += 1;
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (prefix, suffix) = (&base[..start], &base[end..]);
+        let source: &str = &self.wgsl_source;
+        if source == base || source.len() < prefix.len() + suffix.len() {
+            return None;
+        }
+        (source.starts_with(prefix) && source.ends_with(suffix))
+            .then(|| source[prefix.len()..source.len() - suffix.len()].to_string())
+    }
+
+    /// [`Self::build_shader_source`] for a pass whose own shader (`base`)
+    /// declares `radiant_eval_surface` and the override markers like the
+    /// G-buffer's does: this template's surface function and `graph_wgsl` go
+    /// into `base` instead of into the G-buffer shader.
+    pub fn build_shader_source_on(&self, base: &str, graph_wgsl: &str, max_textures: usize) -> String {
+        let composed = match self.surface_override() {
+            Some(surface) => compose_fn_override(base, &surface, "fn radiant_eval_surface"),
+            None => base.to_string(),
+        };
+        RadiantTemplate {
+            name: Arc::clone(&self.name),
+            wgsl_source: Arc::from(composed),
+        }
+        .build_shader_source(graph_wgsl, max_textures)
+    }
+
     /// Replace native binding arrays with baseline-WebGPU individual bindings.
     ///
     /// WebGPU does not expose wgpu's `binding_array` WGSL extension. Individual
