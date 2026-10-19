@@ -346,7 +346,6 @@ impl RenderPass for PortalCullPass {
                 self.chain_count,
             );
         }
-        eprintln!("CULL-EXEC cap={} chains={}", self.draw_capacity, self.chain_count);
         if self.draw_capacity == 0 || self.chain_count == 0 {
             return Ok(());
         }
@@ -472,7 +471,6 @@ impl RenderPass for PortalCullPass {
         // Pack the survivors per material key, for the portal draw's pipelines.
         let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> =
             ctx.registry.get(helio_core::ResourceKey::new("culled_batch"));
-        eprintln!("CULL-CHECK culled={} ", culled.is_some());
         if let Some(culled) = culled {
             let indirect = Arc::clone(&self.portal_indirect_buf);
             self.compaction.record(ctx, &batch, &culled.segments, &indirect);

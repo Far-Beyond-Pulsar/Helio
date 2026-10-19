@@ -726,7 +726,6 @@ impl RenderPass for PortalInstancePass {
         let packed = culled
             .as_ref()
             .filter(|culled| packed_fit && !culled.segments.is_empty() && batch.range_slot_capacity != 0);
-        eprintln!("PACKED-CHECK packed={} fit={} segs={} slots={}", packed.is_some(), packed_fit, culled.as_ref().map_or(0, |c| c.segments.segments.len()), batch.range_slot_capacity);
         if let Some(culled) = packed {
             // One draw per material key, with that key's pipeline: a duplicate is
             // shaded by its own material (`PortalCullPass` packed the records per
