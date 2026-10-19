@@ -85,30 +85,43 @@ struct RayColumn {
 pub const RECENT_BRUSHES: usize = 64;
 /// Brushes sealed at a time.
 const SEAL_BATCH: usize = 16;
-/// Largest brush baked into cells, radius in half base cells (32 cells):
-/// larger ones would bake millions of cells and stay analytic.
+/// Largest brush baked into base cells, radius in half base cells (32
+/// cells): larger ones would bake millions of cells, and bake at their
+/// [`bake_level`] instead.
 pub const BAKE_RADIUS_HALF: u32 = 64;
+
+/// The level a sealed large brush bakes at: the first whose cells it spans
+/// at most [`BAKE_RADIUS_HALF`] half cells of. Below it the brush stays
+/// analytic (`Edits::large`); there and above, baked cells hold it, so a
+/// coarse chunk reads bricks, not every large brush over it (10000 digs 8 m
+/// across cost a regenerated chunk 0.7 ms of brushes).
+pub fn bake_level(fb: &FaceBrush) -> u32 {
+    (0..31).find(|&level| (fb.radius_half >> level) <= BAKE_RADIUS_HALF).unwrap_or(31)
+}
 /// Seals kept undoable (the latest `UNDO_SEALS * SEAL_BATCH` sealed
 /// brushes undo without rebuilding the world).
 const UNDO_SEALS: usize = 128;
 /// Baked column changes kept for renderers to catch up with.
 const CHANGES_KEPT: usize = 8192;
-/// ...and the columns they list, at most (about 12 MB).
+/// ...and the columns they list, at most (about 12 MB): a decoration batch
+/// changes tens of thousands of columns.
 const CHANGES_COLUMNS_KEPT: usize = 1 << 20;
 
 /// A world's edits in three layers, applied to the terrain in this order
 /// (see `edit_store`):
 ///
-/// 1. `large`: sealed brushes too large to bake, analytic;
+/// 1. `large`: sealed brushes too large to bake into base cells, analytic
+///    below their [`bake_level`];
 /// 2. `baked`: every other sealed brush, as baked cell edits (with coarser
 ///    levels built from the base level, so accumulated small edits show at
-///    any distance);
+///    any distance), and the large ones from their bake level up;
 /// 3. `recent`: the latest brushes, exact.
 ///
 /// Sealing keeps the order exact: a small brush bakes on top of the store;
-/// a large one is applied to the cells already baked (it came after them)
-/// and joins `large`, which is applied under the store. Every cell then
-/// reads `recent(baked(large(terrain)))`, the brushes in their order.
+/// a large one is applied to the cells already baked (it came after them),
+/// baked over its bake level's cells, and joins `large`, which is applied
+/// under the store. Every cell then reads `recent(baked(large(terrain)))`,
+/// the brushes in their order.
 ///
 /// Memory is bounded by the edits' effect, not their count: sealed brushes
 /// leave only their baked cells (and large ones their analytic record), a
@@ -200,8 +213,6 @@ impl Edits {
     fn changed(&mut self, before: (usize, u64), columns: impl Iterator<Item = ColumnKey>) {
         let after = self.baked_state();
         self.changes.push_back(BakedChange { before, after, columns: columns.collect() });
-        // Bounded by size as well as count: a decoration batch changes tens of
-        // thousands of columns, and thousands of those must not pile up.
         let mut kept: usize = self.changes.iter().map(|c| c.columns.len()).sum();
         while self.changes.len() > 1 && (self.changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT) {
             if let Some(old) = self.changes.pop_front() {
@@ -347,6 +358,58 @@ impl Planet {
         self.revision += 1;
         Ok(id)
     }
+    /// Apply `brushes` straight into the baked store as one seal: many small
+    /// brushes (a region's trees, a structure) at once, not through the
+    /// recent log one by one. Recent brushes are sealed first (history keeps
+    /// its order). Neither these brushes nor any before them can be undone
+    /// afterwards (an undo would restore bricks from under them); renderers
+    /// follow them as one change of the baked store.
+    pub fn apply_sealed(&mut self, brushes: &[Brush]) -> Result<(), String> {
+        if brushes.is_empty() {
+            return Ok(());
+        }
+        let recent = self.edits.recent.len();
+        if recent > 0 {
+            self.seal(recent)?;
+        }
+        let resolved: Vec<Vec<FaceBrush>> = brushes.iter().map(|b| b.resolve(&self.grid)).collect::<Result<_, _>>()?;
+        let before = self.edits.baked_state();
+        let edits = &mut self.edits;
+        edits.baked.begin_record();
+        let mut changed = Vec::new();
+        let mut hash = edits.sealed_hash;
+        for (brush, faces) in brushes.iter().zip(&resolved) {
+            if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
+                for fb in faces {
+                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
+                }
+            } else {
+                for fb in faces {
+                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
+                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb), false));
+                }
+                edits.large.push(&self.grid, *brush).expect("resolved above");
+            }
+            hash = crate::edits::brush_hash(hash, brush);
+            // A cube brush reaches sqrt(3) radii from its centre.
+            let reach = brush.radius * 1.7321 + self.grid.voxel_size();
+            let centre = self.grid.radial(DVec3::from_array(brush.center));
+            match brush.op {
+                crate::edits::BrushOp::Add => self.edit_top = self.edit_top.max(centre + reach),
+                crate::edits::BrushOp::Remove => self.edit_bottom = self.edit_bottom.min(centre - reach),
+                _ => {}
+            }
+        }
+        edits.baked.rebuild_coarse(changed, self.grid.levels());
+        let store = edits.baked.end_record();
+        edits.sealed_count += brushes.len();
+        edits.sealed_hash = hash;
+        edits.undo_seals.clear();
+        edits.changed(before, store.columns());
+        self.revision += 1;
+        Ok(())
+    }
+
     /// Undo the latest brush: a recent one, or one of the latest sealed ones
     /// (its seal is undone first); `None` past them
     /// ([`Edits::undoable`]).
@@ -378,6 +441,7 @@ impl Planet {
             } else {
                 for fb in faces {
                     changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
+                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb), false));
                 }
                 edits.large.push(&self.grid, *brush).expect("resolved above");
             }
@@ -463,6 +527,13 @@ impl Planet {
             .map(|(id, index)| log.resolved(id).faces[index as usize])
             .collect()
     }
+    /// [`Self::face_brushes`] of the large layer: those below their bake
+    /// level (baked cells hold them above).
+    fn large_brushes(&self, face: u8, i: i32, j: i32, k: Option<i32>, level: u32) -> Vec<FaceBrush> {
+        let mut brushes = Self::face_brushes(&self.edits.large, face, i, j, k, level);
+        brushes.retain(|fb| level < bake_level(fb));
+        brushes
+    }
     /// Canonical `(kind, material)` of a level cell: kind 0 air, 1 solid.
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
@@ -470,7 +541,7 @@ impl Planet {
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         let point = || self.grid.volume_point(face, i, j, k, level);
-        let large = Self::face_brushes(&self.edits.large, face, i, j, Some(k), level);
+        let large = self.large_brushes(face, i, j, Some(k), level);
         let (kind, material) = apply(large.into_iter(), center, point, kind, 0);
         let (kind, material) = self.edits.baked.cell(face, level, i, j, k).apply(kind, material);
         apply(Self::face_brushes(&self.edits.recent, face, i, j, Some(k), level).into_iter(), center, point, kind, material)
@@ -492,7 +563,7 @@ impl Planet {
             *column = Some(RayColumn {
                 key,
                 height: self.column_height(face, i, j, level),
-                large: Self::face_brushes(&self.edits.large, face, i, j, None, level),
+                large: self.large_brushes(face, i, j, None, level),
                 recent: Self::face_brushes(&self.edits.recent, face, i, j, None, level),
             });
         }
@@ -522,8 +593,8 @@ impl Planet {
     }
     /// Slope (eighths of a cell per cell) that classifies the materials of
     /// base column (i, j), whatever level draws it: central differences of
-    /// level-4 heights two cells (3.2 m) each way, in base layers (as the
-    /// shader reads them from level-4 columns' relief).
+    /// level-4 heights two cells (3.2 m) each way, in base layers (as
+    /// `tile_slopes_main` in chunk_generate.wgsl evaluates them).
     ///
     /// Block slopes of level-4 cells are interpolated between their centres
     /// (in 32nds, truncated as the shader does).
@@ -1161,6 +1232,45 @@ mod tests {
         check_replay(&p, &applied, face, i0, j0, top);
     }
 
+    /// A batch applied sealed (a region's decoration) reads exactly as its
+    /// brushes applied one by one, between brushes applied before and after
+    /// it; the history hash is the same, and nothing up to it is undoable.
+    #[test]
+    fn a_sealed_batch_reads_as_its_brushes_applied_in_order() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
+        let top = p.column_top(face, i0 + 20, j0 + 20, 0);
+        let mut seed = 0x51ed_270bu64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        let ops = [BrushOp::Remove, BrushOp::Add, BrushOp::Paint];
+        let mut brush = |n: usize| {
+            let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 16 + (next() * 24.0) as i32);
+            // Every 40th brush is too large to bake.
+            let radius = if n % 40 == 7 { 4.0 } else { 0.05 + next() * 0.6 };
+            let shape = if next() < 0.5 { BrushShape::Sphere } else { BrushShape::Cube };
+            Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32, height: 0.0 }
+        };
+        let before: Vec<Brush> = (0..30).map(&mut brush).collect();
+        let batch: Vec<Brush> = (30..630).map(&mut brush).collect();
+        let after: Vec<Brush> = (630..660).map(&mut brush).collect();
+        for b in &before {
+            p.apply(*b).unwrap();
+        }
+        p.apply_sealed(&batch).unwrap();
+        assert_eq!(p.edits().undoable(), 0, "nothing up to the batch undoes");
+        for b in &after {
+            p.apply(*b).unwrap();
+        }
+        let applied: Vec<Brush> = before.iter().chain(&batch).chain(&after).copied().collect();
+        assert_eq!(p.edits().len(), applied.len());
+        assert_eq!(p.edits().hash(), crate::edits::history_hash(&applied));
+        check_replay(&p, &applied, face, i0, j0, top);
+    }
+
     /// Every level-0 cell of a 40x40x40 block reads what `applied` replayed
     /// in order over the terrain gives.
     fn check_replay(p: &Planet, applied: &[Brush], face: u8, i0: i32, j0: i32, top: i32) {
@@ -1191,6 +1301,50 @@ mod tests {
     }
 
     /// The walks' kinds are the canonical ones at every level.
+    #[test]
+    fn sealed_large_brushes_read_the_same_at_their_bake_level() {
+        // A dig 8 m across, sealed (it bakes at level 2), on unedited ground:
+        // at its bake level every cell reads as the brush applied
+        // analytically to the terrain, and below it the brush stays
+        // analytic.
+        let mut p = heightfield(PlanetRecipe::default());
+        let unedited = p.clone();
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 16, g.cells() / 2 - 32);
+        let top = p.column_top(face, i0, j0, 0);
+        let centre = g.cell_center(Cell::new(face, i0, j0, top));
+        let dig = Brush { center: centre.to_array(), radius: 8.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 };
+        p.apply(dig).unwrap();
+        // Far away small brushes push it out of the recent window.
+        let far = g.cell_center(Cell::new(face, i0 + 4000, j0, top));
+        for _ in 0..RECENT_BRUSHES + SEAL_BATCH {
+            p.apply(Brush { center: far.to_array(), radius: 0.1, shape: BrushShape::Cube, op: BrushOp::Paint, material: 3, height: 0.0 }).unwrap();
+        }
+        assert_eq!(p.edits().large.len(), 1, "the dig is sealed and large");
+        let faces = dig.resolve(&g).unwrap();
+        let level = bake_level(&faces[0]);
+        assert_eq!(level, 2);
+        assert!(p.edits().baked.brick_counts()[level as usize] > 0);
+        let (ci, cj, ck) = (i0 >> level, j0 >> level, top >> level);
+        let reach = 30;
+        let mut inside = 0;
+        for i in ci - reach..=ci + reach {
+            for j in cj - reach..=cj + reach {
+                for k in ck - reach..=ck + reach {
+                    let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
+                    let point = || g.volume_point(face, i, j, k, level);
+                    let natural = unedited.sample_kind(level, face, i, j, k);
+                    let want = apply(faces.iter().copied(), center, point, natural.0, natural.1);
+                    assert_eq!(p.sample_kind(level, face, i, j, k), want, "level {level} cell ({i}, {j}, {k})");
+                    inside += usize::from(natural.0 == 1 && want.0 == 0);
+                }
+            }
+        }
+        assert!(inside > 1000, "{inside} cells dug");
+        assert_eq!(p.large_brushes(face, i0 >> (level - 1), j0 >> (level - 1), None, level - 1).len(), 1);
+        assert!(p.large_brushes(face, ci, cj, None, level).is_empty());
+    }
+
     #[test]
     fn sealed_small_edits_show_at_coarse_levels() {
         let mut p = heightfield(PlanetRecipe::default());
@@ -1296,76 +1450,5 @@ mod scaling {
             }
             eprintln!("{n} edits: clone {:.3} ms, append {per_edit:.1} us/edit", t.elapsed().as_secs_f64() * 1000.0 / copies as f64);
         }
-    }
-}
-
-impl Planet {
-    /// Seals every recent brush into the baked store, so renderers that read
-    /// edits cell by cell (`ChunkWorld`'s block materials) see all of them.
-    pub fn seal_all(&mut self) -> Result<(), String> {
-        let n = self.edits.recent.len();
-        if n > 0 {
-            self.seal(n)?;
-            self.revision += 1;
-        }
-        Ok(())
-    }
-}
-
-impl Planet {
-    /// Applies `brushes` straight into the baked store, as sealed edits: many
-    /// small brushes (a world's trees, a structure) in one pass instead of one
-    /// at a time through the recent log and its seals. They cannot be undone
-    /// (the undo history is dropped), and the renderer follows them as one
-    /// change of the baked store.
-    pub fn apply_baked(&mut self, brushes: &[Brush]) -> Result<(), String> {
-        if brushes.is_empty() {
-            return Ok(());
-        }
-        // Whatever is recent goes in first, so the order of history holds.
-        self.seal_all()?;
-        let before = self.edits.baked_state();
-        let large = self.edits.large.clone();
-        let mut resolved = Vec::with_capacity(brushes.len());
-        for brush in brushes {
-            resolved.push(brush.resolve(&self.grid)?);
-        }
-        let edits = &mut self.edits;
-        edits.baked.begin_record();
-        let mut changed = Vec::new();
-        let mut hash = edits.sealed_hash;
-        for (brush, faces) in brushes.iter().zip(&resolved) {
-            if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
-                for fb in faces {
-                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
-                }
-            } else {
-                for fb in faces {
-                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
-                }
-                edits.large.push(&self.grid, *brush)?;
-            }
-            hash = crate::edits::brush_hash(hash, brush);
-            // A cube brush reaches sqrt(3) radii from its centre.
-            let reach = brush.radius * 1.7321 + self.grid.voxel_size();
-            let centre = self.grid.radial(DVec3::from_array(brush.center));
-            match brush.op {
-                crate::edits::BrushOp::Add => self.edit_top = self.edit_top.max(centre + reach),
-                crate::edits::BrushOp::Remove => self.edit_bottom = self.edit_bottom.min(centre - reach),
-                _ => {}
-            }
-        }
-        let edits = &mut self.edits;
-        edits.baked.rebuild_coarse(changed, self.grid.levels());
-        let store = edits.baked.end_record();
-        edits.sealed_count += brushes.len();
-        edits.sealed_hash = hash;
-        // History that can be undone ends here.
-        edits.undo_seals.clear();
-        let _ = large;
-        let columns: Vec<ColumnKey> = store.columns().collect();
-        edits.changed(before, columns.into_iter());
-        self.revision += 1;
-        Ok(())
     }
 }

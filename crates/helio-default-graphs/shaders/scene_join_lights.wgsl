@@ -71,7 +71,7 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
     let t = transforms[index];
     // World space: the billboard pass subtracts the origin itself.
     let position = object_position(t);
-    let relative = relative_position(position, u.origin_hi.xyz, u.origin_lo.xyz);
+    let relative = object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
     let direction = object_rotation(t) * vec3<f32>(0.0, -1.0, 0.0);
     light.position_range[0] = relative.x;
     light.position_range[1] = relative.y;

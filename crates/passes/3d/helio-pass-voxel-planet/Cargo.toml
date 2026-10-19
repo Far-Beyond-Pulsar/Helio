@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["engine"]
 # Helio render-graph integration (GPU residency, tracing, GBuffer).
-engine = ["dep:helio-core", "dep:wgpu", "dep:image"]
+engine = ["dep:helio-core", "dep:wgpu", "dep:image", "dep:miniz_oxide"]
 
 [dependencies]
 glam = { version = "0.33", features = ["bytemuck"] }
@@ -16,9 +16,13 @@ bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rustc-hash = "2.1"
+# Brush baking and coarse rebuilds across cores (`edit_store`).
+rayon = "1.12"
 wgpu = { version = "30.0.1", optional = true }
 helio-core = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+# Kept chunks in edit snapshots (`ChunkWorld::kept_snapshot`).
+miniz_oxide = { version = "0.8", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"

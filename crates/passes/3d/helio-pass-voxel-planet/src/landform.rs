@@ -1506,9 +1506,9 @@ fn earthlike_material(
 
 /// Material of a solid ground cell by the stack's material style.
 /// `top_height` is the column height (mm), `depth` cells below the column
-/// top (0 = exposed top cell), `slope` the ground slope across the cell's
-/// 8x8 column block in eighths of a cell per cell, `layer` the base layer
-/// index of the cell.
+/// top (0 = exposed top cell), `slope` the ground slope in eighths of a
+/// cell per cell (`Planet::material_slope`), `layer` the base layer index
+/// of the cell; `p` is the cell's volume point.
 pub fn ground_material(c: &LandformConstants, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     match c.style[0] {
         STYLE_LUNAR => lunar_material(c, p, surface, depth, slope, layer),

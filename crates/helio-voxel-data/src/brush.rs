@@ -73,6 +73,25 @@ pub struct VoxelEditBase {
     pub snapshot: std::sync::Arc<[u8]>,
 }
 
+/// A renderer's chunks of a journal's edits (`helio-pass-voxel-planet`'s
+/// `KeptChunks::to_bytes`: what the edits made, so a loaded world copies
+/// it instead of generating it from the terrain and every edit), for the
+/// journal's first `brushes` edits, whose hash is `hash`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoxelKeptChunks {
+    pub brushes: usize,
+    pub hash: u64,
+    pub bytes: std::sync::Arc<[u8]>,
+}
+
+impl VoxelKeptChunks {
+    /// `bytes` made for every edit of `journal`.
+    pub fn of(journal: &VoxelEditJournal, bytes: std::sync::Arc<[u8]>) -> Self {
+        let hash = journal.prefix_hash(journal.len()).expect("the journal's own length");
+        Self { brushes: journal.len(), hash, bytes }
+    }
+}
+
 /// The ordered edit journal of a voxel world.
 ///
 /// Copies share structure (edits live in shared chunks), and every edit
@@ -88,10 +107,15 @@ pub struct VoxelEditBase {
 /// Edits belong to the terrain they were made on: `terrain` is that
 /// terrain's fingerprint (form, voxel size, generator, seed and settings;
 /// 0 before any). Another terrain starts with no edits ([`Self::made_on`]).
-/// Serialized as `{"terrain": .., "base": .., "edits": [..]}`.
+///
+/// A save may keep a renderer's chunks of the journal's edits with it
+/// ([`Self::keep_chunks`]); any change of the edits drops them.
+/// Serialized as `{"terrain": .., "base": .., "edits": [..], "kept": ..}`.
 #[derive(Clone, Default)]
 pub struct VoxelEditJournal {
     base: Option<std::sync::Arc<VoxelEditBase>>,
+    /// Chunks of every edit, the base's included (none past a change).
+    kept: Option<std::sync::Arc<VoxelKeptChunks>>,
     /// The edits after the base.
     chunks: Vec<std::sync::Arc<Vec<(VoxelBrushEdit, u64)>>>,
     /// Every edit, the base's included.
@@ -160,6 +184,7 @@ impl VoxelEditJournal {
         // Copies only this chunk when another journal still shares it.
         std::sync::Arc::make_mut(self.chunks.last_mut().expect("pushed above")).push((edit, hash));
         self.len += 1;
+        self.kept = None;
     }
     /// Remove the newest edit (never one of the base's).
     pub fn pop(&mut self) -> Option<VoxelBrushEdit> {
@@ -169,6 +194,7 @@ impl VoxelEditJournal {
             self.chunks.pop();
         }
         self.len -= 1;
+        self.kept = None;
         Some(edit)
     }
     /// The listed edits (after the base), in order.
@@ -205,6 +231,20 @@ impl VoxelEditJournal {
         self.chunks = tail.chunks(JOURNAL_CHUNK).map(|chunk| std::sync::Arc::new(chunk.to_vec())).collect();
         self.base = Some(std::sync::Arc::new(base));
         true
+    }
+    /// Keep a renderer's chunks of the edits with the journal (saved with
+    /// it): whether they were made for exactly its edits (else they are not
+    /// kept).
+    pub fn keep_chunks(&mut self, kept: VoxelKeptChunks) -> bool {
+        let fits = kept.brushes == self.len && self.prefix_hash(self.len) == Some(kept.hash);
+        if fits {
+            self.kept = Some(std::sync::Arc::new(kept));
+        }
+        fits
+    }
+    /// The renderer's chunks kept for the edits, until they change.
+    pub fn kept_chunks(&self) -> Option<&VoxelKeptChunks> {
+        self.kept.as_deref()
     }
     /// Fingerprint of the terrain the edits were made on (0: none yet).
     pub fn terrain(&self) -> u64 {
@@ -262,6 +302,14 @@ struct SavedBase {
     snapshot: String,
 }
 
+/// The saved form of a [`VoxelKeptChunks`] (the bytes in base64).
+#[derive(Serialize, Deserialize)]
+struct SavedKept {
+    brushes: usize,
+    hash: u64,
+    chunks: String,
+}
+
 /// The saved form of a [`VoxelEditJournal`].
 #[derive(Serialize, Deserialize)]
 struct SavedJournal<E> {
@@ -271,13 +319,16 @@ struct SavedJournal<E> {
     base: Option<SavedBase>,
     #[serde(default)]
     edits: E,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept: Option<SavedKept>,
 }
 
 impl Serialize for VoxelEditJournal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let base = self.base().map(|b| SavedBase { brushes: b.brushes, hash: b.hash, snapshot: base64::encode(&b.snapshot) });
         let edits: Vec<&VoxelBrushEdit> = self.listed().collect();
-        SavedJournal { terrain: self.terrain, base, edits }.serialize(serializer)
+        let kept = self.kept_chunks().map(|k| SavedKept { brushes: k.brushes, hash: k.hash, chunks: base64::encode(&k.bytes) });
+        SavedJournal { terrain: self.terrain, base, edits, kept }.serialize(serializer)
     }
 }
 
@@ -291,6 +342,11 @@ impl<'de> Deserialize<'de> for VoxelEditJournal {
             journal.base = Some(std::sync::Arc::new(VoxelEditBase { brushes: base.brushes, hash: base.hash, snapshot: snapshot.into() }));
         }
         journal.extend(saved.edits);
+        if let Some(kept) = saved.kept {
+            let bytes = base64::decode(&kept.chunks).ok_or_else(|| serde::de::Error::custom("voxel kept chunks: invalid base64"))?;
+            // Chunks of other edits (a hand-edited level) are not kept.
+            journal.keep_chunks(VoxelKeptChunks { brushes: kept.brushes, hash: kept.hash, bytes: bytes.into() });
+        }
         Ok(journal)
     }
 }
@@ -400,6 +456,36 @@ mod journal_tests {
         let mut grown = back.clone();
         grown.push(edit(-5.0));
         assert!(grown.starts_with(&full) && grown.starts_with(&j));
+    }
+
+    #[test]
+    fn kept_chunks_stay_with_exactly_their_edits() {
+        let full: VoxelEditJournal = (0..2500).map(|k| edit(k as f64)).collect();
+        let mut j = full.clone();
+        let bytes: std::sync::Arc<[u8]> = vec![7, 8, 9, 200].into();
+        let mut short = full.clone();
+        short.pop();
+        assert!(!j.keep_chunks(VoxelKeptChunks::of(&short, bytes.clone())), "chunks of other edits");
+        assert!(j.keep_chunks(VoxelKeptChunks::of(&full, bytes.clone())));
+        assert_eq!(j.kept_chunks().map(|k| &k.bytes), Some(&bytes));
+        assert_eq!(j, full, "kept chunks change no edit");
+        // Compaction keeps them (the same edits); saved and loaded.
+        assert!(j.compact(VoxelEditBase { brushes: 2000, hash: full.prefix_hash(2000).unwrap(), snapshot: vec![1, 2].into() }));
+        assert!(j.kept_chunks().is_some());
+        let back: VoxelEditJournal = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(back.kept_chunks(), j.kept_chunks());
+        // Any change drops them.
+        let mut grown = back.clone();
+        grown.push(edit(-1.0));
+        assert!(grown.kept_chunks().is_none());
+        let mut undone = back.clone();
+        undone.pop();
+        assert!(undone.kept_chunks().is_none());
+        // A saved journal whose chunks are of other edits loads without them.
+        let mut json = serde_json::to_value(&back).unwrap();
+        json["kept"]["brushes"] = 2499.into();
+        let other: VoxelEditJournal = serde_json::from_value(json).unwrap();
+        assert!(other.kept_chunks().is_none() && other == back);
     }
 
     #[test]

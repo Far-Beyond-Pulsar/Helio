@@ -99,7 +99,7 @@ impl Worker {
                         let made: usize = built.iter().map(Vec::len).sum();
                         let built_ms = started.elapsed().as_secs_f64() * 1e3;
                         let all: Vec<Brush> = built.into_iter().flatten().collect();
-                        if let Err(error) = planet.apply_baked(&all) {
+                        if let Err(error) = planet.apply_sealed(&all) {
                             log::warn!("decoration rejected: {error}");
                         }
                         log::debug!("{} regions: {made} brushes, scan {scan_ms:.0} ms, built in {built_ms:.0} ms, all in {:.0} ms", batch.len(), started.elapsed().as_secs_f64() * 1e3);
@@ -107,9 +107,7 @@ impl Worker {
                     }
                     let interval = if urgent { SNAPSHOT_INTERVAL } else { DECORATION_INTERVAL };
                     if dirty && last_sent.elapsed() >= interval {
-                        // Edits sealed into the baked store are what the renderer reads cell by cell.
                         let snap_started = Instant::now();
-                        let _ = planet.seal_all();
                         let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()), regions: decorator.regions_done() };
                         if result_tx.send(snapshot).is_err() {
                             break;

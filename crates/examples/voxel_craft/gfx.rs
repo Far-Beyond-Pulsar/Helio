@@ -9,7 +9,6 @@ use glam::{DMat4, DVec3, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_default_graphs::{build_default_graph_external_with_voxel_passes, voxel_scene_materials, VoxelPassFactory};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-use helio_pass_voxel_planet::chunks::residency::PlanConfig;
 use helio_pass_voxel_planet::chunks::ResidencyConfig;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::Planet;
@@ -42,32 +41,19 @@ pub struct Gfx {
 /// Residency settings for chunk trees at a window of height `h`.
 fn chunk_config(h: u32) -> ResidencyConfig {
     let number = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-    ResidencyConfig {
-        plan: PlanConfig {
-            pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h),
-            // Cells a pixel wide at most: one-block detail wherever it shows.
-            lod_pixels: number("VOXEL_CRAFT_LOD", 0.6),
-            offscreen_pixels: 2.0,
-            view_guard: 0.35,
-            coarsen: 0.8,
-            // Far enough for a real horizon.
-            max_distance: number("VOXEL_CRAFT_DISTANCE", 12_000.0),
-            prefetch_seconds: 0.5,
-            keep_frames: 120,
-            motion_flow: 16.0,
-            motion_max: 3.0,
-        },
-        tiles_per_frame: number("VOXEL_CRAFT_TILES", 256.0) as usize,
-        generate_ms: ResidencyConfig::default().generate_ms,
-        frame_ms: ResidencyConfig::default().frame_ms,
-    }
+    let mut config = ResidencyConfig::default();
+    config.plan.pixel_angle = 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h);
+    // Cells a pixel wide at most: one-block detail wherever it shows.
+    config.plan.lod_pixels = number("VOXEL_CRAFT_LOD", 0.6);
+    // Far enough for a real horizon.
+    config.plan.max_distance = number("VOXEL_CRAFT_DISTANCE", 12_000.0);
+    config
 }
 
 fn tsr_quality() -> helio_pass_tsr::TsrQuality {
     match std::env::var("VOXEL_CRAFT_QUALITY").as_deref() {
         Ok("performance") => helio_pass_tsr::TsrQuality::Performance,
         Ok("quality") => helio_pass_tsr::TsrQuality::Quality,
-        Ok("native") => helio_pass_tsr::TsrQuality::Native,
         Ok("native") => helio_pass_tsr::TsrQuality::Native,
         _ => helio_pass_tsr::TsrQuality::Balanced,
     }
@@ -145,7 +131,7 @@ impl Gfx {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
             pass.set_scene_materials(map, voxel_scene_materials());
-            pass.set_exact_shadows(std::env::var_os("VOXEL_CRAFT_SHARED_SHADOWS").is_none());
+            pass.set_steady_shadows(std::env::var_os("VOXEL_CRAFT_SHARED_SHADOWS").is_none());
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());
@@ -201,7 +187,7 @@ impl Gfx {
     pub fn draw(&mut self, view: &View) {
         let (planet, eye, forward) = (view.planet, view.eye, view.look);
         let sun = view.sun.normalize();
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: sun.as_vec3(), picks: None });
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: sun.as_vec3(), picks: None, kept: None, export: None });
         // The sun's light follows the sky.
         update_light(
             &mut self.scene.world,

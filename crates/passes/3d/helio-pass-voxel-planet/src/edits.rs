@@ -342,9 +342,9 @@ impl Cube {
     fn size(&self) -> i64 {
         1i64 << self.log2
     }
-    /// The brick (8 base cells a side) of base-level brick coordinates.
-    pub(crate) fn brick(b: [i64; 3]) -> Cube {
-        Cube { lo: b.map(|v| v * 8), log2: 3 }
+    /// The brick (8 level cells a side) of `level` brick coordinates.
+    pub(crate) fn brick(b: [i64; 3], level: u32) -> Cube {
+        Cube { lo: b.map(|v| (v * 8) << level), log2: 3 + level }
     }
     fn child(&self, c: usize) -> Cube {
         let h = 1i64 << (self.log2 - 1);

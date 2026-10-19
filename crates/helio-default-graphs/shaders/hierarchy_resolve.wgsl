@@ -1,12 +1,12 @@
 // Composes each object's world transform from its parent chain (see
 // `hierarchy_resolve.rs`). Prepended with scene_join_common.wgsl, which
-// supplies `ObjectTransform`, `object_rotation`, `object_position`,
-// `object_scale` and `relative_position`.
+// supplies `ObjectTransform` (positions as f32 pairs), `object_rotation`,
+// `object_scale`, `position_hi` and `position_lo`.
 //
 // Output rows are relative to the frame's world origin (`origin_hi + origin_lo`,
-// zero outside camera-relative frames): the topmost ancestor's position has
-// the origin removed *before* anything is added to it, so a nested object far
-// from the origin keeps the precision of its offset, not of its distance.
+// zero outside camera-relative frames): chains compose in f32 pairs and the
+// origin comes off pair-wise last, so an object 6371 km out keeps its
+// millimetres whichever of its ancestors are far from the origin.
 //
 // Two results per row:
 // - world: the transform composed through every ancestor, relative to the
@@ -36,7 +36,8 @@ const BIT_FRAME: u32 = 4u;
 
 struct ResolveUniforms {
     rows: u32,
-    _pad0: u32,
+    // 1.0, unknown to the compiler: `pair_add`'s guard.
+    one: f32,
     _pad1: u32,
     _pad2: u32,
     origin_hi: vec4<f32>,
@@ -86,10 +87,24 @@ fn linear_part(t: ObjectTransform) -> mat3x3<f32> {
     return mat3x3<f32>(r[0] * s.x, r[1] * s.y, r[2] * s.z);
 }
 
-/// The nearest shear-free `ObjectTransform` to `lin` placed at `offset`, with
-/// `rotation` as YXZ Euler angles in degrees (the inverse of
+/// `a + b` for f32 pairs (`hi + lo` each), renormalised: the sum's f32 and
+/// what that drops (two-sum), so world positions keep their precision.
+/// Each rounding is kept through `u.one`: a driver reassociating floats
+/// folds `(s + lo) - s` to `lo` and the dropped part to zero (NVIDIA's
+/// Vulkan driver did, half a metre on a planet).
+fn pair_add(a_hi: vec3<f32>, a_lo: vec3<f32>, b_hi: vec3<f32>, b_lo: vec3<f32>) -> array<vec3<f32>, 2> {
+    let s = (a_hi + b_hi) * u.one;
+    let b_virtual = (s - a_hi) * u.one;
+    let error = (a_hi - (s - b_virtual)) + (b_hi - b_virtual);
+    let lo = error + a_lo + b_lo;
+    let hi = (s + lo) * u.one;
+    return array<vec3<f32>, 2>(hi, lo - (hi - s));
+}
+
+/// The nearest shear-free `ObjectTransform` to `lin` placed at `hi + lo`,
+/// with `rotation` as YXZ Euler angles in degrees (the inverse of
 /// `object_rotation`).
-fn decompose(lin: mat3x3<f32>, offset: vec3<f32>) -> ObjectTransform {
+fn decompose(lin: mat3x3<f32>, hi: vec3<f32>, lo: vec3<f32>) -> ObjectTransform {
     var sx = length(lin[0]);
     let sy = length(lin[1]);
     let sz = length(lin[2]);
@@ -114,7 +129,8 @@ fn decompose(lin: mat3x3<f32>, offset: vec3<f32>) -> ObjectTransform {
         yaw = atan2(-r[0][2], r[0][0]);
     }
     var out: ObjectTransform;
-    out.position = array<f32, 3>(offset.x, offset.y, offset.z);
+    out.position_hi = array<f32, 3>(hi.x, hi.y, hi.z);
+    out.position_lo = array<f32, 3>(lo.x, lo.y, lo.z);
     out.rotation = array<f32, 3>(pitch * to_deg, yaw * to_deg, roll * to_deg);
     out.scale = array<f32, 3>(sx, sy, sz);
     return out;
@@ -126,22 +142,28 @@ struct Composed {
     space: u32,
 }
 
-/// Row `index`'s transform composed up its parent chain. With `stop_at_frames`
-/// the chain ends below the nearest rigid frame (the result is relative to it,
-/// no origin removed); otherwise it runs to the world and is relative to the
-/// world origin.
+/// Row `index`'s transform composed up its parent chain, its position in
+/// f32 pairs. With `stop_at_frames` the chain ends below the nearest rigid
+/// frame (the result is relative to it, no origin removed); otherwise it
+/// runs to the world and is relative to the world origin (removed pair-wise
+/// last, exact however far the chain's members are from it).
 fn compose_row(index: u32, stop_at_frames: bool) -> Composed {
     let own = local_transforms[index];
     var parent = parent_of(index);
+    let origin_hi = -u.origin_hi.xyz;
+    let origin_lo = -u.origin_lo.xyz;
     if parent == 0u {
         var root = own;
-        let p = relative_position(object_position(own), u.origin_hi.xyz, u.origin_lo.xyz);
-        root.position = array<f32, 3>(p.x, p.y, p.z);
+        let p = pair_add(position_hi(own), position_lo(own), origin_hi, origin_lo);
+        root.position_hi = array<f32, 3>(p[0].x, p[0].y, p[0].z);
+        root.position_lo = array<f32, 3>(p[1].x, p[1].y, p[1].z);
         return Composed(root, 0u);
     }
     var lin = linear_part(own);
-    var offset = object_position(own);
-    var reached_top = false;
+    // The position so far, as an f32 pair: a parent on a planet is far from
+    // the world's origin, its children near it.
+    var hi = position_hi(own);
+    var lo = position_lo(own);
     var space = 0u;
     for (var depth = 0u; depth < MAX_DEPTH; depth = depth + 1u) {
         if parent == 0u {
@@ -155,28 +177,25 @@ fn compose_row(index: u32, stop_at_frames: bool) -> Composed {
             let slot = frame_slot(at);
             if slot != 0u {
                 // Relative to this frame: its own transform lives in the frame
-                // table, and nothing here is near the world origin.
+                // table.
                 space = slot;
                 break;
             }
         }
         let up = local_transforms[at];
         let up_lin = linear_part(up);
-        let next_parent = parent_of(at);
-        var up_position = object_position(up);
-        if next_parent == 0u {
-            // The topmost ancestor: its position is the only large term.
-            up_position = relative_position(up_position, u.origin_hi.xyz, u.origin_lo.xyz);
-            reached_top = true;
-        }
-        offset = up_lin * offset + up_position;
+        let sum = pair_add(up_lin * hi, up_lin * lo, position_hi(up), position_lo(up));
+        hi = sum[0];
+        lo = sum[1];
         lin = up_lin * lin;
-        parent = next_parent;
+        parent = parent_of(at);
     }
-    if space == 0u && !reached_top {
-        offset = relative_position(offset, u.origin_hi.xyz, u.origin_lo.xyz);
+    if space == 0u {
+        let p = pair_add(hi, lo, origin_hi, origin_lo);
+        hi = p[0];
+        lo = p[1];
     }
-    return Composed(decompose(lin, offset), space);
+    return Composed(decompose(lin, hi, lo), space);
 }
 
 @compute @workgroup_size(64)

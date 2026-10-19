@@ -63,7 +63,7 @@ impl Decorator {
         };
         let mut out = Vec::new();
         while ring <= reach && out.len() < limit.min(MAX_REGIONS - self.done.len()) {
-            let mut visit = |dx: i32, dy: i32, out: &mut Vec<Region>| {
+            let visit = |dx: i32, dy: i32, out: &mut Vec<Region>| {
                 if dx * dx + dy * dy > radius * radius || out.len() >= limit {
                     return;
                 }
@@ -280,7 +280,7 @@ fn pick_species(biome: Biome, height_m: f64, kind: f64, density: f64, rng: &mut 
 fn push_columns(grid: &helio_pass_voxel_planet::Grid, brushes: &mut Vec<Brush>, mut cells: Vec<(Cell, Block)>) {
     cells.sort_by_key(|(c, b)| (c.face, c.i, c.j, b.material(), c.k));
     let mut run: Option<(Cell, Block, i32)> = None;
-    let mut flush = |run: Option<(Cell, Block, i32)>, brushes: &mut Vec<Brush>| {
+    let flush = |run: Option<(Cell, Block, i32)>, brushes: &mut Vec<Brush>| {
         if let Some((start, block, length)) = run {
             brushes.push(box_brush(grid, start.face, start.i, start.j, start.k, 1, length, Some(block)));
         }

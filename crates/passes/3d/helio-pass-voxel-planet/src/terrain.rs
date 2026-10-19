@@ -211,9 +211,9 @@ pub trait TerrainField: Send + Sync + 'static {
     /// surface word ([`Self::surface`]), `top_height` its column's top
     /// ([`HEIGHT_ONE`] units, a whole number of voxel layers), `depth` the
     /// cells below the column top (0 is the exposed top cell), `slope` the
-    /// ground slope across the cell's 8x8 column block in eighths of a cell
-    /// per cell, and `layer` the cell's layer index (0 is the layer just
-    /// above the datum).
+    /// ground slope in eighths of a cell per cell (`Planet::material_slope`),
+    /// and `layer` the cell's layer index (0 is the layer just above the
+    /// datum); `p` is the cell's volume point.
     fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
     /// Surface word (8 bits) of `column`, whose height is `height`
     /// (`terrain_surface` in WGSL, stored per column cell at generation):
@@ -315,6 +315,11 @@ pub struct TerrainAppearance {
     /// Patch contrast, voxel pigment contrast, edge darkening, step
     /// softness (share of the slope's normal in natural voxel steps' light).
     pub detail: [f32; 4],
+    /// Shade's light where the sky's is all the renderer gives (no bounce
+    /// yet): a fill light by the surface's albedo (linear rgb; 0 none), and
+    /// the floor sky occlusion never closes below (w; 0 none). A stylised
+    /// world keeps the colour of its shade under canopies and overhangs.
+    pub shade: [f32; 4],
 }
 
 impl Default for TerrainAppearance {
@@ -364,7 +369,7 @@ impl Default for TerrainAppearance {
         materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
         // Voxels a pixel wide or more are lit by their own faces: slopes read
         // as their steps (no step softness).
-        Self { materials, detail: [0.3, 0.4, 0.08, 0.0] }
+        Self { materials, detail: [0.3, 0.4, 0.08, 0.0], shade: [0.0; 4] }
     }
 }
 

@@ -177,7 +177,7 @@ pub fn generate(p: &JungleParams, seed: u64) -> Volume {
             phase_jitter: phase,
         }
     };
-    let mut draw_root = |v: &mut Volume, theta0: f64, r: &Root| {
+    let draw_root = |v: &mut Volume, theta0: f64, r: &Root| {
         let y_max = ((h * clamp(r.height, 0.0, 0.985) + 0.5).floor()).min(h.floor() - 1.0).max(0.0) as i32;
         let twist = p.root_twist * 1.3 * std::f64::consts::PI;
         let thin = 0.12 + 0.88 * p.root_spread.powf(1.2);
@@ -404,7 +404,7 @@ fn fill_watertight(v: &mut Volume, reach: f64, height: f64) {
     for y in 0..=(height.ceil() as i32) {
         let mut outside: HashSet<[i32; 2]> = HashSet::new();
         let mut queue: Vec<[i32; 2]> = Vec::new();
-        let mut push = |x: i32, z: i32, v: &Volume, outside: &mut HashSet<[i32; 2]>, queue: &mut Vec<[i32; 2]>| {
+        let push = |x: i32, z: i32, v: &Volume, outside: &mut HashSet<[i32; 2]>, queue: &mut Vec<[i32; 2]>| {
             if v.get([x, y, z]).is_none() && outside.insert([x, z]) {
                 queue.push([x, z]);
             }

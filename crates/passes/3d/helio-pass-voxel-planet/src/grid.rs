@@ -413,10 +413,7 @@ impl Grid {
     /// field has no crease there), and tangent directions (slopes, flow)
     /// are well defined. On a plane it is the cell's horizontal position.
     pub fn domain_point(&self, face: u8, i: i32, j: i32, level: u32) -> IVec3 {
-        if self.is_plane() {
-            return plane_domain_point(self.origin_index(), self.domain_scale, i, j, level);
-        }
-        sphere_point(domain_point(self.reference_cells, self.domain_scale, face, i, j, level), self.sphere_constants())
+        self.volume_points().column(face, i, j, level)
     }
 
     /// Constants of [`sphere_point`]: `inv = floor(2^(30 + shift) /
@@ -508,8 +505,78 @@ impl Grid {
 
     /// Seamless 3D domain point of the level cell `(face, i, j, k)`.
     pub fn volume_point(&self, face: u8, i: i32, j: i32, k: i32, level: u32) -> IVec3 {
+        self.volume_points().point(face, i, j, k, level)
+    }
+
+    /// [`Self::domain_point`] and [`Self::volume_point`] with their
+    /// constants derived once, for many cells.
+    pub fn volume_points(&self) -> VolumePoints {
         let (inv, shift, layer_q16) = self.volume_constants();
-        volume_point(self.domain_point(face, i, j, level), self.is_plane(), k, level, inv, shift, layer_q16)
+        VolumePoints {
+            plane: self.is_plane(),
+            reference: self.reference_cells,
+            scale: self.domain_scale,
+            origin: self.origin_index(),
+            sphere: self.sphere_constants(),
+            inv,
+            shift,
+            layer_q16,
+        }
+    }
+}
+
+/// The constants of a grid's domain and volume points ([`Grid::volume_points`]).
+/// A cell's volume point is its column's domain point raised to its height,
+/// so cells of one column share [`Self::column`].
+#[derive(Clone, Copy, Debug)]
+pub struct VolumePoints {
+    plane: bool,
+    reference: i32,
+    scale: u32,
+    origin: i32,
+    sphere: [u32; 4],
+    inv: u32,
+    shift: u32,
+    layer_q16: u32,
+}
+
+impl VolumePoints {
+    /// [`Grid::domain_point`] of level column `(face, i, j)`.
+    #[inline]
+    pub fn column(&self, face: u8, i: i32, j: i32, level: u32) -> IVec3 {
+        if self.plane {
+            return plane_domain_point(self.origin, self.scale, i, j, level);
+        }
+        sphere_point(domain_point(self.reference, self.scale, face, i, j, level), self.sphere)
+    }
+    /// The volume point of level cell `k` over a [`Self::column`] point.
+    #[inline]
+    pub fn at(&self, column: IVec3, k: i32, level: u32) -> IVec3 {
+        volume_point(column, self.plane, k, level, self.inv, self.shift, self.layer_q16)
+    }
+    /// The volume points over a [`Self::column`] point as a line in the
+    /// cell's height `h` (half base layers, [`crate::edits::center_half`]):
+    /// `(base, rise, limit)`, every point at `|h| <= limit` within 2 units
+    /// per component of `base + rise * h` (its integer truncations: under
+    /// one each for the height ratio, scaled by `|p| < 2^30`, and for the
+    /// product).
+    pub fn line(&self, column: IVec3) -> (DVec3, DVec3, f64) {
+        let p = column.as_dvec3();
+        if self.plane {
+            let rise = f64::from(self.layer_q16) / 65_536.0;
+            return (DVec3::new(p.x, 0.0, p.z), DVec3::new(0.0, rise, 0.0), 2f64.powi(29) / rise.max(f64::MIN_POSITIVE));
+        }
+        if column.abs().max_element() >= 1 << 30 {
+            return (p, DVec3::ZERO, 0.0);
+        }
+        // `rise h` stays within half the point (no wrap, ratio under Q30).
+        let alpha = f64::from(self.inv) / 2f64.powi(30 + self.shift as i32);
+        (p, p * alpha, 0.5 / alpha)
+    }
+    /// [`Grid::volume_point`].
+    #[inline]
+    pub fn point(&self, face: u8, i: i32, j: i32, k: i32, level: u32) -> IVec3 {
+        self.at(self.column(face, i, j, level), k, level)
     }
 }
 
