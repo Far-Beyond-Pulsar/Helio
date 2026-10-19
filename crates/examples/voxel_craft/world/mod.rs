@@ -1,6 +1,7 @@
 //! The world the game sees: a voxel planet with edits applied off-thread,
 //! block queries that include edits not yet in the latest snapshot, and
-//! the decoration (trees, structures) that streams in around the player.
+//! the decoration (trees, structures: the planet's features) that streams
+//! in around the player and out behind them.
 
 pub mod decorate;
 pub mod edits;
@@ -23,7 +24,6 @@ pub struct World {
     /// batch and what the cell is (`None`: air).
     pending: HashMap<Cell, (u64, Option<Block>)>,
     snapshot_ticket: u64,
-    regions: usize,
     /// Bumped whenever the snapshot changes (the pass syncs by difference).
     revision: u64,
 }
@@ -31,7 +31,7 @@ pub struct World {
 impl World {
     pub fn new(planet: Planet) -> Self {
         let snapshot = Arc::new(planet.clone());
-        Self { snapshot, worker: Worker::spawn(planet), next_ticket: 1, pending: HashMap::new(), snapshot_ticket: 0, regions: 0, revision: 0 }
+        Self { snapshot, worker: Worker::spawn(planet), next_ticket: 1, pending: HashMap::new(), snapshot_ticket: 0, revision: 0 }
     }
 
     /// The latest finished planet, for drawing and for queries.
@@ -48,7 +48,6 @@ impl World {
         if let Some(done) = self.worker.latest() {
             self.snapshot = done.planet;
             self.snapshot_ticket = done.ticket;
-            self.regions = done.regions;
             self.revision += 1;
             self.pending.retain(|_, (ticket, _)| *ticket > done.ticket);
         }
@@ -79,9 +78,9 @@ impl World {
         self.worker.submit(Job::Focus(cell));
     }
 
-    /// Regions decorated so far (in the latest snapshot).
-    pub fn regions_decorated(&self) -> usize {
-        self.regions
+    /// Regions whose features are loaded (in the latest snapshot).
+    pub fn regions_loaded(&self) -> usize {
+        self.snapshot.edits().features.len()
     }
 
     pub fn is_solid(&self, cell: Cell) -> bool {

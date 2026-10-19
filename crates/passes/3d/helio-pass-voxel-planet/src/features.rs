@@ -22,9 +22,49 @@ use crate::grid::Grid;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+/// A square region of a face, `size` base columns a side, by index:
+/// what a host decides features by ([`Region::key`] is the planet's key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Region {
+    pub face: u8,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Region {
+    /// The region of `size` columns holding `cell`.
+    pub fn of(cell: crate::Cell, size: i32) -> Self {
+        Self { face: cell.face, x: cell.i.div_euclid(size), y: cell.j.div_euclid(size) }
+    }
+    /// Its key for [`crate::Planet::load_features`] (indices within 2^27).
+    pub fn key(self) -> u64 {
+        (u64::from(self.face) << 56) | (u64::from(self.x as u32 & 0x0fff_ffff) << 28) | u64::from(self.y as u32 & 0x0fff_ffff)
+    }
+    pub fn from_key(key: u64) -> Self {
+        let index = |v: u64| ((v as u32) << 4) as i32 >> 4;
+        Self { face: (key >> 56) as u8, x: index(key >> 28), y: index(key) }
+    }
+    /// The regions of its face within `radius` regions of it (by centre
+    /// distance), nearest first, within the face's `regions` a side.
+    pub fn around(self, radius: i32, regions: i32) -> Vec<Region> {
+        let mut out: Vec<(i64, Region)> = Vec::new();
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                let (x, y) = (self.x + dx, self.y + dy);
+                let d = i64::from(dx * dx + dy * dy);
+                if d <= i64::from(radius * radius) && (0..regions).contains(&x) && (0..regions).contains(&y) {
+                    out.push((d, Region { face: self.face, x, y }));
+                }
+            }
+        }
+        out.sort_by_key(|(d, r)| (*d, r.x, r.y));
+        out.into_iter().map(|(_, r)| r).collect()
+    }
+}
+
 /// A loaded region: its brushes and what they baked.
 #[derive(Clone)]
-struct Region {
+struct Loaded {
     brushes: Arc<[Brush]>,
     store: EditStore,
 }
@@ -32,7 +72,7 @@ struct Region {
 /// The loaded regions (see the module doc).
 #[derive(Clone, Default)]
 pub struct Features {
-    regions: FxHashMap<u64, Region>,
+    regions: FxHashMap<u64, Loaded>,
     /// Each base column's regions, by key.
     columns: FxHashMap<ColumnKey, Vec<u64>>,
     /// Columns at every level over a region's base columns: how many base
@@ -120,7 +160,7 @@ impl Features {
         changed.extend(columns);
         changed.sort_unstable();
         changed.dedup();
-        self.regions.insert(key, Region { brushes, store });
+        self.regions.insert(key, Loaded { brushes, store });
         self.version += 1;
         Ok(changed)
     }
@@ -181,4 +221,20 @@ impl Features {
 /// Base column `column` and the columns over it at every coarser level.
 fn ancestors(grid: &Grid, column: ColumnKey) -> impl Iterator<Item = ColumnKey> {
     (0..grid.levels()).map(move |level| ColumnKey { face: column.face, level: level as u8, ci: column.ci >> level, cj: column.cj >> level })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_keys_round_trip() {
+        for r in [Region { face: 5, x: 0, y: 0 }, Region { face: 2, x: 123_456, y: 7 }, Region { face: 0, x: (1 << 27) - 1, y: 1 << 26 }] {
+            assert_eq!(Region::from_key(r.key()), r);
+        }
+        let around = Region { face: 1, x: 10, y: 10 }.around(3, 12);
+        assert_eq!(around[0], Region { face: 1, x: 10, y: 10 });
+        assert!(around.iter().all(|r| r.x < 12 && r.y < 12));
+        assert_eq!(around.len(), around.iter().collect::<std::collections::HashSet<_>>().len());
+    }
 }

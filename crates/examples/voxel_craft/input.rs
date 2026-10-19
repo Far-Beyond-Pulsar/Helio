@@ -82,10 +82,6 @@ impl Input {
         self.held.contains(&code)
     }
 
-    pub fn clicked(&self, button: MouseButton) -> bool {
-        self.clicked.contains(&button)
-    }
-
     /// Lines of wheel scroll since the last frame (up positive).
     pub fn scroll(&self) -> f64 {
         self.scroll

@@ -2,7 +2,6 @@
 
 use super::physics::{occupies, Frame};
 use super::Player;
-use crate::blocks::Block;
 use crate::config::REACH;
 use crate::input::Controls;
 use crate::world::edits::BlockEdit;
@@ -23,8 +22,6 @@ pub struct Interaction {
     pub target: Option<Target>,
     /// Seconds until the next block can be broken or placed.
     cooldown: f64,
-    /// What the middle button last picked up (or the hotbar's).
-    pub held: Option<Block>,
 }
 
 /// Seconds between repeated breaks while the button is held.

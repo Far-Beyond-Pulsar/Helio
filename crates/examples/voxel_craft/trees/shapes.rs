@@ -25,10 +25,6 @@ impl Volume {
         self.cells.get(&p).copied()
     }
 
-    pub fn is_wood(&self, p: [i32; 3]) -> bool {
-        self.get(p) == Some(Part::Wood)
-    }
-
     pub fn set_wood(&mut self, p: [i32; 3]) {
         self.cells.insert(p, Part::Wood);
     }
@@ -40,10 +36,6 @@ impl Volume {
 
     pub fn wood(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
         self.cells.iter().filter(|(_, p)| **p == Part::Wood).map(|(c, _)| *c)
-    }
-
-    pub fn leaves(&self) -> impl Iterator<Item = [i32; 3]> + '_ {
-        self.cells.iter().filter(|(_, p)| **p == Part::Leaf).map(|(c, _)| *c)
     }
 
     /// Fill a round capsule from `a` to `b`, radius `r0` to `r1`, with wood

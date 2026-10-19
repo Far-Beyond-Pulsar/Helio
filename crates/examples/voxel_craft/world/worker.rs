@@ -1,6 +1,7 @@
 //! The world worker: owns the authoritative planet, applies the player's
-//! edits and decorates the land around them off the frame, and publishes
-//! immutable snapshots for drawing and queries.
+//! edits, loads the features (`decorate`) of the regions around them and
+//! unloads those left behind, off the frame, and publishes immutable
+//! snapshots for drawing and queries.
 //!
 //! Applying brushes needs the planet by `&mut`, while the renderer and the
 //! player read shared snapshots, so (as Pulsar's voxel backend does) edits are
@@ -8,8 +9,9 @@
 //! `Arc<Planet>`. A snapshot carries the ticket of the last player batch it
 //! includes.
 
-use super::decorate::Decorator;
-use crate::config::DECORATE_BATCH;
+use super::decorate;
+use crate::config::{DECORATE_BATCH, REGION_BLOCKS, REGION_KEEP, REGION_RADIUS};
+use helio_pass_voxel_planet::features::Region;
 use helio_pass_voxel_planet::{Brush, Cell, Planet};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
@@ -31,8 +33,6 @@ pub enum Job {
 pub struct Snapshot {
     pub ticket: u64,
     pub planet: Arc<Planet>,
-    /// Regions decorated so far.
-    pub regions: usize,
 }
 
 pub struct Worker {
@@ -42,9 +42,92 @@ pub struct Worker {
 
 /// Snapshots are copied at most this often while edits stream in.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(16);
-/// While only decorating (no player edit waiting), snapshots are rarer: each
-/// one makes the renderer regenerate the tiles the new edits touch.
-const DECORATION_INTERVAL: Duration = Duration::from_millis(2500);
+/// While only features change (no player edit waiting), snapshots are
+/// rarer: each one makes the renderer generate the tiles they changed.
+const FEATURES_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Regions decorated around `focus`: their features loaded nearest first,
+/// those past [`REGION_KEEP`] unloaded.
+struct Regions {
+    radius: i32,
+    /// The focus region the wanted list was made for, and the list
+    /// (nearest first) with how far its loading got.
+    wanted: Option<(Region, Vec<Region>, usize)>,
+}
+
+impl Regions {
+    fn new() -> Self {
+        let radius = std::env::var("VOXEL_CRAFT_RADIUS").ok().and_then(|v| v.parse().ok()).unwrap_or(REGION_RADIUS);
+        Self { radius, wanted: None }
+    }
+
+    /// Loads the next batch of the regions around `focus` and unloads those
+    /// left behind (when the focus moved to another region); whether
+    /// anything changed.
+    fn update(&mut self, planet: &mut Planet, focus: Cell) -> bool {
+        let centre = Region::of(focus, REGION_BLOCKS);
+        let regions = planet.grid().cells() / REGION_BLOCKS + 1;
+        let mut changed = false;
+        if self.wanted.as_ref().is_none_or(|(c, _, _)| *c != centre) {
+            let keep = self.radius + REGION_KEEP;
+            let gone: Vec<u64> = planet.edits().features.keys().filter(|&k| {
+                let r = Region::from_key(k);
+                r.face != centre.face || (r.x - centre.x).pow(2) + (r.y - centre.y).pow(2) > keep * keep
+            }).collect();
+            for key in gone {
+                changed |= planet.unload_features(key);
+            }
+            let wanted = centre.around(self.radius, regions).into_iter().filter(|r| decorate::decorated(planet, *r)).collect();
+            self.wanted = Some((centre, wanted, 0));
+        }
+        let Some((_, wanted, done)) = &mut self.wanted else { return changed };
+        let end = (*done + DECORATE_BATCH).min(wanted.len());
+        let next: Vec<Region> = wanted[*done..end].iter().filter(|r| !planet.edits().features.contains(r.key())).copied().collect();
+        *done = end;
+        if next.is_empty() {
+            return changed;
+        }
+        // Built side by side against the same terrain, then loaded in order.
+        let started = Instant::now();
+        let built = parallel(&next, |r| decorate::decorate(planet, *r));
+        for (region, brushes) in next.iter().zip(built) {
+            if let Err(error) = planet.load_features(region.key(), brushes) {
+                log::warn!("features of {region:?} rejected: {error}");
+            }
+        }
+        log::debug!("{} regions loaded in {:.0} ms ({} loaded)", next.len(), started.elapsed().as_secs_f64() * 1e3, planet.edits().features.len());
+        true
+    }
+
+    /// Whether regions around the last focus are still to load.
+    fn loading(&self) -> bool {
+        self.wanted.as_ref().is_some_and(|(_, wanted, done)| *done < wanted.len())
+    }
+}
+
+/// `f` over `items` on every core, in their order.
+fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len()).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(n) else { break };
+                        mine.push((n, f(item)));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(|w| w.join().expect("decorate thread")).collect()
+    });
+    out.sort_by_key(|(n, _)| *n);
+    out.into_iter().map(|(_, r)| r).collect()
+}
 
 impl Worker {
     /// Starts the thread; it owns `planet`.
@@ -54,15 +137,14 @@ impl Worker {
         std::thread::Builder::new()
             .name("voxel-craft-world".into())
             .spawn(move || {
-                let mut decorator = Decorator::new();
+                let mut regions = Regions::new();
                 let mut focus: Option<Cell> = None;
                 let mut ticket = 0;
                 let mut dirty = false;
                 let mut urgent = false;
                 let mut last_sent = Instant::now() - SNAPSHOT_INTERVAL;
                 loop {
-                    let work_left = focus.is_some_and(|f| decorator.has_work(&planet, f));
-                    let wait = if work_left || dirty { Duration::from_millis(1) } else { Duration::from_millis(100) };
+                    let wait = if dirty || regions.loading() { Duration::from_millis(1) } else { Duration::from_millis(100) };
                     let mut jobs = Vec::new();
                     match job_rx.recv_timeout(wait) {
                         Ok(job) => jobs.push(job),
@@ -87,32 +169,18 @@ impl Worker {
                             }
                         }
                     }
-                    // A batch of regions is built in parallel, then applied in
-                    // order; batches stay small so player edits are not kept waiting.
-                    let scan_started = Instant::now();
-                    // A waiting edit goes out first: decoration resumes after its snapshot.
-                    let batch = if urgent { Vec::new() } else { focus.map(|f| decorator.next_batch(&planet, f, DECORATE_BATCH)).unwrap_or_default() };
-                    let scan_ms = scan_started.elapsed().as_secs_f64() * 1e3;
-                    if !batch.is_empty() {
-                        let started = Instant::now();
-                        let built = decorator.decorate_all(&planet, &batch);
-                        let made: usize = built.iter().map(Vec::len).sum();
-                        let built_ms = started.elapsed().as_secs_f64() * 1e3;
-                        let all: Vec<Brush> = built.into_iter().flatten().collect();
-                        if let Err(error) = planet.apply_sealed(&all) {
-                            log::warn!("decoration rejected: {error}");
+                    // A waiting edit goes out first: features follow its snapshot.
+                    if !urgent {
+                        if let Some(focus) = focus {
+                            dirty |= regions.update(&mut planet, focus);
                         }
-                        log::debug!("{} regions: {made} brushes, scan {scan_ms:.0} ms, built in {built_ms:.0} ms, all in {:.0} ms", batch.len(), started.elapsed().as_secs_f64() * 1e3);
-                        dirty = true;
                     }
-                    let interval = if urgent { SNAPSHOT_INTERVAL } else { DECORATION_INTERVAL };
+                    let interval = if urgent { SNAPSHOT_INTERVAL } else { FEATURES_INTERVAL };
                     if dirty && last_sent.elapsed() >= interval {
-                        let snap_started = Instant::now();
-                        let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()), regions: decorator.regions_done() };
+                        let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()) };
                         if result_tx.send(snapshot).is_err() {
                             break;
                         }
-                        log::debug!("snapshot in {:.0} ms", snap_started.elapsed().as_secs_f64() * 1e3);
                         dirty = false;
                         urgent = false;
                         last_sent = Instant::now();

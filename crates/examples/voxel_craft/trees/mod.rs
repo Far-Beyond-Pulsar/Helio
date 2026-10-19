@@ -43,7 +43,6 @@ impl Species {
 /// A grown tree: blocks at offsets from its base (x, y up, z).
 #[derive(Clone, Debug)]
 pub struct Tree {
-    pub species: Species,
     pub blocks: Vec<([i32; 3], Block)>,
 }
 
@@ -73,9 +72,22 @@ impl Tree {
             .collect();
         // Deterministic order (the volume is a hash map).
         blocks.sort_by_key(|(c, _)| (c[1], c[0], c[2]));
-        Tree { species, blocks }
+        Tree { blocks }
     }
 
+    /// The tree as a stamp standing on its base.
+    pub fn stamp(&self) -> helio_pass_voxel_planet::stamp::Stamp {
+        let mut stamp = helio_pass_voxel_planet::stamp::Stamp::new();
+        for (at, block) in &self.blocks {
+            stamp.set(*at, block.material());
+        }
+        stamp
+    }
+
+}
+
+#[cfg(test)]
+impl Tree {
     /// Smallest and largest offsets of the tree's blocks.
     pub fn bounds(&self) -> ([i32; 3], [i32; 3]) {
         let mut lo = [i32::MAX; 3];
@@ -95,8 +107,8 @@ impl Tree {
         hi[1] - lo[1] + 1
     }
 
-    pub fn log_count(&self) -> usize {
-        let (log, _) = self.species.blocks();
+    pub fn log_count(&self, species: Species) -> usize {
+        let (log, _) = species.blocks();
         self.blocks.iter().filter(|(_, b)| *b == log).count()
     }
 }
@@ -111,7 +123,7 @@ mod tests {
                 let t = Tree::grow(species, seed);
                 let (lo, hi) = t.bounds();
                 let width = (hi[0] - lo[0]).max(hi[2] - lo[2]) + 1;
-                (t.height(), width, t.log_count(), t.blocks.len() - t.log_count())
+                (t.height(), width, t.log_count(species), t.blocks.len() - t.log_count(species))
             })
             .collect()
     }

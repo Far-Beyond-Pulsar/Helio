@@ -402,11 +402,12 @@ impl Game {
         };
         let target = self.interaction.target.and_then(|t| self.world.block_at(t.cell)).map_or(String::new(), |b| format!("  |  looking at {}", b.name()));
         self.gfx.window.set_title(&format!(
-            "Voxel Craft  |  {:.0} fps  |  {:02}:{:02}  |  height {:.0} m  |  {}{}{}{}",
+            "Voxel Craft  |  {:.0} fps  |  {:02}:{:02}  |  height {:.0} m  |  {} regions  |  {}{}{}{}",
             self.fps,
             hour as u32,
             ((hour.fract()) * 60.0) as u32,
             height,
+            self.world.regions_loaded(),
             hotbar.join("  "),
             target,
             if self.player.flying { "  |  FLYING" } else { "" },

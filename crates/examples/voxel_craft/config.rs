@@ -14,15 +14,11 @@ pub const WORLD_SEED: u64 = 7;
 pub const REGION_BLOCKS: i32 = 32;
 /// Regions decorated around the player, as a radius in regions.
 pub const REGION_RADIUS: i32 = 128;
-/// Most regions ever decorated. Decoration lives in the planet's edit store (about
-/// 100 KB a region, measured), which never drops edits, so the radius alone
-/// would fill memory at ~20 MB/s until the whole disc is covered. Regions go
-/// nearest-first, so this is a disc of radius ~sqrt(MAX / pi) around the start.
-pub const MAX_REGIONS: usize = 5000;
-/// Most regions the world worker decorates in parallel per pass.
+/// Regions further than this past the radius are unloaded (their features
+/// come back the same when the player returns).
+pub const REGION_KEEP: i32 = 16;
+/// Regions the world worker decorates in parallel per pass.
 pub const DECORATE_BATCH: usize = 64;
-/// Regions the generator may hand to the edit worker per frame.
-pub const REGIONS_PER_FRAME: usize = 1;
 
 /// Walking, running and flying speeds (m/s).
 pub const WALK_SPEED: f64 = 4.3;

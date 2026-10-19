@@ -784,20 +784,30 @@ impl Planet {
         match kind {
             0 => material::AIR,
             _ if material != 0 => material,
-            _ => {
-                let slope = self.material_slope(cell.face, cell.i, cell.j);
-                // Materials vary in 3D (`shade` samples the cell's volume
-                // point): a cliff's voxels are not one column's colour.
-                let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
-                let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
-                // Depth counts from the generated top: overhangs and the
-                // rock around caves lie below it.
-                let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
-                let depth = (generated - 1 - cell.k).max(0);
-                let surface = self.field.surface(crate::terrain::Column { face: cell.face, i: cell.i, j: cell.j, level: 0 }, top_height) & 0xff;
-                self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
-            }
+            _ => self.terrain_material(cell),
         }
+    }
+    /// The terrain's own top over base column `(i, j)`: one over its highest
+    /// solid cell, caves and overhangs included, edits and features
+    /// ignored. A host deciding features from it decides a region the same
+    /// whenever it does.
+    pub fn terrain_top(&self, face: u8, i: i32, j: i32) -> i32 {
+        terrain::generated_top(&self.grid, &*self.field, face, i, j, 0, self.column_height(face, i, j, 0))
+    }
+    /// The material the terrain gives base cell `cell` were it solid there,
+    /// edits and features ignored.
+    pub fn terrain_material(&self, cell: Cell) -> u32 {
+        let slope = self.material_slope(cell.face, cell.i, cell.j);
+        // Materials vary in 3D (`shade` samples the cell's volume point): a
+        // cliff's voxels are not one column's colour.
+        let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
+        let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
+        // Depth counts from the generated top: overhangs and the rock
+        // around caves lie below it.
+        let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
+        let depth = (generated - 1 - cell.k).max(0);
+        let surface = self.field.surface(crate::terrain::Column { face: cell.face, i: cell.i, j: cell.j, level: 0 }, top_height) & 0xff;
+        self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
     }
     /// Exact base-grid ray cast. Stops at the first cell for which `stop`
     /// returns true given its kind. `max_distance` may be infinite; the ray

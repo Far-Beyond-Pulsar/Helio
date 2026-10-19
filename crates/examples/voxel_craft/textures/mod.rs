@@ -128,6 +128,9 @@ pub fn load(device: &wgpu::Device, queue: &wgpu::Queue, world: &mut World) -> Bl
     }
     // Blocks look like their textures, not like the generator's patches.
     appearance.detail = [0.0, 0.12, 0.08, 0.0];
+    // Shade keeps its colour: a cool fill like the sky's bounce, and sky
+    // occlusion never closing past 0.38 (canopies stay readable).
+    appearance.shade = [0.20, 0.25, 0.34, 0.38];
     BlockTextures { store: Arc::new(RwLock::new(store)), map, appearance, sides }
 }
 

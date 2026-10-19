@@ -166,8 +166,11 @@ fn tower(rng: &mut Rng) -> Blueprint {
     for (x, z) in [(-h, -h), (h, -h), (-h, h), (h, h)] {
         b.set([x, top + 3, z], Block::Glowstone);
     }
-    // A weathered tower: a few bricks lost to age.
-    let lost: Vec<[i32; 3]> = b.blocks.iter().filter(|(p, v)| p[1] > 8 && v.is_some() && rng.f64() < 0.03).map(|(p, _)| *p).collect();
+    // A weathered tower: a few bricks lost to age (rolled in a fixed
+    // order: a site's tower is the same whenever it is built).
+    let mut upper: Vec<[i32; 3]> = b.stamp.cells().filter(|(p, v)| p[1] > 8 && v.is_some()).map(|(p, _)| p).collect();
+    upper.sort_unstable();
+    let lost: Vec<[i32; 3]> = upper.into_iter().filter(|_| rng.f64() < 0.03).collect();
     for p in lost {
         b.clear(p);
     }

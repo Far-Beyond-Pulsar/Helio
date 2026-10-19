@@ -3,23 +3,17 @@
 pub mod climate;
 pub mod recipe;
 
-use crate::blocks::Block;
 use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{Cell, Planet};
 
-/// The topmost solid block of a column.
+/// The terrain's topmost block of a column (edits and features aside: what
+/// the world was generated with, so features decided on it come out the
+/// same whenever they are).
 #[derive(Clone, Copy, Debug)]
 pub struct Ground {
     pub cell: Cell,
     /// The material id of the block.
     pub material: u32,
-}
-
-impl Ground {
-    /// The cell above the ground (where things are built).
-    pub fn above(&self) -> Cell {
-        Cell::new(self.cell.face, self.cell.i, self.cell.j, self.cell.k + 1)
-    }
 }
 
 /// Faces' edge margin (cells): features keep this far from a cube edge, where
@@ -32,30 +26,19 @@ pub fn buildable(planet: &Planet, i: i32, j: i32) -> bool {
     i >= EDGE_MARGIN && j >= EDGE_MARGIN && i < n - EDGE_MARGIN && j < n - EDGE_MARGIN
 }
 
-/// The topmost solid cell of column `(i, j)` of `face` at or below its
-/// generated top (caves and edits included), if within `reach` cells.
+/// The terrain's top block of column `(i, j)` of `face`.
 pub fn ground(planet: &Planet, face: u8, i: i32, j: i32) -> Option<Ground> {
-    let top = planet.column_top(face, i, j, 0);
-    // Cells over the generated top may be built; start from there.
-    let mut k = top + 24;
-    let floor = top - 64;
-    while k > floor {
-        let cell = Cell::new(face, i, j, k);
-        if planet.solid(cell) {
-            return Some(Ground { cell, material: planet.material(cell) });
-        }
-        k -= 1;
-    }
-    None
+    let cell = Cell::new(face, i, j, planet.terrain_top(face, i, j) - 1);
+    Some(Ground { cell, material: planet.terrain_material(cell) })
 }
 
 /// Heights of the ground around a column, for slope tests: the largest
 /// difference from the column's own top among its neighbours `d` cells away.
 pub fn relief(planet: &Planet, face: u8, i: i32, j: i32, d: i32) -> i32 {
-    let here = planet.column_top(face, i, j, 0);
+    let here = planet.terrain_top(face, i, j);
     [(d, 0), (-d, 0), (0, d), (0, -d)]
         .into_iter()
-        .map(|(di, dj)| (planet.column_top(face, i + di, j + dj, 0) - here).abs())
+        .map(|(di, dj)| (planet.terrain_top(face, i + di, j + dj) - here).abs())
         .max()
         .unwrap_or(0)
 }
@@ -82,9 +65,4 @@ impl Biome {
             _ => Biome::Rock,
         }
     }
-}
-
-/// The block a material id is, when it is one of the game's.
-pub fn block_of(material: u32) -> Option<Block> {
-    Block::from_material(material)
 }

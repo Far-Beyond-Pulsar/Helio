@@ -36,9 +36,9 @@ block pixels instead of smooth magnification).
 | `config.rs` | tunables |
 | `blocks.rs` | the block palette: voxel material ids, faces, emission |
 | `terrain/` | the planet recipe (layer stack and material rules), biomes, hash noise |
-| `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` places trees and structures per region |
-| `trees/` | tree generators: oak, dark oak, birch, spruce, pine, jungle giant |
-| `structures/` | blueprints: cottage, tower, ruins, well, pyramid |
+| `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` decides each region's trees and structures |
+| `trees/` | tree generators: oak, dark oak, birch, spruce, pine, jungle giant (as voxel stamps) |
+| `structures/` | blueprints (voxel stamps of this game's blocks): cottage, tower, ruins, well, pyramid |
 | `textures/` | block tiles to Helio scene materials; composes grass and leaves |
 | `player/` | movement and collision on a sphere, block interaction, the character |
 | `input.rs` | keyboard and mouse state |
@@ -59,12 +59,18 @@ block pixels instead of smooth magnification).
   the character's boxes and the block in hand, so any block can later be
   swapped for a graph-compiled material. Devices without descriptor indexing
   fall back to the averaged flat colours.
-* **Edits** (the player's and the decorator's) are cube brushes applied by a
-  worker thread to the authoritative planet, which publishes immutable
-  snapshots (`world/worker.rs`): the renderer draws the latest, physics reads
-  it plus the player's pending edits so a break or placement is felt at once.
-* **Decoration** is per 32 x 32 column region, generated from a hash of the
-  world seed and the region only, nearest the player first.
+* **Edits** (the player's) are cube brushes applied by a worker thread to the
+  authoritative planet, which publishes immutable snapshots
+  (`world/worker.rs`): the renderer draws the latest, physics reads it plus
+  the player's pending edits so a break or placement is felt at once.
+* **Decoration** is the voxel planet's *features*
+  (`helio_pass_voxel_planet::features`): each 32 x 32 column region's trees
+  and structures are decided from the world seed, the region and the terrain
+  alone, placed as voxel stamps (`helio_pass_voxel_planet::stamp`), loaded
+  nearest the player first and unloaded far behind them. They are not edits:
+  saves and undo never hold them, memory stays bounded however far the player
+  travels, and a region comes back the same when they return, with whatever
+  they dug or built over it.
 
 ## Credits and licenses
 
