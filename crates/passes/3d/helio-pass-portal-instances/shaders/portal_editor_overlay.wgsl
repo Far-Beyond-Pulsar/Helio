@@ -127,12 +127,12 @@ fn vs_glyph_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_ind
 fn fs_glyph_main(input: GlyphOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<u32>(min(vec2<f32>(4.0, 6.0), floor(input.uv * vec2<f32>(5.0, 7.0))));
     let bit = pixel.y * 5u + pixel.x;
-    var set = false;
+    var lit_bit = false;
     if bit < 32u {
-        set = ((input.bitmap.x >> bit) & 1u) != 0u;
+        lit_bit = ((input.bitmap.x >> bit) & 1u) != 0u;
     } else {
-        set = ((input.bitmap.y >> (bit - 32u)) & 1u) != 0u;
+        lit_bit = ((input.bitmap.y >> (bit - 32u)) & 1u) != 0u;
     }
-    if !set { discard; }
+    if !lit_bit { discard; }
     return input.color;
 }
