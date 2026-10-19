@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 mod background;
 pub mod environment_join;
+pub mod portal_projection;
 pub mod hierarchy_resolve;
 pub mod ray_tracing;
 pub mod scene_join;
