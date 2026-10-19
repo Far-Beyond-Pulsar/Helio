@@ -32,6 +32,11 @@ pub struct Game {
     /// The sun's path: a great circle through the sky over the spawn.
     sun_axes: (DVec3, DVec3),
     show_help: bool,
+    total_frames: u64,
+    tour: Option<Tour>,
+    pub quit: bool,
+    luma: bool,
+    walk: bool,
 }
 
 /// A grassy, level place to start on.
@@ -77,6 +82,7 @@ impl Game {
         player.heading = e2;
         let cell = world.cell_at(spawn);
         world.focus(cell);
+        let tour_active = std::env::var_os("VOXEL_CRAFT_SHOTS").is_some();
         Self {
             gfx,
             world,
@@ -90,10 +96,17 @@ impl Game {
             fps: 0.0,
             // Mid-morning.
             time: DAY_SECONDS * 0.08,
-            time_speed: 1.0,
+            time_speed: if tour_active { 0.0 } else { 1.0 },
             focus: (i32::MIN, i32::MIN),
             sun_axes: (up, e1),
             show_help: true,
+            total_frames: 0,
+            tour: std::env::var("VOXEL_CRAFT_SHOTS").ok().map(Tour::new),
+            // A tour keeps the sun where it is: shots compare.
+            // (set below)
+            quit: false,
+            luma: std::env::var_os("VOXEL_CRAFT_LUMA").is_some(),
+            walk: std::env::var_os("VOXEL_CRAFT_WALK").is_some(),
         }
     }
 
@@ -110,6 +123,9 @@ impl Game {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f64().min(0.1);
         self.last_frame = now;
+        if dt > 0.05 {
+            log::info!("HITCH {:.0} ms at frame {}", dt * 1e3, self.total_frames);
+        }
         self.time += dt * self.time_speed;
 
         // Keys that are not movement.
@@ -142,7 +158,12 @@ impl Game {
             self.player.hotbar = (self.player.hotbar as i32 - scroll.signum() as i32).rem_euclid(n) as usize;
         }
 
-        let controls = self.input.controls();
+        let mut controls = self.input.controls();
+        // `VOXEL_CRAFT_WALK=1`: walk forward by itself and log the eye's height each frame.
+        if self.walk {
+            controls.forward = 1.0;
+            log::info!("WALK {:.4} {:.3} ground {}", self.world.planet().grid().height(self.player.eye()), dt * 1e3, self.player.on_ground);
+        }
         self.world.update();
         self.player.update(&self.world, &controls, dt);
         self.interaction.update(&mut self.player, &mut self.world, &controls, dt);
@@ -155,6 +176,42 @@ impl Game {
             self.world.focus(cell);
         }
 
+        self.total_frames += 1;
+        // `VOXEL_CRAFT_PALETTE=1`: every block in a row, for checking the textures.
+        if std::env::var_os("VOXEL_CRAFT_PALETTE").is_some() && self.tour.is_some() {
+            if self.total_frames == 300 {
+                let here = self.world.cell_at(self.player.position);
+                let edits: Vec<_> = Block::ALL.iter().enumerate().map(|(n, b)| crate::world::edits::BlockEdit::set(Cell::new(here.face, here.i + (n as i32 % 8) * 2 - 7, here.j + 12, here.k + 3 + (n as i32 / 8) * 3), *b)).collect();
+                self.world.edit(&edits);
+                let start = Cell::new(here.face, here.i, here.j + 12, here.k + 6);
+                let along = self.world.cell_centre(Cell::new(start.face, start.i, start.j + 1, start.k)) - self.world.cell_centre(start);
+                self.player.flying = true;
+                self.player.position = self.world.cell_centre(Cell::new(start.face, start.i, start.j - 12, start.k)) - self.player.position.normalize() * 1.62;
+                self.player.heading = along.normalize();
+                self.player.pitch = 0.0;
+                self.player.velocity = DVec3::ZERO;
+            }
+        }
+        if let Some(t) = &self.tour {
+            if t.trunk && self.total_frames == 700 {
+                let here = self.world.cell_at(self.player.position);
+                match nearest_wood(&self.world, here, 45) {
+                    Some((cell, block)) => {
+                        log::info!("TRUNK {:?} at {:?} is {:?}, drawn material {}", block, cell, self.world.block_at(cell), block.material());
+                        let target = self.world.cell_centre(cell);
+                        let up = target.normalize();
+                        let side = up.any_orthonormal_vector();
+                        self.player.flying = true;
+                        self.player.position = target + side * 4.0 + up * 0.5 - up * 1.62;
+                        self.player.heading = -side;
+                        self.player.pitch = 0.0;
+                        self.player.velocity = DVec3::ZERO;
+                    }
+                    None => log::info!("TRUNK none found"),
+                }
+            }
+        }
+        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, self.gfx.settled(), &mut self.quit));
         let (eye, look) = self.player.camera(&self.world);
         let outline = self.interaction.outline(&self.world);
         let view = View {
@@ -165,6 +222,8 @@ impl Game {
             sun: self.sun(),
             outline: &outline,
             time: self.started.elapsed().as_secs_f64(),
+            screenshot: shot.as_deref(),
+            luma: self.luma && self.total_frames % 2 == 0,
         };
         self.gfx.draw(&view);
         self.input.end_frame();
@@ -206,4 +265,96 @@ impl Game {
             help
         ));
     }
+}
+
+/// `VOXEL_CRAFT_SHOTS=<dir>`: a scripted tour that poses the camera, waits for
+/// the terrain to settle, saves `<dir>/shot_N.png` for each pose and quits.
+/// For comparing renders without a person at the keyboard.
+struct Tour {
+    dir: String,
+    pose: usize,
+    /// Frames since the pose was set.
+    waited: u32,
+    /// Look at the nearest tree trunk instead of the posed views.
+    trunk: bool,
+}
+
+/// (turn about up in degrees, pitch, third person, metres above the start).
+const POSES: &[(f64, f64, bool, f64)] = &[
+    (0.0, -0.08, false, 0.0),
+    (90.0, 0.0, false, 0.0),
+    (90.0, 0.55, false, 0.0),
+    (90.0, -0.75, false, 0.0),
+    (0.0, -0.2, true, 0.0),
+    (90.0, -0.35, true, 0.0),
+    (0.0, -0.55, false, 45.0),
+    (180.0, 0.05, false, 0.0),
+];
+
+impl Tour {
+    fn new(dir: String) -> Self {
+        let _ = std::fs::create_dir_all(&dir);
+        Self { dir, pose: 0, waited: u32::MAX, trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some() }
+    }
+
+    /// Advances the tour by a frame; the path to save this frame to, if it
+    /// should be.
+    fn step(&mut self, player: &mut Player, settled: bool, quit: &mut bool) -> Option<String> {
+        if self.waited == u32::MAX {
+            self.set_pose(player);
+        }
+        self.waited += 1;
+        // A pose is shot once the terrain has settled and the temporal
+        // anti-aliasing has had frames to converge (or after a long wait).
+        let ready = (settled && self.waited >= 120) || self.waited >= 900;
+        if !ready {
+            return None;
+        }
+        let path = format!("{}/shot_{:02}.png", self.dir, self.pose);
+        log::info!("shot {} at {} frames, settled {settled}", self.pose, self.waited);
+        self.pose += 1;
+        let limit = std::env::var("VOXEL_CRAFT_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(POSES.len());
+        if self.pose >= limit.min(POSES.len()) {
+            *quit = true;
+        } else {
+            self.set_pose(player);
+        }
+        Some(path)
+    }
+
+    fn set_pose(&mut self, player: &mut Player) {
+        let (turn, pitch, third, lift) = POSES[self.pose];
+        let _ = (turn, pitch, third, lift);
+        let frame = player.frame();
+        let (s, c) = turn.to_radians().sin_cos();
+        player.heading = frame.forward * c + frame.right * s;
+        player.pitch = pitch;
+        player.third_person = third;
+        player.flying = lift > 0.0;
+        if lift > 0.0 && self.pose > 0 {
+            player.position += frame.up * lift;
+        }
+        player.velocity = DVec3::ZERO;
+        self.waited = 0;
+    }
+}
+
+/// The nearest wood block within `reach` blocks of `from`, as (cell, block).
+fn nearest_wood(world: &World, from: Cell, reach: i32) -> Option<(Cell, Block)> {
+    let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog];
+    let mut best: Option<(i32, Cell, Block)> = None;
+    for di in -reach..=reach {
+        for dj in -reach..=reach {
+            for dk in 0..16 {
+                let cell = Cell::new(from.face, from.i + di, from.j + dj, from.k + dk);
+                if let Some(block) = world.block_at(cell).filter(|b| logs.contains(b)) {
+                    let d = di * di + dj * dj + dk * dk;
+                    if best.is_none_or(|(bd, _, _)| d < bd) {
+                        best = Some((d, cell, block));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, c, b)| (c, b))
 }

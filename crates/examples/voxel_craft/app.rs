@@ -76,6 +76,9 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) => Self::capture(game, false),
             WindowEvent::RedrawRequested => {
                 game.frame();
+                if game.quit {
+                    event_loop.exit();
+                }
                 game.gfx.window.request_redraw();
             }
             _ => {}

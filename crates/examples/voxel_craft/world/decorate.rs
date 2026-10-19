@@ -146,14 +146,16 @@ impl Decorator {
                     if trunks.iter().any(|&(ti, tj)| (ti - i).abs() < reach && (tj - j).abs() < reach) {
                         continue;
                     }
+                    let mut cells: Vec<(Cell, Block)> = Vec::with_capacity(tree.blocks.len());
                     for (off, block) in &tree.blocks {
                         let cell = Cell::new(face, i + off[0], j + off[2], base.k + off[1]);
                         // Crowns stop at hillsides.
                         if planet.solid(cell) && !matches!(block, Block::OakLog | Block::BirchLog | Block::SpruceLog | Block::JungleLog) {
                             continue;
                         }
-                        brushes.push(BlockEdit::set(cell, *block).brush(&grid));
+                        cells.push((cell, *block));
                     }
+                    push_columns(&grid, &mut brushes, cells);
                     // Dirt under the trunk, as the roots would make it.
                     if matches!(g.material, material::GRASS) {
                         brushes.push(BlockEdit::set(g.cell, Block::Dirt).brush(&grid));
@@ -205,4 +207,28 @@ fn pick_species(biome: Biome, height_m: f64, kind: f64, density: f64, rng: &mut 
             }
         }
     })
+}
+
+/// Brushes for `cells`, with vertical runs of one block made into a single
+/// box brush: a tree is a few hundred brushes, not a few thousand (every brush
+/// is history the planet keeps and the renderer follows).
+fn push_columns(grid: &helio_pass_voxel_planet::Grid, brushes: &mut Vec<Brush>, mut cells: Vec<(Cell, Block)>) {
+    cells.sort_by_key(|(c, b)| (c.face, c.i, c.j, b.material(), c.k));
+    let mut run: Option<(Cell, Block, i32)> = None;
+    let mut flush = |run: Option<(Cell, Block, i32)>, brushes: &mut Vec<Brush>| {
+        if let Some((start, block, length)) = run {
+            brushes.push(box_brush(grid, start.face, start.i, start.j, start.k, 1, length, Some(block)));
+        }
+    };
+    for (cell, block) in cells {
+        run = match run {
+            Some((start, b, length)) if b == block && start.face == cell.face && start.i == cell.i && start.j == cell.j && start.k + length == cell.k => Some((start, b, length + 1)),
+            Some((start, b, length)) if b == block && start.face == cell.face && start.i == cell.i && start.j == cell.j && start.k + length > cell.k => Some((start, b, length)),
+            other => {
+                flush(other, brushes);
+                Some((cell, block, 1))
+            }
+        };
+    }
+    flush(run, brushes);
 }

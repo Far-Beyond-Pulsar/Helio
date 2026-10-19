@@ -42,7 +42,7 @@ tiles!(
 );
 
 /// The tint turning the pack's grey-olive turf into a lively meadow green.
-const TURF: [f32; 3] = [0.93, 1.5, 0.62];
+const TURF: [f32; 3] = [0.58, 0.92, 0.4];
 
 fn tile(name: &str) -> RgbaImage {
     let bytes = tile_bytes(name).unwrap_or_else(|| panic!("tile {name} is not embedded"));

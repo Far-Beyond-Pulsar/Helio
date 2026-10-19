@@ -40,7 +40,10 @@ pub struct Worker {
 }
 
 /// Snapshots are copied at most this often while edits stream in.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(80);
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(60);
+/// While only decorating (no player edit waiting), snapshots are rarer: each
+/// one makes the renderer regenerate the tiles the new edits touch.
+const DECORATION_INTERVAL: Duration = Duration::from_millis(700);
 
 impl Worker {
     /// Starts the thread; it owns `planet`.
@@ -54,6 +57,7 @@ impl Worker {
                 let mut focus: Option<Cell> = None;
                 let mut ticket = 0;
                 let mut dirty = false;
+                let mut urgent = false;
                 let mut last_sent = Instant::now() - SNAPSHOT_INTERVAL;
                 loop {
                     let work_left = focus.is_some_and(|f| decorator.next(&planet, f).is_some());
@@ -78,6 +82,7 @@ impl Worker {
                                     }
                                 }
                                 dirty = true;
+                                urgent = true;
                             }
                         }
                     }
@@ -94,12 +99,14 @@ impl Worker {
                         log::debug!("region {region:?}: {made} brushes in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
                         dirty = true;
                     }
-                    if dirty && last_sent.elapsed() >= SNAPSHOT_INTERVAL {
+                    let interval = if urgent { SNAPSHOT_INTERVAL } else { DECORATION_INTERVAL };
+                    if dirty && last_sent.elapsed() >= interval {
                         let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()), regions: decorator.regions_done() };
                         if result_tx.send(snapshot).is_err() {
                             break;
                         }
                         dirty = false;
+                        urgent = false;
                         last_sent = Instant::now();
                     }
                 }

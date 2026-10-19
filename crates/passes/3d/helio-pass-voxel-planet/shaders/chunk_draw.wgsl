@@ -1699,7 +1699,10 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
         out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0);
     }
     out.normal = vec4<f32>(normal, f0);
-    out.orm = vec4<f32>(look.ao * shading.w, clamp(roughness, 0.04, 1.0), 0.0, f0);
+    // Sky light never fully closes: shade under canopies stays readable.
+    out.orm = vec4<f32>(mix(0.38, 1.0, look.ao * shading.w), clamp(roughness, 0.04, 1.0), 0.0, f0);
+    // Fill light: shade keeps the colour of its surface (the sky's bounce).
+    emissive += albedo * vec3<f32>(0.20, 0.25, 0.34) * mix(0.55, 1.0, shading.w);
     out.emissive = vec4<f32>(emissive, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).
     out.lightmap_uv = vec2<f32>(-1.0, -2.0);

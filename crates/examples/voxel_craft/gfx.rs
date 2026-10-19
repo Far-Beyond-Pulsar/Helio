@@ -104,7 +104,7 @@ impl Gfx {
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 format: surface_format,
                 width: size[0],
                 height: size[1],
@@ -125,10 +125,10 @@ impl Gfx {
         scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         post.tonemap_operator = helio::TonemapOperator::Aces;
-        post.tonemap_exposure = 1.0;
+        post.tonemap_exposure = std::env::var("VOXEL_CRAFT_EXPOSURE").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);
         post.color_saturation = [1.12; 3];
         post.color_contrast = [1.06; 3];
-        post.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
+        post.exposure_mode = helio_pass_postprocess::ExposureMode::Manual;
         set_camera_postprocess(&mut scene.world, 0, &post);
         let avatar = Avatar::spawn(&mut scene.world, |block| textures.side_material(block));
         scene.world.flush_gpu_mirror(&queue);
@@ -152,6 +152,7 @@ impl Gfx {
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], surface_format);
         textures::configure_sampler(&mut renderer);
+        renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size }
     }
 
@@ -163,7 +164,7 @@ impl Gfx {
         self.surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 format: self.surface_format,
                 width,
                 height,
@@ -253,7 +254,48 @@ impl Gfx {
         if let Err(error) = self.renderer.render(&camera, &target) {
             log::error!("render: {error:?}");
         }
+        if let Some(path) = view.screenshot {
+            self.save_screenshot(&output.texture, path);
+        }
+        if view.luma {
+            let pixels = self.read_pixels(&output.texture);
+            let sum: u64 = pixels.chunks(4).map(|p| (u64::from(p[0]) * 3 + u64::from(p[1]) * 6 + u64::from(p[2])) / 10).sum();
+            log::info!("LUMA {:.2}", sum as f64 / (pixels.len() / 4) as f64);
+        }
         self.queue.present(output);
+    }
+
+    /// Writes the frame just drawn to `path` (PNG).
+    fn save_screenshot(&self, texture: &wgpu::Texture, path: &str) {
+        let [w, h] = self.size;
+        let pixels = self.read_pixels(texture);
+        let _ = image::save_buffer(path, &pixels, w, h, image::ColorType::Rgba8);
+    }
+
+    /// The frame just drawn as RGBA8 rows.
+    fn read_pixels(&self, texture: &wgpu::Texture) -> Vec<u8> {
+        let [w, h] = self.size;
+        let row = (w * 4).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        let bgra = matches!(self.surface_format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for line in data.chunks(row as usize).take(h as usize) {
+            for p in line[..(w * 4) as usize].chunks(4) {
+                pixels.extend_from_slice(&if bgra { [p[2], p[1], p[0], 255] } else { [p[0], p[1], p[2], 255] });
+            }
+        }
+        drop(data);
+        pixels
     }
 }
 
@@ -269,4 +311,8 @@ pub struct View<'a> {
     /// Edges to outline (the targeted block), planet-centred.
     pub outline: &'a [(DVec3, DVec3)],
     pub time: f64,
+    /// Save this frame to a PNG at this path.
+    pub screenshot: Option<&'a str>,
+    /// Log the frame's mean luminance and the planet pass's state.
+    pub luma: bool,
 }

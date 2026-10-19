@@ -92,7 +92,7 @@ pub const BAKE_RADIUS_HALF: u32 = 64;
 /// brushes undo without rebuilding the world).
 const UNDO_SEALS: usize = 128;
 /// Baked column changes kept for renderers to catch up with.
-const CHANGES_KEPT: usize = 256;
+const CHANGES_KEPT: usize = 8192;
 
 /// A world's edits in three layers, applied to the terrain in this order
 /// (see `edit_store`):

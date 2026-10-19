@@ -13,7 +13,7 @@ pub const WORLD_SEED: u64 = 7;
 /// region always comes out the same wherever it is generated from.
 pub const REGION_BLOCKS: i32 = 32;
 /// Regions decorated around the player, as a radius in regions.
-pub const REGION_RADIUS: i32 = 4;
+pub const REGION_RADIUS: i32 = 32;
 /// Regions the generator may hand to the edit worker per frame.
 pub const REGIONS_PER_FRAME: usize = 1;
 
