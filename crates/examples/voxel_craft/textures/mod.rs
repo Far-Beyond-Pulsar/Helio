@@ -82,7 +82,7 @@ impl BlockTextures {
 
 /// Registers every block's textures and materials in `world`.
 pub fn load(device: &wgpu::Device, queue: &wgpu::Queue, world: &mut World) -> BlockTextures {
-    let mut store = TextureStore::new(12);
+    let mut store = TextureStore::new(256);
     let mut appearance = TerrainAppearance::default();
     let mut map = VoxelMaterialMap::default();
     // A material row for each distinct (surface, block look).
