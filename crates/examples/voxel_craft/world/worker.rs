@@ -41,7 +41,7 @@ pub struct Worker {
 }
 
 /// Snapshots are copied at most this often while edits stream in.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(60);
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(16);
 /// While only decorating (no player edit waiting), snapshots are rarer: each
 /// one makes the renderer regenerate the tiles the new edits touch.
 const DECORATION_INTERVAL: Duration = Duration::from_millis(2500);
@@ -90,7 +90,8 @@ impl Worker {
                     // A batch of regions is built in parallel, then applied in
                     // order; batches stay small so player edits are not kept waiting.
                     let scan_started = Instant::now();
-                    let batch = focus.map(|f| decorator.next_batch(&planet, f, DECORATE_BATCH)).unwrap_or_default();
+                    // A waiting edit goes out first: decoration resumes after its snapshot.
+                    let batch = if urgent { Vec::new() } else { focus.map(|f| decorator.next_batch(&planet, f, DECORATE_BATCH)).unwrap_or_default() };
                     let scan_ms = scan_started.elapsed().as_secs_f64() * 1e3;
                     if !batch.is_empty() {
                         let started = Instant::now();

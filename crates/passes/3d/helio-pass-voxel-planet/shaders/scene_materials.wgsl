@@ -66,7 +66,9 @@ fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, in_cell: vec3<f32>, p
     if material.tex_base_color != SCENE_NO_TEXTURE && material.tex_base_color < MATERIAL_TEXTURES {
         let size = f32(textureDimensions(scene_textures[material.tex_base_color]).x);
         let voxel_px = params.planet.y / max(pixel_m, 1e-6);
-        let lod = max(log2(size / max(voxel_px, 1e-6)), 0.0);
+        // A texel a half pixel wide (not a whole one): TSR averages the jittered
+        // samples, so the detail the mip would have averaged away is rebuilt.
+        let lod = max(log2(size / max(voxel_px, 1e-6)) - 1.0, 0.0);
         texel = textureSampleLevel(scene_textures[material.tex_base_color], scene_samplers[material.tex_base_color], wrapped, lod).rgb;
         colour *= texel;
     }

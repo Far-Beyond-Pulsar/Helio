@@ -37,6 +37,7 @@ pub struct Game {
     pub quit: bool,
     luma: bool,
     walk: bool,
+    edit_started: Option<Instant>,
 }
 
 /// A grassy, level place to start on.
@@ -107,6 +108,7 @@ impl Game {
             quit: false,
             luma: std::env::var_os("VOXEL_CRAFT_LUMA").is_some(),
             walk: std::env::var_os("VOXEL_CRAFT_WALK").is_some(),
+            edit_started: None,
         }
     }
 
@@ -177,6 +179,44 @@ impl Game {
         }
 
         self.total_frames += 1;
+        // `VOXEL_CRAFT_EDITTEST=1`: place five different blocks in a row, time how long until
+        // the world has them, and look at them.
+        if std::env::var_os("VOXEL_CRAFT_EDITTEST").is_some() {
+            let mut return_early = false;
+            if self.total_frames == 700 {
+                let here = self.world.cell_at(self.player.position);
+                if std::env::var("VOXEL_CRAFT_EDITTEST").as_deref() == Ok("2") {
+                    let c = |di: i32, dk: i32| Cell::new(here.face, here.i + di, here.j + 3, here.k + dk);
+                    let edits = vec![
+                        crate::world::edits::BlockEdit::set(c(0, 0), Block::Glowstone),
+                        crate::world::edits::BlockEdit::set(c(3, 0), Block::Cobblestone),
+                        crate::world::edits::BlockEdit::set(c(3, 1), Block::Cobblestone),
+                        crate::world::edits::BlockEdit::set(c(3, 2), Block::Cobblestone),
+                        crate::world::edits::BlockEdit::set(c(-3, 0), Block::Sand),
+                        crate::world::edits::BlockEdit::set(c(-4, 0), Block::Bricks),
+                    ];
+                    self.world.edit(&edits);
+                    let along = self.world.cell_centre(Cell::new(here.face, here.i, here.j + 1, here.k)) - self.world.cell_centre(here);
+                    self.player.heading = along.normalize();
+                    self.player.pitch = -0.35;
+                    self.edit_started = Some(Instant::now());
+                    return_early = true;
+                }
+                let blocks = [Block::Glowstone, Block::OakPlanks, Block::StoneBricks, Block::Bricks, Block::Sand];
+                let edits: Vec<_> = blocks.iter().enumerate().map(|(n, b)| crate::world::edits::BlockEdit::set(Cell::new(here.face, here.i + n as i32 * 2 - 4, here.j + 5, here.k), *b)).collect();
+                self.world.edit(&edits);
+                self.edit_started = Some(Instant::now());
+                let along = self.world.cell_centre(Cell::new(here.face, here.i, here.j + 1, here.k)) - self.world.cell_centre(here);
+                self.player.heading = along.normalize();
+                self.player.pitch = -0.25;
+            }
+            if let Some(t) = self.edit_started {
+                if self.world.pending_edits() == 0 {
+                    log::info!("EDIT in world after {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+                    self.edit_started = None;
+                }
+            }
+        }
         // `VOXEL_CRAFT_PALETTE=1`: every block in a row, for checking the textures.
         if std::env::var_os("VOXEL_CRAFT_PALETTE").is_some() && self.tour.is_some() {
             if self.total_frames == 300 {

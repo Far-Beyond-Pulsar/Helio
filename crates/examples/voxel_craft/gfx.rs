@@ -46,7 +46,7 @@ fn chunk_config(h: u32) -> ResidencyConfig {
         plan: PlanConfig {
             pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h),
             // Cells a pixel wide at most: one-block detail wherever it shows.
-            lod_pixels: number("VOXEL_CRAFT_LOD", 1.2),
+            lod_pixels: number("VOXEL_CRAFT_LOD", 0.6),
             offscreen_pixels: 2.0,
             view_guard: 0.35,
             coarsen: 0.8,
@@ -264,6 +264,16 @@ impl Gfx {
         if view.luma {
             let pixels = self.read_pixels(&output.texture);
             let sum: u64 = pixels.chunks(4).map(|p| (u64::from(p[0]) * 3 + u64::from(p[1]) * 6 + u64::from(p[2])) / 10).sum();
+            let [w, h] = self.size;
+            let (w, h) = (w as usize, h as usize);
+            let mut sharp = 0u64;
+            for y in (h / 3)..(h * 2 / 3) {
+                for x in 0..w - 1 {
+                    let (a, b) = ((y * w + x) * 4, (y * w + x + 1) * 4);
+                    sharp += (0..3).map(|c| i32::from(pixels[a + c]).abs_diff(i32::from(pixels[b + c]))).sum::<u32>() as u64;
+                }
+            }
+            log::info!("SHARP {:.3}", sharp as f64 / ((h / 3) * w) as f64);
             let changed = self.previous.as_ref().map_or(0.0, |old| old.chunks(4).zip(pixels.chunks(4)).filter(|(a, b)| (0..3).map(|c| i32::from(a[c]).abs_diff(i32::from(b[c]))).sum::<u32>() > 36).count() as f64 / (pixels.len() / 4) as f64);
             log::info!("LUMA {:.2} changed {:.4} {}", sum as f64 / (pixels.len() / 4) as f64, changed, self.diagnostics().split(" fading").next().unwrap_or(""));
             if let Ok(p) = std::env::var("VOXEL_CRAFT_PIXEL") {

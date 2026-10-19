@@ -44,6 +44,9 @@ pub struct BlockMaterials {
     columns: FxHashMap<ColumnKey, Vec<i32>>,
     /// Bricks to write: the latest state of each (`None`: now empty).
     pending: FxHashMap<BrickKey, Option<Arc<Brick>>>,
+    /// Bricks of small changes (an edit someone is looking at): written
+    /// before any of `pending`, which can hold a world's worth.
+    urgent: FxHashMap<BrickKey, Option<Arc<Brick>>>,
     warned: bool,
 }
 
@@ -56,7 +59,7 @@ impl BlockMaterials {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { buffer, keys: vec![[0; 4]; CAPACITY], columns: FxHashMap::default(), pending: FxHashMap::default(), warned: false }
+        Self { buffer, keys: vec![[0; 4]; CAPACITY], columns: FxHashMap::default(), pending: FxHashMap::default(), urgent: FxHashMap::default(), warned: false }
     }
 
     /// The table entry of a brick, adding it if it is new.
@@ -110,6 +113,17 @@ impl BlockMaterials {
     /// queued to be written again, and bricks they no longer hold to be cleared.
     pub fn sync(&mut self, store: &EditStore, changed: &[ColumnKey]) {
         let mut done: rustc_hash::FxHashSet<ColumnKey> = Default::default();
+        // A small change is an edit someone is looking at: it goes first.
+        let small = changed.len() <= 256;
+        let queue = |me: &mut Self, key: BrickKey, brick: Option<Arc<Brick>>| {
+            if small {
+                me.pending.remove(&key);
+                me.urgent.insert(key, brick);
+            } else {
+                me.urgent.remove(&key);
+                me.pending.insert(key, brick);
+            }
+        };
         for column in changed.iter().filter(|c| c.level == 0) {
             if !done.insert(*column) {
                 continue;
@@ -119,13 +133,13 @@ impl BlockMaterials {
             if let Some(now) = store.column(column) {
                 for (bk, brick) in now.iter() {
                     let key = BrickKey { face: column.face, level: 0, bi: column.ci, bj: column.cj, bk: *bk };
-                    self.pending.insert(key, Some(brick.clone()));
+                    queue(self, key, Some(brick.clone()));
                     heights.push(*bk);
                 }
             }
             for bk in before.into_iter().filter(|bk| !heights.contains(bk)) {
                 let key = BrickKey { face: column.face, level: 0, bi: column.ci, bj: column.cj, bk };
-                self.pending.insert(key, None);
+                queue(self, key, None);
             }
             if !heights.is_empty() {
                 self.columns.insert(*column, heights);
@@ -133,15 +147,26 @@ impl BlockMaterials {
         }
     }
 
-    /// Writes up to `budget` queued bricks to the GPU; how many are left.
+    /// Writes the urgent bricks, then queued ones until `budget` of them or
+    /// about two milliseconds are spent; how many are left.
     pub fn flush(&mut self, queue: &wgpu::Queue, budget: usize) -> usize {
+        let urgent: Vec<BrickKey> = self.urgent.keys().copied().collect();
+        for key in urgent {
+            if let Some(brick) = self.urgent.remove(&key) {
+                self.write_brick(queue, &key, brick.as_deref());
+            }
+        }
         if self.pending.is_empty() {
             return 0;
         }
+        let started = std::time::Instant::now();
         let keys: Vec<BrickKey> = self.pending.keys().take(budget).copied().collect();
         for key in keys {
             if let Some(brick) = self.pending.remove(&key) {
                 self.write_brick(queue, &key, brick.as_deref());
+            }
+            if started.elapsed().as_micros() > 2000 {
+                break;
             }
         }
         self.pending.len()

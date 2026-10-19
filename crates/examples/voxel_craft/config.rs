@@ -15,7 +15,7 @@ pub const REGION_BLOCKS: i32 = 32;
 /// Regions decorated around the player, as a radius in regions.
 pub const REGION_RADIUS: i32 = 2048;
 /// Most regions the world worker decorates in parallel per pass.
-pub const DECORATE_BATCH: usize = 192;
+pub const DECORATE_BATCH: usize = 64;
 /// Regions the generator may hand to the edit worker per frame.
 pub const REGIONS_PER_FRAME: usize = 1;
 

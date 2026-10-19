@@ -348,7 +348,10 @@ fn apply_baked(mask: vec2<u32>, job: ChunkJob, column: u32, li: u32) -> vec2<u32
 fn edited_material(material: u32, job: ChunkJob, column: u32, li: u32, p: vec3<i32>, ch: vec2<i32>, level: u32, k: i32, k0: i32) -> u32 {
     var m = material;
     for (var e = 0u; e <= job.brush_count; e++) {
-        if e == job.large && job.baked != NONE {
+        // Base-level edits are drawn from their own exact table, so a leaf's pair
+        // keeps the terrain's materials: a placed block cannot recolour its
+        // neighbours. Coarse levels have no such table and keep the vote.
+        if level != 0u && e == job.large && job.baked != NONE {
             let edit = baked_edit(job, column, li, u32(k - k0));
             if (edit & 3u) >= 2u && (edit >> 8u) != 0u { m = edit >> 8u; }
         }
