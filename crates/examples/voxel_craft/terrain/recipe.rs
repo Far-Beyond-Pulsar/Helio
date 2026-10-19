@@ -97,7 +97,7 @@ pub fn terrain_layers() -> TerrainLayers {
                 r.patch_km = 0.05;
                 r.patch_share = 0.5;
             }),
-            // Deserts: dry land is sand over sandstone.
+            // Deserts: dry land is sand over sandstone (no beaches: there is no sea, and a height rule samples once per 4x4x4 leaf, so it patched meadows with sand).
             rule("Sand", |r| {
                 r.max_moisture = 0.32;
                 r.max_depth_m = 4.0;
@@ -105,11 +105,6 @@ pub fn terrain_layers() -> TerrainLayers {
             rule("Sandstone", |r| {
                 r.max_moisture = 0.32;
                 r.max_depth_m = 14.0;
-            }),
-            // Beaches: low ground.
-            rule("Sand", |r| {
-                r.max_height_m = 2.5;
-                r.max_depth_m = 3.0;
             }),
             // Clay in the lowest, wettest ground.
             rule("Clay", |r| {

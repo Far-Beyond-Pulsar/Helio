@@ -205,6 +205,13 @@ impl Game {
                     self.player.heading = -side;
                     self.player.pitch = -0.4;
                     self.player.velocity = DVec3::ZERO;
+                    for dj in -6..=2 {
+                        let row: Vec<String> = (-8..=8).map(|di| {
+                            let c = Cell::new(cell.face, cell.i + di, cell.j + dj, cell.k);
+                            self.world.block_at(c).map(|b| b.name().chars().take(2).collect::<String>()).unwrap_or("..".into())
+                        }).collect();
+                        println!("CPU j{:+} {}", dj, row.join(" "));
+                    }
                 }
             }
             if self.total_frames > start && (self.total_frames - start) % 90 == 0 {
@@ -344,7 +351,15 @@ impl Game {
                 }
             }
         }
-        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, self.gfx.settled(), &mut self.quit));
+        let mut shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, self.gfx.settled(), &mut self.quit));
+        // `VOXEL_CRAFT_REPLAY_SHOTS=<dir>`: a shot 60 frames after each replay step (and before the first).
+        if let (Ok(dir), Ok(_)) = (std::env::var("VOXEL_CRAFT_REPLAY_SHOTS"), std::env::var("VOXEL_CRAFT_REPLAY")) {
+            let start: u64 = std::env::var("VOXEL_CRAFT_REPLAY_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+            if self.total_frames >= start + 30 && (self.total_frames - start) % 90 == 60 && (self.total_frames - start) / 90 <= 3 {
+                let _ = std::fs::create_dir_all(&dir);
+                shot = Some(format!("{dir}/step_{:02}.png", (self.total_frames - start) / 90));
+            }
+        }
         let (eye, look) = self.player.camera(&self.world);
         let outline = self.interaction.outline(&self.world);
         let view = View {
