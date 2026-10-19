@@ -104,7 +104,7 @@ pub struct DeferredLightPass {
         [wgpu::Sampler; 4],
         wgpu::Buffer,
     )>,
-    bind_group_3_key: Option<[wgpu::Buffer; 2]>,
+    bind_group_3_key: Option<[wgpu::Buffer; 3]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     reflection_bind_group_2_key: Option<(
         [wgpu::TextureView; 5],
@@ -113,6 +113,8 @@ pub struct DeferredLightPass {
     )>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
+    /// One word, every light seen: no terrain shadows local lights.
+    fallback_local_visibility: wgpu::Buffer,
     pre_aa_format: wgpu::TextureFormat,
     fallback_shadow_view: wgpu::TextureView,
     fallback_static_shadow_view: wgpu::TextureView,
@@ -170,6 +172,14 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let fallback_local_visibility = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback Local Visibility"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: true,
+        });
+        fallback_local_visibility.slice(..).get_mapped_range_mut().expect("mapped at creation").copy_from_slice(&u32::MAX.to_le_bytes());
+        fallback_local_visibility.unmap();
         // `//!use pbr_eval` pulls helio-mats' PBR evaluation library in ahead
         // of the shader, exactly what the hand-rolled concatenation used to do.
         let shader = helio_core::shader::module_with(
@@ -330,6 +340,7 @@ impl DeferredLightPass {
             entries: &[
                 storage_entry(0), // tile_light_lists
                 storage_entry(1), // tile_light_counts
+                storage_entry(2), // local_visibility (terrain shadows of the tile's lights)
             ],
         });
 
@@ -785,6 +796,7 @@ impl DeferredLightPass {
             reflection_bind_group_2_key: None,
             fallback_tile_lists,
             fallback_tile_counts,
+            fallback_local_visibility,
             pre_aa_format,
             fallback_shadow_view,
             fallback_static_shadow_view,
@@ -1311,7 +1323,13 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
             .unwrap_or(&self.fallback_tile_counts);
-        let tile_key = [tile_lists.clone(), tile_counts.clone()];
+        // The voxel terrain's shadows of each pixel's tile lights (a word a
+        // pixel; none: every light seen).
+        let local_visibility = ctx
+            .registry
+            .buffer_binding("local_visibility")
+            .unwrap_or(&self.fallback_local_visibility);
+        let tile_key = [tile_lists.clone(), tile_counts.clone(), local_visibility.clone()];
         if self.bind_group_3_key.as_ref() != Some(&tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG3"),
@@ -1324,6 +1342,10 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: tile_counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: local_visibility.as_entire_binding(),
                     },
                 ],
             }));

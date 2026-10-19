@@ -310,17 +310,27 @@ once. A plan that changes a switch under way ends it at once.
    walked within four of its cells; the rest (silhouettes) are listed and
    walk in an indirect dispatch of their own. Mesh pixels nearer than the
    terrain hit, or with only sky behind (the scene's depth before the
-   chunks publish), walk from the mesh point (`mesh_sun_walk`), so terrain
+   chunks publish), walk from the mesh point (`mesh_walk`), so terrain
    shadows fall on meshes. The result is Helio's `directional_visibility`;
    its deferred lighting applies it. `set_steady_shadows` walks every hit
    instead.
-4. **Sky visibility**: four cosine-weighted rays about the planet's up
+4. **Local lights' shadows**: the terrain shadows Helio's point and spot
+   lights the same way (meshes cast into the lights' shadow maps). With a
+   frame's lights (`SceneLights`: the scene's lights, light culling's tile
+   lists), a hit of each 2x2 block walks to every shadowed light of its
+   tile's list that reaches it, the walk ending at the light
+   (`local_sample`); each hit takes its block's or a neighbour's word
+   within reach, else walks its own; mesh pixels in front of the terrain
+   walk from the mesh point. Bit i of a pixel's word of Helio's
+   `local_visibility` (a buffer, a word a pixel) is the tile's light i
+   (the first 32); deferred lighting zeroes a light whose bit is clear.
+5. **Sky visibility**: four cosine-weighted rays about the planet's up
    from one hit a 4x4 block, 48 cells long, turned each frame; each hit
    takes its block's or a neighbour's sample.
-5. **Ray reports** (`feedback`), then **publish** (below).
+6. **Ray reports** (`feedback`), then **publish** (below).
 
-Steps near surfaces dominate: a step heatmap
-(`HELIO_VOXEL_CHUNKS_COUNT=1 HELIO_VOXEL_CHUNKS_HEAT=1`) is hot on
+Steps near surfaces dominate: a step heatmap (debug mode 32; with
+trace counters, `Capacity::counters`, also counted) is hot on
 silhouettes and ridges, where rays skim pixel-sized cells.
 
 ### Ray reports

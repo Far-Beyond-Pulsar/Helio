@@ -49,6 +49,9 @@ struct DrawParams {
     // x: the octree's coarsest level; y: nodes fading (none: no switch to
     // look past).
     cut: vec4<u32>,
+    // The eye in the scene lights' coordinates (xyz); w 1 when the scene's
+    // lights are bound (`local_shadow`).
+    light_eye: vec4<f32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -2101,10 +2104,11 @@ fn skip_along(f: Face, dir: vec3<f32>) -> f32 {
 }
 
 // WALK {
-// Whether the hit at pixel `q` (distance `t`, face `f`) is in the sun.
-fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
+// Whether the hit at pixel `q` (distance `t`, face `f`) sees along `dir` to
+// distance `range` (the sun: as far as the world goes; a light: to it).
+fn hit_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face, dir: vec3<f32>, range: f32) -> f32 {
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let end = walk(Walk(slot, chunk_keys[slot], vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, skip_along(f, params.sun.xyz), 1e30, fade_dither(q), 96u, false, q);
+    let end = walk(Walk(slot, chunk_keys[slot], vec3<i32>(0), vec3<i32>(64), true), org, dir, skip_along(f, dir), range, fade_dither(q), 96u, false, q);
     return select(1.0, 0.0, end.hit);
 }
 
@@ -2219,7 +2223,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk_fine(q, size, v.x, t, f)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, params.sun.xyz, 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2238,7 +2242,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk(q, size, v.x, t, f)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, params.sun.xyz, 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2259,12 +2263,12 @@ fn mesh_point(q: vec2<u32>, size: vec2<u32>) -> vec4<f32> {
     return vec4<f32>(h.xyz / h.w, 1.0);
 }
 
-// Whether the mesh point `org` (eye-relative) at pixel `q` is in the sun: a
-// walk from the node of the cut it is in, placed in the frame of the chunk
-// of `v` (the hit behind it) to its cells' precision; without a hit finer
-// than the exact levels, from the exact level's node over it
-// (planet-centred: to half a metre on an Earth).
-fn mesh_sun_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>) -> f32 {
+// Whether the mesh point `org` (eye-relative) at pixel `q` sees along `dir`
+// to distance `range`: a walk from the node of the cut it is in, placed in
+// the frame of the chunk of `v` (the hit behind it) to its cells'
+// precision; without a hit finer than the exact levels, from the exact
+// level's node over it (planet-centred: to half a metre on an Earth).
+fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> f32 {
     let r = fade_dither(q);
     var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
     var t0 = 0.0;
@@ -2319,7 +2323,7 @@ fn mesh_sun_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>) -> f32 {
         if !exact_level(level) { return 1.0; }
         start.key = vec4<i32>(face_with_normal(normal) | (level << 8u), 0, 0, 0);
     }
-    let end = walk(start, org, params.sun.xyz, t0, 1e30, r, 96u, false, q);
+    let end = walk(start, org, dir, t0, range, r, 96u, false, q);
     return select(1.0, 0.0, end.hit);
 }
 
@@ -2399,12 +2403,210 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     if (packed & MESH_PIXEL) != 0u {
-        textureStore(out_sun, vec2<i32>(q), vec4<f32>(mesh_sun_walk(q, mesh_point(q, size).xyz, v), params.sun.xyz));
+        textureStore(out_sun, vec2<i32>(q), vec4<f32>(mesh_walk(q, mesh_point(q, size).xyz, v, params.sun.xyz, 1e30), params.sun.xyz));
         return;
     }
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     let f = hit_face(v, vec3<f32>(0.0), q, size, t);
-    store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
+    store_sun(vec2<i32>(q), v, f, hit_walk(q, size, v.x, t, f, params.sun.xyz, 1e30));
+}
+
+// ---- 4b. Local lights' terrain shadows ----
+// The terrain shadows the scene's point and spot lights the way it does the
+// sun: meshes cast into the lights' shadow maps, the terrain by walks. A
+// pixel's lights are those of its tile's list (Helio's light culling: 16 px
+// tiles, 64 lights a tile) that are shadowed and reach it; bit i of its
+// word of `out_local` (a row of the frame after another) says whether it
+// sees the tile's light i past the terrain (the first 32; the others, and
+// pixels without terrain, are seen). Deferred lighting multiplies each
+// light by its bit. As the sun's: a hit of each 2x2 block (turning each
+// frame) walks to all its lights (`local_sample`), its block's hits within
+// reach take its word, the others (and meshes in front of the terrain)
+// walk their own.
+@group(1) @binding(29) var hit_normals: texture_2d<f32>;
+@group(1) @binding(30) var<storage, read_write> out_local: array<u32>;
+// Helio's lights (`GpuLight`, 128 bytes) and its tile light lists.
+struct SceneLight {
+    position_range: vec4<f32>,
+    direction_outer: vec4<f32>,
+    color_intensity: vec4<f32>,
+    shadow_index: u32,
+    light_type: u32,
+    inner_angle: f32,
+    flags: u32,
+    rest: array<vec4<u32>, 4>,
+}
+@group(1) @binding(31) var<storage, read> scene_lights: array<SceneLight>;
+@group(1) @binding(32) var<storage, read> tile_light_lists: array<u32>;
+@group(1) @binding(33) var<storage, read> tile_light_counts: array<u32>;
+// A sample a 2x2 block (`local_sample`, rows of the half frame): its word,
+// its hit's distance (0: none).
+@group(1) @binding(34) var<storage, read_write> local_samples: array<vec2<u32>>;
+const LIGHT_TILE: u32 = 16u;
+const LIGHTS_PER_TILE: u32 = 64u;
+const LOCAL_LIGHTS: u32 = 32u;
+
+// Whether light `light` (in a tile's list) wants the terrain's shadow at
+// eye-relative point `at`: a shadowed point or spot light that reaches it,
+// toward which the surface (normal `n`, none: any) faces. Its direction and
+// distance from the point.
+struct LightReach {
+    walk: bool,
+    dir: vec3<f32>,
+    range: f32,
+}
+
+fn light_reach(light: SceneLight, at: vec3<f32>, n: vec3<f32>) -> LightReach {
+    var none: LightReach;
+    // Shadows as the deferred lighting requests them (`shadow_factor`).
+    let requested = select(light.shadow_index != 0xffffffffu, (light.flags & 4u) != 0u, (light.flags & 8u) != 0u);
+    if light.light_type == 0u || !requested || (light.flags & 48u) == 48u { return none; }
+    let to = light.position_range.xyz - params.light_eye.xyz - at;
+    let range = length(to);
+    if range > light.position_range.w || range < 1e-4 { return none; }
+    let dir = to / range;
+    if dot(n, n) > 0.0 && dot(n, dir) <= 0.0 { return none; }
+    if light.light_type == 2u && dot(-dir, normalize(light.direction_outer.xyz)) < light.direction_outer.w { return none; }
+    return LightReach(true, dir, range);
+}
+
+// The tile list of pixel `p` (its first entry, its count up to 32).
+fn light_tile(p: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
+    let tiles_x = (size.x + LIGHT_TILE - 1u) / LIGHT_TILE;
+    let tile = (p.y / LIGHT_TILE) * tiles_x + p.x / LIGHT_TILE;
+    return vec2<u32>(tile * LIGHTS_PER_TILE, min(tile_light_counts[tile], LOCAL_LIGHTS));
+}
+
+// WALK {
+// The local lights the hit at pixel `q` (chunk `slot`, distance `t`) sees.
+fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
+    let list = light_tile(q, size);
+    let at = pixel_ray(q, size) * t;
+    let n = textureLoad(hit_normals, vec2<i32>(q), 0).xyz;
+    var seen = 0xffffffffu;
+    var face: Face;
+    var faced = false;
+    for (var i = 0u; i < list.y; i++) {
+        let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], at, n);
+        if !reach.walk { continue; }
+        if !faced {
+            face = hit_face(textureLoad(hit_visibility, vec2<i32>(q), 0).xy, vec3<f32>(0.0), q, size, t);
+            faced = true;
+        }
+        // Short of the light: the cell a lamp stands in does not shade it.
+        if hit_walk(q, size, slot, t, face, reach.dir, reach.range - face.cell) < 0.5 { seen &= ~(1u << i); }
+    }
+    return seen;
+}
+// } WALK
+
+// Whether pixel `p`'s hit is the terrain's (no mesh in front of it), and
+// of a fine level (`fine`) or an exact one.
+fn local_hit(p: vec2<u32>, size: vec2<u32>, v: vec2<u32>, t: f32, fine: bool) -> bool {
+    if v.x == NONE || exact_level(chunk_keys[v.x].x >> 8u) == fine { return false; }
+    let mesh = mesh_point(p, size);
+    return !(mesh.w > 0.0 && length(mesh.xyz) < t);
+}
+
+// The hit of block `b` this frame (`sample_pixel`): its word and distance.
+fn store_local_sample(b: vec2<u32>, size: vec2<u32>, fine: bool) {
+    let half = (size + 1u) / 2u;
+    let q = sample_pixel(b, size);
+    let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
+    if !local_hit(q, size, v, t, fine) {
+        // The other kernel's, or none (a mesh, the sky).
+        if fine { local_samples[b.y * half.x + b.x] = vec2<u32>(0xffffffffu, 0u); }
+        return;
+    }
+    var seen = 0xffffffffu;
+    if fine { seen = hit_lights_fine(q, size, v.x, t); } else { seen = hit_lights(q, size, v.x, t); }
+    local_samples[b.y * half.x + b.x] = vec2<u32>(seen, bitcast<u32>(t));
+}
+
+// One thread a 2x2 block: dispatch over half the size (the fine levels'
+// hits, then the exact levels').
+@compute @workgroup_size(8, 8)
+fn local_sample(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    let half = (size + 1u) / 2u;
+    if id.x >= half.x || id.y >= half.y || params.light_eye.w == 0.0 { return; }
+    store_local_sample(id.xy, size, true);
+}
+
+@compute @workgroup_size(8, 8)
+fn local_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    let half = (size + 1u) / 2u;
+    if id.x >= half.x || id.y >= half.y || params.light_eye.w == 0.0 { return; }
+    store_local_sample(id.xy, size, false);
+}
+
+// Pixel `p`'s hit (distance `t`, chunk `slot`) from its block's sample, or
+// its nearer neighbours' (towards its side of its block): the first within
+// reach of it (a slope's cells, a pixel's width), else NONE (steady
+// shadows: none).
+fn local_reuse(p: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
+    if steady_shadows() { return NONE; }
+    let half = vec2<i32>((size + 1u) / 2u);
+    let at_hit = pixel_ray(p, size) * t;
+    let reach = max(4.0 * length(chunk_frame(slot).m0.xyz), 8.0 * pixel_width(p, size, t));
+    let block = vec2<i32>(p) / 2;
+    let toward = vec2<i32>(vec2<i32>(p) & vec2<i32>(1)) * 2 - 1;
+    let blocks = array<vec2<i32>, 4>(block, block + vec2<i32>(toward.x, 0), block + vec2<i32>(0, toward.y), block + toward);
+    for (var b = 0u; b < 4u; b++) {
+        let at = blocks[b];
+        // Blocks of another light tile list another tile's lights.
+        if any(at < vec2<i32>(0)) || any(at >= half) || any(at * 2 / i32(LIGHT_TILE) != vec2<i32>(p) / i32(LIGHT_TILE)) { continue; }
+        let s = local_samples[u32(at.y) * u32(half.x) + u32(at.x)];
+        if s.y != 0u && distance(pixel_ray(sample_pixel(vec2<u32>(at), size), size) * bitcast<f32>(s.y), at_hit) <= reach { return s.x; }
+    }
+    return NONE;
+}
+
+// The fine levels' hits (no mesh in front of them): a sample's word, else
+// their own walks.
+@compute @workgroup_size(8, 8)
+fn local_shadow(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    if id.x >= size.x || id.y >= size.y { return; }
+    let v = textureLoad(hit_visibility, vec2<i32>(id.xy), 0).xy;
+    let t = textureLoad(hit_distance, vec2<i32>(id.xy), 0).r;
+    if !local_hit(id.xy, size, v, t, true) { return; }
+    var seen = 0xffffffffu;
+    if params.light_eye.w > 0.0 {
+        seen = local_reuse(id.xy, size, v.x, t);
+        if seen == NONE { seen = hit_lights_fine(id.xy, size, v.x, t); }
+    }
+    out_local[id.y * size.x + id.x] = seen;
+}
+
+// Every other pixel (after `local_shadow`): the exact levels' hits (as the
+// fine ones), meshes in front of the terrain (their own walks), the sky
+// (all seen).
+@compute @workgroup_size(8, 8)
+fn local_shadow_far(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    if id.x >= size.x || id.y >= size.y { return; }
+    let p = vec2<i32>(id.xy);
+    let v = textureLoad(hit_visibility, p, 0).xy;
+    let t = textureLoad(hit_distance, p, 0).r;
+    if local_hit(id.xy, size, v, t, true) { return; }
+    var seen = 0xffffffffu;
+    if params.light_eye.w > 0.0 {
+        let mesh = mesh_point(id.xy, size);
+        if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < t) {
+            let list = light_tile(id.xy, size);
+            for (var i = 0u; i < list.y; i++) {
+                let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], mesh.xyz, vec3<f32>(0.0));
+                if reach.walk && mesh_walk(id.xy, mesh.xyz, v, reach.dir, reach.range) < 0.5 { seen &= ~(1u << i); }
+            }
+        } else if v.x != NONE {
+            seen = local_reuse(id.xy, size, v.x, t);
+            if seen == NONE { seen = hit_lights(id.xy, size, v.x, t); }
+        }
+    }
+    out_local[id.y * size.x + id.x] = seen;
 }
 
 // ---- 5. Ray reports ----

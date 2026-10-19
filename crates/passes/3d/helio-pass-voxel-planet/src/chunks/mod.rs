@@ -272,6 +272,19 @@ struct DrawParams {
     planet: [f32; 4],
     /// x: the octree's coarsest level; y: nodes fading.
     cut: [u32; 4],
+    /// The eye in the scene lights' coordinates; w 1 with lights bound.
+    light_eye: [f32; 4],
+}
+
+/// A frame's scene lights, for the terrain's shadows of them
+/// (`local_visibility`): Helio's lights (`GpuLight`, 128 bytes each), its
+/// tile light lists and counts (16 px tiles, 64 lights a tile), and the
+/// eye in the lights' coordinates.
+pub struct SceneLights<'a> {
+    pub lights: &'a wgpu::Buffer,
+    pub tile_lists: &'a wgpu::Buffer,
+    pub tile_counts: &'a wgpu::Buffer,
+    pub eye: Vec3,
 }
 
 /// `Materials` of chunk_draw.wgsl.
@@ -1101,6 +1114,8 @@ pub struct ChunkWorld {
     uv_grid_sampler: wgpu::Sampler,
     /// The scene depth of a draw given none: no meshes (1x1, cleared).
     no_scene_depth: wgpu::TextureView,
+    /// Bound when a draw has no scene lights (no light, empty lists).
+    no_lights: wgpu::Buffer,
     seed_outside: wgpu::RenderPipeline,
     seed_inside: wgpu::RenderPipeline,
     /// The draw list built on the GPU (`cull_bin`, `cull_offsets`,
@@ -1121,6 +1136,11 @@ pub struct ChunkWorld {
     shadow: wgpu::ComputePipeline,
     shadow_fallback_layout: wgpu::BindGroupLayout,
     shadow_fallback: wgpu::ComputePipeline,
+    local_layout: wgpu::BindGroupLayout,
+    local_sample: wgpu::ComputePipeline,
+    local_sample_far: wgpu::ComputePipeline,
+    local_shadow: wgpu::ComputePipeline,
+    local_shadow_far: wgpu::ComputePipeline,
     publish: wgpu::RenderPipeline,
     /// The publish with the host's scene materials (devices with texture
     /// binding arrays).
@@ -1421,6 +1441,11 @@ pub struct Targets {
     /// (Rgba16Float, Helio's `directional_visibility`), and its view.
     pub sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
+    /// The local lights each pixel sees past the terrain: a word a pixel,
+    /// row by row, bit i the tile list's light i (`local_visibility`).
+    pub local: wgpu::Buffer,
+    /// A local lights' sample a 2x2 block: word, distance.
+    local_samples: wgpu::Buffer,
     /// The normal each hit is lit with (Rgba16Float).
     normal: wgpu::Texture,
     /// A sun sample a 2x2 block: flags, distance, slope (Rgba32Uint).
@@ -1463,6 +1488,8 @@ impl Targets {
             exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
             sun_view: view(&sun),
             sun,
+            local: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local lights"), size: u64::from(size[0]) * u64::from(size[1]) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
+            local_samples: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local light samples"), size: u64::from(size[0].div_ceil(2)) * u64::from(size[1].div_ceil(2)) * 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
             normal: texture("chunk normal", wgpu::TextureFormat::Rgba16Float, s),
             sun_samples: device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("chunk sun samples"),
@@ -1590,7 +1617,7 @@ fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayou
 /// The chunk shaders as compiled for a world form and terrain program:
 /// generation, then drawing (with diagnostic counters when `counting`).
 /// The draw shader's walk templates (`// WALK {` .. `// } WALK`) twice:
-/// with `walk` (`sun_walk`, `sky_visibility`), and with `walk_fine`
+/// with `walk` (`hit_walk`, `hit_lights`, `sky_visibility`), and with `walk_fine`
 /// (`..._fine`: the kernels for hits finer than the exact levels).
 fn walk_templates(source: &str) -> String {
     // Past a marker's line (checkouts may end lines with \r\n).
@@ -1605,7 +1632,8 @@ fn walk_templates(source: &str) -> String {
         out.push_str(
             &body
                 .replace("walk(Walk(", "walk_fine(Walk(")
-                .replace("fn sun_walk(", "fn sun_walk_fine(")
+                .replace("hit_walk(", "hit_walk_fine(")
+                .replace("fn hit_lights(", "fn hit_lights_fine(")
                 .replace("fn sky_visibility(", "fn sky_visibility_fine("),
         );
         rest = &rest[past_line(rest, end)..];
@@ -1934,6 +1962,26 @@ impl ChunkWorld {
         let sky_sample_far = compute("chunk far sky samples", &layout(&sky_sample_layout), "sky_sample_far");
         let shadow = compute("chunk shadow", &layout(&shadow_layout), "shadow");
         let shadow_fallback = compute("chunk shadow fallbacks", &layout(&shadow_fallback_layout), "shadow_fallback");
+        // Local lights' terrain shadows: the hits' normals, the scene's
+        // lights and tile lists, a light mask a pixel.
+        let local_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk local shadows"),
+            entries: &[
+                hits[0],
+                hits[1],
+                scene_depth,
+                texture_entry(29, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
+                storage(30, false, wgpu::ShaderStages::COMPUTE),
+                storage(31, true, wgpu::ShaderStages::COMPUTE),
+                storage(32, true, wgpu::ShaderStages::COMPUTE),
+                storage(33, true, wgpu::ShaderStages::COMPUTE),
+                storage(34, false, wgpu::ShaderStages::COMPUTE),
+            ],
+        });
+        let local_sample = compute("chunk local light samples", &layout(&local_layout), "local_sample");
+        let local_sample_far = compute("chunk far local light samples", &layout(&local_layout), "local_sample_far");
+        let local_shadow = compute("chunk local shadows", &layout(&local_layout), "local_shadow");
+        let local_shadow_far = compute("chunk far local shadows", &layout(&local_layout), "local_shadow_far");
         // Ray reports: the hits a block of pixels samples, as the nodes
         // they want.
         let feedback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2071,6 +2119,12 @@ impl ChunkWorld {
             shadow,
             shadow_fallback_layout,
             shadow_fallback,
+            local_layout,
+            local_sample,
+            local_sample_far,
+            local_shadow,
+            local_shadow_far,
+            no_lights: buffer("chunk no lights", 128, wgpu::BufferUsages::STORAGE),
             publish,
             scene,
             steady_shadows: false,
@@ -3472,7 +3526,8 @@ impl ChunkWorld {
     /// `size` pixels into [`Self::targets`], timing it as draw number
     /// `frame` ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>) {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
@@ -3525,6 +3580,7 @@ impl ChunkWorld {
                 (eye.length_squared() - self.grid.radius() * self.grid.radius()) as f32,
             ],
             cut: [self.grid.levels() - 1, self.drawn_set.fading() as u32, 0, 0],
+            light_eye: lights.map_or([0.0; 4], |l| l.eye.extend(1.0).to_array()),
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.buried, 0, &[0u8; 16]);
@@ -3687,6 +3743,31 @@ impl ChunkWorld {
             pass.set_pipeline(&self.shadow_fallback);
             pass.set_bind_group(1, &fallback_group, &[]);
             pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
+            // 4b. Local lights' terrain shadows, with the hits' normals.
+            let local_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk local shadows"),
+                layout: &self.local_layout,
+                entries: &[
+                    view_entry(4, &distance),
+                    view_entry(7, &visibility),
+                    view_entry(27, scene_depth),
+                    view_entry(29, &normal),
+                    entry(30, &targets.local),
+                    entry(31, lights.map_or(&self.no_lights, |l| l.lights)),
+                    entry(32, lights.map_or(&self.no_lights, |l| l.tile_lists)),
+                    entry(33, lights.map_or(&self.no_lights, |l| l.tile_counts)),
+                    entry(34, &targets.local_samples),
+                ],
+            });
+            pass.set_bind_group(1, &local_group, &[]);
+            for pipeline in [&self.local_sample, &self.local_sample_far] {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
+            }
+            for pipeline in [&self.local_shadow, &self.local_shadow_far] {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+            }
         }
         // Ray reports, back without waiting (a frame's copy when a slot is
         // free): the node each block of pixels' sampled hit wants, and the
@@ -3781,6 +3862,11 @@ impl ChunkWorld {
     /// The last draw's sun visibility (Helio's `directional_visibility`).
     pub fn sun_view(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.sun_view)
+    }
+
+    /// The last draw's local light visibility (Helio's `local_visibility`).
+    pub fn local_visibility(&self) -> Option<&wgpu::Buffer> {
+        self.targets.as_ref().map(|t| &t.local)
     }
 
     /// The last draw's hits into Helio's gbuffer (`engine::GBUFFER_FORMATS`)
@@ -3972,10 +4058,10 @@ mod tests {
     #[test]
     fn walk_templates_expand_with_any_line_ends() {
         for end in ["\n", "\r\n"] {
-            let source = ["head", "// WALK {", "fn sun_walk() { walk(Walk(0)); }", "// } WALK", "tail", ""].join(end);
+            let source = ["head", "// WALK {", "fn hit_walk() { walk(Walk(0)); }", "// } WALK", "tail", ""].join(end);
             let out = walk_templates(&source);
-            assert!(out.contains("fn sun_walk() { walk(Walk(0)); }"), "{out:?}");
-            assert!(out.contains("fn sun_walk_fine() { walk_fine(Walk(0)); }"), "{out:?}");
+            assert!(out.contains("fn hit_walk() { walk(Walk(0)); }"), "{out:?}");
+            assert!(out.contains("fn hit_walk_fine() { walk_fine(Walk(0)); }"), "{out:?}");
             assert!(!out.contains("WALK {") && out.starts_with("head") && out.trim_end().ends_with("tail"), "{out:?}");
         }
     }

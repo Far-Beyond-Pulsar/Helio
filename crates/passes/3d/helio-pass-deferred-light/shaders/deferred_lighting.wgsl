@@ -312,6 +312,10 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 const PORTAL_MAX_LIGHTS: u32 = 256u;
 @group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
 @group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
+// The voxel terrain's shadows of local lights: a word a pixel (rows of the
+// frame), bit i whether the pixel sees its tile list's light i (the first
+// 32). One word (or none past its end): every light seen.
+@group(3) @binding(2) var<storage, read> local_visibility: array<u32>;
 // cluster bindings removed - GPU-driven architecture
 
 // Cluster constants removed - GPU-driven architecture
@@ -1379,6 +1383,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if in_portal {
             light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS);
         }
+        let local_word = u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x);
+        let terrain_seen = select(0xffffffffu, local_visibility[local_word], local_word < arrayLength(&local_visibility) && arrayLength(&local_visibility) > 1u);
         for (var i = 0u; i < light_pass_count; i++) {
             var light_idx = i;
             if !in_portal {
@@ -1417,6 +1423,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 if sf > 0.0 {
                     transmit = light_transmittance(light_idx, world_pos, N);
                 }
+            }
+            // The terrain's shadow of a local light (`local_visibility`).
+            if !in_portal && light.light_type != 0u && i < 32u && ((terrain_seen >> i) & 1u) == 0u {
+                sf = 0.0;
             }
             if !in_portal && light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);

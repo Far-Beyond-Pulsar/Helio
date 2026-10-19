@@ -259,6 +259,32 @@ impl<'a> ResourceRegistry<'a> {
         }
     }
 
+    /// Publishes a graph-owned buffer (whole) into the reflected-binding
+    /// projection, as [`Self::write_texture_binding`] does a view.
+    pub fn write_buffer_binding(
+        &mut self,
+        name: impl Into<String>,
+        buffer: &wgpu::Buffer,
+        writer: &'static str,
+    ) {
+        let name = name.into();
+        let resource = unsafe {
+            std::mem::transmute::<wgpu::BindingResource<'_>, wgpu::BindingResource<'a>>(
+                buffer.as_entire_binding(),
+            )
+        };
+        self.write_binding(name.clone(), resource, writer);
+        self.graph_bindings.insert(name);
+    }
+
+    /// Returns a graph-routed buffer by name.
+    pub fn buffer_binding(&self, name: &str) -> Option<&'a wgpu::Buffer> {
+        match self.bindings.get(name)? {
+            wgpu::BindingResource::Buffer(binding) => Some(binding.buffer),
+            _ => None,
+        }
+    }
+
     /// Removes graph-generated bindings before the next execution.
     pub fn clear_graph_bindings(&mut self) {
         for name in self.graph_bindings.drain() {

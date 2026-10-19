@@ -5,7 +5,7 @@
 mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
-use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, KeptChunks, ResidencyConfig};
+use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, KeptChunks, ResidencyConfig, SceneLights};
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
 use helio_pass_voxel_planet::grid::Shape;
@@ -69,6 +69,9 @@ struct World {
     sun: Vec3,
     /// The meshes' depth the draws shade (none: no meshes).
     scene_depth: Option<wgpu::TextureView>,
+    /// Scene lights the draws shadow (`SceneLights`, eye-relative: lights,
+    /// tile lists, tile counts).
+    lights: Option<[wgpu::Buffer; 3]>,
 }
 
 impl World {
@@ -82,6 +85,7 @@ impl World {
             frame: 0,
             sun: Vec3::new(0.3, 0.8, 0.4).normalize(),
             scene_depth: None,
+            lights: None,
         }
     }
 
@@ -110,7 +114,8 @@ impl World {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
         let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, config);
-        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, self.sun, view.size, self.scene_depth.as_ref());
+        let lights = self.lights.as_ref().map(|[lights, tile_lists, tile_counts]| SceneLights { lights, tile_lists, tile_counts, eye: Vec3::ZERO });
+        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, self.sun, view.size, self.scene_depth.as_ref(), lights.as_ref());
         if let Some(picks) = picks {
             self.chunks.copy_picks(&mut recorder, picks);
         }
@@ -1583,4 +1588,99 @@ fn feature_generation_cost() {
             );
         }
     }
+}
+
+/// Helio's lights and tile lists for one point light at `at`
+/// (eye-relative) of range `range`, in every 16 px tile of `size`.
+fn one_light(gpu: &Gpu, at: Vec3, range: f32, size: [u32; 2]) -> [wgpu::Buffer; 3] {
+    use wgpu::util::DeviceExt;
+    let mut light = [0u32; 32];
+    light[..4].copy_from_slice(&[at.x.to_bits(), at.y.to_bits(), at.z.to_bits(), range.to_bits()]);
+    light[8..12].copy_from_slice(&[1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), 10f32.to_bits()]);
+    // Shadowed (shadow index 0), a point light.
+    light[12] = 0;
+    light[13] = 1;
+    let tiles = (size[0].div_ceil(16) * size[1].div_ceil(16)) as usize;
+    let init = |label, contents: &[u32]| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(contents), usage: wgpu::BufferUsages::STORAGE });
+    [init("lights", &light), init("tile lists", &vec![0u32; tiles * 64]), init("tile counts", &vec![1u32; tiles])]
+}
+
+/// The terrain shadows local lights: a point light 1 m over the ground
+/// beside a raised ball, seen from above. With steady shadows (every hit
+/// walks its own), every pixel facing the light sees it (its bit of
+/// `local_visibility`) where a CPU ray from its hit to the light reaches
+/// it; a hundredth may differ (grazing cells). Then the shadow stage's GPU
+/// time: every hit walking, a 2x2 block's sample shared, no light.
+#[test]
+fn terrain_shadows_local_lights() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 4, 0.37, 0.61);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = planet.grid().up(ground);
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let light = ground + up * 1.0;
+    planet.apply(Brush { center: (ground + fwd * 2.0 + up * 0.8).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    let eye = ground + up * 7.0 - fwd * 4.0 + side * 1.5;
+    let view = View::new(eye, ((ground + fwd * 2.5) - eye).normalize().as_vec3(), [320, 180]);
+    let mut world = World::new(&gpu, &planet);
+    let range = 12.0;
+    world.lights = Some(one_light(&gpu, (light - eye).as_vec3(), range, view.size));
+    world.chunks.set_steady_shadows(true);
+    let hits = world.settle(&gpu, &planet, &view);
+    let mask: Vec<u32> = {
+        let buffer = world.chunks.local_visibility().expect("drawn");
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: buffer.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+        gpu.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
+    };
+    let view_proj = view.view_proj(&planet);
+    let cell = planet.grid().voxel_size();
+    let (mut compared, mut wrong, mut shadowed) = (0, 0, 0);
+    for y in (0..view.size[1]).step_by(2) {
+        for x in (0..view.size[0]).step_by(2) {
+            let ray = view.pixel_dir(view_proj, x, y);
+            let Some(cpu) = planet.raycast(view.eye, ray, 60.0) else { continue };
+            if hits[(y * view.size[0] + x) as usize].is_none_or(|h| h.level != 0) {
+                continue;
+            }
+            let at = view.eye + ray * cpu.distance;
+            let to = light - at;
+            if to.length() > f64::from(range) - cell || cpu.normal.dot(to.normalize()) < 0.3 {
+                continue;
+            }
+            let seen = planet.raycast(at + cpu.normal * 1e-3, to.normalize(), to.length() - cell).is_none();
+            compared += 1;
+            shadowed += usize::from(!seen);
+            if seen != (mask[(y * view.size[0] + x) as usize] & 1 != 0) {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: cpu {}, drawn {}", if seen { "lit" } else { "shadowed" }, if seen { "shadowed" } else { "lit" });
+                }
+            }
+        }
+    }
+    eprintln!("compared {compared}, shadowed {shadowed}, wrong {wrong}");
+    // The shadow stage's GPU time with the light and without.
+    let mut stage = |world: &mut World| {
+        world.chunks.take_timings();
+        for _ in 0..60 {
+            world.frame(&gpu, &planet, &view, None);
+        }
+        let t = world.chunks.take_timings();
+        t.iter().map(|f| f.shadow).sum::<f64>() / t.len().max(1) as f64
+    };
+    let steady = stage(&mut world);
+    world.chunks.set_steady_shadows(false);
+    let sampled = stage(&mut world);
+    world.lights = None;
+    let unlit = stage(&mut world);
+    eprintln!("shadow stage: {steady:.3} ms with the light (every hit walking), {sampled:.3} ms (samples shared), {unlit:.3} ms without");
+    assert!(compared > 2000 && shadowed > 200, "{compared} compared, {shadowed} shadowed");
+    assert!(wrong * 100 <= compared, "{wrong} of {compared} wrong");
 }

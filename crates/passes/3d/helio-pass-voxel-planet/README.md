@@ -61,7 +61,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `src/chunks/scene.rs`, `shaders/scene_materials.wgsl` | Voxel materials drawn with the host's scene materials (Helio material rows and textures for each material's top, side and bottom faces), on devices with texture binding arrays. |
 | `src/engine.rs` | What hosts share with the pass (`PlanetFrame`, picks, appearance) and the terrain half of the shaders (`terrain_source`), checked by `verify_field`. |
 | `shaders/chunk_generate.wgsl` | Footprint columns (two-rate nodes, material slopes, lean halos, feature placements), chunk columns (field, volume terms, lean, features, edits, materials), 64-tree build, eviction, packing and restoring kept chunks. |
-| `shaders/chunk_draw.wgsl` | The cut walk, chunk tracing, fades, sun shadows, sky visibility, appearance, gbuffer publish and ray reports. |
+| `shaders/chunk_draw.wgsl` | The cut walk, chunk tracing, fades, sun and local light shadows, sky visibility, appearance, gbuffer publish and ray reports. |
 | `shaders/chunk_table.wgsl` | Scatters a frame's chunk-table changes. |
 | `tests/chunks.rs` | GPU correctness against the CPU planet (see [Tests](#tests)). |
 | `tests/wide_products.rs`, `tests/bake_cost.rs` | Hardware and limb wide products agree; what baking a brush costs as the history grows (a report). |
@@ -233,8 +233,10 @@ frame of `ChunkPass`:
    one hit a frame and reports the node its level wants there; the planner
    marks it and its ancestors met.
 5. **Light.** Sun shadows are walks toward the sun from quarter-resolution
-   samples with a compacted fallback for hits no sample serves; sky
-   visibility is four short rays per 4x4 block. Both use the same walk.
+   samples with a compacted fallback for hits no sample serves; local
+   lights' shadows are walks to each light of a pixel's light tile, shared
+   the same way (`local_visibility`, a bit a light); sky visibility is four
+   short rays per 4x4 block. All use the same walk.
 6. **Publish.** Material colour (patches, pigment, edge darkening), corner
    AO and the shading normal go to Helio's gbuffer; Helio's deferred
    lighting, atmosphere and TSR do the rest.

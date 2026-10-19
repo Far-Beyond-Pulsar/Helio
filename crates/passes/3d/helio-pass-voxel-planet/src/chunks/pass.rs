@@ -192,6 +192,8 @@ const READS: &[&str] = &[
     "gbuffer_extra",
     "gbuffer_velocity",
     "material_textures",
+    "tile_light_lists",
+    "tile_light_counts",
 ];
 const WRITES: &[&str] = &[
     "gbuffer",
@@ -200,6 +202,7 @@ const WRITES: &[&str] = &[
     "gbuffer_extra",
     "gbuffer_velocity",
     "directional_visibility",
+    "local_visibility",
 ];
 
 /// GPU times kept for a host that does not take them.
@@ -261,6 +264,9 @@ impl RenderPass for ChunkPass {
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         if let Some(view) = self.world.as_ref().and_then(ChunkWorld::sun_view) {
             frame.write_texture_binding("directional_visibility", view, self.name());
+        }
+        if let Some(buffer) = self.world.as_ref().and_then(ChunkWorld::local_visibility) {
+            frame.write_buffer_binding("local_visibility", buffer, self.name());
         }
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -440,6 +446,11 @@ impl ChunkPass {
         };
         self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
+        // The scene's lights and their tile lists (light culling's), for
+        // the terrain's shadows of them.
+        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
+        let tile_lists = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists")).map(|b| (*b).clone());
+        let tile_counts = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")).map(|b| (*b).clone());
         let mut cmds = ctx.graphics_cmds();
         let encoder = &mut cmds;
         // Generation keeps its pace per second at any frame rate: a frame
@@ -487,6 +498,11 @@ impl ChunkPass {
             frame.sun,
             [ctx.width, ctx.height],
             Some(ctx.depth),
+            match (&lights, &tile_lists, &tile_counts) {
+                (Some(lights), Some(tile_lists), Some(tile_counts)) => Some(super::SceneLights { lights, tile_lists, tile_counts, eye: at }),
+                _ => None,
+            }
+            .as_ref(),
         );
         let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
         world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);
