@@ -1847,7 +1847,7 @@ impl ChunkWorld {
                 map: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("chunk scene material map"),
                     size: std::mem::size_of::<scene::VoxelMaterialMap>() as u64,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
                 map_written: None,

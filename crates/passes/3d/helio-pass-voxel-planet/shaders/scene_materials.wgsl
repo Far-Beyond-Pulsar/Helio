@@ -27,7 +27,7 @@ struct SceneMap {
     faces: array<vec4<u32>, 32>,
 }
 
-@group(2) @binding(0) var<uniform> scene_map: SceneMap;
+@group(2) @binding(0) var<storage, read> scene_map: SceneMap;
 @group(2) @binding(1) var<storage, read> scene_materials: array<SceneGpuMaterial>;
 @group(2) @binding(2) var scene_textures: binding_array<texture_2d<f32>, MATERIAL_TEXTURES>;
 @group(2) @binding(3) var scene_samplers: binding_array<sampler, MATERIAL_TEXTURES>;
