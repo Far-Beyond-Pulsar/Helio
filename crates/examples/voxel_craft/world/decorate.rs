@@ -8,7 +8,7 @@
 
 use super::edits::{box_brush, BlockEdit};
 use crate::blocks::Block;
-use crate::config::{REGION_BLOCKS, REGION_RADIUS, WORLD_SEED};
+use crate::config::{MAX_REGIONS, REGION_BLOCKS, REGION_RADIUS, WORLD_SEED};
 use crate::structures::Kind;
 use crate::terrain::climate::{forest_density, forest_kind, hash, unit};
 use crate::terrain::{self, Biome};
@@ -50,6 +50,9 @@ impl Decorator {
     /// reached (it only starts over when the player moves to another region),
     /// so a world-sized radius costs nothing until the rings are walked.
     pub fn next_batch(&mut self, planet: &Planet, focus: Cell, limit: usize) -> Vec<Region> {
+        if self.done.len() >= MAX_REGIONS {
+            return Vec::new();
+        }
         let centre = (focus.face, focus.i.div_euclid(REGION_BLOCKS), focus.j.div_euclid(REGION_BLOCKS));
         // Past the face's own width there is nothing to decorate.
         let radius = radius();
@@ -59,7 +62,7 @@ impl Decorator {
             _ => 0,
         };
         let mut out = Vec::new();
-        while ring <= reach && out.len() < limit {
+        while ring <= reach && out.len() < limit.min(MAX_REGIONS - self.done.len()) {
             let mut visit = |dx: i32, dy: i32, out: &mut Vec<Region>| {
                 if dx * dx + dy * dy > radius * radius || out.len() >= limit {
                     return;
