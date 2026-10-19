@@ -23,7 +23,7 @@
 //! Changes queue and [`BlockMaterials::flush`] uploads a budget of them each
 //! frame, small changes (an edit someone is looking at) first.
 
-use crate::edit_store::{Brick, BrickKey, Column, ColumnKey, EditStore};
+use crate::edit_store::{Brick, BrickKey, ColumnKey, EditStore};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -51,8 +51,8 @@ pub struct BlockMaterials {
     pub buffer: wgpu::Buffer,
     /// The table as the GPU has it.
     keys: Vec<[i32; 4]>,
-    /// Every base-level column of bricks the store holds.
-    all: FxHashMap<ColumnKey, Arc<Column>>,
+    /// The store (a cheap shared clone): columns load from it as the eye nears them.
+    store: EditStore,
     /// The columns on (or on their way to) the GPU, with their brick heights.
     resident: FxHashMap<ColumnKey, Vec<i32>>,
     /// Bricks to write: the latest state of each (`None`: now empty).
@@ -76,7 +76,7 @@ impl BlockMaterials {
         Self {
             buffer,
             keys: vec![[0; 4]; CAPACITY],
-            all: FxHashMap::default(),
+            store: EditStore::default(),
             resident: FxHashMap::default(),
             pending: FxHashMap::default(),
             urgent: FxHashMap::default(),
@@ -153,7 +153,7 @@ impl BlockMaterials {
     /// Makes a column's bricks resident: queued at `urgent` or bulk priority.
     fn load(&mut self, column: ColumnKey, urgent: bool) {
         let mut heights = Vec::new();
-        if let Some(now) = self.all.get(&column).cloned() {
+        if let Some(now) = self.store.column(&column).cloned() {
             for (bk, brick) in now.iter() {
                 let key = BrickKey { face: column.face, level: 0, bi: column.ci, bj: column.cj, bk: *bk };
                 if urgent {
@@ -173,12 +173,7 @@ impl BlockMaterials {
 
     /// Everything the store holds at the base level.
     pub fn fill_all(&mut self, store: &EditStore) {
-        for (key, _) in store.bricks().filter(|(k, _)| k.level == 0) {
-            let column = key.column();
-            if let Some(c) = store.column(&column) {
-                self.all.insert(column, c.clone());
-            }
-        }
+        self.store = store.clone();
         // Resident once the eye is known (`follow`).
         self.centre = None;
     }
@@ -187,19 +182,12 @@ impl BlockMaterials {
     /// brought up to date (small changes first); others only update the
     /// record, and load when the eye comes near.
     pub fn sync(&mut self, store: &EditStore, changed: &[ColumnKey]) {
+        self.store = store.clone();
         let mut done: rustc_hash::FxHashSet<ColumnKey> = Default::default();
         let small = changed.len() <= 256;
         for column in changed.iter().filter(|c| c.level == 0) {
             if !done.insert(*column) {
                 continue;
-            }
-            match store.column(column) {
-                Some(now) => {
-                    self.all.insert(*column, now.clone());
-                }
-                None => {
-                    self.all.remove(column);
-                }
             }
             let Some(before) = self.resident.remove(column) else {
                 // New to the store: load it now if it is within reach of the eye.
@@ -244,17 +232,11 @@ impl BlockMaterials {
         }
         // Load the columns that came near, nearest first.
         let mut wanted: Vec<(i32, ColumnKey)> = Vec::new();
-        if self.all.len() < (2 * RADIUS as usize + 1).pow(2) {
-            for (c, _) in self.all.iter() {
-                if near(c, RADIUS) && !self.resident.contains_key(c) {
-                    wanted.push(((c.ci - ci).abs().max((c.cj - cj).abs()), *c));
-                }
-            }
-        } else {
+        {
             for di in -RADIUS..=RADIUS {
                 for dj in -RADIUS..=RADIUS {
                     let c = ColumnKey { face, level: 0, ci: ci + di, cj: cj + dj };
-                    if self.all.contains_key(&c) && !self.resident.contains_key(&c) {
+                    if self.store.column(&c).is_some() && !self.resident.contains_key(&c) {
                         wanted.push((di.abs().max(dj.abs()), c));
                     }
                 }

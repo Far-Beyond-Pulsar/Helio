@@ -23,7 +23,9 @@ pub type Region = (u8, i32, i32);
 /// Chance a region holds a structure.
 const STRUCTURE_CHANCE: f64 = 0.09;
 /// Regions within this many of the player's are decorated when the worker idles.
-const RADIUS: i32 = REGION_RADIUS;
+fn radius() -> i32 {
+    std::env::var("VOXEL_CRAFT_RADIUS").ok().and_then(|v| v.parse().ok()).unwrap_or(REGION_RADIUS)
+}
 
 pub struct Decorator {
     seed: u64,
@@ -50,7 +52,8 @@ impl Decorator {
     pub fn next_batch(&mut self, planet: &Planet, focus: Cell, limit: usize) -> Vec<Region> {
         let centre = (focus.face, focus.i.div_euclid(REGION_BLOCKS), focus.j.div_euclid(REGION_BLOCKS));
         // Past the face's own width there is nothing to decorate.
-        let reach = RADIUS.min(planet.grid().cells() / REGION_BLOCKS + 1);
+        let radius = radius();
+        let reach = radius.min(planet.grid().cells() / REGION_BLOCKS + 1);
         let mut ring = match self.scan {
             Some((from, ring)) if from == centre => ring,
             _ => 0,
@@ -58,7 +61,7 @@ impl Decorator {
         let mut out = Vec::new();
         while ring <= reach && out.len() < limit {
             let mut visit = |dx: i32, dy: i32, out: &mut Vec<Region>| {
-                if dx * dx + dy * dy > RADIUS * RADIUS || out.len() >= limit {
+                if dx * dx + dy * dy > radius * radius || out.len() >= limit {
                     return;
                 }
                 let region = (centre.0, centre.1 + dx, centre.2 + dy);

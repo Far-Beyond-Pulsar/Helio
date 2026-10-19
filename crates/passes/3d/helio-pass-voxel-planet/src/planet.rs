@@ -93,6 +93,8 @@ pub const BAKE_RADIUS_HALF: u32 = 64;
 const UNDO_SEALS: usize = 128;
 /// Baked column changes kept for renderers to catch up with.
 const CHANGES_KEPT: usize = 8192;
+/// ...and the columns they list, at most (about 12 MB).
+const CHANGES_COLUMNS_KEPT: usize = 1 << 20;
 
 /// A world's edits in three layers, applied to the terrain in this order
 /// (see `edit_store`):
@@ -198,8 +200,13 @@ impl Edits {
     fn changed(&mut self, before: (usize, u64), columns: impl Iterator<Item = ColumnKey>) {
         let after = self.baked_state();
         self.changes.push_back(BakedChange { before, after, columns: columns.collect() });
-        if self.changes.len() > CHANGES_KEPT {
-            self.changes.pop_front();
+        // Bounded by size as well as count: a decoration batch changes tens of
+        // thousands of columns, and thousands of those must not pile up.
+        let mut kept: usize = self.changes.iter().map(|c| c.columns.len()).sum();
+        while self.changes.len() > 1 && (self.changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT) {
+            if let Some(old) = self.changes.pop_front() {
+                kept -= old.columns.len();
+            }
         }
     }
     /// Edits from their layers (a snapshot): `large` and `baked` hold the
