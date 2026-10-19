@@ -39,11 +39,11 @@ const CHUNK_BATCH: usize = 2048;
 /// Chunk slots by default (`HELIO_VOXEL_CHUNKS_SLOTS`), within what the
 /// device can bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
-/// Chunk jobs under edits a batch (`cell_materials` slots: `CELL_WORDS`
-/// words a column, 272 KiB each).
+/// Chunk jobs of `DETAIL_LEVELS` a batch (`cell_materials` slots:
+/// `CELL_WORDS` words a column, 272 KiB each).
 const DETAIL_JOBS: usize = 128;
-/// Levels whose chunks under edits get per-voxel materials: cells of
-/// 0.1-0.2 m at 0.1 m voxels, near the eye. Coarser chunks' leaves keep
+/// Levels whose chunks get per-voxel materials, natural and edited: cells
+/// of 0.1-0.2 m at 0.1 m voxels, near the eye. Coarser chunks' leaves keep
 /// their pairs (an edit's top materials vote in them): a dug wall's detail
 /// pages at every level filled a game's pages after some 80 digs 8 m across.
 const DETAIL_LEVELS: u32 = 2;
@@ -66,8 +66,8 @@ const UNIFORM_BRICK: u32 = 0x4000_0000;
 /// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
 const CELL_WORDS: u64 = 17;
 /// Detail pages by default (`HELIO_VOXEL_DETAIL_PAGES`): 4 KiB each, one
-/// for each leaf page holding a leaf under edits whose cells its pair would
-/// draw wrong.
+/// for each leaf page (of `DETAIL_LEVELS`) holding a leaf whose cells its
+/// pair would draw wrong.
 pub const DEFAULT_DETAIL_PAGES: usize = 16384;
 /// Words a detail page (`DETAIL_WORDS` of chunk_generate.wgsl).
 const DETAIL_WORDS: u64 = 1024;
@@ -204,7 +204,7 @@ struct ChunkJob {
     large: u32,
     /// Its baked bricks' table in `baked_refs`, or NONE.
     baked: u32,
-    /// Its `cell_materials` slot when edits are over it (its leaves get
+    /// Its `cell_materials` slot at `DETAIL_LEVELS` (its leaves get
     /// per-voxel materials where their pairs would draw cells wrong), or
     /// NONE.
     detail: u32,
@@ -484,14 +484,6 @@ const CACHED: u32 = 1 << 31;
 impl GenBatch {
     fn footprints(&self) -> usize {
         self.computed.len() + self.cached.len()
-    }
-
-    /// Whether `store` holds bricks under chunk `cz` of `tile`.
-    fn bricks_under(store: &EditStore, tile: Footprint, cz: i32) -> bool {
-        (0..64).any(|n| {
-            let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + n % 8, cj: tile.cy * 8 + n / 8 };
-            store.column(&key).is_some_and(|column| column.iter().any(|(bk, _)| (0..8).contains(&(bk - cz * 8))))
-        })
     }
 
     /// The table of `store`'s bricks under chunk `cz` of `tile` (their
@@ -2305,8 +2297,8 @@ impl ChunkWorld {
         let edits = self.edits.clone();
         let baked = edits.bricks.footprints.contains(&fp);
         // Each chunk's brushes (from those over the footprint:
-        // `BrushIndex`), and whether edits are over it (its leaves then get
-        // per-voxel materials, a `cell_materials` slot of the batch's): the
+        // `BrushIndex`); at `DETAIL_LEVELS` each takes a `cell_materials`
+        // slot of the batch's (its leaves get per-voxel materials): the
         // chunks up to the first the batch has no slot for.
         let near = edits.brushes_near(fp.face, i, j, fp.level);
         let mut details = batch.details as usize;
@@ -2322,12 +2314,12 @@ impl ChunkWorld {
                     brush_meets(fb, fp.face, fp.level, i, j, span(cz)) && ((b as usize) >= edits.large_faces || fp.level < crate::planet::bake_level(fb))
                 })
                 .collect();
-            let edited = fp.level < DETAIL_LEVELS && (!refs.is_empty() || (baked && GenBatch::bricks_under(&edits.baked, fp, cz)));
-            if edited && details >= DETAIL_JOBS {
+            let detailed = fp.level < DETAIL_LEVELS;
+            if detailed && details >= DETAIL_JOBS {
                 break;
             }
-            details += usize::from(edited);
-            chunks.push((cz, refs, edited));
+            details += usize::from(detailed);
+            chunks.push((cz, refs, detailed));
         }
         if chunks.is_empty() {
             return 0;
@@ -2351,8 +2343,8 @@ impl ChunkWorld {
             }
         };
         let queued = chunks.len();
-        for (cz, refs, edited) in chunks {
-            let detail = if edited {
+        for (cz, refs, detailed) in chunks {
+            let detail = if detailed {
                 batch.details += 1;
                 batch.details - 1
             } else {

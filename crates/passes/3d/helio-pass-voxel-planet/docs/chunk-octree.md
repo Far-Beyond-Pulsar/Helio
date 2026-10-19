@@ -265,9 +265,10 @@ edits set materials (add or paint, including baked cells), each cell now
 keeps its own:
 
 - A chunk job whose brushes or baked bricks set any material gets a
-  `cell_materials` slot (32 a batch; a job past them waits for the next
-  batch). `chunk_columns_main` writes each solid cell's edited material
-  there (0: the terrain's).
+  `cell_materials` slot (128 a batch, `DETAIL_JOBS`; a job past them waits
+  for the next batch; since 2026-10-19 every job of `DETAIL_LEVELS` does).
+  `chunk_columns_main` writes each solid cell's edited material there (0:
+  the terrain's).
 - `chunk_build_main` gives every leaf page holding a leaf with such cells a
   **detail page** (`detail_pages[leaf page]`, 4 KiB: a byte a cell, 16 words
   a leaf by its place in the page), off a free stack (16384 pages by
@@ -279,7 +280,8 @@ keeps its own:
   lookup in chunks without detail pages. `PickHit::material` reports what
   is drawn.
 
-The format holds any cell's material, so natural leaves can use it later.
+The format holds any cell's material; natural leaves use it too since
+[Natural per-voxel materials](#natural-per-voxel-materials-2026-10-19).
 
 The render thread finds the brushes over a footprint through a
 `BrushIndex` (a loose grid per face, each brush in the smallest level where
@@ -374,7 +376,7 @@ a batch, 272 KiB each), whatever the edits set:
   natural top: over the chunk where the volume puts solid cells there
   (scanned as `terrain::generated_top` does), else its highest natural
   cell's.
-- `chunk_build_main` (`leaf_cells`), leaf by leaf with its pair: each
+- `chunk_build_main` (`leaf_column_cells`), leaf by leaf with its pair: each
   exposed solid cell (air on a side in the chunk's masks, or at the
   chunk's faces) without an edit material gets `Planet::material`'s
   natural one (`ground_material` at its volume point, depth from that
@@ -545,9 +547,44 @@ loaded into a new world: 1172 edited chunks restored and none generated
 the saved world drew it. Kept chunks of another history, or damaged, are
 refused.
 
+### Natural per-voxel materials (2026-10-19)
+
+Every chunk of `DETAIL_LEVELS` (0 and 1) now takes a `cell_materials` slot,
+natural or edited. Its leaves whose cells their pair would draw wrong get
+detail pages, the same as dug walls, so mixed natural leaves (dirt beside
+dark stone, gravel in stone, a snow line through a leaf) draw each cell's
+canonical material. Only chunks under edits are kept across eviction
+(`Resident::edited` is separate from the slot).
+
+What keeps it cheap:
+- `leaf_column_cells` runs once per leaf column and reads each of its 16
+  columns once for all 16 leaves (it was once per leaf: ~590k redundant
+  reads a chunk).
+- A column's exposed cells are one 64-bit mask (air over, under or beside
+  them). In a natural chunk, a heightfield column (no volume terms) is
+  solid up to its top, so the chunk's faces count as exposed only where
+  they are: its top, a lower neighbour; past the footprint's sides, a
+  column like it. Counting every face cell as exposed (as edited chunks
+  still do) evaluated thousands of buried cells a chunk.
+- A natural top takes the material `chunk_columns_main` gave its
+  column's top (the same evaluation).
+- A natural chunk's columns write only their natural tops; its leaves
+  store only the nonzero cell words, the build's copy into detail pages
+  reads the ones it marked and zero for the rest.
+
+Measured:
+- `natural_cells_against_the_leaf_rule`, the same 906k pixels: **0 wrong**
+  (3.56 % before: mixed natural leaves' surface vote, dirt drawn as dark
+  stone).
+- Detail pages a test view takes: 3,000 to 10,000 (16,384 by default, and
+  in `TEST_CAPACITY`); a 1196x729 flight view, 1,339.
+- Generation, Helio's cruise stress (interleaved against the commit
+  before): 15.5-15.7 us a chunk against 14.3-14.4 (chunk builds 3.4-3.6
+  against 2.2-2.3, chunk columns 1.9 against 1.8). The first version took
+  37.5 us. Frames p50 6.4-6.5 ms against 6.0-6.2, p95 10.1-10.4 against
+  9.9-10.4; coarse share and worst pixels unchanged.
+
 ### Next
 
-- Natural per-voxel materials where unedited leaves mix materials (5 % of
-  their surface pixels).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
 - A footprint's first computation: progressive (parent-seeded) synthesis.

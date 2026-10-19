@@ -753,7 +753,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // heightfield's.
     if job.detail != NONE {
         let cells = (job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS;
-        for (var w = 0u; w < 16u; w++) {
+        // A natural chunk's cells set none (`leaf_column_cells` starts its
+        // words from zero).
+        for (var w = 0u; w < 16u && (job.brush_count > 0u || job.baked != NONE); w++) {
             var word = 0u;
             for (var b = 0u; b < 4u; b++) {
                 let z = w * 4u + b;
@@ -810,63 +812,108 @@ fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -
     return select(sub, top & 0x7fu, has_top != 0u) | (sub << 8u);
 }
 
-// Leaf `lz` of leaf column (lx, ly) of chunk job `n` (`job`, footprint
-// `tile`), its material pair `pair`: each exposed solid cell's material
-// (its edit's, else `Planet::material`'s natural one), cleared where the
-// pair draws it (the surface's under air, the subsurface's under ground;
-// both at the chunk's top layer; never when the leaf would be `implicit`,
-// drawn with its mid's material), written back to the job's
-// `cell_materials`. Whether any cell is left.
-fn leaf_cells(job: ChunkJob, n: u32, tile: TileJob, lx: u32, ly: u32, lz: u32, pair: u32, implicit: bool) -> bool {
-    let surface = pair & 0xffu;
-    let sub = (pair >> 8u) & 0xffu;
-    var any = false;
+// The leaves of leaf column (lx, ly) of chunk job `n` (`job`, footprint
+// `tile`) in `occupied` (bit lz), their material pairs `leaf_pairs`: each exposed
+// solid cell's material (its edit's, else `Planet::material`'s natural
+// one), cleared where its leaf's pair draws it (the surface's under air,
+// the subsurface's under ground; both at the chunk's top layer; never in a
+// leaf that would be implicit, bit lz of `implicit`, drawn with its mid's
+// material), written back to the job's `cell_materials`. The leaves with
+// any cell left (bit lz). Each column is read once for all its leaves. A
+// natural chunk's words are written only where cells are left, and marked
+// in `written` (bit 16 lz + c, column c of the leaf column): the rest are
+// zero without being stored.
+//
+// In a chunk no edits are over, a heightfield column (no volume terms) is
+// solid up to its top, so its cells on the chunk's faces are exposed only
+// where they are: under air at its top, beside a lower column (past the
+// footprint's sides, a column like it); other columns and edited chunks
+// count the chunk's faces as air. A natural top takes the material
+// `chunk_columns_main` gave its column's top: the same evaluation.
+fn leaf_column_cells(job: ChunkJob, n: u32, tile: TileJob, lx: u32, ly: u32, leaf_pairs: array<u32, 16>, occupied: u32, implicit: u32, written: ptr<function, array<u32, 8>>) -> u32 {
+    // Indexed by a variable: a local copy (a value argument cannot be).
+    var pairs = leaf_pairs;
+    let natural = job.brush_count == 0u && job.baked == NONE;
+    var left = 0u;
     for (var c = 0u; c < 16u; c++) {
         let cx = lx * 4u + (c & 3u);
         let cy = ly * 4u + (c >> 2u);
         let m = column_masks[n * TILE_COLUMNS + cy * 64u + cx];
         let cells = (job.detail * TILE_COLUMNS + cy * 64u + cx) * CELL_WORDS;
-        var word = cell_materials[cells + lz];
-        if ((select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
+        if m.x == 0u && m.y == 0u {
             continue;
         }
-        // The columns beside it (past the chunk's sides: air).
-        var west = vec2<u32>(0u);
-        var east = vec2<u32>(0u);
-        var south = vec2<u32>(0u);
-        var north = vec2<u32>(0u);
+        let natural_top = bitcast<i32>(cell_materials[cells + 16u]);
+        let high = select(firstLeadingBit(m.x), 32u + firstLeadingBit(m.y), m.y != 0u);
+        let top_material = column_materials[n * TILE_COLUMNS + cy * 64u + cx] & 0x7fu;
+        let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
+        let exact = natural && column.z == 0 && column.w == 0;
+        // The columns beside it (past the chunk's sides: air, or for an
+        // exact column one like it).
+        let outside = select(vec2<u32>(0u), m, exact);
+        var west = outside;
+        var east = outside;
+        var south = outside;
+        var north = outside;
         if cx > 0u { west = column_masks[n * TILE_COLUMNS + cy * 64u + cx - 1u]; }
         if cx < 63u { east = column_masks[n * TILE_COLUMNS + cy * 64u + cx + 1u]; }
         if cy > 0u { south = column_masks[n * TILE_COLUMNS + (cy - 1u) * 64u + cx]; }
         if cy < 63u { north = column_masks[n * TILE_COLUMNS + (cy + 1u) * 64u + cx]; }
-        for (var b = 0u; b < 4u; b++) {
-            let z = lz * 4u + b;
-            var own = (word >> (b * 8u)) & 0xffu;
-            if !bit_at(m, z) {
+        // Its exposed cells: air over, under or beside them (the chunk's
+        // top and bottom faces as above).
+        let top_open = !exact || job.cz * 64 + 63 == natural_top - 1;
+        let above = vec2<u32>((m.x >> 1u) | (m.y << 31u), (m.y >> 1u) | select(0x80000000u, 0u, top_open));
+        let below = vec2<u32>((m.x << 1u) | select(0u, 1u, exact), (m.y << 1u) | (m.x >> 31u));
+        let exposed = m & (~above | ~below | ~west | ~east | ~south | ~north);
+        for (var lz = 0u; lz < 16u; lz++) {
+            if ((occupied >> lz) & 1u) == 0u {
                 continue;
             }
-            let under_air = z < 63u && !bit_at(m, z + 1u);
-            let exposed = z == 0u || z == 63u || under_air || !bit_at(m, z - 1u) || !bit_at(west, z) || !bit_at(east, z) || !bit_at(south, z) || !bit_at(north, z);
-            if own == 0u && exposed {
-                let level = tile.level;
-                let i = tile.cx * 64 + i32(cx);
-                let j = tile.cy * 64 + i32(cy);
-                let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
+            // A natural leaf's cells are none but its exposed ones.
+            let cells_in = select(m, exposed, natural);
+            if ((select(cells_in.x, cells_in.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
+                continue;
+            }
+            let surface = pairs[lz] & 0xffu;
+            let sub = (pairs[lz] >> 8u) & 0xffu;
+            let full = ((implicit >> lz) & 1u) != 0u;
+            // Edits' materials as the columns wrote them (none: a natural
+            // chunk's columns write only their natural tops).
+            var word = 0u;
+            if !natural { word = cell_materials[cells + lz]; }
+            for (var b = 0u; b < 4u; b++) {
+                let z = lz * 4u + b;
+                var own = (word >> (b * 8u)) & 0xffu;
+                if !bit_at(m, z) {
+                    continue;
+                }
+                let under_air = z < 63u && !bit_at(m, z + 1u);
                 let k = job.cz * 64 + i32(z);
-                let depth = max(bitcast<i32>(cell_materials[cells + 16u]) - 1 - k, 0) << level;
-                let q = volume_point_half(domain_point(tile.face, i, j, level), (k << (level + 1u)) + (1 << level));
-                own = ground_material(q, u32(column.y) & 0xffu, column.x, depth, column_slope(tile, cx, cy), k << level) & M_ID;
+                let open = bit_at(exposed, z);
+                if own == 0u && open && natural && z == high && k == natural_top - 1 {
+                    own = top_material;
+                } else if own == 0u && open {
+                    let level = tile.level;
+                    let i = tile.cx * 64 + i32(cx);
+                    let j = tile.cy * 64 + i32(cy);
+                    let depth = max(natural_top - 1 - k, 0) << level;
+                    let q = volume_point_half(domain_point(tile.face, i, j, level), (k << (level + 1u)) + (1 << level));
+                    own = ground_material(q, u32(column.y) & 0xffu, column.x, depth, column_slope(tile, cx, cy), k << level) & M_ID;
+                }
+                let drawn = !full && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
+                if own == 0u || drawn {
+                    own = 0u;
+                }
+                word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
             }
-            let drawn = !implicit && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
-            if own == 0u || drawn {
-                own = 0u;
+            if !natural || word != 0u { cell_materials[cells + lz] = word; }
+            if word != 0u {
+                left |= 1u << lz;
+                (*written)[lz >> 1u] |= 1u << ((lz & 1u) * 16u + c);
             }
-            word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
         }
-        cell_materials[cells + lz] = word;
-        any = any || word != 0u;
     }
-    return any;
+    return left;
 }
 
 var<workgroup> w_occ: array<atomic<u32>, 128>;
@@ -1016,25 +1063,37 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             ground = encode_slope(g.x) | (encode_slope(g.y) << 8u);
         }
     }
-    // Leaves (bit lz) holding cells their pair would draw wrong (under
-    // edits: `leaf_cells`).
-    var edited = 0u;
+    var pairs: array<u32, 16>;
+    var occupied = 0u;
+    var full = 0u;
     for (var lz = 0u; lz < 16u; lz++) {
         let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
-        let word = m * 2u + (l >> 5u);
-        let bit = 1u << (l & 31u);
         if leaf[lz].x != 0u || leaf[lz].y != 0u {
             let pair = leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile.level);
-            atomicOr(&w_occ[word], bit);
+            pairs[lz] = pair;
+            occupied |= 1u << lz;
+            atomicOr(&w_occ[m * 2u + (l >> 5u)], 1u << (l & 31u));
             atomicMax(&w_mid_material[m], pair);
-            let implicit = leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u;
-            if job.detail != NONE && leaf_cells(job, wg.x, tile, lx, ly, lz, pair, implicit) { edited |= 1u << lz; }
         }
-        // A full leaf is implicit (its mid's material) unless a column tops
-        // in it (then it is the surface and keeps its own materials) or
-        // its pair draws cells wrong.
-        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && (((topped | edited) >> lz) & 1u) == 0u { atomicOr(&w_full[word], bit); }
+        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u { full |= 1u << lz; }
+    }
+    // Leaves (bit lz) holding cells their pair would draw wrong
+    // (`leaf_column_cells`, at `DETAIL_LEVELS`).
+    var edited = 0u;
+    var written: array<u32, 8>;
+    if job.detail != NONE && occupied != 0u {
+        edited = leaf_column_cells(job, wg.x, tile, lx, ly, pairs, occupied, full, &written);
+    }
+    // A full leaf is implicit (its mid's material) unless a column tops in
+    // it (then it is the surface and keeps its own materials: not in
+    // `full`) or its pair draws cells wrong.
+    for (var lz = 0u; lz < 16u; lz++) {
+        if (((full & ~edited) >> lz) & 1u) != 0u {
+            let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
+            let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
+            atomicOr(&w_full[m * 2u + (l >> 5u)], 1u << (l & 31u));
+        }
     }
     workgroupBarrier();
     // The tops' plane: its slope by least squares, then lifted over every
@@ -1186,9 +1245,15 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             // Its cells' edited materials, column by column.
             let detail = w_detail[order >> 6u];
             if ((edited >> lz) & 1u) != 0u && detail != NONE {
+                // A natural chunk stored only its cells' nonzero words.
+                let natural = job.brush_count == 0u && job.baked == NONE;
                 for (var c = 0u; c < 16u; c++) {
                     let column = (lx * 4u + (c & 3u)) + (ly * 4u + (c >> 2u)) * 64u;
-                    detail_cells[detail * DETAIL_WORDS + (order & 63u) * 16u + c] = cell_materials[(job.detail * TILE_COLUMNS + column) * CELL_WORDS + lz];
+                    var cells = 0u;
+                    if !natural || ((written[lz >> 1u] >> ((lz & 1u) * 16u + c)) & 1u) != 0u {
+                        cells = cell_materials[(job.detail * TILE_COLUMNS + column) * CELL_WORDS + lz];
+                    }
+                    detail_cells[detail * DETAIL_WORDS + (order & 63u) * 16u + c] = cells;
                 }
             }
         }
