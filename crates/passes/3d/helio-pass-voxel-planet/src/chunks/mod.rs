@@ -2792,6 +2792,8 @@ impl ChunkWorld {
         let eye_at = Eye::new(&grid, eye);
         self.claim_timing(frame);
         // A bounded share of the edited cells' exact materials each frame.
+        let (eye_cell, _) = grid.locate(eye);
+        self.blocks.follow(&self.queue, eye_cell.face, eye_cell.i.div_euclid(8), eye_cell.j.div_euclid(8));
         self.blocks.flush(&self.queue, 6000);
         let mut stats = UpdateStats::default();
         if self.worker.is_none() {
