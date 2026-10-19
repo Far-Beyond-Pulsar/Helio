@@ -1412,7 +1412,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // only to throw the result away every time.
             var sf = 1.0;
             var transmit = vec3<f32>(1.0);
-            if !is_vg {
+            if !is_vg && !in_portal {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
                 if sf > 0.0 {
                     transmit = light_transmittance(light_idx, world_pos, N);
