@@ -12,7 +12,9 @@
 //!   terrain half of the shaders, checked against the CPU field.
 pub mod edit_store;
 pub mod edits;
+pub mod features;
 pub mod snapshot;
+pub mod stamp;
 pub mod grid;
 pub mod record;
 pub mod landform;

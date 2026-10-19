@@ -67,8 +67,7 @@ impl CellEdit {
     }
 
     /// This edit followed by `later` (composition of baked edits).
-    #[cfg(test)]
-    fn then_edit(self, later: Self) -> Self {
+    pub fn then_edit(self, later: Self) -> Self {
         match later.state() {
             0 => self,
             1 => Self::AIR,
@@ -197,6 +196,17 @@ impl StoreUndo {
     pub fn columns(&self) -> impl Iterator<Item = ColumnKey> + '_ {
         self.columns.iter().map(|(key, _)| *key)
     }
+    /// Each column the change replaced and the brick heights (`bk`, lowest
+    /// and highest) it held before the change or holds in `now`.
+    pub fn spans(&self, now: &EditStore) -> Vec<(ColumnKey, [i32; 2])> {
+        self.columns
+            .iter()
+            .filter_map(|(key, before)| {
+                let heights = before.iter().chain(now.column(key)).flat_map(|c| c.iter().map(|(bk, _)| *bk));
+                heights.fold(None, |span: Option<[i32; 2]>, bk| Some(span.map_or([bk, bk], |[lo, hi]| [lo.min(bk), hi.max(bk)]))).map(|span| (*key, span))
+            })
+            .collect()
+    }
 }
 
 /// Sparse baked edits of every level (see the module doc).
@@ -235,6 +245,10 @@ impl EditStore {
     /// The baked edit of a level cell.
     pub fn cell(&self, face: u8, level: u32, i: i32, j: i32, k: i32) -> CellEdit {
         self.brick(&BrickKey::of_cell(face, level, i, j, k)).map_or(CellEdit::UNCHANGED, |b| b.cells[Brick::index(i, j, k)])
+    }
+    /// Every column holding bricks (any order).
+    pub fn columns(&self) -> impl Iterator<Item = ColumnKey> + '_ {
+        self.shards.iter().flat_map(|shard| shard.keys().copied())
     }
     /// Every stored brick (any order).
     pub fn bricks(&self) -> impl Iterator<Item = (BrickKey, &Arc<Brick>)> + '_ {
@@ -276,6 +290,29 @@ impl EditStore {
         }
         if column.is_empty() {
             shard.remove(&column_key);
+        }
+    }
+
+    /// Replace column `key` whole (`None` removes it; none of its bricks
+    /// may be unchanged).
+    pub(crate) fn put_column(&mut self, key: ColumnKey, column: Option<Arc<Column>>) {
+        let shard = Arc::make_mut(&mut self.shards[shard_of(&key)]);
+        if let Some(recording) = &mut self.recording {
+            recording.entry(key).or_insert_with(|| shard.get(&key).cloned());
+        }
+        let level = key.level as usize;
+        let column = column.filter(|c| !c.is_empty());
+        let added = column.as_ref().map_or(0, |c| c.len());
+        if added > 0 && self.counts.len() <= level {
+            self.counts.resize(level + 1, 0);
+        }
+        let removed = match column {
+            Some(column) => shard.insert(key, column),
+            None => shard.remove(&key),
+        }
+        .map_or(0, |c| c.len());
+        if added != removed {
+            self.counts[level] = self.counts[level] + added - removed;
         }
     }
 
@@ -444,39 +481,62 @@ impl EditStore {
     /// unchanged keeps its own edit: a large brush baked at its level
     /// directly. Returns every brick of every level that changed.
     pub fn rebuild_coarse(&mut self, changed: Vec<BrickKey>, levels: u32) -> Vec<BrickKey> {
-        let mut all = changed.clone();
-        let mut current = changed;
-        for _ in 1..levels {
-            let mut parents: Vec<BrickKey> = current.iter().map(|k| k.parent()).collect();
-            parents.sort_unstable();
-            parents.dedup();
-            // Parents of one level are independent: built side by side.
+        self.rebuild_coarse_over(changed, Vec::new(), levels, None)
+    }
+
+    /// [`Self::rebuild_coarse`] level by level: the parents of the bricks
+    /// that `changed` (of any level), and the bricks `rebuild` names, are
+    /// built again; a coarse cell whose children are mostly unchanged takes
+    /// `fallback`'s cell (`None`: its own), so a store composed over another
+    /// keeps what that one baked at coarse levels.
+    pub(crate) fn rebuild_coarse_over(&mut self, changed: Vec<BrickKey>, rebuild: Vec<BrickKey>, levels: u32, fallback: Option<&EditStore>) -> Vec<BrickKey> {
+        let levels = levels.max(1) as usize;
+        let mut changed_at: Vec<Vec<BrickKey>> = vec![Vec::new(); levels];
+        let mut rebuild_at: Vec<Vec<BrickKey>> = vec![Vec::new(); levels];
+        for key in changed.iter() {
+            if let Some(at) = changed_at.get_mut(usize::from(key.level)) {
+                at.push(*key);
+            }
+        }
+        for key in rebuild {
+            if let Some(at) = rebuild_at.get_mut(usize::from(key.level)) {
+                at.push(key);
+            }
+        }
+        let mut all = changed;
+        let mut current = std::mem::take(&mut changed_at[0]);
+        for level in 1..levels {
+            let mut targets: Vec<BrickKey> = current.iter().map(|k| k.parent()).chain(std::mem::take(&mut rebuild_at[level])).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            // Bricks of one level are independent: built side by side.
             let store = &*self;
-            let built = par_map(&parents, COARSE_PER_TASK, |&parent| {
-                let brick = store.coarsen(parent);
-                let same = store.brick(&parent).map_or(brick.is_unchanged(), |old| **old == brick);
-                (parent, (!same).then_some(brick))
+            let built = par_map(&targets, COARSE_PER_TASK, |&key| {
+                let brick = store.coarsen(key, fallback.unwrap_or(store));
+                let same = store.brick(&key).map_or(brick.is_unchanged(), |old| **old == brick);
+                (key, (!same).then_some(brick))
             });
-            let mut next = Vec::new();
-            for (parent, brick) in built {
+            let mut next = std::mem::take(&mut changed_at[level]);
+            for (key, brick) in built {
                 if let Some(brick) = brick {
-                    self.set(parent, Some(brick));
-                    next.push(parent);
+                    self.set(key, Some(brick));
+                    next.push(key);
+                    all.push(key);
                 }
             }
-            if next.is_empty() {
+            if next.is_empty() && changed_at[level..].iter().chain(&rebuild_at[level..]).all(Vec::is_empty) {
                 break;
             }
-            all.extend(next.iter().copied());
             current = next;
         }
         all
     }
 
-    /// A coarse brick from the eight finer bricks under it.
-    fn coarsen(&self, key: BrickKey) -> Brick {
+    /// A coarse brick from the eight finer bricks under it; where they are
+    /// mostly unchanged, `fallback`'s cell (what was baked at this level).
+    fn coarsen(&self, key: BrickKey, fallback: &EditStore) -> Brick {
         let mut out = Brick::default();
-        let own = self.brick(&key);
+        let own = fallback.brick(&key);
         // Child brick `c` (bits x, y, z) holds the children of the coarse
         // cells whose coordinates have bit 2 set as `c` has.
         let children: [Option<&Arc<Brick>>; 8] = std::array::from_fn(|c| {
@@ -496,9 +556,10 @@ impl EditStore {
                         let (dx, dy, dz) = ((c & 1) as i32, ((c >> 1) & 1) as i32, (c >> 2) as i32);
                         brick.cells[Brick::index(x * 2 + dx, y * 2 + dy, z * 2 + dz)]
                     });
-                    // Children only gain edits (undo restores bricks), so a
-                    // majority of unchanged children means the cell's own
-                    // edit came at this level.
+                    // A majority of unchanged children means the cell's
+                    // edit, if any, came at this level (children only gain
+                    // edits but in a composed store, whose fallback holds
+                    // what was baked at this level).
                     let majority = CellEdit::majority(cell);
                     out.cells[index] = if majority.is_unchanged() { own.map_or(CellEdit::UNCHANGED, |b| b.cells[index]) } else { majority };
                 }

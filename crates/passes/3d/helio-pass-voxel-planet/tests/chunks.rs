@@ -1238,6 +1238,61 @@ fn sealed_edits_render_exactly_under_a_running_world() {
     check(&planet);
 }
 
+/// Features (trees from stamps, two regions) draw exactly under a running
+/// world as they load, under a dig through one of them, and as a region
+/// unloads.
+#[test]
+fn features_render_exactly_as_they_load_and_unload() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    // The scene in cells.
+    let v = grid.voxel_size();
+    let mut tree = helio_pass_voxel_planet::stamp::Stamp::new();
+    tree.fill([-3, 7, -3], [3, 11, 3], material::GRASS);
+    tree.fill([0, 0, 0], [0, 9, 0], material::BRICK);
+    // Trees of a region on the ground along `side`, `offset` along `fwd`.
+    let region = |planet: &Planet, offset: f64| -> Vec<Brush> {
+        (-2..=2)
+            .flat_map(|n| {
+                let at = ground + side * (f64::from(n) * 9.0 * v) + fwd * offset;
+                let (cell, _) = grid.locate(at);
+                let k = planet.column_top(cell.face, cell.i, cell.j, 0);
+                tree.oriented(n as u32, n % 2 == 0).brushes(&grid, cell.face, cell.i, cell.j, k)
+            })
+            .collect()
+    };
+    let eye = ground + up * (35.0 * v) - fwd * (50.0 * v);
+    let view = View::new(eye, (ground - eye).normalize().as_vec3(), [320, 180]);
+    let mut world = World::new(gpu, &planet);
+    let mut check = |planet: &Planet, what: &str| {
+        world.sync(gpu, planet);
+        let (compared, mismatched) = compare(gpu, &mut world, planet, &view);
+        assert!(compared > 400, "{what}: {compared} compared");
+        assert_eq!(mismatched, 0, "{what}");
+    };
+    check(&planet, "bare");
+    let (near, far) = (region(&planet, 0.0), region(&planet, 6.0 * v));
+    planet.load_features(1, near).unwrap();
+    planet.load_features(2, far).unwrap();
+    check(&planet, "loaded");
+    // A dig through the trees: under them in the history or not, edits
+    // apply over features.
+    planet.apply(Brush { center: (ground + up * (6.0 * v)).to_array(), radius: 6.0 * v, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    for n in 0..200 {
+        planet.apply(Brush { center: (ground + side * ((f64::from(n % 40) - 20.0) * v) + up * (9.0 * v)).to_array(), radius: 0.5 * v, shape: BrushShape::Cube, op: BrushOp::Add, material: material::STONE, height: 0.0 }).unwrap();
+    }
+    assert!(planet.edits().sealed_len() > 0);
+    check(&planet, "dug");
+    planet.unload_features(1);
+    check(&planet, "region 1 unloaded");
+}
+
 /// From orbit (300 km up) every pixel is drawn as the planet's shape
 /// allows: a hit wherever the ray meets the sphere 20 km below the datum,
 /// sky wherever it misses the sphere 20 km above it (no relief reaches

@@ -147,7 +147,7 @@ impl Planet {
         out[..4].copy_from_slice(&MAGIC);
         out[4..6].copy_from_slice(&VERSION.to_le_bytes());
         out[8..16].copy_from_slice(&grid_fingerprint(self.grid()).to_le_bytes());
-        let (sealed, sealed_hash) = edits.baked_state();
+        let crate::planet::BakedState { sealed, hash: sealed_hash, .. } = edits.baked_state();
         let (top, bottom) = self.edit_bounds();
         for v in [edits.len() as u64, edits.hash(), sealed as u64, sealed_hash, top.to_bits(), bottom.to_bits()] {
             out.extend_from_slice(&v.to_le_bytes());
@@ -158,7 +158,8 @@ impl Planet {
                 out.extend_from_slice(&record::encode(index as u32, brush));
             }
         }
-        let mut bricks: Vec<_> = edits.baked.bricks().collect();
+        // The edits' own bricks: loaded features are not the world's to keep.
+        let mut bricks: Vec<_> = edits.own.bricks().collect();
         bricks.sort_unstable_by_key(|(key, _)| *key);
         out.extend_from_slice(&(bricks.len() as u64).to_le_bytes());
         for (key, brick) in bricks {

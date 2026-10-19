@@ -580,6 +580,14 @@ impl Planner {
                     n.empty = false;
                 }
             }
+            Event::Edited(face, boxes) => {
+                for (k, n) in self.nodes.iter_mut() {
+                    if n.generated && n.empty && k.face == face && boxes.iter().any(|b| b.contains(k)) {
+                        n.generated = false;
+                        n.empty = false;
+                    }
+                }
+            }
             Event::Measured(fp, ranges) => {
                 if let Some(f) = self.footprints.get_mut(&fp) {
                     if f.ranges != ranges || !f.exact {
@@ -642,7 +650,7 @@ impl Planner {
 }
 
 /// What happened to nodes since the worker's last plan.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Event {
     /// Queued for generation: drawn from the next plan.
     Generated(NodeKey),
@@ -656,6 +664,25 @@ pub enum Event {
     Seen(NodeKey),
     /// A ray met this Buried node: generate it.
     Reached(NodeKey),
+    /// Edits changed what the nodes of `face` in these boxes hold: those
+    /// generated empty (their chunks dropped, known only here) are
+    /// generated again when wanted.
+    Edited(u8, Arc<[NodeBox]>),
+}
+
+/// Nodes of one level: footprints `x` by `y` and layers `z` (inclusive).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeBox {
+    pub level: u32,
+    pub x: [i32; 2],
+    pub y: [i32; 2],
+    pub z: [i32; 2],
+}
+
+impl NodeBox {
+    pub fn contains(&self, k: &NodeKey) -> bool {
+        k.level == self.level && (self.x[0]..=self.x[1]).contains(&k.cx) && (self.y[0]..=self.y[1]).contains(&k.cy) && (self.z[0]..=self.z[1]).contains(&k.cz)
+    }
 }
 
 impl Event {
@@ -692,6 +719,8 @@ pub struct PlannedFor {
     pub reports_seen: u64,
     pub eye: DVec3,
     pub view: Option<View>,
+    /// The version of the edits it classified with (`EditView::version`).
+    pub edits: u64,
 }
 
 struct Job {
@@ -741,7 +770,7 @@ impl Worker {
                     let added = plan.drawn.iter().filter(|(k, kind)| drawn.get(k) != Some(kind)).copied().collect();
                     let removed = drawn.iter().filter(|(k, kind)| now.get(k) != Some(kind)).map(|(k, _)| *k).collect();
                     drawn = now;
-                    if outbox.send(Planned { plan, added, removed, evicted, made_for: PlannedFor { events_seen: job.events_seen, reports_seen: job.reports_seen, eye: job.eye, view: job.view }, frame: job.frame, ms: started.elapsed().as_secs_f64() * 1e3 }).is_err() {
+                    if outbox.send(Planned { plan, added, removed, evicted, made_for: PlannedFor { events_seen: job.events_seen, reports_seen: job.reports_seen, eye: job.eye, view: job.view, edits: planner.edits.version }, frame: job.frame, ms: started.elapsed().as_secs_f64() * 1e3 }).is_err() {
                         break;
                     }
                 }

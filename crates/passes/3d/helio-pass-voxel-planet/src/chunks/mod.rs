@@ -444,6 +444,11 @@ fn loaded(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_
     Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })
 }
 
+/// The footprint a baked column lies in (a chunk is eight bricks across).
+fn column_footprint(column: ColumnKey) -> Footprint {
+    Footprint { face: column.face, level: u32::from(column.level), cx: column.ci >> 3, cy: column.cj >> 3 }
+}
+
 /// The analytic brushes of `edits` resolved per face: the large log's,
 /// then the recent log's; the count of large ones, and each recent brush's
 /// face count.
@@ -453,7 +458,7 @@ fn loaded(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_
 struct EditState {
     len: usize,
     hash: u64,
-    sealed: (usize, u64),
+    sealed: crate::planet::BakedState,
 }
 
 impl EditState {
@@ -2475,14 +2480,17 @@ impl ChunkWorld {
         if state == self.edit_state {
             return true;
         }
-        let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else { return false };
-        let columns: Vec<_> = columns.into_iter().collect();
+        let Some(changes) = edits.baked_changes_since(self.edit_state.sealed) else { return false };
+        let columns: Vec<ColumnKey> = changes.restated.iter().chain(&changes.world).map(|c| c.key).collect();
         // Where the bricks are: unchanged without seals, extended by a
         // seal's columns (bricks are only added), built again after an
         // unseal.
         let bricks = if state.sealed == self.edit_state.sealed {
             self.edits.bricks.clone()
-        } else if state.sealed.0 > self.edit_state.sealed.0 {
+        } else if state.sealed.sealed > self.edit_state.sealed.sealed || (state.sealed.sealed == self.edit_state.sealed.sealed && state.sealed.hash == self.edit_state.sealed.hash) {
+            // A seal, or features loaded or unloaded: the index marks the
+            // columns changed (a column whose features went stays marked,
+            // which only costs a classification).
             std::sync::Arc::new(self.edits.bricks.extended(planet.grid(), &edits.baked, columns.iter().copied()))
         } else {
             std::sync::Arc::new(classify::BrickIndex::new(planet.grid(), &edits.baked))
@@ -2500,7 +2508,7 @@ impl ChunkWorld {
         }
         // Recent brushes sealed into the baked store left the list, not the
         // world (its coarser levels follow from the baked changes).
-        let sealed = state.sealed.0.saturating_sub(self.edit_state.sealed.0);
+        let sealed = state.sealed.sealed.saturating_sub(self.edit_state.sealed.sealed);
         let sealed_faces: usize = self.edits.recent_counts.iter().take(sealed).sum();
         let large = self.edits.large_faces;
         for fb in &self.edits.faces[large..large + sealed_faces] {
@@ -2519,16 +2527,18 @@ impl ChunkWorld {
             }
         }
         drop(old);
-        // Baked changes (a seal's bricks) end what was kept under them.
-        let changed: FxHashSet<Footprint> = columns.iter().map(|c| Footprint { face: c.face, level: u32::from(c.level), cx: c.ci >> 3, cy: c.cj >> 3 }).collect();
-        if !changed.is_empty() {
-            let kept: Vec<NodeKey> = self.kept.keys().chain(&self.packed_since).filter(|k| changed.contains(&k.footprint())).copied().collect();
-            for key in kept {
-                self.drop_kept(key);
-            }
+        // Restated bricks (a seal's, an undone seal's: the world is the
+        // same) end what was kept under them, and their nodes are generated
+        // again when the budget allows.
+        let restated: FxHashSet<Footprint> = changes.restated.iter().map(|c| column_footprint(c.key)).collect();
+        if !restated.is_empty() {
+            self.drop_kept_where(|k| restated.contains(&k.footprint()));
         }
-        for column in columns {
-            let fp = Footprint { face: column.face, level: u32::from(column.level), cx: column.ci >> 3, cy: column.cj >> 3 };
+        // Changes of the world (a batch sealed at once, features) are marked
+        // as brushes are.
+        self.mark_columns(&changes.world);
+        for column in changes.restated.iter().map(|c| c.key) {
+            let fp = column_footprint(column);
             for cz in self.footprint_nodes.get(&fp).cloned().unwrap_or_default() {
                 let key = fp.node(cz);
                 if !self.urgent.contains(&key) {
@@ -2575,11 +2585,16 @@ impl ChunkWorld {
                 (x.end() - x.start() + 1) as u64 * (y.end() - y.start() + 1) as u64
             })
             .sum();
+        // Nodes generated empty under it are the planner's to generate again.
+        let boxes: std::sync::Arc<[residency::NodeBox]> = (0..levels)
+            .map(|l| {
+                let (x, y, z) = span(l);
+                residency::NodeBox { level: l, x: [*x.start(), *x.end()], y: [*y.start(), *y.end()], z: [*z.start(), *z.end()] }
+            })
+            .collect();
+        self.events.push(residency::Event::Edited(fb.face(), boxes));
         // What was kept of nodes under it no longer holds.
-        let kept: Vec<NodeKey> = self.kept.keys().chain(&self.packed_since).filter(|k| inside(k)).copied().collect();
-        for key in kept {
-            self.drop_kept(key);
-        }
+        self.drop_kept_where(inside);
         let mut marked: Vec<NodeKey> = Vec::new();
         if footprints > self.footprint_nodes.len() as u64 {
             marked.extend(self.nodes.keys().filter(|k| inside(k)));
@@ -2598,15 +2613,7 @@ impl ChunkWorld {
                 }
             }
         }
-        for key in marked {
-            self.stale.remove(&key);
-            if self.drawn_set.in_cut(key) {
-                self.urgent.insert(key);
-            } else if let Some(old) = self.remove_resident(key) {
-                self.dropped.push(old.slot);
-                self.events.push(residency::Event::Stale(key));
-            }
-        }
+        self.mark_resident(marked);
         // Drawn uniform nodes the brush's surface crosses become Mixed.
         let uniform: Vec<NodeKey> = self.drawn_set.uniform_nodes().filter(|k| inside(k)).collect();
         for key in uniform {
@@ -2615,6 +2622,64 @@ impl ChunkWorld {
             if bands.iter().any(|&(a, b)| b > a && a < hi && b > lo) {
                 self.urgent.insert(key);
             }
+        }
+    }
+
+    /// Nodes a change of the world in the baked store touched (`columns`,
+    /// with their bricks' heights), marked as [`Self::mark_brush`] marks a
+    /// brush's: what was kept of them goes, resident ones in the cut are
+    /// generated again (urgent) and the rest dropped, and drawn uniform ones
+    /// over the changed bricks become Mixed.
+    fn mark_columns(&mut self, columns: &[crate::planet::ChangedColumn]) {
+        if columns.is_empty() {
+            return;
+        }
+        // Each footprint's node layers holding changed bricks (a node's
+        // layer is eight bricks).
+        let mut spans: FxHashMap<Footprint, [i32; 2]> = FxHashMap::default();
+        for c in columns {
+            let [lo, hi] = [c.bricks[0] >> 3, c.bricks[1] >> 3];
+            let span = spans.entry(column_footprint(c.key)).or_insert([lo, hi]);
+            *span = [span[0].min(lo), span[1].max(hi)];
+        }
+        let inside = |k: &NodeKey| spans.get(&k.footprint()).is_some_and(|&[lo, hi]| (lo..=hi).contains(&k.cz));
+        // Nodes generated empty there are the planner's to generate again.
+        let mut faces: FxHashMap<u8, Vec<residency::NodeBox>> = FxHashMap::default();
+        for (fp, &[lo, hi]) in &spans {
+            faces.entry(fp.face).or_default().push(residency::NodeBox { level: fp.level, x: [fp.cx, fp.cx], y: [fp.cy, fp.cy], z: [lo, hi] });
+        }
+        for (face, boxes) in faces {
+            self.events.push(residency::Event::Edited(face, boxes.into()));
+        }
+        self.drop_kept_where(inside);
+        let marked: Vec<NodeKey> = spans
+            .iter()
+            .flat_map(|(fp, &[lo, hi])| self.footprint_nodes.get(fp).into_iter().flatten().filter(move |&&cz| (lo..=hi).contains(&cz)).map(move |&cz| fp.node(cz)))
+            .collect();
+        self.mark_resident(marked);
+        let uniform: Vec<NodeKey> = self.drawn_set.uniform_nodes().filter(|k| inside(k)).collect();
+        self.urgent.extend(uniform);
+    }
+
+    /// Resident nodes something changed under: generated again now when the
+    /// cut draws them, else dropped (generated again if wanted).
+    fn mark_resident(&mut self, nodes: Vec<NodeKey>) {
+        for key in nodes {
+            self.stale.remove(&key);
+            if self.drawn_set.in_cut(key) {
+                self.urgent.insert(key);
+            } else if let Some(old) = self.remove_resident(key) {
+                self.dropped.push(old.slot);
+                self.events.push(residency::Event::Stale(key));
+            }
+        }
+    }
+
+    /// What was kept of the nodes `inside` holds no longer.
+    fn drop_kept_where(&mut self, inside: impl Fn(&NodeKey) -> bool) {
+        let kept: Vec<NodeKey> = self.kept.keys().chain(&self.packed_since).filter(|k| inside(k)).copied().collect();
+        for key in kept {
+            self.drop_kept(key);
         }
     }
 
@@ -3254,7 +3319,10 @@ impl ChunkWorld {
         // seen them all since residency last changed may still want more
         // where rays meet what the eye's distance does not ask for.
         let swept = self.targets.is_none() || self.planned_for.is_some_and(|p| p.reports_seen >= self.quiet_from + FEEDBACK_FRAMES);
-        self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0 && self.urgent.is_empty() && self.stale.is_empty() && self.drawn_set.fading() == 0 && swept
+        // The plan shown was made for these edits: what they changed where
+        // the cut draws air (no node to mark) is planned.
+        let current = self.planned_for.is_some_and(|p| p.edits == self.edits.version);
+        current && self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0 && self.urgent.is_empty() && self.stale.is_empty() && self.drawn_set.fading() == 0 && swept
     }
 
     /// Node and occupied layers of the chunk in `slot`.
