@@ -19,6 +19,7 @@ pub use helio_pass_portal_cull::{
     PortalPose, PortalProjectionBridge, PortalProjectionConfig, PortalProjectionFrame,
     PortalProjectionKey, ProjectionError, RuntimePortalKey, MAX_PORTAL_CHAINS,
 };
+pub use helio_pass_portal_instances::PortalDebugText;
 pub use helio_pass_tsr::TsrQuality;
 pub use helio_mats::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,

@@ -439,6 +439,21 @@ impl Renderer {
         }
     }
 
+    /// Set the world-anchored pixel text shown by the editor's portal overlay.
+    pub fn set_portal_debug_texts(
+        &mut self,
+        texts: Vec<helio_pass_portal_instances::PortalDebugText>,
+    ) -> bool {
+        self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
+            .is_some_and(|pass| pass.set_debug_texts(texts))
+    }
+
+    /// Pass the latest asynchronous DeferredLight timestamp to its cost view.
+    pub fn set_deferred_light_timing_ms(&mut self, milliseconds: f32) -> bool {
+        self.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>()
+            .is_some_and(|pass| pass.set_measured_lighting_ms(milliseconds))
+    }
+
     pub fn is_editor_mode(&self) -> bool {
         self.editor_mode
     }
