@@ -52,6 +52,9 @@ struct DrawParams {
     // The eye in the scene lights' coordinates (xyz); w 1 when the scene's
     // lights are bound (`local_shadow`).
     light_eye: vec4<f32>,
+    // x: how far the sky rays reach (m), when GI probes light the sky's
+    // larger occlusion (0: SKY_RANGE_CELLS cells).
+    sky: vec4<f32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -2115,14 +2118,18 @@ fn hit_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face, dir: vec3
 // The share of the sky the hit at pixel `q` (distance `t`, face `f`, chunk
 // `slot`) sees: cosine-weighted rays about the planet's up, turned each
 // frame (TSR gathers them); an occluder near the range end shades less (no
-// edge at the range). A ceiling looks out sideways.
+// edge at the range). A ceiling looks out sideways. With GI probes, only
+// the occlusion nearer than their spacing (`params.sky`).
 fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let at = pixel_ray(q, size) * t;
     let up = select(normalize(params.up.xyz * params.up.w + at), vec3<f32>(0.0, 1.0, 0.0), PLANE_WORLD);
     let ceiling = dot(f.normal, up) < -0.25;
     let t1 = normalize(select(cross(up, vec3<f32>(0.0, 0.0, 1.0)), cross(up, vec3<f32>(1.0, 0.0, 0.0)), abs(up.z) > 0.9));
     let t2 = cross(up, t1);
-    let range = SKY_RANGE_CELLS * f.cell;
+    var range = SKY_RANGE_CELLS * f.cell;
+    // With GI the probes see the sky's occlusion past their spacing: these
+    // rays keep the nearer (no less than a few cells).
+    if params.sky.x > 0.0 { range = clamp(params.sky.x, 4.0 * f.cell, range); }
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
     let turn = select(f32(params.table.w % 64u) * 0.618034, 0.0, steady_shadows());
     var open = 0.0;

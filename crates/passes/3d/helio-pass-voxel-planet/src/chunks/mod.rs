@@ -274,6 +274,8 @@ struct DrawParams {
     cut: [u32; 4],
     /// The eye in the scene lights' coordinates; w 1 with lights bound.
     light_eye: [f32; 4],
+    /// x: the sky rays' reach (m) with GI probes, else 0.
+    sky: [f32; 4],
 }
 
 /// A frame's scene lights, for the terrain's shadows of them
@@ -3615,6 +3617,9 @@ impl ChunkWorld {
             ],
             cut: [self.grid.levels() - 1, self.drawn_set.fading() as u32, 0, 0],
             light_eye: lights.map_or([0.0; 4], |l| l.eye.extend(1.0).to_array()),
+            // Two of the finest probes' spacings: the probes' visibility
+            // holds the occlusion past them.
+            sky: [if gi.is_some() { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.buried, 0, &[0u8; 16]);
