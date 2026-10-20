@@ -133,9 +133,10 @@ impl Gfx {
                 .around_planet([0.0; 3], planet.grid().radius()),
         );
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
-        post.tonemap_operator = helio::TonemapOperator::Aces;
-        post.tonemap_exposure = 3.0;
-        post.color_saturation = [1.12; 3];
+        // AgX: sunlit leaves and grass roll toward white, not lime.
+        post.tonemap_operator = helio::TonemapOperator::Agx;
+        post.tonemap_exposure = 2.2;
+        post.color_saturation = [1.3; 3];
         post.color_contrast = [1.06; 3];
         post.exposure_mode = helio_pass_postprocess::ExposureMode::Manual;
         set_camera_postprocess(&mut scene.world, 0, &post);

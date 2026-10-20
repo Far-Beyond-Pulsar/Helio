@@ -37,6 +37,8 @@ pub enum TonemapOperator {
     Reinhard,
     Uncharted2,
     Lottes,
+    /// Hue-preserving filmic curve: bright saturated colours roll to white.
+    Agx,
 }
 impl Default for TonemapOperator {
     fn default() -> Self {
@@ -619,6 +621,7 @@ impl PostProcessSettingsProps {
                 TonemapOperator::Reinhard => HelioTonemapOperator::Reinhard,
                 TonemapOperator::Uncharted2 => HelioTonemapOperator::Uncharted2,
                 TonemapOperator::Lottes => HelioTonemapOperator::Lottes,
+                TonemapOperator::Agx => HelioTonemapOperator::Agx,
             },
             tonemap_exposure: self.tonemap_exposure,
             tonemap_white_point: self.tonemap_white_point,

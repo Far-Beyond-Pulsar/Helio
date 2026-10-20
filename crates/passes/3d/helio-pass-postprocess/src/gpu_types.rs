@@ -11,6 +11,10 @@ pub enum TonemapOperator {
     Reinhard = 2,
     Uncharted2 = 3,
     Lottes = 4,
+    /// AgX (Sobotka): a log encoding in a slightly desaturated working space
+    /// and a sigmoid. Bright saturated colours roll toward white instead of
+    /// skewing in hue (sunlit grass stays green, not lime).
+    Agx = 6,
 }
 
 // ── Exposure mode ──────────────────────────────────────────────────────────────

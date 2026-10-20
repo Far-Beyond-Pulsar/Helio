@@ -49,6 +49,13 @@ SOURCES = {
     "jungle_log_top": "TreeEnd005",
 }
 
+# Linear-light colour balance of a surface: Grass004 is olive (red three
+# quarters of green), which a warm sun turns yellow; living grass is nearer
+# half.
+BALANCE = {
+    "grass_top": (0.7, 1.0, 0.85),
+}
+
 
 def load(maps, material, kind):
     path = os.path.join(maps, material, f"{material}_1K-JPG_{kind}.jpg")
@@ -88,6 +95,14 @@ def maps_of(maps_dir, material, log_end):
     return colour, normal, orm
 
 
+def balance(colour, gains):
+    """`colour` (sRGB) with each channel's linear light scaled by `gains`."""
+    lut = []
+    for gain in gains:
+        lut += [round(255 * min((v / 255) ** 2.2 * gain, 1.0) ** (1 / 2.2)) for v in range(256)]
+    return colour.point(lut)
+
+
 def grass_side(dirt, grass):
     """Dirt under a band of the grass top, its lower edge ragged (a smooth
     random height a column, seamless across the tile's sides)."""
@@ -120,6 +135,9 @@ def main():
     baked = {}
     for name, material in SOURCES.items():
         baked[name] = maps_of(maps_dir, material, name.endswith("_log_top"))
+        if name in BALANCE:
+            colour, normal, orm = baked[name]
+            baked[name] = (balance(colour, BALANCE[name]), normal, orm)
         save(out, name, baked[name])
     save(out, "grass_side", grass_side(baked["dirt"], baked["grass_top"]))
     print(f"baked {len(baked) + 1} surfaces into {out}")

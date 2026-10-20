@@ -45,6 +45,8 @@ pub use lut_builder::LutBuilder;
 mod abi_tests;
 #[cfg(test)]
 mod exposure_tests;
+#[cfg(test)]
+mod tonemap_tests;
 
 const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
