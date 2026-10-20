@@ -1720,10 +1720,35 @@ struct SceneSurface {
     albedo: vec3<f32>,
     roughness: f32,
     emissive: vec3<f32>,
+    // In the face's texture frame (x along u, y against v, z out).
+    normal: vec3<f32>,
+    occlusion: f32,
     valid: bool,
 }
 
 SCENE_MATERIALS
+
+// Shading normal `n` bent by texture normal `t` (in the face's texture
+// frame: `scene_surface`) on a face along `axis` of a cell of frame `c`:
+// the texture's u and up directions there (cell axes, as `scene_surface`
+// lays textures on faces), made perpendicular to `n`.
+fn textured_normal(n: vec3<f32>, t: vec3<f32>, c: ChunkDraw, axis: u32) -> vec3<f32> {
+    if t.z >= 0.9999 { return n; }
+    // u, and up the texture (against v): x and -y on a top or bottom; y or
+    // x and up (z) on the sides.
+    var u = c.m0.xyz;
+    var up = -c.m1.xyz;
+    if axis == 0u {
+        u = c.m1.xyz;
+        up = c.m2.xyz;
+    } else if axis == 1u {
+        up = c.m2.xyz;
+    }
+    let tu = normalize(u - n * dot(n, u));
+    var tv = cross(n, tu);
+    tv *= select(-1.0, 1.0, dot(tv, up) >= 0.0);
+    return normalize(tu * t.x + tv * t.y + n * t.z);
+}
 
 // Helio's gbuffer (`engine::GBUFFER_FORMATS`).
 struct GOut {
@@ -1752,7 +1777,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let sign = (v.y >> 20u) & 1u;
     let material = (v.y >> 21u) & 31u;
     let shading = textureLoad(hit_normal, p, 0);
-    let normal = shading.xyz;
+    var normal = shading.xyz;
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
     let pixel_m = pixel_width(vec2<u32>(pixel.xy), size, t);
@@ -1763,11 +1788,14 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     var roughness = palette(material).w;
     var emissive = vec3<f32>(0.0);
     let level = u32(chunk_keys[v.x].x >> 8u) & 31u;
-    let scene = scene_surface(material, axis, sign, level, voxel_in_cell(c, cell, position), pixel_m);
+    let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m);
+    var occlusion = 1.0;
     if scene.valid {
         albedo = scene.albedo;
         roughness = scene.roughness;
         emissive = scene.emissive;
+        occlusion = scene.occlusion;
+        normal = textured_normal(normal, scene.normal, c, axis);
     }
     out.albedo = vec4<f32>(albedo, 1.0);
     if debug_mode() == 32u {
@@ -1788,7 +1816,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     // a fill light by albedo stands in for the sky's bounce (both 0 by
     // default).
     let shade = materials.shade;
-    out.orm = vec4<f32>(mix(shade.w, 1.0, look.ao * shading.w), clamp(roughness, 0.04, 1.0), 0.0, f0);
+    out.orm = vec4<f32>(mix(shade.w, 1.0, look.ao * shading.w) * occlusion, clamp(roughness, 0.04, 1.0), 0.0, f0);
     emissive += albedo * shade.rgb * mix(0.55, 1.0, shading.w);
     out.emissive = vec4<f32>(emissive, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).

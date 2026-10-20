@@ -18,12 +18,14 @@ pub const SLOTS: usize = crate::terrain::MATERIALS;
 /// No scene material: the flat appearance colour.
 pub const NO_MATERIAL: u32 = u32::MAX;
 
-/// Which scene material rows each voxel material shows on its faces.
+/// Which scene material rows each voxel material shows on its faces, and
+/// how large its textures are in the world.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct VoxelMaterialMap {
     /// Per voxel material: scene material rows of its top, side and bottom
-    /// faces (`NO_MATERIAL`: flat), and a reserved word.
+    /// faces (`NO_MATERIAL`: flat), and the side of a texture in the world
+    /// (metres, f32 bits; 0: one voxel).
     pub faces: [[u32; 4]; SLOTS],
 }
 
@@ -35,9 +37,12 @@ impl Default for VoxelMaterialMap {
 
 impl VoxelMaterialMap {
     /// Voxel material `material` shows scene material rows `top`, `side`
-    /// and `bottom`.
-    pub fn set(&mut self, material: u32, top: u32, side: u32, bottom: u32) {
-        self.faces[material as usize % SLOTS] = [top, side, bottom, 0];
+    /// and `bottom`, a texture spanning `tile_m` metres (to the nearest
+    /// whole number of voxels; 0: one voxel, a block's face). Textures run
+    /// on across voxels, so a world of small voxels shows its surfaces at
+    /// their size, not a texture a voxel.
+    pub fn set(&mut self, material: u32, top: u32, side: u32, bottom: u32, tile_m: f32) {
+        self.faces[material as usize % SLOTS] = [top, side, bottom, tile_m.max(0.0).to_bits()];
     }
 }
 
@@ -82,7 +87,7 @@ pub fn texture_capacity(device: &wgpu::Device) -> Option<u32> {
 }
 
 /// The line of chunk_draw.wgsl the scene materials replace: no scene surface.
-pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, in_cell: vec3<f32>, pixel_m: f32) -> SceneSurface {\n    return SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), false);\n}";
+pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32) -> SceneSurface {\n    return SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, false);\n}";
 
 /// chunk_draw.wgsl with the scene materials spliced in for a texture table
 /// of `capacity` entries.

@@ -1,0 +1,29 @@
+The textures in this folder are baked (tools/bake_textures.py) from materials
+by ambientCG (https://ambientcg.com), released under the Creative Commons CC0
+1.0 Universal Public Domain Dedication
+(https://creativecommons.org/publicdomain/zero/1.0/). No attribution is
+required; the sources are credited here anyway.
+
+grass_top, grass_side (with dirt)  Grass004   https://ambientcg.com/a/Grass004
+dirt, grass_side                   Ground106  https://ambientcg.com/a/Ground106
+stone                              Rock060    https://ambientcg.com/a/Rock060
+andesite                           Rock051    https://ambientcg.com/a/Rock051
+sand                               Ground080  https://ambientcg.com/a/Ground080
+snow                               Snow006    https://ambientcg.com/a/Snow006
+gravel                             Gravel040  https://ambientcg.com/a/Gravel040
+sandstone                          Bricks084  https://ambientcg.com/a/Bricks084
+sandstone_top                      Ground093A https://ambientcg.com/a/Ground093A
+clay                               Clay007    https://ambientcg.com/a/Clay007
+bricks                             Bricks085  https://ambientcg.com/a/Bricks085
+cobblestone                        Bricks102  https://ambientcg.com/a/Bricks102
+stone_bricks                       Bricks066  https://ambientcg.com/a/Bricks066
+oak_planks                         WoodFloor044 https://ambientcg.com/a/WoodFloor044
+dark_oak_planks                    Planks037A https://ambientcg.com/a/Planks037A
+oak_log                            Bark012    https://ambientcg.com/a/Bark012
+birch_log                          Bark007    https://ambientcg.com/a/Bark007
+spruce_log                         Bark006    https://ambientcg.com/a/Bark006
+jungle_log                         Bark015    https://ambientcg.com/a/Bark015
+oak_log_top                        TreeEnd003 https://ambientcg.com/a/TreeEnd003
+birch_log_top                      TreeEnd004 https://ambientcg.com/a/TreeEnd004
+spruce_log_top                     TreeEnd002 https://ambientcg.com/a/TreeEnd002
+jungle_log_top                     TreeEnd005 https://ambientcg.com/a/TreeEnd005

@@ -1,5 +1,5 @@
-//! Composing block faces from the pack's raw tiles: the turf tinted green,
-//! grass fringes over dirt, and dense leaf tiles built from single sprigs.
+//! Composing block faces from the pack's raw tiles: dense leaf tiles built
+//! from single sprigs.
 
 use image::{Rgba, RgbaImage};
 
@@ -40,18 +40,6 @@ pub fn over(bottom: &mut RgbaImage, top: &RgbaImage, dx: i32, dy: i32, rotation:
             d[3] = 255;
         }
     }
-}
-
-/// The pack's turf, tinted.
-pub fn grass_top(turf: &RgbaImage, green: [f32; 3]) -> RgbaImage {
-    tint(turf, green)
-}
-
-/// Dirt with the pack's grass fringe (an overlay of alpha) tinted over it.
-pub fn grass_side(dirt: &RgbaImage, overlay: &RgbaImage, green: [f32; 3]) -> RgbaImage {
-    let mut out = dirt.clone();
-    over(&mut out, &tint(overlay, green), 0, 0, 0);
-    out
 }
 
 /// A cheap deterministic hash in [0, 1) for a pixel.

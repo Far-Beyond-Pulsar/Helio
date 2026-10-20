@@ -3,16 +3,17 @@
 
 use helio_pass_voxel_planet::terrain::material;
 
-/// A look drawn on a block face. Most are an image of the texture pack;
-/// grass and leaves are composed from several (`textures::compose`).
+/// A look drawn on a block face. Most are baked physically based materials
+/// (colour, normal and occlusion-roughness-metalness maps); a few are
+/// tiles of the pixel pack, and leaves are composed from its sprigs
+/// (`textures::compose`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Surface {
-    /// A block texture of the pack, by file stem.
+    /// A baked material (`assets/textures/pbr`, `tools/bake_textures.py`),
+    /// by name.
+    Pbr(&'static str),
+    /// A tile of the pack, by file stem.
     File(&'static str),
-    /// Grass seen from above: the pack's turf, tinted green.
-    GrassTop,
-    /// Dirt with the grass fringe over its upper edge.
-    GrassSide,
     /// A dense leaf tile built from the pack's leaf sprig, tinted.
     Leaves(&'static str, [f32; 3]),
 }
@@ -154,24 +155,24 @@ impl Block {
 
     /// The surfaces of the top, side and bottom faces.
     pub fn surfaces(self) -> [Surface; 3] {
-        use Surface::File;
+        use Surface::{File, Pbr};
         let all = |s| [s, s, s];
-        let log = |side, end| [File(end), File(side), File(end)];
+        let log = |side, end| [Pbr(end), Pbr(side), Pbr(end)];
         match self {
-            Block::Grass => [Surface::GrassTop, Surface::GrassSide, File("dirt")],
-            Block::Dirt => all(File("dirt")),
-            Block::Stone => all(File("stone")),
-            Block::Sand => all(File("sand")),
-            Block::Snow => all(File("snow")),
-            Block::Gravel => all(File("gravel")),
-            Block::Sandstone => [File("sandstone_top"), File("sandstone"), File("sandstone_bottom")],
-            Block::Andesite => all(File("andesite")),
+            Block::Grass => [Pbr("grass_top"), Pbr("grass_side"), Pbr("dirt")],
+            Block::Dirt => all(Pbr("dirt")),
+            Block::Stone => all(Pbr("stone")),
+            Block::Sand => all(Pbr("sand")),
+            Block::Snow => all(Pbr("snow")),
+            Block::Gravel => all(Pbr("gravel")),
+            Block::Sandstone => [Pbr("sandstone_top"), Pbr("sandstone"), Pbr("sandstone_top")],
+            Block::Andesite => all(Pbr("andesite")),
             Block::OakLog => log("oak_log", "oak_log_top"),
             Block::OakLeaves => all(Surface::Leaves("oak_leaves", [0.62, 0.95, 0.42])),
-            Block::Clay => all(File("clay")),
-            Block::Bricks => all(File("bricks")),
-            Block::OakPlanks => all(File("oak_planks")),
-            Block::Cobblestone => all(File("cobblestone")),
+            Block::Clay => all(Pbr("clay")),
+            Block::Bricks => all(Pbr("bricks")),
+            Block::OakPlanks => all(Pbr("oak_planks")),
+            Block::Cobblestone => all(Pbr("cobblestone")),
             Block::BirchLog => log("birch_log", "birch_log_top"),
             Block::BirchLeaves => all(Surface::Leaves("birch_leaves", [0.78, 1.0, 0.45])),
             Block::SpruceLog => log("spruce_log", "spruce_log_top"),
@@ -180,8 +181,8 @@ impl Block {
             Block::JungleLeaves => all(Surface::Leaves("jungle_leaves", [0.45, 1.0, 0.36])),
             Block::Cactus => [File("cactus_top"), File("cactus_side"), File("cactus_bottom")],
             Block::Glowstone => all(File("glowstone")),
-            Block::StoneBricks => all(File("stone_bricks")),
-            Block::DarkOakPlanks => all(File("dark_oak_planks")),
+            Block::StoneBricks => all(Pbr("stone_bricks")),
+            Block::DarkOakPlanks => all(Pbr("dark_oak_planks")),
         }
     }
 
