@@ -16,8 +16,8 @@
 //!
 //! | Row | Words | Pass row it becomes |
 //! |---|---|---|
-//! | [`GlobalFogSourceRow`] | 16: the medium | `helio_pass_volumetric_fog::GlobalFogComponent` (16) |
-//! | [`LocalFogSourceRow`] | 4 size + 20: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 20) |
+//! | [`GlobalFogSourceRow`] | 20: the medium | `helio_pass_volumetric_fog::GlobalFogComponent` (20) |
+//! | [`LocalFogSourceRow`] | 4 size + 24: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 24) |
 //! | [`PostProcessVolumeSourceRow`] | 4 size + 140: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 140) |
 //! | [`CameraPostProcessSourceRow`] | 136: the row | `helio_pass_postprocess::CameraPostProcessComponent` (136) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
@@ -198,6 +198,9 @@ impl AtmosphereSourceRow {
 pub struct GlobalFogSourceRow {
     #[gpu]
     pub medium: [f32; 16],
+    /// The medium's `planet` (its last four words).
+    #[gpu]
+    pub planet: [f32; 4],
 }
 
 /// A local fog volume: its local size (`xyz`, full extent before the owner's
@@ -210,6 +213,9 @@ pub struct LocalFogSourceRow {
     pub size: [f32; 4],
     #[gpu]
     pub medium: [f32; 16],
+    /// The medium's `planet` (its last four words).
+    #[gpu]
+    pub planet: [f32; 4],
     #[gpu]
     pub edge_fade: [f32; 4],
 }
@@ -366,9 +372,11 @@ impl LocalFogSourceRow {
     pub fn of(fog: &LocalFogVolumeComponent) -> Self {
         let mut medium = fog.medium.to_medium();
         medium.enabled = u32::from(fog.enabled);
+        let words: [f32; 20] = bytemuck::cast(medium);
         Self {
             size: [fog.size[0], fog.size[1], fog.size[2], 0.0],
-            medium: read(bytemuck::bytes_of(&medium)),
+            medium: read(bytemuck::cast_slice(&words[..16])),
+            planet: read(bytemuck::cast_slice(&words[16..])),
             edge_fade: [fog.edge_fade.max(0.0), 0.0, 0.0, 0.0],
         }
     }
@@ -573,8 +581,8 @@ mod tests {
 
     #[test]
     fn rows_have_the_documented_word_counts() {
-        assert_eq!(std::mem::size_of::<GlobalFogSourceRow>(), 16 * 4);
-        assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<GlobalFogSourceRow>(), 20 * 4);
+        assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 144 * 4);
         assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 136 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
@@ -614,11 +622,11 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_volumetric_fog::GlobalFogComponent>(),
-            16 * 4
+            20 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_volumetric_fog::LocalFogVolumeComponent>(),
-            28 * 4
+            32 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_postprocess::PostProcessVolumeComponent>(),

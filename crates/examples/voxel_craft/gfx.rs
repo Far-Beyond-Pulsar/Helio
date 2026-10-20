@@ -48,6 +48,19 @@ fn chunk_config(h: u32) -> ResidencyConfig {
     config
 }
 
+/// The sun along `direction` (from it), of `color`: it lights the haze too,
+/// shadowed by everything (shafts).
+fn sun_light(direction: [f32; 3], color: [f32; 3]) -> helio::GpuLight {
+    let mut light = directional_light(direction, color, 3.0);
+    light.god_rays_enabled = 1;
+    light.god_rays_density = 1.0;
+    light.god_rays_weight = 1.0;
+    light.god_rays_exposure = 1.0;
+    // Fully shadowed in the haze.
+    light.god_rays_decay = 1.0;
+    light
+}
+
 fn tsr_quality() -> helio_pass_tsr::TsrQuality {
     match std::env::var("VOXEL_CRAFT_QUALITY").as_deref() {
         Ok("performance") => helio_pass_tsr::TsrQuality::Performance,
@@ -107,9 +120,18 @@ impl Gfx {
         // and the character.
         let mut scene = new_scene_db_with_gpu_mirror(&device, &queue);
         let textures = blocks(&device, &queue, &mut scene.world);
-        let sun_light = spawn_light(&mut scene.world, directional_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9], 3.0));
+        let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
         let air = scene.world.spawn();
         scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
+        // A light ground haze, thinning with altitude over the planet, the
+        // sun scatters forward through: shafts past trees and ridges (the
+        // terrain's sun occlusion shadows it).
+        let haze = scene.world.spawn();
+        scene.world.insert(
+            haze,
+            helio_pass_volumetric_fog::GlobalFogComponent { mode: 1, extinction: 0.001, height_falloff: 0.01, anisotropy: 0.6, ..Default::default() }
+                .around_planet([0.0; 3], planet.grid().radius()),
+        );
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         post.tonemap_operator = helio::TonemapOperator::Aces;
         post.tonemap_exposure = 3.0;
@@ -189,7 +211,7 @@ impl Gfx {
         update_light(
             &mut self.scene.world,
             self.sun_light,
-            directional_light(
+            sun_light(
                 (-sun).as_vec3().to_array(),
                 // Warm at the horizon, white overhead.
                 {
@@ -198,7 +220,6 @@ impl Gfx {
                     let warm = (1.0 - height * 2.2).clamp(0.0, 1.0);
                     [1.0, 0.97 - 0.25 * warm, 0.92 - 0.5 * warm]
                 },
-                3.0,
             ),
         );
         self.origin = Self::origin_for(eye);

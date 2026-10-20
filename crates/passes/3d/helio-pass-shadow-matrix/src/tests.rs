@@ -29,7 +29,12 @@ fn production_shadow_shaders_validate() {
     ] {
         let mut source = std::fs::read_to_string(root.join(path))
             .unwrap()
+            .replace("__PP_HEAD_VEC4__", "8")
             .replace("__PP_TAIL_VEC4__", "64");
+        if source.contains(crate::SUN_OCCLUSION_MARKER) {
+            source = format!("{}
+{}", crate::SUN_OCCLUSION_SNIPPET.source, source);
+        }
         if source.contains("//!use pbr_eval") {
             source = format!(
                 "{}\n{}",

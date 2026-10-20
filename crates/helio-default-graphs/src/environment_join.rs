@@ -73,10 +73,10 @@ use crate::scene_join::{
     TRANSFORM_ROW_BYTES,
 };
 
-/// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (16 words).
-pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 16 * 4;
-/// `LocalFogSourceRow`: local size vec4, medium (16), edge fade vec4.
-pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 24 * 4;
+/// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (20 words).
+pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 20 * 4;
+/// `LocalFogSourceRow`: local size vec4, medium (20), edge fade vec4.
+pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 28 * 4;
 /// `PostProcessVolumeSourceRow`: local size vec4, then the pass row after
 /// its bounds (140 words).
 pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 144 * 4;
@@ -514,14 +514,14 @@ impl EnvironmentJoin {
                 "Environment Join Global Fog",
                 GLOBAL_FOG_KEY,
                 Source::GlobalFog,
-                16,
+                20,
                 GATE_HIDDEN,
             ),
             Spec::new(
                 "Environment Join Local Fog",
                 LOCAL_FOG_KEY,
                 Source::LocalFog,
-                28,
+                32,
                 volume,
             ),
             Spec::new(

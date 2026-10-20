@@ -24,9 +24,16 @@ pub struct MediumProps {
     pub anisotropy: f32,
     #[property(min = 0.0, max = 100.0, step = 0.001, category = "Medium")]
     pub height_falloff: f32,
-    /// World-space reference height in metres.
+    /// Reference height in metres: along world Y, or an altitude over the
+    /// planet when `planet_radius` is set.
     #[property(category = "Medium")]
     pub height: f32,
+    /// The planet heights are measured above: its centre (world metres).
+    #[property(category = "Medium")]
+    pub planet_center: [f32; 3],
+    /// The planet's radius in metres; 0: heights along world Y.
+    #[property(min = 0.0, step = 1.0, category = "Medium")]
+    pub planet_radius: f32,
 }
 
 impl Default for MediumProps {
@@ -40,6 +47,8 @@ impl Default for MediumProps {
             anisotropy: value.anisotropy,
             height_falloff: value.height_falloff,
             height: value.height,
+            planet_center: [value.planet[0], value.planet[1], value.planet[2]],
+            planet_radius: value.planet[3],
         }
     }
 }
@@ -59,6 +68,7 @@ impl MediumProps {
             anisotropy: self.anisotropy,
             height_falloff: self.height_falloff,
             height: self.height,
+            planet: [self.planet_center[0], self.planet_center[1], self.planet_center[2], self.planet_radius],
             ..Default::default()
         }
     }

@@ -55,6 +55,10 @@ struct DrawParams {
     // x: how far the sky rays reach (m), when GI probes light the sky's
     // larger occlusion (0: SKY_RANGE_CELLS cells).
     sky: vec4<f32>,
+    // An orthographic view (`ortho_view`): its rays' direction (xyz, unit;
+    // zero for the camera's perspective) and the near plane's offset along
+    // it (w: a point's distance along its ray is dot(p, xyz) - w).
+    ortho: vec4<f32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -127,7 +131,7 @@ struct MaterialGpu {
     colour: vec4<f32>,            // linear colour, roughness
     patches: array<vec4<f32>, 3>, // linear dry/middle/lush patch colours; patches[0].w 1: varies
     links: vec4<u32>,             // lip, fleck, speck host, fleck share
-    light: vec4<f32>,             // transmission
+    light: vec4<f32>,             // transmission, emission
 }
 struct Materials {
     m: array<MaterialGpu, 32>,
@@ -246,10 +250,10 @@ fn cull_bin(@builtin(global_invocation_id) id: vec3<u32>) {
         if dot(p.xyz, centre) + p.w < -radius { seen = false; }
     }
     if seen {
-        let distance = length(centre);
+        let distance = ray_distance(centre);
         bin = 1u + min(63u, u32(log2(max(distance, 1.0)) * 2.0));
         let near = params.sun.w;
-        if distance < radius * 1.01 + near * 4.0 {
+        if !ortho_view() && distance < radius * 1.01 + near * 4.0 {
             let o = vec3<f32>(c.i0.w, c.i1.w, c.i2.w);
             let margin = vec3<f32>(length(c.i0.xyz), length(c.i1.xyz), length(c.i2.xyz)) * near * 2.0;
             if all(o > vec3<f32>(-grow - margin.x, -grow - margin.y, z0 - margin.z)) && all(o < vec3<f32>(64.0 + grow + margin.x, 64.0 + grow + margin.y, z1 + margin.z)) { bin = 0u; }
@@ -354,7 +358,7 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
 @fragment
 fn seed_fragment(in: VOut) -> @location(0) u32 {
     let exit = textureLoad(exits, vec2<i32>(in.position.xy), 0).r;
-    if exit < 0.0 || (exit > 0.0 && length(in.world) <= exit) { discard; }
+    if exit < 0.0 || (exit > 0.0 && ray_distance(in.world) <= exit) { discard; }
     return in.instance;
 }
 
@@ -842,11 +846,34 @@ fn cell_frame(slot: u32, cell: vec3<i32>) -> ChunkDraw {
     return ChunkDraw(vec4<f32>(mx, origin.x), vec4<f32>(my, origin.y), vec4<f32>(mz, origin.z), vec4<f32>(i0, -dot(i0, origin)), vec4<f32>(i1, -dot(i1, origin)), vec4<f32>(i2, -dot(i2, origin)), c.box);
 }
 
-// The eye ray through pixel `p` (camera-relative, unit length).
+// The view ray through pixel `p` (unit length): from the eye, or along an
+// orthographic view's axis.
 fn pixel_ray(p: vec2<u32>, size: vec2<u32>) -> vec3<f32> {
+    if ortho_view() { return params.ortho.xyz; }
     let ndc = vec2<f32>((f32(p.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(p.y) + 0.5) / f32(size.y) * 2.0);
     let far = params.inverse_view_proj * vec4<f32>(ndc, 0.5, 1.0);
     return normalize(far.xyz / far.w);
+}
+
+// Whether this draw is an orthographic view (the sun's: `ortho_view`
+// views of `ChunkWorld::draw_sun_occlusion`), not the camera's.
+fn ortho_view() -> bool {
+    return params.ortho.x != 0.0 || params.ortho.y != 0.0 || params.ortho.z != 0.0;
+}
+
+// Where pixel `p`'s ray starts (eye-relative): the eye, or the orthographic
+// view's near plane.
+fn pixel_origin(p: vec2<u32>, size: vec2<u32>) -> vec3<f32> {
+    if !ortho_view() { return vec3<f32>(0.0); }
+    let ndc = vec2<f32>((f32(p.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(p.y) + 0.5) / f32(size.y) * 2.0);
+    let near = params.inverse_view_proj * vec4<f32>(ndc, 1.0, 1.0);
+    return near.xyz / near.w;
+}
+
+// Eye-relative point `world`'s distance along its view ray.
+fn ray_distance(world: vec3<f32>) -> f32 {
+    if ortho_view() { return dot(world, params.ortho.xyz) - params.ortho.w; }
+    return length(world);
 }
 
 // What a pixel with dither `r` does at a tile of `state` (`drawn::choice`):
@@ -1421,6 +1448,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     COUNT(0)
     let dir = pixel_ray(id.xy, size);
+    let org = pixel_origin(id.xy, size);
     var t_prev = max(exit, params.sun.w);
     // The chunk whose frame the ray is in (its last), and the box it is
     // crossing in that frame's cells: the chunk itself, or air.
@@ -1434,7 +1462,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     // not show starts the walk where the ray enters it.
     let own = find_entry(key);
     if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 && !exact_level(key.x >> 8u) {
-        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w);
+        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
         let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
@@ -1460,7 +1488,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), vec3<f32>(0.0), dir, t_prev, 1e30, r, 128u, true, id.xy);
+    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, 1e30, r, 128u, true, id.xy);
     if !end.hit {
         // Unresolved: the next round seeds the boxes beyond (none past
         // the ceiling: the sky).
@@ -1786,7 +1814,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     var out: GOut;
     var albedo = look.albedo;
     var roughness = palette(material).w;
-    var emissive = vec3<f32>(0.0);
+    var emissive = albedo * materials.m[min(material, 31u)].light.y;
     let level = u32(chunk_keys[v.x].x >> 8u) & 31u;
     let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m);
     var occlusion = 1.0;
@@ -2789,8 +2817,8 @@ fn sun_through(q: vec2<u32>, at: vec3<f32>, slot: u32) -> f32 {
 // A thread a ray: its hit (distance, the face's normal, the material's
 // colour, the share of the sun reaching it through what lets light
 // through (`sun_through`); for a material that lets light through, its
-// transmission and the sun's share on its cell's far side), or none; from
-// rock, a back face at once.
+// transmission and the sun's share on its cell's far side; the light it
+// gives off), or none; from rock, a back face at once.
 @compute @workgroup_size(64)
 fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= frame_gi.counts.x * GI_RAYS { return; }
@@ -2822,6 +2850,7 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     } else if through > 0.0 && towards < 0.0 {
         back = sun_through(q, hit - n * (1.5 * cell), end.slot);
     }
-    let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u);
+    let glow = u32(clamp(materials.m[min(material, 31u)].light.y, 0.0, 15.9375) * 16.0 + 0.5);
+    let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u) | (glow << 24u);
     gi_hits[id.x] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), light);
 }

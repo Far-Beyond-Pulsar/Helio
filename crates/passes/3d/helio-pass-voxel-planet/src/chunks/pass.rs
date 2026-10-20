@@ -211,6 +211,8 @@ const WRITES: &[&str] = &[
     "directional_visibility",
     "local_visibility",
     helio_pass_gi::GI_HITS,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
 ];
 
 /// GPU times kept for a host that does not take them.
@@ -276,6 +278,10 @@ impl RenderPass for ChunkPass {
         }
         if let Some(buffer) = self.world.as_ref().and_then(ChunkWorld::local_visibility) {
             frame.write_buffer_binding("local_visibility", buffer, self.name());
+        }
+        if let Some((maps, sun_frame)) = self.world.as_ref().and_then(ChunkWorld::sun_occlusion) {
+            frame.write_texture_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, maps, self.name());
+            frame.write_buffer_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME, sun_frame, self.name());
         }
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -535,6 +541,9 @@ impl ChunkPass {
             .as_ref(),
             gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
         );
+        // The sun's occlusion by the terrain, for what else the sun lights
+        // (volumetric fog): a level of its clipmap a frame.
+        world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
         let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
         world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);
         if let Some(picks) = &frame.picks {

@@ -15,6 +15,7 @@ use pulsar_scenedb_derive::SceneStore;
 /// `extinction` is sigma_a + sigma_s in m^-1, `albedo` is sigma_s / sigma_t,
 /// and `emission` is scene-linear radiance emitted per metre (independent of density).
 /// Mode: 0 uniform, 1 exponential height, 2 animated smoke with a height envelope.
+/// Heights are along world Y, or above a planet (`planet`, `around_planet`).
 /// Zeroed/deleted rows are inert. No camera-distance gates apply to these media.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -42,6 +43,20 @@ pub struct GlobalFogComponent {
     pub emission: [f32; 3],
     #[gpu]
     pub _pad_emission: f32,
+    /// The planet heights are measured above: its centre (world metres) and
+    /// radius (m), so `height` is an altitude over its surface; radius 0:
+    /// heights along world Y.
+    #[gpu]
+    pub planet: [f32; 4],
+}
+
+impl GlobalFogComponent {
+    /// This medium's heights measured above a planet of `radius_m` centred at
+    /// `center_m` (world metres), as `AtmosphereComponent::around_planet`.
+    pub fn around_planet(mut self, center_m: [f32; 3], radius_m: f64) -> Self {
+        self.planet = [center_m[0], center_m[1], center_m[2], radius_m as f32];
+        self
+    }
 }
 
 impl Default for GlobalFogComponent {
@@ -58,13 +73,15 @@ impl Default for GlobalFogComponent {
             _pad_albedo: 0.0,
             emission: [0.0; 3],
             _pad_emission: 0.0,
+            planet: [0.0; 4],
         }
     }
 }
 
-/// Axis-aligned world volume. `medium` stores raw bytes in a reflection-supported
-/// float array (not numeric float conversions), with the GlobalFogComponent layout;
-/// use `new` / `set_medium` instead of packing words manually. `edge_fade` is an
+/// Axis-aligned world volume. `medium` and `medium_planet` store raw bytes in
+/// reflection-supported float arrays (not numeric float conversions), with the
+/// GlobalFogComponent layout (its first 16 words, then `planet`); use `new` /
+/// `set_medium` instead of packing words manually. `edge_fade` is an
 /// inward fade distance in metres; zero gives a hard boundary. No PP priority.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -77,6 +94,8 @@ pub struct LocalFogVolumeComponent {
     #[gpu]
     pub medium: [f32; 16],
     #[gpu]
+    pub medium_planet: [f32; 4],
+    #[gpu]
     pub edge_fade: f32,
     #[gpu]
     pub _pad: [f32; 3],
@@ -84,19 +103,27 @@ pub struct LocalFogVolumeComponent {
 
 impl LocalFogVolumeComponent {
     pub fn new(bounds_min: [f32; 3], bounds_max: [f32; 3], medium: GlobalFogComponent) -> Self {
-        Self {
+        let mut volume = Self {
             bounds_min: [bounds_min[0], bounds_min[1], bounds_min[2], 0.0],
             bounds_max: [bounds_max[0], bounds_max[1], bounds_max[2], 0.0],
-            medium: bytemuck::cast(medium),
+            medium: [0.0; 16],
+            medium_planet: [0.0; 4],
             edge_fade: 0.0,
             _pad: [0.0; 3],
-        }
+        };
+        volume.set_medium(medium);
+        volume
     }
     pub fn set_medium(&mut self, medium: GlobalFogComponent) {
-        self.medium = bytemuck::cast(medium);
+        let words: [f32; 20] = bytemuck::cast(medium);
+        self.medium.copy_from_slice(&words[..16]);
+        self.medium_planet.copy_from_slice(&words[16..]);
     }
     pub fn medium(&self) -> GlobalFogComponent {
-        bytemuck::cast(self.medium)
+        let mut words = [0.0f32; 20];
+        words[..16].copy_from_slice(&self.medium);
+        words[16..].copy_from_slice(&self.medium_planet);
+        bytemuck::cast(words)
     }
 }
 
@@ -289,8 +316,10 @@ mod tests {
 
     #[test]
     fn world_component_layouts_and_local_medium_round_trip() {
-        assert_eq!(std::mem::size_of::<GlobalFogComponent>(), 64);
-        assert_eq!(std::mem::size_of::<LocalFogVolumeComponent>(), 112);
+        assert_eq!(std::mem::size_of::<GlobalFogComponent>(), 80);
+        assert_eq!(std::mem::size_of::<LocalFogVolumeComponent>(), 128);
+        assert_eq!(std::mem::offset_of!(GlobalFogComponent, planet), 64);
+        assert_eq!(std::mem::offset_of!(LocalFogVolumeComponent, medium_planet), 96);
         assert_eq!(std::mem::offset_of!(LocalFogVolumeComponent, medium), 32);
         assert_eq!(std::mem::offset_of!(GlobalFogComponent, albedo), 32);
         assert_eq!(std::mem::offset_of!(GlobalFogComponent, emission), 48);
@@ -300,7 +329,8 @@ mod tests {
             anisotropy: -0.8,
             emission: [1.0, 2.0, 3.0],
             ..Default::default()
-        };
+        }
+        .around_planet([1.0, 2.0, 3.0], 500.0);
         let mut local = LocalFogVolumeComponent::new([-1.0; 3], [1.0; 3], medium);
         assert_eq!(local.medium(), medium);
         medium.extinction = 4.0;

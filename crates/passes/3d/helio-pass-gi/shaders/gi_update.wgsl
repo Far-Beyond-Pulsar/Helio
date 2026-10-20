@@ -142,7 +142,9 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
                 let seen = f32((hit.light >> 16u) & 255u) / 255.0;
                 back = gi_sun[1].rgb * seen * max(dot(-n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, -n).rgb;
             }
-            radiance = albedo.rgb * (front + through * back);
+            // And the light it gives off.
+            let glow = f32(hit.light >> 24u) / 16.0;
+            radiance = albedo.rgb * (front + through * back + glow);
         }
     } else {
         radiance = sky_radiance(probe * 0.001, dir);

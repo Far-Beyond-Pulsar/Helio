@@ -54,8 +54,9 @@ struct GiRay {
 // (packed, `gi_pack_unit`), albedo (RGB8) and the sun's visibility from it
 // (a byte in the albedo word's alpha); and in `light`, bytes: the tracer
 // (bits 0..8), the share of light the surface lets through from its far
-// side, tinted by its albedo (bits 8..16: foliage), and the sun's
-// visibility from that far side (bits 16..24).
+// side, tinted by its albedo (bits 8..16: foliage), the sun's visibility
+// from that far side (bits 16..24), and the light it gives off, its albedo
+// times this (bits 24..32: sixteenths).
 struct GiHit {
     t: f32,
     normal: u32,

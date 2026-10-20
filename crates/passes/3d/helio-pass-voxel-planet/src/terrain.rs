@@ -282,11 +282,15 @@ pub struct MaterialAppearance {
     /// 0: opaque). Global illumination lights the shade under canopies
     /// with it.
     pub transmission: f32,
+    /// Light the material gives off: its colour times this (scene-linear;
+    /// 0: none). It glows, and global illumination lights its
+    /// surroundings with it.
+    pub emission: f32,
 }
 
 impl Default for MaterialAppearance {
     fn default() -> Self {
-        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None, transmission: 0.0 }
+        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None, transmission: 0.0, emission: 0.0 }
     }
 }
 

@@ -276,6 +276,85 @@ struct DrawParams {
     light_eye: [f32; 4],
     /// x: the sky rays' reach (m) with GI probes, else 0.
     sky: [f32; 4],
+    /// An orthographic view's ray direction (xyz; zero: the camera's
+    /// perspective) and its near plane's offset along it (w).
+    ortho: [f32; 4],
+}
+
+/// Texels along a side of the sun's occlusion maps.
+const SUN_OCCLUSION_SIDE: u32 = 512;
+/// Each sun occlusion level's half extent (m): texels of 1/8, 1/2, 2 and
+/// 8 m.
+const SUN_OCCLUSION_HALF: [f64; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS] = [32.0, 128.0, 512.0, 2048.0];
+
+/// The sun's occlusion by the terrain (`ChunkWorld::draw_sun_occlusion`): the
+/// sun's views' own buffers and targets, the maps (a layer a level) and the
+/// frame, the direction they were rendered from, each rendered level's near
+/// plane origin (planet-centred) and half extent, and the level next.
+struct SunOcclusion {
+    params: wgpu::Buffer,
+    cull_state: wgpu::Buffer,
+    cull_bins: wgpu::Buffer,
+    draw_list: wgpu::Buffer,
+    seed_args: wgpu::Buffer,
+    buried: wgpu::Buffer,
+    counters: wgpu::Buffer,
+    targets: Targets,
+    maps: wgpu::Texture,
+    maps_view: wgpu::TextureView,
+    frame: wgpu::Buffer,
+    forward: DVec3,
+    levels: [Option<(DVec3, f64)>; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS],
+    next: usize,
+}
+
+impl SunOcclusion {
+    fn new(device: &wgpu::Device) -> Self {
+        let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
+        let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let max_chunks = (device.limits().max_storage_buffer_binding_size / 4).min(1 << 20) as u64;
+        let maps = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chunk sun occlusion"),
+            size: wgpu::Extent3d { width: SUN_OCCLUSION_SIDE, height: SUN_OCCLUSION_SIDE, depth_or_array_layers: helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS as u32 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: helio_pass_shadow_matrix::SUN_OCCLUSION_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let frame = buffer("chunk sun occlusion frame", helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC);
+        Self {
+            params: buffer("chunk sun params", std::mem::size_of::<DrawParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
+            cull_state: buffer("chunk sun cull", CULL_BYTES, s),
+            cull_bins: buffer("chunk sun cull bins", max_chunks * 4, s),
+            draw_list: buffer("chunk sun draw list", max_chunks * 4, s),
+            seed_args: buffer("chunk sun seed draws", 32, s | wgpu::BufferUsages::INDIRECT),
+            buried: buffer("chunk sun buried hits", BURIED_BYTES, s),
+            counters: buffer("chunk sun counters", 1024, s),
+            targets: Targets::new(device, [SUN_OCCLUSION_SIDE; 2]),
+            maps_view: maps.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() }),
+            maps,
+            frame,
+            forward: DVec3::ZERO,
+            levels: [None; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS],
+            next: 0,
+        }
+    }
+}
+
+/// What one view's trace binds of its own (`ChunkWorld::trace_view`): its
+/// parameters, cull state, bins and draw list, seed draws, the Buried nodes
+/// its rays met and its counters.
+#[derive(Clone, Copy)]
+struct ViewBuffers<'a> {
+    params: &'a wgpu::Buffer,
+    cull_state: &'a wgpu::Buffer,
+    cull_bins: &'a wgpu::Buffer,
+    draw_list: &'a wgpu::Buffer,
+    seed_args: &'a wgpu::Buffer,
+    buried: &'a wgpu::Buffer,
+    counters: &'a wgpu::Buffer,
 }
 
 /// A frame's scene lights, for the terrain's shadows of them
@@ -1168,6 +1247,8 @@ pub struct ChunkWorld {
     steady_shadows: bool,
     /// The last draw's bind group (its parameters and chunk storage).
     last_group: Option<wgpu::BindGroup>,
+    /// The sun's occlusion by the terrain, once drawn (`draw_sun_occlusion`).
+    sun_occlusion: Option<SunOcclusion>,
     targets: Option<Targets>,
     /// Rounds of seed and trace per draw.
     /// The primary trace's repeats a draw (`set_trace_rounds`: timing it).
@@ -2165,6 +2246,7 @@ impl ChunkWorld {
             scene,
             steady_shadows: false,
             last_group: None,
+            sun_occlusion: None,
             targets: None,
             rounds: 1,
             debug_pixel: None,
@@ -3558,31 +3640,15 @@ impl ChunkWorld {
         self.targets.as_ref()
     }
 
-    /// Draw the chunks seen from `eye` (camera-relative `view_proj`) at
-    /// `size` pixels into [`Self::targets`], timing it as draw number
-    /// `frame` ([`Self::draw_ms`]).
+    /// The draw parameters of a view of the chunks from `eye` (camera-
+    /// relative `view_proj`; `near`: its near plane, 0 for an orthographic
+    /// view), lit by the sun toward `sun`, `drawn` chunks drawn; scene lights
+    /// at `light_eye`, GI probes traced when `gi`. The camera's perspective:
+    /// [`Self::draw_sun_occlusion`] makes orthographic views of them.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>) {
-        if self.targets.as_ref().is_none_or(|t| t.size != size) {
-            self.targets = Some(Targets::new(&self.device, size));
-        }
-        if self.timing_now.is_none() {
-            self.claim_timing(frame);
-        }
-        // The drawn chunks' slots, when they changed; the GPU culls them
-        // (`cull_bin`) into the seed's draw list.
-        let drawn = self.drawn_set.list.len() as u32;
-        if self.slots_version != Some(self.drawn_set.version()) {
-            let slots: Vec<u32> = self.drawn_set.list.iter().map(|c| c.slot).collect();
-            if !slots.is_empty() {
-                self.queue.write_buffer(&self.drawn_slots, 0, bytemuck::cast_slice(&slots));
-            }
-            self.slots_version = Some(self.drawn_set.version());
-        }
-        self.queue.write_buffer(&self.cull_state, 0, &[0u8; CULL_BYTES as usize]);
+    fn draw_params(&self, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, drawn: u32, light_eye: Option<Vec3>, gi: bool) -> DrawParams {
         let (eye_hi, eye_lo) = split(eye);
-        let params = DrawParams {
+        DrawParams {
             view_proj: view_proj.to_cols_array_2d(),
             inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
             prev_view_proj: prev_view_proj.to_cols_array_2d(),
@@ -3616,21 +3682,125 @@ impl ChunkWorld {
                 (eye.length_squared() - self.grid.radius() * self.grid.radius()) as f32,
             ],
             cut: [self.grid.levels() - 1, self.drawn_set.fading() as u32, 0, 0],
-            light_eye: lights.map_or([0.0; 4], |l| l.eye.extend(1.0).to_array()),
+            light_eye: light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
             // Two of the finest probes' spacings: the probes' visibility
             // holds the occlusion past them.
-            sky: [if gi.is_some() { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, 0.0, 0.0, 0.0],
+            sky: [if gi { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, 0.0, 0.0, 0.0],
+            ortho: [0.0; 4],
+        }
+    }
+
+    /// The sun's occlusion by the terrain (`helio_pass_shadow_matrix::
+    /// sun_occlusion`): one level of the clipmap a frame, rendered as an
+    /// orthographic view along the sun (`trace_view`) around `eye`
+    /// (planet-centred), the sun toward `sun`; then the frame (every
+    /// rendered level relative to the eye). A new sun direction renders
+    /// the levels again, the stale ones left out until then.
+    pub fn draw_sun_occlusion(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, sun: Vec3) {
+        use helio_pass_shadow_matrix::{SunOcclusionFrame, SUN_OCCLUSION_LEVELS};
+        let forward = -sun.as_dvec3().normalize();
+        if !forward.is_finite() {
+            return;
+        }
+        let o = self.sun_occlusion.get_or_insert_with(|| SunOcclusion::new(&self.device));
+        // Levels rendered for another sun are left out until rendered again.
+        if o.forward.dot(forward) < 0.999_999 {
+            o.forward = forward;
+            o.levels = [None; SUN_OCCLUSION_LEVELS];
+        }
+        let hint = if forward.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+        let right = forward.cross(hint).normalize();
+        let up = right.cross(forward);
+        let level = o.next;
+        o.next = (o.next + 1) % SUN_OCCLUSION_LEVELS;
+        // Texel-snapped in the sun's plane (planet-centred, so the texels
+        // stay put as the eye moves), the near plane high above.
+        let half = SUN_OCCLUSION_HALF[level];
+        let texel = 2.0 * half / f64::from(SUN_OCCLUSION_SIDE);
+        let (u, v) = (eye.dot(right), eye.dot(up));
+        let centre = eye + right * ((u / texel).round() * texel - u) + up * ((v / texel).round() * texel - v);
+        let height = 4.0 * half + 1000.0;
+        let origin = centre - forward * height;
+        let rel = (origin - eye).as_vec3();
+        let view = Mat4::look_to_rh(rel, forward.as_vec3(), up.as_vec3());
+        let (half32, far) = (half as f32, (height + 4.0 * half) as f32);
+        // Reversed depth: the near plane at 1.
+        let proj = Mat4::orthographic_rh(-half32, half32, -half32, half32, far, 0.0);
+        let view_proj = proj * view;
+        let drawn = self.drawn_set.list.len() as u32;
+        let mut params = self.draw_params(frame, eye, view_proj, view_proj, 0.0, sun, drawn, None, false);
+        params.ortho = forward.as_vec3().extend(rel.dot(forward.as_vec3())).to_array();
+        let o = self.sun_occlusion.as_ref().unwrap();
+        let vb = ViewBuffers { params: &o.params, cull_state: &o.cull_state, cull_bins: &o.cull_bins, draw_list: &o.draw_list, seed_args: &o.seed_args, buried: &o.buried, counters: &o.counters };
+        self.trace_view(encoder, vb, &params, &o.targets, [SUN_OCCLUSION_SIDE; 2], drawn, self.rounds, None);
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: &o.targets.distance, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &o.maps, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: level as u32 }, aspect: wgpu::TextureAspect::All },
+            wgpu::Extent3d { width: SUN_OCCLUSION_SIDE, height: SUN_OCCLUSION_SIDE, depth_or_array_layers: 1 },
+        );
+        let o = self.sun_occlusion.as_mut().unwrap();
+        o.levels[level] = Some((origin, half));
+        let mut gpu = SunOcclusionFrame {
+            right: right.as_vec3().extend(SUN_OCCLUSION_LEVELS as f32).to_array(),
+            up: up.as_vec3().extend(0.0).to_array(),
+            forward: forward.as_vec3().extend(SUN_OCCLUSION_SIDE as f32).to_array(),
+            levels: [[0.0; 4]; SUN_OCCLUSION_LEVELS],
         };
-        self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
-        self.queue.write_buffer(&self.buried, 0, &[0u8; 16]);
+        for (out, l) in gpu.levels.iter_mut().zip(o.levels) {
+            if let Some((origin, half)) = l {
+                *out = (origin - eye).as_vec3().extend(half as f32).to_array();
+            }
+        }
+        self.queue.write_buffer(&o.frame, 0, bytemuck::bytes_of(&gpu));
+    }
+
+    /// The sun's occlusion maps and frame (`draw_sun_occlusion`), once drawn.
+    pub fn sun_occlusion(&self) -> Option<(&wgpu::TextureView, &wgpu::Buffer)> {
+        self.sun_occlusion.as_ref().map(|o| (&o.maps_view, &o.frame))
+    }
+
+    /// The sun's occlusion maps (a level's texels after another, rows of
+    /// `SUN_OCCLUSION_SIDE`) and frame, read back (diagnostics; waits on the
+    /// device).
+    pub fn read_sun_occlusion(&self) -> Option<(Vec<f32>, helio_pass_shadow_matrix::SunOcclusionFrame)> {
+        let o = self.sun_occlusion.as_ref()?;
+        let levels = helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS as u32;
+        let bytes = u64::from(SUN_OCCLUSION_SIDE * SUN_OCCLUSION_SIDE * 4 * levels);
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &o.maps, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SUN_OCCLUSION_SIDE * 4), rows_per_image: Some(SUN_OCCLUSION_SIDE) } },
+            wgpu::Extent3d { width: SUN_OCCLUSION_SIDE, height: SUN_OCCLUSION_SIDE, depth_or_array_layers: levels },
+        );
+        self.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let maps = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
+        let frame: Vec<helio_pass_shadow_matrix::SunOcclusionFrame> = self.read(&o.frame, 1);
+        Some((maps, frame[0]))
+    }
+
+    /// The camera's view buffers (`trace_view`).
+    fn camera_view(&self) -> ViewBuffers<'_> {
+        ViewBuffers { params: &self.params, cull_state: &self.cull_state, cull_bins: &self.cull_bins, draw_list: &self.draw_list, seed_args: &self.seed_args, buried: &self.buried, counters: &self.counters }
+    }
+
+    /// Records one view's primary visibility (`params`: its parameters,
+    /// uploaded into `view`'s): the drawn chunks culled and binned, then
+    /// `rounds` of seed and trace into `targets` (`size` pixels; `drawn`
+    /// chunks), timed as `timing` says. Its draw bind group, for the stages
+    /// that shade its hits.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_view(&self, encoder: &mut helio_core::CommandRecorder<'_>, vb: ViewBuffers<'_>, params: &DrawParams, targets: &Targets, size: [u32; 2], drawn: u32, rounds: u32, timing: Option<(&wgpu::QuerySet, u32)>) -> wgpu::BindGroup {
+        self.queue.write_buffer(vb.params, 0, bytemuck::bytes_of(params));
+        self.queue.write_buffer(vb.cull_state, 0, &[0u8; CULL_BYTES as usize]);
+        self.queue.write_buffer(vb.buried, 0, &[0u8; 16]);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.buried), entry(14, &self.leaf_pages), entry(15, &self.leaf_normals), entry(16, &self.detail_pages), entry(17, &self.detail_cells), entry(18, &self.slot_details)],
+            entries: &[entry(0, vb.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, vb.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, vb.draw_list), entry(13, vb.buried), entry(14, &self.leaf_pages), entry(15, &self.leaf_normals), entry(16, &self.detail_pages), entry(17, &self.detail_cells), entry(18, &self.slot_details)],
         });
-        self.last_group = Some(group.clone());
-        let targets = self.targets.as_ref().unwrap();
-        let timing = self.queries.as_ref().zip(self.timing_now.filter(|&r| r == (frame % TIMING_RING) as usize)).map(|((set, resolve), ring)| (set, resolve, ring as u32));
         let (depth, seed, exits) = (view(&targets.depth), view(&targets.seed), view(&targets.exits));
         // Every ray starts unresolved (0).
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3649,19 +3819,19 @@ impl ChunkWorld {
         let seed_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk seed exits"),
             layout: &self.seed_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&exits) }, entry(22, &self.cull_state)],
+            entries: &[wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&exits) }, entry(22, vb.cull_state)],
         });
         {
             // 0. The draw list: the drawn chunks in view, binned, ordered.
             let frames = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk cull frames"),
                 layout: &self.cull_layout[0],
-                entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta)],
+                entries: &[entry(0, vb.params), entry(1, &self.statics), entry(2, &self.chunk_meta)],
             });
             let lists = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk cull"),
                 layout: &self.cull_layout[1],
-                entries: &[entry(17, &self.drawn_slots), entry(18, &self.cull_state), entry(19, &self.cull_bins), entry(20, &self.draw_list), entry(21, &self.seed_args)],
+                entries: &[entry(17, &self.drawn_slots), entry(18, vb.cull_state), entry(19, vb.cull_bins), entry(20, vb.draw_list), entry(21, vb.seed_args)],
             });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk cull"), timestamp_writes: None });
             pass.set_bind_group(0, &frames, &[]);
@@ -3688,7 +3858,6 @@ impl ChunkWorld {
         });
         // Rounds of seed and trace: each resolves the rays that hit in
         // their box; the rest are seeded beyond it.
-        let rounds = self.rounds;
         for round in 0..rounds {
             {
                 // 1. Seed: each pixel's nearest box (beyond its last exit).
@@ -3705,7 +3874,7 @@ impl ChunkWorld {
                         depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(QUERIES * ring + 2), end_of_pass_write_index: Some(QUERIES * ring + 3) }),
+                    timestamp_writes: timing.filter(|_| round == 0).map(|(set, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(QUERIES * ring + 2), end_of_pass_write_index: Some(QUERIES * ring + 3) }),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -3714,21 +3883,51 @@ impl ChunkWorld {
                 // Boxes holding the eye only in the first round.
                 if round == 0 {
                     pass.set_pipeline(&self.seed_inside);
-                    pass.draw_indirect(&self.seed_args, 0);
+                    pass.draw_indirect(vb.seed_args, 0);
                 }
                 pass.set_pipeline(&self.seed_outside);
-                pass.draw_indirect(&self.seed_args, 16);
+                pass.draw_indirect(vb.seed_args, 16);
             }
             // 2. Trace each pixel's ray through its seed chunk.
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk trace"),
-                timestamp_writes: timing.filter(|_| round + 1 == rounds).map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 4) }),
+                timestamp_writes: timing.filter(|_| round + 1 == rounds).map(|(set, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 4) }),
             });
             pass.set_pipeline(&self.trace);
             pass.set_bind_group(0, &group, &[]);
             pass.set_bind_group(1, &trace_group, &[]);
             pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
         }
+        group
+    }
+
+    /// Draw the chunks seen from `eye` (camera-relative `view_proj`) at
+    /// `size` pixels into [`Self::targets`], timing it as draw number
+    /// `frame` ([`Self::draw_ms`]).
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>) {
+        if self.targets.as_ref().is_none_or(|t| t.size != size) {
+            self.targets = Some(Targets::new(&self.device, size));
+        }
+        if self.timing_now.is_none() {
+            self.claim_timing(frame);
+        }
+        // The drawn chunks' slots, when they changed; the GPU culls them
+        // (`cull_bin`) into the seed's draw list.
+        let drawn = self.drawn_set.list.len() as u32;
+        if self.slots_version != Some(self.drawn_set.version()) {
+            let slots: Vec<u32> = self.drawn_set.list.iter().map(|c| c.slot).collect();
+            if !slots.is_empty() {
+                self.queue.write_buffer(&self.drawn_slots, 0, bytemuck::cast_slice(&slots));
+            }
+            self.slots_version = Some(self.drawn_set.version());
+        }
+        let params = self.draw_params(frame, eye, view_proj, prev_view_proj, near, sun, drawn, lights.map(|l| l.eye), gi.is_some());
+        let timing = self.queries.as_ref().zip(self.timing_now.filter(|&r| r == (frame % TIMING_RING) as usize)).map(|((set, resolve), ring)| (set, resolve, ring as u32));
+        let group = self.trace_view(encoder, self.camera_view(), &params, self.targets.as_ref().unwrap(), size, drawn, self.rounds, timing.map(|(set, _, ring)| (set, ring)));
+        self.last_group = Some(group.clone());
+        let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
             // their hits (`scene_depth`: the meshes', the frame's size).

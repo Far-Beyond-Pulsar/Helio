@@ -76,9 +76,13 @@ pub fn shader_source() -> String {
     use helio_pass_postprocess::GpuPostProcessUniforms as Uniforms;
     let head = Uniforms::FOG_BLOCK_OFFSET / 16;
     let tail = (std::mem::size_of::<Uniforms>() as u64 - Uniforms::FOG_BLOCK_OFFSET - Uniforms::FOG_BLOCK_SIZE) / 16;
-    include_str!("../shaders/volumetric_fog.wgsl")
+    let source = include_str!("../shaders/volumetric_fog.wgsl")
         .replace("__PP_HEAD_VEC4__", &head.to_string())
-        .replace("__PP_TAIL_VEC4__", &tail.to_string())
+        .replace("__PP_TAIL_VEC4__", &tail.to_string());
+    // The terrain's sun occlusion (`//!use sun_occlusion`) ahead of it;
+    // the prelude is the module's to resolve.
+    format!("{}
+{source}", helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source)
 }
 
 /// Preserve approximately square screen tiles, bounded by the tier's budget.
@@ -162,6 +166,8 @@ pub struct VolumetricFogPass {
     fallback_shadow_cleared: bool,
     /// Zeroed (the layer stores 1 - T): nothing translucent filters the light.
     fallback_transmittance: wgpu::TextureView,
+    /// No terrain's sun occlusion: an empty map and a frame of no levels.
+    fallback_sun_occlusion: (wgpu::TextureView, wgpu::Buffer),
 
     /// Ping-ponged scattering grids: one is read as history while the other is
     /// written. Sampling and storing to one texture in a single dispatch is a
@@ -176,7 +182,7 @@ pub struct VolumetricFogPass {
 
     inject_bg: [Option<wgpu::BindGroup>; 2],
     inject_bg_key: Option<[wgpu::Buffer; 8]>,
-    inject_shadow: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView)>,
+    inject_shadow: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::Buffer)>,
     integrate_g0_bg: Option<wgpu::BindGroup>,
     integrate_bg: [Option<wgpu::BindGroup>; 2],
 
@@ -330,6 +336,18 @@ impl VolumetricFogPass {
                     },
                     count: None,
                 },
+                // The sun's occlusion by terrain outside the shadow maps.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 22,
+                    visibility: cv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                uniform(23),
                 tex3d(7), // scatter history
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
@@ -517,8 +535,8 @@ impl VolumetricFogPass {
                 mapped_at_creation: false,
             })
         };
-        let fallback_global = empty_storage("Fog Empty Global Media", 64);
-        let fallback_local = empty_storage("Fog Empty Local Media", 112);
+        let fallback_global = empty_storage("Fog Empty Global Media", std::mem::size_of::<GlobalFogComponent>() as u64);
+        let fallback_local = empty_storage("Fog Empty Local Media", std::mem::size_of::<LocalFogVolumeComponent>() as u64);
         let fallback_settings = empty_storage("Fog Empty View Settings", 48);
         let clusters_buf = empty_storage("Fog Cluster Light Lists", (24 * 14 * 32 * 65 * 4) as u64);
         let resolved_fog_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -588,6 +606,26 @@ impl VolumetricFogPass {
             fallback_shadow,
             fallback_shadow_cleared: false,
             fallback_transmittance: clear_transmittance(device),
+            fallback_sun_occlusion: (
+                device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Fog No Sun Occlusion"),
+                        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: helio_pass_shadow_matrix::SUN_OCCLUSION_FORMAT,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() }),
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Fog No Sun Occlusion Frame"),
+                    size: helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES,
+                    usage: wgpu::BufferUsages::UNIFORM,
+                    mapped_at_creation: false,
+                }),
+            ),
             inject_pipeline,
             integrate_pipeline,
             inject_bgl,
@@ -668,7 +706,7 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["shadow_atlas", "static_shadow_atlas", "shadow_transmittance", "shadow_matrices", "postprocess_uniforms"]
+        &["shadow_atlas", "static_shadow_atlas", "shadow_transmittance", "shadow_matrices", "postprocess_uniforms", helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME]
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -818,6 +856,11 @@ impl RenderPass for VolumetricFogPass {
             .registry
             .get(helio_core::ResourceKey::new("shadow_transmittance"))
             .unwrap_or(&self.fallback_transmittance);
+        let sun_occlusion = ctx
+            .registry
+            .texture_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS)
+            .zip(ctx.registry.buffer_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME))
+            .unwrap_or((&self.fallback_sun_occlusion.0, &self.fallback_sun_occlusion.1));
 
         let camera_buf = ctx.camera;
         let lights_buf = ctx
@@ -864,15 +907,20 @@ impl RenderPass for VolumetricFogPass {
             legacy_buf.clone(),
         ];
         if self.inject_bg_key.as_ref() != Some(&key)
-            || self.inject_shadow.as_ref().map(|(d, s, t)| (d, s, t))
-                != Some((shadow_atlas, static_shadow_atlas, transmittance))
+            || self.inject_shadow.as_ref().map(|(d, s, t, o, f)| (d, s, t, o, f))
+                != Some((shadow_atlas, static_shadow_atlas, transmittance, sun_occlusion.0, sun_occlusion.1))
         {
             // Both sides are rebuilt together: each pins a fixed history/write
             // pair, so a stale one would read the grid it is also writing.
             self.inject_bg = [None, None];
             self.inject_bg_key = Some(key);
-            self.inject_shadow =
-                Some((shadow_atlas.clone(), static_shadow_atlas.clone(), transmittance.clone()));
+            self.inject_shadow = Some((
+                shadow_atlas.clone(),
+                static_shadow_atlas.clone(),
+                transmittance.clone(),
+                sun_occlusion.0.clone(),
+                sun_occlusion.1.clone(),
+            ));
             self.integrate_g0_bg = None;
             self.resolve_bg = None;
             self.classify_bg = None;
@@ -981,6 +1029,14 @@ impl RenderPass for VolumetricFogPass {
                         wgpu::BindGroupEntry {
                             binding: 21,
                             resource: wgpu::BindingResource::TextureView(transmittance),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 22,
+                            resource: wgpu::BindingResource::TextureView(sun_occlusion.0),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 23,
+                            resource: sun_occlusion.1.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,

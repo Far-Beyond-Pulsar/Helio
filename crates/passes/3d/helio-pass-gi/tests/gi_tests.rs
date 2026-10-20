@@ -292,3 +292,47 @@ fn light_through_a_canopy_lights_probes_under_it() {
     }
     assert!(under > 500, "{under} under the canopy");
 }
+
+/// No sky, no sun; a glowing floor at height 0 (albedo about 0.5, giving
+/// off its albedo times 4: radiance 2): a probe over it sees that radiance
+/// below and nothing above, irradiance / pi 2 facing down.
+#[test]
+fn glowing_ground_lights_probes() {
+    let Some(gpu) = gpu() else { return };
+    let mut pass = GiPass::new(&gpu.device);
+    let eye = DVec3::new(0.3, 1.7, -0.2);
+    let floor = |rays: &[u32]| -> Vec<u32> {
+        let mut hits = vec![0u32; rays.len() / 2];
+        for (k, ray) in rays.chunks(8).enumerate() {
+            let f = |w: u32| f32::from_bits(w);
+            let origin = Vec3::new(f(ray[0]), f(ray[1]), f(ray[2])).as_dvec3() + eye;
+            let dir = Vec3::new(f(ray[4]), f(ray[5]), f(ray[6]));
+            if origin.y > 0.0 && dir.y < 0.0 {
+                let t = (-origin.y / f64::from(dir.y)) as f32;
+                // Albedo 128/255, the sun unseen, glow 4 (64 sixteenths).
+                hits[k * 4..k * 4 + 4].copy_from_slice(&[t.to_bits(), pack(Vec3::Y), 128 | (128 << 8) | (128 << 16), 1 | (64 << 24)]);
+            }
+        }
+        hits
+    };
+    for n in 0..4 {
+        frame(gpu, &mut pass, eye, n, 0.0, None, Some(&floor));
+    }
+    let clipmap = Clipmap::around(eye);
+    let words = read(gpu, pass.buffers()[1]);
+    let below = 128.0 / 255.0 * 4.0;
+    let mut over = 0;
+    for index in 0..PROBES {
+        let (_, state) = probe(&words, index, Vec3::Y);
+        let y = clipmap.position(index).y;
+        if state >> 8 == 0 || y < 0.5 {
+            continue;
+        }
+        over += 1;
+        let down = probe(&words, index, Vec3::NEG_Y).0;
+        let up = probe(&words, index, Vec3::Y).0;
+        assert!((down - Vec3::splat(below)).abs().max_element() < 0.05 * below, "probe {index} at {y}: down {down}, want {below}");
+        assert!(up.max_element() < 0.05 * below, "probe {index} at {y}: up {up}");
+    }
+    assert!(over > 1000, "{over} probes over the floor");
+}

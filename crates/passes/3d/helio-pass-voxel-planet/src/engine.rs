@@ -102,7 +102,7 @@ pub(crate) struct MaterialGpu {
     colour: [f32; 4],
     patches: [[f32; 4]; 3],
     links: [u32; 4],
-    /// x: transmission (`MaterialAppearance::transmission`).
+    /// x: transmission, y: emission (`MaterialAppearance`).
     light: [f32; 4],
 }
 
@@ -125,7 +125,7 @@ pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; M
             colour: linear(m.colour),
             patches,
             links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
-            light: [clean(m.transmission), 0.0, 0.0, 0.0],
+            light: [clean(m.transmission), if m.emission.is_finite() { m.emission.clamp(0.0, 64.0) } else { 0.0 }, 0.0, 0.0],
         }
     });
     let [r, g, b, floor] = appearance.shade;
