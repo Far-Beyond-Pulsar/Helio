@@ -40,7 +40,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(in.uv * vec2<f32>(dimensions));
     
     // Sample center and neighbors
-    let rgb_center = textureSampleLevel(input_tex, input_sampler, in.uv, 0.0).rgb;
+    let center_sample = textureSampleLevel(input_tex, input_sampler, in.uv, 0.0);
+    let rgb_center = center_sample.rgb;
     let luma_center = rgb2luma(rgb_center);
     
     let luma_down = load_luma(texel + vec2<i32>(0, -1));
@@ -56,7 +57,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     
     // Early exit if no edge
     if luma_range < max(EDGE_THRESHOLD_MIN, luma_max * EDGE_THRESHOLD_MAX) {
-        return vec4<f32>(rgb_center, 1.0);
+        return vec4<f32>(rgb_center, center_sample.a);
     }
     
     // Sample corners
@@ -130,5 +131,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let smooth_coverage=coverage*coverage*(3.0-2.0*coverage);
     let subpixel_offset=min(0.5,smooth_coverage*smooth_coverage*SUBPIXEL_QUALITY);
     let offset=max(edge_offset,subpixel_offset)*direction;
-    return vec4<f32>(textureSampleLevel(input_tex,input_sampler,in.uv+perpendicular*offset,0.0).rgb,1.0);
+    let filtered=textureSampleLevel(input_tex,input_sampler,in.uv+perpendicular*offset,0.0);
+    return vec4<f32>(filtered.rgb,filtered.a);
 }
