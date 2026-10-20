@@ -87,12 +87,13 @@ pub fn texture_capacity(device: &wgpu::Device) -> Option<u32> {
 }
 
 /// The line of chunk_draw.wgsl the scene materials replace: no scene surface.
-pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32) -> SceneSurface {\n    return SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, false);\n}";
+pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32, slant: f32) -> SceneSurface {\n    return SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, false);\n}";
 
 /// chunk_draw.wgsl with the scene materials spliced in for a texture table
-/// of `capacity` entries.
+/// of `capacity` entries, and Helio's specular anti-aliasing, which they
+/// shade normal maps with.
 pub(crate) fn scene_source(draw: &str, capacity: u32) -> String {
-    let real = include_str!("../../shaders/scene_materials.wgsl").replace("MATERIAL_TEXTURES", &format!("{capacity}"));
+    let real = include_str!("../../shaders/scene_materials.wgsl").replace("MATERIAL_TEXTURES", &format!("{capacity}")) + "\n" + helio_mats::SPECULAR_AA;
     format!("enable wgpu_binding_array;\n{}", draw.replacen(STUB, &real, 1))
 }
 

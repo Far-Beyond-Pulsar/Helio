@@ -104,7 +104,7 @@ impl VirtualGeometryPass {
                 "VG GBuffer Shader",
                 helio_core::include_wgsl!("../shaders/vg_gbuffer.wgsl"),
             );
-            let s = text
+            let s = helio_core::shader::resolve_with(&text, &[helio_mats::SPECULAR_AA_SNIPPET])
                 .replace(
                     "binding_array<texture_2d<f32>, 256>",
                     &format!(

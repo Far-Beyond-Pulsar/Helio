@@ -31,8 +31,9 @@ impl RadiantTemplate {
     /// passthrough to keep the default PBR evaluation.
     pub fn build_shader_source(&self, graph_wgsl: &str, max_textures: usize) -> String {
         let max_tex_str = max_textures.to_string();
-        let src = self
-            .wgsl_source
+        // Specular anti-aliasing for the shaders that opt in (the mesh
+        // material shaders).
+        let src = helio_core::shader::resolve_with(&self.wgsl_source, &[crate::SPECULAR_AA_SNIPPET])
             .replace(
                 "binding_array<texture_2d<f32>, 256>",
                 &format!("binding_array<texture_2d<f32>, {max_tex_str}>"),

@@ -1,4 +1,5 @@
 enable wgpu_binding_array;
+//!use specular_aa
 
 //! Portal-duplicate G-buffer write — draws the instances `helio-pass-portal-cull`
 //! selected, one duplicate per surviving (instance, chain) pair, mapped
@@ -463,10 +464,14 @@ fn default_pbr_surface(material: GpuMaterial, material_tex: MaterialTextureData,
     let N_geom = normalize(input.world_normal);
 
     var N: vec3<f32>;
+    // The normal map's mean normal length (1: no spread, or no map).
+    var normal_spread = 1.0;
     if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
         let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
         let B = cross(N_geom, T) * input.bitangent_sign;
-        var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
+        let normal_sample = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0));
+        normal_spread = normal_sample.a;
+        var norm_ts = normal_sample.rgb * 2.0 - 1.0;
         norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);
         N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
     } else {
@@ -478,7 +483,7 @@ fn default_pbr_surface(material: GpuMaterial, material_tex: MaterialTextureData,
     let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
 
     var ao: f32 = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
-    var roughness: f32 = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
+    var roughness: f32 = clamp(specular_aa_roughness(material.roughness_metallic.x * orm_sample.g, normal_spread, material_tex.params.x, N_geom), 0.045, 1.0);
     var metallic: f32 = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
     var specular_f0: vec3<f32> = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
     var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;

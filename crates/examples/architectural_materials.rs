@@ -1,4 +1,5 @@
 //! Shared, embedded CC0 architectural materials for interactive and capture paths.
+use helio_mats::texture_mips::{mip_chain, TexelKind};
 use helio_pass_gbuffer::MaterialComponent;
 use pulsar_scenedb::{gpu::TextureStore, Entity, World};
 use std::sync::{Arc, RwLock};
@@ -61,21 +62,21 @@ pub fn load(
             queue,
             &mut store,
             include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_diff_1k.png"),
-            true,
+            TexelKind::Colour,
         );
         let normal = upload(
             device,
             queue,
             &mut store,
             include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_nor_gl_1k.png"),
-            false,
+            TexelKind::Normal,
         );
         let arm = upload(
             device,
             queue,
             &mut store,
             include_bytes!("assets/castle_wall_varriation/castle_wall_varriation_arm_1k.png"),
-            false,
+            TexelKind::Data,
         );
         apply_material(
             world,
@@ -90,32 +91,32 @@ pub fn load(
 
     if !carved_stone.is_empty() {
         let base = upload(device, queue, &mut store,
-            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_diff_2k.jpg"), true);
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_diff_2k.jpg"), TexelKind::Colour);
         let normal = upload(device, queue, &mut store,
-            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_nor_gl_2k.jpg"), false);
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_nor_gl_2k.jpg"), TexelKind::Normal);
         let arm = upload(device, queue, &mut store,
-            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_arm_2k.jpg"), false);
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_arm_2k.jpg"), TexelKind::Data);
         apply_material(world, carved_stone, base, normal, arm, true, 1.0);
     }
 
     if !floor.is_empty() {
         let base = upload(device, queue, &mut store,
-            include_bytes!("assets/marble_01/marble_01_diff_2k.jpg"), true);
+            include_bytes!("assets/marble_01/marble_01_diff_2k.jpg"), TexelKind::Colour);
         let normal = upload(device, queue, &mut store,
-            include_bytes!("assets/marble_01/marble_01_nor_gl_2k.jpg"), false);
+            include_bytes!("assets/marble_01/marble_01_nor_gl_2k.jpg"), TexelKind::Normal);
         let arm = upload(device, queue, &mut store,
-            include_bytes!("assets/marble_01/marble_01_arm_2k.jpg"), false);
+            include_bytes!("assets/marble_01/marble_01_arm_2k.jpg"), TexelKind::Data);
         // The source's median roughness is about 0.5. Worn nave paving is
         // less reflective than a newly polished slab; retain map variation.
         apply_material(world, floor, base, normal, arm, true, 1.3);
     }
     if !wood.is_empty() {
         let base = upload(device, queue, &mut store,
-            include_bytes!("assets/fine_grained_wood/fine_grained_wood_col_2k.jpg"), true);
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_col_2k.jpg"), TexelKind::Colour);
         let normal = upload(device, queue, &mut store,
-            include_bytes!("assets/fine_grained_wood/fine_grained_wood_nor_gl_2k.jpg"), false);
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_nor_gl_2k.jpg"), TexelKind::Normal);
         let arm = upload(device, queue, &mut store,
-            include_bytes!("assets/fine_grained_wood/fine_grained_wood_arm_2k.jpg"), false);
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_arm_2k.jpg"), TexelKind::Data);
         apply_material(world, wood, base, normal, arm, true, 1.0);
     }
     Some(Arc::new(RwLock::new(store)))
@@ -144,51 +145,37 @@ fn apply_material(
     }
 }
 
-fn srgb_to_linear(x: f32) -> f32 {
-    if x <= 0.04045 {
-        x / 12.92
-    } else {
-        ((x + 0.055) / 1.055).powf(2.4)
-    }
-}
-fn linear_to_srgb(x: f32) -> f32 {
-    if x <= 0.0031308 {
-        x * 12.92
-    } else {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
-    }
-}
-
+/// Decodes `bytes` and uploads it with a full mip chain filtered as
+/// `texels` says (`helio_mats::texture_mips`: normal maps keep their spread
+/// for specular anti-aliasing).
 fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     store: &mut TextureStore,
     bytes: &[u8],
-    srgb: bool,
+    texels: TexelKind,
 ) -> u32 {
     let image = image::load_from_memory(bytes)
-        .expect("embedded stone PNG")
+        .expect("embedded architectural texture")
         .to_rgba8();
-    let (mut width, mut height) = image.dimensions();
-    // These source maps are square powers of two. Explicitly reject an asset
-    // replacement incompatible with this exact 2x2 box mip filter.
-    assert!(width.is_power_of_two() && height == width);
-    let count = width.ilog2() + 1;
-    let slot = store
-        .register(
+    let (width, height) = image.dimensions();
+    let chain = mip_chain(image.as_raw(), width, height, texels);
+    let mips: Vec<&[u8]> = chain.iter().map(|level| level.texels.as_slice()).collect();
+    store
+        .register_mips(
             device,
             queue,
             &wgpu::TextureDescriptor {
-                label: Some("CC0 architectural stone"),
+                label: Some("CC0 architectural material"),
                 size: wgpu::Extent3d {
                     width,
                     height,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: count,
+                mip_level_count: mips.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: if srgb {
+                format: if texels.is_srgb() {
                     wgpu::TextureFormat::Rgba8UnormSrgb
                 } else {
                     wgpu::TextureFormat::Rgba8Unorm
@@ -196,74 +183,7 @@ fn upload(
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
-            image.as_raw(),
+            &mips,
         )
-        .expect("register stone texture");
-    let texture = store.texture(slot).expect("registered texture");
-    let mut pixels: Vec<[f32; 4]> = image
-        .pixels()
-        .map(|pixel| {
-            std::array::from_fn(|c| {
-                let x = pixel[c] as f32 / 255.0;
-                if srgb && c < 3 {
-                    srgb_to_linear(x)
-                } else {
-                    x
-                }
-            })
-        })
-        .collect();
-    for level in 1..count {
-        let w = width / 2;
-        let h = height / 2;
-        let mut next = vec![[0.0; 4]; (w * h) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let source = pixels[((y * 2 + dy) * width + x * 2 + dx) as usize];
-                        for c in 0..4 {
-                            next[(y * w + x) as usize][c] += source[c] * 0.25;
-                        }
-                    }
-                }
-            }
-        }
-        let texels: Vec<u8> = next
-            .iter()
-            .flat_map(|pixel| {
-                (0..4).map(move |c| {
-                    let x = if srgb && c < 3 {
-                        linear_to_srgb(pixel[c])
-                    } else {
-                        pixel[c]
-                    };
-                    (x.clamp(0.0, 1.0) * 255.0).round() as u8
-                })
-            })
-            .collect();
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: level,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &texels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        pixels = next;
-        width = w;
-        height = h;
-    }
-    slot
+        .expect("register architectural texture")
 }

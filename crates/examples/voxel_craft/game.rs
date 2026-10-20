@@ -101,6 +101,12 @@ impl Game {
         }
     }
 
+    /// Whether the screenshot tour is running (`VOXEL_CRAFT_SHOTS`): it
+    /// poses the camera itself and takes no input.
+    pub fn touring(&self) -> bool {
+        self.tour.is_some()
+    }
+
     /// The direction to the sun at game time `time`: a great circle that
     /// passes over the spawn at noon.
     fn sun(&self) -> DVec3 {

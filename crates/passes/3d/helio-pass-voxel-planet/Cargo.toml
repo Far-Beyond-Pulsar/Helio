@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["engine"]
 # Helio render-graph integration (GPU residency, tracing, GBuffer).
-engine = ["dep:helio-core", "dep:helio-pass-gi", "dep:helio-pass-shadow-matrix", "dep:wgpu", "dep:image", "dep:miniz_oxide"]
+engine = ["dep:helio-core", "dep:helio-mats", "dep:helio-pass-gi", "dep:helio-pass-shadow-matrix", "dep:wgpu", "dep:image", "dep:miniz_oxide"]
 
 [dependencies]
 glam = { version = "0.33", features = ["bytemuck"] }
@@ -20,6 +20,8 @@ rustc-hash = "2.1"
 rayon = "1.12"
 wgpu = { version = "30.0.1", optional = true }
 helio-core = { workspace = true, optional = true }
+# Specular anti-aliasing for the scene materials' normal maps.
+helio-mats = { workspace = true, optional = true }
 helio-pass-gi = { workspace = true, optional = true }
 helio-pass-shadow-matrix = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
