@@ -66,7 +66,7 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
 | `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` is the decoration: tree, cactus and structure stamps and the spawns that place them |
 | `trees/` | tree generators: oak, dark oak, birch, spruce, pine, jungle giant (as voxel stamps) |
 | `structures/` | blueprints (voxel stamps of this game's blocks): cottage, tower, ruins, well, pyramid |
-| `textures/` | block tiles to Helio scene materials; composes grass and leaves |
+| `textures/` | block materials to Helio scene materials; composes leaves |
 | `player/` | movement and collision on a sphere, block interaction, the character |
 | `input.rs` | keyboard and mouse state |
 
@@ -78,8 +78,9 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
   to 31 for this game's (birch, spruce and jungle wood and leaves, cactus,
   glowstone, stone bricks, dark oak planks).
 * **Textures go through Helio's material system.** Each block face is a
-  scene `MaterialComponent` with a base colour texture in the SceneDB texture
-  store, like any mesh's material. `ChunkPass::set_scene_materials` maps each
+  scene `MaterialComponent` with textures in the SceneDB texture store (most
+  blocks: colour, normal map and occlusion-roughness-metalness), like any
+  mesh's material. `ChunkPass::set_scene_materials` maps each
   voxel material to the scene material rows of its top, side and bottom faces,
   and the pass's publish stage samples them through the renderer's material
   table (`helio_default_graphs::voxel_scene_materials`). The same table feeds
@@ -102,10 +103,12 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
 
 ## Credits and licenses
 
-* Block textures: *Modernized 128x* by Sir E of Cali,
+* Block materials: baked by `tools/bake_textures.py` from
+  [ambientCG](https://ambientcg.com) materials, CC0
+  (`assets/textures/pbr/LICENSE` lists each source).
+* Leaves, cactus and glowstone tiles: *Modernized 128x* by Sir E of Cali,
   [kallyluv/Modernized-128x](https://github.com/kallyluv/Modernized-128x),
-  MIT (`assets/textures/LICENSE-Modernized-128x`). Only the tiles listed in
-  `textures/mod.rs` are bundled.
+  MIT (`assets/textures/LICENSE-Modernized-128x`).
 * Tree generators: ports of the oak, birch, spruce/pine and kapok workers of
   [NGNT/treegen-pinegen](https://github.com/NGNT/treegen-pinegen), MIT
   (`assets/trees/LICENSE-treegen-pinegen`).
