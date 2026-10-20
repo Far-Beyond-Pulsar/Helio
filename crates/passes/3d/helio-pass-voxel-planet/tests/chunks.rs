@@ -1775,7 +1775,7 @@ fn forest() -> FeatureSet {
     round.capsule([0.5, -1.0, 0.5], [1.2, 10.0, 0.3], [1.4, 0.6], material::WOOD);
     round.capsule([1.0, 7.0, 0.5], [4.5, 11.0, 2.5], [0.7, 0.35], material::WOOD);
     for (c, r) in [([1.0, 12.0, 0.5], 4.5), ([4.0, 11.5, 2.5], 3.0), ([-1.5, 11.0, -1.0], 2.5)] {
-        round.add(Part { sparse: 0.3, rough: 1.5, ..Part::solid(Form::Capsule { a: c, b: c, radius: [r; 2] }, material::LEAVES) });
+        round.add(Part { sparse: 0.3, rough: 1.5, lump: 1.2, lump_size: 2, ..Part::solid(Form::Capsule { a: c, b: c, radius: [r; 2] }, material::LEAVES) });
     }
     round.cone([-3.5, 2.0, 3.5], [-3.5, 7.0, 3.5], [2.0, 0.3], material::LEAVES);
     round.add(Part::air(Form::Capsule { a: [2.0, 13.0, 1.0], b: [2.0, 13.0, 1.0], radius: [1.5; 2] }));

@@ -1617,7 +1617,7 @@ fn placed_local(p: Placed, d: vec3<i32>) -> vec3<i32> {
     return vec3<i32>(x, d.y, z);
 }
 
-// A stamp's part (`stamp::CompiledPart`, its 16 words): box or capsule
+// A stamp's part (`stamp::CompiledPart`, its 20 words): box or capsule
 // (flat ended or round),
 // material (0 air), the cells it may hold (inclusive), the segment's ends
 // and radii or the box's corners (sixteenths of a cell), its edge's
@@ -1634,11 +1634,13 @@ struct Part {
     rough: i32,
     keep: u32,
     seed: u32,
+    lump: i32,
+    lump_shift: u32,
 }
 
 // Part `n` of stamp `t`.
 fn stamp_part(t: u32, n: u32) -> Part {
-    let at = stamp_word(t, 8u) + 16u * n;
+    let at = stamp_word(t, 8u) + 20u * n;
     var q: Part;
     q.capsule = (features[at] & 1u) != 0u;
     q.flat = (features[at] & 2u) != 0u;
@@ -1651,6 +1653,8 @@ fn stamp_part(t: u32, n: u32) -> Part {
     q.rough = i32(features[at + 14u] & 0xffffu);
     q.keep = features[at + 14u] >> 16u;
     q.seed = features[at + 15u];
+    q.lump = bitcast<i32>(features[at + 16u]);
+    q.lump_shift = features[at + 17u];
     return q;
 }
 
@@ -1686,6 +1690,11 @@ fn part_holds(q: Part, p: vec3<i32>, base: bool, cell: vec3<i32>) -> bool {
     let e = w - d * t / 256;
     var r = q.radius.x + (q.radius.y - q.radius.x) * t / 256;
     if base { r -= q.rough * i32((h >> 8u) & 255u) / 256; }
+    if q.lump > 0 {
+        let s = 4u + q.lump_shift;
+        let l = hash3(p.x >> s, p.y >> s, p.z >> s, q.seed ^ 0x6c756d70u);
+        r -= q.lump * i32(l & 255u) / 256;
+    }
     return r > 0 && dot(e, e) <= r * r;
 }
 

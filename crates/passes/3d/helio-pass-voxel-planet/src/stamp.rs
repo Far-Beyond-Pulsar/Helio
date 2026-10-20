@@ -50,8 +50,10 @@ pub enum Shape {
 
 /// A shape of a stamp: a material (`None`: air, clearing what stands
 /// there), a share of its cells left out by hash (`sparse`, 0 to 1:
-/// foliage), and an edge broken by hash (`rough`: up to this many cells
-/// off its radius: leaves, rock).
+/// foliage), an edge broken cell by cell by hash (`rough`: up to this many
+/// cells off its radius), and an outline broken into lumps (`lump`: up to
+/// this many cells off its radius, constant over blocks of `lump_size`
+/// cells, a power of two: a leaf mass's knobbly silhouette, a boulder's).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Part {
     pub shape: Shape,
@@ -60,15 +62,19 @@ pub struct Part {
     pub sparse: f32,
     #[serde(default)]
     pub rough: f32,
+    #[serde(default)]
+    pub lump: f32,
+    #[serde(default)]
+    pub lump_size: u32,
 }
 
 impl Part {
     pub fn solid(shape: Shape, material: u32) -> Self {
-        Self { shape, material: Some(material), sparse: 0.0, rough: 0.0 }
+        Self { shape, material: Some(material), sparse: 0.0, rough: 0.0, lump: 0.0, lump_size: 1 }
     }
 
     pub fn air(shape: Shape) -> Self {
-        Self { shape, material: None, sparse: 0.0, rough: 0.0 }
+        Self { shape, material: None, sparse: 0.0, rough: 0.0, lump: 0.0, lump_size: 1 }
     }
 }
 
@@ -232,12 +238,13 @@ pub fn coarse_of(parts: &[CompiledPart], lo: [i32; 3], hi: [i32; 3]) -> Option<O
     out
 }
 
-/// A part as evaluation reads it (`chunk_generate.wgsl` the same, 16 words
+/// A part as evaluation reads it (`chunk_generate.wgsl` the same, 20 words
 /// a part): its kind (a box; a capsule; flat ended) and material code (0
-/// air, else the material), the
-/// cells it may hold (inclusive), the segment's ends and radii (sixteenths
-/// of a cell; a box's corners as `a` and `b`), its edge's roughness
-/// (sixteenths) and the share of its cells kept (of 256), and its seed.
+/// air, else the material), the cells it may hold (inclusive), the
+/// segment's ends and radii (sixteenths of a cell; a box's corners as `a`
+/// and `b`), its edge's roughness (sixteenths) and the share of its cells
+/// kept (of 256), its seed, and its lumps' depth (sixteenths) and size
+/// (log2 cells).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompiledPart {
     pub capsule: bool,
@@ -251,6 +258,8 @@ pub struct CompiledPart {
     pub rough: i32,
     pub keep: u32,
     pub seed: u32,
+    pub lump: i32,
+    pub lump_shift: u32,
 }
 
 impl CompiledPart {
@@ -265,10 +274,12 @@ impl CompiledPart {
         let keep = ((1.0 - part.sparse.clamp(0.0, 1.0)) * 256.0).round() as u32;
         let rough = units(part.rough.max(0.0));
         let seed = hash3(index as i32, 0x57a, 0x3e7, 0x9e37_79b9);
+        let lump = units(part.lump.max(0.0));
+        let lump_shift = part.lump_size.max(1).next_power_of_two().trailing_zeros().min(8);
         let p = match part.shape {
             Shape::Box { lo, hi } => {
                 let (lo, hi) = (min3(lo, hi), max3(lo, hi));
-                Self { capsule: false, flat: false, material, lo, hi, a: lo.map(|v| v * UNIT), b: hi.map(|v| (v + 1) * UNIT), radius: [0; 2], rough: 0, keep, seed }
+                Self { capsule: false, flat: false, material, lo, hi, a: lo.map(|v| v * UNIT), b: hi.map(|v| (v + 1) * UNIT), radius: [0; 2], rough: 0, keep, seed, lump: 0, lump_shift: 0 }
             }
             Shape::Capsule { a, b, radius } | Shape::Cone { a, b, radius } => {
                 let flat = matches!(part.shape, Shape::Cone { .. });
@@ -278,7 +289,7 @@ impl CompiledPart {
                 // Cells whose centre may lie within the radius.
                 let lo = [0, 1, 2].map(|k| (a[k].min(b[k]) - r - UNIT / 2).div_euclid(UNIT));
                 let hi = [0, 1, 2].map(|k| (a[k].max(b[k]) + r - UNIT / 2).div_euclid(UNIT) + 1);
-                Self { capsule: true, flat, material, lo, hi, a, b, radius, rough, keep, seed }
+                Self { capsule: true, flat, material, lo, hi, a, b, radius, rough, keep, seed, lump, lump_shift }
             }
         };
         if p.lo.iter().chain(&p.hi).any(|v| v.abs() > MAX_STAMP_REACH) {
@@ -327,11 +338,18 @@ impl CompiledPart {
         if cell.is_some() {
             r -= self.rough * (((h >> 8) & 255) as i32) / 256;
         }
+        if self.lump > 0 {
+            // Constant over blocks of 2^lump_shift cells (the point's cell
+            // block, at any level).
+            let s = 4 + self.lump_shift;
+            let l = hash3(p[0] >> s, p[1] >> s, p[2] >> s, self.seed ^ 0x6c75_6d70);
+            r -= self.lump * ((l & 255) as i32) / 256;
+        }
         r > 0 && dot3(e, e) <= r * r
     }
 
     /// The part as `chunk_generate.wgsl` reads it.
-    pub fn gpu_words(&self) -> [u32; 16] {
+    pub fn gpu_words(&self) -> [u32; 20] {
         let i = |v: i32| v as u32;
         [
             u32::from(self.capsule) | (u32::from(self.flat) << 1) | (self.material << 8),
@@ -350,6 +368,10 @@ impl CompiledPart {
             i(self.radius[0]) | (i(self.radius[1]) << 16),
             i(self.rough) | (self.keep << 16),
             self.seed,
+            i(self.lump),
+            self.lump_shift,
+            0,
+            0,
         ]
     }
 }
@@ -497,6 +519,15 @@ mod tests {
         whole.ball([0.0; 3], 8.0, 5);
         let share = kept / whole.cells().len() as f64;
         assert!((share - 0.75).abs() < 0.05, "{share}");
+        // Lumps break the outline in blocks: fewer cells than the ball,
+        // more than the ball shrunk by the whole lump, the same through
+        // each block of cells.
+        let mut lumpy = Stamp::new();
+        lumpy.add(Part { lump: 3.0, lump_size: 4, ..Part::solid(Shape::Capsule { a: [0.0; 3], b: [0.0; 3], radius: [8.0; 2] }, 5) });
+        let mut small = Stamp::new();
+        small.ball([0.0; 3], 5.0, 5);
+        let n = lumpy.cells().len();
+        assert!(n < whole.cells().len() && n > small.cells().len(), "{n}");
     }
 
     /// A coarse cell takes the last part holding its box's centre: a box

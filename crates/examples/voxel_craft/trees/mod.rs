@@ -62,10 +62,11 @@ impl Builder {
     }
 
     /// Foliage: a cone or ball (a limb of leaves) a share of whose cells
-    /// is left out and whose edge is broken by `rough` metres.
-    fn foliage(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, block: Block, sparse: f32, rough: f64) {
+    /// is left out, its edge broken by `rough` metres and its outline into
+    /// lumps up to `lump` metres deep, 40 cm across.
+    fn foliage(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, block: Block, sparse: f32, rough: f64, lump: f64) {
         let shape = Shape::Capsule { a: Self::at(a), b: Self::at(b), radius: [Self::cells(ra), Self::cells(rb)] };
-        self.stamp.add(Part { sparse, rough: Self::cells(rough), ..Part::solid(shape, block.material()) });
+        self.stamp.add(Part { sparse, rough: Self::cells(rough), lump: Self::cells(lump), lump_size: Self::cells(0.4).round().max(1.0) as u32, ..Part::solid(shape, block.material()) });
     }
 
     /// A flat-ended cone of foliage: a conifer's tier.
@@ -74,8 +75,9 @@ impl Builder {
         self.stamp.add(Part { sparse, rough: Self::cells(rough), ..Part::solid(shape, block.material()) });
     }
 
+    /// A leaf mass: a lumpy ball of leaves.
     fn crown(&mut self, c: DVec3, r: f64, block: Block, sparse: f32) {
-        self.foliage(c, c, r, r, block, sparse, r * 0.3);
+        self.foliage(c, c, r, r, block, sparse, r * 0.2, r * 0.4);
     }
 }
 
@@ -83,6 +85,67 @@ impl Builder {
 /// horizontal (radians).
 fn direction(azimuth: f64, elevation: f64) -> DVec3 {
     DVec3::new(azimuth.cos() * elevation.cos(), elevation.sin(), azimuth.sin() * elevation.cos())
+}
+
+/// A trunk `height` metres to its fork, of `radius` at the ground, gently
+/// curved, with roots flaring into the ground: the fork's point.
+fn trunk(b: &mut Builder, rng: &mut Rng, height: f64, radius: f64, wood: Block) -> DVec3 {
+    let lean = direction(rng.uniform(0.0, std::f64::consts::TAU), 0.0);
+    let mid = DVec3::Y * height * 0.5 + lean * rng.uniform(0.0, 0.25);
+    let fork = DVec3::Y * height + lean * rng.uniform(0.1, 0.5);
+    b.limb(DVec3::Y * -0.5, mid, radius, radius * 0.85, wood);
+    b.limb(mid, fork, radius * 0.85, radius * 0.72, wood);
+    for n in 0..rng.int(3, 5) {
+        let out = direction(f64::from(n) * 1.7 + rng.uniform(0.0, 0.6), 0.0);
+        b.limb(DVec3::Y * radius * 1.4, out * radius * rng.uniform(2.2, 3.2) - DVec3::Y * 0.25, radius * 0.55, radius * 0.2, wood);
+    }
+    fork
+}
+
+/// How a species branches: its wood and leaves, its leaf masses' share
+/// left out and radius range (m), how far a child limb turns from its
+/// parent (radians) and how much it is drawn upward.
+struct Limbs {
+    wood: Block,
+    leaves: Block,
+    sparse: f32,
+    cluster: [f64; 2],
+    spread: f64,
+    rise: f64,
+}
+
+impl Limbs {
+    /// A limb from `from` along `dir` of `length` and base `radius`, then
+    /// two or three children to `depth` more levels, each shorter and
+    /// thinner; a leaf mass at every twig's end.
+    fn grow(&self, b: &mut Builder, rng: &mut Rng, from: DVec3, dir: DVec3, length: f64, radius: f64, depth: u32) {
+        let end = from + dir * length;
+        b.limb(from, end, radius, radius * 0.7, self.wood);
+        if depth == 0 {
+            b.crown(end, rng.uniform(self.cluster[0], self.cluster[1]), self.leaves, self.sparse);
+            return;
+        }
+        let side = dir.any_orthonormal_vector();
+        for n in 0..rng.int(2, 3) {
+            // Turned about the limb, then pulled outward and up.
+            let around = glam::DQuat::from_axis_angle(dir, f64::from(n) * 2.4 + rng.uniform(0.0, 1.0));
+            let tilt = glam::DQuat::from_axis_angle(around * side, self.spread * rng.uniform(0.6, 1.2));
+            let outward = DVec3::new(end.x, 0.0, end.z).normalize_or_zero();
+            let child = (tilt * dir + outward * 0.25 + DVec3::Y * self.rise * 0.5).normalize();
+            let next = length * rng.uniform(0.7, 0.85);
+            self.grow(b, rng, end, child, next, radius * 0.62, depth - 1);
+        }
+    }
+
+    /// `count` leaf masses filling the crown round `centre`: a flattened
+    /// ellipsoid `[radius, half height]` (m), closing the gaps between the
+    /// twigs' masses.
+    fn fill(&self, b: &mut Builder, rng: &mut Rng, centre: DVec3, extent: [f64; 2], count: u32) {
+        for _ in 0..count {
+            let at = centre + direction(rng.uniform(0.0, std::f64::consts::TAU), 0.0) * extent[0] * rng.uniform(0.0, 0.8) + DVec3::Y * extent[1] * rng.uniform(-0.6, 0.8);
+            b.crown(at, rng.uniform(self.cluster[0], self.cluster[1]) * 1.25, self.leaves, self.sparse);
+        }
+    }
 }
 
 /// The tree of `species` grown from `seed`, as a stamp.
@@ -94,43 +157,36 @@ pub fn tree(species: Species, seed: u64) -> Stamp {
     match species {
         Species::Oak | Species::DarkOak => {
             let dark = species == Species::DarkOak;
-            let height = if dark { rng.uniform(4.0, 6.0) } else { rng.uniform(5.5, 8.5) };
-            let radius = if dark { rng.uniform(0.3, 0.4) } else { rng.uniform(0.22, 0.3) };
-            let lean = direction(rng.uniform(0.0, std::f64::consts::TAU), 0.0) * rng.uniform(0.0, 0.5);
-            let fork = DVec3::Y * height * 0.6 + lean;
-            b.limb(DVec3::Y * -0.4, fork, radius, radius * 0.7, wood);
-            let top = fork + DVec3::Y * height * 0.35 + lean * 0.4;
-            b.limb(fork, top, radius * 0.7, radius * 0.35, wood);
-            let sparse = if dark { 0.2 } else { 0.3 };
-            b.crown(top + DVec3::Y * 0.4, rng.uniform(1.8, 2.4) * height / 7.0 + 0.6, leaves, sparse);
-            let branches = rng.int(4, 6);
-            for n in 0..branches {
-                let azimuth = (f64::from(n) + rng.uniform(-0.3, 0.3)) * std::f64::consts::TAU / f64::from(branches);
-                let from = fork + DVec3::Y * rng.uniform(-0.8, 0.6);
-                let length = height * rng.uniform(0.32, 0.48);
-                let end = from + direction(azimuth, rng.uniform(0.45, 0.85)) * length;
-                b.limb(from, end, radius * 0.45, radius * 0.18, wood);
-                b.crown(end, rng.uniform(1.3, 2.0) * if dark { 1.2 } else { 1.0 }, leaves, sparse);
-                // A smaller cluster part way along.
-                b.crown(from.lerp(end, 0.6) + DVec3::Y * 0.5, rng.uniform(0.9, 1.3), leaves, sparse);
+            let height = if dark { rng.uniform(3.0, 4.0) } else { rng.uniform(3.2, 4.6) };
+            let radius = if dark { rng.uniform(0.45, 0.6) } else { rng.uniform(0.38, 0.5) };
+            let fork = trunk(&mut b, &mut rng, height, radius, wood);
+            let limbs = Limbs { wood, leaves, sparse: if dark { 0.18 } else { 0.24 }, cluster: if dark { [1.5, 2.1] } else { [1.3, 1.9] }, spread: 0.55, rise: 0.35 };
+            // Three or four main limbs out of the fork, each branching on.
+            let main = rng.int(3, 4);
+            let turn = rng.uniform(0.0, std::f64::consts::TAU);
+            for n in 0..main {
+                let azimuth = turn + (f64::from(n) + rng.uniform(-0.25, 0.25)) * std::f64::consts::TAU / f64::from(main);
+                let dir = direction(azimuth, rng.uniform(0.45, 0.8));
+                let length = rng.uniform(2.4, 3.0) * if dark { 1.1 } else { 1.0 };
+                limbs.grow(&mut b, &mut rng, fork, dir, length, radius * 0.62, 2);
             }
+            // The crown's top and its body, filled between the limbs' ends.
+            limbs.fill(&mut b, &mut rng, fork + DVec3::Y * 2.8, [3.6, 2.2], 5);
         }
         Species::Birch => {
-            let height = rng.uniform(8.0, 12.0);
-            let bend = direction(rng.uniform(0.0, std::f64::consts::TAU), 0.0) * rng.uniform(0.2, 0.6);
-            let mid = DVec3::Y * height * 0.5 + bend;
-            let top = DVec3::Y * height - bend * 0.3;
-            b.limb(DVec3::Y * -0.3, mid, 0.17, 0.12, wood);
-            b.limb(mid, top, 0.12, 0.05, wood);
-            // Clusters round the top half on twigs, at heights and
-            // distances of their own: an open, uneven crown.
-            for _ in 0..rng.int(5, 7) {
-                let on = mid.lerp(top, rng.uniform(0.0, 0.9));
-                let out = direction(rng.uniform(0.0, std::f64::consts::TAU), rng.uniform(0.0, 0.5)) * rng.uniform(0.7, 1.6);
-                b.limb(on, on + out, 0.05, 0.03, wood);
-                b.crown(on + out, rng.uniform(0.8, 1.3), leaves, 0.35);
+            let height = rng.uniform(4.5, 6.0);
+            let fork = trunk(&mut b, &mut rng, height, 0.17, wood);
+            let limbs = Limbs { wood, leaves, sparse: 0.32, cluster: [0.8, 1.2], spread: 0.35, rise: 0.75 };
+            let leader = direction(rng.uniform(0.0, std::f64::consts::TAU), 1.35);
+            let length = rng.uniform(2.4, 3.2);
+            limbs.grow(&mut b, &mut rng, fork, leader, length, 0.12, 2);
+            for n in 0..rng.int(2, 3) {
+                let from = fork + DVec3::Y * rng.uniform(-1.2, 0.4);
+                let dir = direction(f64::from(n) * 2.3 + rng.uniform(0.0, 0.8), rng.uniform(0.6, 0.9));
+                let length = rng.uniform(1.6, 2.2);
+                limbs.grow(&mut b, &mut rng, from, dir, length, 0.08, 2);
             }
-            b.crown(top, 0.9, leaves, 0.4);
+            limbs.fill(&mut b, &mut rng, fork + DVec3::Y * 2.6, [1.8, 2.4], 3);
         }
         Species::Spruce | Species::Pine => {
             let pine = species == Species::Pine;
@@ -166,18 +222,20 @@ pub fn tree(species: Species, seed: u64) -> Stamp {
                 let out = direction(f64::from(n) * 1.3 + rng.uniform(0.0, 0.5), 0.0);
                 b.limb(DVec3::Y * rng.uniform(1.2, 2.2) + out * radius * 0.5, out * rng.uniform(1.3, 2.0) - DVec3::Y * 0.3, radius * 0.45, 0.12, wood);
             }
-            // Spreading limbs and a broad canopy.
-            for n in 0..rng.int(4, 6) {
-                let from = top - DVec3::Y * rng.uniform(1.0, 4.0);
-                let end = from + direction(f64::from(n) * 1.25 + rng.uniform(0.0, 0.6), rng.uniform(0.25, 0.6)) * rng.uniform(3.0, 5.0);
-                b.limb(from, end, radius * 0.4, 0.12, wood);
-                b.crown(end + DVec3::Y * 0.5, rng.uniform(2.2, 3.2), leaves, 0.25);
+            // Spreading limbs and a broad, layered canopy.
+            let limbs = Limbs { wood, leaves, sparse: 0.22, cluster: [1.6, 2.4], spread: 0.6, rise: 0.25 };
+            for n in 0..rng.int(4, 5) {
+                let from = top - DVec3::Y * rng.uniform(1.0, 3.5);
+                let dir = direction(f64::from(n) * 1.4 + rng.uniform(0.0, 0.6), rng.uniform(0.25, 0.5));
+                let length = rng.uniform(2.8, 3.6);
+                limbs.grow(&mut b, &mut rng, from, dir, length, radius * 0.4, 2);
             }
-            b.crown(top + DVec3::Y * 0.8, rng.uniform(3.0, 3.8), leaves, 0.25);
+            limbs.fill(&mut b, &mut rng, top + DVec3::Y * 0.8, [5.0, 2.0], 6);
             // Vines' worth of leaves hanging down the trunk.
             for _ in 0..3 {
                 let at = DVec3::Y * height * rng.uniform(0.3, 0.8) + direction(rng.uniform(0.0, std::f64::consts::TAU), 0.0) * radius;
-                b.foliage(at, at - DVec3::Y * rng.uniform(1.5, 3.0), 0.35, 0.2, leaves, 0.45, 0.15);
+                let down = at - DVec3::Y * rng.uniform(1.5, 3.0);
+                b.foliage(at, down, 0.35, 0.2, leaves, 0.45, 0.15, 0.0);
             }
         }
     }
@@ -219,7 +277,7 @@ pub fn boulder(block: Block, seed: u64) -> Stamp {
     for _ in 0..rng.int(1, 3) {
         let c = DVec3::new(rng.uniform(-0.4, 0.4), rng.uniform(-0.3, 0.1) * size, rng.uniform(-0.4, 0.4)) * size;
         let r = size * rng.uniform(0.6, 1.0);
-        b.foliage(c, c, r, r, block, 0.0, r * 0.25);
+        b.foliage(c, c, r, r, block, 0.0, r * 0.1, r * 0.3);
     }
     b.stamp
 }
@@ -241,12 +299,12 @@ mod tests {
     /// anchor column, within a stamp's reach; a seed grows the same tree.
     #[test]
     fn every_species_grows_a_plausible_tree() {
-        for (species, height) in [(Species::Oak, 5.0..12.0), (Species::DarkOak, 4.0..10.0), (Species::Birch, 8.0..14.0), (Species::Spruce, 9.0..18.0), (Species::Pine, 12.0..21.0), (Species::Jungle, 15.0..25.0)] {
+        for (species, height) in [(Species::Oak, 7.0..13.0), (Species::DarkOak, 6.0..12.0), (Species::Birch, 8.0..16.0), (Species::Spruce, 9.0..18.0), (Species::Pine, 12.0..21.0), (Species::Jungle, 15.0..25.0)] {
             for seed in 0..3 {
                 let s = tree(species, seed);
                 let (lo, hi) = extent(&s);
                 assert!(height.contains(&hi.y), "{species:?} {seed}: {}", hi.y);
-                assert!(hi.x - lo.x > 1.0 && hi.x - lo.x < 18.0, "{species:?} {seed}: width {}", hi.x - lo.x);
+                assert!(hi.x - lo.x > 1.0 && hi.x - lo.x < 24.0, "{species:?} {seed}: width {}", hi.x - lo.x);
                 let (wood, _) = species.blocks();
                 assert_eq!(s.get([0, 1, 0]), Some(Some(wood.material())), "{species:?} {seed}: trunk");
                 s.compile().expect("within a stamp's reach");
