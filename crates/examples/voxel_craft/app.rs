@@ -4,7 +4,7 @@ use crate::game::Game;
 use crate::gfx::Gfx;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -36,9 +36,15 @@ impl ApplicationHandler for App {
             return;
         }
         event_loop.set_control_flow(ControlFlow::Poll);
+        // `VOXEL_CRAFT_SIZE=<w>x<h>`: the window's size in pixels (measurements at a
+        // known resolution); otherwise 1600 x 900 logical.
+        let size = std::env::var("VOXEL_CRAFT_SIZE")
+            .ok()
+            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
+            .map_or(Size::Logical(LogicalSize::new(1600.0, 900.0)), |(w, h)| Size::Physical(PhysicalSize::new(w, h)));
         let window: Arc<Window> = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("Voxel Craft: building the world...").with_inner_size(LogicalSize::new(1600.0, 900.0)))
+                .create_window(Window::default_attributes().with_title("Voxel Craft: building the world...").with_inner_size(size))
                 .expect("window"),
         );
         let mut game = Game::new(|planet| Gfx::new(window.clone(), planet));

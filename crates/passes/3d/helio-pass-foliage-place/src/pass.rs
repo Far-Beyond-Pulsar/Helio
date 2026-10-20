@@ -258,12 +258,18 @@ impl FoliagePlacePass {
 
         // Density-first when asked for, budget-first otherwise.
         let tile_area = FOLIAGE_TILE_SIZE_METERS * FOLIAGE_TILE_SIZE_METERS;
+        let cluster_size = quality.cluster_granularity().max(1);
         let blades_per_tile = match blades_per_square_metre {
             Some(density) if density.is_finite() && density > 0.0 => {
                 // `MAX_BLADES_PER_TILE` is a representational ceiling, not a budget: a
                 // blade's tile-local index travels in the low 16 bits of a
                 // `visible_blades[]` entry, so a slab larger than 65 536 would alias.
-                let wanted = (density * tile_area).ceil();
+                // The slab holds the whole candidate grid: its side rounded up to whole
+                // cluster blocks, as `candidate_grid` lays it (rounded down, a slab of
+                // exactly the density would thin the grass by the last block's row).
+                let edge = isqrt(cluster_size).max(1);
+                let side = ((density * tile_area).sqrt().ceil() as u32).div_ceil(edge) * edge;
+                let wanted = (side as f32) * (side as f32);
                 let clamped = wanted.min(MAX_BLADES_PER_TILE as f32).max(1.0) as u32;
                 if wanted > clamped as f32 {
                     log::warn!(
@@ -284,7 +290,6 @@ impl FoliagePlacePass {
             blades_per_tile as f32 / tile_area,
             ring_radius,
         );
-        let cluster_size = quality.cluster_granularity().max(1);
         let clusters_per_tile = blades_per_tile.div_ceil(cluster_size).max(1);
 
         let blade_arena = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -827,12 +832,14 @@ impl FoliagePlacePass {
         // multi-millisecond stall.
         let slab_limit = isqrt(self.blades_per_tile).max(1);
         let loop_limit = isqrt(MAX_CANDIDATES_PER_TILE).max(1);
-        // Round DOWN to a whole number of cluster blocks. The candidate index is mapped
-        // block-linearly so one cluster is a square patch of cells rather than a strip;
-        // a grid that is not a multiple of the block edge would leave a partial block on
-        // two sides whose cells belong to no cluster.
+        // A whole number of cluster blocks: up from the ideal (placement accepts by the
+        // grid's own density, so a finer grid costs no accuracy), down from the limits.
+        // The candidate index is mapped block-linearly so one cluster is a square patch
+        // of cells rather than a strip; a grid that is not a multiple of the block edge
+        // would leave a partial block on two sides whose cells belong to no cluster.
         let edge = isqrt(self.cluster_size).max(1);
-        let grid = (ideal.min(slab_limit).min(loop_limit) / edge).max(1) * edge;
+        let ceiling = (slab_limit.min(loop_limit) / edge).max(1) * edge;
+        let grid = (ideal.div_ceil(edge) * edge).min(ceiling);
         let achieved = ((grid as f32 * grid as f32) / desired).clamp(0.0, 1.0);
         (grid, achieved)
     }

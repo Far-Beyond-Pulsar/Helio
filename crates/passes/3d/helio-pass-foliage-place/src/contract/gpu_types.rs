@@ -450,9 +450,12 @@ pub enum FoliageKind {
     /// A virtual-geometry mesh, culled and LOD-selected by the existing meshlet path.
     /// `mesh_or_impostor_id` is a `VirtualMeshId` for this kind.
     Mesh = 2,
-    /// A blade made of a thin box (voxel worlds' grass): flat faces, sheared rather
-    /// than bent by wind, at the blade's own width square. Drawn by the same procedural
-    /// strip as [`FoliageKind::Blade`], two sides and its top near the eye.
+    /// Voxel worlds' grass: a stack of cubes (edge `width_range[0]`, as many as the
+    /// height rounds to, at most [`crate::FOLIAGE_STACK_CUBES`]) upright on one grid,
+    /// no yaw. Placement stands each on a cube's centre (no two share one) and shapes
+    /// tufts: stacks lean out of their tuft in whole-cube steps, tallest at its centre.
+    /// Wind moves each cube whole. Drawn as procedural strips of the faces turned to
+    /// the eye ([`crate::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`]).
     Block = 3,
 }
 

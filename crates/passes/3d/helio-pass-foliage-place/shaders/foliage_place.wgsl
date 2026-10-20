@@ -50,6 +50,8 @@ const COUNTER_PLACED_BLADES: u32 = 6u;
 const GROUND_NONE: u32 = 0xffffffffu;
 // A queue entry's slot (low half) and its tile's place in last frame's queries (high).
 const QUEUE_SLOT_MASK: u32 = 0xffffu;
+/// `FoliageKind::Block`: blades stacked from cubes on one grid.
+const FOLIAGE_KIND_BLOCK: u32 = 3u;
 
 /// Mirrors `PlaceUniforms` (Rust, 80 bytes).
 struct PlaceUniforms {
@@ -281,16 +283,56 @@ fn unpack_octahedral(packed: u32) -> vec3<f32> {
 
 // ── Candidates ──────────────────────────────────────────────────────────────────
 
+/// The cubes across a tile's two axes that blocky types stand on (`FoliageKind::Block`,
+/// whose cube is the type's `width_min`: the smallest of them), or zero without any.
+/// Whole cubes a tile, so the grid runs on unbroken from tile to tile.
+fn cube_cells(frame: TileFrame) -> vec2<u32> {
+    var edge = 0.0;
+    let rows = min(place.type_count, arrayLength(&types));
+    for (var t = 0u; t < rows; t++) {
+        let ty = types[t];
+        if (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK && ty.density > 0.0 && ty.width_min > 0.0 {
+            edge = select(min(edge, ty.width_min), ty.width_min, edge == 0.0);
+        }
+    }
+    if edge <= 0.0 {
+        return vec2<u32>(0u);
+    }
+    return vec2<u32>(
+        u32(max(round(length(frame.axis_u) / edge), 1.0)),
+        u32(max(round(length(frame.axis_v) / edge), 1.0)),
+    );
+}
+
+/// The cube a candidate stands on along one axis: one of the cubes whose centres fall in
+/// its grid cell `cell` of `grid` (picked by `pick` in 0..1), of `cubes` across. Integer
+/// ownership, so no two candidates share a cube; -1 when the cell holds no centre (cubes
+/// coarser than the grid).
+fn owned_cube(cell: u32, grid: u32, cubes: u32, pick: f32) -> i32 {
+    // Cube k's centre (k + 1/2) / cubes is in cell floor((2k + 1) grid / (2 cubes)).
+    let g = i32(grid);
+    let n2 = 2 * i32(cubes);
+    let a = (2 * i32(cell) * i32(cubes) + g - 1) / g;
+    let b = (n2 * (i32(cell) + 1) + g - 1) / g;
+    let lo = a / 2;
+    let hi = (b - 2) / 2 + select(0, -1, b < 2);
+    if hi < lo {
+        return -1;
+    }
+    return min(lo + i32(pick * f32(hi - lo + 1)), hi);
+}
+
 /// Candidate `candidate` of a tile: its stratified, jittered `(u, v)` in the tile, on the
 /// unorm16 grid the blade stores. The ground is asked at exactly the stored point: a
 /// candidate a hair from a voxel step's edge would otherwise be answered by one column
-/// and stored over the other, a whole step off.
+/// and stored over the other, a whole step off. With a cube grid (`cubes`, from
+/// [`cube_cells`]) the candidate is the centre of a cube its cell owns, or `-1` (none).
 ///
 /// Stratified: one candidate per grid cell, jittered inside it — pure rejection sampling
 /// clumps. Block-linear, not row-major: `cluster_size` consecutive candidates form one
 /// cluster, and the L3 clump card is anchored on its cluster, so a row-major mapping
 /// renders the far field as straight rows.
-fn candidate_uv(candidate: u32, seed: u32) -> vec2<f32> {
+fn candidate_uv(candidate: u32, seed: u32, cubes: vec2<u32>) -> vec2<f32> {
     let grid = max(place.candidate_grid, 1u);
     let edge = max(place.cluster_edge, 1u);
     let per_block = edge * edge;
@@ -300,11 +342,61 @@ fn candidate_uv(candidate: u32, seed: u32) -> vec2<f32> {
     let cell_x = (block % blocks_across) * edge + (within % edge);
     let cell_z = (block / blocks_across) * edge + (within / edge);
     let inv_grid = 1.0 / f32(grid);
-    let uv = vec2<f32>(
-        (f32(cell_x) + hash_to_unit(seed)) * inv_grid,
-        (f32(cell_z) + hash_to_unit(rotl(seed, 11u))) * inv_grid,
-    );
+    let pick = vec2<f32>(hash_to_unit(seed), hash_to_unit(rotl(seed, 11u)));
+    if cubes.x > 0u {
+        let ku = owned_cube(cell_x, grid, cubes.x, pick.x);
+        let kv = owned_cube(cell_z, grid, cubes.y, pick.y);
+        if ku < 0 || kv < 0 {
+            return vec2<f32>(-1.0);
+        }
+        let at = (vec2<f32>(f32(ku), f32(kv)) + 0.5) / vec2<f32>(cubes);
+        return vec2<f32>(f32(pack_unorm16_u(at.x)), f32(pack_unorm16_u(at.y))) * (1.0 / 65535.0);
+    }
+    let uv = (vec2<f32>(f32(cell_x), f32(cell_z)) + pick) * inv_grid;
     return vec2<f32>(f32(pack_unorm16_u(uv.x)), f32(pack_unorm16_u(uv.y))) * (1.0 / 65535.0);
+}
+
+/// Edge of the cells blocky grass gathers in tufts over, metres.
+const FOLIAGE_TUFT_M: f32 = 0.45;
+
+/// A blocky blade's tuft (transcription of `crate::reference::block_tuft`): the
+/// nearest of one jittered centre a cell, the blade's lean away from it (cubes stepped
+/// sideways per cube up, along the tile's u and v: further out, further over) and how
+/// tall it stands (1 at the centre, lower to the rim) and how likely it grows (thinning
+/// to the rim, so tufts stand apart). Over the chart, not the tile, so tufts run on
+/// across tile edges; no generation, so they keep their shape.
+struct Tuft {
+    lean: vec2<f32>,
+    tall: f32,
+    fill: f32,
+}
+
+fn block_tuft(tile_x: i32, tile_z: i32, uv: vec2<f32>) -> Tuft {
+    let p = (vec2<f32>(f32(tile_x), f32(tile_z)) + uv) * (place.tile_size / FOLIAGE_TUFT_M);
+    let cell = floor(p);
+    var nearest = vec2<f32>(0.0);
+    var best = 1.0e9;
+    for (var dz = -1; dz <= 1; dz++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let c = cell + vec2<f32>(f32(dx), f32(dz));
+            let h = blade_seed(i32(c.x), i32(c.y), 7u, 0x5f3759dfu);
+            let d = p - (c + vec2<f32>(hash_to_unit(h), hash_to_unit(rotl(h, 11u))));
+            let dd = dot(d, d);
+            if dd < best {
+                best = dd;
+                nearest = d;
+            }
+        }
+    }
+    let r = sqrt(best);
+    let away = select(vec2<f32>(0.0), nearest / r, r > 1.0e-4);
+    return Tuft(away * min(0.25 + r, 1.0), clamp(1.0 - 0.7 * r, 0.3, 1.0), clamp(1.25 - 1.1 * r, 0.1, 1.0));
+}
+
+/// The 16 bits a blade's yaw takes, holding a blocky blade's lean instead (a stack is
+/// upright on the grid): u then v, each an 8-bit unorm of `0.5 + lean / 2`.
+fn pack_lean_u(lean: vec2<f32>) -> u32 {
+    return pack_unorm8_u(0.5 + 0.5 * lean.x) | (pack_unorm8_u(0.5 + 0.5 * lean.y) << 8u);
 }
 
 fn frame_point(frame: TileFrame, uv: vec2<f32>, h: f32) -> vec3<f32> {
@@ -336,9 +428,10 @@ fn cs_query(
     let start_h = eye_h + place.search_above;
     let length = place.search_above + place.search_below;
     let first = workgroup_id.x * cells;
+    let cubes = cube_cells(frame);
     for (var candidate = lane; candidate < cells; candidate += WG_SIZE) {
         let seed = blade_seed(tile.tile_coord_x, tile.tile_coord_z, candidate, tile.generation);
-        let uv = candidate_uv(candidate, seed);
+        let uv = max(candidate_uv(candidate, seed, cubes), vec2<f32>(0.0));
         let index = first + candidate;
         if index < arrayLength(&queries) {
             queries[index] = GroundQuery(frame_point(frame, uv, start_h), length, frame.up, 0u);
@@ -455,6 +548,7 @@ fn cs_place(
     }
     let cells = max(place.candidate_grid, 1u) * max(place.candidate_grid, 1u);
     let first = asked * cells;
+    let cubes = cube_cells(frame);
 
     if lane == 0u {
         atomicStore(&wg_low, ordered(3.0e38));
@@ -509,9 +603,9 @@ fn cs_place(
 
         if valid && candidate < cells {
             let seed = blade_seed(tile.tile_coord_x, tile.tile_coord_z, candidate, tile.generation);
-            let uv = candidate_uv(candidate, seed);
+            let uv = candidate_uv(candidate, seed, cubes);
             let g = answered_ground(first + candidate, frame);
-            if g.ok && within_any_layer(frame_point(frame, uv, g.h)) {
+            if g.ok && uv.x >= 0.0 && within_any_layer(frame_point(frame, uv, g.h)) {
                 // The types that grow here, by their densities: the candidate grid holds
                 // `grid_density` candidates a square metre, so the ground grows a blade
                 // with probability `sum / grid_density` and the blade is each type's by
@@ -537,8 +631,18 @@ fn cs_place(
                     accepted = 1u;
                     record.packed_pos = pack_pos(uv.x, uv.y);
                     record.packed_height_yaw = pack_height_yaw(g.h - center, hash_to_unit(rotl(seed, 23u)) * TAU);
+                    var height_lerp = hash_to_unit(rotl(seed, 29u));
+                    if (types[type_id].kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK {
+                        // In its tuft: leaning out from the centre, tallest there.
+                        let tuft = block_tuft(tile.tile_coord_x, tile.tile_coord_z, uv);
+                        if hash_to_unit(rotl(seed, 19u)) >= tuft.fill {
+                            accepted = 0u;
+                        }
+                        record.packed_height_yaw = (record.packed_height_yaw & 0xffffu) | (pack_lean_u(tuft.lean) << 16u);
+                        height_lerp = clamp(tuft.tall * (0.55 + 0.45 * height_lerp), 0.0, 1.0);
+                    }
                     record.packed_scale_type = pack_scale_type(
-                        hash_to_unit(rotl(seed, 29u)),
+                        height_lerp,
                         hash_to_unit(rotl(seed, 3u)),
                         type_id,
                         (seed >> 30u) & 3u,

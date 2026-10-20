@@ -23,7 +23,7 @@
 //! that pretended to sample a texture would be testing nothing.
 
 use crate::{
-    blade_seed, hash_to_unit, pack_blade, BladeParams, GpuBladeInstance, GpuFoliageLayer,
+    blade_seed, hash_to_unit, pack_blade, BladeParams, FoliageKind, GpuBladeInstance, GpuFoliageLayer,
     GpuFoliageType,
 };
 
@@ -118,6 +118,68 @@ pub fn type_grows(foliage: &GpuFoliageType, ground: &ReferenceGround) -> bool {
         && ground.height <= foliage.altitude_range[1]
 }
 
+/// Cubes across an `edge`-metre tile that blocky types stand on (the smallest cube of
+/// the [`FoliageKind::Block`] types with a density), or 0 without any. Mirror of
+/// `cube_cells` in foliage_place.wgsl.
+pub fn cube_cells(types: &[GpuFoliageType], edge: f32) -> u32 {
+    let cube = types
+        .iter()
+        .filter(|t| t.kind() == Some(FoliageKind::Block) && t.density > 0.0 && t.width_range[0] > 0.0)
+        .map(|t| t.width_range[0])
+        .fold(0.0_f32, |a, w| if a == 0.0 { w } else { a.min(w) });
+    if cube <= 0.0 { 0 } else { (edge / cube).round().max(1.0) as u32 }
+}
+
+/// The cube of `cubes` across that grid cell `cell` of `grid` stands on: one of those
+/// whose centres fall in the cell, by `pick` in 0..1, or `None` when no centre does.
+/// Mirror of `owned_cube` in foliage_place.wgsl.
+pub fn owned_cube(cell: u32, grid: u32, cubes: u32, pick: f32) -> Option<u32> {
+    // Cube k's centre (k + 1/2) / cubes is in cell floor((2k + 1) grid / (2 cubes)).
+    let (g, n2, i) = (grid as i64, 2 * cubes as i64, cell as i64);
+    let a = (i * n2 + g - 1).div_euclid(g);
+    let b = ((i + 1) * n2 + g - 1).div_euclid(g);
+    let (lo, hi) = (a.div_euclid(2), (b - 2).div_euclid(2));
+    (hi >= lo).then(|| (lo + (pick * (hi - lo + 1) as f32) as i64).min(hi) as u32)
+}
+
+/// Edge of the cells blocky grass gathers in tufts over, metres.
+pub const FOLIAGE_TUFT_M: f32 = 0.45;
+
+/// A blocky blade's tuft at `tile_uv` of tile `tile_coord` (`tile_size` metres): its
+/// lean away from the nearest tuft centre (cubes stepped sideways per cube up, along
+/// the tile's u and v), how tall it stands (1 at the centre, lower to the rim) and how
+/// likely it grows (thinning to the rim). Mirror of `block_tuft` in foliage_place.wgsl.
+pub fn block_tuft(tile_coord: [i32; 2], tile_uv: [f32; 2], tile_size: f32) -> ([f32; 2], f32, f32) {
+    let scale = tile_size / FOLIAGE_TUFT_M;
+    let p = [(tile_coord[0] as f32 + tile_uv[0]) * scale, (tile_coord[1] as f32 + tile_uv[1]) * scale];
+    let cell = [p[0].floor(), p[1].floor()];
+    let (mut nearest, mut best) = ([0.0_f32; 2], 1.0e9_f32);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let c = [cell[0] + dx as f32, cell[1] + dz as f32];
+            let h = blade_seed([c[0] as i32, c[1] as i32], 7, 0x5f37_59df);
+            let d = [p[0] - (c[0] + hash_to_unit(h)), p[1] - (c[1] + hash_to_unit(h.rotate_left(11)))];
+            let dd = d[0] * d[0] + d[1] * d[1];
+            if dd < best {
+                best = dd;
+                nearest = d;
+            }
+        }
+    }
+    let r = best.sqrt();
+    let reach = (0.25 + r).min(1.0);
+    let lean = if r > 1.0e-4 { nearest.map(|x| x / r * reach) } else { [0.0; 2] };
+    (lean, (1.0 - 0.7 * r).clamp(0.3, 1.0), (1.25 - 1.1 * r).clamp(0.1, 1.0))
+}
+
+/// The yaw (radians) whose 16 packed bits hold a blocky blade's `lean`: u then v, each
+/// an 8-bit unorm of `0.5 + lean / 2`. Mirror of `pack_lean_u` in foliage_place.wgsl.
+pub fn lean_as_yaw(lean: [f32; 2]) -> f32 {
+    let byte = |x: f32| ((0.5 + 0.5 * x).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+    let bits = byte(lean[0]) | (byte(lean[1]) << 8);
+    bits as f32 / 65536.0 * std::f32::consts::TAU
+}
+
 /// Evaluate a single stratified candidate over `ground` (a tile-local `(u, v)` to its
 /// answer, `None` where there is no ground).
 ///
@@ -141,12 +203,21 @@ pub fn reference_candidate(
 
     let cell_x = index % grid;
     let cell_z = index / grid;
-    // On the stored unorm16 grid, so the ground answered is the ground under the blade.
+    // On the stored unorm16 grid, so the ground answered is the ground under the blade;
+    // with blocky types, on the centre of a cube the cell owns.
     let snap = |x: f32| crate::contract::packing::unpack_unorm16(crate::contract::packing::pack_unorm16(x));
-    let u = snap((cell_x as f32 + hash_to_unit(seed)) * inv_grid);
-    let v = snap((cell_z as f32 + hash_to_unit(seed.rotate_left(11))) * inv_grid);
-
-    let mut candidate = ReferenceCandidate { index, seed, tile_uv: [u, v], type_id: 0, weight: 0.0, accepted: false };
+    let pick = [hash_to_unit(seed), hash_to_unit(seed.rotate_left(11))];
+    let cubes = cube_cells(types, uniforms.tile_size);
+    let mut candidate = ReferenceCandidate { index, seed, tile_uv: [0.0; 2], type_id: 0, weight: 0.0, accepted: false };
+    let (u, v) = if cubes > 0 {
+        let (Some(ku), Some(kv)) = (owned_cube(cell_x, grid, cubes, pick[0]), owned_cube(cell_z, grid, cubes, pick[1])) else {
+            return candidate;
+        };
+        (snap((ku as f32 + 0.5) / cubes as f32), snap((kv as f32 + 0.5) / cubes as f32))
+    } else {
+        (snap((cell_x as f32 + pick[0]) * inv_grid), snap((cell_z as f32 + pick[1]) * inv_grid))
+    };
+    candidate.tile_uv = [u, v];
     let Some(g) = ground([u, v]) else { return candidate };
     // On the flat tiling the frame is world XZ with +Y up.
     let world = [
@@ -217,17 +288,27 @@ pub fn place_tile_reference(
         if !candidate.accepted {
             continue;
         }
+        let seed = candidate.seed;
+        let mut yaw = hash_to_unit(seed.rotate_left(23)) * std::f32::consts::TAU;
+        let mut height_scale = hash_to_unit(seed.rotate_left(29));
+        if types[candidate.type_id as usize].kind() == Some(FoliageKind::Block) {
+            // In its tuft: thinning to its rim, leaning out from the centre, tallest there.
+            let (lean, tall, fill) = block_tuft(tile_coord, candidate.tile_uv, uniforms.tile_size);
+            if hash_to_unit(seed.rotate_left(19)) >= fill {
+                continue;
+            }
+            yaw = lean_as_yaw(lean);
+            height_scale = (tall * (0.55 + 0.45 * height_scale)).clamp(0.0, 1.0);
+        }
         if placement.blades.len() as u32 >= uniforms.slab_capacity {
             placement.dropped += 1;
             continue;
         }
-
-        let seed = candidate.seed;
         placement.blades.push(pack_blade(BladeParams {
             tile_uv: candidate.tile_uv,
             height_offset: g.map_or(0.0, |g| g.height) - center,
-            yaw: hash_to_unit(seed.rotate_left(23)) * std::f32::consts::TAU,
-            height_scale: hash_to_unit(seed.rotate_left(29)),
+            yaw,
+            height_scale,
             width_scale: hash_to_unit(seed.rotate_left(3)),
             type_id: candidate.type_id,
             variant: ((seed >> 30) & 3) as u8,
@@ -469,6 +550,42 @@ mod tests {
 
     /// Types keyed by ground: each grows only where the ground answers one of its ids,
     /// at its own density there; a ground none is keyed to grows nothing.
+    #[test]
+    fn cubes_belong_to_one_cell_each() {
+        // Every cube centre is owned by exactly one cell, whatever the two grids.
+        for (grid, cubes) in [(80, 160), (80, 80), (80, 100), (96, 160), (100, 64), (64, 100)] {
+            let mut owner = vec![None; cubes as usize];
+            for cell in 0..grid {
+                for pick in [0.0, 0.3, 0.999] {
+                    if let Some(k) = owned_cube(cell, grid, cubes, pick) {
+                        let centre = (k as f64 + 0.5) / cubes as f64;
+                        assert_eq!((centre * grid as f64).floor() as u32, cell, "cube {k} of {cubes} in cell {cell} of {grid}");
+                        assert!(owner[k as usize].is_none_or(|c| c == cell));
+                        owner[k as usize] = Some(cell);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blocky_candidates_stand_on_cube_centres() {
+        let mut t = GpuFoliageType { density: 10.0, ..GpuFoliageType::default() };
+        t.kind_and_flags = crate::pack_kind_and_flags(FoliageKind::Block, 0);
+        t.width_range = [0.05, 0.05];
+        let types = [t];
+        let u = uniforms(80, 6400, &types);
+        let cubes = cube_cells(&types, u.tile_size);
+        assert_eq!(cubes, (u.tile_size / 0.05).round() as u32);
+        let mut seen = std::collections::HashSet::new();
+        for index in 0..80 * 80 {
+            let c = reference_candidate(&u, &types, &[], [3, -2], 0, index, &flat_ground);
+            let k = c.tile_uv.map(|x| x * cubes as f32 - 0.5);
+            assert!(k.iter().all(|k| (k - k.round()).abs() < 0.01), "{:?} is not a cube centre", c.tile_uv);
+            assert!(seen.insert(k.map(|k| k.round() as i32)), "two candidates on one cube");
+        }
+    }
+
     #[test]
     fn types_grow_only_on_their_ground() {
         let mut grass = GpuFoliageType::default();

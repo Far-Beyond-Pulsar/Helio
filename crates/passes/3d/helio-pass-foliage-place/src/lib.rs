@@ -111,6 +111,22 @@ pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
 /// indirect args. Changing one without the other draws a truncated or over-long strip.
 pub const FOLIAGE_LOD_VERTEX_COUNTS: [u32; 4] = [11, 7, 4, 4];
 
+/// Cubes in the tallest blocky blade ([`FoliageKind::Block`]): a stack of the type's
+/// cube (`width_range[0]`) as tall as its height rounds to, at most this many.
+pub const FOLIAGE_STACK_CUBES: u32 = 6;
+
+/// Vertices a blocky blade draws at each LOD: per box its three faces turned to the eye
+/// (9) and two degenerate joins to the next (2), the last box without them. L0 draws
+/// every cube, L1 the cubes merged in pairs, L2 and L3 one box. `cs_finalize` draws the
+/// larger of these and [`FOLIAGE_LOD_VERTEX_COUNTS`] at each LOD while any blocky type
+/// has a density; a shorter strip repeats its last vertex.
+pub const FOLIAGE_BLOCK_LOD_VERTEX_COUNTS: [u32; 4] = [
+    11 * FOLIAGE_STACK_CUBES - 2,
+    11 * FOLIAGE_STACK_CUBES.div_ceil(2) - 2,
+    9,
+    9,
+];
+
 /// Number of `u32` blade indices reserved for each LOD region of `visible_blades`.
 ///
 /// 4 × 2²⁰ indices = 16 MiB total. That is sized so **any one** region can hold the
@@ -266,6 +282,12 @@ mod tests {
         // out-of-bounds one is not.
         assert_eq!(lod_region_offset(4), lod_region_offset(3));
         assert_eq!(lod_region_offset(u32::MAX), lod_region_offset(3));
+    }
+
+    #[test]
+    fn block_vertex_counts_hold_their_boxes() {
+        // Duplicated in foliage_cull.wgsl (`cs_finalize`) and foliage_gbuffer.wgsl.
+        assert_eq!(FOLIAGE_BLOCK_LOD_VERTEX_COUNTS, [64, 31, 9, 9]);
     }
 
     #[test]

@@ -63,7 +63,7 @@ impl Harness {
                 let t = GpuFoliageType {
                     density,
                     height_range: [0.1, 0.3],
-                    width_range: [0.02, 0.03],
+                    width_range: [0.05, 0.05],
                     slope_range: [-1.0, 1.0],
                     lod_distances: [6.0, 12.0, 18.0, 22.0],
                     kind_and_flags: pack_kind_and_flags(FoliageKind::Block, 0),

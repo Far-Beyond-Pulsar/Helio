@@ -27,6 +27,8 @@ const FOLIAGE_LOD_NONE: u32 = 4u;
 /// with `LOD_WIDTH_SCALE` / `LOD_HEIGHT_SCALE` in `helio-pass-foliage-gbuffer`, which
 /// size that card to cover sixteen blades.
 const FOLIAGE_LOD_CLUMP: u32 = 3u;
+/// `FoliageKind::Block`: cube stacks, drawn with longer strips (`cs_finalize`).
+const FOLIAGE_KIND_BLOCK: u32 = 3u;
 
 // Mirrors crate::TileState. `Placing` is excluded on purpose: its slab
 // contents are undefined until the placement dispatch's final barrier, so drawing it
@@ -535,12 +537,24 @@ fn cs_finalize(@builtin(local_invocation_index) lane: u32) {
     // 11 / 7 / 4 / 4, matching FOLIAGE_LOD_VERTEX_COUNTS: a 5-segment blade, a 3-segment
     // blade, a card and a clump card, all `TriangleStrip` with no vertex or index buffer.
     // Written as a branch rather than a const array because indexing a `const` array with
-    // a runtime value is not portable across WGSL front-ends.
+    // a runtime value is not portable across WGSL front-ends. While a blocky type has a
+    // density, its cube stacks' 64 / 31 / 9 / 9 (FOLIAGE_BLOCK_LOD_VERTEX_COUNTS) where
+    // larger: a shorter strip repeats its last vertex.
     var vertex_count = 4u;
+    var block_count = 9u;
     if lane == 0u {
         vertex_count = 11u;
+        block_count = 64u;
     } else if lane == 1u {
         vertex_count = 7u;
+        block_count = 31u;
+    }
+    let rows = min(cull.type_count, arrayLength(&types));
+    for (var t = 0u; t < rows; t++) {
+        if (types[t].kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK && types[t].density > 0.0 {
+            vertex_count = max(vertex_count, block_count);
+            break;
+        }
     }
 
     let raw = atomicLoad(&counters[lane]);

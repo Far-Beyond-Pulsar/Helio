@@ -178,7 +178,7 @@ struct TileFrame {
     up: vec3<f32>,
 }
 
-/// Mirror of `helio_pass_foliage_place::FoliageKind::Block`: a blade made of a thin box.
+/// Mirror of `helio_pass_foliage_place::FoliageKind::Block`: a stack of cubes on a grid.
 const FOLIAGE_KIND_BLOCK: u32 = 3u;
 
 /// Mirror of `helio_pass_foliage_place::GpuBladeInstance` (16 bytes).
@@ -406,40 +406,90 @@ fn foliage_to_world(b: BladeBasis, local: vec3<f32>) -> vec3<f32> {
     return b.tangent * local.x + b.up * local.y + b.bitangent * local.z;
 }
 
-/// The blocky blade's strip ([`FoliageKind::Block`]): the two side faces turned to the
-/// eye, then (with `with_top`) the top, as a strip of `vertex_count` vertices with
-/// degenerate joins. `facing` is the eye's direction in the box's own (yawed) xz.
-/// Returns the corner (x, z in -1..1, y 0 or 1) and the face normal of the triangle the
-/// vertex provokes (the first of each strip triangle: flat shading).
-struct BlockVertex {
-    corner: vec3<f32>,
+/// Cubes in the tallest stack (`FOLIAGE_STACK_CUBES`).
+const FOLIAGE_STACK_CUBES: u32 = 6u;
+
+/// One vertex of a blocky blade ([`FoliageKind::Block`]): a stack of `cubes` cubes of
+/// edge `cube`, upright on the tile's grid (no yaw), cube `i` stepped `floor(i * |lean|)`
+/// cubes along each axis the way `lean` points (its tuft's, from placement). Each box draws the three faces turned to the eye as 9 strip
+/// vertices (two sides, then the top) and joins the next box with two degenerate ones.
+/// L0 draws every cube, L1 cubes merged in pairs, L2 and L3 one box (scaled by `scale`:
+/// the LOD's width and height scales and the clump fade). Blade-local, the root at the
+/// origin; `eye` is the eye's (x, z) in the same axes. `anchor` is the box's centre: the
+/// wind moves each box whole.
+struct StackVertex {
+    local: vec3<f32>,
     normal: vec3<f32>,
+    anchor: vec3<f32>,
+    height_frac: f32,
 }
 
-fn foliage_block_vertex(vertex_index: u32, facing: vec2<f32>, with_top: bool) -> BlockVertex {
-    let sx = select(-1.0, 1.0, facing.x >= 0.0);
-    let sz = select(-1.0, 1.0, facing.y >= 0.0);
-    // Sides: (sx, -sz) -> (sx, sz) on the x face, then on to (-sx, sz) on the z face.
-    var corners = array<vec3<f32>, 11>(
-        vec3<f32>(sx, 0.0, -sz), vec3<f32>(sx, 1.0, -sz),
-        vec3<f32>(sx, 0.0, sz), vec3<f32>(sx, 1.0, sz),
+fn foliage_stack_vertex(
+    vertex_index: u32,
+    lod: u32,
+    cube: f32,
+    cubes: u32,
+    lean: vec2<f32>,
+    scale: vec2<f32>,
+    eye: vec2<f32>,
+) -> StackVertex {
+    var out = StackVertex(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), 0.0);
+    if cubes == 0u {
+        return out;
+    }
+    let merged = lod >= 2u;
+    let per = select(1u, 2u, lod == 1u);
+    let boxes = select((cubes + per - 1u) / per, 1u, merged);
+    // Strip position -> box and vertex in it (index 9 repeats the box's last vertex,
+    // index 10 is the next box's first; past the last box, its last vertex again).
+    var b = vertex_index / 11u;
+    var k = vertex_index % 11u;
+    if b >= boxes {
+        b = boxes - 1u;
+        k = 8u;
+    } else if k == 9u {
+        k = 8u;
+    } else if k == 10u {
+        if b + 1u < boxes {
+            b += 1u;
+            k = 0u;
+        } else {
+            k = 8u;
+        }
+    }
+    let first = select(b * per, 0u, merged);
+    let count = select(min(per, cubes - first), cubes, merged);
+    let shift = select(sign(lean) * floor(f32(first) * abs(lean)), vec2<f32>(0.0), merged);
+    let centre = shift * cube;
+    let half = 0.5 * cube * select(1.0, scale.x, merged);
+    let rise = cube * select(1.0, scale.y, merged);
+    let y0 = f32(first) * rise;
+    let y1 = f32(first + count) * rise;
+
+    let sx = select(-1.0, 1.0, eye.x >= centre.x);
+    let sz = select(-1.0, 1.0, eye.y >= centre.y);
+    // Q0 Q1 P0 P1 R0 R1 P1 S1 Q1: P is the edge between the two sides turned to the eye,
+    // Q and R their far edges, S the top's far corner.
+    var corners = array<vec3<f32>, 9>(
         vec3<f32>(-sx, 0.0, sz), vec3<f32>(-sx, 1.0, sz),
-        // The top: two degenerate joins, then its two triangles (R S F, S F A).
-        vec3<f32>(-sx, 1.0, sz), vec3<f32>(sx, 1.0, sz),
-        vec3<f32>(-sx, 1.0, -sz), vec3<f32>(sx, 1.0, -sz),
-        vec3<f32>(sx, 1.0, -sz),
+        vec3<f32>(sx, 0.0, sz), vec3<f32>(sx, 1.0, sz),
+        vec3<f32>(sx, 0.0, -sz), vec3<f32>(sx, 1.0, -sz),
+        vec3<f32>(sx, 1.0, sz), vec3<f32>(-sx, 1.0, -sz),
+        vec3<f32>(-sx, 1.0, sz),
     );
-    var normals = array<vec3<f32>, 11>(
-        vec3<f32>(sx, 0.0, 0.0), vec3<f32>(sx, 0.0, 0.0),
+    // The normal of the triangle each vertex provokes (the first of each: flat faces).
+    var normals = array<vec3<f32>, 9>(
         vec3<f32>(0.0, 0.0, sz), vec3<f32>(0.0, 0.0, sz),
+        vec3<f32>(sx, 0.0, 0.0), vec3<f32>(sx, 0.0, 0.0), vec3<f32>(sx, 0.0, 0.0),
         vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
         vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0),
     );
-    // Without the top (fewer vertices), the strip ends by repeating its last side vertex.
-    let i = select(min(vertex_index, 5u), min(vertex_index, 10u), with_top);
-    return BlockVertex(corners[i], normals[i]);
+    let c = corners[k];
+    out.local = vec3<f32>(centre.x + c.x * half, mix(y0, y1, c.y), centre.y + c.z * half);
+    out.normal = normals[k];
+    out.anchor = vec3<f32>(centre.x, 0.5 * (y0 + y1), centre.y);
+    out.height_frac = out.local.y / max(f32(cubes) * rise, 1.0e-6);
+    return out;
 }
 
 /// Rotate a blade-local offset about +Y by `yaw`.
@@ -609,8 +659,11 @@ fn vs_main(
 
     // ── Derive the vertex ─────────────────────────────────────────────────────
     let is_card = lod_info.is_card != 0u;
-    let blocky = (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK && !is_card;
-    var v = foliage_blade_vertex(lod_info.segments, is_card, vertex_index);
+    let blocky = (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK;
+    // The draw is as long as the longest strip of the kinds present (`cs_finalize`): a
+    // shorter one repeats its last vertex.
+    let own_count = select(2u * lod_info.segments + 1u, 4u, is_card);
+    var v = foliage_blade_vertex(lod_info.segments, is_card, min(vertex_index, own_count - 1u));
     // Cards are flat: a curled card would swing its silhouette at the L1→L2 boundary
     // where the blade it replaces is still nearly straight, which is exactly the
     // continuity the plan's §6.3 card-orientation rule is protecting.
@@ -627,20 +680,41 @@ fn vs_main(
         -2.0 * curve * v.height_frac,
         max(height, 1.0e-6),
     ));
+    var world_base = root + foliage_to_world(basis, foliage_yaw_rotate(local, yaw));
+    var world_normal = foliage_to_world(basis, foliage_yaw_rotate(local_normal, yaw));
+    // Where the wind is evaluated, and at what height: the vertex, or a cube's centre.
+    var wind_at = world_base;
+    var wind_frac = v.height_frac;
+    let seed = blade.packed_tint_seed >> 16u;
     if blocky {
-        // A box `width` square: its two sides turned to the eye (the eye's direction in
-        // the box's own yawed xz picks them) and, near the eye, its top.
+        // Cubes of the type's `width_min`, upright on the tile's grid: placement stood
+        // the root on a cube's centre. As many as the height rounds to, leaning out of
+        // its tuft: placement packed the lean where a blade's yaw goes.
+        let cube = max(ty.width_min, 1.0e-3);
+        let tall = mix(ty.height_min, ty.height_max, height_lerp) * scale_in;
+        let cubes = min(u32(round(tall / cube)), FOLIAGE_STACK_CUBES);
+        let lean_bits = blade.packed_height_yaw >> 16u;
+        let lean = vec2<f32>(
+            foliage_unorm8(lean_bits & 0xffu),
+            foliage_unorm8((lean_bits >> 8u) & 0xffu),
+        ) * 2.0 - 1.0;
         let to_eye = camera_pos - root;
         let eye_local = vec2<f32>(dot(to_eye, basis.tangent), dot(to_eye, basis.bitangent));
-        let s = sin(yaw);
-        let c = cos(yaw);
-        let facing = vec2<f32>(eye_local.x * c - eye_local.y * s, eye_local.x * s + eye_local.y * c);
-        let b = foliage_block_vertex(vertex_index, facing, lod_info.segments >= 5u);
-        local = vec3<f32>(b.corner.x * 0.5 * width, b.corner.y * height, b.corner.z * 0.5 * width);
-        local_normal = b.normal;
-        v.height_frac = b.corner.y;
+        let st = foliage_stack_vertex(
+            vertex_index,
+            lod_info.lod,
+            cube,
+            cubes,
+            lean,
+            vec2<f32>(lod_info.width_scale, lod_info.height_scale) * size_fade,
+            eye_local,
+        );
+        v.height_frac = st.height_frac;
+        world_base = root + foliage_to_world(basis, st.local);
+        world_normal = foliage_to_world(basis, st.normal);
+        wind_at = root + foliage_to_world(basis, st.anchor);
+        wind_frac = st.anchor.y / max(f32(cubes) * cube, 1.0e-6);
     }
-    let world_base = root + foliage_to_world(basis, foliage_yaw_rotate(local, yaw));
 
     // ── Wind, evaluated at BOTH timestamps ────────────────────────────────────
     //
@@ -648,13 +722,12 @@ fn vs_main(
     // is the single change that would make every blade of grass in the frame smear under
     // TAA and take the LOD cross-fade down with it. See the file header.
     let response = vec3<f32>(ty.wind_trunk, ty.wind_branch, ty.wind_leaf);
-    let seed = blade.packed_tint_seed >> 16u;
     // The wind model sways in a +Y-up frame: its offset turned into the tile's.
     let wind_now = foliage_to_world(basis, helio_wind_offset(
-        wind, world_base, root, v.height_frac, seed, response, globals.clock_ring.x,
+        wind, wind_at, root, wind_frac, seed, response, globals.clock_ring.x,
     ));
     let wind_prev = foliage_to_world(basis, helio_wind_offset(
-        wind, world_base, root, v.height_frac, seed, response, globals.clock_ring.y,
+        wind, wind_at, root, wind_frac, seed, response, globals.clock_ring.y,
     ));
 
     // The interaction bend is added to both positions, so it currently contributes no
@@ -670,7 +743,7 @@ fn vs_main(
     var out: VertexOutput;
     out.clip_position = cameras[0].view_proj * vec4<f32>(position_now, 1.0);
     out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(position_prev, 1.0);
-    out.world_normal = foliage_to_world(basis, foliage_yaw_rotate(local_normal, yaw));
+    out.world_normal = world_normal;
     out.face_normal = out.world_normal;
     out.blocky = u32(blocky);
     out.height_frac = v.height_frac;
