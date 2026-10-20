@@ -255,6 +255,12 @@ pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
+    /// Colour the default graphs' `Background` pass writes into `pre_aa` before any geometry.
+    ///
+    /// Defaults to opaque black, matching the retired hard-coded clear. Alpha is preserved by the
+    /// FXAA, fog-composite and post-process passes, so `[0.0; 4]` leaves the scene background
+    /// transparent for a compositor (GPUI's `paint_surface` blends the dma-buf with alpha).
+    pub background_color: [f32; 4],
     pub gi_config: GiConfig,
     pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
@@ -359,6 +365,7 @@ impl RendererConfig {
             width: width.max(1),
             height: height.max(1),
             surface_format,
+            background_color: [0.0, 0.0, 0.0, 1.0],
             gi_config: GiConfig::default(),
             shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
@@ -378,6 +385,12 @@ impl RendererConfig {
             enable_xr: false,
             enable_portals: true,
         }
+    }
+
+    /// Set the default graphs' scene clear colour. Use alpha 0 for a transparent background.
+    pub fn with_background_color(mut self, color: [f32; 4]) -> Self {
+        self.background_color = color;
+        self
     }
 
     /// Enable/disable environment-cubemap indirect specular.

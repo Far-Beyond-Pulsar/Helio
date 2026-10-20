@@ -344,7 +344,10 @@ fn add_common_early_passes(
 
     // The black background the sky (the atmosphere composite) and every
     // lighting pass draw over.
-    graph.add_pass(Box::new(BackgroundPass::new(config.surface_format)));
+    graph.add_pass(Box::new(BackgroundPass::new(
+        config.surface_format,
+        config.background_color,
+    )));
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(
         device,

@@ -79,11 +79,12 @@ fn sample_medium(uv: vec2<f32>, slice: f32) -> vec4<f32> {
 @fragment
 fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.pos.xy);
-    let color = textureLoad(scene_color, pixel, 0).rgb;
+    let source = textureLoad(scene_color, pixel, 0);
+    let color = source.rgb;
     let far = fog_parameters.max_distance;
     // Zero range: no fog producer (neutral fallback buffer). Pass through.
     if !(far > HELIO_FROXEL_NEAR) {
-        return vec4<f32>(color, 1.0);
+        return vec4<f32>(color, source.a);
     }
     let depth_dims = vec2<f32>(textureDimensions(scene_depth));
     let depth_pixel = vec2<i32>(in.uv * depth_dims);
@@ -104,5 +105,5 @@ fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
     let medium = sample_medium(grid_uv, slice);
     // Beer-Lambert attenuation of the surface plus scattered radiance. HDR is
     // preserved; exposure and tone mapping happen once, later.
-    return vec4<f32>(color * clamp(medium.a, 0.0, 1.0) + max(medium.rgb, vec3<f32>(0.0)), 1.0);
+    return vec4<f32>(color * clamp(medium.a, 0.0, 1.0) + max(medium.rgb, vec3<f32>(0.0)), source.a);
 }
