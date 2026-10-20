@@ -50,17 +50,14 @@ impl LutBuilder {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("LUT Build Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("LUT Build Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let (tex, view) = Self::create_texture(device, size);
 

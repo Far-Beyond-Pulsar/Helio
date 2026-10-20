@@ -90,11 +90,7 @@ impl LightCullPass {
             .checked_mul(num_tiles_y)
             .expect("tile grid overflow: viewport dimensions too large");
 
-        let shader = helio_core::shader::module(
-            device,
-            "LightCull Shader",
-            helio_core::include_wgsl!("../shaders/light_cull.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "LightCull Shader", helio_core::include_wgsl!("../shaders/light_cull.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LightCull BGL"),
@@ -187,31 +183,25 @@ impl LightCullPass {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("LightCull Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("LightCull Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         // Separate layout: the compaction output is writable here and read-only
         // in the tile kernel. Never bind the same buffer with conflicting usage.
-        let compact_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("LightCull Compact Pipeline"),
-                layout: None,
-                module: &shader,
-                entry_point: Some("compact_lights"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let compact_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("LightCull Compact Pipeline"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("compact_lights"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let active_indices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Active light indices"),
             size: 8,
@@ -230,9 +220,7 @@ impl LightCullPass {
         let tile_light_lists = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightLists"),
             size: list_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -240,9 +228,7 @@ impl LightCullPass {
         let tile_light_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightCounts"),
             size: count_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -288,9 +274,7 @@ impl RenderPass for LightCullPass {
         self.tile_light_lists = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightLists"),
             size: list_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -298,9 +282,7 @@ impl RenderPass for LightCullPass {
         self.tile_light_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightCounts"),
             size: count_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
@@ -323,18 +305,9 @@ impl RenderPass for LightCullPass {
             unsafe { std::mem::transmute(&self.tile_light_lists) };
         let tile_light_counts: &'a wgpu::Buffer =
             unsafe { std::mem::transmute(&self.tile_light_counts) };
-        frame.write(
-            helio_core::ResourceKey::new("tile_light_lists"),
-            tile_light_lists,
-            "LightCull",
-        );
-        frame.write(
-            helio_core::ResourceKey::new("tile_light_counts"),
-            tile_light_counts,
-            "LightCull",
-        );
-        frame.write(
-            helio_core::ResourceKey::new("cluster_light_grid"),
+        frame.write(helio_core::ResourceKey::new("tile_light_lists"), tile_light_lists, "LightCull");
+        frame.write(helio_core::ResourceKey::new("tile_light_counts"), tile_light_counts, "LightCull");
+        frame.write(helio_core::ResourceKey::new("cluster_light_grid"),
             crate::ClusterLightGrid {
                 tile_light_lists,
                 tile_light_counts,
@@ -441,25 +414,15 @@ impl RenderPass for LightCullPass {
             if self.compact_bind_group.is_none()
                 || self.compact_key.map(|key| key.0) != Some(lights_gen.0)
             {
-                self.compact_bind_group =
-                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("LightCull Compact BG"),
-                        layout: &self.compact_pipeline.get_bind_group_layout(0),
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: self.params_buf.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: lights_buf.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 7,
-                                resource: self.active_indices.as_entire_binding(),
-                            },
-                        ],
-                    }));
+                self.compact_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("LightCull Compact BG"),
+                    layout: &self.compact_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: lights_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.active_indices.as_entire_binding() },
+                    ],
+                }));
             }
             let mut cmds = ctx.graphics_cmds();
             cmds.clear_buffer(&self.active_indices, 0, Some(4));

@@ -120,74 +120,64 @@ impl Transmittance {
             ],
         });
 
-        let shader = helio_core::shader::module(
-            device,
-            "Shadow/Transmittance",
-            helio_core::include_wgsl!("../shaders/shadow_transmittance.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "Shadow/Transmittance", helio_core::include_wgsl!("../shaders/shadow_transmittance.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow/Transmittance PL"),
             bind_group_layouts: &[Some(bgl_0), Some(&bgl_1)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("Shadow/Transmittance Pipeline"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[
-                        Some(wgpu::VertexBufferLayout {
-                            array_stride: 40,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            }],
-                        }),
-                        Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT),
-                    ],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: TRANSMITTANCE_FORMAT,
-                        blend: Some(wgpu::BlendState {
-                            // rgb = 1 - T: src (1 - dst) + dst = 1 - T_src T_dst,
-                            // so panes in series multiply.
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::OneMinusDst,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            // a = 1 - nearest pane depth.
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Max,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    // Panes are single sheets: both sides filter the light.
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow/Transmittance Pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 40,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TRANSMITTANCE_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        // rgb = 1 - T: src (1 - dst) + dst = 1 - T_src T_dst,
+                        // so panes in series multiply.
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::OneMinusDst,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        // a = 1 - nearest pane depth.
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Max,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Panes are single sheets: both sides filter the light.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let clear_source = format!(
             "{}\n@fragment fn fs_clear() -> @location(0) vec4f {{ return vec4f(0); }}",
@@ -202,34 +192,31 @@ impl Transmittance {
             bind_group_layouts: &[Some(bgl_0)],
             immediate_size: 0,
         });
-        let clear_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("Clear transmission tile"),
-                layout: Some(&clear_layout),
-                vertex: wgpu::VertexState {
-                    module: &clear_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &clear_shader,
-                    entry_point: Some("fs_clear"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: TRANSMITTANCE_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
+        let clear_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("Clear transmission tile"),
+            layout: Some(&clear_layout),
+            vertex: wgpu::VertexState {
+                module: &clear_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &clear_shader,
+                entry_point: Some("fs_clear"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TRANSMITTANCE_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         Self {
             pipeline,

@@ -3,12 +3,13 @@ use crate::{
     VirtualGeometryDebugStats, DRAW_COUNTER_BYTES, INITIAL_INSTANCES, INITIAL_MESHLETS,
     INITIAL_OBJECTS,
 };
-use crate::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
-    DebugViewDescriptor, PassContext, PrepareContext, RenderCmds, RenderPass, Result as HelioResult,
+    DebugViewDescriptor, PassContext, PrepareContext, RenderCmds, RenderPass,
+    Result as HelioResult,
 };
 use helio_pass_object_batch::GpuInstanceData;
+use crate::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
 use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -97,11 +98,7 @@ impl VirtualGeometryPass {
         budget: VirtualGeometryBudget,
     ) -> Self {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
-        let cull_shader = helio_core::shader::module(
-            device,
-            "VG Cull Shader",
-            helio_core::include_wgsl!("../shaders/vg_cull.wgsl"),
-        );
+        let cull_shader = helio_core::shader::module(device, "VG Cull Shader", helio_core::include_wgsl!("../shaders/vg_cull.wgsl"));
         let draw_shader_source = {
             let text = helio_core::shader::source_text(
                 "VG GBuffer Shader",
@@ -289,28 +286,22 @@ impl VirtualGeometryPass {
             bind_group_layouts: &[Some(&cull_bgl)],
             immediate_size: 0,
         });
-        let select_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("VG Object Select Pipeline"),
-                layout: Some(&cull_pipeline_layout),
-                module: &cull_shader,
-                entry_point: Some("cs_select_objects"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
-        let cull_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("VG Meshlet Cull Pipeline"),
-                layout: Some(&cull_pipeline_layout),
-                module: &cull_shader,
-                entry_point: Some("cs_cull_meshlets"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let select_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("VG Object Select Pipeline"),
+            layout: Some(&cull_pipeline_layout),
+            module: &cull_shader,
+            entry_point: Some("cs_select_objects"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let cull_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("VG Meshlet Cull Pipeline"),
+            layout: Some(&cull_pipeline_layout),
+            module: &cull_shader,
+            entry_point: Some("cs_cull_meshlets"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let draw_bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VG Draw BGL0"),
@@ -388,40 +379,37 @@ impl VirtualGeometryPass {
             bind_group_layouts: &[Some(&draw_bgl_0), Some(&draw_bgl_1)],
             immediate_size: 0,
         });
-        let vg_vertex_buffers = &[
-            Some(wgpu::VertexBufferLayout {
-                array_stride: 40,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32,
-                        offset: 12,
-                        shader_location: 1,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x2,
-                        offset: 16,
-                        shader_location: 2,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Uint32,
-                        offset: 32,
-                        shader_location: 3,
-                    },
-                    wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Uint32,
-                        offset: 36,
-                        shader_location: 4,
-                    },
-                ],
-            }),
-            Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT),
-        ];
+        let vg_vertex_buffers = &[Some(wgpu::VertexBufferLayout {
+            array_stride: 40,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 12,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 16,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 32,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 36,
+                    shader_location: 4,
+                },
+            ],
+        }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)];
         let gbuffer_targets = &[
             Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
@@ -473,54 +461,22 @@ impl VirtualGeometryPass {
         });
 
         let make_draw_pipeline = |label: &'static str, constants: &[(&str, f64)]| {
-            helio_core::shader::create_render_pipeline(
-                &device,
-                wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&draw_pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &draw_shader,
-                        entry_point: Some("vs_main"),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        buffers: vg_vertex_buffers,
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &draw_shader,
-                        entry_point: Some("fs_main"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants,
-                            ..Default::default()
-                        },
-                        targets: gbuffer_targets,
-                    }),
-                    primitive: draw_primitive,
-                    depth_stencil: draw_depth.clone(),
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                },
-            )
-        };
-
-        let opaque_draw_pipeline = make_draw_pipeline("VG Opaque Draw Pipeline", &[]);
-        let alpha_draw_pipeline =
-            make_draw_pipeline("VG Alpha Draw Pipeline", &[("has_alpha_test", 1.0)]);
-
-        let debug_draw_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("VG Debug Pipeline"),
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+                label: Some(label),
                 layout: Some(&draw_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &draw_shader,
                     entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: vg_vertex_buffers,
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &draw_shader,
-                    entry_point: Some("fs_debug"),
-                    compilation_options: Default::default(),
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
                     targets: gbuffer_targets,
                 }),
                 primitive: draw_primitive,
@@ -528,33 +484,56 @@ impl VirtualGeometryPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            },
-        );
+            })
+        };
 
-        let lod_debug_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("VG LOD Debug Pipeline"),
-                layout: Some(&draw_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &draw_shader,
-                    entry_point: Some("vs_debug_lod"),
-                    compilation_options: Default::default(),
-                    buffers: vg_vertex_buffers,
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &draw_shader,
-                    entry_point: Some("fs_debug_lod"),
-                    compilation_options: Default::default(),
-                    targets: gbuffer_targets,
-                }),
-                primitive: draw_primitive,
-                depth_stencil: draw_depth,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let opaque_draw_pipeline = make_draw_pipeline("VG Opaque Draw Pipeline", &[]);
+        let alpha_draw_pipeline =
+            make_draw_pipeline("VG Alpha Draw Pipeline", &[("has_alpha_test", 1.0)]);
+
+        let debug_draw_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("VG Debug Pipeline"),
+            layout: Some(&draw_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &draw_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: vg_vertex_buffers,
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &draw_shader,
+                entry_point: Some("fs_debug"),
+                compilation_options: Default::default(),
+                targets: gbuffer_targets,
+            }),
+            primitive: draw_primitive,
+            depth_stencil: draw_depth.clone(),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let lod_debug_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("VG LOD Debug Pipeline"),
+            layout: Some(&draw_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &draw_shader,
+                entry_point: Some("vs_debug_lod"),
+                compilation_options: Default::default(),
+                buffers: vg_vertex_buffers,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &draw_shader,
+                entry_point: Some("fs_debug_lod"),
+                compilation_options: Default::default(),
+                targets: gbuffer_targets,
+            }),
+            primitive: draw_primitive,
+            depth_stencil: draw_depth,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         Self {
             material_binding,
@@ -782,9 +761,7 @@ impl RenderPass for VirtualGeometryPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.poll_debug_readback(ctx.device, ctx.owns_device);
 
-        let Some(vg): Option<crate::VgFrameData<'_>> =
-            ctx.registry.get(helio_core::ResourceKey::new("vg"))
-        else {
+        let Some(vg): Option<crate::VgFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("vg")) else {
             return Ok(());
         };
 
@@ -977,17 +954,10 @@ impl RenderPass for VirtualGeometryPass {
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
-        let Some(material_textures): Option<helio_mats::MaterialTextureBindings<'_>> =
-            ctx.registry.read(
-                helio_core::resource_keys::material_textures(),
-                "VirtualGeometry",
-            )
-        else {
+        let Some(material_textures): Option<helio_mats::MaterialTextureBindings<'_>> = ctx.registry.read(helio_core::resource_keys::material_textures(), "VirtualGeometry") else {
             return Ok(());
         };
-        let environment: Option<helio_core::RenderEnvironment<'_>> = ctx
-            .registry
-            .get(helio_core::resource_keys::render_environment());
+        let environment: Option<helio_core::RenderEnvironment<'_>> = ctx.registry.get(helio_core::resource_keys::render_environment());
         let rc_volume = ctx
             .registry
             .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
@@ -1027,19 +997,11 @@ impl RenderPass for VirtualGeometryPass {
                 .scene_buffers
                 .get(BufferKey::of("scene_lights"))
                 .map_or(0, |lights| lights.row_capacity()),
-            ambient_intensity: environment
-                .map(|value| value.ambient_intensity)
-                .unwrap_or(0.1),
+            ambient_intensity: environment.map(|value| value.ambient_intensity).unwrap_or(0.1),
             ambient_color: [
-                environment
-                    .map(|value| value.ambient_color[0])
-                    .unwrap_or(0.1),
-                environment
-                    .map(|value| value.ambient_color[1])
-                    .unwrap_or(0.1),
-                environment
-                    .map(|value| value.ambient_color[2])
-                    .unwrap_or(0.15),
+                environment.map(|value| value.ambient_color[0]).unwrap_or(0.1),
+                environment.map(|value| value.ambient_color[1]).unwrap_or(0.1),
+                environment.map(|value| value.ambient_color[2]).unwrap_or(0.15),
                 0.0,
             ],
             rc_world_min: [
@@ -1072,22 +1034,12 @@ impl RenderPass for VirtualGeometryPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer: helio_core::ViewGroup<'_, 4> =
-            resources.read(helio_core::ResourceKey::new("gbuffer"), "VirtualGeometry")?;
-        let lightmap_uv = resources.read(
-            helio_core::ResourceKey::new("gbuffer_lightmap_uv"),
-            "VirtualGeometry",
-        )?;
-        let sss = resources.read(
-            helio_core::ResourceKey::new("gbuffer_sss"),
-            "VirtualGeometry",
-        )?;
-        let extra = resources.read(
-            helio_core::ResourceKey::new("gbuffer_extra"),
-            "VirtualGeometry",
-        )?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
-            .retain_boxed_slice(Box::new([
+        let gbuffer: helio_core::ViewGroup<'_, 4> = resources.read(helio_core::ResourceKey::new("gbuffer"), "VirtualGeometry")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "VirtualGeometry")?;
+        let sss = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "VirtualGeometry")?;
+        let extra = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "VirtualGeometry")?;
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -1187,8 +1139,7 @@ impl RenderPass for VirtualGeometryPass {
             .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("hiz_sampler"))
             .expect("VirtualGeometry: 'hiz_sampler' not available");
         let hiz_key = (hiz_view.clone(), hiz_sampler.clone());
-        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key.as_ref() != Some(&hiz_key)
-        {
+        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key.as_ref() != Some(&hiz_key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Cull BG"),
                 layout: &self.cull_bgl,
@@ -1265,11 +1216,15 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else {
             return Ok(());
         };
-        let Some(vertices_handle) = ctx.scene_buffers.get(BufferKey::of("builtin_mesh_vertex"))
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
         else {
             return Ok(());
         };
-        let Some(indices_handle) = ctx.scene_buffers.get(BufferKey::of("builtin_mesh_index"))
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
         else {
             return Ok(());
         };
@@ -1341,7 +1296,10 @@ impl RenderPass for VirtualGeometryPass {
             rpass.set_bind_group(1, draw_bg1, &[]);
             rpass.set_vertex_buffer(0, vertices.slice(..));
             rpass.set_vertex_buffer(1, slots.slice(..));
-            rpass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            rpass.set_index_buffer(
+                indices.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
 
             let opaque_capacity = max_draw_count / 2;
 
@@ -1351,12 +1309,12 @@ impl RenderPass for VirtualGeometryPass {
                                count: u32,
                                counter_byte: u64| {
                 rpass.set_pipeline(pipeline);
-                let gpu_count =
-                    self.use_count_indirect
-                        .then_some(helio_pass_gbuffer::GpuDrawCount {
-                            buffer: &self.draw_count_buf,
-                            offset: counter_byte,
-                        });
+                let gpu_count = self.use_count_indirect.then_some(
+                    helio_pass_gbuffer::GpuDrawCount {
+                        buffer: &self.draw_count_buf,
+                        offset: counter_byte,
+                    },
+                );
                 helio_pass_gbuffer::multi_draw_indexed_indirect(
                     rpass,
                     &self.indirect_buf,
@@ -1383,13 +1341,7 @@ impl RenderPass for VirtualGeometryPass {
                     );
                 }
                 _ => {
-                    draw_region(
-                        &mut rpass,
-                        &self.opaque_draw_pipeline,
-                        0,
-                        opaque_capacity,
-                        0,
-                    );
+                    draw_region(&mut rpass, &self.opaque_draw_pipeline, 0, opaque_capacity, 0);
                     draw_region(
                         &mut rpass,
                         &self.alpha_draw_pipeline,
@@ -1405,13 +1357,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "gbuffer",
-            "material_textures",
-            "render_environment",
-            "vg",
-            "hiz",
-        ]
+        &["gbuffer", "material_textures", "render_environment", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &[
@@ -1485,3 +1431,5 @@ fn create_material_bgl(
         entries: &entries,
     })
 }
+
+

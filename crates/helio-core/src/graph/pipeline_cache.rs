@@ -42,10 +42,8 @@ fn shared_driver_cache(
         return (None, requested_path, None);
     }
 
-    // Every graph and pass constructor on a Device must feed the same wgpu
-    // cache. The Arc<Device> held by RenderGraph keeps this address stable for
-    // the lifetime of its cache; a weak cache entry avoids retaining old GPU
-    // devices after their last renderer is closed.
+    // All graphs and pass constructors using one Device share this cache.
+    // Keep a weak registry entry so closing a renderer releases its Device.
     let device_key = device as *const wgpu::Device as usize;
     let caches = DRIVER_CACHES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut caches = caches
@@ -54,10 +52,8 @@ fn shared_driver_cache(
 
     if let Some(record) = caches.get(&device_key) {
         if let Some(cache) = record.cache.upgrade() {
-            // An explicitly persistent cache can upgrade a live in-memory
-            // cache when graph setup opts in before constructing any passes.
-            // Once a cache already has a path, keep that first path for the
-            // Device so every graph continues sharing one driver cache.
+            // A graph opts into persistence before adding passes. If an
+            // in-memory graph cache exists, replace it with the loaded cache.
             let upgrade_to_persistent = record.path.is_none() && requested_path.is_some();
             if !upgrade_to_persistent {
                 return (
@@ -94,8 +90,7 @@ fn shared_driver_cache(
     (Some(cache), path, Some(persist_lock))
 }
 
-/// The wgpu cache shared by all pipeline construction for this device, when
-/// the device enabled the optional pipeline-cache feature.
+/// The wgpu cache shared by all pipeline construction for this device.
 pub(crate) fn driver_cache_for_device(device: &wgpu::Device) -> Option<Arc<wgpu::PipelineCache>> {
     let path = std::env::var_os("PULSAR_PIPELINE_CACHE").map(std::path::PathBuf::from);
     shared_driver_cache(device, path).0
@@ -407,7 +402,8 @@ impl PipelineFormatCache {
         path: impl Into<std::path::PathBuf>,
     ) -> Self {
         let path = path.into();
-        let (driver_cache, persistent_path, persist_lock) = shared_driver_cache(device, Some(path));
+        let (driver_cache, persistent_path, persist_lock) =
+            shared_driver_cache(device, Some(path));
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             build_lock: Arc::new(Mutex::new(())),
@@ -666,10 +662,10 @@ impl PipelineFormatCache {
         let Some(path) = &self.persistent_path else {
             return Ok(());
         };
-        let _persist_guard = self.persist_lock.as_ref().map(|lock| {
-            lock.lock()
-                .expect("driver pipeline cache persist lock poisoned")
-        });
+        let _persist_guard = self
+            .persist_lock
+            .as_ref()
+            .map(|lock| lock.lock().expect("driver pipeline cache persist lock poisoned"));
         let Some(data) = self
             .driver_cache
             .as_ref()

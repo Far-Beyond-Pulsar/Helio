@@ -11,9 +11,7 @@
 //!    against unrelated nearby real geometry.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{
-    PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult,
-};
+use helio_core::{PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
 pub struct PortalMaskPass {
@@ -35,11 +33,7 @@ pub struct PortalMaskPass {
 
 impl PortalMaskPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "PortalMask Shader",
-            helio_core::include_wgsl!("../shaders/portal_mask.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "PortalMask Shader", helio_core::include_wgsl!("../shaders/portal_mask.wgsl"));
 
         // ── Stamp pipeline: draw each portal's real opening quad, testing
         // (read-only) against real depth, writing portal_index+1 to the mask.
@@ -73,77 +67,74 @@ impl PortalMaskPass {
             bind_group_layouts: &[Some(&stamp_bgl)],
             immediate_size: 0,
         });
-        let stamp_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("PortalMask Stamp Pipeline"),
-                layout: Some(&stamp_pl),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_stamp"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_stamp"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Uint,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    // Both winding directions valid — sign of the composed
-                    // transform's determinant isn't guaranteed either way.
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    // Writes ARE enabled here, even though this same depth
-                    // buffer holds GBufferPass's real scene depth. That real
-                    // depth still isn't disturbed for anything downstream: every
-                    // pixel this stamp can possibly touch is, by construction,
-                    // unconditionally overwritten again a moment later by
-                    // PortalMaskReset (below) to a single canonical far-plane
-                    // value, so nothing after this pass ever observes whatever
-                    // depth a portal quad happened to write. What the write
-                    // *does* do is give multiple portals' quads correct
-                    // depth-ordering against each other within this one draw
-                    // call — e.g. two faces of a portal cube both filling the
-                    // screen from an oblique angle, with no real wall between
-                    // them to occlude the farther one via the real-depth test
-                    // alone. Without this, whichever portal happened to
-                    // rasterize last simply overwrote the mask at every
-                    // overlapping pixel regardless of which one was actually
-                    // nearer — the "z-fighting"/wrong-layering symptom. With it,
-                    // ordinary depth buffering resolves overlaps correctly
-                    // regardless of instance submission order: nearer-portal
-                    // fragments always win, the same as any other opaque
-                    // geometry.
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                    stencil: wgpu::StencilState::default(),
-                    // The quad is meant to be flush with the portal's real
-                    // surrounding surface (so content lines up exactly with no
-                    // seam) — e.g. a portal placed right at the end of a
-                    // corridor is coplanar with that corridor's own walls right
-                    // at the boundary. Without a nudge, that coincident geometry
-                    // is a coin-flip depth tie at the portal's edge, so the
-                    // stamp randomly loses a thin border of pixels there and
-                    // leaves them unmasked — a visible gap between the portal's
-                    // content and the real scene around it. Push the quad
-                    // slightly toward the camera so it reliably wins.
-                    bias: helio_core::depth::bias_toward_camera(2, 0.0, 0.0),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let stamp_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("PortalMask Stamp Pipeline"),
+            layout: Some(&stamp_pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_stamp"),
+                compilation_options: Default::default(),
+                buffers: &[],
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_stamp"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Both winding directions valid — sign of the composed
+                // transform's determinant isn't guaranteed either way.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Writes ARE enabled here, even though this same depth
+                // buffer holds GBufferPass's real scene depth. That real
+                // depth still isn't disturbed for anything downstream: every
+                // pixel this stamp can possibly touch is, by construction,
+                // unconditionally overwritten again a moment later by
+                // PortalMaskReset (below) to a single canonical far-plane
+                // value, so nothing after this pass ever observes whatever
+                // depth a portal quad happened to write. What the write
+                // *does* do is give multiple portals' quads correct
+                // depth-ordering against each other within this one draw
+                // call — e.g. two faces of a portal cube both filling the
+                // screen from an oblique angle, with no real wall between
+                // them to occlude the farther one via the real-depth test
+                // alone. Without this, whichever portal happened to
+                // rasterize last simply overwrote the mask at every
+                // overlapping pixel regardless of which one was actually
+                // nearer — the "z-fighting"/wrong-layering symptom. With it,
+                // ordinary depth buffering resolves overlaps correctly
+                // regardless of instance submission order: nearer-portal
+                // fragments always win, the same as any other opaque
+                // geometry.
+                depth_write_enabled: Some(true),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                stencil: wgpu::StencilState::default(),
+                // The quad is meant to be flush with the portal's real
+                // surrounding surface (so content lines up exactly with no
+                // seam) — e.g. a portal placed right at the end of a
+                // corridor is coplanar with that corridor's own walls right
+                // at the boundary. Without a nudge, that coincident geometry
+                // is a coin-flip depth tie at the portal's edge, so the
+                // stamp randomly loses a thin border of pixels there and
+                // leaves them unmasked — a visible gap between the portal's
+                // content and the real scene around it. Push the quad
+                // slightly toward the camera so it reliably wins.
+                bias: helio_core::depth::bias_toward_camera(2, 0.0, 0.0),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         // ── Reset pipeline: full-screen triangle, writes far depth wherever
         // the mask just stamped is non-zero.
@@ -165,42 +156,39 @@ impl PortalMaskPass {
             bind_group_layouts: &[Some(&reset_bgl)],
             immediate_size: 0,
         });
-        let reset_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("PortalMask Reset Pipeline"),
-                layout: Some(&reset_pl),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_reset"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_reset"),
-                    compilation_options: Default::default(),
-                    targets: &[],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    // Unconditional write for surviving (non-discarded) fragments
-                    // — the mask lookup in fs_reset is the real gate, not depth.
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let reset_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("PortalMask Reset Pipeline"),
+            layout: Some(&reset_pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_reset"),
+                compilation_options: Default::default(),
+                buffers: &[],
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_reset"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Unconditional write for surviving (non-discarded) fragments
+                // — the mask lookup in fs_reset is the real gate, not depth.
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         Self {
             stamp_pipeline,

@@ -169,12 +169,7 @@ const RW: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE
     .union(wgpu::BufferUsages::COPY_DST)
     .union(wgpu::BufferUsages::COPY_SRC);
 
-fn buffer(
-    device: &wgpu::Device,
-    label: &str,
-    size: u64,
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
+fn buffer(device: &wgpu::Device, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
@@ -232,17 +227,14 @@ impl HierarchyResolve {
             immediate_size: 0,
         });
         let pipeline = |entry: &str| {
-            helio_core::shader::create_compute_pipeline(
-                &device,
-                wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            )
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         };
         Self {
             keys,
@@ -262,12 +254,7 @@ impl HierarchyResolve {
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             ),
             world: buffer(device, "Hierarchy Resolve World", TRANSFORM_ROW_BYTES, RW),
-            placement: buffer(
-                device,
-                "Hierarchy Resolve Placement",
-                TRANSFORM_ROW_BYTES,
-                RW,
-            ),
+            placement: buffer(device, "Hierarchy Resolve Placement", TRANSFORM_ROW_BYTES, RW),
             spaces: buffer(device, "Hierarchy Resolve Spaces", 4, RW),
             changed: buffer(device, "Hierarchy Resolve Changed", 16, RW),
             moved: buffer(device, "Hierarchy Resolve Moved", 16, RW),
@@ -279,18 +266,8 @@ impl HierarchyResolve {
                     | wgpu::BufferUsages::INDIRECT
                     | wgpu::BufferUsages::COPY_SRC,
             ),
-            empty: buffer(
-                device,
-                "Hierarchy Resolve Empty",
-                16,
-                wgpu::BufferUsages::STORAGE,
-            ),
-            marker: buffer(
-                device,
-                "Hierarchy Resolve Marker",
-                16,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            empty: buffer(device, "Hierarchy Resolve Empty", 16, wgpu::BufferUsages::STORAGE),
+            marker: buffer(device, "Hierarchy Resolve Marker", 16, wgpu::BufferUsages::STORAGE),
             rows: 1,
             epoch: 0,
             content_generation: 0,
@@ -305,12 +282,7 @@ impl HierarchyResolve {
         }
     }
 
-    fn handle(
-        &self,
-        buffer: &wgpu::Buffer,
-        row_bytes: u64,
-        content_generation: u64,
-    ) -> BufferHandle {
+    fn handle(&self, buffer: &wgpu::Buffer, row_bytes: u64, content_generation: u64) -> BufferHandle {
         BufferHandle {
             buffer: buffer.clone(),
             epoch: self.epoch,
@@ -320,12 +292,7 @@ impl HierarchyResolve {
     }
 
     /// The bind group for a dispatch over `inputs` that reads `flushed`.
-    fn bind(
-        &mut self,
-        device: &wgpu::Device,
-        inputs: [&wgpu::Buffer; 3],
-        flushed: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
+    fn bind(&mut self, device: &wgpu::Device, inputs: [&wgpu::Buffer; 3], flushed: &wgpu::Buffer) -> wgpu::BindGroup {
         let [local, parents, frames] = inputs;
         let bound = vec![
             local.clone(),
@@ -353,12 +320,7 @@ impl HierarchyResolve {
             }
         }
         let mut entries = vec![entry(0, &self.uniforms)];
-        entries.extend(
-            bound
-                .iter()
-                .enumerate()
-                .map(|(i, b)| entry(i as u32 + 1, b)),
-        );
+        entries.extend(bound.iter().enumerate().map(|(i, b)| entry(i as u32 + 1, b)));
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Hierarchy Resolve"),
             layout: &self.layout,
@@ -408,24 +370,9 @@ impl SceneDerivation for HierarchyResolve {
             self.rows = rows.next_power_of_two();
             let transform_bytes = TRANSFORM_ROW_BYTES * u64::from(self.rows);
             self.world = buffer(ctx.device, "Hierarchy Resolve World", transform_bytes, RW);
-            self.placement = buffer(
-                ctx.device,
-                "Hierarchy Resolve Placement",
-                transform_bytes,
-                RW,
-            );
-            self.spaces = buffer(
-                ctx.device,
-                "Hierarchy Resolve Spaces",
-                u64::from(self.rows) * 4,
-                RW,
-            );
-            self.changed = buffer(
-                ctx.device,
-                "Hierarchy Resolve Changed",
-                u64::from(self.rows) * 4,
-                RW,
-            );
+            self.placement = buffer(ctx.device, "Hierarchy Resolve Placement", transform_bytes, RW);
+            self.spaces = buffer(ctx.device, "Hierarchy Resolve Spaces", u64::from(self.rows) * 4, RW);
+            self.changed = buffer(ctx.device, "Hierarchy Resolve Changed", u64::from(self.rows) * 4, RW);
             self.moved = buffer(
                 ctx.device,
                 "Hierarchy Resolve Moved",
@@ -560,11 +507,7 @@ impl SceneDerivation for HierarchyResolve {
         ));
         output.buffers.push((
             LOCAL_PLACEMENT_KEY,
-            self.handle(
-                &self.placement,
-                TRANSFORM_ROW_BYTES,
-                self.content_generation,
-            ),
+            self.handle(&self.placement, TRANSFORM_ROW_BYTES, self.content_generation),
         ));
         output.buffers.push((
             OBJECT_SPACE_KEY,

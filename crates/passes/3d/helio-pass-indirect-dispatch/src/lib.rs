@@ -60,11 +60,7 @@ pub struct IndirectDispatchPass {
 
 impl IndirectDispatchPass {
     pub fn new(device: &wgpu::Device, cull_stats_buf: wgpu::Buffer) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "IndirectDispatch Shader",
-            helio_core::include_wgsl!("../shaders/indirect_dispatch.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "IndirectDispatch Shader", helio_core::include_wgsl!("../shaders/indirect_dispatch.wgsl"));
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CullUniforms"),
@@ -184,17 +180,14 @@ impl IndirectDispatchPass {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("IndirectDispatch Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("IndirectDispatch Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let indirect_buf = create_indirect_buf(device, MIN_CAPACITY);
         let compacted_indices_buf = create_compacted_indices_buf(device, MIN_CAPACITY);
@@ -267,9 +260,7 @@ fn create_compacted_indices_buf(device: &wgpu::Device, capacity: u32) -> wgpu::B
         // hiz_warmed_up`'s doc), so this missing flag never surfaced as a
         // validation error until that gate was fixed to actually run the
         // bypass on the first frame with real instances.
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_DST
-            | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
 }
@@ -297,10 +288,8 @@ impl RenderPass for IndirectDispatchPass {
         // The pass owns these buffers for the renderer lifetime; ResourceRegistry
         // stores borrowed views for the current frame.
         let indirect: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.indirect_buf) };
-        let compacted_indices: &'a wgpu::Buffer =
-            unsafe { std::mem::transmute(&self.compacted_indices_buf) };
-        frame.write(
-            helio_core::ResourceKey::new("indirect_dispatch"),
+        let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_buf) };
+        frame.write(helio_core::ResourceKey::new("indirect_dispatch"), 
             crate::IndirectDispatchFrameData {
                 indirect,
                 compacted_indices,
@@ -310,12 +299,7 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let Some(batch) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
-        else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
         // Sized for every group the GPU can produce this frame: the live
@@ -334,20 +318,10 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
-        else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(
-                helio_core::resource_keys::coordinate_spaces(),
-            )
-        else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
 

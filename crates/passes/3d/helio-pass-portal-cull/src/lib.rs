@@ -53,8 +53,8 @@
 use std::sync::Arc;
 
 mod segments;
-use segments::PortalCompaction;
 pub use segments::{PortalSegmentBuffers, SharedPortalSegments};
+use segments::PortalCompaction;
 
 mod portal_math;
 pub use portal_math::{
@@ -67,19 +67,18 @@ pub use resolver::{
 };
 mod projection;
 pub use projection::{
-    PortalProjectionBridge, PortalProjectionConfig, PortalProjectionFrame, PortalProjectionKey,
-    ProjectionError, RuntimePortalKey, IDENTITY_COORDINATE_SPACE_SLOT,
+    PortalProjectionBridge, PortalProjectionFrame, PortalProjectionKey, ProjectionError,
+    PortalProjectionConfig, RuntimePortalKey, IDENTITY_COORDINATE_SPACE_SLOT,
 };
 mod contract;
 pub use contract::{
-    GpuPortalView, MAX_PORTAL_CHAINS, PORTAL_CHAIN_HANDLE_BUFFER, PORTAL_CHAIN_PORTAL_POOL_BUFFER,
+    GpuPortalView, MAX_PORTAL_CHAINS, PORTAL_CHAIN_HANDLE_BUFFER,
+    PORTAL_CHAIN_PORTAL_POOL_BUFFER,
 };
 pub use helio_pass_gbuffer::CoordinateSpacesFrameData;
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{
-    PassContext, PrepareContext, RenderFrameInputs, RenderPass, Result as HelioResult,
-};
+use helio_core::{PassContext, PrepareContext, RenderPass, RenderFrameInputs, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 pub mod components;
 
@@ -148,11 +147,7 @@ pub struct PortalCullPass {
 
 impl PortalCullPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "PortalCull Shader",
-            helio_core::include_wgsl!("../shaders/portal_cull.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "PortalCull Shader", helio_core::include_wgsl!("../shaders/portal_cull.wgsl"));
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalCull Uniforms"),
@@ -228,28 +223,22 @@ impl PortalCullPass {
             immediate_size: 0,
         });
 
-        let select_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("PortalCull Select Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("select"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
-        let finalize_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("PortalCull Finalize Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("finalize"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let select_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("PortalCull Select Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("select"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let finalize_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("PortalCull Finalize Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("finalize"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         Self {
             select_pipeline,
@@ -320,9 +309,7 @@ impl RenderPass for PortalCullPass {
         // this frame is culled this frame; the live count is read on the GPU.
         self.draw_capacity = ctx
             .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
             .map(|b| b.group_capacity.min(PORTAL_DRAW_CAPACITY))
             .unwrap_or(0);
         // A growable SceneDB buffer reports reserved capacity, not the number
@@ -362,16 +349,10 @@ impl RenderPass for PortalCullPass {
         if self.draw_capacity == 0 || self.chain_count == 0 {
             return Ok(());
         }
-        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("object_batch"))
-        else {
+        let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx
-            .registry
-            .get(helio_core::resource_keys::coordinate_spaces())
-        else {
+        let Some(coord_data): Option<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>> = ctx.registry.get(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
@@ -488,13 +469,11 @@ impl RenderPass for PortalCullPass {
         drop(cmds);
 
         // Pack the survivors per material key, for the portal draw's pipelines.
-        let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("culled_batch"));
+        let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> =
+            ctx.registry.get(helio_core::ResourceKey::new("culled_batch"));
         if let Some(culled) = culled {
             let indirect = Arc::clone(&self.portal_indirect_buf);
-            self.compaction
-                .record(ctx, &batch, &culled.segments, &indirect);
+            self.compaction.record(ctx, &batch, &culled.segments, &indirect);
         }
 
         Ok(())

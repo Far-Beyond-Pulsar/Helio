@@ -82,37 +82,34 @@ impl BufferViewPass {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("Buffer View Pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: target_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("Buffer View Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let view_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Buffer View Mode"),
             size: 16,
@@ -153,15 +150,12 @@ impl RenderPass for BufferViewPass {
         if !self.active() {
             return None;
         }
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
-            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Buffer View"),
@@ -177,50 +171,28 @@ impl RenderPass for BufferViewPass {
         if !self.active() {
             return Ok(());
         }
-        let Some(gbuffer) = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
-            "BufferView",
-        ) else {
+        let Some(gbuffer) = ctx
+            .registry
+            .read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "BufferView")
+        else {
             return Ok(());
         };
-        let key = (
-            ctx.depth.clone(),
-            gbuffer.views[1].clone(),
-            ctx.camera.clone(),
-        );
+        let key = (ctx.depth.clone(), gbuffer.views[1].clone(), ctx.camera.clone());
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Buffer View BG"),
                 layout: &self.bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&key.0),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&key.1),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: key.2.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.view_buf.as_entire_binding(),
-                    },
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&key.0) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&key.1) },
+                    wgpu::BindGroupEntry { binding: 2, resource: key.2.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.view_buf.as_entire_binding() },
                 ],
             }));
             self.bind_group_key = Some(key);
         }
-        ctx.queue.write_buffer(
-            &self.view_buf,
-            0,
-            &[self.mode.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat(),
-        );
-        let Some(mut rp) = ctx.render_cmds() else {
-            return Ok(());
-        };
+        ctx.queue.write_buffer(&self.view_buf, 0, &[self.mode.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat());
+        let Some(mut rp) = ctx.render_cmds() else { return Ok(()) };
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.draw(0..3, 0..1);

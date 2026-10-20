@@ -14,31 +14,11 @@ impl WaterSimPass {
         internal_height: u32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let vert = helio_core::shader::module(
-            device,
-            "WaterSim VS",
-            helio_core::include_wgsl!("../shaders/fullscreen.vert.wgsl"),
-        );
-        let drop_frag = helio_core::shader::module(
-            device,
-            "WaterSim Drop FS",
-            helio_core::include_wgsl!("../shaders/drop.frag.wgsl"),
-        );
-        let update_frag = helio_core::shader::module(
-            device,
-            "WaterSim Update FS",
-            helio_core::include_wgsl!("../shaders/update.frag.wgsl"),
-        );
-        let normal_frag = helio_core::shader::module(
-            device,
-            "WaterSim Normal FS",
-            helio_core::include_wgsl!("../shaders/normal.frag.wgsl"),
-        );
-        let hitbox_frag = helio_core::shader::module(
-            device,
-            "WaterSim Hitbox FS",
-            helio_core::include_wgsl!("../shaders/hitbox.frag.wgsl"),
-        );
+        let vert = helio_core::shader::module(device, "WaterSim VS", helio_core::include_wgsl!("../shaders/fullscreen.vert.wgsl"));
+        let drop_frag = helio_core::shader::module(device, "WaterSim Drop FS", helio_core::include_wgsl!("../shaders/drop.frag.wgsl"));
+        let update_frag = helio_core::shader::module(device, "WaterSim Update FS", helio_core::include_wgsl!("../shaders/update.frag.wgsl"));
+        let normal_frag = helio_core::shader::module(device, "WaterSim Normal FS", helio_core::include_wgsl!("../shaders/normal.frag.wgsl"));
+        let hitbox_frag = helio_core::shader::module(device, "WaterSim Hitbox FS", helio_core::include_wgsl!("../shaders/hitbox.frag.wgsl"));
 
         let sim_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("WaterSim BGL"),
@@ -197,37 +177,34 @@ impl WaterSimPass {
 
         let make_sim_pipeline =
             |label, layout: &wgpu::PipelineLayout, frag: &wgpu::ShaderModule| {
-                helio_core::shader::create_render_pipeline(
-                    &device,
-                    wgpu::RenderPipelineDescriptor {
-                        label: Some(label),
-                        layout: Some(layout),
-                        vertex: wgpu::VertexState {
-                            module: &vert,
-                            entry_point: Some("vs_main"),
-                            buffers: &[],
-                            compilation_options: Default::default(),
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: frag,
-                            entry_point: Some("fs_main"),
-                            compilation_options: Default::default(),
-                            targets: &[Some(wgpu::ColorTargetState {
-                                format: wgpu::TextureFormat::Rgba16Float,
-                                blend: None,
-                                write_mask: wgpu::ColorWrites::ALL,
-                            })],
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleList,
-                            ..Default::default()
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview_mask: None,
-                        cache: None,
+                helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: &vert,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
                     },
-                )
+                    fragment: Some(wgpu::FragmentState {
+                        module: frag,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
             };
 
         let drop_pipeline = make_sim_pipeline("WaterSim Drop", &sim_pl, &drop_frag);
@@ -582,37 +559,34 @@ impl WaterSimPass {
             bind_group_layouts: &[Some(&blit_bgl)],
             immediate_size: 0,
         });
-        let blit_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("Water Blit Pipeline"),
-                layout: Some(&blit_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &blit_shader,
-                    entry_point: Some("vs"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &blit_shader,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let blit_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("Water Blit Pipeline"),
+            layout: Some(&blit_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let tint_scratch_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Water Tint Scratch"),
@@ -731,9 +705,8 @@ impl WaterSimPass {
             bind_group_layouts: &[Some(&underwater_tint_bgl)],
             immediate_size: 0,
         });
-        let underwater_tint_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
+        let underwater_tint_pipeline =
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("Water Underwater Tint Pipeline"),
                 layout: Some(&underwater_tint_pl),
                 vertex: wgpu::VertexState {
@@ -760,8 +733,7 @@ impl WaterSimPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            },
-        );
+            });
 
         let caustics_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Caustics PL"),
@@ -792,84 +764,78 @@ impl WaterSimPass {
 
         let vbl = vec4_vbl();
 
-        let caustics_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("Water Caustics Pipeline"),
-                layout: Some(&caustics_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &caustics_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(vbl.clone())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &caustics_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent::OVER,
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let caustics_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("Water Caustics Pipeline"),
+            layout: Some(&caustics_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &caustics_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(vbl.clone())],
+                compilation_options: Default::default(),
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &caustics_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
-        let surface_pipeline = helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("Water Surface Pipeline"),
-                layout: Some(&render_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &surface_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(vbl.clone())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &surface_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+        let surface_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("Water Surface Pipeline"),
+            layout: Some(&render_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &surface_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(vbl.clone())],
+                compilation_options: Default::default(),
             },
-        );
+            fragment: Some(wgpu::FragmentState {
+                module: &surface_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let (static_box_vbuf, static_box_ibuf, static_box_index_count) =
             make_static_box_mesh(device);

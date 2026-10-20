@@ -37,17 +37,14 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
             .into(),
         ),
     });
-    let pipeline = helio_core::shader::create_compute_pipeline(
-        &device,
-        wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &shader,
-            entry_point: Some("read_uniform"),
-            compilation_options: Default::default(),
-            cache: None,
-        },
-    );
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: None,
+        module: &shader,
+        entry_point: Some("read_uniform"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: 96,
@@ -142,11 +139,7 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
         assert_eq!(words[7], previous_uv[1].to_bits());
         // Reset uses the current view; subsequent unchanged-origin frames
         // upload the preceding raw view exactly.
-        let expected_view = if index == 0 {
-            camera.view
-        } else {
-            previous_view
-        };
+        let expected_view = if index == 0 { camera.view } else { previous_view };
         assert_eq!(&words[8..24], &expected_view.map(f32::to_bits));
         previous_view = camera.view;
         previous_uv = [camera.jitter_frame[0] * 0.5, -camera.jitter_frame[1] * 0.5];
@@ -208,17 +201,14 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
                   answer=reproject_history(raster_uv,0.5);\n\
                 }}").into()),
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: None,
-                layout: None,
-                module: &shader,
-                entry_point: Some("probe"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &shader,
+            entry_point: Some("probe"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 16,
@@ -342,17 +332,14 @@ fn depth_history_rejects_disocclusion_and_invalid_samples() {
                 .into(),
             ),
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: None,
-                layout: None,
-                module: &shader,
-                entry_point: Some("test_depth"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &shader,
+            entry_point: Some("test_depth"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 24,

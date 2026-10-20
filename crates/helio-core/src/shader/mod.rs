@@ -56,12 +56,12 @@
 
 use std::borrow::Cow;
 
-/// Build a render pipeline with the device's shared pipeline cache when one
-/// is configured. wgpu stores backend compiled pipeline data in this cache;
-/// WGSL modules still come from the normal shader source path.
+/// Create a render pipeline with the device's shared driver cache when one is
+/// configured. wgpu persists backend compiled pipeline data, including shader
+/// compilation results; WGSL module parsing still uses the normal source path.
 pub fn create_render_pipeline(
     device: &wgpu::Device,
-    mut descriptor: wgpu::RenderPipelineDescriptor<'_>,
+    descriptor: wgpu::RenderPipelineDescriptor<'_>,
 ) -> wgpu::RenderPipeline {
     let cache = crate::graph::driver_cache_for_device(device);
     let descriptor = wgpu::RenderPipelineDescriptor {
@@ -71,12 +71,11 @@ pub fn create_render_pipeline(
     device.create_render_pipeline(&descriptor)
 }
 
-/// Build a compute pipeline with the device's shared pipeline cache when one
-/// is configured. The persistent cache can reuse compiled backend pipeline
-/// data on later launches.
+/// Create a compute pipeline with the device's shared driver cache when one is
+/// configured.
 pub fn create_compute_pipeline(
     device: &wgpu::Device,
-    mut descriptor: wgpu::ComputePipelineDescriptor<'_>,
+    descriptor: wgpu::ComputePipelineDescriptor<'_>,
 ) -> wgpu::ComputePipeline {
     let cache = crate::graph::driver_cache_for_device(device);
     let descriptor = wgpu::ComputePipelineDescriptor {
@@ -90,15 +89,15 @@ pub mod directives;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub mod hot;
 pub mod reflection;
-pub use directives::{parse as parse_directives, PipelineDirectives};
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use hot::ShaderFile;
+pub use directives::{parse as parse_directives, PipelineDirectives};
 pub use reflection::{
     create_bind_group_layouts, create_pipeline_layout, create_reflected_bind_groups,
     create_reflected_bind_groups_with_layouts, create_reflected_pipeline, layout_entries,
-    populate_bind_group_entries, reflect, reuse_or_create_reflected_bind_groups, BindingKind,
-    CachedBindGroup, CachedReflectedGroup, ReflectedBinding, ReflectedLayout, ReflectedPipeline,
-    ReflectedShader, ReflectionError,
+    reuse_or_create_reflected_bind_groups, CachedBindGroup, CachedReflectedGroup,
+    populate_bind_group_entries, reflect, BindingKind, ReflectedBinding, ReflectedLayout,
+    ReflectedPipeline, ReflectedShader, ReflectionError,
 };
 
 /// The canonical camera struct and depth/G-buffer conventions.

@@ -174,17 +174,14 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 .into(),
             ),
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: None,
-                layout: None,
-                module: &probe,
-                entry_point: Some("read_pixel"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &probe,
+            entry_point: Some("read_pixel"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 32,

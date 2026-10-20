@@ -69,32 +69,17 @@ const WORKGROUP: u32 = 64;
 
 /// A join shader as compiled: the shared join declarations, then `source`.
 pub fn join_source(source: &str) -> String {
-    format!(
-        "{}\n{source}",
-        include_str!("../shaders/scene_join_common.wgsl")
-    )
+    format!("{}\n{source}", include_str!("../shaders/scene_join_common.wgsl"))
 }
 
 /// The scene and environment join shaders as compiled (shader validation
 /// without a device).
 pub fn validation_sources() -> Vec<(String, String)> {
     [
-        (
-            "scene_join_meshes.wgsl",
-            include_str!("../shaders/scene_join_meshes.wgsl"),
-        ),
-        (
-            "scene_join_lights.wgsl",
-            include_str!("../shaders/scene_join_lights.wgsl"),
-        ),
-        (
-            "hierarchy_resolve.wgsl",
-            include_str!("../shaders/hierarchy_resolve.wgsl"),
-        ),
-        (
-            "environment_join.wgsl",
-            include_str!("../shaders/environment_join.wgsl"),
-        ),
+        ("scene_join_meshes.wgsl", include_str!("../shaders/scene_join_meshes.wgsl")),
+        ("scene_join_lights.wgsl", include_str!("../shaders/scene_join_lights.wgsl")),
+        ("hierarchy_resolve.wgsl", include_str!("../shaders/hierarchy_resolve.wgsl")),
+        ("environment_join.wgsl", include_str!("../shaders/environment_join.wgsl")),
     ]
     .into_iter()
     .map(|(name, source)| (name.to_string(), join_source(source)))
@@ -171,9 +156,7 @@ pub(crate) fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
 /// The bits of `origin`, for an input signature: a moved origin moves
 /// every output position.
 pub(crate) fn origin_bits(origin: Option<glam::DVec3>) -> [u64; 3] {
-    origin.map_or([u64::MAX; 3], |o| {
-        [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()]
-    })
+    origin.map_or([u64::MAX; 3], |o| [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()])
 }
 /// Published (as an empty marker buffer) by `HierarchyResolve` when the
 /// transform rows it republishes are already relative to the frame's world
@@ -382,17 +365,14 @@ impl MovedJoin {
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            helio_core::shader::create_compute_pipeline(
-                &device,
-                wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            )
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         };
         let list = || {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -503,17 +483,14 @@ impl SceneJoin {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(join_source(source).into()),
             });
-            helio_core::shader::create_compute_pipeline(
-                &device,
-                wgpu::ComputePipelineDescriptor {
-                    label: Some(label),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            )
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         };
         let uniforms = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -616,12 +593,7 @@ impl SceneJoin {
             Some(at) => at,
             None => {
                 let mut entries = vec![entry(0, &self.moved.uniforms)];
-                entries.extend(
-                    bound
-                        .iter()
-                        .enumerate()
-                        .map(|(i, b)| entry(i as u32 + 1, b)),
-                );
+                entries.extend(bound.iter().enumerate().map(|(i, b)| entry(i as u32 + 1, b)));
                 let plain = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Scene Join Moved"),
                     layout: &self.moved.layout_plain,
@@ -635,9 +607,7 @@ impl SceneJoin {
                 if self.moved.binds.len() >= 4 {
                     self.moved.binds.remove(0);
                 }
-                self.moved
-                    .binds
-                    .push((bound.iter().map(|b| (*b).clone()).collect(), plain, full));
+                self.moved.binds.push((bound.iter().map(|b| (*b).clone()).collect(), plain, full));
                 self.moved.binds.len() - 1
             }
         };
@@ -809,7 +779,8 @@ impl SceneDerivation for SceneJoin {
             &[self.objects.epoch, self.materials.epoch],
         );
         let placement_signature = signature(&[transforms], &[ox, oy, oz]);
-        let structure_changed = grew || self.last_structure_inputs != Some(structure_signature);
+        let structure_changed =
+            grew || self.last_structure_inputs != Some(structure_signature);
         let placement_changed = self.last_placement_inputs != Some(placement_signature);
         if structure_changed || placement_changed {
             helio_core::cpu_scope!("SceneJoin: meshes");
@@ -826,8 +797,7 @@ impl SceneDerivation for SceneJoin {
             let gpu_list = resolved
                 .filter(|args| {
                     args.content_generation != 0
-                        && transforms
-                            .is_some_and(|t| args.content_generation == t.content_generation)
+                        && transforms.is_some_and(|t| args.content_generation == t.content_generation)
                 })
                 .map(|args| &args.buffer);
             let list_unusable = resolved.is_some() && gpu_list.is_none();
@@ -862,24 +832,24 @@ impl SceneDerivation for SceneJoin {
             if let (Some(rows), Some(transforms), Some(section_handles)) =
                 (moved_rows, transforms, section_handles)
             {
-                moved_ran = Some(self.record_moved(
-                    ctx,
-                    encoder,
-                    rows,
-                    gpu_list,
-                    transforms,
-                    section_handles,
-                    mesh_bounds,
-                ));
+                moved_ran =
+                    Some(self.record_moved(
+                        ctx,
+                        encoder,
+                        rows,
+                        gpu_list,
+                        transforms,
+                        section_handles,
+                        mesh_bounds,
+                    ));
             } else {
-                self.moved.link_built = false;
-                self.moved.previous_complete = false;
-                self.moved.generation = 0;
-                let owner_rows = transforms.map_or(0, |h| rows_of(h, TRANSFORM_ROW_BYTES));
-                self.moved
-                    .ensure(ctx.device, owner_rows, instance_rows, self.objects.rows);
-                encoder.clear_buffer(&self.moved.link, 0, None);
-                encoder.clear_buffer(&self.moved.lists[self.moved.current], 0, Some(8));
+            self.moved.link_built = false;
+            self.moved.previous_complete = false;
+            self.moved.generation = 0;
+            let owner_rows = transforms.map_or(0, |h| rows_of(h, TRANSFORM_ROW_BYTES));
+            self.moved.ensure(ctx.device, owner_rows, instance_rows, self.objects.rows);
+            encoder.clear_buffer(&self.moved.link, 0, None);
+            encoder.clear_buffer(&self.moved.lists[self.moved.current], 0, Some(8));
                 encoder.clear_buffer(&self.objects.buffer, 0, None);
                 encoder.clear_buffer(&self.materials.buffer, 0, None);
                 if let (
@@ -979,11 +949,7 @@ impl SceneDerivation for SceneJoin {
             // across a frame that only moved things.
             self.objects.content_generation += 1;
             if let Some(complete) = moved_ran {
-                self.moved.generation = if complete {
-                    self.objects.content_generation
-                } else {
-                    0
-                };
+                self.moved.generation = if complete { self.objects.content_generation } else { 0 };
             }
             if structure_changed {
                 self.materials.content_generation += 1;

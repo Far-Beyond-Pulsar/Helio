@@ -79,11 +79,7 @@ impl ShadowCullPass {
     /// this pass only *reads* it to skip clean faces.
     pub fn new(device: &wgpu::Device, face_dirty_buf: Arc<wgpu::Buffer>) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
-        let shader = helio_core::shader::module(
-            device,
-            "ShadowCull Shader",
-            helio_core::include_wgsl!("../shaders/shadow_cull.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "ShadowCull Shader", helio_core::include_wgsl!("../shaders/shadow_cull.wgsl"));
 
         // ── Uniform buffer ────────────────────────────────────────────────────
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -225,17 +221,14 @@ impl ShadowCullPass {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("ShadowCull Pipeline"),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("ShadowCull Pipeline"),
+            layout: Some(&pl),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         Self {
             pipeline,
@@ -280,31 +273,16 @@ impl RenderPass for ShadowCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
-        else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
         // Every movable draw the batch can produce this frame; threads past
         // the live count (read on the GPU) return at once.
         let draw_capacity = batch.group_capacity;
-        let Some(shadow_data) = ctx
-            .registry
-            .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::resource_keys::shadow_matrices(),
-            )
-        else {
+        let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(
-                helio_core::resource_keys::coordinate_spaces(),
-            )
-        else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let face_count = shadow_data.shadow_count;
@@ -315,7 +293,11 @@ impl RenderPass for ShadowCullPass {
 
         // ── Reset face counters to zero ───────────────────────────────────────
         let mut cmds = ctx.graphics_cmds();
-        cmds.clear_buffer(&self.face_counts_buf, 0, Some((MAX_FACES as u64) * 4u64));
+        cmds.clear_buffer(
+            &self.face_counts_buf,
+            0,
+            Some((MAX_FACES as u64) * 4u64),
+        );
 
         // ── Lazy bind-group rebuild on GrowableBuffer reallocation ────────────
         let key = [

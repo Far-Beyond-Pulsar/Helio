@@ -102,8 +102,7 @@ impl PortalInstancePass {
         let shader = helio_core::shader::module(device, "PortalInstance Shader", &*shader_source);
         // The raw text, for filling in material graphs (the registered, hot-reloadable
         // module above is the default pipeline's).
-        let base_shader: Cow<'static, str> =
-            Cow::Borrowed(include_str!("../shaders/gbuffer_portal.wgsl"));
+        let base_shader: Cow<'static, str> = Cow::Borrowed(include_str!("../shaders/gbuffer_portal.wgsl"));
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalInstance/ScreenSize"),
@@ -117,8 +116,8 @@ impl PortalInstancePass {
                 label: Some("PortalInstance BGL 0"),
                 entries: &[
                     storage_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // cameras
-                    uniform_entry(1, wgpu::ShaderStages::FRAGMENT, false),       // screen size
-                    storage_entry(2, wgpu::ShaderStages::VERTEX, true),          // instance_data
+                    uniform_entry(1, wgpu::ShaderStages::FRAGMENT, false), // screen size
+                    storage_entry(2, wgpu::ShaderStages::VERTEX, true), // instance_data
                     storage_entry(3, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // coordinate_spaces
                     storage_entry(4, wgpu::ShaderStages::VERTEX, true), // coordinate_spaces_prev
                     storage_entry(5, wgpu::ShaderStages::VERTEX, true), // portal_compacted_indices
@@ -175,142 +174,132 @@ impl PortalInstancePass {
 }
 
 impl PortalInstancePass {
-    fn create_pipeline(
-        device: &wgpu::Device,
-        pipeline_layout: &wgpu::PipelineLayout,
-        shader: &wgpu::ShaderModule,
-    ) -> wgpu::RenderPipeline {
-        helio_core::shader::create_render_pipeline(
-            &device,
-            wgpu::RenderPipelineDescriptor {
-                label: Some("PortalInstance Pipeline"),
-                layout: Some(pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    // Shared mesh vertex buffer layout — identical to GBufferPass
-                    // (stride = 40 bytes; see there for the per-field breakdown).
-                    buffers: &[
-                        Some(wgpu::VertexBufferLayout {
-                            array_stride: 40,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[
-                                wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32x3,
-                                    offset: 0,
-                                    shader_location: 0,
-                                },
-                                wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32,
-                                    offset: 12,
-                                    shader_location: 1,
-                                },
-                                wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32x2,
-                                    offset: 16,
-                                    shader_location: 2,
-                                },
-                                wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Float32x2,
-                                    offset: 24,
-                                    shader_location: 5,
-                                },
-                                wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Uint32,
-                                    offset: 32,
-                                    shader_location: 3,
-                                },
-                                wgpu::VertexAttribute {
-                                    format: wgpu::VertexFormat::Uint32,
-                                    offset: 36,
-                                    shader_location: 4,
-                                },
-                            ],
-                        }),
-                        Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT),
+    fn create_pipeline(device: &wgpu::Device, pipeline_layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
+        helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some("PortalInstance Pipeline"),
+            layout: Some(pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                // Shared mesh vertex buffer layout — identical to GBufferPass
+                // (stride = 40 bytes; see there for the per-field breakdown).
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: 40,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 24,
+                            shader_location: 5,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 32,
+                            shader_location: 3,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 36,
+                            shader_location: 4,
+                        },
                     ],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rg16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                    ],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    // `helio-pass-portal-mask` (run immediately before this pass)
-                    // already reset depth to the clear value everywhere a portal's
-                    // opening is actually visible on screen, and left real depth
-                    // untouched everywhere else. So a normal nearer-or-equal+write test
-                    // here does the right thing on both sides of that boundary:
-                    // duplicate content behind a visible opening self-occludes
-                    // correctly (nearer copies win), while any pixel the mask
-                    // pass *didn't* reset (portal not visible / occluded from
-                    // here) keeps real depth and would fail this test too — belt
-                    // and suspenders alongside the mask discard in the shader.
-                    // Writing depth lets downstream passes in the same fused
-                    // pass (foliage, virtual geometry) occlude correctly against
-                    // the illusion content instead of the stale real depth.
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                    stencil: wgpu::StencilState::default(),
-                    // Small nudge so adjacent duplicate copies' coplanar seams
-                    // (e.g. two segments' floors meeting end to end) don't
-                    // z-fight.
-                    bias: helio_core::depth::bias_toward_camera(1, 0.0, 0.0),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
-        )
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // `helio-pass-portal-mask` (run immediately before this pass)
+                // already reset depth to the clear value everywhere a portal's
+                // opening is actually visible on screen, and left real depth
+                // untouched everywhere else. So a normal nearer-or-equal+write test
+                // here does the right thing on both sides of that boundary:
+                // duplicate content behind a visible opening self-occludes
+                // correctly (nearer copies win), while any pixel the mask
+                // pass *didn't* reset (portal not visible / occluded from
+                // here) keeps real depth and would fail this test too — belt
+                // and suspenders alongside the mask discard in the shader.
+                // Writing depth lets downstream passes in the same fused
+                // pass (foliage, virtual geometry) occlude correctly against
+                // the illusion content instead of the stale real depth.
+                depth_write_enabled: Some(true),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                stencil: wgpu::StencilState::default(),
+                // Small nudge so adjacent duplicate copies' coplanar seams
+                // (e.g. two segments' floors meeting end to end) don't
+                // z-fight.
+                bias: helio_core::depth::bias_toward_camera(1, 0.0, 0.0),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     /// The pipeline drawing materials with `graph_hash` (0: none).
@@ -413,13 +402,7 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "gbuffer",
-            "portal_mask",
-            "object_batch",
-            "culled_batch",
-            "material_textures",
-        ]
+        &["gbuffer", "portal_mask", "object_batch", "culled_batch", "material_textures"]
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -433,33 +416,18 @@ impl RenderPass for PortalInstancePass {
         // attachment identity at lock time, not per-frame content — see
         // helio-pass-foliage-gbuffer's docs for why returning `None` here
         // conditionally would break fusion).
-        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
-            "PortalInstance",
-        )?;
-        let lightmap_uv = resources.read(
-            helio_core::ResourceKey::new("gbuffer_lightmap_uv"),
-            "PortalInstance",
-        )?;
-        let sss_target = resources.read(
-            helio_core::ResourceKey::new("gbuffer_sss"),
-            "PortalInstance",
-        )?;
-        let extra_target = resources.read(
-            helio_core::ResourceKey::new("gbuffer_extra"),
-            "PortalInstance",
-        )?;
-        let velocity_target = resources.read(
-            helio_core::ResourceKey::new("gbuffer_velocity"),
-            "PortalInstance",
-        )?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "PortalInstance")?;
+        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "PortalInstance")?;
+        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "PortalInstance")?;
+        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "PortalInstance")?;
+        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "PortalInstance")?;
 
         const LOAD: wgpu::Operations<wgpu::Color> = wgpu::Operations {
             load: wgpu::LoadOp::Load,
             store: wgpu::StoreOp::Store,
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
-            .retain_boxed_slice(Box::new([
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            storage.retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -530,13 +498,9 @@ impl RenderPass for PortalInstancePass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The most groups to draw; with GPU counts the draw reads this
         // frame's live count (see `execute`).
-        self.draw_count = ctx
-            .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
-            .map(|b| b.all_draws().0)
-            .unwrap_or(0);
+        self.draw_count = ctx.registry
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
+            .map(|b| b.all_draws().0).unwrap_or(0);
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,
@@ -566,12 +530,7 @@ impl RenderPass for PortalInstancePass {
             );
             return Ok(());
         };
-        let material_textures = ctx
-            .registry
-            .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
-                "PortalInstance",
-            );
+        let material_textures = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "PortalInstance");
         if ctx.frame_num < 3 {
             log::info!(
                 "[PortalInstance] frame={} material_textures_available={}",
@@ -588,33 +547,25 @@ impl RenderPass for PortalInstancePass {
             return Ok(());
         };
 
-        let Some(batch) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
-        else {
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx
-            .registry
-            .get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(
-                helio_core::resource_keys::coordinate_spaces(),
-            )
-        else {
+        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
             return Ok(());
         };
-        let Some(portal_chain_handles) = ctx.scene_buffers.get(BufferKey::of(
-            helio_pass_portal_cull::PORTAL_CHAIN_HANDLE_BUFFER,
-        )) else {
+        let Some(portal_chain_handles) = ctx
+            .scene_buffers
+            .get(BufferKey::of(helio_pass_portal_cull::PORTAL_CHAIN_HANDLE_BUFFER))
+        else {
             return Ok(());
         };
-        let Some(portal_chain_portals) = ctx.scene_buffers.get(BufferKey::of(
-            helio_pass_portal_cull::PORTAL_CHAIN_PORTAL_POOL_BUFFER,
-        )) else {
+        let Some(portal_chain_portals) = ctx
+            .scene_buffers
+            .get(BufferKey::of(helio_pass_portal_cull::PORTAL_CHAIN_PORTAL_POOL_BUFFER))
+        else {
             return Ok(());
         };
 
@@ -629,12 +580,8 @@ impl RenderPass for PortalInstancePass {
                 portal_chain_portals.buffer.clone(),
                 (*self.portal_compacted_indices_buf).clone(),
                 (*self.portal_compacted_chains_buf).clone(),
-                ctx.scene_buffers
-                    .get(BufferKey::of("skeletal_skin_vertices"))
-                    .map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
-                ctx.scene_buffers
-                    .get(BufferKey::of("skeletal_bone_palette"))
-                    .map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
+                ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices")).map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
+                ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette")).map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
             ],
             portal_mask_view.clone(),
         );
@@ -687,14 +634,8 @@ impl RenderPass for PortalInstancePass {
                         binding: 10,
                         resource: portal_chain_portals.buffer.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 11,
-                        resource: key.0[8].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 12,
-                        resource: key.0[9].as_entire_binding(),
-                    },
+                    wgpu::BindGroupEntry { binding: 11, resource: key.0[8].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 12, resource: key.0[9].as_entire_binding() },
                 ],
             }));
             self.bind_group_0_key = Some(key);
@@ -704,11 +645,15 @@ impl RenderPass for PortalInstancePass {
         let Some(material_textures) = material_textures else {
             return Ok(());
         };
-        let Some(vertices_handle) = ctx.scene_buffers.get(BufferKey::of("builtin_mesh_vertex"))
+        let Some(vertices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_vertex"))
         else {
             return Ok(());
         };
-        let Some(indices_handle) = ctx.scene_buffers.get(BufferKey::of("builtin_mesh_index"))
+        let Some(indices_handle) = ctx
+            .scene_buffers
+            .get(BufferKey::of("builtin_mesh_index"))
         else {
             return Ok(());
         };
@@ -766,42 +711,32 @@ impl RenderPass for PortalInstancePass {
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
 
-        let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("culled_batch"));
+        let culled: Option<helio_pass_gbuffer::CulledBatchFrameData<'_>> =
+            ctx.registry.get(helio_core::ResourceKey::new("culled_batch"));
         // The packed records exist once the cull has laid them out like the
         // G-buffer's (it sizes the portal segment buffers to follow its table).
         let packed_fit = {
             let shared = self.segments.lock().unwrap_or_else(|p| p.into_inner());
             culled.as_ref().is_some_and(|culled| {
                 shared.indirect.size() >= culled.segments.indirect.size()
-                    && culled
-                        .segments
-                        .counts
-                        .is_none_or(|c| shared.counts.size() >= c.size())
+                    && culled.segments.counts.is_none_or(|c| shared.counts.size() >= c.size())
             })
         };
-        let packed = culled.as_ref().filter(|culled| {
-            packed_fit && !culled.segments.is_empty() && batch.range_slot_capacity != 0
-        });
+        let packed = culled
+            .as_ref()
+            .filter(|culled| packed_fit && !culled.segments.is_empty() && batch.range_slot_capacity != 0);
         if let Some(culled) = packed {
             // One draw per material key, with that key's pipeline: a duplicate is
             // shaded by its own material (`PortalCullPass` packed the records per
             // segment, laid out by the G-buffer's own segment table).
             let segments = Arc::clone(&self.segments);
             let shared = segments.lock().unwrap_or_else(|p| p.into_inner());
-            for (index, segment) in culled
-                .segments
-                .in_bucket(helio_pass_gbuffer::ShadingBucket::Opaque)
-            {
+            for (index, segment) in culled.segments.in_bucket(helio_pass_gbuffer::ShadingBucket::Opaque) {
                 pass.set_pipeline(self.pipeline_for(ctx.device, segment.graph_hash));
-                let count = culled
-                    .segments
-                    .counts
-                    .map(|_| helio_pass_gbuffer::GpuDrawCount {
-                        buffer: &shared.counts,
-                        offset: index as u64 * 4,
-                    });
+                let count = culled.segments.counts.map(|_| helio_pass_gbuffer::GpuDrawCount {
+                    buffer: &shared.counts,
+                    offset: index as u64 * 4,
+                });
                 helio_pass_gbuffer::multi_draw_indexed_indirect(
                     &mut pass,
                     &shared.indirect,
@@ -863,6 +798,8 @@ mod tests {
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
     }
 }
+
+
 
 #[cfg(test)]
 mod material_tests {

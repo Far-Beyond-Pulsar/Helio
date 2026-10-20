@@ -71,11 +71,7 @@ impl DecalPass {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         let collect_src = decal_collect_source(material_binding);
         let collect_mod = helio_core::shader::module(device, "Decal Collect", &collect_src);
-        let apply_mod = helio_core::shader::module(
-            device,
-            "Decal Apply",
-            helio_core::include_wgsl!("../shaders/decal_apply.wgsl"),
-        );
+        let apply_mod = helio_core::shader::module(device, "Decal Apply", helio_core::include_wgsl!("../shaders/decal_apply.wgsl"));
         let fallback_decals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Decal Fallback Decals"),
             size: std::mem::size_of::<crate::GpuDecal>() as u64,
@@ -129,17 +125,14 @@ impl DecalPass {
             bind_group_layouts: &[Some(&bgl_collect), Some(&bgl_textures)],
             immediate_size: 0,
         });
-        let collect_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("Decal Collect"),
-                layout: Some(&collect_pl),
-                module: &collect_mod,
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let collect_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("Decal Collect"),
+            layout: Some(&collect_pl),
+            module: &collect_mod,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         // BGL apply: camera(0) + globals(1) + decals(2) + temp_in(3-6) + gbuf_out(7-10 storage)
         let bgl_apply = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -179,17 +172,14 @@ impl DecalPass {
             bind_group_layouts: &[Some(&bgl_apply)],
             immediate_size: 0,
         });
-        let apply_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("Decal Apply"),
-                layout: Some(&apply_pl),
-                module: &apply_mod,
-                entry_point: Some("cs_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+        let apply_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("Decal Apply"),
+            layout: Some(&apply_pl),
+            module: &apply_mod,
+            entry_point: Some("cs_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         Self {
             material_binding,
@@ -409,28 +399,17 @@ impl RenderPass for DecalPass {
         if self.decal_count == 0 {
             return Ok(());
         }
-        let gb = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
-            self.name(),
-        ) {
+        let gb = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), self.name()) {
             Some(g) => g,
             None => return Ok(()),
         };
-        let depth_view = match ctx
-            .registry
-            .read::<&wgpu::TextureView>(helio_core::ResourceKey::new("hiz"), self.name())
-        {
+        let depth_view = match ctx.registry.read::<&wgpu::TextureView>(helio_core::ResourceKey::new("hiz"), self.name()) {
             Some(v) => v,
             None => return Ok(()),
         };
         // The bindless table is published per-frame by the renderer, so it
         // survives graph rebuilds that drop this pass's own state.
-        let material_textures = match ctx
-            .registry
-            .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
-                self.name(),
-            ) {
+        let material_textures = match ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), self.name()) {
             Some(m) => m,
             None => return Ok(()),
         };

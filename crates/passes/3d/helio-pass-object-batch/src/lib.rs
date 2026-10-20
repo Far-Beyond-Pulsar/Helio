@@ -215,17 +215,14 @@ fn make_compute_pipeline(
         bind_group_layouts: &[Some(bgl)],
         immediate_size: 0,
     });
-    helio_core::shader::create_compute_pipeline(
-        &device,
-        wgpu::ComputePipelineDescriptor {
-            label: Some(label),
-            layout: Some(&layout),
-            module,
-            entry_point: Some(entry_point),
-            compilation_options: Default::default(),
-            cache: None,
-        },
-    )
+    helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        module,
+        entry_point: Some(entry_point),
+        compilation_options: Default::default(),
+        cache: None,
+    })
 }
 
 fn make_compute_pipeline_with(
@@ -240,17 +237,14 @@ fn make_compute_pipeline_with(
         bind_group_layouts: bgls,
         immediate_size: 0,
     });
-    helio_core::shader::create_compute_pipeline(
-        &device,
-        wgpu::ComputePipelineDescriptor {
-            label: Some(label),
-            layout: Some(&layout),
-            module,
-            entry_point: Some(entry_point),
-            compilation_options: Default::default(),
-            cache: None,
-        },
-    )
+    helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        module,
+        entry_point: Some(entry_point),
+        compilation_options: Default::default(),
+        cache: None,
+    })
 }
 
 /// One CPU-visible material-class-batched draw range, mirroring the CPU
@@ -521,11 +515,7 @@ pub struct ObjectBatchPass {
 
 impl ObjectBatchPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "ObjectBatch Shader",
-            helio_core::include_wgsl!("../shaders/object_batch.wgsl"),
-        );
+        let shader = helio_core::shader::module(device, "ObjectBatch Shader", helio_core::include_wgsl!("../shaders/object_batch.wgsl"));
 
         let cs = wgpu::ShaderStages::COMPUTE;
         let bgls = BindGroupLayouts {
@@ -591,10 +581,7 @@ impl ObjectBatchPass {
             }),
             moved_args: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ObjBatch MovedArgs BGL"),
-                entries: &[
-                    bgl_entry_storage(0, cs, true),
-                    bgl_entry_storage(1, cs, false),
-                ],
+                entries: &[bgl_entry_storage(0, cs, true), bgl_entry_storage(1, cs, false)],
             }),
             group_local_scan: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ObjBatch GroupLocalScan BGL"),
@@ -1679,11 +1666,7 @@ impl RenderPass for ObjectBatchPass {
                 range_slot_capacity: self.scratch_capacity,
             })
         };
-        frame.write(
-            helio_core::ResourceKey::new("object_batch"),
-            data,
-            "ObjectBatch",
-        );
+        frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
         // Culling and drawing follow this frame's GPU counts, but a few
         // fallbacks still follow these read-back ones (Hi-Z warm-up, draws
         // without `MULTI_DRAW_INDIRECT_COUNT`), so depth can also change when
@@ -1698,11 +1681,7 @@ impl RenderPass for ObjectBatchPass {
         // which trail by the readback latency). Lets shadow consumers skip an
         // atlas that holds no casters.
         let counts: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.scratch.shadow_counts) };
-        frame.write_buffer(
-            helio_core::ResourceKey::new("shadow_caster_counts"),
-            counts,
-            "ObjectBatch",
-        );
+        frame.write_buffer(helio_core::ResourceKey::new("shadow_caster_counts"), counts, "ObjectBatch");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -1786,19 +1765,12 @@ impl RenderPass for ObjectBatchPass {
             // list before it, which settles last frame's movers' motion
             // vectors, was complete): then only those slots need gathering.
             let moved = ctx.scene_buffers.get(BufferKey::of(MOVED_KEY));
-            let follows_last =
-                previous_inputs.is_some_and(|last| last[1].wrapping_add(1) == inputs[1]);
+            let follows_last = previous_inputs.is_some_and(|last| last[1].wrapping_add(1) == inputs[1]);
             self.use_moved = placements_only
                 && follows_last
-                && moved.is_some_and(|h| {
-                    h.content_generation != 0 && h.content_generation == inputs[1]
-                });
+                && moved.is_some_and(|h| h.content_generation != 0 && h.content_generation == inputs[1]);
             if let (true, Some(list)) = (self.use_moved, moved) {
-                if !self
-                    .moved_bgs
-                    .iter()
-                    .any(|(buffer, _)| *buffer == list.buffer)
-                {
+                if !self.moved_bgs.iter().any(|(buffer, _)| *buffer == list.buffer) {
                     let binds = self.moved_binds(ctx.device, &list.buffer);
                     if self.moved_bgs.len() >= 4 {
                         self.moved_bgs.remove(0);
@@ -1898,3 +1870,4 @@ mod tests {
         assert_eq!(INDIRECT_ARGS_BYTES, 20);
     }
 }
+

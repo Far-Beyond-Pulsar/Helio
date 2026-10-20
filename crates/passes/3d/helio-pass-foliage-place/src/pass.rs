@@ -356,16 +356,8 @@ impl FoliagePlacePass {
         });
 
         // ── Pipelines ──────────────────────────────────────────────────────────
-        let place_shader = helio_core::shader::module(
-            device,
-            "Foliage Place Shader",
-            helio_core::include_wgsl!("../shaders/foliage_place.wgsl"),
-        );
-        let cull_shader = helio_core::shader::module(
-            device,
-            "Foliage Cull Shader",
-            helio_core::include_wgsl!("../shaders/foliage_cull.wgsl"),
-        );
+        let place_shader = helio_core::shader::module(device, "Foliage Place Shader", helio_core::include_wgsl!("../shaders/foliage_place.wgsl"));
+        let cull_shader = helio_core::shader::module(device, "Foliage Cull Shader", helio_core::include_wgsl!("../shaders/foliage_cull.wgsl"));
 
         let place_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Foliage Place BGL"),
@@ -440,50 +432,39 @@ impl FoliagePlacePass {
             immediate_size: 0,
         });
 
-        let place_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("Foliage Place Pipeline"),
-                layout: Some(&place_layout),
-                module: &place_shader,
-                entry_point: Some("cs_place"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
-        let tile_cull_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("Foliage Tile Cull Pipeline"),
-                layout: Some(&cull_layout),
-                module: &cull_shader,
-                entry_point: Some("cs_tile_cull"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
-        let cluster_cull_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
+        let place_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("Foliage Place Pipeline"),
+            layout: Some(&place_layout),
+            module: &place_shader,
+            entry_point: Some("cs_place"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let tile_cull_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("Foliage Tile Cull Pipeline"),
+            layout: Some(&cull_layout),
+            module: &cull_shader,
+            entry_point: Some("cs_tile_cull"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let cluster_cull_pipeline =
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some("Foliage Cluster Cull Pipeline"),
                 layout: Some(&cull_layout),
                 module: &cull_shader,
                 entry_point: Some("cs_cluster_cull"),
                 compilation_options: Default::default(),
                 cache: None,
-            },
-        );
-        let finalize_pipeline = helio_core::shader::create_compute_pipeline(
-            &device,
-            wgpu::ComputePipelineDescriptor {
-                label: Some("Foliage Finalize Pipeline"),
-                layout: Some(&cull_layout),
-                module: &cull_shader,
-                entry_point: Some("cs_finalize"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        );
+            });
+        let finalize_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("Foliage Finalize Pipeline"),
+            layout: Some(&cull_layout),
+            module: &cull_shader,
+            entry_point: Some("cs_finalize"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         Self {
             blade_arena,
@@ -818,8 +799,7 @@ impl RenderPass for FoliagePlacePass {
         let Some(type_handle) = ctx.scene_buffers.get(BufferKey::of("foliage_types")) else {
             return Ok(());
         };
-        self.type_liveness
-            .update(ctx.device, ctx.queue, Some(type_handle));
+        self.type_liveness.update(ctx.device, ctx.queue, Some(type_handle));
         if !self.type_liveness.maybe_live(type_handle) {
             return Ok(());
         }
@@ -879,14 +859,12 @@ impl RenderPass for FoliagePlacePass {
         // and a collision only means one tile keeps its blades through an edit it should
         // have re-rolled.
         let mix = |handle: &helio_core::BufferHandle| {
-            handle.epoch
-                ^ handle
-                    .content_generation
-                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            handle.epoch ^ handle.content_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15)
         };
         let seed_generation = mix(type_handle) as u32;
         let layers = ctx.scene_buffers.get(BufferKey::of("foliage_layers"));
-        let generation = (mix(type_handle) ^ layers.map_or(0, |h| mix(h).rotate_left(29))) as u32;
+        let generation =
+            (mix(type_handle) ^ layers.map_or(0, |h| mix(h).rotate_left(29))) as u32;
         let position_near = ctx.camera_data.position_near;
         let camera = [position_near[0], position_near[1], position_near[2]];
         let ring_update = self.ring.update([camera[0], camera[2]], generation);
@@ -1006,13 +984,9 @@ impl RenderPass for FoliagePlacePass {
             return Ok(());
         }
 
-        let hiz_view = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("hiz"))
-            .unwrap_or(&self.placeholder_hiz);
+        let hiz_view = ctx.registry.get(helio_core::ResourceKey::new("hiz")).unwrap_or(&self.placeholder_hiz);
         let hiz_sampler = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("hiz_sampler"))
+            .registry.get(helio_core::ResourceKey::new("hiz_sampler"))
             .unwrap_or(&self.placeholder_hiz_sampler);
         let type_buffer = ctx
             .scene_buffers
