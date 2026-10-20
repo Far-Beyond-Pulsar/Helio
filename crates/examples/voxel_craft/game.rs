@@ -243,6 +243,10 @@ struct Tour {
     waited: u32,
     /// Look at the nearest tree trunk instead of the posed views.
     trunk: bool,
+    /// Consecutive frames saved a pose (`VOXEL_CRAFT_BURST`), and those
+    /// saved of this one: still frames, to measure flicker.
+    burst: u32,
+    shots: u32,
 }
 
 /// (turn about up in degrees, pitch, third person, metres above the start).
@@ -262,7 +266,8 @@ const POSES: &[(f64, f64, bool, f64)] = &[
 impl Tour {
     fn new(dir: String) -> Self {
         let _ = std::fs::create_dir_all(&dir);
-        Self { dir, pose: 0, waited: u32::MAX, trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some() }
+        let burst = std::env::var("VOXEL_CRAFT_BURST").ok().and_then(|v| v.parse().ok()).unwrap_or(1u32).max(1);
+        Self { dir, pose: 0, waited: u32::MAX, trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some(), burst, shots: 0 }
     }
 
     /// Advances the tour by a frame; the path to save this frame to, if it
@@ -282,15 +287,21 @@ impl Tour {
         if !ready {
             return None;
         }
-        let path = format!("{}/shot_{:02}.png", self.dir, self.pose);
+        let path = if self.burst == 1 { format!("{}/shot_{:02}.png", self.dir, self.pose) } else { format!("{}/shot_{:02}_{:03}.png", self.dir, self.pose, self.shots) };
         log::info!("shot {} at {} frames, settled {settled}", self.pose, self.waited);
+        self.shots += 1;
+        if self.shots < self.burst {
+            return Some(path);
+        }
+        self.shots = 0;
         self.pose += 1;
         let limit = std::env::var("VOXEL_CRAFT_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(POSES.len());
         if self.pose >= limit.min(POSES.len()) {
             *quit = true;
             self.pose = usize::MAX / 2;
         } else {
-            self.set_pose(player);
+            // The next pose from the next frame: this one is shot as posed.
+            self.waited = u32::MAX;
         }
         Some(path)
     }
