@@ -43,16 +43,21 @@ impl ApplicationHandler for App {
                 .expect("window"),
         );
         let mut game = Game::new(|planet| Gfx::new(window.clone(), planet, textures::load));
-        Self::capture(&mut game, true);
+        // A tour takes no input (its shots compare), so it leaves the cursor
+        // to whoever is at the machine.
+        if !game.touring() {
+            Self::capture(&mut game, true);
+        }
         self.game = Some(game);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(game) = &mut self.game else { return };
+        let input = !game.touring();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => game.gfx.resize(size.width, size.height),
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput { event, .. } if input => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape && event.state == ElementState::Pressed {
                         if game.input.captured {
@@ -65,14 +70,14 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::MouseInput { state, button, .. } if input => {
                 if !game.input.captured && state == ElementState::Pressed && button == MouseButton::Left {
                     Self::capture(game, true);
                 } else {
                     game.input.button(button, state);
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => game.input.wheel(delta),
+            WindowEvent::MouseWheel { delta, .. } if input => game.input.wheel(delta),
             WindowEvent::Focused(false) => Self::capture(game, false),
             WindowEvent::RedrawRequested => {
                 game.frame();
@@ -87,7 +92,9 @@ impl ApplicationHandler for App {
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
         if let (Some(game), DeviceEvent::MouseMotion { delta: (dx, dy) }) = (&mut self.game, event) {
-            game.input.mouse_motion(dx, dy);
+            if !game.touring() {
+                game.input.mouse_motion(dx, dy);
+            }
         }
     }
 
