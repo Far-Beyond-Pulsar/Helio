@@ -93,7 +93,7 @@ pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
 pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 40 * 4;
 /// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
 /// row, its centre in the owner's space.
-pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 28 * 4;
+pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 44 * 4;
 /// `DecalSourceRow`: local size vec4, then the `helio_pass_decal`
 /// `DecalComponent` row (32 words) with its transform left to the join.
 pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
@@ -628,7 +628,7 @@ impl EnvironmentJoin {
                 "Environment Join Atmospheres",
                 ATMOSPHERES_KEY,
                 Source::Atmospheres,
-                28,
+                44,
                 CENTERED,
             ),
             // The pass walks a fixed number of rows.

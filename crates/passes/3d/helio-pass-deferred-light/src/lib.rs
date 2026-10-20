@@ -5,7 +5,7 @@ use helio_core::{
 };
 use helio_pass_sky::atmosphere::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
-    ATMOSPHERE_SNIPPET,
+    ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
 };
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -194,7 +194,7 @@ impl DeferredLightPass {
             device,
             "Deferred Lighting Shader",
             helio_core::include_wgsl!("../shaders/deferred_lighting.wgsl"),
-            &[helio_mats::PBR_EVAL_SNIPPET, ATMOSPHERE_SNIPPET],
+            &[helio_mats::PBR_EVAL_SNIPPET, ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET],
         );
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -878,6 +878,7 @@ impl RenderPass for DeferredLightPass {
             "shadow_caster_counts",
             ATMOSPHERE_FRAME,
             ATMOSPHERE_SKY_TABLE,
+            helio_pass_sky::clouds::SUN_VISIBILITY,
             "ssao",
             "tile_light_lists",
             "tile_light_counts",
@@ -1033,9 +1034,12 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get(helio_core::ResourceKey::new("gbuffer_extra"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
+        // The sun's visibility at each pixel: the clouds' and the terrain's
+        // (`sun_visibility`), or the terrain's alone without clouds.
         let directional_visibility_view = ctx
             .registry
-            .texture_binding("directional_visibility")
+            .texture_binding(helio_pass_sky::clouds::SUN_VISIBILITY)
+            .or_else(|| ctx.registry.texture_binding(helio_pass_sky::clouds::DIRECTIONAL_VISIBILITY))
             .unwrap_or(&self.fallback_ssr_view);
 
         let gbuffer_key: Vec<wgpu::TextureView> = [

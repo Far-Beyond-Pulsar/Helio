@@ -620,6 +620,10 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
     let no_frame = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES, usage: wgpu::BufferUsages::UNIFORM, mapped_at_creation: false });
     entries.push(wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&no_occlusion) });
     entries.push(wgpu::BindGroupEntry { binding: 23, resource: no_frame.as_entire_binding() });
+    // No clouds' shadow.
+    let (no_clouds, no_cloud_frame) = helio_pass_sky::clouds::cloud_shadow_fallback(&device);
+    entries.push(wgpu::BindGroupEntry { binding: 24, resource: wgpu::BindingResource::TextureView(&no_clouds) });
+    entries.push(wgpu::BindGroupEntry { binding: 25, resource: no_cloud_frame.as_entire_binding() });
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &probe.get_bind_group_layout(0),

@@ -1,6 +1,7 @@
 //!use helio_prelude
 //!use pbr_eval
 //!use atmosphere
+//!use atmosphere_sky_table
 
 //! Deferred lighting pass.
 //!
@@ -171,45 +172,6 @@ fn portal_chain_of(lightmap_uv: vec2<f32>) -> i32 {
     return -1;
 }
 
-// The sky's irradiance / pi at a surface `from_camera` (km, relative to the
-// camera) with normal `n`: its own sky, by its altitude and sun angle, not
-// the eye's (`sky_table_kernel`). Above the atmosphere the planet's glow
-// falls with its solid angle.
-fn atmosphere_local_irradiance(from_camera: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
-    if atmosphere.planet.w < 0.5 { return vec3<f32>(0.0); }
-    let bottom = atmosphere.params.bottom_radius;
-    let top = atmosphere.params.top_radius;
-    let pos = from_camera - atmosphere.planet.xyz;
-    let r = max(length(pos), bottom);
-    let up = normalize(pos);
-    let sun = atmosphere.sun.xyz;
-    let mu_s = dot(up, sun);
-    var x = sun - up * mu_s;
-    if dot(x, x) < 1e-8 { x = cross(up, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(up.x) > 0.9)); }
-    x = normalize(x);
-    let z = cross(x, up);
-    let l = vec3<f32>(dot(n, x), dot(n, up), dot(n, z));
-    let height = clamp((r - bottom) / (top - bottom), 0.0, 1.0);
-    let fr = sqrt(height) * f32(SKY_TABLE_R - 1u);
-    let fm = clamp((mu_s - SKY_TABLE_MU_LO) / (1.0 - SKY_TABLE_MU_LO), 0.0, 1.0) * f32(SKY_TABLE_MU - 1u);
-    let r0 = min(u32(fr), SKY_TABLE_R - 2u);
-    let m0 = min(u32(fm), SKY_TABLE_MU - 2u);
-    let w = vec2<f32>(fr - f32(r0), fm - f32(m0));
-    let basis = array<f32, 6>(0.282095, 0.488603 * l.y, 0.488603 * l.x, 1.092548 * l.x * l.y, 0.315392 * (3.0 * l.z * l.z - 1.0), 0.546274 * (l.x * l.x - l.y * l.y));
-    var e = vec3<f32>(0.0);
-    for (var k = 0u; k < SKY_TABLE_COEFFS; k++) {
-        let a = (r0 * SKY_TABLE_MU + m0) * SKY_TABLE_COEFFS + k;
-        let b = a + SKY_TABLE_COEFFS;
-        let c = a + SKY_TABLE_MU * SKY_TABLE_COEFFS;
-        let d = c + SKY_TABLE_COEFFS;
-        let v = mix(mix(atmosphere_sky_table[a].rgb, atmosphere_sky_table[b].rgb, w.y), mix(atmosphere_sky_table[c].rgb, atmosphere_sky_table[d].rgb, w.y), w.x);
-        e += v * basis[k];
-    }
-    let above = length(pos) / top;
-    let falloff = select(1.0, 1.0 / (above * above), above > 1.0);
-    return max(e, vec3<f32>(0.0)) * atmosphere.sun_illuminance.rgb * falloff;
-}
-
 // min(dynamic, static) shadow comparison, skipping an atlas with no casters.
 fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
     var lit = 1.0;
@@ -250,7 +212,11 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 @group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
 // Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, numeric surface_flags
 @group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
-@group(1) @binding(10) var directional_visibility: texture_2d<f32>;
+// The sun's visibility at each pixel (helio-pass-sky's `sun_visibility`: the
+// clouds' shadow times the voxel terrain's `directional_visibility`), x the
+// visibility and yzw the sun's direction it holds for; zero where none is
+// published.
+@group(1) @binding(10) var sun_visibility: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -1390,9 +1356,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // GPU-driven: iterate all visible lights (already culled on CPU by distance).
     // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
     // is handled separately — shadow maps do not occlude it (that is AO's job).
-    let voxel_visibility = textureLoad(directional_visibility, pix, 0);
+    let sun_seen = textureLoad(sun_visibility, pix, 0);
     if globals.debug_mode == 26u {
-        return vec4<f32>(vec3<f32>(clamp(voxel_visibility.x, 0.0, 1.0)), 1.0);
+        return vec4<f32>(vec3<f32>(clamp(sun_seen.x, 0.0, 1.0)), 1.0);
     }
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
@@ -1447,10 +1413,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if !in_portal && light.light_type != 0u && i < 32u {
                 sf *= terrain_light_visibility(local_words, i);
             }
-            if !in_portal && light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
+            if !in_portal && light.light_type == 0u && dot(sun_seen.yzw, sun_seen.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
-                if dot(normalize(voxel_visibility.yzw), light_direction) > 0.99999 {
-                    sf *= clamp(voxel_visibility.x, 0.0, 1.0);
+                if dot(normalize(sun_seen.yzw), light_direction) > 0.99999 {
+                    sf *= clamp(sun_seen.x, 0.0, 1.0);
                 }
             }
             let sss_color = sss_r.rgb;
@@ -1511,7 +1477,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // horizon included, cosine-convolved.
     var hemi: vec3<f32>;
     if atmosphere.planet.w > 0.5 {
-        hemi = atmosphere_local_irradiance((world_pos - eye) * 0.001, N) * albedo;
+        // The sky over the surface, by its altitude and sun angle, not the
+        // eye's.
+        hemi = atmosphere_sky_table_eval(atmosphere, (world_pos - eye) * 0.001, N, vec3<f32>(1.0)) * albedo;
     } else {
         let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
         let ground_color = sky_color * 0.15;

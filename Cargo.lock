@@ -2055,7 +2055,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "helio-pass-sky",
  "naga",
  "pollster 0.4.0",
  "wgpu",
@@ -2147,6 +2146,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "naga",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -2284,6 +2284,7 @@ dependencies = [
  "helio-core",
  "helio-pass-postprocess",
  "helio-pass-shadow-matrix",
+ "helio-pass-sky",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",

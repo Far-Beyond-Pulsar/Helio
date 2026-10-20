@@ -79,10 +79,14 @@ pub fn shader_source() -> String {
     let source = include_str!("../shaders/volumetric_fog.wgsl")
         .replace("__PP_HEAD_VEC4__", &head.to_string())
         .replace("__PP_TAIL_VEC4__", &tail.to_string());
-    // The terrain's sun occlusion (`//!use sun_occlusion`) ahead of it;
-    // the prelude is the module's to resolve.
-    format!("{}
-{source}", helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source)
+    // The terrain's sun occlusion (`//!use sun_occlusion`) and the clouds'
+    // shadow (`//!use cloud_shadow`) ahead of it; the prelude is the
+    // module's to resolve.
+    format!(
+        "{}\n{}\n{source}",
+        helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source,
+        helio_pass_sky::clouds::CLOUD_SHADOW_SNIPPET.source
+    )
 }
 
 /// Preserve approximately square screen tiles, bounded by the tier's budget.
@@ -168,6 +172,7 @@ pub struct VolumetricFogPass {
     fallback_transmittance: wgpu::TextureView,
     /// No terrain's sun occlusion: an empty map and a frame of no levels.
     fallback_sun_occlusion: (wgpu::TextureView, wgpu::Buffer),
+    fallback_cloud_shadow: (wgpu::TextureView, wgpu::Buffer),
 
     /// Ping-ponged scattering grids: one is read as history while the other is
     /// written. Sampling and storing to one texture in a single dispatch is a
@@ -182,7 +187,15 @@ pub struct VolumetricFogPass {
 
     inject_bg: [Option<wgpu::BindGroup>; 2],
     inject_bg_key: Option<[wgpu::Buffer; 8]>,
-    inject_shadow: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::Buffer)>,
+    inject_shadow: Option<(
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::Buffer,
+        wgpu::TextureView,
+        wgpu::Buffer,
+    )>,
     integrate_g0_bg: Option<wgpu::BindGroup>,
     integrate_bg: [Option<wgpu::BindGroup>; 2],
 
@@ -348,6 +361,18 @@ impl VolumetricFogPass {
                     count: None,
                 },
                 uniform(23),
+                // The clouds' shadow along the sun.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 24,
+                    visibility: cv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                uniform(25),
                 tex3d(7), // scatter history
                 wgpu::BindGroupLayoutEntry {
                     binding: 8,
@@ -626,6 +651,7 @@ impl VolumetricFogPass {
                     mapped_at_creation: false,
                 }),
             ),
+            fallback_cloud_shadow: helio_pass_sky::clouds::cloud_shadow_fallback(device),
             inject_pipeline,
             integrate_pipeline,
             inject_bgl,
@@ -706,7 +732,7 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["shadow_atlas", "static_shadow_atlas", "shadow_transmittance", "shadow_matrices", "postprocess_uniforms", helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME]
+        &["shadow_atlas", "static_shadow_atlas", "shadow_transmittance", "shadow_matrices", "postprocess_uniforms", helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME, helio_pass_sky::clouds::CLOUD_SHADOW_MAP, helio_pass_sky::clouds::CLOUD_SHADOW_FRAME]
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -861,6 +887,11 @@ impl RenderPass for VolumetricFogPass {
             .texture_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS)
             .zip(ctx.registry.buffer_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME))
             .unwrap_or((&self.fallback_sun_occlusion.0, &self.fallback_sun_occlusion.1));
+        let cloud_shadow = ctx
+            .registry
+            .texture_binding(helio_pass_sky::clouds::CLOUD_SHADOW_MAP)
+            .zip(ctx.registry.buffer_binding(helio_pass_sky::clouds::CLOUD_SHADOW_FRAME))
+            .unwrap_or((&self.fallback_cloud_shadow.0, &self.fallback_cloud_shadow.1));
 
         let camera_buf = ctx.camera;
         let lights_buf = ctx
@@ -907,8 +938,8 @@ impl RenderPass for VolumetricFogPass {
             legacy_buf.clone(),
         ];
         if self.inject_bg_key.as_ref() != Some(&key)
-            || self.inject_shadow.as_ref().map(|(d, s, t, o, f)| (d, s, t, o, f))
-                != Some((shadow_atlas, static_shadow_atlas, transmittance, sun_occlusion.0, sun_occlusion.1))
+            || self.inject_shadow.as_ref().map(|(d, s, t, o, f, c, cf)| (d, s, t, o, f, c, cf))
+                != Some((shadow_atlas, static_shadow_atlas, transmittance, sun_occlusion.0, sun_occlusion.1, cloud_shadow.0, cloud_shadow.1))
         {
             // Both sides are rebuilt together: each pins a fixed history/write
             // pair, so a stale one would read the grid it is also writing.
@@ -920,6 +951,8 @@ impl RenderPass for VolumetricFogPass {
                 transmittance.clone(),
                 sun_occlusion.0.clone(),
                 sun_occlusion.1.clone(),
+                cloud_shadow.0.clone(),
+                cloud_shadow.1.clone(),
             ));
             self.integrate_g0_bg = None;
             self.resolve_bg = None;
@@ -1037,6 +1070,14 @@ impl RenderPass for VolumetricFogPass {
                         wgpu::BindGroupEntry {
                             binding: 23,
                             resource: sun_occlusion.1.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 24,
+                            resource: wgpu::BindingResource::TextureView(cloud_shadow.0),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 25,
+                            resource: cloud_shadow.1.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,
