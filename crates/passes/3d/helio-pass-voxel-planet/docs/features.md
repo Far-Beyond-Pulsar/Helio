@@ -12,9 +12,13 @@ footprints, and a forest shows to the horizon at the terrain's cost.
 A planet's recipe holds a **feature set** (`FeatureSet`), part of the world's
 definition (its fingerprint; saves keep the recipe):
 
-- **Stamps**: voxel models (`stamp::Stamp`: material ids 1 to 127 or air at
-  offsets from an anchor), compiled to dense cells and summed-volume counts
-  of air and each material (a box's count in eight reads).
+- **Stamps**: voxel models built from shapes (`stamp::Stamp`): boxes and
+  tapered capsules (a ball is a capsule of no length) of material ids 1 to
+  127 or of air, around an anchor, the later over the earlier. A shape may
+  be sparse (a share of its cells left out by hash: foliage) and rough (its
+  edge broken by hash). A shape is a handful of numbers at any size, so a
+  10 cm tree of a million cells is a few dozen shapes; they are evaluated
+  in integer sixteenths of a cell, bit for bit on the CPU and the GPU.
 - **Spawns** (rules, data): which stamps grow where, from the widest
   spacing to the narrowest (structures, then trees, then rocks):
   - a placement grid: one candidate per `spacing` x `spacing` base columns,
@@ -44,12 +48,13 @@ spawn's squares by row then column).
 
 ## Levels
 
-- **Near levels** (cells at most half the spacing, and level 0): the
-  stamps. A coarse cell sums the cells the placements' stamps fill and
-  clear in its box: solid with the most common material from half its base
-  cells (majorities, as the terrain's coarse levels are), else air from
-  half, else the terrain's. The spawns drawn at a level are a prefix of the
-  set (spawns go widest first).
+- **Near levels** (level 0, and cells at most half the spacing and an
+  eighth of the stamps' footprint: legible shapes): the
+  stamps. A base cell takes the last shape holding its centre; a coarse
+  cell the last holding its box's centre, smooth (no broken edge) and solid
+  where a sparse shape keeps half its cells, else the terrain's. The
+  spawns drawn at a level are a prefix of the set (spawns go widest
+  first).
 - **Far levels**: a spawn with a far form draws as a canopy over the area
   it grows in, as a mountain is drawn by its envelope: a level column whose
   ground its rules accept (its field at the column's middle, or past the
@@ -73,7 +78,8 @@ GPU (`chunk_generate.wgsl`):
    canopies (classification and residency see trees as terrain).
 3. `chunk_columns_main`: after the terrain's mask and before the edits,
    `feature_column`: the far canopy, then each placement within reach in
-   order (base cells) or their sums (coarse cells); their materials into
+   order, its shapes in order over the cells their boxes span; their
+   materials into
    the chunk's cells, and the column marked so `chunk_build_main` stores
    them as it does edited cells.
 
@@ -90,4 +96,5 @@ and far canopies) is solid on the CPU.
 A footprint keeps `CompiledFeatures::stride` squares (8 bytes each). A
 candidate costs one height evaluation, plus four with a relief rule, once
 per footprint while it stays in the pool; a chunk column scans the squares
-within its spawns' reach.
+within its spawns' reach, and each placement's shapes over the cells their
+boxes span.
