@@ -34,8 +34,8 @@ pub struct Gfx {
     /// The renderer's world origin of the last frame.
     pub origin: DVec3,
     size: [u32; 2],
-    /// The view's clock at the last frame (s): the renderer's frame clock
-    /// (the clouds' wind) advances with it.
+    /// The weather's clock at the last frame (game seconds): the renderer's
+    /// frame clock (the clouds' wind) advances with it.
     clock: f64,
 }
 
@@ -238,8 +238,8 @@ impl Gfx {
                 },
             ),
         );
-        self.renderer.set_frame_clock_delta(Some((view.time - self.clock).clamp(0.0, 0.1) as f32));
-        self.clock = view.time;
+        self.renderer.set_frame_clock_delta(Some((view.weather - self.clock).clamp(0.0, 0.1) as f32));
+        self.clock = view.weather;
         self.origin = Self::origin_for(eye);
         self.renderer.set_world_origin(Some(self.origin));
         let origin = self.origin;
@@ -331,7 +331,11 @@ pub struct View<'a> {
     pub sun: DVec3,
     /// Edges to outline (the targeted block), planet-centred.
     pub outline: &'a [(DVec3, DVec3)],
+    /// Seconds since the game started (the character's animation).
     pub time: f64,
+    /// Game seconds (they hold still in the tour and race with `T`): the
+    /// clouds drift with them.
+    pub weather: f64,
     /// Save this frame to a PNG at this path.
     pub screenshot: Option<&'a str>,
 }
