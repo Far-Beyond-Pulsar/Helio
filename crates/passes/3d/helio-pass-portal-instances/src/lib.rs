@@ -794,8 +794,8 @@ mod tests {
             max_textures: 256,
         });
 
-        assert!(matches!(source, std::borrow::Cow::Borrowed(_)));
         assert!(source.contains("enable wgpu_binding_array;"));
+        assert!(source.contains("fn specular_aa_roughness"), "specular anti-aliasing spliced in");
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
     }
 }
