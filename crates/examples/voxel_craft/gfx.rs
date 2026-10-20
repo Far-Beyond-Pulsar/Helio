@@ -160,7 +160,14 @@ impl Gfx {
         // and the character.
         let mut scene = new_scene_db_with_gpu_mirror(&device, &queue);
         let palette = palette::load(&mut scene.world);
-        crate::meadow::plant(&mut scene.world);
+        // Grass and flowers on the world's grass: the engine's voxel meadow.
+        let meadow = helio_pass_voxel_planet::meadow::meadow();
+        for row in meadow.types {
+            let entity = scene.world.spawn();
+            scene.world.insert(entity, row);
+        }
+        let wind = scene.world.spawn();
+        scene.world.insert(wind, meadow.wind);
         let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
         let air = scene.world.spawn();
         // Fair-weather cumulus, sized for the small planet: a layer from 0.9
@@ -210,11 +217,10 @@ impl Gfx {
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());
-        // Grass and flowers on the world's grass (`meadow`), grown on the terrain the
-        // planet pass draws.
+        // The meadow, grown on the terrain the planet pass draws.
         renderer_config.enable_foliage = true;
-        renderer_config.foliage_blades_per_m2 = Some(crate::meadow::DENSITY);
-        renderer_config.foliage_ring_radius = Some(crate::meadow::RING_RADIUS_M);
+        renderer_config.foliage_blades_per_m2 = Some(meadow.blades_per_m2);
+        renderer_config.foliage_ring_radius = Some(meadow.ring_radius_m);
         let handle = scene_db_handle(&scene);
         let mut renderer = RendererBuilder::new(renderer_config, handle)
             .with_external_device()

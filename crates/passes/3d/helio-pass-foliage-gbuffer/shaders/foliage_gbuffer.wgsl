@@ -21,7 +21,7 @@
 //   1 normal       Rgba16Float  written
 //   2 orm          Rgba8Unorm   written
 //   3 emissive     Rgba16Float  written
-//   4 lightmap_uv  Rg16Float    NOT written — grass has no lightmap UV
+//   4 lightmap_uv  Rg16Float    written: (-1, -1.5), foliage's tag (no lightmap, no SSAO)
 //   5 sss          Rgba16Float  NOT written
 //   6 extra        Rgba16Float  NOT written
 //   7 velocity     Rgba16Float    written
@@ -406,6 +406,11 @@ fn foliage_to_world(b: BladeBasis, local: vec3<f32>) -> vec3<f32> {
     return b.tangent * local.x + b.up * local.y + b.bitangent * local.z;
 }
 
+/// How far a blocky blade's shading normal leans from the ground's up towards its
+/// face's own: enough to tell the box's faces apart, little enough that a meadow
+/// lights like the ground under it from any side.
+const BLOCK_FACE_TILT: f32 = 0.4;
+
 /// Cubes in the tallest stack (`FOLIAGE_STACK_CUBES`).
 const FOLIAGE_STACK_CUBES: u32 = 6u;
 
@@ -422,6 +427,50 @@ struct StackVertex {
     normal: vec3<f32>,
     anchor: vec3<f32>,
     height_frac: f32,
+    /// Past the strip's end (and its repeated last vertex): the vertex only has to
+    /// coincide with the other such ones, so the caller skips the rest of its work.
+    past: bool,
+}
+
+/// Cube `i`'s step along each axis, in cubes: `floor(i * |lean|)` the way `lean` points.
+fn stack_shift(i: u32, lean: vec2<f32>) -> vec2<f32> {
+    return sign(lean) * floor(f32(i) * abs(lean));
+}
+
+/// Box `want` of a stack (the last one past them) and how many there are: each box a
+/// run of cubes on the same step (at L1 a run of cube pairs, stepped as their lower
+/// cube), so a straight run is one box with no hidden tops inside it. L2 and L3: one.
+struct StackBox {
+    first: u32,
+    count: u32,
+    shift: vec2<f32>,
+    boxes: u32,
+}
+
+fn stack_box(lod: u32, cubes: u32, lean: vec2<f32>, want: u32) -> StackBox {
+    if lod >= 2u {
+        return StackBox(0u, cubes, vec2<f32>(0.0), 1u);
+    }
+    let per = select(1u, 2u, lod == 1u);
+    let units = (cubes + per - 1u) / per;
+    var out = StackBox(0u, cubes, vec2<f32>(0.0), 1u);
+    var boxes = 0u;
+    var first = 0u;
+    var shift = vec2<f32>(0.0);
+    for (var u = 1u; u <= units; u++) {
+        let start = min(u * per, cubes);
+        let next = stack_shift(u * per, lean);
+        if u == units || any(next != shift) {
+            if boxes <= want {
+                out = StackBox(first, start - first, shift, 0u);
+            }
+            boxes += 1u;
+            first = start;
+            shift = next;
+        }
+    }
+    out.boxes = boxes;
+    return out;
 }
 
 fn foliage_stack_vertex(
@@ -433,34 +482,35 @@ fn foliage_stack_vertex(
     scale: vec2<f32>,
     eye: vec2<f32>,
 ) -> StackVertex {
-    var out = StackVertex(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), 0.0);
+    var out = StackVertex(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0), 0.0, true);
     if cubes == 0u {
         return out;
     }
     let merged = lod >= 2u;
-    let per = select(1u, 2u, lod == 1u);
-    let boxes = select((cubes + per - 1u) / per, 1u, merged);
     // Strip position -> box and vertex in it (index 9 repeats the box's last vertex,
     // index 10 is the next box's first; past the last box, its last vertex again).
     var b = vertex_index / 11u;
     var k = vertex_index % 11u;
-    if b >= boxes {
-        b = boxes - 1u;
+    var bx = stack_box(lod, cubes, lean, b);
+    if vertex_index > 11u * (bx.boxes - 1u) + 9u {
+        return out;
+    }
+    out.past = false;
+    if b >= bx.boxes {
         k = 8u;
     } else if k == 9u {
         k = 8u;
     } else if k == 10u {
-        if b + 1u < boxes {
-            b += 1u;
+        if b + 1u < bx.boxes {
+            bx = stack_box(lod, cubes, lean, b + 1u);
             k = 0u;
         } else {
             k = 8u;
         }
     }
-    let first = select(b * per, 0u, merged);
-    let count = select(min(per, cubes - first), cubes, merged);
-    let shift = select(sign(lean) * floor(f32(first) * abs(lean)), vec2<f32>(0.0), merged);
-    let centre = shift * cube;
+    let first = bx.first;
+    let count = bx.count;
+    let centre = bx.shift * cube;
     let half = 0.5 * cube * select(1.0, scale.x, merged);
     let rise = cube * select(1.0, scale.y, merged);
     let y0 = f32(first) * rise;
@@ -560,7 +610,8 @@ struct VertexOutput {
     /// blade is one material.
     @location(7) @interpolate(flat) material: vec2<u32>,
     /// A blocky blade's face normal (the provoking vertex's: flat faces), and whether
-    /// the blade is blocky (then it, not `world_normal`, shades).
+    /// the blade is blocky (then `world_normal` is the ground's up, and the two shade
+    /// it together: see the fragment stage).
     @location(8) @interpolate(flat) face_normal: vec3<f32>,
     @location(9) @interpolate(flat) blocky: u32,
 }
@@ -663,6 +714,11 @@ fn vs_main(
     // The draw is as long as the longest strip of the kinds present (`cs_finalize`): a
     // shorter one repeats its last vertex.
     let own_count = select(2u * lod_info.segments + 1u, 4u, is_card);
+    if !blocky && vertex_index > own_count {
+        var tail: VertexOutput;
+        tail.clip_position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        return tail;
+    }
     var v = foliage_blade_vertex(lod_info.segments, is_card, min(vertex_index, own_count - 1u));
     // Cards are flat: a curled card would swing its silhouette at the L1→L2 boundary
     // where the blade it replaces is still nearly straight, which is exactly the
@@ -682,6 +738,7 @@ fn vs_main(
     ));
     var world_base = root + foliage_to_world(basis, foliage_yaw_rotate(local, yaw));
     var world_normal = foliage_to_world(basis, foliage_yaw_rotate(local_normal, yaw));
+    var face_normal = world_normal;
     // Where the wind is evaluated, and at what height: the vertex, or a cube's centre.
     var wind_at = world_base;
     var wind_frac = v.height_frac;
@@ -709,9 +766,16 @@ fn vs_main(
             vec2<f32>(lod_info.width_scale, lod_info.height_scale) * size_fade,
             eye_local,
         );
+        if st.past {
+            // Past the strip's end: one point for all such vertices (a zero-area tail).
+            var tail: VertexOutput;
+            tail.clip_position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            return tail;
+        }
         v.height_frac = st.height_frac;
         world_base = root + foliage_to_world(basis, st.local);
-        world_normal = foliage_to_world(basis, st.normal);
+        face_normal = foliage_to_world(basis, st.normal);
+        world_normal = basis.up;
         wind_at = root + foliage_to_world(basis, st.anchor);
         wind_frac = st.anchor.y / max(f32(cubes) * cube, 1.0e-6);
     }
@@ -744,7 +808,7 @@ fn vs_main(
     out.clip_position = cameras[0].view_proj * vec4<f32>(position_now, 1.0);
     out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(position_prev, 1.0);
     out.world_normal = world_normal;
-    out.face_normal = out.world_normal;
+    out.face_normal = face_normal;
     out.blocky = u32(blocky);
     out.height_frac = v.height_frac;
     out.tint = vec2<f32>(
@@ -771,8 +835,10 @@ struct FoliageGBufferOutput {
     @location(1) normal: vec4<f32>,
     @location(2) orm: vec4<f32>,
     @location(3) emissive: vec4<f32>,
-    /// `(-1, -1)`: no lightmap, as `gbuffer.wgsl` writes for unlightmapped meshes. The
-    /// target's clear value `(0, 0)` would read as a lightmapped surface.
+    /// `(-1, -1.5)`: foliage's tag. Negative x: no lightmap (the target's clear value
+    /// `(0, 0)` would read as a lightmapped surface); y -1.5 (clear of the voxel pass's
+    /// -2 and of portal chains, below -2.5): the deferred pass leaves screen-space AO
+    /// off it (dense blades overwhelm the kernel; they carry their own height AO).
     @location(4) lightmap_uv: vec2<f32>,
     @location(7) velocity: vec4<f32>,
 }
@@ -849,10 +915,13 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     // flipped for back faces or half of every blade lights as if it faced away from the
     // sun.
     var normal = normalize(select(-input.world_normal, input.world_normal, front_facing));
-    // A blocky blade's faces are its box's: flat, and turned to the eye already (its
-    // strip's winding alternates, so `front_facing` says nothing about them).
+    // A blocky blade lights as the ground it grows on, its faces telling apart: the
+    // up tilted towards each face's own normal (flat, and turned to the eye already;
+    // the strip's winding alternates, so `front_facing` says nothing about them). Its
+    // sides are the two facing the eye, so lit by the faces alone a meadow looked at
+    // towards the sun is its unlit sides: black.
     if input.blocky != 0u {
-        normal = normalize(input.face_normal);
+        normal = normalize(input.world_normal + BLOCK_FACE_TILT * input.face_normal);
     }
 
     // Ambient occlusion from the blade's own height: the base of a grass sward is deep
@@ -883,6 +952,6 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     out.orm = vec4<f32>(ao, roughness, metallic, f0.g);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0.b);
     out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position),0.0,0.0);
-    out.lightmap_uv = vec2<f32>(-1.0, -1.0);
+    out.lightmap_uv = vec2<f32>(-1.0, -1.5);
     return out;
 }

@@ -171,6 +171,17 @@ impl Flight {
                     .around_planet([0.0; 3], planet.grid().radius()),
             );
         }
+        // The engine's voxel meadow on the grass (`HELIO_VOXEL_FLIGHT_NO_FOLIAGE`:
+        // bare ground, A/B for its cost).
+        let meadow = (std::env::var_os("HELIO_VOXEL_FLIGHT_NO_FOLIAGE").is_none()).then(helio_pass_voxel_planet::meadow::meadow);
+        if let Some(meadow) = &meadow {
+            for row in &meadow.types {
+                let entity = scene.world.spawn();
+                scene.world.insert(entity, *row);
+            }
+            let wind = scene.world.spawn();
+            scene.world.insert(wind, meadow.wind);
+        }
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
@@ -181,7 +192,11 @@ impl Flight {
         config.frame_ms = config.frame_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().frame_ms);
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::with_config(pass_source.clone(), config)));
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
-        config.enable_foliage = false;
+        config.enable_foliage = meadow.is_some();
+        if let Some(meadow) = &meadow {
+            config.foliage_blades_per_m2 = Some(meadow.blades_per_m2);
+            config.foliage_ring_radius = Some(meadow.ring_radius_m);
+        }
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
@@ -858,6 +873,18 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     let mut by_pass: Vec<(&str, f64)> = passes.iter().map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1)))).collect();
     by_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
     eprintln!("CHUNKENGINE {view} graph gpu p50 {:.2} ms; by pass: {}", percentile(&graph, 0.5), by_pass.iter().filter(|p| p.1 >= 0.05).map(|(n, ms)| format!("{n} {ms:.2}")).collect::<Vec<_>>().join(", "));
+    // The foliage drawn: blades a LOD (the pass's last read-back counters).
+    if let Some(foliage) = flight.renderer.find_pass::<helio_pass_foliage_place::FoliagePlacePass>() {
+        let c = foliage.debug_counters();
+        eprintln!(
+            "CHUNKENGINE {view} foliage: {} tiles, visible L0 {} L1 {} L2 {} L3 {}",
+            foliage.placed_tile_count(),
+            c[0],
+            c[1],
+            c[2],
+            c[3]
+        );
+    }
     flight.capture(&format!("chunks_{view}"));
     pick_probe(flight, view, eye, forward);
 }

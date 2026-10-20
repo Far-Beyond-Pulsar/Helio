@@ -29,6 +29,8 @@ pub mod terrain;
 pub mod engine;
 #[cfg(feature = "engine")]
 pub mod chunks;
+#[cfg(feature = "engine")]
+pub mod meadow;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

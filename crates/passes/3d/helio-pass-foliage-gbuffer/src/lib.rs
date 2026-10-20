@@ -45,9 +45,12 @@
 //! value, so without the mask those G-buffer channels are filled with garbage wherever
 //! grass covers a pixel, and the deferred pass reads them everywhere.
 //!
-//! `lightmap_uv` *is* written: `(-1, -1)`, the "no lightmap" value `GBufferPass` writes
-//! for unlightmapped meshes. Its clear value `(0, 0)` reads as a lightmap at the atlas's
-//! corner, and the deferred pass lit grass by that empty texel alone: black.
+//! `lightmap_uv` *is* written: `(-1, -1.5)`, foliage's tag. Negative x is "no
+//! lightmap" (its clear value `(0, 0)` reads as a lightmap at the atlas's corner, and
+//! the deferred pass lit grass by that empty texel alone: black); y -1.5 (clear of the
+//! voxel pass's -2 and of portal chains, below -2.5) keeps screen-space AO off grass,
+//! whose dense blades overwhelm the kernel (black fields) and which carries its own
+//! height AO.
 //!
 //! # Zero overhead when absent
 //!
