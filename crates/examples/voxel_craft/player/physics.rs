@@ -1,11 +1,12 @@
-//! The player's body against the blocks: a box that slides along walls, lands
-//! on floors, steps up single blocks and is pulled to the planet's centre.
+//! The player's body against the voxels: a box that slides along walls, lands
+//! on floors, steps up ledges to `STEP_M` and is pulled to the planet's
+//! centre.
 //!
 //! The world is a cube sphere, so "down" is the direction to the centre and
 //! the box's axes are the local up, forward and right. Collision samples
 //! points over the box and asks which cells they are in.
 
-use crate::config::{PLAYER_HEIGHT, PLAYER_WIDTH, VOXEL_M};
+use crate::config::{PLAYER_HEIGHT, PLAYER_WIDTH, STEP_M, VOXEL_M};
 use crate::world::World;
 use glam::DVec3;
 
@@ -89,11 +90,14 @@ pub fn slide(world: &World, mut feet: DVec3, delta: DVec3, frame: &Frame, can_st
                 feet = next;
                 continue;
             }
-            // A block in the way: climb it if there is room over it.
+            // A ledge in the way: climb the lowest lift that clears it, up to
+            // `STEP_M`, if there is room over it.
             if can_step {
-                let lifted = next + frame.up * (VOXEL_M + 0.02);
-                if !collides(world, lifted, frame) && !collides(world, feet + frame.up * (VOXEL_M + 0.02), frame) {
-                    feet = rest_on_floor(world, lifted, frame);
+                let lift = (1..=(STEP_M / VOXEL_M).round() as i32)
+                    .map(|n| f64::from(n) * VOXEL_M + 0.02)
+                    .find(|&h| !collides(world, next + frame.up * h, frame) && !collides(world, feet + frame.up * h, frame));
+                if let Some(h) = lift {
+                    feet = rest_on_floor(world, next + frame.up * h, frame);
                     moved.stepped = true;
                     continue;
                 }

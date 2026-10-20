@@ -54,19 +54,4 @@ impl Rng {
     pub fn choice<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.u64() as usize % items.len()]
     }
-
-    pub fn shuffle<T>(&mut self, items: &mut [T]) {
-        for i in (1..items.len()).rev() {
-            let j = (self.u64() % (i as u64 + 1)) as usize;
-            items.swap(i, j);
-        }
-    }
-
-    /// `count` distinct items of `items`.
-    pub fn sample<T: Clone>(&mut self, items: &[T], count: usize) -> Vec<T> {
-        let mut all = items.to_vec();
-        self.shuffle(&mut all);
-        all.truncate(count);
-        all
-    }
 }

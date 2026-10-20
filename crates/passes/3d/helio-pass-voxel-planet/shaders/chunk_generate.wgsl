@@ -1505,6 +1505,10 @@ fn restore_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
 // Per chunk job, a bit per column (`FEATURE_JOB_WORDS` words) whose cells
 // features changed: their cells' materials are stored as edited ones are.
 @group(0) @binding(38) var<storage, read_write> job_features: array<atomic<u32>>;
+// Each `tile_features_main` workgroup's node quad table (FEATURE_QUADS
+// keys: `quad_key`, 0 a free entry), probed linearly from `quad_probe`,
+// at most half full (`CompiledFeatures::new`).
+@group(0) @binding(39) var<storage, read_write> feature_quads: array<atomic<u32>>;
 const FEATURE_JOB_WORDS: u32 = 128u;
 
 const MAX_SPAWNS: u32 = 32u;
@@ -1613,115 +1617,81 @@ fn placed_local(p: Placed, d: vec3<i32>) -> vec3<i32> {
     return vec3<i32>(x, d.y, z);
 }
 
-// Cells of `code` (0 air, 1 + n material n) of stamp `t` in box `[lo, hi)`
-// of its frame (`CompiledStamp::count`: summed counts).
-fn stamp_count(t: u32, code: u32, lo: vec3<i32>, hi: vec3<i32>) -> u32 {
-    let first = vec3<i32>(bitcast<i32>(stamp_word(t, 0u)), bitcast<i32>(stamp_word(t, 1u)), bitcast<i32>(stamp_word(t, 2u)));
-    let size = vec3<i32>(i32(stamp_word(t, 4u)), i32(stamp_word(t, 5u)), i32(stamp_word(t, 6u)));
-    let a = vec3<u32>(clamp(lo - first, vec3<i32>(0), size));
-    let b = vec3<u32>(clamp(hi - first, vec3<i32>(0), size));
-    if any(a >= b) { return 0u; }
-    let sx = u32(size.x) + 1u;
-    let sz = u32(size.z) + 1u;
-    let base = stamp_word(t, 9u) + code * sx * sz * (u32(size.y) + 1u);
-    let s111 = i32(features[base + b.x + sx * (b.z + sz * b.y)]);
-    let s011 = i32(features[base + a.x + sx * (b.z + sz * b.y)]);
-    let s101 = i32(features[base + b.x + sx * (b.z + sz * a.y)]);
-    let s110 = i32(features[base + b.x + sx * (a.z + sz * b.y)]);
-    let s001 = i32(features[base + a.x + sx * (b.z + sz * a.y)]);
-    let s010 = i32(features[base + a.x + sx * (a.z + sz * b.y)]);
-    let s100 = i32(features[base + b.x + sx * (a.z + sz * a.y)]);
-    let s000 = i32(features[base + a.x + sx * (a.z + sz * a.y)]);
-    return u32(s111 - s011 - s101 - s110 + s001 + s010 + s100 - s000);
+// A stamp's part (`stamp::CompiledPart`, its 16 words): box or capsule
+// (flat ended or round),
+// material (0 air), the cells it may hold (inclusive), the segment's ends
+// and radii or the box's corners (sixteenths of a cell), its edge's
+// roughness, the share of its cells kept (of 256) and its seed.
+struct Part {
+    capsule: bool,
+    flat: bool,
+    material: u32,
+    lo: vec3<i32>,
+    hi: vec3<i32>,
+    a: vec3<i32>,
+    b: vec3<i32>,
+    radius: vec2<i32>,
+    rough: i32,
+    keep: u32,
+    seed: u32,
 }
 
-// Stamp `t`'s cell at `p` of its frame: 0 nothing, 1 air, 2 + m material m.
-fn stamp_cell(t: u32, p: vec3<i32>) -> u32 {
-    let q = p - vec3<i32>(bitcast<i32>(stamp_word(t, 0u)), bitcast<i32>(stamp_word(t, 1u)), bitcast<i32>(stamp_word(t, 2u)));
-    let size = vec3<i32>(i32(stamp_word(t, 4u)), i32(stamp_word(t, 5u)), i32(stamp_word(t, 6u)));
-    if any(q < vec3<i32>(0)) || any(q >= size) { return 0u; }
-    let n = u32(q.x + size.x * (q.z + size.z * q.y));
-    let code = (features[stamp_word(t, 8u) + (n >> 2u)] >> ((n & 3u) * 8u)) & 0xffu;
-    if code < 2u { return code; }
-    return 2u + stamp_word(t, 8u + code);
+// Part `n` of stamp `t`.
+fn stamp_part(t: u32, n: u32) -> Part {
+    let at = stamp_word(t, 8u) + 16u * n;
+    var q: Part;
+    q.capsule = (features[at] & 1u) != 0u;
+    q.flat = (features[at] & 2u) != 0u;
+    q.material = features[at] >> 8u;
+    q.lo = vec3<i32>(bitcast<i32>(features[at + 1u]), bitcast<i32>(features[at + 2u]), bitcast<i32>(features[at + 3u]));
+    q.hi = vec3<i32>(bitcast<i32>(features[at + 4u]), bitcast<i32>(features[at + 5u]), bitcast<i32>(features[at + 6u]));
+    q.a = vec3<i32>(bitcast<i32>(features[at + 7u]), bitcast<i32>(features[at + 8u]), bitcast<i32>(features[at + 9u]));
+    q.b = vec3<i32>(bitcast<i32>(features[at + 10u]), bitcast<i32>(features[at + 11u]), bitcast<i32>(features[at + 12u]));
+    q.radius = vec2<i32>(i32(features[at + 13u] & 0xffffu), i32(features[at + 13u] >> 16u));
+    q.rough = i32(features[at + 14u] & 0xffffu);
+    q.keep = features[at + 14u] >> 16u;
+    q.seed = features[at + 15u];
+    return q;
 }
 
-// Cells of stamp material `m` the placements over level cell `(i, j, k)`
-// of footprint `tile` fill in it.
-fn feature_material_count(tile: TileJob, i: i32, j: i32, k: i32, m: u32) -> u32 {
-    let level = tile.level;
-    let base = vec3<i32>(i, k, j) << vec3<u32>(level);
-    let lo = vec2<i32>(i, j) << vec2<u32>(level);
-    let hi = lo + (1 << level) - 1;
-    var count = 0u;
-    for (var s = 0u; s < feature_near(level); s++) {
-        if !feature_drawn(level, s) { continue; }
-        let g = reaching_squares(s, lo, hi);
-        for (var gy = g.y; gy <= g.w; gy++) {
-            for (var gx = g.x; gx <= g.z; gx++) {
-                let p = tile_placement(tile, s, vec2<i32>(gx, gy));
-                if !placed_meets(p, lo, hi) { continue; }
-                for (var c = 0u; c < stamp_word(p.stamp, 7u); c++) {
-                    if stamp_word(p.stamp, 10u + c) != m { continue; }
-                    let a = placed_local(p, base - p.anchor);
-                    let b = placed_local(p, base + (1 << level) - 1 - p.anchor);
-                    count += stamp_count(p.stamp, 1u + c, min(a, b), max(a, b) + 1);
-                }
-            }
-        }
-    }
-    return count;
+// How far along a segment of squared length `length` its closest point to
+// a point lies (of 256), the point's offset dotted with the segment being
+// `dot` (`stamp::along`).
+fn part_along(dot: i32, length: i32) -> i32 {
+    if length <= 0 { return 0; }
+    let d = clamp(dot, 0, length);
+    let shift = u32(max(32 - i32(countLeadingZeros(u32(length))) - 22, 0));
+    return ((d >> shift) * 256) / max(length >> shift, 1);
 }
 
-// What the near spawns make of coarse cell `(i, j, k)` of footprint `tile`
-// (`FeatureEval::coarse_cell`): 0 nothing, 1 air, 2 + m material m. The
-// placements' stamp cells in its box summed: solid with the most common
-// material from half its base cells, else air from half.
-fn coarse_feature_cell(tile: TileJob, i: i32, j: i32, k: i32) -> u32 {
-    let level = tile.level;
-    let base = vec3<i32>(i, k, j) << vec3<u32>(level);
-    let lo = vec2<i32>(i, j) << vec2<u32>(level);
-    let hi = lo + (1 << level) - 1;
-    var air = 0u;
-    var solid = 0u;
-    for (var s = 0u; s < feature_near(level); s++) {
-        if !feature_drawn(level, s) { continue; }
-        let g = reaching_squares(s, lo, hi);
-        for (var gy = g.y; gy <= g.w; gy++) {
-            for (var gx = g.x; gx <= g.z; gx++) {
-                let p = tile_placement(tile, s, vec2<i32>(gx, gy));
-                if !placed_meets(p, lo, hi) { continue; }
-                let a = placed_local(p, base - p.anchor);
-                let b = placed_local(p, base + (1 << level) - 1 - p.anchor);
-                air += stamp_count(p.stamp, 0u, min(a, b), max(a, b) + 1);
-                for (var c = 0u; c < stamp_word(p.stamp, 7u); c++) { solid += stamp_count(p.stamp, 1u + c, min(a, b), max(a, b) + 1); }
-            }
-        }
+// Whether part `q` holds point `p` (sixteenths of a cell): base cell
+// `cell` when `base` (sparse and rough by hash), else a coarse cell's
+// centre (smooth, held where the part keeps half its cells)
+// (`CompiledPart::holds`).
+fn part_holds(q: Part, p: vec3<i32>, base: bool, cell: vec3<i32>) -> bool {
+    var h = 0u;
+    if base {
+        h = hash3(cell.x, cell.y, cell.z, q.seed);
+        if (h & 255u) >= q.keep { return false; }
+    } else if q.keep < 128u {
+        return false;
     }
-    let half = 1u << (3u * level - 1u);
-    if solid < half { return select(0u, 1u, air >= half); }
-    // The most common material (the lowest id of equals).
-    var best = 0u;
-    var most = 0u;
-    for (var s = 0u; s < feature_near(level); s++) {
-        if !feature_drawn(level, s) { continue; }
-        let g = reaching_squares(s, lo, hi);
-        for (var gy = g.y; gy <= g.w; gy++) {
-            for (var gx = g.x; gx <= g.z; gx++) {
-                let p = tile_placement(tile, s, vec2<i32>(gx, gy));
-                if !placed_meets(p, lo, hi) { continue; }
-                for (var c = 0u; c < stamp_word(p.stamp, 7u); c++) {
-                    let m = stamp_word(p.stamp, 10u + c);
-                    let count = feature_material_count(tile, i, j, k, m);
-                    if count > most || (count == most && m < best) {
-                        best = m;
-                        most = count;
-                    }
-                }
-            }
-        }
-    }
-    return 2u + best;
+    if !q.capsule { return all(p >= q.a) && all(p < q.b); }
+    let d = q.b - q.a;
+    let w = p - q.a;
+    let length = dot(d, d);
+    let along_d = dot(w, d);
+    if q.flat && (along_d < 0 || along_d > length) { return false; }
+    let t = part_along(along_d, length);
+    let e = w - d * t / 256;
+    var r = q.radius.x + (q.radius.y - q.radius.x) * t / 256;
+    if base { r -= q.rough * i32((h >> 8u) & 255u) / 256; }
+    return r > 0 && dot(e, e) <= r * r;
+}
+
+// A part's cell code for `feature_set`: 1 air, 2 + m material m.
+fn part_code(q: Part) -> u32 {
+    return select(1u, 2u + q.material, q.material != 0u);
 }
 
 // The far form over level column `(i, j)` of footprint `tile`
@@ -1804,9 +1774,11 @@ fn feature_column(tile: TileJob, i: i32, j: i32, k0: i32, p: vec3<i32>, top: i32
     }
     let lo = vec2<i32>(i, j) << vec2<u32>(level);
     let hi = lo + (1 << level) - 1;
-    // Base cells: each placement over the column in order, its cells over
-    // the earlier ones'. Coarse cells: the layers any placement reaches.
-    var range = vec2<i32>(0x7fffffff, -0x7fffffff);
+    // Each placement over the column in order, its parts in order, each
+    // over the cells before: a base cell takes the last holding its centre,
+    // a coarse cell the last holding its box's centre (`stamp::cell_of`,
+    // `coarse_of`). A part reads the cells its box spans.
+    let span = 1 << level;
     for (var s = 0u; s < feature_near(level); s++) {
         if !feature_drawn(level, s) { continue; }
         let g = reaching_squares(s, lo, hi);
@@ -1814,22 +1786,31 @@ fn feature_column(tile: TileJob, i: i32, j: i32, k0: i32, p: vec3<i32>, top: i32
             for (var gx = g.x; gx <= g.z; gx++) {
                 let pl = tile_placement(tile, s, vec2<i32>(gx, gy));
                 if !placed_meets(pl, lo, hi) { continue; }
-                let y0 = pl.anchor.y + bitcast<i32>(stamp_word(pl.stamp, 1u));
-                let y1 = y0 + i32(stamp_word(pl.stamp, 5u));
-                if level == 0u {
-                    for (var k = max(y0, k0); k < min(y1, k0 + 64); k++) {
-                        let v = stamp_cell(pl.stamp, placed_local(pl, vec3<i32>(i, k, j) - pl.anchor));
-                        if v != 0u { feature_set(&c, k - k0, v); }
+                // The column's box in the stamp's frame (x, z).
+                let ca = placed_local(pl, vec3<i32>(lo.x, 0, lo.y) - pl.anchor);
+                let cb = placed_local(pl, vec3<i32>(hi.x, 0, hi.y) - pl.anchor);
+                let clo = min(ca, cb);
+                let chi = max(ca, cb);
+                for (var n = 0u; n < stamp_word(pl.stamp, 7u); n++) {
+                    let q = stamp_part(pl.stamp, n);
+                    if q.lo.x > chi.x || q.hi.x < clo.x || q.lo.z > chi.z || q.hi.z < clo.z { continue; }
+                    let code = part_code(q);
+                    let first = max((pl.anchor.y + q.lo.y) >> level, k0);
+                    let last = min(((pl.anchor.y + q.hi.y) >> level) + 1, k0 + 64);
+                    for (var k = first; k < last; k++) {
+                        let y = (k << level) - pl.anchor.y;
+                        var held: bool;
+                        if level == 0u {
+                            let cell = vec3<i32>(clo.x, y, clo.z);
+                            held = part_holds(q, cell * 16 + 8, true, cell);
+                        } else {
+                            held = part_holds(q, vec3<i32>(clo.x + chi.x + 1, 2 * y + span, clo.z + chi.z + 1) * 8, false, vec3<i32>(0));
+                        }
+                        if held { feature_set(&c, k - k0, code); }
                     }
-                } else {
-                    range = vec2<i32>(min(range.x, y0 >> level), max(range.y, ((y1 - 1) >> level) + 1));
                 }
             }
         }
-    }
-    for (var k = max(range.x, k0); k < min(range.y, k0 + 64); k++) {
-        let v = coarse_feature_cell(tile, i, j, k);
-        if v != 0u { feature_set(&c, k - k0, v); }
     }
     return c;
 }
@@ -1840,28 +1821,46 @@ fn feature_material(c: FeatureColumn, z: u32) -> u32 {
     return (words[z >> 2u] >> ((z & 3u) * 8u)) & 0xffu;
 }
 
-// A footprint's level-0 node lattice (`feature_lattice`): its node grid's
-// origin, side and first node slot.
+// A footprint's level-0 node quads (`feature_lattice`): the node grid
+// keying them (its origin and side), its workgroup's first node slot and
+// its table's first key; quad `e` of the table (`feature_quads`) holds the
+// four nodes a column blends at slots `base + 4 e` on.
 struct FeatureLattice {
     origin: vec2<i32>,
     side: u32,
     base: u32,
+    keys: u32,
 }
 
-// The lattice workgroup `group` keeps for footprint `job`: over every
+// The node quads workgroup `group` keeps for footprint `job`: over every
 // column its candidates read (the level's reach past the footprint).
 fn feature_lattice(job: TileJob, group: u32) -> FeatureLattice {
-    if job.level >= NEAR_LEVELS { return FeatureLattice(vec2<i32>(0), 0u, 0u); }
+    if job.level >= NEAR_LEVELS { return FeatureLattice(vec2<i32>(0), 0u, 0u, 0u); }
     let at = features[3] + job.level * 4u * (1u + MAX_SPAWNS);
     let reach = i32(features[at + 2u]);
     let first = (vec2<i32>(job.cx, job.cy) * 64 << vec2<u32>(job.level)) - reach;
-    return FeatureLattice(first & vec2<i32>(~(NODE_COLUMNS - 1)), features[at + 3u], FEATURE_LATTICE_AT + group * features[5]);
+    return FeatureLattice(first & vec2<i32>(~(NODE_COLUMNS - 1)), features[at + 3u], FEATURE_LATTICE_AT + group * features[5], group * FEATURE_QUADS);
 }
 
-// The terrain's level-0 column `(i, j)` (height, surface word) from a
-// lattice.
+// The key of the node quad column `(i, j)` blends (0: none).
+fn quad_key(l: FeatureLattice, i: i32, j: i32) -> u32 {
+    let n = vec2<u32>(((vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1))) - l.origin) / NODE_COLUMNS);
+    return n.y * l.side + n.x + 1u;
+}
+
+// Where key `key` lies in the quad table: its first probe.
+fn quad_probe(key: u32) -> u32 {
+    return (key * 0x9e3779b1u) % FEATURE_QUADS;
+}
+
+// The terrain's level-0 column `(i, j)` (height, surface word) from the
+// footprint's node quads.
 fn feature_ground(l: FeatureLattice, face: u32, i: i32, j: i32) -> vec2<i32> {
-    return generation_grid_column(l.base, l.side, l.origin, face, i, j, 0u, false);
+    let key = quad_key(l, i, j);
+    var e = quad_probe(key);
+    for (var n = 0u; n < FEATURE_QUADS && atomicLoad(&feature_quads[l.keys + e]) != key; n++) { e = (e + 1u) % FEATURE_QUADS; }
+    let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    return generation_grid_column(l.base + 4u * e, 2u, first, face, i, j, 0u, false);
 }
 
 // Spawn `s`'s candidate anchor on square `g` of `face`, where its rules
@@ -1934,16 +1933,15 @@ fn feature_candidate(job: TileJob, l: FeatureLattice, s: u32, g: vec2<i32>) -> v
 
 var<workgroup> w_feature_tiles: u32;
 var<workgroup> w_feature_near: u32;
-// The lattice nodes a footprint's candidates read (a bit each,
-// MAX_LATTICE_NODES of them).
-var<workgroup> w_lattice_need: array<atomic<u32>, 128>;
-
-// Marks the four nodes column `(i, j)` blends in lattice `l`.
+// Keeps the node quad column `(i, j)` blends.
 fn need_column(l: FeatureLattice, i: i32, j: i32) {
-    let n = vec2<u32>(((vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1))) - l.origin) / NODE_COLUMNS);
-    for (var c = 0u; c < 4u; c++) {
-        let at = (n.y + (c >> 1u)) * l.side + n.x + (c & 1u);
-        atomicOr(&w_lattice_need[at >> 5u], 1u << (at & 31u));
+    let key = quad_key(l, i, j);
+    var e = quad_probe(key);
+    for (var n = 0u; n < FEATURE_QUADS; n++) {
+        let held = atomicCompareExchangeWeak(&feature_quads[l.keys + e], 0u, key);
+        if held.exchanged || held.old_value == key { return; }
+        // A spurious failure retries the entry; another key moves on.
+        if held.old_value != 0u { e = (e + 1u) % FEATURE_QUADS; }
     }
 }
 
@@ -1972,10 +1970,11 @@ fn tile_features_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         let near = workgroupUniformLoad(&w_feature_near);
         let lattice = feature_lattice(job, wg.x);
         let first = vec2<i32>(job.cx * 64, job.cy * 64) << vec2<u32>(job.level);
-        // The level-0 nodes the candidates' heights read (anchors whose
-        // rules that read no terrain pass, their footprints' corners),
-        // each evaluated once into the lattice.
-        for (var w = li; w < 128u; w += 64u) { atomicStore(&w_lattice_need[w], 0u); }
+        // The level-0 node quads the candidates' heights read (anchors
+        // whose rules that read no terrain pass, their footprints'
+        // corners), each evaluated once into the workgroup's slots.
+        for (var e = li; e < FEATURE_QUADS; e += 64u) { atomicStore(&feature_quads[lattice.keys + e], 0u); }
+        storageBarrier();
         workgroupBarrier();
         for (var s = 0u; s < near; s++) {
             let grid = feature_grid(job.level, s);
@@ -1990,10 +1989,14 @@ fn tile_features_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
                 }
             }
         }
+        storageBarrier();
         workgroupBarrier();
-        for (var n = li; n < lattice.side * lattice.side; n += 64u) {
-            if ((atomicLoad(&w_lattice_need[n >> 5u]) >> (n & 31u)) & 1u) != 0u {
-                generation_grid_nodes(lattice.base, lattice.side, job.face, lattice.origin, lattice.side, 0u, n);
+        for (var n = li; n < 4u * FEATURE_QUADS; n += 64u) {
+            let key = atomicLoad(&feature_quads[lattice.keys + (n >> 2u)]);
+            if key != 0u {
+                let at = vec2<u32>((key - 1u) % lattice.side, (key - 1u) / lattice.side);
+                let first = lattice.origin + vec2<i32>(at) * NODE_COLUMNS;
+                generation_grid_nodes(lattice.base + 4u * (n >> 2u), 2u, job.face, first, 2u, 0u, n & 3u);
             }
         }
         storageBarrier();

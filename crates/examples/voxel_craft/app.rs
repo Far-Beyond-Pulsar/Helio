@@ -2,7 +2,6 @@
 
 use crate::game::Game;
 use crate::gfx::Gfx;
-use crate::textures;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -42,7 +41,7 @@ impl ApplicationHandler for App {
                 .create_window(Window::default_attributes().with_title("Voxel Craft: building the world...").with_inner_size(LogicalSize::new(1600.0, 900.0)))
                 .expect("window"),
         );
-        let mut game = Game::new(|planet| Gfx::new(window.clone(), planet, textures::load));
+        let mut game = Game::new(|planet| Gfx::new(window.clone(), planet));
         // A tour takes no input (its shots compare), so it leaves the cursor
         // to whoever is at the machine.
         if !game.touring() {

@@ -1,11 +1,21 @@
-//! Stamps: small voxel models (a tree, a house, a well), cells of material
-//! ids or air around an anchor. Features place them procedurally
-//! (`crate::features`, turned and mirrored by each placement); an edit
-//! places one as brushes ([`Stamp::brushes`]).
+//! Stamps: voxel models (a tree, a house, a well) built from shapes around
+//! an anchor: boxes and tapered capsules (a ball is a capsule of no length)
+//! of a material or of air, the later ones over the earlier. Features place
+//! them procedurally (`crate::features`, turned and mirrored by each
+//! placement); an edit places one as brushes ([`Stamp::brushes`]).
 //!
-//! Offsets are `[x, y, z]` with +y up the planet's radial axis and `y = 0`
-//! the layer the anchor is in; x runs along the face's i axis and z along
-//! its j axis.
+//! Offsets are `[x, y, z]` in cells with +y up the planet's radial axis and
+//! `y = 0` the layer the anchor is in; x runs along the face's i axis and z
+//! along its j axis. A shape holds the cells whose centres it holds: cell
+//! `c` spans `[c, c + 1)`, its centre `c + 0.5`.
+//!
+//! A shape is a handful of numbers at any size, so a 10 cm tree of a
+//! million cells is a few dozen shapes. Evaluation is integer arithmetic in
+//! sixteenths of a cell ([`CompiledPart`]), bit for bit on the CPU and the
+//! GPU (`chunk_generate.wgsl`): a base cell takes the last shape holding its
+//! centre; a coarse cell the last holding its box's centre, smooth (no
+//! rough edge) and solid where a sparse shape keeps at least half its
+//! cells.
 //!
 //! Placing one as edits is a few hundred brushes, not one a cell: vertical
 //! runs of a material (a trunk, a wall) become one box brush
@@ -14,28 +24,60 @@
 
 use crate::edits::{Brush, BrushOp, BrushShape};
 use crate::grid::{Cell, Grid};
+use crate::noise::hash3;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
-/// Cells of material ids (`Some`) or air (`None`) at offsets from an anchor.
-/// Serialized as its cells in order.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Sixteenths of a cell: the unit shapes are evaluated in.
+pub const UNIT: i32 = 16;
+/// Most cells a stamp spans each way from its anchor: evaluation's integers
+/// stay in range (`CompiledPart::holds`).
+pub const MAX_STAMP_REACH: i32 = 512;
+
+/// A region of cells (offsets in cells; positions may be fractional).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Shape {
+    /// The cells of the box between two corner cells (inclusive).
+    Box { lo: [i32; 3], hi: [i32; 3] },
+    /// Points within a radius of the segment from `a` to `b`, the radius
+    /// going from `radius[0]` at `a` to `radius[1]` at `b` (a branch, a
+    /// trunk; a ball with `a == b`).
+    Capsule { a: [f32; 3], b: [f32; 3], radius: [f32; 2] },
+    /// The same between the planes through `a` and `b` square to the
+    /// segment: flat ends (a cone's tier, a column).
+    Cone { a: [f32; 3], b: [f32; 3], radius: [f32; 2] },
+}
+
+/// A shape of a stamp: a material (`None`: air, clearing what stands
+/// there), a share of its cells left out by hash (`sparse`, 0 to 1:
+/// foliage), and an edge broken by hash (`rough`: up to this many cells
+/// off its radius: leaves, rock).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Part {
+    pub shape: Shape,
+    pub material: Option<u32>,
+    #[serde(default)]
+    pub sparse: f32,
+    #[serde(default)]
+    pub rough: f32,
+}
+
+impl Part {
+    pub fn solid(shape: Shape, material: u32) -> Self {
+        Self { shape, material: Some(material), sparse: 0.0, rough: 0.0 }
+    }
+
+    pub fn air(shape: Shape) -> Self {
+        Self { shape, material: None, sparse: 0.0, rough: 0.0 }
+    }
+}
+
+/// Shapes of material ids or air around an anchor, the later over the
+/// earlier. Serialized as its parts in order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Stamp {
-    cells: FxHashMap<[i32; 3], Option<u32>>,
-}
-
-impl serde::Serialize for Stamp {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut cells: Vec<([i32; 3], Option<u32>)> = self.cells().collect();
-        cells.sort_unstable();
-        serde::Serialize::serialize(&cells, serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Stamp {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let cells: Vec<([i32; 3], Option<u32>)> = serde::Deserialize::deserialize(deserializer)?;
-        Ok(Self { cells: cells.into_iter().collect() })
-    }
+    parts: Vec<Part>,
 }
 
 impl Stamp {
@@ -43,72 +85,113 @@ impl Stamp {
         Self::default()
     }
 
-    /// Material `material` at `at` (over what was there).
+    /// `part` over what the stamp holds.
+    pub fn add(&mut self, part: Part) {
+        self.parts.push(part);
+    }
+
+    /// Material `material` at cell `at` (over what was there).
     pub fn set(&mut self, at: [i32; 3], material: u32) {
-        self.cells.insert(at, Some(material));
+        self.fill(at, at, material);
     }
 
-    /// Air at `at`: whatever the ground or a neighbour put there goes.
+    /// Air at cell `at`: whatever the ground or a neighbour put there goes.
     pub fn clear(&mut self, at: [i32; 3]) {
-        self.cells.insert(at, None);
+        self.hollow(at, at);
     }
 
-    /// Fills the box between `a` and `b` (inclusive) with `material`.
+    /// Fills the box between cells `a` and `b` (inclusive) with `material`.
     pub fn fill(&mut self, a: [i32; 3], b: [i32; 3], material: u32) {
-        for at in box_cells(a, b) {
-            self.set(at, material);
-        }
+        self.add(Part::solid(Shape::Box { lo: min3(a, b), hi: max3(a, b) }, material));
     }
 
-    /// Clears the box between `a` and `b` (inclusive).
+    /// Clears the box between cells `a` and `b` (inclusive).
     pub fn hollow(&mut self, a: [i32; 3], b: [i32; 3]) {
-        for at in box_cells(a, b) {
-            self.clear(at);
-        }
+        self.add(Part::air(Shape::Box { lo: min3(a, b), hi: max3(a, b) }));
     }
 
     /// The four walls of the box between `a` and `b` (its outer cells on
     /// the x and z sides), of `material`.
     pub fn walls(&mut self, a: [i32; 3], b: [i32; 3], material: u32) {
         let (lo, hi) = (min3(a, b), max3(a, b));
-        for at in box_cells(lo, hi) {
-            if at[0] == lo[0] || at[0] == hi[0] || at[2] == lo[2] || at[2] == hi[2] {
-                self.set(at, material);
-            }
-        }
+        self.fill(lo, [hi[0], hi[1], lo[2]], material);
+        self.fill([lo[0], lo[1], hi[2]], hi, material);
+        self.fill(lo, [lo[0], hi[1], hi[2]], material);
+        self.fill([hi[0], lo[1], lo[2]], hi, material);
     }
 
-    /// Every cell of `other` over this stamp's, offset by `at`.
+    /// A ball of `material` of `radius` cells around point `centre`.
+    pub fn ball(&mut self, centre: [f32; 3], radius: f32, material: u32) {
+        self.add(Part::solid(Shape::Capsule { a: centre, b: centre, radius: [radius; 2] }, material));
+    }
+
+    /// A tapered capsule of `material` from point `a` (radius `radius[0]`)
+    /// to `b` (`radius[1]`).
+    pub fn capsule(&mut self, a: [f32; 3], b: [f32; 3], radius: [f32; 2], material: u32) {
+        self.add(Part::solid(Shape::Capsule { a, b, radius }, material));
+    }
+
+    /// A flat-ended cone (frustum) of `material` from point `a` (radius
+    /// `radius[0]`) to `b` (`radius[1]`).
+    pub fn cone(&mut self, a: [f32; 3], b: [f32; 3], radius: [f32; 2], material: u32) {
+        self.add(Part::solid(Shape::Cone { a, b, radius }, material));
+    }
+
+    /// Every part of `other` over this stamp's, offset by `at` cells.
     pub fn place(&mut self, other: &Stamp, at: [i32; 3]) {
-        for (p, m) in &other.cells {
-            self.cells.insert([p[0] + at[0], p[1] + at[1], p[2] + at[2]], *m);
-        }
+        let f = at.map(|v| v as f32);
+        self.parts.extend(other.parts.iter().map(|p| {
+            let shape = match p.shape {
+                Shape::Box { lo, hi } => Shape::Box { lo: add3(lo, at), hi: add3(hi, at) },
+                Shape::Capsule { a, b, radius } => Shape::Capsule { a: addf(a, f), b: addf(b, f), radius },
+                Shape::Cone { a, b, radius } => Shape::Cone { a: addf(a, f), b: addf(b, f), radius },
+            };
+            Part { shape, ..*p }
+        }));
     }
 
-    /// What the stamp holds at `at`: `None` where it holds nothing,
-    /// `Some(None)` air.
-    pub fn get(&self, at: [i32; 3]) -> Option<Option<u32>> {
-        self.cells.get(&at).copied()
-    }
-
-    /// The stamp's cells, in no order.
-    pub fn cells(&self) -> impl Iterator<Item = ([i32; 3], Option<u32>)> + '_ {
-        self.cells.iter().map(|(p, m)| (*p, *m))
-    }
-
-    pub fn len(&self) -> usize {
-        self.cells.len()
+    pub fn parts(&self) -> &[Part] {
+        &self.parts
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
+        self.parts.is_empty()
     }
 
-    /// The smallest and largest offsets it holds (`None` when empty).
+    /// The parts compiled for evaluation.
+    pub fn compile(&self) -> Result<Vec<CompiledPart>, String> {
+        self.parts.iter().enumerate().map(|(n, p)| CompiledPart::new(p, n as u32)).collect()
+    }
+
+    /// The smallest and largest cells any part may hold (`None` when
+    /// empty).
     pub fn bounds(&self) -> Option<([i32; 3], [i32; 3])> {
-        let mut cells = self.cells.keys();
-        let first = *cells.next()?;
-        Some(cells.fold((first, first), |(lo, hi), p| (min3(lo, *p), max3(hi, *p))))
+        let parts = self.compile().ok()?;
+        let mut boxes = parts.iter().map(|p| (p.lo, p.hi));
+        let first = boxes.next()?;
+        Some(boxes.fold(first, |(lo, hi), (a, b)| (min3(lo, a), max3(hi, b))))
+    }
+
+    /// What the stamp holds at cell `at`: `None` nothing, `Some(None)` air.
+    pub fn get(&self, at: [i32; 3]) -> Option<Option<u32>> {
+        cell_of(&self.compile().ok()?, at)
+    }
+
+    /// The cells the stamp holds (air or a material), in no order.
+    pub fn cells(&self) -> Vec<([i32; 3], Option<u32>)> {
+        let Ok(parts) = self.compile() else { return Vec::new() };
+        let Some((lo, hi)) = self.bounds() else { return Vec::new() };
+        let mut out = Vec::new();
+        for y in lo[1]..=hi[1] {
+            for z in lo[2]..=hi[2] {
+                for x in lo[0]..=hi[0] {
+                    if let Some(v) = cell_of(&parts, [x, y, z]) {
+                        out.push(([x, y, z], v));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The brushes that place the stamp with its origin at cell `(i, j, k)`
@@ -116,11 +199,171 @@ impl Stamp {
     /// materials, vertical runs as one brush each.
     pub fn brushes(&self, grid: &Grid, face: u8, i: i32, j: i32, k: i32) -> Vec<Brush> {
         let at = |p: [i32; 3]| Cell::new(face, i + p[0], j + p[2], k + p[1]);
-        let (air, solid): (Vec<_>, Vec<_>) = self.cells.iter().map(|(p, m)| (at(*p), *m)).partition(|(_, m)| m.is_none());
+        let (air, solid): (Vec<_>, Vec<_>) = self.cells().into_iter().map(|(p, m)| (at(p), m)).partition(|(_, m)| m.is_none());
         let mut out = run_brushes(grid, air);
         out.extend(run_brushes(grid, solid));
         out
     }
+}
+
+/// What `parts` (in order) make of base cell `at`: the last holding it.
+pub fn cell_of(parts: &[CompiledPart], at: [i32; 3]) -> Option<Option<u32>> {
+    let centre = at.map(|v| v * UNIT + UNIT / 2);
+    let mut out = None;
+    for p in parts {
+        if p.holds(centre, Some(at)) {
+            out = Some(p.material());
+        }
+    }
+    out
+}
+
+/// What `parts` make of the coarse cell over base cells `[lo, hi)` (its
+/// box in the stamp's frame): the last holding its centre, smooth, solid
+/// where a sparse part keeps half its cells.
+pub fn coarse_of(parts: &[CompiledPart], lo: [i32; 3], hi: [i32; 3]) -> Option<Option<u32>> {
+    let centre = [0, 1, 2].map(|a| (lo[a] + hi[a]) * (UNIT / 2));
+    let mut out = None;
+    for p in parts {
+        if p.holds(centre, None) {
+            out = Some(p.material());
+        }
+    }
+    out
+}
+
+/// A part as evaluation reads it (`chunk_generate.wgsl` the same, 16 words
+/// a part): its kind (a box; a capsule; flat ended) and material code (0
+/// air, else the material), the
+/// cells it may hold (inclusive), the segment's ends and radii (sixteenths
+/// of a cell; a box's corners as `a` and `b`), its edge's roughness
+/// (sixteenths) and the share of its cells kept (of 256), and its seed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompiledPart {
+    pub capsule: bool,
+    pub flat: bool,
+    pub material: u32,
+    pub lo: [i32; 3],
+    pub hi: [i32; 3],
+    pub a: [i32; 3],
+    pub b: [i32; 3],
+    pub radius: [i32; 2],
+    pub rough: i32,
+    pub keep: u32,
+    pub seed: u32,
+}
+
+impl CompiledPart {
+    fn new(part: &Part, index: u32) -> Result<Self, String> {
+        let material = match part.material {
+            None => 0,
+            Some(m) if (1..128).contains(&m) => m,
+            // Leaves draw materials in 7 bits; 0 is the terrain's rule.
+            Some(m) => return Err(format!("a stamp's material {m} is not 1 to 127")),
+        };
+        let units = |v: f32| (v * UNIT as f32).round() as i32;
+        let keep = ((1.0 - part.sparse.clamp(0.0, 1.0)) * 256.0).round() as u32;
+        let rough = units(part.rough.max(0.0));
+        let seed = hash3(index as i32, 0x57a, 0x3e7, 0x9e37_79b9);
+        let p = match part.shape {
+            Shape::Box { lo, hi } => {
+                let (lo, hi) = (min3(lo, hi), max3(lo, hi));
+                Self { capsule: false, flat: false, material, lo, hi, a: lo.map(|v| v * UNIT), b: hi.map(|v| (v + 1) * UNIT), radius: [0; 2], rough: 0, keep, seed }
+            }
+            Shape::Capsule { a, b, radius } | Shape::Cone { a, b, radius } => {
+                let flat = matches!(part.shape, Shape::Cone { .. });
+                let (a, b) = (a.map(units), b.map(units));
+                let radius = [units(radius[0].max(0.0)), units(radius[1].max(0.0))];
+                let r = radius[0].max(radius[1]);
+                // Cells whose centre may lie within the radius.
+                let lo = [0, 1, 2].map(|k| (a[k].min(b[k]) - r - UNIT / 2).div_euclid(UNIT));
+                let hi = [0, 1, 2].map(|k| (a[k].max(b[k]) + r - UNIT / 2).div_euclid(UNIT) + 1);
+                Self { capsule: true, flat, material, lo, hi, a, b, radius, rough, keep, seed }
+            }
+        };
+        if p.lo.iter().chain(&p.hi).any(|v| v.abs() > MAX_STAMP_REACH) {
+            return Err(format!("a stamp's part reaches past {MAX_STAMP_REACH} cells from its anchor"));
+        }
+        Ok(p)
+    }
+
+    /// Its material: `None` air.
+    pub fn material(&self) -> Option<u32> {
+        (self.material != 0).then_some(self.material)
+    }
+
+    /// Whether it holds point `p` (sixteenths of a cell). A base cell
+    /// (`cell`) is left out by hash where the part is sparse, and its edge
+    /// broken by hash where it is rough; a coarse cell (`None`) is smooth,
+    /// held where the part keeps half its cells.
+    pub fn holds(&self, p: [i32; 3], cell: Option<[i32; 3]>) -> bool {
+        let h = cell.map_or(0, |c| hash3(c[0], c[1], c[2], self.seed));
+        match cell {
+            Some(_) => {
+                if (h & 255) >= self.keep {
+                    return false;
+                }
+            }
+            None => {
+                if self.keep < 128 {
+                    return false;
+                }
+            }
+        }
+        if !self.capsule {
+            return (0..3).all(|k| p[k] >= self.a[k] && p[k] < self.b[k]);
+        }
+        // The closest point of the segment, at t (of 256) along it.
+        let d = sub3(self.b, self.a);
+        let w = sub3(p, self.a);
+        let length = dot3(d, d);
+        let along_d = dot3(w, d);
+        if self.flat && (along_d < 0 || along_d > length) {
+            return false;
+        }
+        let t = along(along_d, length);
+        let e = sub3(w, d.map(|v| v * t / 256));
+        let mut r = self.radius[0] + (self.radius[1] - self.radius[0]) * t / 256;
+        if cell.is_some() {
+            r -= self.rough * (((h >> 8) & 255) as i32) / 256;
+        }
+        r > 0 && dot3(e, e) <= r * r
+    }
+
+    /// The part as `chunk_generate.wgsl` reads it.
+    pub fn gpu_words(&self) -> [u32; 16] {
+        let i = |v: i32| v as u32;
+        [
+            u32::from(self.capsule) | (u32::from(self.flat) << 1) | (self.material << 8),
+            i(self.lo[0]),
+            i(self.lo[1]),
+            i(self.lo[2]),
+            i(self.hi[0]),
+            i(self.hi[1]),
+            i(self.hi[2]),
+            i(self.a[0]),
+            i(self.a[1]),
+            i(self.a[2]),
+            i(self.b[0]),
+            i(self.b[1]),
+            i(self.b[2]),
+            i(self.radius[0]) | (i(self.radius[1]) << 16),
+            i(self.rough) | (self.keep << 16),
+            self.seed,
+        ]
+    }
+}
+
+/// How far along a segment of squared length `length` its closest point to
+/// a point lies (of 256), its offset's dot product with the segment being
+/// `dot`: both shifted by the same bits so the product stays in range.
+fn along(dot: i32, length: i32) -> i32 {
+    if length <= 0 {
+        return 0;
+    }
+    let dot = dot.clamp(0, length);
+    let shift = (32 - length.leading_zeros() as i32 - 22).max(0);
+    ((dot >> shift) * 256) / (length >> shift).max(1)
 }
 
 /// The brush that makes `cell` of `material`, or air (`None`): a cube of the
@@ -179,9 +422,20 @@ fn max3(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
     [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])]
 }
 
-fn box_cells(a: [i32; 3], b: [i32; 3]) -> impl Iterator<Item = [i32; 3]> {
-    let (lo, hi) = (min3(a, b), max3(a, b));
-    (lo[0]..=hi[0]).flat_map(move |x| (lo[1]..=hi[1]).flat_map(move |y| (lo[2]..=hi[2]).map(move |z| [x, y, z])))
+fn add3(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn addf(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sub3(a: [i32; 3], b: [i32; 3]) -> [i32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [i32; 3], b: [i32; 3]) -> i32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 #[cfg(test)]
@@ -203,17 +457,61 @@ mod tests {
         house.hollow([0, 0, -2], [0, 1, -2]);
         house.fill([-2, 0, -1], [2, 3, 1], 7);
         house.hollow([-2, 0, -1], [2, 3, 1]);
+        house.ball([0.5, 6.5, 0.5], 2.0, 9);
+        let cells = house.cells();
         let brushes = house.brushes(&grid, face, i, j, k);
-        assert!(brushes.len() * 2 < house.len(), "{} brushes for {} cells", brushes.len(), house.len());
+        assert!(brushes.len() * 2 < cells.len(), "{} brushes for {} cells", brushes.len(), cells.len());
         for brush in brushes {
             planet.apply(brush).unwrap();
         }
-        for (p, m) in house.cells() {
+        for (p, m) in cells {
             let cell = Cell::new(face, i + p[0], j + p[2], k + p[1]);
             assert_eq!(planet.solid(cell), m.is_some(), "{p:?}");
             if let Some(m) = m {
                 assert_eq!(planet.material(cell), m, "{p:?}");
             }
         }
+    }
+
+    /// Shapes hold the cells whose centres they hold: a ball of radius 2
+    /// about a cell's centre holds the 33 cells within 2 of it, a capsule's
+    /// radius tapers along it, and a sparse part keeps about its share.
+    #[test]
+    fn shapes_hold_the_cells_whose_centres_they_hold() {
+        let mut ball = Stamp::new();
+        ball.ball([0.5, 0.5, 0.5], 2.0, 5);
+        let expected = (-2..=2).flat_map(|x| (-2..=2).flat_map(move |y| (-2..=2).map(move |z| x * x + y * y + z * z))).filter(|&d| d <= 4).count();
+        assert_eq!(ball.cells().len(), expected);
+        let mut cone = Stamp::new();
+        cone.capsule([0.5, 0.0, 0.5], [0.5, 20.0, 0.5], [3.0, 0.5], 5);
+        let width = |y: i32| (-4..=4).filter(|&x| cone.get([x, y, 0]).is_some()).count();
+        assert!(width(1) > width(10) && width(10) > width(19), "{} {} {}", width(1), width(10), width(19));
+        assert!(cone.get([0, -2, 0]).is_some(), "a capsule's end is round");
+        let mut flat = Stamp::new();
+        flat.cone([0.5, 0.0, 0.5], [0.5, 20.0, 0.5], [3.0, 0.5], 5);
+        assert_eq!((flat.get([0, -1, 0]), flat.get([0, 0, 0]), flat.get([2, 0, 0])), (None, Some(Some(5)), Some(Some(5))), "a cone's end is flat");
+        let mut leaves = Stamp::new();
+        leaves.add(Part { sparse: 0.25, ..Part::solid(Shape::Capsule { a: [0.0; 3], b: [0.0; 3], radius: [8.0; 2] }, 5) });
+        let kept = leaves.cells().len() as f64;
+        let mut whole = Stamp::new();
+        whole.ball([0.0; 3], 8.0, 5);
+        let share = kept / whole.cells().len() as f64;
+        assert!((share - 0.75).abs() < 0.05, "{share}");
+    }
+
+    /// A coarse cell takes the last part holding its box's centre: a box
+    /// of eight cells is one cell of level 1 where it lines up, and air
+    /// holding the centre clears it.
+    #[test]
+    fn coarse_cells_read_their_centre() {
+        let mut s = Stamp::new();
+        s.fill([0, 0, 0], [1, 1, 1], 4);
+        let parts = s.compile().unwrap();
+        assert_eq!(coarse_of(&parts, [0, 0, 0], [2, 2, 2]), Some(Some(4)));
+        assert_eq!(coarse_of(&parts, [2, 0, 0], [4, 2, 2]), None);
+        s.hollow([0, 0, 0], [0, 0, 0]);
+        assert_eq!(coarse_of(&s.compile().unwrap(), [0, 0, 0], [2, 2, 2]), Some(Some(4)), "cell (0, 0, 0) ends at the centre");
+        s.hollow([1, 1, 1], [1, 1, 1]);
+        assert_eq!(coarse_of(&s.compile().unwrap(), [0, 0, 0], [2, 2, 2]), Some(None), "cell (1, 1, 1) starts at it");
     }
 }

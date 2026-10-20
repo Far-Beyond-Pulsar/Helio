@@ -24,13 +24,13 @@
 //! squares (a forest's crowns interlock). A base cell is what the last
 //! placement holding it (spawns in order, a spawn's by row then column)
 //! makes of it: air or a material. A coarse cell (cells narrower than the
-//! spacing) sums the cells the placements' stamps fill and clear in its
-//! box: solid with their most common material from half its base cells,
-//! else air from half, else the terrain's.
+//! spacing) is what the last placement whose stamp holds its centre makes
+//! of it (`stamp::coarse_of`: its parts smooth, a sparse one solid where it
+//! keeps half its cells), else the terrain's.
 //!
 //! A spawn draws as its stamps at its near levels: level 0, and those whose
-//! cells are at most half its spacing and half its footprint (its stamps
-//! two cells wide or more). Each footprint of a level keeps the placements
+//! cells are at most half its spacing and an eighth of its footprint (its
+//! stamps eight cells wide or more: legible). Each footprint of a level keeps the placements
 //! of the spawns up to its last near one (those the near ones' exclusion
 //! reads) on the GPU (`tile_features_main`), square by square over the
 //! footprint and a margin ([`CompiledFeatures::layout`]).
@@ -51,29 +51,26 @@
 
 use crate::grid::Grid;
 use crate::noise::{hash3, noise, ONE};
-use crate::stamp::Stamp;
+use crate::stamp::{coarse_of, cell_of, CompiledPart, Stamp, MAX_STAMP_REACH, UNIT};
 use crate::terrain::{top_cells, Column, TerrainField};
 use serde::{Deserialize, Serialize};
 
 /// Most stamps a set holds, and most spawns (the GPU's tables).
 pub const MAX_STAMPS: usize = 256;
 pub const MAX_SPAWNS: usize = 32;
-/// Largest stamp, cells a side (x and z) and tall (y).
-pub const MAX_STAMP_SIDE: i32 = 64;
 /// Widest spacing (placements pack their anchor's offset in a square in 10
-/// bits), and the levels it makes near (`(2 << level) <= spacing`).
+/// bits), and the levels it makes near (`(2 << level) <= spacing` at most).
 pub const MAX_SPACING: u32 = 1024;
 pub const NEAR_LEVELS: u32 = 10;
 /// Most placement squares a footprint keeps (8 bytes each).
 pub const MAX_FOOTPRINT_SQUARES: usize = 16384;
-/// Most level-0 terrain nodes a footprint's candidates read (each
-/// `tile_features_main` workgroup keeps a lattice of them).
-pub const MAX_LATTICE_NODES: usize = 4096;
+/// Node quads (the four level-0 terrain nodes a column blends) a
+/// `tile_features_main` workgroup keeps for its footprint's candidates: a
+/// table of the quads they read (`feature_quads`), kept at most half full,
+/// however wide the footprint (`LevelLayout::quads`).
+pub const FEATURE_QUADS: usize = 8192;
 /// Base columns between the terrain's nodes (`engine::NODE_COLUMNS`).
 const NODE_COLUMNS: i64 = 16;
-pub const MAX_STAMP_HEIGHT: i32 = 96;
-/// Most distinct materials in one stamp (coarse cells count each).
-pub const MAX_STAMP_MATERIALS: usize = 6;
 
 /// A world's features: stamps and the spawns that place them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -127,111 +124,65 @@ impl Default for Spawn {
     }
 }
 
-/// A stamp as evaluation reads it: dense cells over its box, and summed
-/// counts for coarse cells.
+/// A stamp as evaluation reads it: its parts compiled (`stamp::CompiledPart`)
+/// and the box of cells they may hold.
 #[derive(Clone, Debug)]
 pub struct CompiledStamp {
     /// Its box: lowest offset and size.
     pub lo: [i32; 3],
     pub size: [i32; 3],
-    /// Per cell (`x + size.x (z + size.z y)`): 0 none, 1 air, 2 + n its
-    /// `n`th material.
-    pub cells: Vec<u8>,
-    pub materials: Vec<u32>,
-    /// Summed counts over `(size + 1)^3`: air, then each material's.
-    pub sums: Vec<Vec<u32>>,
+    pub parts: Vec<CompiledPart>,
     /// Most base columns it reaches from its anchor in x or z (any turn).
     pub reach: i32,
-    /// Columns it covers (any solid cell over them).
+    /// Columns its solid parts cover, kept share of them counted.
     pub area: u32,
 }
 
 impl CompiledStamp {
     fn new(stamp: &Stamp) -> Result<Self, String> {
+        let parts = stamp.compile()?;
         let (lo, hi) = stamp.bounds().unwrap_or(([0; 3], [-1; 3]));
         let size = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
-        if size[0] > MAX_STAMP_SIDE || size[2] > MAX_STAMP_SIDE || size[1] > MAX_STAMP_HEIGHT {
-            return Err(format!("a stamp of {size:?} cells is larger than {MAX_STAMP_SIDE} x {MAX_STAMP_HEIGHT} x {MAX_STAMP_SIDE}"));
+        let reach = [lo[0], lo[2], hi[0], hi[2]].into_iter().map(i32::abs).max().unwrap_or(0);
+        // The columns under its solid parts (their outlines from above).
+        let mut covered = 0.0;
+        for z in lo[2]..=hi[2] {
+            for x in lo[0]..=hi[0] {
+                let c = [x * UNIT + UNIT / 2, z * UNIT + UNIT / 2];
+                let keep = parts.iter().filter(|p| p.material != 0 && p.lo[0] <= x && x <= p.hi[0] && p.lo[2] <= z && z <= p.hi[2] && from_above(p, c)).map(|p| f64::from(p.keep) / 256.0).fold(0.0, f64::max);
+                covered += keep;
+            }
         }
-        let mut materials: Vec<u32> = Vec::new();
-        let mut cells = vec![0u8; (size[0].max(0) * size[1].max(0) * size[2].max(0)) as usize];
-        let mut sorted: Vec<([i32; 3], Option<u32>)> = stamp.cells().collect();
-        sorted.sort_unstable();
-        for (p, m) in sorted {
-            let at = ((p[0] - lo[0]) + size[0] * ((p[2] - lo[2]) + size[2] * (p[1] - lo[1]))) as usize;
-            cells[at] = match m {
-                None => 1,
-                Some(m) => {
-                    // Leaves draw materials in 7 bits; 0 is the terrain's rule.
-                    if !(1..128).contains(&m) {
-                        return Err(format!("a stamp's material {m} is not 1 to 127"));
-                    }
-                    let n = match materials.iter().position(|&x| x == m) {
-                        Some(n) => n,
-                        None => {
-                            if materials.len() == MAX_STAMP_MATERIALS {
-                                return Err(format!("a stamp has more than {MAX_STAMP_MATERIALS} materials"));
-                            }
-                            materials.push(m);
-                            materials.len() - 1
-                        }
-                    };
-                    2 + n as u8
-                }
-            };
-        }
-        let (sx, sy, sz) = (size[0].max(0) as usize + 1, size[1].max(0) as usize + 1, size[2].max(0) as usize + 1);
-        let sums = (0..=materials.len())
-            .map(|code| {
-                let mut s = vec![0u32; sx * sy * sz];
-                let at = |x: usize, y: usize, z: usize| x + sx * (z + sz * y);
-                for y in 1..sy {
-                    for z in 1..sz {
-                        for x in 1..sx {
-                            let c = cells[(x - 1) + (sx - 1) * ((z - 1) + (sz - 1) * (y - 1))];
-                            let v = u32::from(c == code as u8 + 1);
-                            s[at(x, y, z)] = v + s[at(x - 1, y, z)] + s[at(x, y, z - 1)] + s[at(x, y - 1, z)] - s[at(x - 1, y - 1, z)] - s[at(x - 1, y, z - 1)] - s[at(x, y - 1, z - 1)] + s[at(x - 1, y - 1, z - 1)];
-                        }
-                    }
-                }
-                s
-            })
-            .collect();
-        let reach = [lo[0], lo[2], lo[0] + size[0] - 1, lo[2] + size[2] - 1].into_iter().map(i32::abs).max().unwrap_or(0);
-        let mut columns: Vec<[i32; 2]> = stamp.cells().filter(|(_, m)| m.is_some()).map(|(p, _)| [p[0], p[2]]).collect();
-        columns.sort_unstable();
-        columns.dedup();
-        Ok(Self { lo, size, cells, materials, sums, reach, area: columns.len() as u32 })
+        Ok(Self { lo, size, parts, reach, area: covered.round() as u32 })
     }
 
     /// What it holds at offset `p` (its own frame): `None` nothing,
     /// `Some(None)` air.
     pub fn at(&self, p: [i32; 3]) -> Option<Option<u32>> {
-        let q = [p[0] - self.lo[0], p[1] - self.lo[1], p[2] - self.lo[2]];
-        if (0..3).any(|a| q[a] < 0 || q[a] >= self.size[a]) {
-            return None;
-        }
-        match self.cells[(q[0] + self.size[0] * (q[2] + self.size[2] * q[1])) as usize] {
-            0 => None,
-            1 => Some(None),
-            c => Some(Some(self.materials[usize::from(c) - 2])),
-        }
+        cell_of(&self.parts, p)
     }
 
-    /// Cells of code `code` (0 air, `1 + n` material `n`) in the box
-    /// `[lo, hi)` of its own frame.
-    fn count(&self, code: usize, lo: [i32; 3], hi: [i32; 3]) -> u32 {
-        let clamp = |v: i32, a: usize| (v - self.lo[a]).clamp(0, self.size[a]) as usize;
-        let (x0, y0, z0) = (clamp(lo[0], 0), clamp(lo[1], 1), clamp(lo[2], 2));
-        let (x1, y1, z1) = (clamp(hi[0], 0), clamp(hi[1], 1), clamp(hi[2], 2));
-        if x0 >= x1 || y0 >= y1 || z0 >= z1 {
-            return 0;
-        }
-        let (sx, sz) = (self.size[0] as usize + 1, self.size[2] as usize + 1);
-        let s = &self.sums[code];
-        let at = |x: usize, y: usize, z: usize| s[x + sx * (z + sz * y)] as i64;
-        (at(x1, y1, z1) - at(x0, y1, z1) - at(x1, y0, z1) - at(x1, y1, z0) + at(x0, y0, z1) + at(x0, y1, z0) + at(x1, y0, z0) - at(x0, y0, z0)) as u32
+    /// What it makes of the coarse cell over offsets `[lo, hi)` of its own
+    /// frame (`stamp::coarse_of`).
+    pub fn coarse(&self, lo: [i32; 3], hi: [i32; 3]) -> Option<Option<u32>> {
+        coarse_of(&self.parts, lo, hi)
     }
+}
+
+/// Whether a part seen from above covers column centre `c` (x, z in
+/// sixteenths of a cell).
+fn from_above(p: &CompiledPart, c: [i32; 2]) -> bool {
+    if !p.capsule {
+        return true;
+    }
+    let (a, b) = ([p.a[0] as f64, p.a[2] as f64], [p.b[0] as f64, p.b[2] as f64]);
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let w = [c[0] as f64 - a[0], c[1] as f64 - a[1]];
+    let length = d[0] * d[0] + d[1] * d[1];
+    let t = if length > 0.0 { ((w[0] * d[0] + w[1] * d[1]) / length).clamp(0.0, 1.0) } else { 0.0 };
+    let e = [w[0] - d[0] * t, w[1] - d[1] * t];
+    let r = f64::from(p.radius[0].max(p.radius[1]));
+    e[0] * e[0] + e[1] * e[1] <= r * r
 }
 
 /// A spawn as evaluation reads it.
@@ -280,18 +231,23 @@ pub struct CompiledFeatures {
     /// holds.
     pub levels: Vec<LevelLayout>,
     pub stride: usize,
+    /// Node slots a workgroup keeps (`FEATURE_QUADS` quads, four nodes
+    /// each), or none without near spawns.
     pub lattice_nodes: usize,
 }
 
 /// A level's near spawns (a prefix of the set) and, for each, where its
 /// squares lie in a footprint's placements; the columns past a footprint
 /// its candidates read heights of (their anchors and footprints' corners),
-/// and the nodes a side of the level-0 lattice over them.
+/// the nodes a side of the level-0 node grid over them (node quads are
+/// keyed by their place in it), and the most node quads its candidates
+/// read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LevelLayout {
     pub spawns: Vec<SquareGrid>,
     pub reach: i32,
     pub lattice: u32,
+    pub quads: usize,
 }
 
 /// A spawn's squares in a footprint's placements: from `offset`, `side` x
@@ -345,11 +301,6 @@ impl Placement {
     }
 }
 
-/// A coarse cell's share threshold: half its base cells.
-fn half(level: u32) -> u64 {
-    1u64 << (3 * level).saturating_sub(1)
-}
-
 impl CompiledFeatures {
     /// `set` compiled for a world of seed `seed`.
     pub fn new(set: &FeatureSet, grid: &Grid, seed: u64) -> Result<Self, String> {
@@ -394,7 +345,7 @@ impl CompiledFeatures {
             if s.far_material >= 128 {
                 return Err(format!("spawn {} far material {} is not under 128", s.name, s.far_material));
             }
-            let far_height = if s.far_height > 0 { s.far_height.min(MAX_STAMP_HEIGHT as u32) as i32 } else { (heights as f64 / s.stamps.len() as f64).round().max(1.0) as i32 };
+            let far_height = if s.far_height > 0 { s.far_height.min(2 * MAX_STAMP_REACH as u32) as i32 } else { (heights as f64 / s.stamps.len() as f64).round().max(1.0) as i32 };
             if s.far_material != 0 {
                 above = above.max(far_height);
             }
@@ -424,12 +375,13 @@ impl CompiledFeatures {
         let mut features = Self { stamps, spawns, above: above.max(0), below: below.max(0), levels: Vec::new(), stride: 0, lattice_nodes: 0 };
         features.levels = (0..NEAR_LEVELS).map(|level| features.layout(level)).collect();
         features.stride = features.levels.iter().map(|l| l.spawns.last().map_or(0, |g| (g.offset + g.side * g.side) as usize)).max().unwrap_or(0);
-        features.lattice_nodes = features.levels.iter().filter(|l| !l.spawns.is_empty()).map(|l| (l.lattice * l.lattice) as usize).max().unwrap_or(0);
+        features.lattice_nodes = if features.levels.iter().any(|l| !l.spawns.is_empty()) { 4 * FEATURE_QUADS } else { 0 };
+        let quads = features.levels.iter().map(|l| l.quads).max().unwrap_or(0);
         if features.stride > MAX_FOOTPRINT_SQUARES {
             return Err(format!("the spawns' placements take {} squares a footprint, more than {MAX_FOOTPRINT_SQUARES}: fewer spawns of narrow spacing", features.stride));
         }
-        if features.lattice_nodes > MAX_LATTICE_NODES {
-            return Err(format!("a footprint's candidates read {} terrain nodes, more than {MAX_LATTICE_NODES}: spawns reach too far", features.lattice_nodes));
+        if 2 * quads > FEATURE_QUADS {
+            return Err(format!("a footprint's candidates read up to {quads} terrain node quads, more than {}: fewer spawns of narrow spacing", FEATURE_QUADS / 2));
         }
         Ok(features)
     }
@@ -439,10 +391,11 @@ impl CompiledFeatures {
     }
 
     /// Whether spawn `s` draws as its stamps at `level`: at level 0, and
-    /// where its spacing and its footprint are two of its cells or more.
+    /// where its spacing is two of its cells or more and its footprint
+    /// eight (its shapes stay legible; past that its far form, if any).
     pub fn drawn(&self, s: usize, level: u32) -> bool {
         let sp = &self.spawns[s];
-        level == 0 || (2i64 << level) <= i64::from(sp.spacing).min(i64::from(2 * sp.reach + 1))
+        level == 0 || (8i64 << level) <= (4 * i64::from(sp.spacing)).min(i64::from(2 * sp.reach + 1))
     }
 
     /// Spawns whose placements a footprint of `level` keeps: up to the last
@@ -523,17 +476,21 @@ impl CompiledFeatures {
         // column) past them.
         let reach = (0..near).map(|s| { let sp = &self.spawns[s]; margins[s] + i64::from(sp.spacing - sp.inset + sp.reach.max(1)) }).max().unwrap_or(0);
         let lattice = if near == 0 { 0 } else { ((width + 2 * reach) / NODE_COLUMNS + 3) as u32 };
-        LevelLayout { spawns, reach: reach as i32, lattice }
+        // A candidate reads its anchor's column, and its footprint's four
+        // corners' with a relief rule: no more quads than the grid holds.
+        let read: usize = (0..near).map(|s| (spawns[s].side * spawns[s].side) as usize * if self.spawns[s].max_relief < i32::MAX { 5 } else { 1 }).sum();
+        let quads = read.min((lattice * lattice) as usize);
+        LevelLayout { spawns, reach: reach as i32, lattice, quads }
     }
 
     /// The set as `chunk_generate.wgsl` reads it (`feature_*`): a header
     /// (spawn count, where spawns, stamps and levels start, the footprint
-    /// stride, the lattice nodes), 24 words a spawn, 16 a stamp,
+    /// stride, the lattice nodes), 24 words a spawn, 16 a stamp (its box's
+    /// lowest offset, reach, size, part count, where its parts start),
     /// `4 (1 + MAX_SPAWNS)` a near level (the spawns whose placements it
     /// keeps, the mask of those it draws, its lattice's reach and side, then
-    /// each spawn's offset, side, margin), then
-    /// spawns' stamp lists, stamps' cells (four codes a word) and their
-    /// summed counts.
+    /// each spawn's offset, side, margin), then spawns' stamp lists and
+    /// stamps' parts (`CompiledPart::gpu_words`).
     pub fn gpu_words(&self) -> Vec<u32> {
         const HEADER: usize = 8;
         let spawns_at = HEADER;
@@ -579,16 +536,10 @@ impl CompiledFeatures {
             ]);
         }
         for (n, st) in self.stamps.iter().enumerate() {
-            let mut packed = vec![0u32; st.cells.len().div_ceil(4)];
-            for (c, &code) in st.cells.iter().enumerate() {
-                packed[c >> 2] |= u32::from(code) << ((c & 3) * 8);
-            }
-            let cells = put(&mut tail, &packed);
-            let sums: Vec<u32> = st.sums.iter().flatten().copied().collect();
-            let sums = put(&mut tail, &sums);
+            let parts: Vec<u32> = st.parts.iter().flat_map(|p| p.gpu_words()).collect();
+            let parts = put(&mut tail, &parts);
             let r = &mut w[stamps_at + 16 * n..stamps_at + 16 * n + 16];
-            r[..10].copy_from_slice(&[st.lo[0] as u32, st.lo[1] as u32, st.lo[2] as u32, st.reach as u32, st.size[0] as u32, st.size[1] as u32, st.size[2] as u32, st.materials.len() as u32, cells, sums]);
-            r[10..10 + st.materials.len()].copy_from_slice(&st.materials);
+            r[..9].copy_from_slice(&[st.lo[0] as u32, st.lo[1] as u32, st.lo[2] as u32, st.reach as u32, st.size[0] as u32, st.size[1] as u32, st.size[2] as u32, st.parts.len() as u32, parts]);
         }
         for (level, l) in self.levels.iter().enumerate() {
             let at = levels_at + 4 * (1 + MAX_SPAWNS) * level;
@@ -738,39 +689,24 @@ impl<'a> FeatureEval<'a> {
         out
     }
 
-    /// What the near spawns make of cell `(i, j, k)` of `level`: solid
-    /// with the most common material from half its base cells, else air
-    /// from half, else nothing.
+    /// What the near spawns make of cell `(i, j, k)` of `level`: the last
+    /// placement whose stamp holds its centre (`stamp::coarse_of`).
     pub fn coarse_cell(&mut self, face: u8, level: u32, i: i32, j: i32, k: i32) -> Option<Option<u32>> {
         if level == 0 {
             return self.cell(face, i, j, k);
         }
         let s0 = 1i32 << level;
         let (bi, bj, bk) = (i * s0, j * s0, k * s0);
-        let mut air = 0u64;
-        let mut counts: Vec<(u32, u64)> = Vec::new();
+        let mut out = None;
         for s in (0..self.features.near(level)).filter(|&s| self.features.drawn(s, level)) {
             for p in self.placements_near(s, face, [bi, bi + s0], [bj, bj + s0]) {
-                let st = &self.features.stamps[p.stamp as usize];
                 let (lo, hi) = p.local_box([bi - p.i, bk - p.k, bj - p.j], [bi + s0 - p.i, bk + s0 - p.k, bj + s0 - p.j]);
-                air += u64::from(st.count(0, lo, hi));
-                for (n, &m) in st.materials.iter().enumerate() {
-                    let c = u64::from(st.count(n + 1, lo, hi));
-                    if c > 0 {
-                        match counts.iter_mut().find(|(x, _)| *x == m) {
-                            Some(e) => e.1 += c,
-                            None => counts.push((m, c)),
-                        }
-                    }
+                if let Some(v) = self.features.stamps[p.stamp as usize].coarse(lo, hi) {
+                    out = Some(v);
                 }
             }
         }
-        let solid: u64 = counts.iter().map(|(_, c)| c).sum();
-        if solid >= half(level) {
-            let best = counts.iter().max_by_key(|(m, c)| (*c, u32::MAX - m)).map(|(m, _)| *m);
-            return Some(best);
-        }
-        (air >= half(level)).then_some(None)
+        out
     }
 }
 
@@ -809,9 +745,9 @@ mod tests {
         tree.fill([-2, 5, -2], [2, 8, 2], 11);
         tree.fill([0, 0, 0], [0, 7, 0], 10);
         let mut hut = Stamp::new();
-        hut.fill([-3, -1, -3], [3, 4, 3], 12);
-        hut.hollow([-2, 0, -2], [2, 3, 2]);
-        hut.hollow([0, 0, -3], [0, 1, -3]);
+        hut.fill([-8, -1, -8], [8, 4, 8], 12);
+        hut.hollow([-7, 0, -7], [7, 3, 7]);
+        hut.hollow([0, 0, -8], [1, 1, -8]);
         vec![tree, hut]
     }
 
@@ -819,7 +755,7 @@ mod tests {
         FeatureSet {
             stamps: stamps(),
             spawns: vec![
-                Spawn { name: "huts".into(), stamps: vec![1], spacing: 24, density: 0.6, max_relief: 3, ..Spawn::default() },
+                Spawn { name: "huts".into(), stamps: vec![1], spacing: 48, density: 0.6, max_relief: 3, ..Spawn::default() },
                 Spawn { name: "trees".into(), stamps: vec![0], spacing: 6, density: 0.7, field_scale_m: 40.0, field_threshold: -0.3, max_relief: 3, ..Spawn::default() },
             ],
         }
@@ -914,56 +850,41 @@ mod tests {
         assert!(overlapping > 0, "no crowns interlock");
     }
 
-    /// A coarse cell sums its near spawns' stamp cells (each placement's,
-    /// counted cell by cell here): solid with their most common material
-    /// from half its base cells, else air from half, else the terrain's
-    /// (level 1 draws huts and trees as stamps; level 2 neither, their
-    /// footprints narrower than two of its cells).
+    /// A coarse cell is what the last near placement whose stamp holds its
+    /// centre makes of it, else the terrain's (level 1 draws huts as
+    /// stamps, not trees; level 2 neither, their footprints narrower than
+    /// eight of its cells).
     #[test]
-    fn coarse_cells_count_their_base_cells() {
+    fn coarse_cells_read_their_centres() {
         let p = world(set());
         let (face, i0, j0) = block(&p);
         let top = p.column_top(face, i0 + 20, j0 + 20, 0);
         let all = placements(&p, (face, i0, j0));
-        assert_eq!((p.features().near(1), p.features().near(2)), (2, 0));
-        for level in 1..2u32 {
-            let near: Vec<&Placement> = all.iter().filter(|pl| p.features().drawn(pl.spawn as usize, level)).collect();
-            let stamped = |i: i32, j: i32, k: i32| near.iter().filter_map(|pl| p.features().stamps[pl.stamp as usize].at(pl.local([i - pl.i, k - pl.k, j - pl.j]))).collect::<Vec<_>>();
-            let s = 1 << level;
-            let (mut solid, mut air) = (0, 0);
-            for ci in (i0 >> level)..((i0 + 40) >> level) {
-                for cj in (j0 >> level)..((j0 + 40) >> level) {
-                    for ck in ((top - 8) >> level)..((top + 16) >> level) {
-                        let mut counts: Vec<(u32, u32)> = Vec::new();
-                        let mut cleared = 0;
-                        for d in 0..s * s * s {
-                            for v in stamped(ci * s + d % s, cj * s + d / s % s, ck * s + d / (s * s)) {
-                                match v {
-                                    Some(m) => match counts.iter_mut().find(|(x, _)| *x == m) {
-                                        Some(e) => e.1 += 1,
-                                        None => counts.push((m, 1)),
-                                    },
-                                    None => cleared += 1,
-                                }
-                            }
-                        }
-                        let half = (s * s * s / 2) as u32;
-                        let filled: u32 = counts.iter().map(|(_, c)| c).sum();
-                        let expected = if filled >= half {
-                            Some(counts.iter().max_by_key(|(m, c)| (*c, u32::MAX - m)).map(|(m, _)| *m))
-                        } else if cleared >= half {
-                            Some(None)
-                        } else {
-                            None
-                        };
-                        solid += usize::from(matches!(expected, Some(Some(_))));
-                        air += usize::from(expected == Some(None));
-                        assert_eq!(p.features_at(level, face, ci, cj, ck), expected, "level {level} ({ci}, {cj}, {ck})");
-                    }
+        assert_eq!((p.features().near(1), p.features().near(2)), (1, 0));
+        let level = 1u32;
+        let near: Vec<&Placement> = all.iter().filter(|pl| p.features().drawn(pl.spawn as usize, level)).collect();
+        let s = 1 << level;
+        let (mut solid, mut air) = (0, 0);
+        for ci in (i0 >> level)..((i0 + 40) >> level) {
+            for cj in (j0 >> level)..((j0 + 40) >> level) {
+                for ck in ((top - 8) >> level)..((top + 16) >> level) {
+                    let (bi, bj, bk) = (ci * s, cj * s, ck * s);
+                    let expected = near
+                        .iter()
+                        .filter_map(|pl| {
+                            let a = pl.local([bi - pl.i, bk - pl.k, bj - pl.j]);
+                            let b = pl.local([bi + s - 1 - pl.i, bk + s - 1 - pl.k, bj + s - 1 - pl.j]);
+                            let (lo, hi) = ([0, 1, 2].map(|k| a[k].min(b[k])), [0, 1, 2].map(|k| a[k].max(b[k]) + 1));
+                            p.features().stamps[pl.stamp as usize].coarse(lo, hi)
+                        })
+                        .last();
+                    solid += usize::from(matches!(expected, Some(Some(_))));
+                    air += usize::from(expected == Some(None));
+                    assert_eq!(p.features_at(level, face, ci, cj, ck), expected, "level {level} ({ci}, {cj}, {ck})");
                 }
             }
-            assert!(solid > 5 && air > 0, "level {level}: {solid} solid, {air} air cells");
         }
+        assert!(solid > 5 && air > 0, "level {level}: {solid} solid, {air} air cells");
     }
 
     /// Near and far agree in coverage: past the trees' near levels their
@@ -977,7 +898,7 @@ mod tests {
         features.spawns[1].max_relief = u32::MAX;
         let p = world(features);
         let fc = p.features();
-        assert!(fc.drawn(1, 1) && !fc.drawn(1, 2) && fc.spawns[1].far_height == 9);
+        assert!(fc.drawn(1, 0) && !fc.drawn(1, 1) && fc.spawns[1].far_height == 9);
         let (face, i0, j0) = block(&p);
         let side = 256;
         let top = |f: u8, i: i32, j: i32| ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0));

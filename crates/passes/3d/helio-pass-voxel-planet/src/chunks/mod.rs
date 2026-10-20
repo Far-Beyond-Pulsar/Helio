@@ -1325,6 +1325,8 @@ pub struct ChunkWorld {
     feature_set: wgpu::Buffer,
     tile_placements: wgpu::Buffer,
     job_features: wgpu::Buffer,
+    /// Each feature workgroup's node quad table (`feature_quads`).
+    feature_quads: wgpu::Buffer,
     has_features: bool,
     tile_ranges: wgpu::Buffer,
     chunk_jobs: wgpu::Buffer,
@@ -1895,7 +1897,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("PLANE_WORLD", if plane { "true" } else { "false" })
         .replace("SCENE_MATERIALS", scene::STUB);
-    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\nconst FEATURE_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS, crate::engine::FEATURE_GROUPS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
+    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\nconst FEATURE_GROUPS: u32 = {}u;\nconst FEATURE_QUADS: u32 = {}u;\n", crate::engine::HALO_GROUPS, crate::engine::FEATURE_GROUPS, crate::features::FEATURE_QUADS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
 impl ChunkWorld {
@@ -1958,6 +1960,7 @@ impl ChunkWorld {
                 storage(36, true, c),
                 storage(37, false, c),
                 storage(38, false, c),
+                storage(39, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -2474,6 +2477,7 @@ impl ChunkWorld {
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk features"), contents: bytemuck::cast_slice(&features.gpu_words()), usage: wgpu::BufferUsages::STORAGE }),
             tile_placements: buffer("chunk footprint placements", (pool_size as u64 * placement_stride).max(8), wgpu::BufferUsages::STORAGE),
             job_features: buffer("chunk job features", CHUNK_BATCH as u64 * FEATURE_JOB_WORDS * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
+            feature_quads: buffer("chunk feature node quads", u64::from(crate::engine::FEATURE_GROUPS) * crate::features::FEATURE_QUADS as u64 * 4, wgpu::BufferUsages::STORAGE),
             has_features: !features.is_empty(),
             // Four words a tile, then the batch's tile count.
             tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
@@ -2647,6 +2651,7 @@ impl ChunkWorld {
                 entry(36, &self.feature_set),
                 entry(37, &self.tile_placements),
                 entry(38, &self.job_features),
+                entry(39, &self.feature_quads),
                 entry(4, &self.tile_ranges),
                 entry(5, &self.chunk_jobs),
                 entry(6, &self.column_masks),

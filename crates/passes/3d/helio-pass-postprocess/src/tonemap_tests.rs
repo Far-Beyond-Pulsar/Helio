@@ -1,7 +1,8 @@
 use super::PostProcessPass;
 
-/// `tonemap_agx` on scene-linear `inputs`, read back display-linear.
-fn agx(inputs: &[[f32; 3]]) -> Vec<[f32; 3]> {
+/// `tonemap_agx` (its punchy look when `punchy`) on scene-linear `inputs`,
+/// read back display-linear.
+fn agx(inputs: &[[f32; 3]], punchy: bool) -> Vec<[f32; 3]> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
@@ -9,7 +10,7 @@ fn agx(inputs: &[[f32; 3]]) -> Vec<[f32; 3]> {
         let probe = format!(
             "{}\n@group(1) @binding(0) var<storage, read_write> probe: array<vec4<f32>>;\n\
              @compute @workgroup_size(1) fn probe_agx(@builtin(global_invocation_id) id: vec3<u32>) {{\n\
-                 probe[id.x] = vec4<f32>(tonemap_agx(probe[id.x].rgb), 1.0);\n\
+                 probe[id.x] = vec4<f32>(tonemap_agx(probe[id.x].rgb, {punchy}), 1.0);\n\
              }}",
             helio_core::shader::resolve(&PostProcessPass::build_shader_source(&[])),
         );
@@ -75,7 +76,7 @@ fn agx_keeps_grey_and_the_hue_of_bright_colours() {
     let green = [0.2f32, 1.0, 0.05];
     let scales = [0.25f32, 1.0, 4.0, 16.0];
     let inputs: Vec<[f32; 3]> = greys.iter().map(|&v| [v; 3]).chain(scales.iter().map(|&k| green.map(|c| c * k))).collect();
-    let out = agx(&inputs);
+    let out = agx(&inputs, false);
     let grey: Vec<f32> = out[..greys.len()].iter().map(|c| c[1]).collect();
     assert!(grey.windows(2).all(|w| w[1] > w[0] || w[1] >= 0.99), "{grey:?}");
     assert!(grey[0] < 1e-3 && (0.15..0.25).contains(&grey[3]) && grey[8] > 0.99, "{grey:?}");
@@ -85,5 +86,26 @@ fn agx_keeps_grey_and_the_hue_of_bright_colours() {
     let source = hue(green.map(|c| c.powf(2.2)));
     for (k, c) in scales.iter().zip(&out[greys.len()..]) {
         assert!((hue(*c) - source).abs() < 25.0, "x{k}: {c:?} hue {} vs {source}", hue(*c));
+    }
+}
+
+/// AgX's punchy look keeps greys neutral and rising, and gives a sky blue
+/// and a green more saturation than base AgX.
+#[test]
+#[ignore = "requires a GPU"]
+fn agx_punchy_saturates_and_keeps_grey() {
+    let saturation = |c: [f32; 3]| {
+        let [r, g, b] = c.map(|v| v.max(0.0).powf(1.0 / 2.2));
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        if max > 0.0 { (max - min) / max } else { 0.0 }
+    };
+    let inputs = [[0.05f32; 3], [0.18; 3], [1.0; 3], [0.18, 0.32, 0.62], [0.2, 0.4, 0.09]];
+    let (base, punchy) = (agx(&inputs, false), agx(&inputs, true));
+    for c in &punchy[..3] {
+        assert!((c[0] - c[1]).abs() < 2e-3 && (c[2] - c[1]).abs() < 2e-3, "grey stays neutral: {c:?}");
+    }
+    assert!(punchy[0][1] < punchy[1][1] && punchy[1][1] < punchy[2][1], "{punchy:?}");
+    for n in 3..5 {
+        assert!(saturation(punchy[n]) > saturation(base[n]) + 0.1, "{:?} vs {:?}", punchy[n], base[n]);
     }
 }
