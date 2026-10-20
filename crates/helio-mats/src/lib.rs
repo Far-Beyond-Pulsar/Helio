@@ -16,6 +16,7 @@
 pub mod material;
 pub mod radiant;
 pub mod shader;
+pub mod texture_mips;
 
 pub use material::{
     GpuMaterial, MaterialBindingConfig, MaterialBindingMode, MaterialTextureBindings,
@@ -32,5 +33,5 @@ pub use radiant::{
 };
 pub use shader::{
     apply_webgpu_decal_bindings, apply_webgpu_material_bindings, PBR_EVAL, PBR_EVAL_SNIPPET,
-    PBR_MARKER,
+    PBR_MARKER, SPECULAR_AA, SPECULAR_AA_MARKER, SPECULAR_AA_SNIPPET,
 };

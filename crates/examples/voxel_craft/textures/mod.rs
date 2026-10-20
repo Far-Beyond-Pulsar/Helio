@@ -17,6 +17,7 @@ mod compose;
 
 use crate::blocks::{Block, Surface};
 use helio_pass_gbuffer::MaterialComponent;
+use helio_mats::texture_mips::{mip_chain, TexelKind};
 use helio_pass_voxel_planet::chunks::scene::{VoxelMaterialMap, NO_MATERIAL};
 use helio_pass_voxel_planet::engine::TerrainAppearance;
 use image::RgbaImage;
@@ -122,15 +123,15 @@ pub fn load(device: &wgpu::Device, queue: &wgpu::Queue, world: &mut World) -> Bl
             let key = format!("{surface:?}/{:?}", block.emission().is_some());
             let maps = surface_maps(surface);
             let row = *rows.entry(key).or_insert_with(|| {
-                let base = upload(device, queue, &mut store, &maps.colour, Texels::Colour);
+                let base = upload(device, queue, &mut store, &maps.colour, TexelKind::Colour);
                 let (emissive, strength) = block.emission().unwrap_or(([0.0; 3], 0.0));
                 // A baked material's roughness is its map's.
                 let roughness = if maps.normal_orm.is_some() { 1.0 } else { block.roughness() };
                 let mut material = MaterialComponent::new([1.0; 4], roughness, 0.0, emissive, strength);
                 material.tex_base_color = base;
                 if let Some((normal, orm)) = &maps.normal_orm {
-                    material.tex_normal = upload(device, queue, &mut store, normal, Texels::Normal);
-                    let orm = upload(device, queue, &mut store, orm, Texels::Linear);
+                    material.tex_normal = upload(device, queue, &mut store, normal, TexelKind::Normal);
+                    let orm = upload(device, queue, &mut store, orm, TexelKind::Data);
                     material.tex_roughness = orm;
                     material.tex_occlusion = orm;
                     material.flags |= helio_mats::FLAG_HAS_NORMAL_MAP;
@@ -188,102 +189,28 @@ pub fn configure_sampler(renderer: &mut helio::Renderer) {
     });
 }
 
-fn srgb_to_linear(x: f32) -> f32 {
-    if x <= 0.04045 {
-        x / 12.92
-    } else {
-        ((x + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(x: f32) -> f32 {
-    if x <= 0.0031308 {
-        x * 12.92
-    } else {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// What a texture's texels are, for its format and mips.
-#[derive(Clone, Copy, PartialEq)]
-enum Texels {
-    /// sRGB colour (mips averaged in linear light).
-    Colour,
-    /// Linear data (occlusion, roughness, metalness).
-    Linear,
-    /// A tangent-space normal map (mips averaged, then made unit again).
-    Normal,
-}
-
-/// Uploads `image` with a full mip chain (2x2 boxes averaged as `texels`
-/// says) and returns its texture slot.
-fn upload(device: &wgpu::Device, queue: &wgpu::Queue, store: &mut TextureStore, image: &RgbaImage, texels: Texels) -> u32 {
-    let srgb = texels == Texels::Colour;
-    let decode = |c: usize, v: u8| {
-        let x = f32::from(v) / 255.0;
-        match texels {
-            Texels::Colour if c < 3 => srgb_to_linear(x),
-            Texels::Normal if c < 3 => x * 2.0 - 1.0,
-            _ => x,
-        }
-    };
-    let encode = |c: usize, v: f32| match texels {
-        Texels::Colour if c < 3 => linear_to_srgb(v),
-        Texels::Normal if c < 3 => v * 0.5 + 0.5,
-        _ => v,
-    };
-    let (mut width, mut height) = image.dimensions();
-    assert!(width.is_power_of_two() && width == height, "block tiles are square powers of two");
-    let levels = width.ilog2() + 1;
-    let slot = store
-        .register(
+/// Uploads `image` with a full mip chain filtered as `texels` says
+/// (`helio_mats::texture_mips`: a normal map's mips keep their normals'
+/// spread for specular anti-aliasing) and returns its texture slot.
+fn upload(device: &wgpu::Device, queue: &wgpu::Queue, store: &mut TextureStore, image: &RgbaImage, texels: TexelKind) -> u32 {
+    let (width, height) = image.dimensions();
+    let chain = mip_chain(image.as_raw(), width, height, texels);
+    let mips: Vec<&[u8]> = chain.iter().map(|level| level.texels.as_slice()).collect();
+    store
+        .register_mips(
             device,
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("Voxel Craft block"),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-                mip_level_count: levels,
+                mip_level_count: mips.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: if srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
+                format: if texels.is_srgb() { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm },
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
-            image.as_raw(),
+            &mips,
         )
-        .expect("register block texture");
-    let texture = store.texture(slot).expect("registered texture");
-    let mut pixels: Vec<[f32; 4]> = image.pixels().map(|p| std::array::from_fn(|c| decode(c, p[c]))).collect();
-    for level in 1..levels {
-        let (w, h) = (width / 2, height / 2);
-        let mut next = vec![[0.0f32; 4]; (w * h) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let texel = &mut next[(y * w + x) as usize];
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let s = pixels[((y * 2 + dy) * width + x * 2 + dx) as usize];
-                    for c in 0..4 {
-                        texel[c] += s[c] * 0.25;
-                    }
-                }
-                if texels == Texels::Normal {
-                    let n = (texel[0] * texel[0] + texel[1] * texel[1] + texel[2] * texel[2]).sqrt().max(1e-6);
-                    for c in 0..3 {
-                        texel[c] /= n;
-                    }
-                }
-            }
-        }
-        let bytes: Vec<u8> = next.iter().flat_map(|p| (0..4).map(move |c| (encode(c, p[c]).clamp(0.0, 1.0) * 255.0).round() as u8)).collect();
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
-        pixels = next;
-        width = w;
-        height = h;
-    }
-    slot
+        .expect("register block texture")
 }

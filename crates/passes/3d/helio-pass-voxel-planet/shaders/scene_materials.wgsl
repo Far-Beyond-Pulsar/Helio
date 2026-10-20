@@ -54,8 +54,12 @@ fn tile_coord(b: i32, t: f32, span: f32, tile: i32) -> f32 {
 // size and distance; the mip level follows its texels' size in pixels
 // (filtered, never derivative based, which would break across cells). The
 // normal map's normal is in the face's texture frame (x along u, y against
-// v, z out: OpenGL's), straight out without one.
-fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32) -> SceneSurface {
+// v, z out: OpenGL's), straight out without one. `slant` is how much longer
+// a pixel's footprint runs along the face than across the view (one over
+// the cosine of the view's angle to it): the normals under the whole
+// footprint widen the roughness (specular anti-aliasing,
+// `normal_map_roughness`).
+fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32, slant: f32) -> SceneSurface {
     let none = SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, false);
     let faces = scene_map.faces[min(m, 31u)];
     var row = faces.y;
@@ -100,16 +104,29 @@ fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_c
     }
     var normal = vec3<f32>(0.0, 0.0, 1.0);
     if (material.flags & SCENE_HAS_NORMAL_MAP) != 0u && material.tex_normal != SCENE_NO_TEXTURE && material.tex_normal < MATERIAL_TEXTURES {
-        let n = scene_sample(material.tex_normal, uv, tile_px).rgb * 2.0 - 1.0;
+        let slot = material.tex_normal;
+        let n = scene_sample(slot, uv, tile_px).rgb * 2.0 - 1.0;
         normal = n / max(length(n), 1e-4);
+        // The spread of the normals under the pixel's whole footprint, along
+        // its longer side (not the half pixel the direction is sampled at):
+        // the mip whose texels are that long.
+        let footprint = max(scene_texels_per_pixel(slot, tile_px) + log2(clamp(slant, 1.0, 16.0)), 0.0);
+        let spread = textureSampleLevel(scene_textures[slot], scene_samplers[slot], uv, footprint).a;
+        roughness = normal_map_roughness(roughness, spread, 1.0);
     }
     return SceneSurface(colour, roughness, material.emissive.rgb * material.emissive.w * texel, normal, occlusion, true);
 }
 
-// Texture `slot` at `uv`, its mip by the texture's width on screen
-// (`tile_px` pixels).
-fn scene_sample(slot: u32, uv: vec2<f32>, tile_px: f32) -> vec4<f32> {
+// The mip level whose texels are a pixel wide, for texture `slot` spanning
+// `tile_px` pixels: log2 of its texels per pixel.
+fn scene_texels_per_pixel(slot: u32, tile_px: f32) -> f32 {
     let size = f32(textureDimensions(scene_textures[slot]).x);
-    let lod = max(log2(size / max(tile_px, 1e-6)) - 1.0, 0.0);
+    return log2(size / max(tile_px, 1e-6));
+}
+
+// Texture `slot` at `uv`, its texels half a pixel wide (see
+// `scene_surface`) on a texture `tile_px` pixels wide.
+fn scene_sample(slot: u32, uv: vec2<f32>, tile_px: f32) -> vec4<f32> {
+    let lod = max(scene_texels_per_pixel(slot, tile_px) - 1.0, 0.0);
     return textureSampleLevel(scene_textures[slot], scene_samplers[slot], uv, lod);
 }

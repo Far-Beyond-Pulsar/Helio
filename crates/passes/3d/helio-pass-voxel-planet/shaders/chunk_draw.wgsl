@@ -1788,7 +1788,9 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     var roughness = palette(material).w;
     var emissive = vec3<f32>(0.0);
     let level = u32(chunk_keys[v.x].x >> 8u) & 31u;
-    let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m);
+    // A pixel's footprint along the face over its width (the view's slant).
+    let slant = 1.0 / max(abs(dot(normal, normalize(position))), 1.0 / 16.0);
+    let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m, slant);
     var occlusion = 1.0;
     if scene.valid {
         albedo = scene.albedo;

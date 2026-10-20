@@ -2299,6 +2299,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "helio-pass-gi",
  "image",
  "miniz_oxide",
