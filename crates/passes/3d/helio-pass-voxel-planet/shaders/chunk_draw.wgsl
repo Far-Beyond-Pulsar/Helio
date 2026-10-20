@@ -3827,6 +3827,10 @@ struct ProbeFrame {
     counts: vec4<u32>,
 }
 
+// Starts a probe tries, PROBE_STEP metres apart downwards.
+const PROBE_ATTEMPTS: u32 = 4u;
+const PROBE_STEP: f32 = 4.0;
+
 @group(1) @binding(58) var<uniform> probe_frame: ProbeFrame;
 @group(1) @binding(59) var<storage, read> ground_queries: array<GroundQuery>;
 @group(1) @binding(60) var<storage, read_write> ground_hits: array<GroundHit>;
@@ -3841,14 +3845,21 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let query = ground_queries[id.x];
     let tile = probe_tiles[t];
     // Walked from under the query start by the tile drop (`frac.w`), where drawn
-    // chunks are near.
-    let drop = tile.frac.w;
-    let org = query.start - probe_frame.eye.xyz - normalize(query.up) * drop;
-    let d = org - tile.at.xyz;
-    let c = tile.frac.xyz + vec3<f32>(dot(tile.j0.xyz, d), dot(tile.j1.xyz, d), dot(tile.j2.xyz, d));
-    let start = probe_start(vec4<i32>(tile.cell.xyz + vec3<i32>(floor(c)), tile.cell.w), org, 0);
+    // chunks are near; lower, a step at a time, where none is near enough to start
+    // from (rock ends it: the ground is over the start there).
+    let up = normalize(query.up);
+    var drop = tile.frac.w;
+    var org = vec3<f32>(0.0);
+    var start: ProbeStart;
+    for (var attempt = 0u; attempt < PROBE_ATTEMPTS; attempt++) {
+        org = query.start - probe_frame.eye.xyz - up * drop;
+        let d = org - tile.at.xyz;
+        let c = tile.frac.xyz + vec3<f32>(dot(tile.j0.xyz, d), dot(tile.j1.xyz, d), dot(tile.j2.xyz, d));
+        start = probe_start(vec4<i32>(tile.cell.xyz + vec3<i32>(floor(c)), tile.cell.w), org, 0);
+        if start.ok || start.rock { break; }
+        drop += PROBE_STEP;
+    }
     if start.ok {
-        let up = normalize(query.up);
         let end = walk(start.walk, org, -up, 0.0, query.length - drop, 0, 96u, false, vec2<u32>(id.x & 63u, id.x >> 6u));
         if end.hit && end.slot != NONE && end.t >= 0.0 && end.t + drop <= query.length {
             let f = cell_frame(end.slot, end.cell);

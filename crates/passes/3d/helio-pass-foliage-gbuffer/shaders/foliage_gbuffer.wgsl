@@ -698,6 +698,9 @@ struct FoliageGBufferOutput {
     @location(1) normal: vec4<f32>,
     @location(2) orm: vec4<f32>,
     @location(3) emissive: vec4<f32>,
+    /// `(-1, -1)`: no lightmap, as `gbuffer.wgsl` writes for unlightmapped meshes. The
+    /// target's clear value `(0, 0)` would read as a lightmapped surface.
+    @location(4) lightmap_uv: vec2<f32>,
     @location(7) velocity: vec4<f32>,
 }
 
@@ -807,5 +810,6 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     out.orm = vec4<f32>(ao, roughness, metallic, f0.g);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0.b);
     out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position),0.0,0.0);
+    out.lightmap_uv = vec2<f32>(-1.0, -1.0);
     return out;
 }

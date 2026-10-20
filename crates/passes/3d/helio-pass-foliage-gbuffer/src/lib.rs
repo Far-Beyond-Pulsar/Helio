@@ -30,7 +30,7 @@
 //!
 //! # The 8-target pipeline with masked writes
 //!
-//! Grass writes neither `lightmap_uv`, `sss` nor `extra`, and the obvious optimisation —
+//! Grass writes neither `sss` nor `extra`, and the obvious optimisation —
 //! a 5-target pipeline — is invalid. A pipeline's fragment targets must match the render
 //! pass's colour attachments in count and format (`RenderPassContext::check_compatible`
 //! compares the lists element-wise), so a 5-target pipeline needs its own render pass,
@@ -39,11 +39,15 @@
 //! tile-based GPU, far more than the lever was ever going to save.
 //!
 //! So: all eight targets, identical formats to `GBufferPass`'s, and
-//! [`wgpu::ColorWrites::empty()`] on the three grass does not write, with those
+//! [`wgpu::ColorWrites::empty()`] on the two grass does not write, with those
 //! `@location`s omitted from the fragment shader. **The empty write mask is mandatory,
 //! not cosmetic** — a declared fragment target with no shader output has an undefined
-//! value, so without the mask those three G-buffer channels are filled with garbage
-//! wherever grass covers a pixel, and the deferred pass reads them everywhere.
+//! value, so without the mask those G-buffer channels are filled with garbage wherever
+//! grass covers a pixel, and the deferred pass reads them everywhere.
+//!
+//! `lightmap_uv` *is* written: `(-1, -1)`, the "no lightmap" value `GBufferPass` writes
+//! for unlightmapped meshes. Its clear value `(0, 0)` reads as a lightmap at the atlas's
+//! corner, and the deferred pass lit grass by that empty texel alone: black.
 //!
 //! # Zero overhead when absent
 //!
@@ -201,12 +205,12 @@ pub const GBUFFER_TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float, // 7 velocity (depth residual reserved)
 ];
 
-/// The three targets grass does not write, which therefore carry
+/// The two targets grass does not write, which therefore carry
 /// [`wgpu::ColorWrites::empty()`].
 ///
 /// See the crate docs: this is the corrected §12 perf lever, and the mask is what makes
 /// it *correct* rather than merely cheap.
-pub const UNWRITTEN_TARGET_INDICES: [usize; 3] = [4, 5, 6];
+pub const UNWRITTEN_TARGET_INDICES: [usize; 2] = [5, 6];
 
 /// The pipeline's fragment target list.
 ///
@@ -521,6 +525,9 @@ pub struct FoliageGBufferPass {
     /// what `FoliagePlacePass` was configured with — the two independently apply the
     /// same scale, and a mismatch shears the cross-fade.
     pub quality: FoliageQuality,
+    /// The placement ring's radius (`FoliagePlacePass::ring_radius`), where blades scale
+    /// in; `None`: the quality preset's.
+    pub ring_radius: Option<f32>,
     /// Width of the stochastic cross-fade band in metres.
     ///
     /// Four metres against the default `[8, 20, 45, 120]` ladder: wide enough that the
@@ -817,6 +824,7 @@ impl FoliageGBufferPass {
             uploaded_generation: None,
             type_liveness: helio_pass_foliage_place::foliage_type_liveness(),
             quality: FoliageQuality::default(),
+            ring_radius: None,
             lod_fade_band: 4.0,
             interaction_strength: 1.0,
             interaction_field: [0.0, 0.0, 64.0],
@@ -1072,7 +1080,7 @@ impl RenderPass for FoliageGBufferPass {
                 ctx.time,
                 ctx.time - ctx.time_delta,
                 0.0,
-                self.quality.ring_radius(),
+                self.ring_radius.unwrap_or(self.quality.ring_radius()),
             ],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.

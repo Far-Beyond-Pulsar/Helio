@@ -49,25 +49,26 @@ fn there_are_exactly_eight_targets_in_gbuffer_order() {
 }
 
 #[test]
-fn the_three_unwritten_targets_have_an_empty_write_mask() {
+fn the_unwritten_targets_have_an_empty_write_mask() {
     // MANDATORY, not cosmetic. See the module docs.
-    assert_eq!(UNWRITTEN_TARGET_INDICES, [4, 5, 6]);
+    assert_eq!(UNWRITTEN_TARGET_INDICES, [5, 6]);
     let targets = color_target_states();
     for &index in &UNWRITTEN_TARGET_INDICES {
         let mask = targets[index].as_ref().unwrap().write_mask;
         assert_eq!(
             mask,
             wgpu::ColorWrites::empty(),
-            "target {index} (lightmap_uv / sss / extra) must be write-masked off — grass \
+            "target {index} (sss / extra) must be write-masked off — grass \
              emits no @location for it, and an unwritten fragment output is undefined"
         );
     }
 }
 
 #[test]
-fn the_five_written_targets_write_every_channel() {
+fn the_written_targets_write_every_channel() {
+    // Lightmap UV (4) included: grass writes its "no lightmap" value.
     let targets = color_target_states();
-    for index in [0usize, 1, 2, 3, 7] {
+    for index in [0usize, 1, 2, 3, 4, 7] {
         assert_eq!(
             targets[index].as_ref().unwrap().write_mask,
             wgpu::ColorWrites::ALL,
@@ -90,7 +91,7 @@ fn no_target_blends() {
 #[test]
 fn the_written_and_unwritten_sets_partition_the_eight_targets() {
     // A target that is in neither set is a target nobody thought about.
-    let written = [0usize, 1, 2, 3, 7];
+    let written = [0usize, 1, 2, 3, 4, 7];
     let mut seen = [false; 8];
     for index in written.iter().chain(UNWRITTEN_TARGET_INDICES.iter()) {
         assert!(!seen[*index], "target {index} is in both sets");

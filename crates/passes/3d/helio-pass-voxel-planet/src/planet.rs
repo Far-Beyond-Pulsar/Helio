@@ -542,11 +542,6 @@ impl Planet {
     pub fn outer_radius(&self) -> f64 {
         (self.grid.radius() + self.max_terrain_height() + self.overhang_height() + f64::from(self.features_above() + 4) * self.grid.voxel_size()).max(self.edit_top + self.grid.voxel_size())
     }
-    /// Metres anything generated may stand over a column's terrain top: features and
-    /// overhangs (edits aside).
-    pub fn growth_height(&self) -> f64 {
-        f64::from(self.features_above()) * self.grid.voxel_size() + self.overhang_height()
-    }
     /// Largest rise (m) of generated overhangs over the heightfield.
     pub fn overhang_height(&self) -> f64 {
         f64::from(self.field.volume_bounds().1) / f64::from(HEIGHT_ONE)

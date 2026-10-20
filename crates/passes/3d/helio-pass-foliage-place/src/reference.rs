@@ -141,8 +141,10 @@ pub fn reference_candidate(
 
     let cell_x = index % grid;
     let cell_z = index / grid;
-    let u = (cell_x as f32 + hash_to_unit(seed)) * inv_grid;
-    let v = (cell_z as f32 + hash_to_unit(seed.rotate_left(11))) * inv_grid;
+    // On the stored unorm16 grid, so the ground answered is the ground under the blade.
+    let snap = |x: f32| crate::contract::packing::unpack_unorm16(crate::contract::packing::pack_unorm16(x));
+    let u = snap((cell_x as f32 + hash_to_unit(seed)) * inv_grid);
+    let v = snap((cell_z as f32 + hash_to_unit(seed.rotate_left(11))) * inv_grid);
 
     let mut candidate = ReferenceCandidate { index, seed, tile_uv: [u, v], type_id: 0, weight: 0.0, accepted: false };
     let Some(g) = ground([u, v]) else { return candidate };

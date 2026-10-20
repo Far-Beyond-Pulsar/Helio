@@ -149,6 +149,8 @@ pub struct FoliagePlacePass {
     terrain_sampler: wgpu::Sampler,
 
     ring: TileRing,
+    /// Radius of the resident ring, metres.
+    ring_radius: f32,
     quality: FoliageQuality,
     ring_capacity: u32,
     blades_per_tile: u32,
@@ -224,8 +226,21 @@ impl FoliagePlacePass {
         quality: FoliageQuality,
         blades_per_square_metre: Option<f32>,
     ) -> Self {
+        Self::new_with(device, quality, blades_per_square_metre, None)
+    }
+
+    /// [`Self::new_with_density`] with the resident ring's radius `ring_radius` (metres;
+    /// `None`: the preset's). A small ring at full density suits short dense grass, which
+    /// its LOD distances end well inside the preset's ring anyway.
+    pub fn new_with(
+        device: &wgpu::Device,
+        quality: FoliageQuality,
+        blades_per_square_metre: Option<f32>,
+        ring_radius: Option<f32>,
+    ) -> Self {
+        let ring_radius = ring_radius.filter(|r| r.is_finite() && *r > 0.0).unwrap_or(quality.ring_radius());
         let tiles_across =
-            ((2.0 * quality.ring_radius() / FOLIAGE_TILE_SIZE_METERS).ceil() as u32).max(1);
+            ((2.0 * ring_radius / FOLIAGE_TILE_SIZE_METERS).ceil() as u32).max(1);
         // The ring is a hard ceiling. If a preset's footprint ever exceeded it the ring
         // would thrash rather than fail — re-placing the same tiles every frame and
         // turning the amortised placement cost into a per-frame one — so clamp loudly
@@ -267,7 +282,7 @@ impl FoliagePlacePass {
              ({:.0} blades/m^2 over a {:.0} m ring)",
             (arena_blades * BLADE_BYTES) as f64 / (1024.0 * 1024.0),
             blades_per_tile as f32 / tile_area,
-            quality.ring_radius(),
+            ring_radius,
         );
         let cluster_size = quality.cluster_granularity().max(1);
         let clusters_per_tile = blades_per_tile.div_ceil(cluster_size).max(1);
@@ -275,13 +290,13 @@ impl FoliagePlacePass {
         let blade_arena = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Foliage Blade Arena"),
             size: arena_blades * BLADE_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let tile_table = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Foliage Tile Table"),
             size: ring_capacity as u64 * TILE_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         let visible_blades = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -304,7 +319,7 @@ impl FoliagePlacePass {
         let tile_frames = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Foliage Tile Frames"),
             size: ring_capacity as u64 * FRAME_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         }));
         // A frame queries its budget of tiles, each at most the candidates its slab or the
@@ -584,6 +599,7 @@ impl FoliagePlacePass {
             placeholder_hiz_sampler,
             placeholder_terrain,
             terrain_sampler,
+            ring_radius,
             ring: TileRing::new(
                 ring_capacity,
                 tiles_across,
@@ -640,6 +656,12 @@ impl FoliagePlacePass {
     #[inline]
     pub fn quality(&self) -> FoliageQuality {
         self.quality
+    }
+
+    /// Radius of the resident ring in metres (the draw's scale-in edge).
+    #[inline]
+    pub fn ring_radius(&self) -> f32 {
+        self.ring_radius
     }
 
     /// Number of slots in the tile ring, i.e. entries in [`FoliagePlacePass::tile_table`].
@@ -941,8 +963,14 @@ impl FoliagePlacePass {
         if ctx.frame_num % 120 == 0 {
             let c = self.debug_counters;
             log::debug!(
-                "[foliage] queued_tiles={} placed={} visible L0={} L1={} L2={} L3={} \
+                "[foliage] ground {} chart {:?} resident {} batch {} answered {:?} \
+                 queued_tiles={} placed={} visible L0={} L1={} L2={} L3={} \
                  visible_overflow={} placement_overflow={}",
+                if self.ground.is_external() { "elsewhere" } else { "built in" },
+                self.chart,
+                self.ring.resident_count(),
+                self.batch,
+                self.ground.answered(),
                 self.queued_tile_count,
                 c[COUNTER_PLACED_BLADES],
                 c[0],

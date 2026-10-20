@@ -253,9 +253,6 @@ impl RenderPass for ChunkPass {
             return false;
         }
         self.world = previous.world.take();
-        // Foliage keeps the ground it was given.
-        self.planet_ground = previous.planet_ground.clone();
-        self.foliage_ground = previous.foliage_ground.clone();
         self.debug_mode = previous.debug_mode;
         if let Some(world) = &mut self.world {
             world.set_debug_mode(self.debug_mode);
@@ -398,6 +395,8 @@ impl ChunkPass {
             self.built_for = None;
             return Ok(());
         };
+        // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too).
+        self.planet_ground.set_grid(*frame.planet.grid());
         let recipe = crate::record::recipe_fingerprint(frame.planet.recipe());
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe)
@@ -414,7 +413,6 @@ impl ChunkPass {
                 world.set_appearance(appearance);
             }
             self.kept_loaded = frame.kept.as_ref().map(|kept| world.load_kept(&frame.planet, kept));
-            self.planet_ground.set_grid(*frame.planet.grid());
             self.world = Some(world);
             self.built_for = Some(recipe);
             self.last_eye = None;

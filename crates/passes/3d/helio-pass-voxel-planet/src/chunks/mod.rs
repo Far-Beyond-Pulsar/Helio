@@ -630,8 +630,7 @@ struct GenBatch {
 /// placement budget, with room.
 const PROBE_TILES: usize = 256;
 
-/// Metres over a tile's highest terrain top (and what grows on it) its ground probes
-/// start their walks.
+/// Metres over a tile's highest terrain top its ground probes start their walks.
 const PROBE_MARGIN_M: f64 = 4.0;
 
 /// Ground changes kept for foliage between takes (`ChunkWorld::take_ground_changes`).
@@ -4416,13 +4415,14 @@ impl ChunkWorld {
     ///
     /// A walk starts only where drawn chunks are near: each tile's queries are walked
     /// from a little over the highest terrain `planet` has at the tile's corners and
-    /// centre (with what grows on it), the same segments below that.
+    /// centre (overhangs included), the same segments below that. Features taller than
+    /// that start the walk in them: no ground under a tree's trunk or in a building.
     #[allow(clippy::too_many_arguments)]
     pub fn probe_ground(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, queries: &wgpu::Buffer, hits: &wgpu::Buffer, tiles: &[helio_pass_foliage_place::AskedTile], planet: &Planet, eye: DVec3, camera: Vec3) {
         let Some(group) = self.last_group.clone() else { return };
         let per_tile = tiles.first().map_or(0, |t| t.count);
         let grid = self.grid;
-        let margin = planet.growth_height() + PROBE_MARGIN_M;
+        let margin = planet.overhang_height() + PROBE_MARGIN_M;
         let places: Vec<ground::ProbeTile> = tiles
             .iter()
             .take(PROBE_TILES)

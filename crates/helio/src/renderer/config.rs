@@ -293,6 +293,16 @@ pub struct RendererConfig {
     /// does not, because a wider ring grows the tile count as its square and the per-tile
     /// slab barely moves. Range and density are separate axes.
     pub foliage_blades_per_m2: Option<f32>,
+    /// Foliage quality preset: the resident ring's radius, the density multiplier and
+    /// the LOD distances' scale. Default [`FoliageQuality::Medium`]. A small ring (`Low`,
+    /// 48 m) suits short dense grass, such as a voxel world's meadows.
+    ///
+    /// [`FoliageQuality::Medium`]: helio_pass_foliage_place::FoliageQuality::Medium
+    pub foliage_quality: helio_pass_foliage_place::FoliageQuality,
+    /// Radius of the foliage ring in metres, or `None` for the quality preset's. A
+    /// smaller ring at the preset's density saves the arena and placement past where
+    /// short grass's LOD distances end.
+    pub foliage_ring_radius: Option<f32>,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -370,6 +380,8 @@ impl RendererConfig {
             enable_ssr: false,
             enable_foliage: true,
             foliage_blades_per_m2: None,
+            foliage_quality: helio_pass_foliage_place::FoliageQuality::Medium,
+            foliage_ring_radius: None,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,

@@ -281,7 +281,10 @@ fn unpack_octahedral(packed: u32) -> vec3<f32> {
 
 // ── Candidates ──────────────────────────────────────────────────────────────────
 
-/// Candidate `candidate` of a tile: its stratified, jittered `(u, v)` in the tile.
+/// Candidate `candidate` of a tile: its stratified, jittered `(u, v)` in the tile, on the
+/// unorm16 grid the blade stores. The ground is asked at exactly the stored point: a
+/// candidate a hair from a voxel step's edge would otherwise be answered by one column
+/// and stored over the other, a whole step off.
 ///
 /// Stratified: one candidate per grid cell, jittered inside it — pure rejection sampling
 /// clumps. Block-linear, not row-major: `cluster_size` consecutive candidates form one
@@ -297,10 +300,11 @@ fn candidate_uv(candidate: u32, seed: u32) -> vec2<f32> {
     let cell_x = (block % blocks_across) * edge + (within % edge);
     let cell_z = (block / blocks_across) * edge + (within / edge);
     let inv_grid = 1.0 / f32(grid);
-    return vec2<f32>(
+    let uv = vec2<f32>(
         (f32(cell_x) + hash_to_unit(seed)) * inv_grid,
         (f32(cell_z) + hash_to_unit(rotl(seed, 11u))) * inv_grid,
     );
+    return vec2<f32>(f32(pack_unorm16_u(uv.x)), f32(pack_unorm16_u(uv.y))) * (1.0 / 65535.0);
 }
 
 fn frame_point(frame: TileFrame, uv: vec2<f32>, h: f32) -> vec3<f32> {

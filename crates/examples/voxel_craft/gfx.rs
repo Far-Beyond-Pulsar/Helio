@@ -120,6 +120,7 @@ impl Gfx {
         // and the character.
         let mut scene = new_scene_db_with_gpu_mirror(&device, &queue);
         let palette = palette::load(&mut scene.world);
+        crate::meadow::plant(&mut scene.world);
         let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
         let air = scene.world.spawn();
         scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
@@ -154,7 +155,11 @@ impl Gfx {
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());
-        renderer_config.enable_foliage = false;
+        // Grass and flowers on the world's grass (`meadow`), grown on the terrain the
+        // planet pass draws.
+        renderer_config.enable_foliage = true;
+        renderer_config.foliage_blades_per_m2 = Some(crate::meadow::DENSITY);
+        renderer_config.foliage_ring_radius = Some(crate::meadow::RING_RADIUS_M);
         let handle = scene_db_handle(&scene);
         let mut renderer = RendererBuilder::new(renderer_config, handle)
             .with_external_device()

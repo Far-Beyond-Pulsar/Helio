@@ -37,6 +37,7 @@ mod config;
 mod game;
 mod gfx;
 mod input;
+mod meadow;
 mod palette;
 mod player;
 mod structures;
