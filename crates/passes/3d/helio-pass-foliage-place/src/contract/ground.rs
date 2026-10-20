@@ -2,16 +2,17 @@
 //!
 //! Foliage does not know what it stands on. A **ground** gives it two things:
 //!
-//! - **Geometry, on the CPU** ([`GroundGeometry`]): a *chart* of 8 m tiles around the
-//!   eye, each with a frame — an origin, two edge axes and an up direction — so a heightfield
+//! - **Geometry, on the CPU** ([`GroundGeometry`]): a *chart* of tiles around the eye (8 m
+//!   base tiles, and the larger tiles of the far bands spanning several), each with a frame — an origin, two edge axes and an up direction — so a heightfield
 //!   tiles world XZ with +Y up, and a planet tiles the cube face under the eye with its
 //!   radial up. Blades are stored in their tile's frame (`u`, `v` across it, a height along
 //!   its up), so the same arena, cull and draw serve every ground.
 //! - **Answers, on the GPU**: placement writes one [`GpuGroundQuery`] per candidate (a
 //!   segment down the tile's up through the candidate) and the ground writes a
-//!   [`GpuGroundHit`] for it — where the segment meets the surface, the surface's normal
-//!   and its **ground id** (a terrain material, a biome), which decides the foliage types
-//!   that grow there ([`crate::GpuFoliageType::ground_mask`]). The built-in plane answers
+//!   [`GpuGroundHit`] for it — where the segment meets the surface, the surface's normal,
+//!   its **ground id** (a terrain material, a biome), which decides the foliage types
+//!   that grow there ([`crate::GpuFoliageType::ground_mask`]), and its colour, which
+//!   grass of [`crate::FOLIAGE_FLAG_GROUND_COLOUR`] types takes. The built-in plane answers
 //!   in the placement pass itself; another pass (a voxel world's) answers by reading the
 //!   [`GROUND_QUERIES`], [`GROUND_ARGS`] and [`GROUND_HITS`] resources the placement pass
 //!   publishes, and placement consumes the answers the next frame.
@@ -73,14 +74,26 @@ pub struct TileFrame {
 }
 
 impl TileFrame {
-    /// World XZ tile `coord` of a flat ground with +Y up (the tiling every heightfield uses).
-    pub fn flat(coord: [i32; 2]) -> Self {
-        let size = f64::from(crate::FOLIAGE_TILE_SIZE_METERS);
+    /// The world XZ tile of a flat ground with +Y up (the tiling every heightfield uses)
+    /// at base tile `coord`, `span` base tiles across.
+    pub fn flat(coord: [i32; 2], span: u32) -> Self {
+        let base = f64::from(crate::FOLIAGE_TILE_SIZE_METERS);
+        let size = base * f64::from(span.max(1));
         Self {
-            origin: DVec3::new(f64::from(coord[0]) * size, 0.0, f64::from(coord[1]) * size),
+            origin: DVec3::new(f64::from(coord[0]) * base, 0.0, f64::from(coord[1]) * base),
             axis_u: DVec3::new(size, 0.0, 0.0),
             axis_v: DVec3::new(0.0, 0.0, size),
             up: DVec3::Y,
+        }
+    }
+
+    /// The part `[lo, hi)` (in `0..1` of each axis) of this frame: a block of its tile.
+    pub fn part(&self, lo: [f64; 2], hi: [f64; 2]) -> Self {
+        Self {
+            origin: self.origin + self.axis_u * lo[0] + self.axis_v * lo[1],
+            axis_u: self.axis_u * (hi[0] - lo[0]),
+            axis_v: self.axis_v * (hi[1] - lo[1]),
+            up: self.up,
         }
     }
 
@@ -127,11 +140,13 @@ pub struct GpuGroundHit {
     pub normal: u32,
     /// The ground id there; [`GROUND_NONE`]: none foliage grows on.
     pub ground: u32,
-    pub _pad: u32,
+    /// The ground's linear colour there, RGBA8 unorm (red in the low byte); `0`: the
+    /// ground has none to give (grass keeps its type's colour).
+    pub colour: u32,
 }
 
 impl GpuGroundHit {
-    pub const MISS: Self = Self { distance: 0xbf80_0000, normal: 0, ground: GROUND_NONE, _pad: 0 };
+    pub const MISS: Self = Self { distance: 0xbf80_0000, normal: 0, ground: GROUND_NONE, colour: 0 };
 }
 
 /// The header of a frame's queries: the answering dispatch's workgroups (an indirect
@@ -173,9 +188,10 @@ pub trait GroundGeometry: Send + Sync {
     /// the chart's u and v), or `None` while the ground cannot say (not loaded yet). Tiles
     /// of one chart only are resident: a new chart places every tile again.
     fn chart(&self, eye: DVec3) -> Option<GroundChart>;
-    /// Tile `coord` of `chart` (tile `[i, j]` spans chart metres `[8 i, 8 i + 8)` and
-    /// `[8 j, 8 j + 8)`).
-    fn tile_frame(&self, chart: u64, coord: [i32; 2]) -> Option<TileFrame>;
+    /// The tile of `chart` whose corner is base tile `coord` and which spans `span` base
+    /// tiles each way (base tile `[i, j]` spans chart metres `[8 i, 8 i + 8)` and
+    /// `[8 j, 8 j + 8)`; a far band's tile spans several).
+    fn tile_frame(&self, chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame>;
     /// Where world point `p` lies on `chart` (metres), to find the tiles under a change.
     fn locate(&self, chart: u64, p: DVec3) -> Option<[f64; 2]>;
 }
@@ -191,8 +207,8 @@ impl<T: GroundGeometry> GroundGeometry for std::sync::Arc<T> {
     fn chart(&self, eye: DVec3) -> Option<GroundChart> {
         (**self).chart(eye)
     }
-    fn tile_frame(&self, chart: u64, coord: [i32; 2]) -> Option<TileFrame> {
-        (**self).tile_frame(chart, coord)
+    fn tile_frame(&self, chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame> {
+        (**self).tile_frame(chart, coord, span)
     }
     fn locate(&self, chart: u64, p: DVec3) -> Option<[f64; 2]> {
         (**self).locate(chart, p)
@@ -208,8 +224,8 @@ impl GroundGeometry for PlaneGround {
     fn chart(&self, eye: DVec3) -> Option<GroundChart> {
         Some(GroundChart { id: 0, eye: [eye.x, eye.z] })
     }
-    fn tile_frame(&self, _chart: u64, coord: [i32; 2]) -> Option<TileFrame> {
-        Some(TileFrame::flat(coord))
+    fn tile_frame(&self, _chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame> {
+        Some(TileFrame::flat(coord, span))
     }
     fn locate(&self, _chart: u64, p: DVec3) -> Option<[f64; 2]> {
         Some([p.x, p.z])
@@ -249,6 +265,8 @@ struct LinkState {
     asked: Option<Question>,
     /// The latest batch the ground answered.
     answered: Option<u64>,
+    /// The ground's fill light ([`GroundLink::fill`]).
+    fill: [f32; 3],
 }
 
 impl GroundLink {
@@ -302,6 +320,18 @@ impl GroundLink {
     pub fn answered(&self) -> Option<u64> {
         self.state.lock().expect("ground link").answered
     }
+
+    /// The ground's shade gets a fill light by its albedo (linear rgb): a stylised
+    /// world's stand-in for the sky's bounce. Foliage on it gets the same, so a meadow
+    /// in shade keeps the turf's colour.
+    pub fn set_fill(&self, fill: [f32; 3]) {
+        self.state.lock().expect("ground link").fill = fill.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
+    }
+
+    /// The fill light [`Self::set_fill`] last set (0: none).
+    pub fn fill(&self) -> [f32; 3] {
+        self.state.lock().expect("ground link").fill
+    }
 }
 
 #[cfg(test)]
@@ -326,9 +356,15 @@ mod tests {
 
     #[test]
     fn flat_frames_tile_world_xz_under_plus_y() {
-        let frame = TileFrame::flat([-3, 5]).gpu(DVec3::new(100.0, 0.0, 0.0));
+        let frame = TileFrame::flat([-3, 5], 1).gpu(DVec3::new(100.0, 0.0, 0.0));
         assert_eq!(frame.point(0.0, 0.0, 2.0), Vec3::new(-124.0, 2.0, 40.0));
         assert_eq!(frame.point(1.0, 1.0, 0.0), Vec3::new(-116.0, 0.0, 48.0));
+        // A far band's tile spans several base tiles from its corner.
+        let big = TileFrame::flat([-4, 4], 4).gpu(DVec3::ZERO);
+        assert_eq!(big.point(1.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 64.0));
+        let block = TileFrame::flat([0, 0], 4).part([0.5, 0.25], [0.75, 0.5]).gpu(DVec3::ZERO);
+        assert_eq!(block.point(0.0, 0.0, 0.0), Vec3::new(16.0, 0.0, 8.0));
+        assert_eq!(block.point(1.0, 1.0, 0.0), Vec3::new(24.0, 0.0, 16.0));
         assert_eq!(PlaneGround.chart(DVec3::new(1.0, 2.0, 3.0)).unwrap().eye, [1.0, 3.0]);
     }
 

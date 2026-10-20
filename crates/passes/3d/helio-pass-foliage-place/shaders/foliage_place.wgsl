@@ -1,41 +1,41 @@
-// Foliage placement — stage 1 of `FoliagePlacePass`, on any ground (`contract::ground`).
+//!use helio_foliage_common
+// Foliage placement — stage 1 of `FoliagePlacePass`, on any ground (`contract::ground`),
+// in every band (`contract::bands`).
 //
 // A tile is placed in two halves a frame apart:
 //
 //  1. `cs_query` (the frame a tile is queued): one workgroup per tile writes one
-//     `GroundQuery` per stratified candidate — a segment down the tile's up through the
-//     candidate — and lane 0 of the first workgroup the answering dispatch's header.
-//     The ground answers before the next frame: `cs_ground_plane` here for a
-//     heightfield (the terrain capture, else the plane y = 0), or another pass (a voxel
-//     world's) reading the published `foliage_ground_*` resources.
+//     `GroundQuery` per candidate — a segment down the tile's up through the candidate.
+//     The ground answers before the next frame: `cs_ground_plane` here for a heightfield
+//     (the terrain capture, else the plane y = 0), or another pass (a voxel world's)
+//     reading the published `foliage_ground_*` resources.
 //  2. `cs_place` (the next frame): one workgroup per answered tile reads its hits, takes
-//     the tile's height range along its up, accepts each candidate by the types that grow
-//     on its ground, and compacts the survivors into the tile's fixed arena slab.
+//     the tile's height range along its up, accepts each candidate as a tuft of the types
+//     growing on its ground (their densities, thinned by their patches), and compacts the
+//     tufts into the tile's slab: a record per blade in the near band, one per tuft past it.
+//
+// A tile's band (`foliage_band_of_slot`) sets its size, candidate grid, density share and
+// record kind. Candidates are ordered by probe block (the 16 m blocks big tiles ask the
+// ground in, each from its own reference point), then by cluster block within one.
 //
 // ── Determinism is the contract, not a nice-to-have ─────────────────────────────
 //
-// The same (tile_coord, generation, lane) over the same ground must produce a
-// byte-identical blade list on every GPU, in every build, forever. Residency caching, the
-// stable per-blade seed that wind phase and the dithered LOD cross-fade key off, and the
-// CPU reference this shader is tested against all rest on it. Two consequences that look
-// like over-engineering and are not:
+// The same (band, tile_coord, generation, lane) over the same ground must produce a
+// byte-identical record list on every GPU, in every build. Residency caching, the stable
+// per-tuft seed that wind phase and the dithered fades key off, and the CPU reference all
+// rest on it:
 //
 //  1. **Nothing frame-dependent may enter the hash.** No frame index, no time, no
-//     `atomicAdd` result. A seed that changes between frames turns the stochastic
-//     cross-fade into full-screen static that TAA cannot resolve.
-//
+//     `atomicAdd` result.
 //  2. **Compaction is a workgroup prefix sum, not `atomicAdd`.** Atomic ordering is
-//     unspecified, so the arena contents would differ run to run. A 64-lane Hillis-Steele
-//     scan makes the slab a pure function of the candidate index.
+//     unspecified; a 64-lane Hillis-Steele scan of the records each candidate writes makes
+//     the slab a pure function of the candidate index.
 //
-// The packing helpers below are hand-rolled rather than using `pack2x16unorm` /
-// `pack4x8unorm` on purpose: the builtins round to nearest even, while
-// `crate::packing` rounds half away from zero (`x * 65535.0 + 0.5` then
-// truncate). `pack2x16float` *is* used for the f16 height offset because both sides round
-// to nearest even there.
+// The packing helpers round half away from zero as `crate::packing` does (the builtins
+// round to nearest even); `pack2x16float` is used for the f16 height because both sides
+// round to nearest even there.
 
 const WG_SIZE: u32 = 64u;
-const TAU: f32 = 6.283185307179586;
 
 // Mirrors crate::TileState.
 const TILE_STATE_PLACING: u32 = 1u;
@@ -48,111 +48,48 @@ const COUNTER_PLACED_BLADES: u32 = 6u;
 
 // Mirrors contract::ground::GROUND_NONE.
 const GROUND_NONE: u32 = 0xffffffffu;
-// A queue entry's slot (low half) and its tile's place in last frame's queries (high).
-const QUEUE_SLOT_MASK: u32 = 0xffffu;
-/// `FoliageKind::Block`: blades stacked from cubes on one grid.
-const FOLIAGE_KIND_BLOCK: u32 = 3u;
 
 /// Mirrors `PlaceUniforms` (Rust, 80 bytes).
 struct PlaceUniforms {
-    tile_size:          f32,
-    candidate_grid:     u32,
-    /// Edge length of one cluster block in cells. Candidates are mapped block-linearly
-    /// so a cluster is a square patch, not a 1-cell-tall strip — see `candidate_uv`.
+    /// Edge of one cluster block in candidates: `cluster_size` consecutive candidates are
+    /// a square patch (the cull's clusters), not a strip.
     cluster_edge:       u32,
-    slab_capacity:      u32,
-
     /// Tiles to place this frame (`tile_queue[0..]`), then tiles to query
-    /// (`tile_queue[place_tile_count..]`).
+    /// (`tile_queue[place_tile_count..]`), and the queries those ask in all.
     place_tile_count:   u32,
     query_tile_count:   u32,
-    density_multiplier: f32,
-    /// Candidates per square metre of the grid (`candidate_grid² / tile area`): the
-    /// denominator of the acceptance probability.
-    grid_density:       f32,
+    query_count:        u32,
 
+    density_multiplier: f32,
     type_count:         u32,
     max_foliage_height: f32,
     // 0 until a terrain capture and its ring transform are published; then the built-in
     // ground samples it (`ground_plane_height`).
     terrain_valid:      u32,
-    terrain_origin_x:   f32,
 
+    terrain_origin_x:   f32,
     terrain_origin_z:   f32,
     terrain_extent:     f32,
     // Number of valid entries in the layer table. Zero = carpet everything.
     layer_count:        u32,
+
     /// How far over the eye's height along a tile's up a query starts, and how far under
     /// it it ends.
     search_above:       f32,
-
     search_below:       f32,
     eye_x:              f32,
     eye_y:              f32,
+
     eye_z:              f32,
-}
-
-/// Mirrors `crate::GpuFoliageType` (Rust, 96 bytes). **Every field is a scalar** — see the
-/// struct doc in `src/contract/gpu_types.rs`.
-struct FoliageType {
-    density:               f32,
-    height_min:            f32,
-    height_max:            f32,
-    width_min:             f32,
-    width_max:             f32,
-    slope_min:             f32,
-    slope_max:             f32,
-    altitude_min:          f32,
-    altitude_max:          f32,
-    lod0:                  f32,
-    lod1:                  f32,
-    lod2:                  f32,
-    lod3:                  f32,
-    wind_trunk:            f32,
-    wind_branch:           f32,
-    wind_leaf:             f32,
-    interaction_stiffness: f32,
-    material_id:           u32,
-    density_layer:         u32,
-    kind_and_flags:        u32,
-    mesh_or_impostor_id:   u32,
-    base_color:            u32,
-    roughness_metallic:    u32,
-    ground_mask:           u32,
-}
-
-/// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).
-struct FoliageTile {
-    tile_coord_x:  i32,
-    tile_coord_z:  i32,
-    blade_offset:  u32,
-    blade_count:   u32,
-    bounds_center: f32,
-    bounds_half:   f32,
-    state:         u32,
-    generation:    u32,
-}
-
-/// Mirrors `crate::GpuTileFrame` (Rust, 64 bytes).
-struct TileFrame {
-    origin: vec3<f32>,
-    axis_u: vec3<f32>,
-    axis_v: vec3<f32>,
-    up:     vec3<f32>,
+    _pad0:              u32,
+    _pad1:              u32,
+    _pad2:              u32,
 }
 
 /// Mirrors `crate::GpuFoliageLayer` (Rust, 32 bytes).
 struct FoliageLayer {
     bounds_min: vec4<f32>,
     bounds_max: vec4<f32>,
-}
-
-/// Mirrors `crate::GpuBladeInstance` (Rust, 16 bytes).
-struct BladeInstance {
-    packed_pos:        u32,
-    packed_height_yaw: u32,
-    packed_scale_type: u32,
-    packed_tint_seed:  u32,
 }
 
 /// Mirrors `crate::GpuGroundQuery` (Rust, 32 bytes).
@@ -168,7 +105,7 @@ struct GroundHit {
     distance: u32,
     normal:   u32,
     ground:   u32,
-    pad:      u32,
+    colour:   u32,
 }
 
 /// Mirrors `crate::GpuGroundArgs` (Rust, 16 bytes).
@@ -181,7 +118,8 @@ struct GroundArgs {
 @group(0) @binding(1)  var<storage, read> types: array<FoliageType>;
 @group(0) @binding(2)  var<storage, read_write> tiles: array<FoliageTile>;
 @group(0) @binding(3)  var<storage, read_write> blades: array<BladeInstance>;
-@group(0) @binding(4)  var<storage, read> tile_queue: array<u32>;
+/// Queued tiles: their slot (x) and their first query (y).
+@group(0) @binding(4)  var<storage, read> tile_queue: array<vec2<u32>>;
 @group(0) @binding(5)  var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(6)  var terrain_height_slope: texture_2d<f32>;
 @group(0) @binding(7)  var terrain_samp: sampler;
@@ -190,12 +128,14 @@ struct GroundArgs {
 @group(0) @binding(10) var<storage, read_write> queries: array<GroundQuery>;
 @group(0) @binding(11) var<storage, read_write> hits: array<GroundHit>;
 @group(0) @binding(12) var<storage, read_write> ground_args: GroundArgs;
+@group(0) @binding(13) var<uniform> foliage_bands: FoliageBands;
 
 var<workgroup> wg_scan: array<u32, WG_SIZE>;
 var<workgroup> wg_base: u32;
 var<workgroup> wg_low: atomic<i32>;
 var<workgroup> wg_high: atomic<i32>;
 var<workgroup> wg_live_types: atomic<u32>;
+var<workgroup> wg_cells: u32;
 
 // ── Hash, transcribed from crate::placement ────────────────────────
 
@@ -224,6 +164,11 @@ fn hash_to_unit(hash: u32) -> f32 {
     return f32(hash >> 8u) * (1.0 / 16777216.0);
 }
 
+/// The seed generation of band `band`'s tiles: the bands' tiles are distinct draws.
+fn band_generation(generation: u32, band: u32) -> u32 {
+    return generation ^ (band * 0x9e3779b9u);
+}
+
 // ── Packing, matching crate::packing exactly ───────────────────────
 
 fn pack_unorm16_u(value: f32) -> u32 {
@@ -234,30 +179,32 @@ fn pack_unorm8_u(value: f32) -> u32 {
     return u32(clamp(value, 0.0, 1.0) * 255.0 + 0.5);
 }
 
-/// 16 bits of *turn*, not unorm: 0 and 2π are the same orientation.
-fn pack_yaw_u(radians: f32) -> u32 {
-    let turns = radians * (1.0 / TAU);
-    let wrapped = turns - floor(turns);
-    return u32(wrapped * 65536.0 + 0.5) & 0xffffu;
-}
-
 fn pack_pos(u: f32, v: f32) -> u32 {
     return pack_unorm16_u(u) | (pack_unorm16_u(v) << 16u);
 }
 
-fn pack_height_yaw(height_offset: f32, yaw: f32) -> u32 {
-    return (pack2x16float(vec2<f32>(height_offset, 0.0)) & 0xffffu) | (pack_yaw_u(yaw) << 16u);
+fn pack_height_tuft(height_offset: f32, blade: u32, blades: u32, rank: f32) -> u32 {
+    return (pack2x16float(vec2<f32>(height_offset, 0.0)) & 0xffffu)
+        | ((blade & 15u) << 16u)
+        | ((blades & 15u) << 20u)
+        | (pack_unorm8_u(rank) << 24u);
 }
 
-fn pack_scale_type(height: f32, width: f32, type_id: u32, variant: u32) -> u32 {
+fn pack_scale_type(height: f32, aux: u32, type_id: u32, variant: u32) -> u32 {
     return pack_unorm8_u(height)
-        | (pack_unorm8_u(width) << 8u)
+        | ((aux & 0xffu) << 8u)
         | ((type_id & 0xffu) << 16u)
         | ((variant & 0xffu) << 24u);
 }
 
-fn pack_tint_seed(tint_x: f32, tint_y: f32, seed: u32) -> u32 {
-    return pack_unorm8_u(tint_x) | (pack_unorm8_u(tint_y) << 8u) | ((seed & 0xffffu) << 16u);
+/// `crate::pack_rgb565` of an RGBA8 ground colour (0: none).
+fn pack_ground_colour(rgba8: u32) -> u32 {
+    if rgba8 == 0u {
+        return 0u;
+    }
+    let c = unpack4x8unorm(rgba8);
+    let packed = u32(c.r * 31.0 + 0.5) | (u32(c.g * 63.0 + 0.5) << 5u) | (u32(c.b * 31.0 + 0.5) << 11u);
+    return max(packed, 1u);
 }
 
 /// An `f32` as an `i32` ordered like the float (for `atomicMin`/`atomicMax`).
@@ -322,85 +269,97 @@ fn owned_cube(cell: u32, grid: u32, cubes: u32, pick: f32) -> i32 {
     return min(lo + i32(pick * f32(hi - lo + 1)), hi);
 }
 
-/// Candidate `candidate` of a tile: its stratified, jittered `(u, v)` in the tile, on the
-/// unorm16 grid the blade stores. The ground is asked at exactly the stored point: a
-/// candidate a hair from a voxel step's edge would otherwise be answered by one column
-/// and stored over the other, a whole step off. With a cube grid (`cubes`, from
-/// [`cube_cells`]) the candidate is the centre of a cube its cell owns, or `-1` (none).
-///
-/// Stratified: one candidate per grid cell, jittered inside it — pure rejection sampling
-/// clumps. Block-linear, not row-major: `cluster_size` consecutive candidates form one
-/// cluster, and the L3 clump card is anchored on its cluster, so a row-major mapping
-/// renders the far field as straight rows.
-fn candidate_uv(candidate: u32, seed: u32, cubes: vec2<u32>) -> vec2<f32> {
-    let grid = max(place.candidate_grid, 1u);
+/// Candidate `candidate`'s cell in a tile of `band`: probe block first (the blocks a big
+/// tile asks the ground in), then cluster block within it (`cluster_edge`² consecutive
+/// candidates are a square patch, the cull's cluster), then row. Mirror of
+/// `reference::candidate_cell`.
+fn candidate_cell(candidate: u32, band: FoliageBand) -> vec2<u32> {
+    let grid = max(band.candidate_grid, 1u);
+    let blocks = max(band.probe_blocks, 1u);
+    let per_side = max(grid / blocks, 1u);
+    let per_probe = per_side * per_side;
+    let probe = candidate / per_probe;
+    let within = candidate % per_probe;
     let edge = max(place.cluster_edge, 1u);
-    let per_block = edge * edge;
-    let blocks_across = max(grid / edge, 1u);
-    let block = candidate / per_block;
-    let within = candidate % per_block;
-    let cell_x = (block % blocks_across) * edge + (within % edge);
-    let cell_z = (block / blocks_across) * edge + (within / edge);
-    let inv_grid = 1.0 / f32(grid);
+    let clusters_across = max(per_side / edge, 1u);
+    let cluster = within / (edge * edge);
+    let inside = within % (edge * edge);
+    return vec2<u32>(
+        (probe % blocks) * per_side + (cluster % clusters_across) * edge + inside % edge,
+        (probe / blocks) * per_side + (cluster / clusters_across) * edge + inside / edge,
+    );
+}
+
+/// Candidate `candidate`'s `(u, v)` in its tile, on the unorm16 grid the record stores:
+/// the ground is asked at exactly the stored point (a candidate a hair from a voxel step's
+/// edge would otherwise be answered by one column and stored over the other). With a cube
+/// grid (`cubes`) the candidate is the centre of a cube its cell owns, or `-1` (none);
+/// else it is jittered in its cell (stratified: one a cell — pure rejection sampling
+/// clumps).
+fn candidate_uv(candidate: u32, seed: u32, cubes: vec2<u32>, band: FoliageBand) -> vec2<f32> {
+    let grid = max(band.candidate_grid, 1u);
+    let cell = candidate_cell(candidate, band);
     let pick = vec2<f32>(hash_to_unit(seed), hash_to_unit(rotl(seed, 11u)));
     if cubes.x > 0u {
-        let ku = owned_cube(cell_x, grid, cubes.x, pick.x);
-        let kv = owned_cube(cell_z, grid, cubes.y, pick.y);
+        let ku = owned_cube(cell.x, grid, cubes.x, pick.x);
+        let kv = owned_cube(cell.y, grid, cubes.y, pick.y);
         if ku < 0 || kv < 0 {
             return vec2<f32>(-1.0);
         }
         let at = (vec2<f32>(f32(ku), f32(kv)) + 0.5) / vec2<f32>(cubes);
         return vec2<f32>(f32(pack_unorm16_u(at.x)), f32(pack_unorm16_u(at.y))) * (1.0 / 65535.0);
     }
-    let uv = (vec2<f32>(f32(cell_x), f32(cell_z)) + pick) * inv_grid;
+    let uv = (vec2<f32>(cell) + pick) / f32(grid);
     return vec2<f32>(f32(pack_unorm16_u(uv.x)), f32(pack_unorm16_u(uv.y))) * (1.0 / 65535.0);
-}
-
-/// Edge of the cells blocky grass gathers in tufts over, metres.
-const FOLIAGE_TUFT_M: f32 = 0.45;
-
-/// A blocky blade's tuft (transcription of `crate::reference::block_tuft`): the
-/// nearest of one jittered centre a cell, the blade's lean away from it (cubes stepped
-/// sideways per cube up, along the tile's u and v: further out, further over) and how
-/// tall it stands (1 at the centre, lower to the rim) and how likely it grows (thinning
-/// to the rim, so tufts stand apart). Over the chart, not the tile, so tufts run on
-/// across tile edges; no generation, so they keep their shape.
-struct Tuft {
-    lean: vec2<f32>,
-    tall: f32,
-    fill: f32,
-}
-
-fn block_tuft(tile_x: i32, tile_z: i32, uv: vec2<f32>) -> Tuft {
-    let p = (vec2<f32>(f32(tile_x), f32(tile_z)) + uv) * (place.tile_size / FOLIAGE_TUFT_M);
-    let cell = floor(p);
-    var nearest = vec2<f32>(0.0);
-    var best = 1.0e9;
-    for (var dz = -1; dz <= 1; dz++) {
-        for (var dx = -1; dx <= 1; dx++) {
-            let c = cell + vec2<f32>(f32(dx), f32(dz));
-            let h = blade_seed(i32(c.x), i32(c.y), 7u, 0x5f3759dfu);
-            let d = p - (c + vec2<f32>(hash_to_unit(h), hash_to_unit(rotl(h, 11u))));
-            let dd = dot(d, d);
-            if dd < best {
-                best = dd;
-                nearest = d;
-            }
-        }
-    }
-    let r = sqrt(best);
-    let away = select(vec2<f32>(0.0), nearest / r, r > 1.0e-4);
-    return Tuft(away * min(0.25 + r, 1.0), clamp(1.0 - 0.7 * r, 0.3, 1.0), clamp(1.25 - 1.1 * r, 0.1, 1.0));
-}
-
-/// The 16 bits a blade's yaw takes, holding a blocky blade's lean instead (a stack is
-/// upright on the grid): u then v, each an 8-bit unorm of `0.5 + lean / 2`.
-fn pack_lean_u(lean: vec2<f32>) -> u32 {
-    return pack_unorm8_u(0.5 + 0.5 * lean.x) | (pack_unorm8_u(0.5 + 0.5 * lean.y) << 8u);
 }
 
 fn frame_point(frame: TileFrame, uv: vec2<f32>, h: f32) -> vec3<f32> {
     return frame.origin + frame.axis_u * uv.x + frame.axis_v * uv.y + frame.up * h;
+}
+
+// ── Patches ─────────────────────────────────────────────────────────────────────
+
+/// A lattice hash in `[0, 1)`.
+fn lattice(i: vec2<i32>, salt: u32) -> f32 {
+    return foliage_unit(foliage_hash(bitcast<u32>(i.x) * 73856093u ^ bitcast<u32>(i.y) * 19349663u ^ salt));
+}
+
+/// Value noise in `[0, 1]` over the chart at the point `uv` of the tile at band `coord`
+/// (`span` base tiles across), with lattice cells `2^e` base tiles (8 m) across. The
+/// lattice index is integer arithmetic on the tile coordinate, so patches are as sharp at
+/// a planet's millionth tile as at its first (a float position there is half a metre off).
+fn chart_noise(coord: vec2<i32>, uv: vec2<f32>, span: u32, e: i32, salt: u32) -> f32 {
+    let base = coord * i32(span);
+    let local = uv * f32(span);
+    var i: vec2<i32>;
+    var f: vec2<f32>;
+    if e <= 0 {
+        let at = local * f32(1u << u32(-e));
+        i = base * i32(1u << u32(-e)) + vec2<i32>(floor(at));
+        f = fract(at);
+    } else {
+        let mask = i32((1u << u32(e)) - 1u);
+        let at = (vec2<f32>(base & vec2<i32>(mask)) + local) / f32(1u << u32(e));
+        i = (base >> vec2<u32>(u32(e))) + vec2<i32>(floor(at));
+        f = fract(at);
+    }
+    let s = f * f * (3.0 - 2.0 * f);
+    let a = mix(lattice(i, salt), lattice(i + vec2<i32>(1, 0), salt), s.x);
+    let b = mix(lattice(i + vec2<i32>(0, 1), salt), lattice(i + vec2<i32>(1, 1), salt), s.x);
+    return mix(a, b, s.y);
+}
+
+/// Type `t`'s patch weight at the candidate (`0..1`): bare where its noise is low, by its
+/// strength. Two octaves, so patches have ragged edges.
+fn patch_weight(ty: FoliageType, t: u32, coord: vec2<i32>, uv: vec2<f32>, span: u32) -> f32 {
+    if ty.patch_scale <= 0.0 || ty.patch_strength <= 0.0 {
+        return 1.0;
+    }
+    let e = clamp(i32(round(log2(ty.patch_scale / 8.0))), -8, 16);
+    let salt = t * 0x27d4eb2fu + 0x165667b1u;
+    let n = 0.7 * chart_noise(coord, uv, span, e, salt) + 0.3 * chart_noise(coord, uv, span, e - 2, salt ^ 0x9e3779b9u);
+    let f = smoothstep(0.38, 0.62, n);
+    return mix(1.0 - clamp(ty.patch_strength, 0.0, 1.0), 1.0, f);
 }
 
 // ── 1. Queries ──────────────────────────────────────────────────────────────────
@@ -410,29 +369,31 @@ fn cs_query(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_index) lane: u32,
 ) {
-    let cells = max(place.candidate_grid, 1u) * max(place.candidate_grid, 1u);
     if workgroup_id.x == 0u && lane == 0u {
-        let count = place.query_tile_count * cells;
-        ground_args.groups = vec3<u32>((count + WG_SIZE - 1u) / WG_SIZE, 1u, 1u);
-        ground_args.count = count;
+        ground_args.groups = vec3<u32>((place.query_count + WG_SIZE - 1u) / WG_SIZE, 1u, 1u);
+        ground_args.count = place.query_count;
     }
     if workgroup_id.x >= place.query_tile_count { return; }
     let at = place.place_tile_count + workgroup_id.x;
     if at >= arrayLength(&tile_queue) { return; }
-    let slot = tile_queue[at] & QUEUE_SLOT_MASK;
+    let entry = tile_queue[at];
+    let slot = entry.x;
     if slot >= arrayLength(&tiles) { return; }
     let tile = tiles[slot];
     let frame = frames[slot];
+    let band_index = foliage_band_of_slot(slot);
+    let band = foliage_bands.bands[band_index];
+    let generation = band_generation(tile.generation, band_index);
     // Every query of the tile starts the same height over its datum: the eye's, raised.
     let eye_h = dot(vec3<f32>(place.eye_x, place.eye_y, place.eye_z) - frame.origin, frame.up);
     let start_h = eye_h + place.search_above;
     let length = place.search_above + place.search_below;
-    let first = workgroup_id.x * cells;
+    let cells = band.candidate_grid * band.candidate_grid;
     let cubes = cube_cells(frame);
     for (var candidate = lane; candidate < cells; candidate += WG_SIZE) {
-        let seed = blade_seed(tile.tile_coord_x, tile.tile_coord_z, candidate, tile.generation);
-        let uv = max(candidate_uv(candidate, seed, cubes), vec2<f32>(0.0));
-        let index = first + candidate;
+        let seed = blade_seed(tile.tile_coord_x, tile.tile_coord_z, candidate, generation);
+        let uv = max(candidate_uv(candidate, seed, cubes, band), vec2<f32>(0.0));
+        let index = entry.y + candidate;
         if index < arrayLength(&queries) {
             queries[index] = GroundQuery(frame_point(frame, uv, start_h), length, frame.up, 0u);
         }
@@ -453,11 +414,10 @@ fn ground_plane_height(world_xz: vec2<f32>) -> vec2<f32> {
     return texel.rg;
 }
 
-/// The built-in ground's answers (+Y up, ground id 0): a thread a query, over the header
-/// `cs_query` wrote (dispatched indirectly from it).
+/// The built-in ground's answers (+Y up, ground id 0, no colour): a thread a query.
 @compute @workgroup_size(64)
 fn cs_ground_plane(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= ground_args.count || id.x >= arrayLength(&queries) || id.x >= arrayLength(&hits) { return; }
+    if id.x >= place.query_count || id.x >= arrayLength(&queries) || id.x >= arrayLength(&hits) { return; }
     let q = queries[id.x];
     let terrain = ground_plane_height(q.start.xz);
     let c = clamp(terrain.y, -1.0, 1.0);
@@ -468,21 +428,21 @@ fn cs_ground_plane(@builtin(global_invocation_id) id: vec3<u32>) {
     hit.distance = bitcast<u32>(q.start.y - terrain.x);
     hit.normal = pack2x16snorm(p);
     hit.ground = 0u;
+    hit.colour = 0u;
     hits[id.x] = hit;
 }
 
 // ── 2. Placement ────────────────────────────────────────────────────────────────
 
-/// Whether a render-space position lies inside at least one authored layer. An empty
-/// layer table carpets everything; an infinite-extent layer accepts everything.
+/// True when `p` lies inside at least one layer's AABB, or the layer table is empty.
 fn within_any_layer(p: vec3<f32>) -> bool {
-    let layer_limit = min(place.layer_count, arrayLength(&layers));
-    if layer_limit == 0u {
+    let count = min(place.layer_count, arrayLength(&layers));
+    if count == 0u {
         return true;
     }
-    for (var i = 0u; i < layer_limit; i = i + 1u) {
+    for (var i = 0u; i < count; i++) {
         let layer = layers[i];
-        if layer.bounds_max.w > 0.5 {
+        if layer.bounds_max.w >= 0.5 {
             return true;
         }
         if all(p >= layer.bounds_min.xyz) && all(p <= layer.bounds_max.xyz) {
@@ -492,7 +452,7 @@ fn within_any_layer(p: vec3<f32>) -> bool {
     return false;
 }
 
-/// Whether type `t` grows on ground `ground` at slope `slope_cos` and height `h`.
+/// Whether type `t` grows on ground id `ground` with `slope_cos` at height `h`.
 fn type_grows(t: FoliageType, ground: u32, slope_cos: f32, h: f32) -> bool {
     let on_ground = t.ground_mask == 0u || (ground < 32u && ((t.ground_mask >> ground) & 1u) != 0u);
     return t.density > 0.0 && on_ground
@@ -501,26 +461,38 @@ fn type_grows(t: FoliageType, ground: u32, slope_cos: f32, h: f32) -> bool {
 }
 
 /// A candidate's answered ground: whether there is any, its height along the tile's up
-/// over the frame's datum, the normal and the ground id.
+/// over the frame's datum, the normal, the ground id and colour.
 struct Ground {
     ok: bool,
     h: f32,
     normal: vec3<f32>,
     ground: u32,
+    colour: u32,
 }
 
-fn answered_ground(index: u32, frame: TileFrame) -> Ground {
-    var g = Ground(false, 0.0, frame.up, GROUND_NONE);
-    if index >= arrayLength(&hits) || index >= arrayLength(&queries) { return g; }
+fn answered_ground(index: u32, frame: TileFrame, start_h: f32, length: f32) -> Ground {
+    var g = Ground(false, 0.0, frame.up, GROUND_NONE, 0u);
+    if index >= arrayLength(&hits) {
+        return g;
+    }
     let hit = hits[index];
-    let q = queries[index];
-    let distance = bitcast<f32>(hit.distance);
-    if hit.ground == GROUND_NONE || !(distance >= 0.0 && distance <= q.length) { return g; }
+    let d = bitcast<f32>(hit.distance);
+    if hit.ground == GROUND_NONE || !(d >= 0.0) || d > length {
+        return g;
+    }
     g.ok = true;
-    g.h = dot(q.start - frame.origin, frame.up) - distance;
+    g.h = start_h - d;
     g.normal = unpack_octahedral(hit.normal);
     g.ground = hit.ground;
+    g.colour = hit.colour;
     return g;
+}
+
+/// The blades a tuft of type `ty` holds, by `pick` in 0..1.
+fn tuft_blades(ty: FoliageType, pick: f32) -> u32 {
+    let lo = clamp(ty.blades_per_tuft & 0xffffu, 1u, 15u);
+    let hi = clamp(ty.blades_per_tuft >> 16u, lo, 15u);
+    return min(lo + u32(pick * f32(hi - lo + 1u)), hi);
 }
 
 @compute @workgroup_size(64)
@@ -528,16 +500,15 @@ fn cs_place(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_index) lane: u32,
 ) {
-    // Resolve the tile *without* letting the result gate any barrier: `tile_queue` is a
-    // storage load, so uniformity analysis cannot prove it uniform. Every lane runs the
-    // full candidate loops and only the *writes* are guarded.
+    // The whole workgroup takes the same path up to the scan: a workgroup whose tile is
+    // not valid still runs the loops (and their barriers) and only guards the writes.
     var slot = 0u;
-    var asked = 0u;
+    var first = 0u;
     var valid = false;
     if workgroup_id.x < place.place_tile_count && workgroup_id.x < arrayLength(&tile_queue) {
         let entry = tile_queue[workgroup_id.x];
-        slot = entry & QUEUE_SLOT_MASK;
-        asked = entry >> 16u;
+        slot = entry.x;
+        first = entry.y;
         valid = slot < arrayLength(&tiles);
     }
     var tile: FoliageTile;
@@ -546,9 +517,22 @@ fn cs_place(
         tile = tiles[slot];
         frame = frames[slot];
     }
-    let cells = max(place.candidate_grid, 1u) * max(place.candidate_grid, 1u);
-    let first = asked * cells;
+    let band_index = foliage_band_of_slot(slot);
+    let band = foliage_bands.bands[band_index];
+    let generation = band_generation(tile.generation, band_index);
+    let eye_h = dot(vec3<f32>(place.eye_x, place.eye_y, place.eye_z) - frame.origin, frame.up);
+    let start_h = eye_h + place.search_above;
+    let length = place.search_above + place.search_below;
     let cubes = cube_cells(frame);
+    let coord = vec2<i32>(tile.tile_coord_x, tile.tile_coord_z);
+    let blade_records = band.lod == FOLIAGE_BAND_LOD_BLADES;
+
+    // The candidate count is the same for the whole workgroup (one tile), but it comes
+    // from storage: broadcast it so the loops around the scan's barriers are uniform.
+    if lane == 0u {
+        wg_cells = band.candidate_grid * band.candidate_grid;
+    }
+    let cells = workgroupUniformLoad(&wg_cells);
 
     if lane == 0u {
         atomicStore(&wg_low, ordered(3.0e38));
@@ -558,10 +542,10 @@ fn cs_place(
     }
     workgroupBarrier();
 
-    // The tile's height range along its up: blades store a height *offset* from its
-    // centre, so it is known before any blade is packed.
+    // The tile's height range along its up: records store a height *offset* from its
+    // centre, so it is known before any is packed.
     for (var candidate = lane; candidate < cells; candidate += WG_SIZE) {
-        let g = answered_ground(first + candidate, frame);
+        let g = answered_ground(first + candidate, frame, start_h, length);
         if g.ok {
             atomicMin(&wg_low, ordered(g.h));
             atomicMax(&wg_high, ordered(g.h));
@@ -589,8 +573,8 @@ fn cs_place(
     }
     workgroupBarrier();
 
-    // `cells` comes from the uniform buffer, so this loop and every barrier inside it are
-    // in uniform control flow for the whole workgroup.
+    // `cells` is a workgroup-uniform load, so this loop and every barrier inside it are in
+    // uniform control flow for the whole workgroup.
     var chunk = 0u;
     loop {
         if chunk >= cells {
@@ -598,66 +582,57 @@ fn cs_place(
         }
 
         let candidate = chunk + lane;
-        var accepted = 0u;
+        var count = 0u;
         var record = BladeInstance(0u, 0u, 0u, 0u);
 
         if valid && candidate < cells {
-            let seed = blade_seed(tile.tile_coord_x, tile.tile_coord_z, candidate, tile.generation);
-            let uv = candidate_uv(candidate, seed, cubes);
-            let g = answered_ground(first + candidate, frame);
+            let seed = blade_seed(coord.x, coord.y, candidate, generation);
+            let uv = candidate_uv(candidate, seed, cubes, band);
+            let g = answered_ground(first + candidate, frame, start_h, length);
             if g.ok && uv.x >= 0.0 && within_any_layer(frame_point(frame, uv, g.h)) {
-                // The types that grow here, by their densities: the candidate grid holds
-                // `grid_density` candidates a square metre, so the ground grows a blade
-                // with probability `sum / grid_density` and the blade is each type's by
-                // its share of the sum. Types keyed to other grounds cost nothing here.
+                // The types that grow here, by their densities and patches: the band's
+                // grid holds `grid_density` candidates a square metre for `share` of the
+                // full density, so the ground grows a tuft with probability
+                // `sum · share / grid_density`, of each type by its share of the sum.
                 let slope_cos = dot(g.normal, frame.up);
                 var sum = 0.0;
                 for (var t = 0u; t < type_limit; t++) {
-                    if type_grows(types[t], g.ground, slope_cos, g.h) { sum += types[t].density; }
+                    let ty = types[t];
+                    if type_grows(ty, g.ground, slope_cos, g.h) {
+                        sum += ty.density * patch_weight(ty, t, coord, uv, band.tile_span);
+                    }
                 }
-                let wanted = sum * place.density_multiplier;
-                let roll = hash_to_unit(rotl(seed, 17u)) * max(place.grid_density, 1.0e-6);
+                let wanted = sum * place.density_multiplier * band.share;
+                let roll = hash_to_unit(rotl(seed, 17u)) * max(band.grid_density, 1.0e-6);
                 if roll < wanted {
                     // Which type: the roll's place in the cumulative densities.
                     let pick = hash_to_unit(rotl(seed, 5u)) * sum;
                     var type_id = 0u;
                     var running = 0.0;
                     for (var t = 0u; t < type_limit; t++) {
-                        if !type_grows(types[t], g.ground, slope_cos, g.h) { continue; }
+                        let ty = types[t];
+                        if !type_grows(ty, g.ground, slope_cos, g.h) { continue; }
                         type_id = t;
-                        running += types[t].density;
+                        running += ty.density * patch_weight(ty, t, coord, uv, band.tile_span);
                         if pick < running { break; }
                     }
-                    accepted = 1u;
+                    let blades_in_tuft = tuft_blades(types[type_id], hash_to_unit(rotl(seed, 3u)));
+                    count = select(1u, blades_in_tuft, blade_records);
                     record.packed_pos = pack_pos(uv.x, uv.y);
-                    record.packed_height_yaw = pack_height_yaw(g.h - center, hash_to_unit(rotl(seed, 23u)) * TAU);
-                    var height_lerp = hash_to_unit(rotl(seed, 29u));
-                    if (types[type_id].kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK {
-                        // In its tuft: leaning out from the centre, tallest there.
-                        let tuft = block_tuft(tile.tile_coord_x, tile.tile_coord_z, uv);
-                        if hash_to_unit(rotl(seed, 19u)) >= tuft.fill {
-                            accepted = 0u;
-                        }
-                        record.packed_height_yaw = (record.packed_height_yaw & 0xffffu) | (pack_lean_u(tuft.lean) << 16u);
-                        height_lerp = clamp(tuft.tall * (0.55 + 0.45 * height_lerp), 0.0, 1.0);
-                    }
+                    record.packed_height_tuft = pack_height_tuft(g.h - center, 0u, blades_in_tuft, hash_to_unit(rotl(seed, 23u)));
                     record.packed_scale_type = pack_scale_type(
-                        height_lerp,
-                        hash_to_unit(rotl(seed, 3u)),
+                        hash_to_unit(rotl(seed, 29u)),
+                        (seed >> 9u) & 0xffu,
                         type_id,
                         (seed >> 30u) & 3u,
                     );
-                    record.packed_tint_seed = pack_tint_seed(
-                        hash_to_unit(rotl(seed, 7u)),
-                        hash_to_unit(rotl(seed, 13u)),
-                        seed & 0xffffu,
-                    );
+                    record.packed_colour_seed = pack_ground_colour(g.colour) | ((seed & 0xffffu) << 16u);
                 }
             }
         }
 
-        // Hillis-Steele inclusive scan over the 64 acceptance flags.
-        wg_scan[lane] = accepted;
+        // Hillis-Steele inclusive scan over the 64 lanes' record counts.
+        wg_scan[lane] = count;
         workgroupBarrier();
         var offset = 1u;
         loop {
@@ -675,39 +650,32 @@ fn cs_place(
         }
 
         let inclusive = wg_scan[lane];
-        let chunk_total = wg_scan[WG_SIZE - 1u];
+        let exclusive = inclusive - count;
         let base = wg_base;
-
-        if accepted == 1u {
-            let index = base + inclusive - 1u;
-            let arena_index = tile.blade_offset + index;
-            if index < place.slab_capacity && arena_index < arrayLength(&blades) {
-                blades[arena_index] = record;
-            } else {
-                // Hard ceiling, never silent truncation: counted. The CPU clamps the
-                // candidate grid so `cells <= slab_capacity`, so a non-zero value here
-                // means the two sides have drifted.
-                atomicAdd(&counters[COUNTER_PLACEMENT_OVERFLOW], 1u);
+        if valid && count > 0u {
+            for (var j = 0u; j < count; j++) {
+                let local = base + exclusive + j;
+                if local < band.slab && tile.blade_offset + local < arrayLength(&blades) {
+                    var r = record;
+                    r.packed_height_tuft = r.packed_height_tuft | (j << 16u);
+                    blades[tile.blade_offset + local] = r;
+                } else {
+                    atomicAdd(&counters[COUNTER_PLACEMENT_OVERFLOW], 1u);
+                }
             }
         }
-
-        // Every lane must have consumed `wg_base` before lane 0 advances it.
         workgroupBarrier();
-        if lane == 0u {
-            wg_base = base + chunk_total;
+        if lane == WG_SIZE - 1u {
+            wg_base = base + inclusive;
         }
         workgroupBarrier();
-
         chunk = chunk + WG_SIZE;
     }
 
-    workgroupBarrier();
     if lane == 0u && valid {
-        let count = min(wg_base, place.slab_capacity);
-        tiles[slot].blade_count = count;
-        // Placing -> Resident makes the tile drawable; until this line the slab holds
-        // whatever its previous tenant (or its previous placement) left.
+        let placed = min(wg_base, band.slab);
+        tiles[slot].blade_count = placed;
         tiles[slot].state = TILE_STATE_RESIDENT;
-        atomicAdd(&counters[COUNTER_PLACED_BLADES], count);
+        atomicAdd(&counters[COUNTER_PLACED_BLADES], placed);
     }
 }

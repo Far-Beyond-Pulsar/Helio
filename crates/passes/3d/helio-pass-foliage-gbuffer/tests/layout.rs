@@ -23,17 +23,13 @@ fn foliage_globals_field_offsets_match_the_wgsl_mirror() {
     assert_eq!(std::mem::offset_of!(FoliageGlobals, screen_size), 0);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, frame), 8);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, flags), 12);
-    // The two vec4s must land on 16-byte boundaries or WGSL inserts padding the Rust
+    // The vec4s must land on 16-byte boundaries or WGSL inserts padding the Rust
     // side does not have.
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, clock_ring), 16);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, interaction_field), 32);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_quality_scale), 48);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, scale_in_band), 52);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_fade_band), 56);
-    assert_eq!(
-        std::mem::offset_of!(FoliageGlobals, interaction_strength),
-        60
-    );
+    assert_eq!(std::mem::offset_of!(FoliageGlobals, clock), 16);
+    assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_quality_scale), 32);
+    assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_fade_band), 36);
+    assert_eq!(std::mem::offset_of!(FoliageGlobals, interaction_strength), 40);
+    assert_eq!(std::mem::offset_of!(FoliageGlobals, fill), 48);
 }
 
 #[test]
@@ -62,26 +58,18 @@ fn draw_indirect_stride_matches_draw_indirect_args() {
 
 #[test]
 fn the_ladder_has_no_vertex_or_index_buffer_and_the_counts_are_pinned() {
-    // The whole grass path is four non-indexed instanced strip draws. These vertex
-    // counts are what `FoliagePlacePass` writes into the indirect buffer; if they change
-    // here without changing there, a blade is drawn with a truncated strip.
-    assert_eq!(LOD_VERTEX_COUNTS, [11, 7, 4, 4]);
+    // The whole foliage path is four non-indexed instanced strip draws. These vertex
+    // counts are what `FoliagePlacePass` writes into the indirect buffer (smooth blades;
+    // blocky ones draw `FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`): L0 and L1 a blade strip with a
+    // collapsed tip, L2 a tuft's blades as cards (four vertices and two joins each), L3 a
+    // fan of three blades (three vertices and two joins each).
+    assert_eq!(LOD_VERTEX_COUNTS, [11, 7, 88, 13]);
     assert_eq!(LOD_SEGMENTS, [5, 3, 1, 1]);
-    assert_eq!(LOD_IS_CARD, [false, false, true, true]);
-
-    for lod in 0..LOD_COUNT {
-        let expected = if LOD_IS_CARD[lod] {
-            4 // two rows of two, no collapsed tip
-        } else {
-            2 * LOD_SEGMENTS[lod] + 1 // two per row, plus the collapsed tip
-        };
-        assert_eq!(
-            LOD_VERTEX_COUNTS[lod], expected,
-            "LOD {lod} vertex count disagrees with its own topology"
-        );
-        // A strip needs at least three vertices to make one triangle.
-        assert!(LOD_VERTEX_COUNTS[lod] >= 3);
+    for lod in 0..2 {
+        assert_eq!(LOD_VERTEX_COUNTS[lod], 2 * LOD_SEGMENTS[lod] + 1);
     }
+    assert_eq!(LOD_VERTEX_COUNTS[2], 6 * helio_pass_foliage_place::FOLIAGE_MAX_TUFT_BLADES - 2);
+    assert_eq!(LOD_VERTEX_COUNTS[3], 3 * 5 - 2);
 }
 
 #[test]
@@ -93,19 +81,6 @@ fn lod_uniforms_carry_the_ladder_verbatim() {
         assert_eq!(uniform.segments, LOD_SEGMENTS[lod]);
         assert_eq!(uniform.vertex_count, LOD_VERTEX_COUNTS[lod]);
         assert_eq!(uniform.region_base, lod as u32 * stride);
-        assert_eq!(uniform.is_card, LOD_IS_CARD[lod] as u32);
-        if lod == CLUMP_LOD {
-            // The clump card's width is derived, not table-driven: it stands in for a
-            // whole cluster, so it must cover that many blades' footprint. Area goes as
-            // width squared, hence sqrt(cluster). Asserting the property rather than a
-            // literal is the point — a hardcoded width silently mis-covers as soon as
-            // `FoliageQuality::cluster_granularity` differs (16 on Medium, 64 on Low),
-            // and the symptom is a density step at the L2→L3 boundary, not a failure.
-            assert_eq!(uniform.width_scale, 4.0, "sqrt(16) for a 16-blade cluster");
-        } else {
-            assert_eq!(uniform.width_scale, LOD_WIDTH_SCALE[lod]);
-        }
-        assert_eq!(uniform.height_scale, LOD_HEIGHT_SCALE[lod]);
         // Reserved words must be zero so a future build can tell "unset" from
         // "predates the field".
         assert_eq!(uniform._pad, 0);
@@ -135,21 +110,21 @@ fn visible_blade_halves_do_not_bleed_into_each_other() {
 }
 
 #[test]
-fn visible_blade_halves_cover_the_default_ring_and_tile_occupancy() {
-    // 16 bits each has to be enough for the shipped presets, or the encoding silently
-    // aliases. The default ring is 4096 slots; an 8 m tile at the reference 40 blades/m²
-    // holds ~2560 blades.
+fn visible_blade_halves_cover_every_band() {
+    // 16 bits each has to be enough for the bands' slots and their slabs, or the encoding
+    // silently aliases.
     let ceiling = VISIBLE_LOCAL_MASK;
-    assert!(helio_pass_foliage_place::DEFAULT_TILE_RING_CAPACITY <= ceiling);
-    let tile_area = helio_pass_foliage_place::FOLIAGE_TILE_SIZE_METERS.powi(2);
-    let blades_per_tile = (helio_pass_foliage_place::GpuFoliageType::default().density
-        * tile_area
-        * helio_pass_foliage_place::FoliageQuality::Ultra.density_multiplier())
-        as u32;
-    assert!(
-        blades_per_tile <= ceiling,
-        "{blades_per_tile} blades/tile at Ultra exceeds the 16-bit local index"
-    );
+    for quality in [helio_pass_foliage_place::FoliageQuality::Medium, helio_pass_foliage_place::FoliageQuality::Ultra] {
+        let bands = helio_pass_foliage_place::plan_bands(&helio_pass_foliage_place::FoliageRange {
+            range: quality.range(),
+            tufts_per_m2: 12.0,
+            ..Default::default()
+        });
+        assert!(bands.slots() <= ceiling);
+        for band in bands.bands() {
+            assert!(band.slab <= ceiling + 1, "{} records a slab exceeds the 16-bit local index", band.slab);
+        }
+    }
 }
 
 #[test]

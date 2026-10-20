@@ -23,7 +23,7 @@ pub(crate) fn gpu_type(
         metallic: component.rendering.metallic,
     }
     .pack();
-    helio_pass_foliage_place::components::FoliageTypeComponent {
+    helio_pass_foliage_place::GpuFoliageType {
         density: component.general.density,
         height_range: [
             component.placement.height_min,
@@ -59,8 +59,11 @@ pub(crate) fn gpu_type(
         mesh_or_impostor_id: u32::MAX,
         base_color,
         roughness_metallic,
-        _pad: 0,
+        // Any ground, one upright blade a tuft, no patches (the type's defaults) until
+        // the component authors tufts.
+        ..helio_pass_foliage_place::GpuFoliageType::default()
     }
+    .into()
 }
 
 /// The component's own wind. Its `_pad[0]` is 1 when the component opts

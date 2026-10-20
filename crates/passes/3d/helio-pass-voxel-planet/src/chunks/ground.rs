@@ -70,11 +70,12 @@ impl GroundGeometry for PlanetGround {
         Some(GroundChart { id: u64::from(f), eye: [c[0] * s, c[1] * s] })
     }
 
-    fn tile_frame(&self, chart: u64, coord: [i32; 2]) -> Option<TileFrame> {
+    fn tile_frame(&self, chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame> {
         let grid = self.grid()?;
         let face = u8::try_from(chart).ok()?;
-        let n = Self::tile_cells(&grid);
-        let (i0, j0) = (f64::from(coord[0]) * n, f64::from(coord[1]) * n);
+        let base = Self::tile_cells(&grid);
+        let n = base * f64::from(span.max(1));
+        let (i0, j0) = (f64::from(coord[0]) * base, f64::from(coord[1]) * base);
         let at = |i: f64, j: f64| grid.position(face, [i, j, 0.0]);
         let origin = at(i0, j0);
         Some(TileFrame {
@@ -93,11 +94,12 @@ impl GroundGeometry for PlanetGround {
     }
 }
 
-/// `ProbeTile` of chunk_draw.wgsl: where an asked tile's queries start, located on the
-/// CPU in f64 (as GI probes are): the base cell of a reference point (the tile's centre at
-/// its queries' start height), the point's continuous coordinates in it, the point
-/// eye-relative, and the face coordinates' derivatives by position, which place each
-/// query's start (metres from it) in its own cell.
+/// `ProbeTile` of chunk_draw.wgsl: where an asked block's queries start, located on the
+/// CPU in f64 (as GI probes are): the base cell of a reference point (the block's centre
+/// at its queries' start height), the point's continuous coordinates in it, the point
+/// eye-relative (`w`: the block's first query, as bits), and the face coordinates'
+/// derivatives by position, which place each query's start (metres from it) in its own
+/// cell. Blocks are at most 16 m across, so the derivatives hold to millimetres.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub(crate) struct ProbeTile {
@@ -111,7 +113,7 @@ impl ProbeTile {
     /// The tile `frame` whose queries start `start_height` along its up, walked from
     /// `walk_height` (under it: where drawn chunks are near; `frac.w` holds the drop), for
     /// an eye at world `eye`. `None` where the grid has no cell there.
-    pub fn new(grid: &Grid, frame: &TileFrame, start_height: f64, walk_height: f64, eye: DVec3) -> Option<Self> {
+    pub fn new(grid: &Grid, frame: &TileFrame, start_height: f64, walk_height: f64, eye: DVec3, first: u32) -> Option<Self> {
         let up = frame.up.normalize_or(DVec3::Y);
         let walk_height = walk_height.min(start_height);
         let p = frame.origin + (frame.axis_u + frame.axis_v) * 0.5 + up * walk_height;
@@ -127,14 +129,14 @@ impl ProbeTile {
         Some(Self {
             cell: [cell.i, cell.j, cell.k, i32::from(cell.face) | 8],
             frac: [(c[0] - f64::from(cell.i)) as f32, (c[1] - f64::from(cell.j)) as f32, (c[2] - f64::from(cell.k)) as f32, (start_height - walk_height) as f32],
-            at: { let e = (p - eye).as_vec3(); [e.x, e.y, e.z, 0.0] },
+            at: { let e = (p - eye).as_vec3(); [e.x, e.y, e.z, f32::from_bits(first)] },
             jacobian,
         })
     }
 }
 
 /// `ProbeFrame` of chunk_draw.wgsl: the eye in the queries' space (render space), the
-/// queries a tile and the tiles.
+/// queries in all and the blocks.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub(crate) struct ProbeFrame {
@@ -157,7 +159,7 @@ mod tests {
         let chart = ground.chart(eye).unwrap();
         assert_eq!(chart.id, u64::from(grid.locate(eye).0.face));
         let tile = [(chart.eye[0] / 8.0).floor() as i32, (chart.eye[1] / 8.0).floor() as i32];
-        let frame = ground.tile_frame(chart.id, tile).unwrap();
+        let frame = ground.tile_frame(chart.id, tile, 1).unwrap();
         assert!((frame.axis_u.length() - 8.0).abs() < 0.1 && (frame.axis_v.length() - 8.0).abs() < 0.1, "{frame:?}");
         assert!((frame.origin.length() - 16_000.0).abs() < 1e-6);
         assert!(frame.up.dot(eye.normalize()) > 0.999_99);
@@ -165,7 +167,7 @@ mod tests {
         let at = ground.locate(chart.id, eye).unwrap();
         assert_eq!([(at[0] / 8.0).floor() as i32, (at[1] / 8.0).floor() as i32], tile);
         // A probe tile's reference point is its cell's.
-        let probe = ProbeTile::new(&grid, &frame, 12.0, 12.0, eye).unwrap();
+        let probe = ProbeTile::new(&grid, &frame, 12.0, 12.0, eye, 0).unwrap();
         assert!(probe.frac[..3].iter().all(|f| (0.0..1.0).contains(f)), "{probe:?}");
     }
 
@@ -191,7 +193,7 @@ mod tests {
         let grid = Grid::plane(Shape::Plane, 4_000.0, 0.1).unwrap();
         ground.set_grid(grid);
         let chart = ground.chart(DVec3::new(10.0, 5.0, -7.0)).unwrap();
-        let frame = ground.tile_frame(chart.id, [0, 0]).unwrap();
+        let frame = ground.tile_frame(chart.id, [0, 0], 1).unwrap();
         assert_eq!(frame.up, DVec3::Y);
         assert!((frame.axis_u.length() - 8.0).abs() < 1e-9 && frame.axis_u.y == 0.0);
     }

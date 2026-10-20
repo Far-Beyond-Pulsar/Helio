@@ -194,8 +194,9 @@ impl Flight {
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = meadow.is_some();
         if let Some(meadow) = &meadow {
-            config.foliage_blades_per_m2 = Some(meadow.blades_per_m2);
-            config.foliage_ring_radius = Some(meadow.ring_radius_m);
+            config.foliage_tufts_per_m2 = Some(meadow.tufts_per_m2);
+            config.foliage_blades_per_tuft = Some(meadow.blades_per_tuft);
+            config.foliage_range = Some(meadow.range);
         }
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_external_device()

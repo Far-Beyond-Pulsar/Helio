@@ -1,4 +1,5 @@
 //!use helio_prelude
+//!use helio_foliage_common
 // Foliage tile cull, cluster cull + compaction, and indirect finalize — stages 2 and 3
 // of `FoliagePlacePass`.
 //
@@ -23,12 +24,6 @@ const WG_SIZE: u32 = 64u;
 const FOLIAGE_LOD_COUNT: u32 = 4u;
 const FOLIAGE_LOD_NONE: u32 = 4u;
 
-/// The clump-card LOD: one instance per 4x4 cluster rather than per blade. Must agree
-/// with `LOD_WIDTH_SCALE` / `LOD_HEIGHT_SCALE` in `helio-pass-foliage-gbuffer`, which
-/// size that card to cover sixteen blades.
-const FOLIAGE_LOD_CLUMP: u32 = 3u;
-/// `FoliageKind::Block`: cube stacks, drawn with longer strips (`cs_finalize`).
-const FOLIAGE_KIND_BLOCK: u32 = 3u;
 
 // Mirrors crate::TileState. `Placing` is excluded on purpose: its slab
 // contents are undefined until the placement dispatch's final barrier, so drawing it
@@ -70,63 +65,6 @@ struct FoliageCullUniforms {
     _pad0:                  u32,
 }
 
-/// Mirrors `crate::GpuFoliageType` (Rust, 96 bytes). All scalars — see the
-/// note in foliage_place.wgsl.
-struct FoliageType {
-    density:               f32,
-    height_min:            f32,
-    height_max:            f32,
-    width_min:             f32,
-    width_max:             f32,
-    slope_min:             f32,
-    slope_max:             f32,
-    altitude_min:          f32,
-    altitude_max:          f32,
-    lod0:                  f32,
-    lod1:                  f32,
-    lod2:                  f32,
-    lod3:                  f32,
-    wind_trunk:            f32,
-    wind_branch:           f32,
-    wind_leaf:             f32,
-    interaction_stiffness: f32,
-    material_id:           u32,
-    density_layer:         u32,
-    kind_and_flags:        u32,
-    mesh_or_impostor_id:   u32,
-    base_color:            u32,
-    roughness_metallic:    u32,
-    ground_mask:           u32,
-}
-
-/// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).
-struct FoliageTile {
-    tile_coord_x:    i32,
-    tile_coord_z:    i32,
-    blade_offset:    u32,
-    blade_count:     u32,
-    bounds_center: f32,
-    bounds_half:   f32,
-    state:           u32,
-    generation:      u32,
-}
-
-/// Mirrors `crate::GpuTileFrame` (Rust, 64 bytes): where a tile's blades stand.
-struct TileFrame {
-    origin: vec3<f32>,
-    axis_u: vec3<f32>,
-    axis_v: vec3<f32>,
-    up:     vec3<f32>,
-}
-
-/// Mirrors `crate::GpuBladeInstance` (Rust, 16 bytes).
-struct BladeInstance {
-    packed_pos:        u32,
-    packed_height_yaw: u32,
-    packed_scale_type: u32,
-    packed_tint_seed:  u32,
-}
-
 /// Mirrors `wgpu::util::DrawIndirectArgs` (16 bytes).
 struct DrawIndirect {
     vertex_count:   u32,
@@ -147,6 +85,7 @@ struct DrawIndirect {
 @group(0) @binding(9)  var hiz_tex: texture_2d<f32>;
 @group(0) @binding(10) var hiz_samp: sampler;
 @group(0) @binding(11) var<storage, read> frames: array<TileFrame>;
+@group(0) @binding(12) var<uniform> foliage_bands: FoliageBands;
 
 var<workgroup> wg_planes: array<vec4<f32>, 5>;
 
@@ -240,97 +179,6 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
     return helio_hiz_occludes(hiz_depth, near_z);
 }
 
-/// Transcription of `crate::select_blade_lod`.
-///
-/// Bands are half-open and lower-inclusive: level `n` covers `[threshold[n-1],
-/// threshold[n])`, so a blade exactly on a boundary belongs to the *coarser* level. The
-/// CPU reference and this function must agree bit-for-bit at the boundary or the two
-/// disagree on a hairline of the ring, and `FoliageGBufferPass` reimplements the same
-/// function again for its cross-fade — three copies that must not drift.
-///
-/// Non-finite input drops to `FOLIAGE_LOD_NONE` rather than LOD 0: this runs once per
-/// cluster, and a poisoned uniform that promoted the whole ring to the 11-vertex strip
-/// would blow the raster budget in a single frame. Dropping to terrain shading is the
-/// bounded failure.
-/// Upper distance bound of `level`, with the same non-decreasing repair
-/// `select_blade_lod` applies. Mirrors `foliage_lod_threshold` in the consumer's shader —
-/// the two must agree or a cluster is emitted into a band the consumer does not blend.
-fn lod_upper_threshold(ty: FoliageType, level: u32, quality_scale: f32) -> f32 {
-    var scale = 1.0;
-    if is_finite_f32(quality_scale) && quality_scale > 0.0 {
-        scale = quality_scale;
-    }
-    var ladder = array<f32, 4>(ty.lod0, ty.lod1, ty.lod2, ty.lod3);
-    var threshold = 0.0;
-    for (var i = 0u; i < FOLIAGE_LOD_COUNT; i = i + 1u) {
-        let scaled = ladder[i] * scale;
-        if scaled > threshold {
-            threshold = scaled;
-        }
-        if i >= level {
-            break;
-        }
-    }
-    return threshold;
-}
-
-fn select_blade_lod(
-    distance: f32,
-    lod0: f32,
-    lod1: f32,
-    lod2: f32,
-    lod3: f32,
-    quality_scale: f32,
-) -> u32 {
-    if !is_finite_f32(distance) {
-        return FOLIAGE_LOD_NONE;
-    }
-    var scale = 1.0;
-    if is_finite_f32(quality_scale) && quality_scale > 0.0 {
-        scale = quality_scale;
-    }
-    var clamped_distance = distance;
-    if clamped_distance < 0.0 {
-        clamped_distance = 0.0;
-    }
-
-    var threshold = 0.0;
-    var level = 0u;
-    loop {
-        if level >= FOLIAGE_LOD_COUNT {
-            break;
-        }
-        var raw = lod0;
-        if level == 1u {
-            raw = lod1;
-        } else if level == 2u {
-            raw = lod2;
-        } else if level == 3u {
-            raw = lod3;
-        }
-        if !is_finite_f32(raw) {
-            return FOLIAGE_LOD_NONE;
-        }
-        let scaled = raw * scale;
-        if scaled > threshold {
-            threshold = scaled;
-        }
-        if clamped_distance < threshold {
-            return level;
-        }
-        level = level + 1u;
-    }
-    return FOLIAGE_LOD_NONE;
-}
-
-fn blade_world_position(tile: FoliageTile, frame: TileFrame, blade: BladeInstance) -> vec3<f32> {
-    let local_u = f32(blade.packed_pos & 0xffffu) * (1.0 / 65535.0);
-    let local_v = f32(blade.packed_pos >> 16u) * (1.0 / 65535.0);
-    let height_offset = unpack2x16float(blade.packed_height_yaw).x;
-    return frame.origin + frame.axis_u * local_u + frame.axis_v * local_v
-        + frame.up * (tile.bounds_center + height_offset);
-}
-
 // ── Stage 2a: tile cull ─────────────────────────────────────────────────────────
 
 @compute @workgroup_size(64)
@@ -354,13 +202,18 @@ fn cs_tile_cull(
         && tile.blade_count > 0u
     {
         let frame = frames[slot];
+        let band = foliage_bands.bands[foliage_band_of_slot(slot)];
         let center = frame.origin + (frame.axis_u + frame.axis_v) * 0.5 + frame.up * tile.bounds_center;
         // Dilate by the tallest foliage plus its wind displacement before testing.
         // Under-dilating here is the classic wind-culling bug: blades blow outside the
         // tile bounds and the tile is culled while its geometry is still on screen.
         let radius = 0.5 * max(length(frame.axis_u + frame.axis_v), length(frame.axis_u - frame.axis_v))
             + tile.bounds_half + cull.max_foliage_height + cull.wpo_extent;
-        if sphere_visible(center, radius) && !hiz_occluded(center, radius) {
+        // Only the tiles reaching into their band's distances draw: the inner tiles of a
+        // far band's ring lie under the nearer bands.
+        let d = length(center - cameras[0].position_near.xyz);
+        let in_band = d + radius > band.inner - band.fade_in && d - radius < band.outer;
+        if in_band && sphere_visible(center, radius) && !hiz_occluded(center, radius) {
             visible = 1u;
         }
     }
@@ -400,10 +253,11 @@ fn cs_cluster_cull(
         return;
     }
     let count = min(cluster_size, tile.blade_count - first);
+    let band = foliage_bands.bands[foliage_band_of_slot(slot)];
+    let eye = cameras[0].position_near.xyz;
 
-    // Real per-cluster bounds, read from the blades. The alternative — reusing the tile's
-    // bounds — makes cluster culling exactly as precise as tile culling, i.e. useless. At
-    // the reference tier this is 16 loads per lane over ~98 k lanes, ~25 MiB of reads.
+    // Real per-cluster bounds, read from the records. The alternative — reusing the tile's
+    // bounds — makes cluster culling exactly as precise as tile culling, i.e. useless.
     var bounds_min = vec3<f32>(1.0e30);
     var bounds_max = vec3<f32>(-1.0e30);
     var sampled = 0u;
@@ -412,7 +266,7 @@ fn cs_cluster_cull(
         if arena_index >= arrayLength(&blades) {
             break;
         }
-        let position = blade_world_position(tile, frame, blades[arena_index]);
+        let position = foliage_blade_root(tile, frame, blades[arena_index]);
         bounds_min = min(bounds_min, position);
         bounds_max = max(bounds_max, position);
         sampled = sampled + 1u;
@@ -432,70 +286,55 @@ fn cs_cluster_cull(
         return;
     }
 
-    // LOD is classified per *cluster*, per the plan's §6.2, using the ladder of the
-    // cluster's first blade. Candidates pick their type independently, so a cluster can
-    // straddle two types with different ladders; when that happens the whole cluster
-    // follows the first blade's. Types in a layer overwhelmingly share a ladder, and the
-    // fix if that stops being true is to move the classification into the append loop
-    // below and emit up to four `atomicAdd`s per cluster instead of one.
+    // The band decides the LOD: the near band's blades at L0 or L1 (by the cluster's
+    // first record's type, with the cluster in both inside the fade band), a tuft of
+    // blades at L2, a tuft as one shape at L3.
+    let distance = length(center - eye);
     let head = blades[tile.blade_offset + first];
-    let type_id = min(
-        (head.packed_scale_type >> 16u) & 0xffu,
-        max(min(cull.type_count, arrayLength(&types)), 1u) - 1u,
-    );
+    let type_id = min((head.packed_scale_type >> 16u) & 0xffu, max(min(cull.type_count, arrayLength(&types)), 1u) - 1u);
     let foliage = types[type_id];
-    let distance = length(center - cameras[0].position_near.xyz);
-    let lod = select_blade_lod(
-        distance,
-        foliage.lod0,
-        foliage.lod1,
-        foliage.lod2,
-        foliage.lod3,
-        cull.lod_quality_scale,
-    );
-    if lod >= FOLIAGE_LOD_COUNT {
-        // Not a cull: past the last band the type contributes as a terrain-material
-        // perturbation instead of geometry (plan §2.7). This pass simply stops emitting
-        // draws for it.
-        return;
+    var lod = band.lod;
+    var second = FOLIAGE_LOD_NONE;
+    if band.lod == FOLIAGE_BAND_LOD_BLADES {
+        let boundary = foliage.lod0 * select(1.0, cull.lod_quality_scale, is_finite_f32(cull.lod_quality_scale) && cull.lod_quality_scale > 0.0);
+        lod = select(1u, 0u, distance < boundary);
+        // Inside the switch band each tuft draws at one of L0 and L1 by its hash (the
+        // vertex shader's switch), so a cluster there is emitted at both.
+        if lod == 0u && distance > boundary - cull.lod_fade_band {
+            second = 1u;
+        }
     }
 
-    emit_cluster(lod, count, slot, first);
-
-    // ── Cross-fade needs the cluster in BOTH bands ────────────────────────────
-    //
-    // The consumer's `foliage_cross_fade` gives the near LOD weight `f` and the far LOD
-    // `1 - f` across the overlap band, so the two sum to one blade's coverage. That only
-    // works if both instances actually exist. Classifying each cluster into exactly one
-    // LOD — which is what this pass used to do — means the near LOD fades *out* over the
-    // band and nothing fades *in*: coverage collapses toward the boundary and then jumps
-    // back at it. That is the hard-edged LOD banding, and no amount of tuning the fade
-    // curve fixes it, because the second half of the blend was never submitted.
-    //
-    // So a cluster inside the band is emitted twice, once per adjacent LOD, and the
-    // fragment shader's complementary weights do the rest. The extra instances exist only
-    // within `lod_fade_band` metres of a boundary, so the cost is a thin annulus, not a
-    // doubling.
-    let upper = lod_upper_threshold(foliage, lod, cull.lod_quality_scale);
-    if lod + 1u < FOLIAGE_LOD_COUNT && distance > upper - cull.lod_fade_band {
-        emit_cluster(lod + 1u, count, slot, first);
+    // Which records draw: those whose tuft's scale (the band's fade, the kept share
+    // against its rank, the type's reach) is above zero. Whole tufts drop out together:
+    // a tuft's records share their rank and position.
+    var keep_mask = 0u;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let blade = blades[tile.blade_offset + first + i];
+        let d = length(foliage_blade_root(tile, frame, blade) - eye);
+        let ty = types[min((blade.packed_scale_type >> 16u) & 0xffu, max(min(cull.type_count, arrayLength(&types)), 1u) - 1u)];
+        if foliage_tuft_scale(band, d, foliage_tuft_rank(blade)) * foliage_type_reach(ty, d) > 0.0 {
+            keep_mask = keep_mask | (1u << i);
+        }
+    }
+    if keep_mask == 0u {
+        return;
+    }
+    emit_cluster(lod, keep_mask, slot, first);
+    if second < FOLIAGE_LOD_COUNT {
+        emit_cluster(second, keep_mask, slot, first);
     }
 }
 
-/// Append one cluster's blade references into `visible_blades[]` for a single LOD.
-fn emit_cluster(lod: u32, count: u32, slot: u32, first: u32) {
-    // L3 is a *clump* card: one card standing in for the whole 4x4 cluster, not one card
-    // per blade. The consumer sizes it to cover the cluster (`sqrt(cluster_granularity)`
-    // times a blade's width), so emitting one per blade puts sixteen oversized cards
-    // where one belongs and the far ring reads denser than the near field — the density
-    // falloff looks inverted. The near LODs stay one instance per blade.
-    let emit = select(count, 1u, lod == FOLIAGE_LOD_CLUMP);
+/// Append the kept records of one cluster (`mask`, a bit per record) into
+/// `visible_blades[]` for a single LOD.
+fn emit_cluster(lod: u32, mask: u32, slot: u32, first: u32) {
+    let emit = countOneBits(mask);
 
     // Bounded append. The reservation can overshoot the region, so the finalize stage
     // clamps `instance_count` — and the partial write below guarantees every slot below
-    // that clamp was actually written, which a "reserve then drop the whole cluster"
-    // policy would not: it would leave a hole of uninitialised indices inside the drawn
-    // range and render blades from wherever those indices happened to point.
+    // that clamp was actually written: a "reserve then drop" policy would leave a hole of
+    // uninitialised indices inside the drawn range.
     let capacity = cull.per_lod_capacity;
     let base = atomicAdd(&counters[lod], emit);
     if base >= capacity {
@@ -508,21 +347,22 @@ fn emit_cluster(lod: u32, count: u32, slot: u32, first: u32) {
     }
 
     let region = lod * capacity;
-    for (var i = 0u; i < writable; i = i + 1u) {
-        let out_index = region + base + i;
+    var written = 0u;
+    var bits = mask;
+    loop {
+        if bits == 0u || written >= writable {
+            break;
+        }
+        let i = firstTrailingBit(bits);
+        bits = bits & (bits - 1u);
+        let out_index = region + base + written;
         if out_index < arrayLength(&visible_blades) {
             // Packed reference, NOT a flat arena index: tile slot in the high 16 bits,
-            // tile-local blade index in the low 16. `FoliageGBufferPass` needs the tile
-            // anyway (for `tile_coord` and `bounds_center`, which is how a blade's
-            // world position is reconstructed), so handing it the slot directly saves a
-            // division per *vertex* in the hottest shader in the foliage path. The
-            // consumer mirrors this as `VISIBLE_TILE_SHIFT` / `VISIBLE_LOCAL_MASK`; the
-            // two must change together or blades render from the wrong tile's origin.
-            //
-            // Both halves are comfortably in range: the ring is 4096 slots and a tile's
-            // arena slab is a few hundred blades, against a 65 536 ceiling each.
+            // tile-local record index in the low 16. The consumer mirrors this as
+            // `VISIBLE_TILE_SHIFT` / `VISIBLE_LOCAL_MASK`.
             visible_blades[out_index] = (slot << 16u) | ((first + i) & 0xffffu);
         }
+        written = written + 1u;
     }
 }
 
@@ -534,20 +374,22 @@ fn cs_finalize(@builtin(local_invocation_index) lane: u32) {
         return;
     }
 
-    // 11 / 7 / 4 / 4, matching FOLIAGE_LOD_VERTEX_COUNTS: a 5-segment blade, a 3-segment
-    // blade, a card and a clump card, all `TriangleStrip` with no vertex or index buffer.
-    // Written as a branch rather than a const array because indexing a `const` array with
-    // a runtime value is not portable across WGSL front-ends. While a blocky type has a
-    // density, its cube stacks' 64 / 31 / 9 / 9 (FOLIAGE_BLOCK_LOD_VERTEX_COUNTS) where
-    // larger: a shorter strip repeats its last vertex.
-    var vertex_count = 4u;
-    var block_count = 9u;
+    // The longest strip of the kinds present at each LOD (FOLIAGE_LOD_VERTEX_COUNTS for
+    // smooth blades, FOLIAGE_BLOCK_LOD_VERTEX_COUNTS for cube stacks), all `TriangleStrip`
+    // with no vertex or index buffer; a shorter strip ends in a zero-area tail. Written as
+    // a branch rather than a const array because indexing a `const` array with a runtime
+    // value is not portable across WGSL front-ends.
+    var vertex_count = 13u;
+    var block_count = 20u;
     if lane == 0u {
         vertex_count = 11u;
-        block_count = 64u;
+        block_count = 86u;
     } else if lane == 1u {
         vertex_count = 7u;
-        block_count = 31u;
+        block_count = 53u;
+    } else if lane == 2u {
+        vertex_count = 88u;
+        block_count = 163u;
     }
     let rows = min(cull.type_count, arrayLength(&types));
     for (var t = 0u; t < rows; t++) {

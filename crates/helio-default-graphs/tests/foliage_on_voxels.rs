@@ -59,17 +59,19 @@ impl Harness {
             helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut store, 16, &device);
             scene.world.attach_gpu_mirror(GpuMirrorHandle::new(Arc::new(store), queue.clone()));
             // Grass on grass, and a type keyed to sand (never seen on grass).
-            for (ground, density) in [(material::GRASS, 60.0), (material::SAND, 60.0)] {
-                let t = GpuFoliageType {
+            for (ground, density) in [(material::GRASS, 8.0), (material::SAND, 8.0)] {
+                let mut t = GpuFoliageType {
                     density,
                     height_range: [0.1, 0.3],
                     width_range: [0.05, 0.05],
                     slope_range: [-1.0, 1.0],
-                    lod_distances: [6.0, 12.0, 18.0, 22.0],
+                    lod_distances: [6.0, 0.0, 0.0, 0.0],
+                    lean_range: [0.2, 0.8],
                     kind_and_flags: pack_kind_and_flags(FoliageKind::Block, 0),
                     ground_mask: 1 << ground,
                     ..GpuFoliageType::default()
                 };
+                t.set_blades_per_tuft([4, 8]);
                 let e = scene.world.spawn();
                 scene.world.insert(e, FoliageTypeComponent::from(t));
             }
@@ -78,8 +80,9 @@ impl Harness {
             let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(pass_source.clone())));
             let mut config = RendererConfig::new(SIZE[0], SIZE[1], wgpu::TextureFormat::Rgba8Unorm);
             config.enable_foliage = true;
-            config.foliage_blades_per_m2 = Some(120.0);
-            config.foliage_ring_radius = Some(24.0);
+            config.foliage_tufts_per_m2 = Some(8.0);
+            config.foliage_blades_per_tuft = Some(6.0);
+            config.foliage_range = Some(60.0);
             let mirror = scene.world.gpu_mirror().cloned().unwrap();
             let renderer = RendererBuilder::new(config, mirror)
                 .with_external_device()
@@ -136,23 +139,29 @@ impl Harness {
         data
     }
 
-    /// Every resident tile's blades, at world origin `origin`; and the resident tiles.
+    /// The blades every resident tile draws (its band at their distance from `origin`,
+    /// the eye; far bands hold tufts under the near ones that never draw there), at world
+    /// origin `origin`; and the resident tiles.
     fn blades(&self, origin: DVec3) -> (Vec<Blade>, usize) {
         let place = self.renderer.find_pass::<FoliagePlacePass>().unwrap();
+        let bands = *place.bands();
         let tiles: Vec<GpuFoliageTile> = bytemuck::cast_slice(&self.read(&place.tile_table)).to_vec();
         let frames: Vec<GpuTileFrame> = bytemuck::cast_slice(&self.read(&place.tile_frames)).to_vec();
         let arena: Vec<GpuBladeInstance> = bytemuck::cast_slice(&self.read(&place.blade_arena)).to_vec();
         let mut out = Vec::new();
         let mut resident = 0;
-        for (tile, frame) in tiles.iter().zip(&frames) {
+        for (slot, (tile, frame)) in tiles.iter().zip(&frames).enumerate() {
             if tile.state() != Some(TileState::Resident) {
                 continue;
             }
             resident += 1;
+            let band = bands.bands[bands.band_of_slot(slot as u32).unwrap()];
             for blade in &arena[tile.blade_offset as usize..(tile.blade_offset + tile.blade_count) as usize] {
                 let p = unpack_blade(blade);
                 let root = frame.point(p.tile_uv[0], p.tile_uv[1], tile.bounds_center + p.height_offset);
-                out.push(Blade { kind: p.type_id, root: origin + root.as_dvec3() });
+                if helio_pass_foliage_place::tuft_scale(&bands, &band, root.length(), p.rank) > 0.0 {
+                    out.push(Blade { kind: p.type_id, root: origin + root.as_dvec3() });
+                }
             }
         }
         (out, resident)
@@ -262,11 +271,32 @@ fn foliage_grows_on_the_voxel_ground() {
     };
     eprintln!("2 m squares with blades within 12 m: {coverage}");
     assert!(coverage > 100, "bare ground near the eye: {coverage} squares with blades");
+    // As dense near the eye as the types ask (8 tufts a square metre of 4 to 8 blades):
+    // the ground answers every candidate.
+    let within = |r: f64| blades.iter().filter(|b| (b.root - eye).length() < r).count() as f64;
+    let density = (within(10.0) - within(3.0)) / (std::f64::consts::PI * (100.0 - 9.0));
+    eprintln!("records a square metre 3 to 10 m out: {density:.1} (planned {:.1})", 8.0 * 6.0);
+    assert!(density > 0.7 * 8.0 * 6.0, "sparse near the eye: {density:.1} records a square metre");
 
     // Still: the same blades frame after frame.
     h.run(&shared, eye, forward, 20);
     let (again, _) = h.blades(eye);
     assert_eq!(again, blades, "blades changed under a still camera");
+    // Placed again against the same ground: the same tufts (in any order).
+    {
+        let link = h.renderer.find_pass::<ChunkPass>().unwrap().foliage_ground();
+        link.push_changes([[eye - DVec3::splat(30.0), eye + DVec3::splat(30.0)]]);
+    }
+    h.run(&shared, eye, forward, 12);
+    let sorted = |mut v: Vec<Blade>| {
+        v.sort_by(|a, b| a.root.to_array().partial_cmp(&b.root.to_array()).unwrap().then(a.kind.cmp(&b.kind)));
+        v
+    };
+    let (replaced, _) = h.blades(eye);
+    let (replaced, before) = (sorted(replaced), sorted(blades.clone()));
+    let moved = replaced.iter().zip(&before).filter(|(a, b)| a != b).count();
+    eprintln!("placed again: {} blades against {}, {moved} differ", replaced.len(), before.len());
+    assert!(replaced == before, "placing the same ground again changed {moved} blades");
 
     // A dig 3 m in front: the blades over it go within a few frames of its chunks.
     let ground = planet.surface_point(dir, 0.0) + (forward - up * forward.dot(up)).normalize() * 3.0;

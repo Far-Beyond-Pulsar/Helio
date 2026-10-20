@@ -21,7 +21,7 @@
 //! | [`PostProcessVolumeSourceRow`] | 4 size + 140: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 140) |
 //! | [`CameraPostProcessSourceRow`] | 136: the row | `helio_pass_postprocess::CameraPostProcessComponent` (136) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
-//! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
+//! | [`FoliageSourceRow`] | 32 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (32), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
 //! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell + 16 clouds: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (44) |
 //! | [`DecalSourceRow`] | 4 size + 32: the row, its transform left to the join | `helio_pass_decal::DecalComponent` (32), packed into its leading rows |
 //! | [`GlobalWindSourceRow`] | 12: the wind row, marked global | `helio_pass_foliage_place`'s `FoliageWindComponent` (12), over the foliage components' own wind |
@@ -302,15 +302,17 @@ impl WaterVolumeSourceRow {
 /// Foliage: the foliage type row (density, size, slope and altitude ranges,
 /// LOD distances and wind response in `type_params`; the interaction
 /// stiffness, material, density layer and kind/flags words in `type_ids`;
-/// the impostor id and padding in `type_tail`), its layer (half extent,
-/// infinite-extent flag, altitude min and max) and its wind row. A disabled
+/// the impostor id, colour and ground mask in `type_tail`; blades a tuft,
+/// lean, curve, fall, tip colour and patches in `type_tuft`), its layer
+/// (half extent, infinite-extent flag, altitude min and max) and its wind
+/// row. A disabled
 /// component derives a zero row, which the join skips (it places only rows
 /// with a density).
 ///
 /// The layer is a world-aligned square centred on the owner. The foliage
 /// passes grow every type in every layer and read one wind row: the first
 /// component that opts out of the global wind (its wind's `_pad[0]`, word
-/// 38 of this row, is 1), else the level's global wind, else the first
+/// 46 of this row, is 1), else the level's global wind, else the first
 /// component's own wind. So with several foliage components their types
 /// share their layers and one wind applies to all of them.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
@@ -323,6 +325,8 @@ pub struct FoliageSourceRow {
     pub type_ids: [u32; 4],
     #[gpu]
     pub type_tail: [u32; 4],
+    #[gpu]
+    pub type_tuft: [u32; 8],
     #[gpu]
     pub layer: [f32; 4],
     #[gpu]
@@ -612,7 +616,7 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_foliage_place::components::FoliageTypeComponent>(),
-            24 * 4
+            32 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_foliage_place::components::FoliageWindComponent>(),

@@ -2450,7 +2450,7 @@ fn ground_probes(gpu: &Gpu, planet: &Planet, eye: DVec3) -> Probes {
     let (mut starts, mut ups, mut tiles, mut queries) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for dj in -1..=1 {
         for di in -1..=1 {
-            let frame = ground.tile_frame(chart.id, [centre[0] + di, centre[1] + dj]).unwrap();
+            let frame = ground.tile_frame(chart.id, [centre[0] + di, centre[1] + dj], 1).unwrap();
             let start_height = (eye - frame.origin).dot(frame.up) + 256.0;
             tiles.push(AskedTile { frame, start_height, first: queries.len() as u32, count: PROBE_SIDE * PROBE_SIDE });
             for b in 0..PROBE_SIDE {

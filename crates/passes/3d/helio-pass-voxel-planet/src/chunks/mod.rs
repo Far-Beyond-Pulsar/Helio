@@ -628,7 +628,7 @@ struct GenBatch {
 
 /// Foliage tiles one ground probe answers at most (`ChunkWorld::probe_ground`): a frame's
 /// placement budget, with room.
-const PROBE_TILES: usize = 256;
+const PROBE_TILES: usize = 1024;
 
 /// Metres over a tile's highest terrain top its ground probes start their walks.
 const PROBE_MARGIN_M: f64 = 4.0;
@@ -3590,15 +3590,33 @@ impl ChunkWorld {
         stats.kept_bytes = self.kept_bytes;
         lap(&mut stats, 3);
         // 4. This frame's drawn nodes and the table entries that changed. The ground
-        // under each changes for foliage now, and again once a switch's fade ends.
+        // under drawn nodes whose chunk changed (generated, dug) changes for foliage now
+        // and again once a switch's fade ends; under nodes drawn finer than before, once
+        // the fade ends (while it lasts the probe may meet either level). A node drawn
+        // coarser in place of finer ones, or no longer drawn, does not change it: the
+        // finer ground placed the foliage there, and placing it again against the coarser
+        // would only make it flicker as a still view's cut breathes.
         {
-            let changed: Vec<NodeKey> = added.iter().map(|a| a.0).chain(removed.iter().copied()).chain(self.changed_nodes.iter().copied()).collect();
+            let levels = self.grid.levels();
+            let mut over_removed = FxHashSet::default();
+            for &r in &removed {
+                let mut k = r;
+                while k.level + 1 < levels {
+                    k = k.parent();
+                    if !over_removed.insert(k) {
+                        break;
+                    }
+                }
+            }
+            let finer: FxHashSet<NodeKey> = added.iter().map(|a| a.0).filter(|k| !over_removed.contains(k)).collect();
+            let drawn_set = &self.drawn_set;
+            let changed: Vec<NodeKey> = self.changed_nodes.iter().copied().filter(|k| drawn_set.holds(*k) && !finer.contains(k)).collect();
             let due: Vec<NodeKey> = self.ground_later.iter().filter(|(at, _)| *at <= frame).map(|(_, k)| *k).collect();
             self.ground_later.retain(|(at, _)| *at > frame);
             for key in changed.iter().chain(&due) {
                 self.ground_changes.push(node_box(&self.grid, *key));
             }
-            self.ground_later.extend(changed.iter().map(|k| (frame + drawn::FADE_FRAMES + 1, *k)));
+            self.ground_later.extend(changed.iter().chain(&finer).map(|k| (frame + drawn::FADE_FRAMES + 1, *k)));
             // A world nothing asks to draw keeps few: past a bound, the oldest go.
             if self.ground_changes.len() > GROUND_CHANGES {
                 self.ground_changes.drain(..self.ground_changes.len() - GROUND_CHANGES);
@@ -4420,7 +4438,7 @@ impl ChunkWorld {
     #[allow(clippy::too_many_arguments)]
     pub fn probe_ground(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, queries: &wgpu::Buffer, hits: &wgpu::Buffer, tiles: &[helio_pass_foliage_place::AskedTile], planet: &Planet, eye: DVec3, camera: Vec3) {
         let Some(group) = self.last_group.clone() else { return };
-        let per_tile = tiles.first().map_or(0, |t| t.count);
+        let queries_in_all = tiles.iter().take(PROBE_TILES).map(|t| t.first + t.count).max().unwrap_or(0);
         let grid = self.grid;
         let margin = planet.overhang_height() + PROBE_MARGIN_M;
         let places: Vec<ground::ProbeTile> = tiles
@@ -4435,21 +4453,21 @@ impl ChunkWorld {
                         grid.layer_radius(f64::from(planet.column_top(cell.face, cell.i, cell.j, 0))) - grid.radius()
                     })
                     .fold(f64::NEG_INFINITY, f64::max);
-                ground::ProbeTile::new(&grid, f, t.start_height, top + margin, eye).unwrap_or_default()
+                ground::ProbeTile::new(&grid, f, t.start_height, top + margin, eye, t.first).unwrap_or_default()
             })
             .collect();
-        if places.is_empty() || per_tile == 0 {
+        if places.is_empty() || queries_in_all == 0 {
             return;
         }
         self.queue.write_buffer(&self.probe_tiles, 0, bytemuck::cast_slice(&places));
-        let frame = ground::ProbeFrame { eye: [camera.x, camera.y, camera.z, 0.0], counts: [per_tile, places.len() as u32, 0, 0] };
+        let frame = ground::ProbeFrame { eye: [camera.x, camera.y, camera.z, 0.0], counts: [queries_in_all, places.len() as u32, 0, 0] };
         self.queue.write_buffer(&self.probe_frame, 0, bytemuck::bytes_of(&frame));
         let probe_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk ground probes"),
             layout: &self.ground_layout,
             entries: &[entry(58, &self.probe_frame), entry(59, queries), entry(60, hits), entry(61, &self.probe_tiles)],
         });
-        let count = per_tile * places.len() as u32;
+        let count = queries_in_all;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk ground probes"), timestamp_writes: None });
         pass.set_bind_group(0, &group, &[]);
         pass.set_bind_group(1, &probe_group, &[]);

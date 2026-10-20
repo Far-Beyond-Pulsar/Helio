@@ -402,11 +402,16 @@ fn add_geometry_passes(
     // FoliageGBufferPass exists to join. Nothing renders wrong either way, which is
     // exactly why this is worth a comment — the cost is a silent tile store/reload.
     let foliage_buffers = config.enable_foliage.then(|| {
+        let defaults = helio_pass_foliage_place::FoliageRange::default();
         let place_pass = FoliagePlacePass::new_with(
             device,
             config.foliage_quality,
-            config.foliage_blades_per_m2,
-            config.foliage_ring_radius,
+            helio_pass_foliage_place::FoliageRange {
+                range: config.foliage_range.unwrap_or(config.foliage_quality.range()),
+                tufts_per_m2: config.foliage_tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
+                blades_per_tuft: config.foliage_blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
+                ..defaults
+            },
         );
         let handles = (
             Arc::clone(&place_pass.blade_arena),
@@ -414,8 +419,8 @@ fn add_geometry_passes(
             Arc::clone(&place_pass.tile_frames),
             Arc::clone(&place_pass.visible_blades),
             Arc::clone(&place_pass.foliage_indirect),
-            place_pass.blades_per_tile(),
-            place_pass.ring_radius(),
+            Arc::clone(&place_pass.bands_buffer),
+            Arc::clone(&place_pass.interactors),
         );
         graph.add_pass(Box::new(place_pass));
         handles
@@ -462,20 +467,10 @@ fn add_geometry_passes(
     // run of exact-attachment-match passes); before VirtualGeometry because VG
     // binds only seven attachments — it omits gbuffer_velocity — so anything
     // downstream of VG can never fuse with the G-buffer.
-    if let Some((blade_arena, tile_table, tile_frames, visible_blades, foliage_indirect, blades_per_tile, ring_radius)) =
-        foliage_buffers
-    {
-        let mut pass = FoliageGBufferPass::new(
-            device,
-            blade_arena,
-            tile_table,
-            tile_frames,
-            visible_blades,
-            foliage_indirect,
-            blades_per_tile,
-        );
+    if let Some((blade_arena, tile_table, tile_frames, visible_blades, foliage_indirect, bands, interactors)) = foliage_buffers {
+        let mut pass =
+            FoliageGBufferPass::new(device, blade_arena, tile_table, tile_frames, visible_blades, foliage_indirect, bands, interactors);
         pass.quality = config.foliage_quality;
-        pass.ring_radius = Some(ring_radius);
         graph.add_pass(Box::new(pass));
     }
 
@@ -1085,8 +1080,13 @@ fn build_default_graph_internal_with_lens_user(
     // Foliage grows on the voxel terrain when there is one: its pass answers the
     // placement's ground queries (`helio_pass_voxel_planet::chunks::ground`).
     let voxel_ground = graph.find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>().map(|p| p.foliage_ground());
-    if let (Some(ground), Some(place)) = (voxel_ground, graph.find_pass_mut::<FoliagePlacePass>()) {
-        place.set_ground(ground);
+    if let Some(ground) = voxel_ground {
+        if let Some(draw) = graph.find_pass_mut::<FoliageGBufferPass>() {
+            draw.set_ground(ground.clone());
+        }
+        if let Some(place) = graph.find_pass_mut::<FoliagePlacePass>() {
+            place.set_ground(ground);
+        }
     }
 
     // Decal pass — projects decals into the G-buffer after it's been written.
