@@ -217,7 +217,7 @@ fn the_resolve_reads_the_probes_at_pixels() {
     }));
     let mut cmds = helio_core::CommandRecorder::from_encoder(&mut encoder);
     let [frame_buffer, probes, ..] = pass.buffers();
-    resolve.record(&gpu.device, &mut cmds, [frame_buffer, probes, &camera], &normal_view, &depth_view, size);
+    resolve.record(&gpu.device, &gpu.queue, &mut cmds, [frame_buffer, probes, &camera], &normal_view, &depth_view, size);
     drop(cmds);
     gpu.queue.submit([encoder.finish()]);
     let words = read(gpu, resolve.irradiance().unwrap());

@@ -1664,11 +1664,11 @@ fn debug_mode() -> u32 {
 }
 
 fn voxel_levels_debug() -> bool {
-    return debug_mode() == 33u || debug_mode() == 34u;
+    return debug_mode() == 34u || debug_mode() == 35u;
 }
 
 fn voxel_levels_half_debug() -> bool {
-    return debug_mode() == 34u;
+    return debug_mode() == 35u;
 }
 
 // Whether the walks write the plain colour target (bit 8 of

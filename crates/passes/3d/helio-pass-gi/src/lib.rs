@@ -48,6 +48,9 @@ pub const GI_RAYS: &str = "gi_rays";
 pub const GI_HITS: &str = "gi_hits";
 pub const GI_SUN: &str = "gi_sun";
 pub const GI_IRRADIANCE: &str = "gi_irradiance";
+/// Debug mode of the probes' view (`GiResolvePass`; deferred lighting shows
+/// it as it shows `gi_irradiance`).
+pub const GI_PROBES_VIEW: u32 = 36;
 /// Bytes of a `GiRay` and a `GiHit`.
 pub const RAY_BYTES: u64 = 32;
 pub const HIT_BYTES: u64 = 16;
@@ -534,6 +537,11 @@ pub struct GiResolvePass {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     out: Option<(wgpu::Buffer, [u32; 2])>,
+    /// The renderer's debug mode (`GI_PROBES_VIEW` shows the probes), and
+    /// the one last written to `view`.
+    view: wgpu::Buffer,
+    debug_mode: u32,
+    view_written: Option<u32>,
 }
 
 impl GiResolvePass {
@@ -557,6 +565,7 @@ impl GiResolvePass {
                 texture(3, wgpu::TextureSampleType::Float { filterable: false }),
                 texture(4, wgpu::TextureSampleType::Depth),
                 storage(5, false),
+                uniform(6, 16),
             ],
         });
         let module = helio_core::shader::module_with(
@@ -578,18 +587,23 @@ impl GiResolvePass {
             compilation_options: Default::default(),
             cache: None,
         });
-        Self { layout, pipeline, out: None }
+        let view = buffer(device, "GI resolve view", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        Self { layout, pipeline, out: None, view, debug_mode: 0, view_written: None }
     }
 
     /// Records the probes' irradiance at each pixel of a `size` frame
     /// (`gi_irradiance`) from `frame`, `probes` and `camera` (GiPass's
     /// frame and probes, Helio's camera) and the G-buffer's normals and
     /// depth.
-    pub fn record(&mut self, device: &wgpu::Device, cmds: &mut helio_core::CommandRecorder<'_>, [frame, probes, camera]: [&wgpu::Buffer; 3], normal: &wgpu::TextureView, depth: &wgpu::TextureView, size: [u32; 2]) {
+    pub fn record(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cmds: &mut helio_core::CommandRecorder<'_>, [frame, probes, camera]: [&wgpu::Buffer; 3], normal: &wgpu::TextureView, depth: &wgpu::TextureView, size: [u32; 2]) {
         let size = [size[0].max(1), size[1].max(1)];
         if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
             let bytes = u64::from(size[0]) * u64::from(size[1]) * 8;
             self.out = Some((buffer(device, "GI irradiance", bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC), size));
+        }
+        if self.view_written != Some(self.debug_mode) {
+            helio_core::upload::write_buffer(queue, &self.view, 0, bytemuck::cast_slice(&[self.debug_mode, 0, 0, 0]));
+            self.view_written = Some(self.debug_mode);
         }
         let Some((out, _)) = &self.out else { return };
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -602,6 +616,7 @@ impl GiResolvePass {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(normal) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
                 wgpu::BindGroupEntry { binding: 5, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.view.as_entire_binding() },
             ],
         });
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI resolve"), timestamp_writes: None });
@@ -651,8 +666,21 @@ impl RenderPass for GiResolvePass {
             return Err(helio_core::Error::ResourceNotFound("gbuffer".into()));
         };
         let mut cmds = ctx.graphics_cmds();
-        self.record(ctx.device, &mut cmds, [frame, probes, ctx.camera], gbuffer.views[1], ctx.depth, [ctx.width, ctx.height]);
+        self.record(ctx.device, ctx.queue, &mut cmds, [frame, probes, ctx.camera], gbuffer.views[1], ctx.depth, [ctx.width, ctx.height]);
         Ok(())
+    }
+
+    fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
+    }
+
+    fn debug_views(&self) -> &'static [helio_core::DebugViewDescriptor] {
+        static VIEWS: &[helio_core::DebugViewDescriptor] = &[helio_core::DebugViewDescriptor {
+            name: "GI Probes",
+            debug_mode: GI_PROBES_VIEW,
+            description: "Each pixel's nearest GI probe (finest level holding it): its irradiance, dark red inside the ground, dark purple not yet updated; its cell's edges darker",
+        }];
+        VIEWS
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {

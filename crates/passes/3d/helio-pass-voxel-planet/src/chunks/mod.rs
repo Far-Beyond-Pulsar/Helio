@@ -250,7 +250,7 @@ struct DrawParams {
     /// Direction to the sun, near plane.
     sun: [f32; 4],
     /// x: the renderer's debug mode in the low byte (1 UV grid, 32 trace
-    /// cost, 33 levels, 34 levels over the left half), the plain colour
+    /// cost, 34 levels, 35 levels over the left half), the plain colour
     /// flag (bit 8), steady shadows (0x1000); y: a counting build; z, w:
     /// the debug pixel (`set_debug_pixel`).
     debug: [u32; 4],

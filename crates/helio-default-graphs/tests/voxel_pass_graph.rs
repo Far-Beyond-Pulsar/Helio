@@ -158,6 +158,27 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             assert!(!renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "a settled still view asked for frame {still}");
         }
 
+        // Every debug view the graph advertises (the editor's menu) has a
+        // mode of its own and draws without validation errors.
+        let views = renderer.available_debug_views();
+        let mut modes: Vec<u32> = views.iter().map(|v| v.debug_mode).collect();
+        modes.sort_unstable();
+        let unique = modes.len();
+        modes.dedup();
+        assert_eq!(modes.len(), unique, "debug modes shared: {:?}", views.iter().map(|v| (v.debug_mode, v.name)).collect::<Vec<_>>());
+        for v in &views {
+            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            renderer.set_debug_mode(v.debug_mode);
+            for _ in 0..2 {
+                renderer.render(&camera, &view).unwrap();
+            }
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let error = validation.pop().await;
+            assert!(error.is_none(), "debug view {} ({}): {error:?}", v.debug_mode, v.name);
+        }
+        renderer.set_debug_mode(0);
+        eprintln!("DEBUG_VIEWS {}", views.iter().map(|v| format!("{}={}", v.debug_mode, v.name)).collect::<Vec<_>>().join(", "));
+
         // Removing the source drops the planet's chunks.
         *source.lock().unwrap() = None;
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);

@@ -1551,7 +1551,7 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "Indirect Lighting",
                 debug_mode: 23,
-                description: "Ambient, radiance-cascade, or baked lightmap diffuse contribution",
+                description: "Diffuse indirect light: the sky ambient or GI probes, radiance cascades, or the baked lightmap",
             },
             DebugViewDescriptor {
                 name: "Lighting Only",
@@ -1578,6 +1578,11 @@ impl RenderPass for DeferredLightPass {
                 name: "GI Irradiance",
                 debug_mode: 28,
                 description: "Irradiance / pi from the GI probes at each pixel (purple: none)",
+            },
+            DebugViewDescriptor {
+                name: "GI vs Sky Ambient",
+                debug_mode: 29,
+                description: "What GI changes against the sky's ambient: green brighter, red darker (full at 3 stops), blue where no probe holds the point",
             },
             DebugViewDescriptor {
                 name: "Ray Trace vs Raster",

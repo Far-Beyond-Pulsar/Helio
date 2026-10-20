@@ -1182,7 +1182,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // the stored terrain visibility path instead.
     let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
-    if globals.debug_mode == 32u {
+    // The voxel pass's debug colours (trace cost, levels) unlit.
+    if globals.debug_mode == 32u || globals.debug_mode == 34u || (globals.debug_mode == 35u && pix.x * 2 < i32(textureDimensions(gbuf_albedo).x)) {
         if is_stored_voxel {
             return vec4<f32>(albedo, 1.0);
         }
@@ -1514,9 +1515,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let ba = unpack2x16float(g.y);
         gi = vec3<f32>(unpack2x16float(g.x), ba.x);
         gi_weight = clamp(ba.y, 0.0, 1.0);
+        // What GI changes against the sky's ambient: green brighter, red
+        // darker (a stop a third of full), blue where no probe holds it.
+        if globals.debug_mode == 29u {
+            let l = vec3<f32>(0.2126, 0.7152, 0.0722);
+            let stops = log2(max(dot(gi * albedo, l), 1e-6) / max(dot(hemi, l), 1e-6)) * gi_weight;
+            return vec4<f32>(clamp(-stops / 3.0, 0.0, 1.0), clamp(stops / 3.0, 0.0, 1.0), 0.0, 1.0);
+        }
         hemi = mix(hemi, gi * albedo, gi_weight);
     }
-    if globals.debug_mode == 28u {
+    if globals.debug_mode == 29u {
+        return vec4<f32>(0.0, 0.0, 0.3, 1.0);
+    }
+    // The probes' irradiance, or (36) the resolve's view of the probes.
+    if globals.debug_mode == 28u || globals.debug_mode == 36u {
         return vec4<f32>(select(vec3<f32>(0.25, 0.0, 0.25), gi, gi_weight > 0.0), 1.0);
     }
 
@@ -1605,7 +1617,9 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 22u || globals.debug_mode == 23u
         || globals.debug_mode == 24u || globals.debug_mode == 25u
         || globals.debug_mode == 26u || globals.debug_mode == 27u
-        || globals.debug_mode == 28u
+        || globals.debug_mode == 28u || globals.debug_mode == 29u
+        || globals.debug_mode == 34u || globals.debug_mode == 35u
+        || globals.debug_mode == 36u
         || globals.debug_mode == 20u || globals.debug_mode == 21u
         || globals.debug_mode == 32u || globals.debug_mode == 33u {
         return vec4<f32>(0.0);

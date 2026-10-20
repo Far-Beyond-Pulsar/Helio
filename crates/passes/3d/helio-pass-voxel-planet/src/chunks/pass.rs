@@ -293,11 +293,23 @@ impl RenderPass for ChunkPass {
     }
 
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
-        static VIEWS: &[DebugViewDescriptor] = &[DebugViewDescriptor {
-            name: "Voxel Trace Cost",
-            debug_mode: 32,
-            description: "Voxel surfaces shaded by primary-ray traversal work; red is cheaper, yellow and white are more expensive",
-        }];
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "Voxel Trace Cost",
+                debug_mode: 32,
+                description: "Voxel surfaces shaded by primary-ray traversal work; red is cheaper, yellow and white are more expensive",
+            },
+            DebugViewDescriptor {
+                name: "Voxel Levels",
+                debug_mode: 34,
+                description: "Voxel surfaces coloured by the octree level drawing them (level 0 finest)",
+            },
+            DebugViewDescriptor {
+                name: "Voxel Levels (Left Half)",
+                debug_mode: 35,
+                description: "Voxel levels over the left half of the view, shading on the right",
+            },
+        ];
         VIEWS
     }
 
