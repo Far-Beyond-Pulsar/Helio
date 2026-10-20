@@ -54,7 +54,7 @@ struct Globals {
     // desync the struct from its Rust mirror.
     enable_env_reflections: u32,
     measured_lighting_ms: f32,
-    _pad_0: u32,
+    pixel_count: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -177,6 +177,17 @@ fn complexity_color(value: f32) -> vec3<f32> {
     if t < 0.5 { return mix(vec3<f32>(0.0, 1.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), (t - 0.25) * 4.0); }
     if t < 0.75 { return mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), (t - 0.5) * 4.0); }
     return mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), (t - 0.75) * 4.0);
+}
+
+// Fixed absolute scale in microseconds per pixel. Unlike a normalized
+// complexity view, one color always represents the same measured duration.
+fn time_cost_color(us_per_pixel: f32) -> vec3<f32> {
+    let t = max(us_per_pixel, 0.0);
+    if t < 0.01 { return mix(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 1.0), t / 0.01); }
+    if t < 0.03 { return mix(vec3<f32>(0.0, 1.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), (t - 0.01) / 0.02); }
+    if t < 0.1 { return mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), (t - 0.03) / 0.07); }
+    if t < 0.5 { return mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), (t - 0.1) / 0.4); }
+    return vec3<f32>(1.0, 0.0, 0.0);
 }
 
 // The sky's irradiance / pi at a surface `from_camera` (km, relative to the
@@ -1393,13 +1404,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         material_work += select(0.0, 1.8, is_anisotropic) + select(0.0, 1.2, has_subsurface);
         material_work += select(0.0, 0.4, has_lightmap) + select(0.0, 0.6, is_vg);
         let surface_work = 2.0 + material_work * 2.0 + affecting_lights * 1.6 + shadow_work * 1.1;
-        var normalized_cost = surface_work / 32.0;
         if globals.debug_mode == 34u {
-            // Scale the per-surface estimate with the latest completed GPU
-            // timestamp for DeferredLight; no CPU wall-clock approximation.
-            normalized_cost *= max(globals.measured_lighting_ms, 0.01) / 2.0;
+            // Show an absolute estimated time contribution per output pixel.
+            // The pass timestamp is real GPU timing; surface_work distributes
+            // that measured duration according to this pixel's known shader
+            // work. Values are encoded against fixed microseconds-per-pixel
+            // thresholds, never frame-relative percentiles or scene exposure.
+            let estimated_us_per_pixel = globals.measured_lighting_ms * 1000.0
+                * surface_work / f32(max(globals.pixel_count, 1u));
+            return vec4<f32>(time_cost_color(estimated_us_per_pixel), 1.0);
         }
-        return vec4<f32>(complexity_color(normalized_cost), 1.0);
+        return vec4<f32>(complexity_color(surface_work / 32.0), 1.0);
     }
 
     // Anisotropic GGX parameters

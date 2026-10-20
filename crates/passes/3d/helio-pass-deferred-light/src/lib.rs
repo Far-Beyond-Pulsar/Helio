@@ -67,7 +67,7 @@ struct DeferredGlobals {
     enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
     measured_lighting_ms: f32,
-    _pad: u32,
+    pixel_count: u32,
 }
 
 pub struct DeferredLightPass {
@@ -954,7 +954,7 @@ impl RenderPass for DeferredLightPass {
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
             measured_lighting_ms: self.measured_lighting_ms,
-            _pad: 0,
+            pixel_count: ctx.width.saturating_mul(ctx.height).max(1),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1563,7 +1563,7 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "GPU-Time-Weighted Shader Cost",
                 debug_mode: 34,
-                description: "Per-surface GPU-time estimate in milliseconds, weighted by the last measured DeferredLight pass time; the timestamp is pass-wide",
+                description: "Estimated absolute shader time contribution per pixel in microseconds, weighted by the last measured DeferredLight GPU duration",
             },
             DebugViewDescriptor {
                 name: "Ray Trace vs Raster",
@@ -1576,11 +1576,11 @@ impl RenderPass for DeferredLightPass {
 
     fn debug_view_legend(&self, debug_mode: u32) -> Option<DebugViewLegend> {
         static COLORS: &[DebugViewLegendStop] = &[
-            DebugViewLegendStop { label: "0 ms", color: [0, 0, 255] },
-            DebugViewLegendStop { label: "0.5 ms", color: [0, 255, 255] },
-            DebugViewLegendStop { label: "1 ms", color: [0, 255, 0] },
-            DebugViewLegendStop { label: "1.5 ms", color: [255, 255, 0] },
-            DebugViewLegendStop { label: "2+ ms", color: [255, 0, 0] },
+            DebugViewLegendStop { label: "0 µs/px", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "0.01 µs/px", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "0.03 µs/px", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "0.1 µs/px", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "0.5+ µs/px", color: [255, 0, 0] },
         ];
         static LIGHTS: &[DebugViewLegendStop] = &[
             DebugViewLegendStop { label: "0", color: [0, 0, 255] },
@@ -1600,7 +1600,7 @@ impl RenderPass for DeferredLightPass {
         match debug_mode {
             28 => Some(DebugViewLegend { title: "Light complexity", unit: "lights", stops: LIGHTS }),
             29 => Some(DebugViewLegend { title: "Shader complexity", unit: "work units", stops: WORK }),
-            34 => Some(DebugViewLegend { title: "GPU-time-weighted shader cost", unit: "estimated ms", stops: COLORS }),
+            34 => Some(DebugViewLegend { title: "Estimated GPU time per pixel", unit: "µs / pixel", stops: COLORS }),
             _ => None,
         }
     }
