@@ -2661,3 +2661,89 @@ fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     }
     if all(id.xy < blocks) { reports[id.y * blocks.x + id.x] = report; }
 }
+
+// ---- 6. GI probe rays ----
+// The terrain as a tracer of the probes' rays (helio-pass-gi): a ray walks
+// the cut from its probe's place, and its hit walks to the sun. A probe's
+// place (`gi_cells`: base cell i, j, k and face | 8) is located on the CPU
+// in f64 when the probe comes into the clipmap.
+@group(1) @binding(35) var<uniform> frame_gi: GiFrame;
+@group(1) @binding(36) var<storage, read> gi_rays: array<GiRay>;
+@group(1) @binding(37) var<storage, read_write> gi_hits: array<GiHit>;
+@group(1) @binding(38) var<storage, read> gi_cells: array<vec4<i32>>;
+@group(1) @binding(39) var<storage, read> gi_sun: array<vec4<f32>, 2>;
+
+// Where a walk from eye-relative point `org` in base cell `c` starts: its
+// chunk, rock, or the air box it is in, crossed in the frame of a drawn
+// chunk beside it (in its column, at its level or finer: the ground under
+// air). None without one (nothing drawn near).
+struct ProbeStart {
+    walk: Walk,
+    rock: bool,
+    ok: bool,
+}
+
+fn probe_start(c: vec4<i32>, org: vec3<f32>, r: i32) -> ProbeStart {
+    var out = ProbeStart(Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false), false, false);
+    if (c.w & 8) == 0 { return out; }
+    let face = c.w & 7;
+    let at = place_at(face, 0, c.xyz, vec3<f32>(0.5), r, false);
+    if at.slot != NONE {
+        let f = chunk_frame(at.slot);
+        let o = vec3<f32>(f.i0.w, f.i1.w, f.i2.w) + vec3<f32>(dot(f.i0.xyz, org), dot(f.i1.xyz, org), dot(f.i2.xyz, org));
+        out.rock = solid_at(at.slot, vec3<i32>(floor(o)));
+        out.walk = Walk(at.slot, chunk_keys[at.slot], vec3<i32>(0), vec3<i32>(64), true);
+        out.ok = !out.rock;
+        return out;
+    }
+    if at.level == ROCK || at.level == BURIED {
+        out.rock = true;
+        return out;
+    }
+    if at.level == LOST { return out; }
+    if exact_level(at.level) {
+        out.walk = Walk(0u, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
+        out.ok = true;
+        return out;
+    }
+    var f = at.frame;
+    for (var l = at.level; l >= 0 && f == NONE; l--) {
+        f = frame_near(vec4<i32>(face | (l << 8u), (c.xyz >> vec3<u32>(u32(l))) >> vec3<u32>(6u)));
+    }
+    if f == NONE { return out; }
+    let fk = chunk_keys[f];
+    let diff = at.level - (fk.x >> 8u);
+    out.walk = Walk(f, fk, to_frame(at.lo, diff, fk, true), clip_to_face(to_frame(at.hi, diff, fk, false), fk), false);
+    out.ok = true;
+    return out;
+}
+
+// A thread a ray: its hit (distance, the face's normal, the material's
+// colour, whether the sun reaches it), or none; from rock, a back face at
+// once.
+@compute @workgroup_size(64)
+fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= frame_gi.counts.x * GI_RAYS { return; }
+    let ray = gi_rays[id.x];
+    let q = vec2<u32>(id.x & 63u, id.x >> 6u);
+    let r = fade_dither(q);
+    let start = probe_start(gi_cells[ray.probe], ray.origin.xyz, r);
+    if start.rock {
+        gi_hits[id.x] = GiHit(1e-3, gi_pack_unit(ray.dir), 0u, 1u);
+        return;
+    }
+    if !start.ok { return; }
+    let end = walk(start.walk, ray.origin.xyz, ray.dir, 0.0, ray.origin.w, r, 96u, false, q);
+    if !end.hit { return; }
+    let c = cell_frame(end.slot, end.cell);
+    let axis = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
+    let n = normalize(axis) * select(-1.0, 1.0, end.sign == 1u);
+    let material = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
+    // The sun from off the hit's face by half its cell.
+    var sun = 0.0;
+    if dot(n, gi_sun[0].xyz) > 0.0 {
+        let at = ray.origin.xyz + ray.dir * end.t + n * (0.5 * length(c.m0.xyz));
+        sun = mesh_walk(q, at, vec2<u32>(end.slot, 0u), gi_sun[0].xyz, 1e30);
+    }
+    gi_hits[id.x] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), 1u);
+}

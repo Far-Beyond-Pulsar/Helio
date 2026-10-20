@@ -1877,6 +1877,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-gi"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.5",
+ "helio-core",
+ "helio-pass-sky",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-pass-hiz"
 version = "0.1.0"
 dependencies = [
@@ -2230,6 +2241,8 @@ name = "helio-pass-tsr"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
+ "half",
  "helio-core",
  "pollster 0.4.0",
  "wgpu",
@@ -2283,6 +2296,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-pass-gi",
  "image",
  "miniz_oxide",
  "naga",

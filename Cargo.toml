@@ -116,6 +116,7 @@ helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
 helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }
 helio-pass-radiance-cascades-2d = { path = "crates/passes/2d/helio-pass-radiance-cascades-2d" }
 helio-pass-sky = { path = "crates/passes/3d/helio-pass-sky" }
+helio-pass-gi = { path = "crates/passes/3d/helio-pass-gi" }
 helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
 helio-pass-shadow-matrix = { path = "crates/passes/3d/helio-pass-shadow-matrix" }
 helio-pass-forward-lit = { path = "crates/passes/3d/helio-pass-forward-lit" }

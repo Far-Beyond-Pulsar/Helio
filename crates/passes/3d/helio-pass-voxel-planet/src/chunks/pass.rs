@@ -39,6 +39,9 @@ pub struct ChunkPass {
     scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
     /// Every hit walks its own sun ray (`set_steady_shadows`).
     steady_shadows: bool,
+    /// The eye's world position this frame (`helio_pass_gi::eye`), for the
+    /// GI clipmap the terrain traces rays of.
+    gi_eye: Option<DVec3>,
 }
 
 impl ChunkPass {
@@ -67,6 +70,7 @@ impl ChunkPass {
             cpu_ms: [0.0; 2],
             scene: None,
             steady_shadows: false,
+            gi_eye: None,
         }
     }
 
@@ -194,6 +198,9 @@ const READS: &[&str] = &[
     "material_textures",
     "tile_light_lists",
     "tile_light_counts",
+    helio_pass_gi::GI_FRAME,
+    helio_pass_gi::GI_RAYS,
+    helio_pass_gi::GI_SUN,
 ];
 const WRITES: &[&str] = &[
     "gbuffer",
@@ -203,6 +210,7 @@ const WRITES: &[&str] = &[
     "gbuffer_velocity",
     "directional_visibility",
     "local_visibility",
+    helio_pass_gi::GI_HITS,
 ];
 
 /// GPU times kept for a host that does not take them.
@@ -257,6 +265,7 @@ impl RenderPass for ChunkPass {
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let started = std::time::Instant::now();
+        self.gi_eye = Some(helio_pass_gi::eye(ctx));
         let result = self.prepare_frame(ctx);
         self.cpu_ms[0] = started.elapsed().as_secs_f64() * 1e3;
         result
@@ -451,6 +460,15 @@ impl ChunkPass {
         let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
         let tile_lists = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists")).map(|b| (*b).clone());
         let tile_counts = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")).map(|b| (*b).clone());
+        // The GI probes' rays, when a GI pass runs before this one.
+        let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
+        let gi = match (binding(helio_pass_gi::GI_FRAME), binding(helio_pass_gi::GI_RAYS), binding(helio_pass_gi::GI_HITS), binding(helio_pass_gi::GI_SUN), self.gi_eye) {
+            (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(world_eye)) => {
+                world.follow_gi(helio_pass_gi::Clipmap::around(world_eye), world_eye, frame.eye);
+                Some((frame_gi, rays, hits, sun))
+            }
+            _ => None,
+        };
         let mut cmds = ctx.graphics_cmds();
         let encoder = &mut cmds;
         // Generation keeps its pace per second at any frame rate: a frame
@@ -503,6 +521,7 @@ impl ChunkPass {
                 _ => None,
             }
             .as_ref(),
+            gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
         );
         let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
         world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);

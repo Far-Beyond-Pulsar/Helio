@@ -287,6 +287,16 @@ pub struct SceneLights<'a> {
     pub eye: Vec3,
 }
 
+/// The GI probes' rays the terrain traces (`helio_pass_gi`: `gi_frame`,
+/// `gi_rays`, `gi_hits`, `gi_sun`), from the probes' places
+/// ([`ChunkWorld::follow_gi`]).
+pub struct GiRays<'a> {
+    pub frame: &'a wgpu::Buffer,
+    pub rays: &'a wgpu::Buffer,
+    pub hits: &'a wgpu::Buffer,
+    pub sun: &'a wgpu::Buffer,
+}
+
 /// `Materials` of chunk_draw.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -1141,6 +1151,13 @@ pub struct ChunkWorld {
     local_sample_far: wgpu::ComputePipeline,
     local_shadow: wgpu::ComputePipeline,
     local_shadow_far: wgpu::ComputePipeline,
+    /// The GI probes' rays (`gi_trace`), from each probe's base cell
+    /// (`gi_cells`, and its CPU copy) in the clipmap they were located for.
+    gi_layout: wgpu::BindGroupLayout,
+    gi_trace: wgpu::ComputePipeline,
+    gi_cells: wgpu::Buffer,
+    gi_cell_data: Vec<[i32; 4]>,
+    gi_clipmap: Option<helio_pass_gi::Clipmap>,
     publish: wgpu::RenderPipeline,
     /// The publish with the host's scene materials (devices with texture
     /// binding arrays).
@@ -1655,7 +1672,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}") } else { heat }
     };
     // The noise library (materials' patches), then the draw.
-    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
+    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + helio_pass_gi::GI_COMMON_SNIPPET.source + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -1982,6 +1999,18 @@ impl ChunkWorld {
         let local_sample_far = compute("chunk far local light samples", &layout(&local_layout), "local_sample_far");
         let local_shadow = compute("chunk local shadows", &layout(&local_layout), "local_shadow");
         let local_shadow_far = compute("chunk far local shadows", &layout(&local_layout), "local_shadow_far");
+        // GI probe rays: the frame, rays, hits, the probes' cells, the sun.
+        let gi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk GI rays"),
+            entries: &[
+                uniform(35, wgpu::ShaderStages::COMPUTE),
+                storage(36, true, wgpu::ShaderStages::COMPUTE),
+                storage(37, false, wgpu::ShaderStages::COMPUTE),
+                storage(38, true, wgpu::ShaderStages::COMPUTE),
+                storage(39, true, wgpu::ShaderStages::COMPUTE),
+            ],
+        });
+        let gi_trace = compute("chunk GI rays", &layout(&gi_layout), "gi_trace");
         // Ray reports: the hits a block of pixels samples, as the nodes
         // they want.
         let feedback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2124,6 +2153,11 @@ impl ChunkWorld {
             local_sample_far,
             local_shadow,
             local_shadow_far,
+            gi_layout,
+            gi_trace,
+            gi_cells: buffer("chunk GI probe cells", u64::from(helio_pass_gi::PROBES) * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
+            gi_cell_data: vec![[0; 4]; helio_pass_gi::PROBES as usize],
+            gi_clipmap: None,
             no_lights: buffer("chunk no lights", 128, wgpu::BufferUsages::STORAGE),
             publish,
             scene,
@@ -3527,7 +3561,7 @@ impl ChunkWorld {
     /// `frame` ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>) {
+    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>) {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
@@ -3768,6 +3802,18 @@ impl ChunkWorld {
                 pass.set_pipeline(pipeline);
                 pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
             }
+            // 6. The GI probes' rays (a thread a ray, past the frame's
+            // count none).
+            if let (Some(gi), true) = (gi, self.gi_clipmap.is_some()) {
+                let gi_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("chunk GI rays"),
+                    layout: &self.gi_layout,
+                    entries: &[entry(35, gi.frame), entry(36, gi.rays), entry(37, gi.hits), entry(38, &self.gi_cells), entry(39, gi.sun)],
+                });
+                pass.set_bind_group(1, &gi_group, &[]);
+                pass.set_pipeline(&self.gi_trace);
+                pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+            }
         }
         // Ray reports, back without waiting (a frame's copy when a slot is
         // free): the node each block of pixels' sampled hit wants, and the
@@ -3841,6 +3887,27 @@ impl ChunkWorld {
 
     /// Boxes drawn by the last [`Self::draw`]: from outside, from inside
     /// (reads the cull back: diagnostics).
+    /// Follows the GI clipmap `clipmap`, around world point `world_eye`
+    /// (the eye, at `eye` in the planet's coordinates): the base cell of
+    /// each probe that came in, located in f64, for its rays' walks.
+    pub fn follow_gi(&mut self, clipmap: helio_pass_gi::Clipmap, world_eye: DVec3, eye: DVec3) {
+        if self.gi_clipmap == Some(clipmap) {
+            return;
+        }
+        let entered = clipmap.entered(self.gi_clipmap.as_ref());
+        self.gi_clipmap = Some(clipmap);
+        let (mut lo, mut hi) = (usize::MAX, 0);
+        for &index in &entered {
+            let (cell, _) = self.grid.locate(eye + (clipmap.position(index) - world_eye));
+            self.gi_cell_data[index as usize] = [cell.i, cell.j, cell.k, i32::from(cell.face) | 8];
+            lo = lo.min(index as usize);
+            hi = hi.max(index as usize + 1);
+        }
+        if lo < hi {
+            self.queue.write_buffer(&self.gi_cells, lo as u64 * 16, bytemuck::cast_slice(&self.gi_cell_data[lo..hi]));
+        }
+    }
+
     pub fn drawn(&self) -> (u32, u32) {
         let counts: Vec<u32> = self.read(&self.cull_state, 2);
         (counts[1] - counts[0], counts[0])
