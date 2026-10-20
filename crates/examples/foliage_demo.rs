@@ -548,7 +548,7 @@ impl ApplicationHandler for App {
             mesh_or_impostor_id: 0,
             base_color: 0,
             roughness_metallic: 0,
-            _pad: 0,
+            ground_mask: 0,
         };
         // The same surface as `grass_mat`, carried by the type row itself.
         grass.set_material(Some(FoliageMaterial {

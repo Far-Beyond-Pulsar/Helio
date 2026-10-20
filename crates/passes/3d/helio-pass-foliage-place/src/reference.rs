@@ -93,12 +93,39 @@ pub fn within_any_layer(world: [f32; 3], layers: &[GpuFoliageLayer]) -> bool {
     false
 }
 
-/// Evaluate a single stratified candidate.
+/// The ground a reference candidate stands on: its height along the tile's up, the
+/// cosine of its slope and its ground id (the answer `cs_place` reads from a hit).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReferenceGround {
+    pub height: f32,
+    pub slope_cos: f32,
+    pub ground: u32,
+}
+
+/// The built-in plane: height 0, flat, ground id 0 everywhere.
+pub fn flat_ground(_uv: [f32; 2]) -> Option<ReferenceGround> {
+    Some(ReferenceGround { height: 0.0, slope_cos: 1.0, ground: 0 })
+}
+
+/// Whether type `foliage` grows on `ground` (`type_grows` in the shader).
+pub fn type_grows(foliage: &GpuFoliageType, ground: &ReferenceGround) -> bool {
+    let on_ground = foliage.ground_mask == 0 || (ground.ground < 32 && (foliage.ground_mask >> ground.ground) & 1 != 0);
+    foliage.density > 0.0
+        && on_ground
+        && ground.slope_cos >= foliage.slope_range[0]
+        && ground.slope_cos <= foliage.slope_range[1]
+        && ground.height >= foliage.altitude_range[0]
+        && ground.height <= foliage.altitude_range[1]
+}
+
+/// Evaluate a single stratified candidate over `ground` (a tile-local `(u, v)` to its
+/// answer, `None` where there is no ground).
 ///
 /// Every hash rotation here is load-bearing and must match the shader exactly: the
 /// rotations are what decorrelate position from yaw from tint, and using the same
 /// rotation twice would visibly couple two properties (all tall blades facing the same
 /// way, for instance).
+#[allow(clippy::too_many_arguments)]
 pub fn reference_candidate(
     uniforms: &PlaceUniforms,
     types: &[GpuFoliageType],
@@ -106,6 +133,7 @@ pub fn reference_candidate(
     tile_coord: [i32; 2],
     generation: u32,
     index: u32,
+    ground: &dyn Fn([f32; 2]) -> Option<ReferenceGround>,
 ) -> ReferenceCandidate {
     let grid = uniforms.candidate_grid.max(1);
     let inv_grid = 1.0 / grid as f32;
@@ -116,74 +144,74 @@ pub fn reference_candidate(
     let u = (cell_x as f32 + hash_to_unit(seed)) * inv_grid;
     let v = (cell_z as f32 + hash_to_unit(seed.rotate_left(11))) * inv_grid;
 
-    // The temporary flat-plane fallback, matching `sample_terrain` when the capture is
-    // absent: everything is at y = 0 with a straight-up normal, so every slope band
-    // accepts.
-    let height = 0.0f32;
-    let slope_cos = 1.0f32;
-
-    let type_limit = (uniforms.type_count.min(types.len() as u32)).max(1);
-    let type_id =
-        ((hash_to_unit(seed.rotate_left(5)) * type_limit as f32) as u32).min(type_limit - 1);
-    let foliage = types
-        .get(type_id as usize)
-        .copied()
-        .unwrap_or_else(GpuFoliageType::default);
-
+    let mut candidate = ReferenceCandidate { index, seed, tile_uv: [u, v], type_id: 0, weight: 0.0, accepted: false };
+    let Some(g) = ground([u, v]) else { return candidate };
+    // On the flat tiling the frame is world XZ with +Y up.
     let world = [
         tile_coord[0] as f32 * uniforms.tile_size + u * uniforms.tile_size,
-        height,
+        g.height,
         tile_coord[1] as f32 * uniforms.tile_size + v * uniforms.tile_size,
     ];
-
-    let mut weight = 0.0f32;
-    if within_any_layer(world, layers)
-        && slope_cos >= foliage.slope_range[0]
-        && slope_cos <= foliage.slope_range[1]
-        && height >= foliage.altitude_range[0]
-        && height <= foliage.altitude_range[1]
-    {
-        weight = (foliage.density * uniforms.density_multiplier / uniforms.max_density.max(1.0e-6))
-            .clamp(0.0, 1.0);
+    if !within_any_layer(world, layers) {
+        return candidate;
     }
-
-    ReferenceCandidate {
-        index,
-        seed,
-        tile_uv: [u, v],
-        type_id: type_id as u8,
-        weight,
-        accepted: hash_to_unit(seed.rotate_left(17)) < weight,
+    // The types growing here by their densities: a blade with probability
+    // `sum / grid_density`, of each type by its share of the sum.
+    let live = types.iter().rposition(|t| t.density > 0.0).map_or(0, |n| n + 1).min(uniforms.type_count as usize);
+    let sum: f32 = types[..live].iter().filter(|t| type_grows(t, &g)).map(|t| t.density).sum();
+    candidate.weight = (sum * uniforms.density_multiplier / uniforms.grid_density.max(1.0e-6)).clamp(0.0, 1.0);
+    let roll = hash_to_unit(seed.rotate_left(17)) * uniforms.grid_density.max(1.0e-6);
+    if roll < sum * uniforms.density_multiplier {
+        let pick = hash_to_unit(seed.rotate_left(5)) * sum;
+        let mut running = 0.0;
+        for (t, foliage) in types[..live].iter().enumerate() {
+            if !type_grows(foliage, &g) {
+                continue;
+            }
+            candidate.type_id = t as u8;
+            running += foliage.density;
+            if pick < running {
+                break;
+            }
+        }
+        candidate.accepted = true;
     }
+    candidate
 }
 
-/// Place one tile, returning the blade list the placement shader must reproduce
-/// byte-for-byte.
+/// Place one tile over `ground`, returning the blade list the placement shader must
+/// reproduce byte-for-byte.
 ///
-/// `center_y` is zero under the flat-plane fallback, so blade height offsets are zero.
-/// Once the terrain capture exists the shader derives it from a 4×4 probe of the tile and
-/// this function will have to do the same — the two must not diverge, because the offset
-/// is stored as f16 relative to that centre and a different centre re-quantises every
-/// blade in the tile.
+/// Heights are stored as f16 offsets from the centre of the tile's ground range (every
+/// candidate's ground, accepted or not, as the shader takes it), so the reference takes
+/// the same centre: a different centre re-quantises every blade in the tile.
 pub fn place_tile_reference(
     uniforms: &PlaceUniforms,
     types: &[GpuFoliageType],
     layers: &[GpuFoliageLayer],
     tile_coord: [i32; 2],
     generation: u32,
+    ground: &dyn Fn([f32; 2]) -> Option<ReferenceGround>,
 ) -> ReferencePlacement {
     let grid = uniforms.candidate_grid.max(1);
     let candidates = grid.saturating_mul(grid);
-    let center_y = 0.0f32;
 
     let mut placement = ReferencePlacement {
         blades: Vec::new(),
         candidates,
         dropped: 0,
     };
+    let evaluated: Vec<(ReferenceCandidate, Option<ReferenceGround>)> = (0..candidates)
+        .map(|index| {
+            let c = reference_candidate(uniforms, types, layers, tile_coord, generation, index, ground);
+            (c, ground(c.tile_uv))
+        })
+        .collect();
+    let heights = evaluated.iter().filter_map(|(_, g)| g.map(|g| g.height));
+    let (low, high) = heights.fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), h| (a.min(h), b.max(h)));
+    let center = if low <= high { (low + high) * 0.5 } else { 0.0 };
 
-    for index in 0..candidates {
-        let candidate = reference_candidate(uniforms, types, layers, tile_coord, generation, index);
+    for (candidate, g) in evaluated {
         if !candidate.accepted {
             continue;
         }
@@ -195,7 +223,7 @@ pub fn place_tile_reference(
         let seed = candidate.seed;
         placement.blades.push(pack_blade(BladeParams {
             tile_uv: candidate.tile_uv,
-            height_offset: 0.0 - center_y,
+            height_offset: g.map_or(0.0, |g| g.height) - center,
             yaw: hash_to_unit(seed.rotate_left(23)) * std::f32::consts::TAU,
             height_scale: hash_to_unit(seed.rotate_left(29)),
             width_scale: hash_to_unit(seed.rotate_left(3)),
@@ -218,7 +246,8 @@ mod tests {
     use crate::{unpack_blade, FOLIAGE_TILE_SIZE_METERS};
 
     fn uniforms(grid: u32, slab: u32, types: &[GpuFoliageType]) -> PlaceUniforms {
-        let max_density = types.iter().map(|t| t.density).fold(0.0f32, f32::max);
+        let _ = types;
+        let grid_density = (grid * grid) as f32 / (FOLIAGE_TILE_SIZE_METERS * FOLIAGE_TILE_SIZE_METERS);
         PlaceUniforms {
             tile_size: FOLIAGE_TILE_SIZE_METERS,
             candidate_grid: grid,
@@ -227,9 +256,10 @@ mod tests {
             // changes which cells a *cluster* spans, not which cells exist.
             cluster_edge: 1,
             slab_capacity: slab,
-            queued_tile_count: 1,
+            place_tile_count: 1,
+            query_tile_count: 0,
             density_multiplier: 1.0,
-            max_density,
+            grid_density,
             type_count: types.len() as u32,
             max_foliage_height: 0.45,
             terrain_valid: 0,
@@ -237,7 +267,9 @@ mod tests {
             terrain_origin_z: 0.0,
             terrain_extent: 256.0,
             layer_count: 0,
-            _pad: [0; 2],
+            search_above: 256.0,
+            search_below: 512.0,
+            eye: [0.0; 3],
         }
     }
 
@@ -248,8 +280,8 @@ mod tests {
         // re-placed without its grass moving.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(24, 1024, &types);
-        let first = place_tile_reference(&uni, &types, &[], [12, -7], 3);
-        let second = place_tile_reference(&uni, &types, &[], [12, -7], 3);
+        let first = place_tile_reference(&uni, &types, &[], [12, -7], 3, &flat_ground);
+        let second = place_tile_reference(&uni, &types, &[], [12, -7], 3, &flat_ground);
         assert!(
             !first.blades.is_empty(),
             "the reference placed nothing to compare"
@@ -268,9 +300,9 @@ mod tests {
         // grows a frame argument, this call stops compiling.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(16, 1024, &types);
-        let baseline = place_tile_reference(&uni, &types, &[], [0, 0], 0);
+        let baseline = place_tile_reference(&uni, &types, &[], [0, 0], 0, &flat_ground);
         for _ in 0..8 {
-            assert_eq!(place_tile_reference(&uni, &types, &[], [0, 0], 0), baseline);
+            assert_eq!(place_tile_reference(&uni, &types, &[], [0, 0], 0, &flat_ground), baseline);
         }
     }
 
@@ -281,8 +313,8 @@ mod tests {
         // stayed dense.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(24, 1024, &types);
-        let first = place_tile_reference(&uni, &types, &[], [4, 4], 0);
-        let bumped = place_tile_reference(&uni, &types, &[], [4, 4], 1);
+        let first = place_tile_reference(&uni, &types, &[], [4, 4], 0, &flat_ground);
+        let bumped = place_tile_reference(&uni, &types, &[], [4, 4], 1, &flat_ground);
         let shared = first
             .blades
             .iter()
@@ -300,9 +332,9 @@ mod tests {
     fn neighbouring_tiles_are_independent_draws() {
         let types = [GpuFoliageType::default()];
         let uni = uniforms(24, 1024, &types);
-        let here = place_tile_reference(&uni, &types, &[], [0, 0], 0);
-        let east = place_tile_reference(&uni, &types, &[], [1, 0], 0);
-        let west = place_tile_reference(&uni, &types, &[], [-1, 0], 0);
+        let here = place_tile_reference(&uni, &types, &[], [0, 0], 0, &flat_ground);
+        let east = place_tile_reference(&uni, &types, &[], [1, 0], 0, &flat_ground);
+        let west = place_tile_reference(&uni, &types, &[], [-1, 0], 0, &flat_ground);
         // The i32-as-u32 reinterpretation in `blade_seed` is what keeps the negative half
         // of the world from mirroring the positive half.
         assert_ne!(here.blades, east.blades);
@@ -314,7 +346,7 @@ mod tests {
     fn every_blade_lands_inside_its_own_tile() {
         let types = [GpuFoliageType::default()];
         let uni = uniforms(32, 4096, &types);
-        let placement = place_tile_reference(&uni, &types, &[], [-3, 5], 2);
+        let placement = place_tile_reference(&uni, &types, &[], [-3, 5], 2, &flat_ground);
         for blade in &placement.blades {
             let params = unpack_blade(blade);
             assert!((0.0..=1.0).contains(&params.tile_uv[0]));
@@ -330,7 +362,7 @@ mod tests {
         // every bucket to be populated.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(32, 4096, &types);
-        let placement = place_tile_reference(&uni, &types, &[], [7, -2], 0);
+        let placement = place_tile_reference(&uni, &types, &[], [7, -2], 0, &flat_ground);
         let mut buckets = [0u32; 16];
         for blade in &placement.blades {
             let params = unpack_blade(blade);
@@ -359,7 +391,7 @@ mod tests {
 
         let mut counts = [0u32; 2];
         for tile in 0..8i32 {
-            let placement = place_tile_reference(&uni, &types, &[], [tile, 0], 0);
+            let placement = place_tile_reference(&uni, &types, &[], [tile, 0], 0, &flat_ground);
             for blade in &placement.blades {
                 counts[blade.type_id() as usize] += 1;
             }
@@ -381,7 +413,7 @@ mod tests {
         cliff_only.slope_range = [-1.0, 0.5];
         let types = [cliff_only];
         let uni = uniforms(32, 4096, &types);
-        let placement = place_tile_reference(&uni, &types, &[], [0, 0], 0);
+        let placement = place_tile_reference(&uni, &types, &[], [0, 0], 0, &flat_ground);
         assert!(placement.blades.is_empty());
         assert_eq!(placement.candidates, 32 * 32);
     }
@@ -392,7 +424,7 @@ mod tests {
         // reported rather than silently swallowed.
         let types = [GpuFoliageType::default()];
         let uni = uniforms(32, 16, &types);
-        let placement = place_tile_reference(&uni, &types, &[], [0, 0], 0);
+        let placement = place_tile_reference(&uni, &types, &[], [0, 0], 0, &flat_ground);
         assert_eq!(placement.blades.len(), 16);
         assert!(placement.dropped > 0, "over-budget blades must be counted");
     }
@@ -409,7 +441,7 @@ mod tests {
         }];
         let mut uni = uniforms(32, 4096, &types);
         uni.layer_count = layers.len() as u32;
-        let placement = place_tile_reference(&uni, &types, &layers, [-1, -1], 0);
+        let placement = place_tile_reference(&uni, &types, &layers, [-1, -1], 0, &flat_ground);
         assert!(
             placement.blades.is_empty(),
             "grass must not grow outside a layer"
@@ -426,11 +458,67 @@ mod tests {
         }];
         let mut uni = uniforms(24, 1024, &types);
         uni.layer_count = layers.len() as u32;
-        let placement = place_tile_reference(&uni, &types, &layers, [0, 0], 0);
+        let placement = place_tile_reference(&uni, &types, &layers, [0, 0], 0, &flat_ground);
         assert!(
             !placement.blades.is_empty(),
             "grass inside a layer must be placed"
         );
+    }
+
+    /// Types keyed by ground: each grows only where the ground answers one of its ids,
+    /// at its own density there; a ground none is keyed to grows nothing.
+    #[test]
+    fn types_grow_only_on_their_ground() {
+        let mut grass = GpuFoliageType::default();
+        grass.density = 30.0;
+        grass.ground_mask = 1 << 1;
+        let mut sand = GpuFoliageType::default();
+        sand.density = 10.0;
+        sand.ground_mask = 1 << 4;
+        let types = [grass, sand];
+        let uni = uniforms(48, 4096, &types);
+        let ground = |uv: [f32; 2]| {
+            let id = if uv[1] > 0.75 { 7 } else if uv[0] < 0.5 { 1 } else { 4 };
+            Some(ReferenceGround { height: 0.0, slope_cos: 1.0, ground: id })
+        };
+        let mut counts = [0usize; 2];
+        for tile in 0..6 {
+            for blade in place_tile_reference(&uni, &types, &[], [tile, 1], 0, &ground).blades {
+                let p = unpack_blade(&blade);
+                assert!(p.tile_uv[1] <= 0.75 + 1e-4, "a blade on ground 7 at {:?}", p.tile_uv);
+                let left = p.tile_uv[0] < 0.5;
+                assert_eq!(p.type_id, if left { 0 } else { 1 }, "type {} at {:?}", p.type_id, p.tile_uv);
+                counts[p.type_id as usize] += 1;
+            }
+        }
+        // Each at its own density over its share (a half by three quarters of the tile).
+        let area = 6.0 * 64.0 * 0.375;
+        let (g, s) = (counts[0] as f32 / area, counts[1] as f32 / area);
+        assert!((g - 30.0).abs() < 3.0 && (s - 10.0).abs() < 1.5, "grass {g}/m2, sand {s}/m2");
+    }
+
+    /// Blades stand on the ground the answers give: their roots' heights over the
+    /// tile's datum are the ground's (f16 offsets from the tile's centre), and where
+    /// there is no ground nothing grows.
+    #[test]
+    fn blades_stand_on_the_answered_ground() {
+        let types = [GpuFoliageType::default()];
+        let uni = uniforms(32, 4096, &types);
+        let height = |uv: [f32; 2]| 3.0 + 2.0 * uv[0] - 1.5 * uv[1];
+        let ground = |uv: [f32; 2]| (uv[0] < 0.9).then(|| ReferenceGround { height: height(uv), slope_cos: 1.0, ground: 0 });
+        let placement = place_tile_reference(&uni, &types, &[], [2, 3], 0, &ground);
+        assert!(placement.blades.len() > 400);
+        // The centre of the answered range: every candidate with ground, from 1.5 to 5.
+        let (low, high) = (0..32 * 32)
+            .map(|n| reference_candidate(&uni, &types, &[], [2, 3], 0, n, &ground))
+            .filter_map(|c| ground(c.tile_uv).map(|g| g.height))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), h| (a.min(h), b.max(h)));
+        let center = (low + high) * 0.5;
+        for blade in &placement.blades {
+            let p = unpack_blade(blade);
+            assert!(p.tile_uv[0] < 0.9 + 1e-4);
+            assert!((center + p.height_offset - height(p.tile_uv)).abs() < 4e-3, "{p:?}");
+        }
     }
 
     #[test]
@@ -445,7 +533,7 @@ mod tests {
         }];
         let mut uni = uniforms(24, 1024, &types);
         uni.layer_count = layers.len() as u32;
-        let placement = place_tile_reference(&uni, &types, &layers, [5, -3], 0);
+        let placement = place_tile_reference(&uni, &types, &layers, [5, -3], 0, &flat_ground);
         assert!(
             !placement.blades.is_empty(),
             "an infinite layer must not cull"

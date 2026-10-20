@@ -76,7 +76,7 @@ pub mod wind;
 
 pub use frame_data::FoliageTerrainViews;
 pub use pass::{FoliagePlacePass, MAX_FOLIAGE_LAYERS, MAX_FOLIAGE_TYPES};
-pub use reference::{place_tile_reference, ReferenceCandidate, ReferencePlacement};
+pub use reference::{flat_ground, place_tile_reference, type_grows, ReferenceCandidate, ReferenceGround, ReferencePlacement};
 pub use residency::{RingUpdate, TileRing};
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
 pub use wind::{GpuWind, Wind};

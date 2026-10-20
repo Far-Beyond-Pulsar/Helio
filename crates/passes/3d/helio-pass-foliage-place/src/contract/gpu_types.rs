@@ -69,7 +69,7 @@ pub struct GpuBladeInstance {
     /// Terrain height offset in metres as f16 (bits 0..16) | yaw as a 16-bit turn
     /// (bits 16..32).
     ///
-    /// The height offset is relative to the tile's `bounds_center_y`, not absolute
+    /// The height offset is relative to the tile's `bounds_center`, not absolute
     /// world Y — f16 has ~3 decimal digits, which is centimetre precision at 100 m and
     /// useless at planetary altitudes. Keeping it tile-relative is what makes f16 safe
     /// here; storing absolute Y would visibly quantise grass into terraces far from the
@@ -116,7 +116,7 @@ pub struct GpuBladeInstance {
 pub struct BladeParams {
     /// Tile-local position in `0.0..=1.0` over the tile extent, `[x, z]`.
     pub tile_uv: [f32; 2],
-    /// Height offset in metres from the tile's `bounds_center_y`.
+    /// Height offset in metres from the tile's `bounds_center`.
     pub height_offset: f32,
     /// Yaw in radians. Wrapped, not clamped, on encode.
     pub yaw: f32,
@@ -348,8 +348,8 @@ impl TileState {
 ///  0..8   tile_coord:      vec2<i32>   world tile grid coordinate (WGSL vec2 is safe here)
 ///  8..12  blade_offset:    u32
 /// 12..16  blade_count:     u32
-/// 16..20  bounds_center_y: f32
-/// 20..24  bounds_half_y:   f32
+/// 16..20  bounds_center: f32
+/// 20..24  bounds_half:   f32
 /// 24..28  state:           u32         TileState
 /// 28..32  generation:      u32
 /// ```
@@ -370,14 +370,14 @@ pub struct GpuFoliageTile {
 
     /// Centre of the tile's vertical extent, taken from the terrain capture. XZ come
     /// from `tile_coord` and are not stored.
-    pub bounds_center_y: f32,
+    pub bounds_center: f32,
 
     /// Half-extent of the tile's vertical span. The tile cull dilates this by the
     /// type's max height plus its WPO extent before the frustum and Hi-Z tests — see
     /// the plan's §6.2. Under-dilating here is the classic wind-culling bug: blades
     /// blow outside the tile bounds and the tile is culled while its geometry is still
     /// on screen.
-    pub bounds_half_y: f32,
+    pub bounds_half: f32,
 
     /// [`TileState`] as a `u32`. Access through [`GpuFoliageTile::state`].
     pub state: u32,
@@ -399,8 +399,8 @@ impl GpuFoliageTile {
         tile_coord: [0, 0],
         blade_offset: 0,
         blade_count: 0,
-        bounds_center_y: 0.0,
-        bounds_half_y: 0.0,
+        bounds_center: 0.0,
+        bounds_half: 0.0,
         state: TileState::Free as u32,
         generation: 0,
     };
@@ -450,6 +450,10 @@ pub enum FoliageKind {
     /// A virtual-geometry mesh, culled and LOD-selected by the existing meshlet path.
     /// `mesh_or_impostor_id` is a `VirtualMeshId` for this kind.
     Mesh = 2,
+    /// A blade made of a thin box (voxel worlds' grass): flat faces, sheared rather
+    /// than bent by wind, at the blade's own width square. Drawn by the same procedural
+    /// strip as [`FoliageKind::Blade`], two sides and its top near the eye.
+    Block = 3,
 }
 
 impl FoliageKind {
@@ -464,6 +468,7 @@ impl FoliageKind {
             0 => Some(FoliageKind::Blade),
             1 => Some(FoliageKind::Card),
             2 => Some(FoliageKind::Mesh),
+            3 => Some(FoliageKind::Block),
             _ => None,
         }
     }
@@ -524,8 +529,8 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// the header was simply wrong, and the fields are what matter. Rounding up to 96 left
 /// 12 bytes of tail padding, which was **deliberate and meant to be spent**: §4.3 is a
 /// first draft of what a foliage type needs, and this table will grow. The authored
-/// material ([`FoliageMaterial`]) spent eight of them; four remain in
-/// [`GpuFoliageType::_pad`]. When they run out, grow to 128 rather than packing more.
+/// material ([`FoliageMaterial`]) spent eight of them and the ground mask
+/// ([`GpuFoliageType::ground_mask`]) the last four. Grow to 128 rather than packing more.
 ///
 /// The earlier draft of this type hit 64 bytes by storing `height_range`, `width_range`,
 /// `slope_range` and `lod_distances` as `f16` pairs. That bought about two kilobytes —
@@ -579,7 +584,7 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// 80..84  mesh_or_impostor_id:   u32
 /// 84..88  base_color:            u32        RGBA8 unorm, 0 = no authored material
 /// 88..92  roughness_metallic:    u32        unorm16 × 2, roughness in the low half
-/// 92..96  _pad:                  u32        reserved headroom, spend before widening
+/// 92..96  ground_mask:           u32        ground ids it grows on (bit per id; 0: any)
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -650,15 +655,11 @@ pub struct GpuFoliageType {
     /// `unpack2x16unorm`). Read only when [`GpuFoliageType::base_color`] is non-zero.
     pub roughness_metallic: u32,
 
-    /// Reserved headroom. **Must be written as zero.**
-    ///
-    /// This padding exists to be spent. §4.3 is a first draft of what a foliage type
-    /// needs — `wpo_extent`, a cull-distance override and an impostor transition band are
-    /// all plausible next fields — and a spare slot means the next one lands without
-    /// touching the size assert, the WGSL struct's tail, or anything that reads this
-    /// table. Zeroing it is what makes that safe: a future build can then tell "this
-    /// field was left at its default" from "this data predates the field".
-    pub _pad: u32,
+    /// The ground ids this type grows on, a bit per id below 32 (the ground's
+    /// [`crate::GpuGroundHit::ground`]: a terrain material, a biome); **0: any ground**.
+    /// A heightfield's ground is id 0. This spent the struct's last spare word: the next
+    /// field grows it to 128 bytes.
+    pub ground_mask: u32,
 }
 
 /// A foliage type's authored surface: linear base colour, roughness and metallic.
@@ -815,7 +816,7 @@ impl Default for GpuFoliageType {
             mesh_or_impostor_id: 0,
             base_color: 0,
             roughness_metallic: 0,
-            _pad: 0,
+            ground_mask: 0,
         }
     }
 }
@@ -929,7 +930,7 @@ mod tests {
             offset_of(&value.roughness_metallic as *const u32 as *const u8),
             88
         );
-        assert_eq!(offset_of(&value._pad as *const u32 as *const u8), 92);
+        assert_eq!(offset_of(&value.ground_mask as *const u32 as *const u8), 92);
 
         // 4 bytes of deliberate tail headroom. If this shrinks to zero, grow the struct
         // to 128 rather than packing more.
@@ -1226,10 +1227,10 @@ mod tests {
             Some(FoliageKind::Card)
         );
 
-        for kind in [FoliageKind::Blade, FoliageKind::Card, FoliageKind::Mesh] {
+        for kind in [FoliageKind::Blade, FoliageKind::Card, FoliageKind::Mesh, FoliageKind::Block] {
             assert_eq!(FoliageKind::from_u32(kind.as_u32()), Some(kind));
         }
-        assert_eq!(FoliageKind::from_u32(3), None);
+        assert_eq!(FoliageKind::from_u32(4), None);
         assert_eq!(FoliageKind::from_u32(u32::MAX), None);
     }
 

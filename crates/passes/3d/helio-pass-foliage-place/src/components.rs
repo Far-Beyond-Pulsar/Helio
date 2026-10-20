@@ -36,7 +36,7 @@ pub struct FoliageTypeComponent {
     #[gpu]
     pub roughness_metallic: u32,
     #[gpu]
-    pub _pad: u32,
+    pub ground_mask: u32,
 }
 
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]

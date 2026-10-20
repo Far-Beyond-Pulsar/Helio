@@ -13,6 +13,7 @@
 
 pub mod classify;
 mod drawn;
+pub mod ground;
 pub mod scene;
 pub mod pass;
 pub mod residency;
@@ -623,6 +624,29 @@ struct GenBatch {
     details: u32,
     /// Restore jobs the batch carries too (their results follow its jobs').
     restored: usize,
+}
+
+/// Foliage tiles one ground probe answers at most (`ChunkWorld::probe_ground`): a frame's
+/// placement budget, with room.
+const PROBE_TILES: usize = 256;
+
+/// Metres over a tile's highest terrain top (and what grows on it) its ground probes
+/// start their walks.
+const PROBE_MARGIN_M: f64 = 4.0;
+
+/// Ground changes kept for foliage between takes (`ChunkWorld::take_ground_changes`).
+const GROUND_CHANGES: usize = 16_384;
+
+/// Node `key`'s box in world (planet) coordinates: its eight corners' bounds.
+fn node_box(grid: &Grid, key: NodeKey) -> [DVec3; 2] {
+    let side = f64::from(CHUNK) * f64::from(1u32 << key.level.min(31));
+    let lo = [f64::from(key.cx) * side, f64::from(key.cy) * side, f64::from(key.cz) * side];
+    let mut b = [DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)];
+    for corner in 0..8 {
+        let p = grid.position(key.face, [lo[0] + side * f64::from(corner & 1), lo[1] + side * f64::from((corner >> 1) & 1), lo[2] + side * f64::from((corner >> 2) & 1)]);
+        b = [b[0].min(p), b[1].max(p)];
+    }
+    b
 }
 
 /// `ChunkJob::tile` of a footprint the batch reads from the pool.
@@ -1284,6 +1308,17 @@ pub struct ChunkWorld {
     /// (`gi_cells`, and its CPU copy) in the clipmap they were located for.
     gi_layout: wgpu::BindGroupLayout,
     gi_trace: wgpu::ComputePipeline,
+    /// Foliage ground probes (`ground_probe`, `chunks::ground`): their layout and
+    /// pipeline, the probe frame and the asked tiles' places.
+    ground_layout: wgpu::BindGroupLayout,
+    ground_probe: wgpu::ComputePipeline,
+    probe_frame: wgpu::Buffer,
+    probe_tiles: wgpu::Buffer,
+    /// World boxes whose drawn ground changed since the last
+    /// [`ChunkWorld::take_ground_changes`], and nodes whose ground changes again
+    /// when their switch's fade ends (at that frame).
+    ground_changes: Vec<[DVec3; 2]>,
+    ground_later: Vec<(u64, NodeKey)>,
     gi_cells: wgpu::Buffer,
     gi_cell_data: Vec<[i32; 4]>,
     gi_clipmap: Option<helio_pass_gi::Clipmap>,
@@ -2292,6 +2327,19 @@ impl ChunkWorld {
             ],
         });
         let gi_trace = compute("chunk GI rays", &layout(&gi_layout), "gi_trace");
+        // Foliage ground probes: the probe frame, queries, hits, the tiles.
+        let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk ground probes"),
+            entries: &[
+                uniform(58, wgpu::ShaderStages::COMPUTE),
+                storage(59, true, wgpu::ShaderStages::COMPUTE),
+                storage(60, false, wgpu::ShaderStages::COMPUTE),
+                storage(61, true, wgpu::ShaderStages::COMPUTE),
+            ],
+        });
+        let ground_probe = compute("chunk ground probes", &layout(&ground_layout), "ground_probe");
+        let probe_frame = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk probe frame"), size: std::mem::size_of::<ground::ProbeFrame>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let probe_tiles = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk probe tiles"), size: (PROBE_TILES * std::mem::size_of::<ground::ProbeTile>()) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         // Ray reports: the hits a block of pixels samples, as the nodes
         // they want.
         let feedback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2446,6 +2494,12 @@ impl ChunkWorld {
             local_filter,
             gi_layout,
             gi_trace,
+            ground_layout,
+            ground_probe,
+            probe_frame,
+            probe_tiles,
+            ground_changes: Vec::new(),
+            ground_later: Vec::new(),
             gi_cells: buffer("chunk GI probe cells", u64::from(helio_pass_gi::PROBES) * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
             gi_cell_data: vec![[0; 4]; helio_pass_gi::PROBES as usize],
             gi_clipmap: None,
@@ -3536,7 +3590,21 @@ impl ChunkWorld {
         stats.kept_chunks = self.kept.len();
         stats.kept_bytes = self.kept_bytes;
         lap(&mut stats, 3);
-        // 4. This frame's drawn nodes and the table entries that changed.
+        // 4. This frame's drawn nodes and the table entries that changed. The ground
+        // under each changes for foliage now, and again once a switch's fade ends.
+        {
+            let changed: Vec<NodeKey> = added.iter().map(|a| a.0).chain(removed.iter().copied()).chain(self.changed_nodes.iter().copied()).collect();
+            let due: Vec<NodeKey> = self.ground_later.iter().filter(|(at, _)| *at <= frame).map(|(_, k)| *k).collect();
+            self.ground_later.retain(|(at, _)| *at > frame);
+            for key in changed.iter().chain(&due) {
+                self.ground_changes.push(node_box(&self.grid, *key));
+            }
+            self.ground_later.extend(changed.iter().map(|k| (frame + drawn::FADE_FRAMES + 1, *k)));
+            // A world nothing asks to draw keeps few: past a bound, the oldest go.
+            if self.ground_changes.len() > GROUND_CHANGES {
+                self.ground_changes.drain(..self.ground_changes.len() - GROUND_CHANGES);
+            }
+        }
         let nodes = &self.nodes;
         let chunk_of = |key: NodeKey| nodes.get(&key).map(|c| drawn::NodeChunk { slot: c.slot, z: c.z.map_or((0.0, 64.0), |(a, b)| (f64::from(a), f64::from(b))) });
         self.drawn_set.update(&added, &removed, &self.changed_nodes, frame, chunk_of);
@@ -4335,6 +4403,60 @@ impl ChunkWorld {
     /// Follows the GI clipmap `clipmap`, around world point `world_eye`
     /// (the eye, at `eye` in the planet's coordinates): the base cell of
     /// each probe that came in, located in f64, for its rays' walks.
+    /// World boxes (planet coordinates) whose drawn ground changed since the last
+    /// call: where foliage is placed again (`chunks::ground`).
+    pub fn take_ground_changes(&mut self) -> Vec<[DVec3; 2]> {
+        std::mem::take(&mut self.ground_changes)
+    }
+
+    /// Answer foliage's ground queries (`chunks::ground`): `queries` (render space,
+    /// `tiles.len()` tiles of `per_tile` each) walked down the drawn cut into `hits`, for
+    /// an eye at world `eye` and render-space `camera`. After [`Self::draw`] (its cut and
+    /// bind group); recorded on `encoder`.
+    ///
+    /// A walk starts only where drawn chunks are near: each tile's queries are walked
+    /// from a little over the highest terrain `planet` has at the tile's corners and
+    /// centre (with what grows on it), the same segments below that.
+    #[allow(clippy::too_many_arguments)]
+    pub fn probe_ground(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, queries: &wgpu::Buffer, hits: &wgpu::Buffer, tiles: &[helio_pass_foliage_place::AskedTile], planet: &Planet, eye: DVec3, camera: Vec3) {
+        let Some(group) = self.last_group.clone() else { return };
+        let per_tile = tiles.first().map_or(0, |t| t.count);
+        let grid = self.grid;
+        let margin = planet.growth_height() + PROBE_MARGIN_M;
+        let places: Vec<ground::ProbeTile> = tiles
+            .iter()
+            .take(PROBE_TILES)
+            .map(|t| {
+                let f = &t.frame;
+                let top = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)]
+                    .into_iter()
+                    .map(|(u, v)| {
+                        let (cell, _) = grid.locate(f.origin + f.axis_u * u + f.axis_v * v);
+                        grid.layer_radius(f64::from(planet.column_top(cell.face, cell.i, cell.j, 0))) - grid.radius()
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max);
+                ground::ProbeTile::new(&grid, f, t.start_height, top + margin, eye).unwrap_or_default()
+            })
+            .collect();
+        if places.is_empty() || per_tile == 0 {
+            return;
+        }
+        self.queue.write_buffer(&self.probe_tiles, 0, bytemuck::cast_slice(&places));
+        let frame = ground::ProbeFrame { eye: [camera.x, camera.y, camera.z, 0.0], counts: [per_tile, places.len() as u32, 0, 0] };
+        self.queue.write_buffer(&self.probe_frame, 0, bytemuck::bytes_of(&frame));
+        let probe_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk ground probes"),
+            layout: &self.ground_layout,
+            entries: &[entry(58, &self.probe_frame), entry(59, queries), entry(60, hits), entry(61, &self.probe_tiles)],
+        });
+        let count = per_tile * places.len() as u32;
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk ground probes"), timestamp_writes: None });
+        pass.set_bind_group(0, &group, &[]);
+        pass.set_bind_group(1, &probe_group, &[]);
+        pass.set_pipeline(&self.ground_probe);
+        pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+    }
+
     pub fn follow_gi(&mut self, clipmap: helio_pass_gi::Clipmap, world_eye: DVec3, eye: DVec3) {
         if self.gi_clipmap == Some(clipmap) {
             return;

@@ -127,7 +127,7 @@ pub const fn tile_slot_of_blade(blade_index: u32, blades_per_tile: u32) -> u32 {
 //
 // Packing rather than a flat index because the consumer needs the *tile* regardless — a
 // blade's stored position is tile-local, so reconstructing a world position requires the
-// tile's origin and `bounds_center_y`. Handing the slot over directly saves a division
+// tile's origin and `bounds_center`. Handing the slot over directly saves a division
 // per vertex in the hottest shader in the foliage path. `tile_slot_of_blade` above is the
 // flat-index alternative, kept only for callers holding a raw arena index.
 //
@@ -477,6 +477,8 @@ pub struct FoliageGBufferPass {
     // ── Producer-owned buffers (the pinned contract) ─────────────────────────
     blade_arena: Arc<wgpu::Buffer>,
     tile_table: Arc<wgpu::Buffer>,
+    /// `GpuTileFrame[]`, each slot's frame (origin, axes, up) in render space.
+    tile_frames: Arc<wgpu::Buffer>,
     visible_blades: Arc<wgpu::Buffer>,
     foliage_indirect: Arc<wgpu::Buffer>,
 
@@ -553,6 +555,7 @@ impl FoliageGBufferPass {
         device: &wgpu::Device,
         blade_arena: Arc<wgpu::Buffer>,
         tile_table: Arc<wgpu::Buffer>,
+        tile_frames: Arc<wgpu::Buffer>,
         visible_blades: Arc<wgpu::Buffer>,
         foliage_indirect: Arc<wgpu::Buffer>,
         blades_per_tile: u32,
@@ -692,6 +695,7 @@ impl FoliageGBufferPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    storage(9), // tile_frames
                 ],
             });
 
@@ -791,6 +795,7 @@ impl FoliageGBufferPass {
             bind_group_layout_0,
             blade_arena,
             tile_table,
+            tile_frames,
             visible_blades,
             foliage_indirect,
             globals_buf,
@@ -1190,6 +1195,10 @@ impl RenderPass for FoliageGBufferPass {
                         wgpu::BindGroupEntry {
                             binding: 8,
                             resource: wgpu::BindingResource::Sampler(interaction_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: self.tile_frames.as_entire_binding(),
                         },
                     ],
                 }))

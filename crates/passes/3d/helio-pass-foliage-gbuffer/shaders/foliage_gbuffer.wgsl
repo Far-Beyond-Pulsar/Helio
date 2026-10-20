@@ -165,8 +165,21 @@ struct FoliageType {
     // roughness/metallic as unorm16 x 2. See `FoliageMaterial`.
     base_color: u32,
     roughness_metallic: u32,
-    pad0: u32,
+    ground_mask: u32,
 }
+
+/// Mirror of `helio_pass_foliage_place::GpuTileFrame` (64 bytes): where a tile's blades
+/// stand in render space. A blade at `(u, v)` with height `h` roots at
+/// `origin + u * axis_u + v * axis_v + h * up` and grows along `up`.
+struct TileFrame {
+    origin: vec3<f32>,
+    axis_u: vec3<f32>,
+    axis_v: vec3<f32>,
+    up: vec3<f32>,
+}
+
+/// Mirror of `helio_pass_foliage_place::FoliageKind::Block`: a blade made of a thin box.
+const FOLIAGE_KIND_BLOCK: u32 = 3u;
 
 /// Mirror of `helio_pass_foliage_place::GpuBladeInstance` (16 bytes).
 struct BladeInstance {
@@ -184,8 +197,8 @@ struct FoliageTile {
     tile_coord: vec2<i32>,
     blade_offset: u32,
     blade_count: u32,
-    bounds_center_y: f32,
-    bounds_half_y: f32,
+    bounds_center: f32,
+    bounds_half: f32,
     state: u32,
     generation: u32,
 }
@@ -199,6 +212,7 @@ struct FoliageTile {
 @group(0) @binding(6) var<storage, read> visible_blades: array<u32>;
 @group(0) @binding(7) var interaction_tex: texture_2d<f32>;
 @group(0) @binding(8) var interaction_samp: sampler;
+@group(0) @binding(9) var<storage, read> tile_frames: array<TileFrame>;
 
 @group(1) @binding(0) var<uniform> lod_info: FoliageLod;
 
@@ -372,6 +386,62 @@ fn foliage_blade_vertex(segments: u32, is_card: bool, vertex_index: u32) -> Blad
     return out;
 }
 
+/// A blade's frame in render space: the tile's along-u direction, its up, and their cross
+/// product (world X, Y and Z on a heightfield, so blade-local offsets are world offsets
+/// there).
+struct BladeBasis {
+    tangent: vec3<f32>,
+    up: vec3<f32>,
+    bitangent: vec3<f32>,
+}
+
+fn foliage_basis(frame: TileFrame) -> BladeBasis {
+    let up = normalize(frame.up);
+    let along = frame.axis_u - up * dot(frame.axis_u, up);
+    let tangent = normalize(select(vec3<f32>(1.0, 0.0, 0.0), along, dot(along, along) > 1.0e-12));
+    return BladeBasis(tangent, up, cross(tangent, up));
+}
+
+fn foliage_to_world(b: BladeBasis, local: vec3<f32>) -> vec3<f32> {
+    return b.tangent * local.x + b.up * local.y + b.bitangent * local.z;
+}
+
+/// The blocky blade's strip ([`FoliageKind::Block`]): the two side faces turned to the
+/// eye, then (with `with_top`) the top, as a strip of `vertex_count` vertices with
+/// degenerate joins. `facing` is the eye's direction in the box's own (yawed) xz.
+/// Returns the corner (x, z in -1..1, y 0 or 1) and the face normal of the triangle the
+/// vertex provokes (the first of each strip triangle: flat shading).
+struct BlockVertex {
+    corner: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn foliage_block_vertex(vertex_index: u32, facing: vec2<f32>, with_top: bool) -> BlockVertex {
+    let sx = select(-1.0, 1.0, facing.x >= 0.0);
+    let sz = select(-1.0, 1.0, facing.y >= 0.0);
+    // Sides: (sx, -sz) -> (sx, sz) on the x face, then on to (-sx, sz) on the z face.
+    var corners = array<vec3<f32>, 11>(
+        vec3<f32>(sx, 0.0, -sz), vec3<f32>(sx, 1.0, -sz),
+        vec3<f32>(sx, 0.0, sz), vec3<f32>(sx, 1.0, sz),
+        vec3<f32>(-sx, 0.0, sz), vec3<f32>(-sx, 1.0, sz),
+        // The top: two degenerate joins, then its two triangles (R S F, S F A).
+        vec3<f32>(-sx, 1.0, sz), vec3<f32>(sx, 1.0, sz),
+        vec3<f32>(-sx, 1.0, -sz), vec3<f32>(sx, 1.0, -sz),
+        vec3<f32>(sx, 1.0, -sz),
+    );
+    var normals = array<vec3<f32>, 11>(
+        vec3<f32>(sx, 0.0, 0.0), vec3<f32>(sx, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, sz), vec3<f32>(0.0, 0.0, sz),
+        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+    );
+    // Without the top (fewer vertices), the strip ends by repeating its last side vertex.
+    let i = select(min(vertex_index, 5u), min(vertex_index, 10u), with_top);
+    return BlockVertex(corners[i], normals[i]);
+}
+
 /// Rotate a blade-local offset about +Y by `yaw`.
 fn foliage_yaw_rotate(local: vec3<f32>, yaw: f32) -> vec3<f32> {
     let s = sin(yaw);
@@ -439,6 +509,10 @@ struct VertexOutput {
     /// The type's packed `base_color` and `roughness_metallic` words. Flat: the whole
     /// blade is one material.
     @location(7) @interpolate(flat) material: vec2<u32>,
+    /// A blocky blade's face normal (the provoking vertex's: flat faces), and whether
+    /// the blade is blocky (then it, not `world_normal`, shades).
+    @location(8) @interpolate(flat) face_normal: vec3<f32>,
+    @location(9) @interpolate(flat) blocky: u32,
 }
 
 @vertex
@@ -462,13 +536,14 @@ fn vs_main(
     let local_index = reference & FOLIAGE_VISIBLE_LOCAL_MASK;
 
     let tile = tile_table[tile_slot];
+    let frame = tile_frames[tile_slot];
+    let basis = foliage_basis(frame);
     let blade = blade_arena[tile.blade_offset + local_index];
 
     // ── Reconstruct the blade's world root ────────────────────────────────────
     // Mirror of `helio_pass_foliage_place::blade_world_position`. Positions are tile-local so
     // a blade's encoding does not depend on where in the world its tile sits, which is
     // what lets placement be reproducible across GPUs.
-    let tile_origin = vec2<f32>(f32(tile.tile_coord.x), f32(tile.tile_coord.y)) * FOLIAGE_TILE_SIZE;
     let local_uv = vec2<f32>(
         foliage_unorm16(blade.packed_pos & 0xffffu),
         foliage_unorm16(blade.packed_pos >> 16u),
@@ -477,11 +552,8 @@ fn vs_main(
     // float, so it must not go through `unpack2x16float`.
     let height_offset = unpack2x16float(blade.packed_height_yaw).x;
     let yaw = foliage_yaw(blade.packed_height_yaw >> 16u);
-    let root = vec3<f32>(
-        tile_origin.x + local_uv.x * FOLIAGE_TILE_SIZE,
-        tile.bounds_center_y + height_offset,
-        tile_origin.y + local_uv.y * FOLIAGE_TILE_SIZE,
-    );
+    let root = frame.origin + frame.axis_u * local_uv.x + frame.axis_v * local_uv.y
+        + frame.up * (tile.bounds_center + height_offset);
 
     // ── Resolve the foliage type ──────────────────────────────────────────────
     let type_id = (blade.packed_scale_type >> 16u) & 0xffu;
@@ -537,25 +609,38 @@ fn vs_main(
 
     // ── Derive the vertex ─────────────────────────────────────────────────────
     let is_card = lod_info.is_card != 0u;
-    let v = foliage_blade_vertex(lod_info.segments, is_card, vertex_index);
+    let blocky = (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK && !is_card;
+    var v = foliage_blade_vertex(lod_info.segments, is_card, vertex_index);
     // Cards are flat: a curled card would swing its silhouette at the L1→L2 boundary
     // where the blade it replaces is still nearly straight, which is exactly the
     // continuity the plan's §6.3 card-orientation rule is protecting.
-    let curve = select(height * FOLIAGE_BLADE_CURVE_FRACTION, 0.0, is_card);
-    let local = vec3<f32>(
+    let curve = select(height * FOLIAGE_BLADE_CURVE_FRACTION, 0.0, is_card || blocky);
+    var local = vec3<f32>(
         v.side * 0.5 * width * v.width_frac,
         height * v.height_frac,
         curve * v.height_frac * v.height_frac,
     );
-    let world_base = root + foliage_yaw_rotate(local, yaw);
-
     // Analytic normal: the strip is two vertices wide, so a differenced normal would
     // divide by a zero-width edge at the collapsed tip.
-    let local_normal = normalize(vec3<f32>(
+    var local_normal = normalize(vec3<f32>(
         0.0,
         -2.0 * curve * v.height_frac,
         max(height, 1.0e-6),
     ));
+    if blocky {
+        // A box `width` square: its two sides turned to the eye (the eye's direction in
+        // the box's own yawed xz picks them) and, near the eye, its top.
+        let to_eye = camera_pos - root;
+        let eye_local = vec2<f32>(dot(to_eye, basis.tangent), dot(to_eye, basis.bitangent));
+        let s = sin(yaw);
+        let c = cos(yaw);
+        let facing = vec2<f32>(eye_local.x * c - eye_local.y * s, eye_local.x * s + eye_local.y * c);
+        let b = foliage_block_vertex(vertex_index, facing, lod_info.segments >= 5u);
+        local = vec3<f32>(b.corner.x * 0.5 * width, b.corner.y * height, b.corner.z * 0.5 * width);
+        local_normal = b.normal;
+        v.height_frac = b.corner.y;
+    }
+    let world_base = root + foliage_to_world(basis, foliage_yaw_rotate(local, yaw));
 
     // ── Wind, evaluated at BOTH timestamps ────────────────────────────────────
     //
@@ -564,12 +649,13 @@ fn vs_main(
     // TAA and take the LOD cross-fade down with it. See the file header.
     let response = vec3<f32>(ty.wind_trunk, ty.wind_branch, ty.wind_leaf);
     let seed = blade.packed_tint_seed >> 16u;
-    let wind_now = helio_wind_offset(
+    // The wind model sways in a +Y-up frame: its offset turned into the tile's.
+    let wind_now = foliage_to_world(basis, helio_wind_offset(
         wind, world_base, root, v.height_frac, seed, response, globals.clock_ring.x,
-    );
-    let wind_prev = helio_wind_offset(
+    ));
+    let wind_prev = foliage_to_world(basis, helio_wind_offset(
         wind, world_base, root, v.height_frac, seed, response, globals.clock_ring.y,
-    );
+    ));
 
     // The interaction bend is added to both positions, so it currently contributes no
     // velocity — see `foliage_interaction_bend`.
@@ -584,7 +670,9 @@ fn vs_main(
     var out: VertexOutput;
     out.clip_position = cameras[0].view_proj * vec4<f32>(position_now, 1.0);
     out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(position_prev, 1.0);
-    out.world_normal = foliage_yaw_rotate(local_normal, yaw);
+    out.world_normal = foliage_to_world(basis, foliage_yaw_rotate(local_normal, yaw));
+    out.face_normal = out.world_normal;
+    out.blocky = u32(blocky);
     out.height_frac = v.height_frac;
     out.tint = vec2<f32>(
         foliage_unorm8(blade.packed_tint_seed & 0xffu),
@@ -684,7 +772,12 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     // Blades are two-sided (`cull_mode: None`), so the geometric normal has to be
     // flipped for back faces or half of every blade lights as if it faced away from the
     // sun.
-    let normal = normalize(select(-input.world_normal, input.world_normal, front_facing));
+    var normal = normalize(select(-input.world_normal, input.world_normal, front_facing));
+    // A blocky blade's faces are its box's: flat, and turned to the eye already (its
+    // strip's winding alternates, so `front_facing` says nothing about them).
+    if input.blocky != 0u {
+        normal = normalize(input.face_normal);
+    }
 
     // Ambient occlusion from the blade's own height: the base of a grass sward is deep
     // in its own canopy. This is cheap and it is what stops a lawn reading as a flat

@@ -29,12 +29,14 @@
 //! groups and residency bookkeeping belong to `helio-pass-foliage-place`; the authoring
 //! API belongs to `helio::Scene`.
 
+pub mod ground;
 pub mod gpu_types;
 pub mod packing;
 pub mod placement;
 pub mod quality;
 
 pub use gpu_types::*;
+pub use ground::*;
 pub use packing::*;
 pub use placement::*;
 pub use quality::*;
@@ -84,7 +86,7 @@ pub fn tile_origin(tile_coord: [i32; 2]) -> Vec2 {
 /// Reconstruct a blade's world position from its tile header and packed record.
 ///
 /// This is the CPU mirror of the first three lines of every foliage vertex shader.
-/// Blades store tile-local XZ and a height *offset* from the tile's `bounds_center_y`
+/// Blades store tile-local XZ and a height *offset* from the tile's `bounds_center`
 /// precisely so this reconstruction is the only place world coordinates appear — see
 /// [`GpuBladeInstance::packed_height_yaw`] for why storing absolute Y instead would
 /// quantise grass into terraces far from the origin.
@@ -95,7 +97,7 @@ pub fn blade_world_position(tile: &GpuFoliageTile, blade: &GpuBladeInstance) -> 
     let (height_offset, _yaw) = unpack_blade_height_yaw(blade.packed_height_yaw);
     Vec3::new(
         origin.x + local[0] * FOLIAGE_TILE_SIZE_METERS,
-        tile.bounds_center_y + height_offset,
+        tile.bounds_center + height_offset,
         origin.y + local[1] * FOLIAGE_TILE_SIZE_METERS,
     )
 }
@@ -122,7 +124,7 @@ mod tests {
     fn blade_world_position_is_tile_relative() {
         let mut tile = GpuFoliageTile::EMPTY;
         tile.tile_coord = [-3, 5];
-        tile.bounds_center_y = 120.0;
+        tile.bounds_center = 120.0;
 
         let blade = pack_blade(BladeParams {
             tile_uv: [0.0, 0.0],

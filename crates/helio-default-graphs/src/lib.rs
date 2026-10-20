@@ -403,6 +403,7 @@ fn add_geometry_passes(
         let handles = (
             Arc::clone(&place_pass.blade_arena),
             Arc::clone(&place_pass.tile_table),
+            Arc::clone(&place_pass.tile_frames),
             Arc::clone(&place_pass.visible_blades),
             Arc::clone(&place_pass.foliage_indirect),
             place_pass.blades_per_tile(),
@@ -452,13 +453,14 @@ fn add_geometry_passes(
     // run of exact-attachment-match passes); before VirtualGeometry because VG
     // binds only seven attachments — it omits gbuffer_velocity — so anything
     // downstream of VG can never fuse with the G-buffer.
-    if let Some((blade_arena, tile_table, visible_blades, foliage_indirect, blades_per_tile)) =
+    if let Some((blade_arena, tile_table, tile_frames, visible_blades, foliage_indirect, blades_per_tile)) =
         foliage_buffers
     {
         graph.add_pass(Box::new(FoliageGBufferPass::new(
             device,
             blade_arena,
             tile_table,
+            tile_frames,
             visible_blades,
             foliage_indirect,
             blades_per_tile,
@@ -1061,6 +1063,12 @@ fn build_default_graph_internal_with_lens_user(
     }
     for factory in &voxel_passes {
         graph.add_pass(factory(device, queue, iw, ih));
+    }
+    // Foliage grows on the voxel terrain when there is one: its pass answers the
+    // placement's ground queries (`helio_pass_voxel_planet::chunks::ground`).
+    let voxel_ground = graph.find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>().map(|p| p.foliage_ground());
+    if let (Some(ground), Some(place)) = (voxel_ground, graph.find_pass_mut::<FoliagePlacePass>()) {
+        place.set_ground(ground);
     }
 
     // Decal pass — projects decals into the G-buffer after it's been written.

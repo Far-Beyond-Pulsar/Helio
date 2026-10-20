@@ -3,9 +3,12 @@
 use std::sync::Arc;
 
 use crate::{
-    FoliageQuality, GpuBladeInstance, GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, TileState,
-    DEFAULT_MAX_TILES_PER_FRAME, DEFAULT_TILE_RING_CAPACITY, FOLIAGE_TILE_SIZE_METERS,
+    FoliageQuality, GpuBladeInstance, GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, GpuGroundArgs,
+    GpuGroundHit, GpuGroundQuery, GpuTileFrame, GroundLink, PlaneGround, TileState,
+    DEFAULT_MAX_TILES_PER_FRAME, DEFAULT_TILE_RING_CAPACITY, FOLIAGE_TILE_SIZE_METERS, GROUND_ARGS,
+    GROUND_HITS, GROUND_QUERIES,
 };
+use glam::DVec3;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -22,7 +25,25 @@ const TILE_BYTES: u64 = std::mem::size_of::<GpuFoliageTile>() as u64;
 const BLADE_BYTES: u64 = std::mem::size_of::<GpuBladeInstance>() as u64;
 const TYPE_BYTES: u64 = std::mem::size_of::<GpuFoliageType>() as u64;
 const LAYER_BYTES: u64 = std::mem::size_of::<GpuFoliageLayer>() as u64;
+const FRAME_BYTES: u64 = std::mem::size_of::<GpuTileFrame>() as u64;
 
+/// How far over the eye's height along a tile's up a ground query starts, and how far
+/// under it it ends: ground within this band of the eye's height is found, which a ring
+/// a few hundred metres across never leaves outside cliffs that tall.
+const SEARCH_ABOVE_METRES: f32 = 256.0;
+const SEARCH_BELOW_METRES: f32 = 512.0;
+
+/// Densest authored ground assumed when the pass is not sized for a density
+/// (`new_with_density`), in blades per square metre: it sizes the candidate grid.
+const DEFAULT_MAX_DENSITY: f32 = 40.0;
+
+/// A tile whose ground was asked last frame: placed this frame from the answers if its
+/// slot still holds it.
+#[derive(Clone, Copy, Debug)]
+struct Asked {
+    slot: u32,
+    coord: [i32; 2],
+}
 /// Hard ceiling on the foliage type table.
 ///
 /// `GpuBladeInstance` stores the type id in 8 bits, so 256 is not a budget choice — it is
@@ -72,8 +93,34 @@ pub struct FoliagePlacePass {
     /// all four.
     pub foliage_indirect: Arc<wgpu::Buffer>,
 
+    /// `GpuTileFrame[]`, one per ring slot: where its blades stand (origin, axes, up) in
+    /// render space. Written by the CPU when a slot takes a tile and when the world origin
+    /// moves; read by placement, the cull and the draw.
+    pub tile_frames: Arc<wgpu::Buffer>,
+
     /// Per-LOD visible counts plus the overflow telemetry. See the `COUNTER_*` constants.
     counters: Arc<wgpu::Buffer>,
+
+    /// The ground exchange (`contract::ground`): queries, hits and the queries' header,
+    /// published as [`GROUND_QUERIES`], [`GROUND_HITS`] and [`GROUND_ARGS`].
+    queries: Arc<wgpu::Buffer>,
+    hits: Arc<wgpu::Buffer>,
+    ground_args: Arc<wgpu::Buffer>,
+    /// Queries a frame can hold: the tiles a frame queries times the most candidates a tile
+    /// evaluates.
+    query_capacity: u32,
+    /// The ground: its tiling, and who answers its queries.
+    ground: Arc<GroundLink>,
+    /// The chart the resident tiles lie on.
+    chart: Option<u64>,
+    /// The renderer's world origin the frames were written for.
+    world_origin: Option<DVec3>,
+    /// Batches of queries published so far (the last one is `batch`).
+    batch: u64,
+    /// Tiles asked in the last batch, in query order.
+    asked: Vec<Asked>,
+    /// Densest ground the candidate grid is sized for (blades per square metre).
+    max_density: f32,
 
     // ── Internal ────────────────────────────────────────────────────────────────
     placeholder_type: wgpu::Buffer,
@@ -84,6 +131,8 @@ pub struct FoliagePlacePass {
     cull_uniforms: wgpu::Buffer,
 
     place_pipeline: wgpu::ComputePipeline,
+    query_pipeline: wgpu::ComputePipeline,
+    ground_plane_pipeline: wgpu::ComputePipeline,
     tile_cull_pipeline: wgpu::ComputePipeline,
     cluster_cull_pipeline: wgpu::ComputePipeline,
     finalize_pipeline: wgpu::ComputePipeline,
@@ -110,6 +159,8 @@ pub struct FoliagePlacePass {
 
     // Per-frame state handed from `prepare` to `execute`.
     active: bool,
+    /// Tiles placed from last frame's answers, then tiles queried, this frame.
+    place_tile_count: u32,
     queued_tile_count: u32,
     cluster_dispatch_width: u32,
     cluster_dispatch_height: u32,
@@ -132,7 +183,9 @@ pub struct FoliagePlacePass {
     debug_counters: [u32; FOLIAGE_COUNTER_COUNT],
 
     header_scratch: Vec<GpuFoliageTile>,
+    frame_scratch: Vec<GpuTileFrame>,
     dirty_scratch: Vec<u32>,
+    queue_scratch: Vec<u32>,
 }
 
 impl FoliagePlacePass {
@@ -248,6 +301,22 @@ impl FoliagePlacePass {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
+        let tile_frames = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Foliage Tile Frames"),
+            size: ring_capacity as u64 * FRAME_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        // A frame queries its budget of tiles, each at most the candidates its slab or the
+        // loop bound allow (`candidate_grid`).
+        let query_capacity = DEFAULT_MAX_TILES_PER_FRAME.max(1) * blades_per_tile.min(MAX_CANDIDATES_PER_TILE).max(1);
+        let ground_buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
+            Arc::new(device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE | usage, mapped_at_creation: false }))
+        };
+        let queries = ground_buffer("Foliage Ground Queries", query_capacity as u64 * std::mem::size_of::<GpuGroundQuery>() as u64, wgpu::BufferUsages::empty());
+        let hits = ground_buffer("Foliage Ground Hits", query_capacity as u64 * std::mem::size_of::<GpuGroundHit>() as u64, wgpu::BufferUsages::empty());
+        let ground_args = ground_buffer("Foliage Ground Args", std::mem::size_of::<GpuGroundArgs>() as u64, wgpu::BufferUsages::INDIRECT);
+
         let counters = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Foliage Counters"),
             size: FOLIAGE_COUNTER_COUNT as u64 * 4,
@@ -271,7 +340,8 @@ impl FoliagePlacePass {
         });
         let place_queue = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Foliage Place Queue"),
-            size: (DEFAULT_MAX_TILES_PER_FRAME.max(1) as u64) * 4,
+            // Last frame's answered tiles, then this frame's queried ones.
+            size: 2 * (DEFAULT_MAX_TILES_PER_FRAME.max(1) as u64) * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -385,6 +455,10 @@ impl FoliagePlacePass {
                     count: None,
                 },
                 storage_entry(8, true),
+                storage_entry(9, true),
+                storage_entry(10, false),
+                storage_entry(11, false),
+                storage_entry(12, false),
             ],
         });
 
@@ -418,6 +492,7 @@ impl FoliagePlacePass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                storage_entry(11, true),
             ],
         });
 
@@ -432,14 +507,19 @@ impl FoliagePlacePass {
             immediate_size: 0,
         });
 
-        let place_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Foliage Place Pipeline"),
-            layout: Some(&place_layout),
-            module: &place_shader,
-            entry_point: Some("cs_place"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let place_entry = |label: &str, entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&place_layout),
+                module: &place_shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let place_pipeline = place_entry("Foliage Place Pipeline", "cs_place");
+        let query_pipeline = place_entry("Foliage Ground Query Pipeline", "cs_query");
+        let ground_plane_pipeline = place_entry("Foliage Plane Ground Pipeline", "cs_ground_plane");
         let tile_cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Foliage Tile Cull Pipeline"),
             layout: Some(&cull_layout),
@@ -471,7 +551,18 @@ impl FoliagePlacePass {
             tile_table,
             visible_blades,
             foliage_indirect,
+            tile_frames,
             counters,
+            queries,
+            hits,
+            ground_args,
+            query_capacity,
+            ground: Arc::new(GroundLink::built_in(Box::new(PlaneGround))),
+            chart: None,
+            world_origin: None,
+            batch: 0,
+            asked: Vec::new(),
+            max_density: blades_per_square_metre.filter(|d| d.is_finite() && *d > 0.0).unwrap_or(DEFAULT_MAX_DENSITY),
             placeholder_type,
             placeholder_layer,
             place_queue,
@@ -479,6 +570,8 @@ impl FoliagePlacePass {
             place_uniforms,
             cull_uniforms,
             place_pipeline,
+            query_pipeline,
+            ground_plane_pipeline,
             tile_cull_pipeline,
             cluster_cull_pipeline,
             finalize_pipeline,
@@ -504,6 +597,7 @@ impl FoliagePlacePass {
             clusters_per_tile,
             terrain_transform: None,
             active: false,
+            place_tile_count: 0,
             queued_tile_count: 0,
             cluster_dispatch_width: 1,
             cluster_dispatch_height: 1,
@@ -522,8 +616,23 @@ impl FoliagePlacePass {
             readback_state: ReadbackState::Idle,
             debug_counters: [0; FOLIAGE_COUNTER_COUNT],
             header_scratch: Vec::new(),
+            frame_scratch: Vec::new(),
             dirty_scratch: Vec::new(),
+            queue_scratch: Vec::new(),
         }
+    }
+
+    /// Grow on `ground` from now on (`contract::ground`): its chart tiles the ring, and
+    /// its answers place the blades. Every resident tile is placed again.
+    pub fn set_ground(&mut self, ground: Arc<GroundLink>) {
+        self.ground = ground;
+        self.chart = None;
+        self.asked.clear();
+    }
+
+    /// The ground this pass grows on.
+    pub fn ground(&self) -> &Arc<GroundLink> {
+        &self.ground
     }
 
     /// Quality preset this pass was built for. Changing it means rebuilding the pass —
@@ -591,9 +700,14 @@ impl FoliagePlacePass {
         self.debug_counters
     }
 
-    /// Tiles queued for placement this frame.
+    /// Tiles whose ground was queried this frame (placed the next).
     pub fn queued_tile_count(&self) -> u32 {
         self.queued_tile_count
+    }
+
+    /// Tiles placed this frame from last frame's answers.
+    pub fn placed_tile_count(&self) -> u32 {
+        self.place_tile_count
     }
 
     /// Advance the non-blocking readback. Called once per frame from `prepare`.
@@ -706,10 +820,14 @@ impl FoliagePlacePass {
     /// Contiguous slots are coalesced into one write, which matters on the teleport path
     /// where the whole table turns over in a single frame; in steady state the dirty set
     /// is a perimeter strip and this is a handful of small writes.
-    fn upload_tile_headers(&mut self, ctx: &PrepareContext, generation: u32) {
+    fn upload_tile_headers(&mut self, ctx: &PrepareContext, generation: u32, chart: u64, world_origin: DVec3, all_frames: bool) {
         self.dirty_scratch.clear();
-        self.dirty_scratch
-            .extend_from_slice(self.ring.dirty_slots());
+        if all_frames {
+            self.dirty_scratch.extend(0..self.ring_capacity);
+        } else {
+            self.dirty_scratch.extend_from_slice(self.ring.dirty_slots());
+        }
+        let dirty_headers: std::collections::HashSet<u32> = self.ring.dirty_slots().iter().copied().collect();
         if self.dirty_scratch.is_empty() {
             return;
         }
@@ -726,15 +844,32 @@ impl FoliagePlacePass {
                 end += 1;
             }
 
+            // Every slot's frame in the run; the headers of the slots the ring changed
+            // (a frame rewritten for a moved origin keeps its tile's header and blades).
+            self.frame_scratch.clear();
+            for slot in start..=self.dirty_scratch[end] {
+                let frame = self.ring.slot_coord(slot).and_then(|coord| self.ground.geometry().tile_frame(chart, coord));
+                self.frame_scratch.push(frame.map_or(GpuTileFrame::default(), |f| f.gpu(world_origin)));
+            }
+            ctx.write_buffer(&self.tile_frames, start as u64 * FRAME_BYTES, bytemuck::cast_slice(&self.frame_scratch));
             self.header_scratch.clear();
             for slot in start..=self.dirty_scratch[end] {
+                if !dirty_headers.contains(&slot) {
+                    // Contiguous runs of header writes only: flush and skip this one.
+                    if !self.header_scratch.is_empty() {
+                        let first = slot - self.header_scratch.len() as u32;
+                        ctx.write_buffer(&self.tile_table, first as u64 * TILE_BYTES, bytemuck::cast_slice(&self.header_scratch));
+                        self.header_scratch.clear();
+                    }
+                    continue;
+                }
                 self.header_scratch.push(match self.ring.slot_coord(slot) {
                     Some(coord) => GpuFoliageTile {
                         tile_coord: coord,
                         blade_offset: slot * self.blades_per_tile,
                         blade_count: 0,
-                        bounds_center_y: 0.0,
-                        bounds_half_y: 0.0,
+                        bounds_center: 0.0,
+                        bounds_half: 0.0,
                         // The GPU flips this to `Resident` at the end of `cs_place`.
                         // Publishing `Resident` from here instead would let the cull
                         // read a slab that placement has not written yet, drawing the
@@ -745,174 +880,18 @@ impl FoliagePlacePass {
                     None => GpuFoliageTile::EMPTY,
                 });
             }
-            ctx.write_buffer(
-                &self.tile_table,
-                start as u64 * TILE_BYTES,
-                bytemuck::cast_slice(&self.header_scratch),
-            );
+            if !self.header_scratch.is_empty() {
+                let first = self.dirty_scratch[end] + 1 - self.header_scratch.len() as u32;
+                ctx.write_buffer(&self.tile_table, first as u64 * TILE_BYTES, bytemuck::cast_slice(&self.header_scratch));
+            }
             index = end + 1;
         }
     }
 }
 
-impl RenderPass for FoliagePlacePass {
-    fn name(&self) -> &'static str {
-        "FoliagePlace"
-    }
-
-    /// `"foliage_terrain"` is deliberately absent even though the plan's §10 lists it.
-    ///
-    /// `RenderGraph::validate_dependencies` rejects a read with no prior writer, and
-    /// `FoliageTerrainPass` does not exist yet — declaring the read today makes every
-    /// graph containing this pass fail to build. Add it in the same change that adds the
-    /// producer.
-    fn reads(&self) -> &'static [&'static str] {
-        &["hiz"]
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["foliage_draws"]
-    }
-
-    fn render_pass_descriptor<'a>(
-        &'a self,
-        _target: &'a wgpu::TextureView,
-        _depth: &'a wgpu::TextureView,
-        _resources: &'a helio_core::ResourceRegistry<'a>,
-    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        None
-    }
-
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // SceneDB is the only foliage authoring input.  Buffer size is the stable row
-        // capacity exposed by the mirror; zero rows means the pass has no work.
-        self.active = false;
-        if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
-            log::debug!(
-                "[foliage][gate] frame={} scene_type_buffer={}",
-                ctx.frame_num,
-                ctx.scene_buffers
-                    .get(BufferKey::of("foliage_types"))
-                    .is_some(),
-            );
-        }
-        let Some(type_handle) = ctx.scene_buffers.get(BufferKey::of("foliage_types")) else {
-            return Ok(());
-        };
-        self.type_liveness.update(ctx.device, ctx.queue, Some(type_handle));
-        if !self.type_liveness.maybe_live(type_handle) {
-            return Ok(());
-        }
-        let mut type_count = (type_handle.buffer.size() / TYPE_BYTES) as u32;
-        if type_count > MAX_FOLIAGE_TYPES {
-            if !self.warned_type_overflow {
-                log::warn!(
-                    "{type_count} foliage types published but GpuBladeInstance stores the \
-                     type id in 8 bits; clamping to {MAX_FOLIAGE_TYPES}"
-                );
-                self.warned_type_overflow = true;
-            }
-            type_count = MAX_FOLIAGE_TYPES;
-        }
-
-        let mut layer_count = ctx
-            .scene_buffers
-            .get(BufferKey::of("foliage_layers"))
-            .map(|h| (h.buffer.size() / LAYER_BYTES) as u32)
-            .unwrap_or(0);
-        if layer_count > MAX_FOLIAGE_LAYERS {
-            log::warn!(
-                "{layer_count} foliage layers published but the layer table holds \
-                 {MAX_FOLIAGE_LAYERS}; clamping"
-            );
-            layer_count = MAX_FOLIAGE_LAYERS;
-        }
-        // The placement uniform only needs conservative bounds.  The actual authored
-        // values are read by the GPU directly from the SceneDB type column.
-        let max_foliage_height = 0.45;
-        let max_density = 40.0;
-        let (candidate_grid, achieved_density) = self.candidate_grid(max_density);
-        self.density_scale = achieved_density;
-        if achieved_density < 0.999 && !self.warned_density_clamp {
-            log::warn!(
-                "foliage density clamped to {:.0}% of the authored value: a tile's \
-                 {} candidates do not fit its {}-blade arena slab. Grass will be uniformly \
-                 thinner. Raise FoliageQuality::blade_arena_bytes or lower the authored \
-                 density.",
-                achieved_density * 100.0,
-                (max_density
-                    * self.quality.density_multiplier()
-                    * FOLIAGE_TILE_SIZE_METERS
-                    * FOLIAGE_TILE_SIZE_METERS)
-                    .ceil(),
-                self.blades_per_tile,
-            );
-            self.warned_density_clamp = true;
-        }
-
-        // Residency is keyed on (tile_coord, generation): a tile is re-placed whenever
-        // the type or layer table's contents change. The blades' seed follows the type
-        // table alone, so a tile re-placed because only the layers changed (a publisher
-        // may re-derive them when any object moves) grows the same blades wherever its
-        // layers still cover it. Both are truncated to 32 bits because that is what
-        // `blade_seed` mixes. Wrapping is harmless — it takes 4 billion authoring edits,
-        // and a collision only means one tile keeps its blades through an edit it should
-        // have re-rolled.
-        let mix = |handle: &helio_core::BufferHandle| {
-            handle.epoch ^ handle.content_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        };
-        let seed_generation = mix(type_handle) as u32;
-        let layers = ctx.scene_buffers.get(BufferKey::of("foliage_layers"));
-        let generation =
-            (mix(type_handle) ^ layers.map_or(0, |h| mix(h).rotate_left(29))) as u32;
-        let position_near = ctx.camera_data.position_near;
-        let camera = [position_near[0], position_near[1], position_near[2]];
-        let ring_update = self.ring.update([camera[0], camera[2]], generation);
-        if ring_update.evicted > 0 {
-            log::debug!(
-                "foliage ring evicted {} resident tiles to make room; the ring capacity is \
-                 smaller than its window and placement is no longer amortised",
-                ring_update.evicted
-            );
-        }
-
-        self.upload_tile_headers(ctx, seed_generation);
-
-        let queue = self.ring.place_queue();
-        self.queued_tile_count = queue.len() as u32;
-        if !queue.is_empty() {
-            ctx.write_buffer(&self.place_queue, 0, bytemuck::cast_slice(queue));
-        }
-
-        let (terrain_origin, terrain_extent, terrain_valid) = match self.terrain_transform {
-            Some((origin, extent)) if ctx.registry.contains("foliage_terrain") => {
-                (origin, extent, 1)
-            }
-            _ => ([0.0, 0.0], 1.0, 0),
-        };
-
-        ctx.write_buffer(
-            &self.place_uniforms,
-            0,
-            bytemuck::bytes_of(&PlaceUniforms {
-                tile_size: FOLIAGE_TILE_SIZE_METERS,
-                candidate_grid,
-                cluster_edge: isqrt(self.cluster_size).max(1),
-                slab_capacity: self.blades_per_tile,
-                queued_tile_count: self.queued_tile_count,
-                density_multiplier: self.quality.density_multiplier(),
-                max_density: max_density * self.quality.density_multiplier(),
-                type_count,
-                max_foliage_height,
-                terrain_valid,
-                terrain_origin_x: terrain_origin[0],
-                terrain_origin_z: terrain_origin[1],
-                terrain_extent,
-                layer_count,
-                _pad: [0; 2],
-            }),
-        );
-
+impl FoliagePlacePass {
+    /// The cull's constants and dispatch sizes, and the counters' readback.
+    fn prepare_cull(&mut self, ctx: &PrepareContext, type_count: u32, max_foliage_height: f32) -> HelioResult<()> {
         // 2D dispatch grid, the way `vg_cull.wgsl` does it: at the reference tier the
         // cluster lane count is ~98 k, which is under the single-dimension limit, but a
         // large ring on a device with a small limit must still fit.
@@ -977,6 +956,273 @@ impl RenderPass for FoliagePlacePass {
 
         self.active = true;
         Ok(())
+    }
+}
+
+impl RenderPass for FoliagePlacePass {
+    fn name(&self) -> &'static str {
+        "FoliagePlace"
+    }
+
+    /// `"foliage_terrain"` is deliberately absent even though the plan's §10 lists it.
+    ///
+    /// `RenderGraph::validate_dependencies` rejects a read with no prior writer, and
+    /// `FoliageTerrainPass` does not exist yet — declaring the read today makes every
+    /// graph containing this pass fail to build. Add it in the same change that adds the
+    /// producer.
+    fn reads(&self) -> &'static [&'static str] {
+        &["hiz"]
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["foliage_draws", GROUND_QUERIES, GROUND_HITS, GROUND_ARGS]
+    }
+
+    /// The ground exchange, for a ground answered by another pass (`contract::ground`).
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        frame.write_buffer_binding(GROUND_QUERIES, &self.queries, "FoliagePlace");
+        frame.write_buffer_binding(GROUND_HITS, &self.hits, "FoliagePlace");
+        frame.write_buffer_binding(GROUND_ARGS, &self.ground_args, "FoliagePlace");
+    }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // SceneDB is the only foliage authoring input.  Buffer size is the stable row
+        // capacity exposed by the mirror; zero rows means the pass has no work.
+        self.active = false;
+        if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
+            log::debug!(
+                "[foliage][gate] frame={} scene_type_buffer={}",
+                ctx.frame_num,
+                ctx.scene_buffers
+                    .get(BufferKey::of("foliage_types"))
+                    .is_some(),
+            );
+        }
+        let Some(type_handle) = ctx.scene_buffers.get(BufferKey::of("foliage_types")) else {
+            return Ok(());
+        };
+        self.type_liveness.update(ctx.device, ctx.queue, Some(type_handle));
+        if !self.type_liveness.maybe_live(type_handle) {
+            return Ok(());
+        }
+        let mut type_count = (type_handle.buffer.size() / TYPE_BYTES) as u32;
+        if type_count > MAX_FOLIAGE_TYPES {
+            if !self.warned_type_overflow {
+                log::warn!(
+                    "{type_count} foliage types published but GpuBladeInstance stores the \
+                     type id in 8 bits; clamping to {MAX_FOLIAGE_TYPES}"
+                );
+                self.warned_type_overflow = true;
+            }
+            type_count = MAX_FOLIAGE_TYPES;
+        }
+
+        let mut layer_count = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_layers"))
+            .map(|h| (h.buffer.size() / LAYER_BYTES) as u32)
+            .unwrap_or(0);
+        if layer_count > MAX_FOLIAGE_LAYERS {
+            log::warn!(
+                "{layer_count} foliage layers published but the layer table holds \
+                 {MAX_FOLIAGE_LAYERS}; clamping"
+            );
+            layer_count = MAX_FOLIAGE_LAYERS;
+        }
+        // The placement uniform only needs conservative bounds: the authored values are
+        // read by the GPU directly from the SceneDB type column.
+        let max_foliage_height = 0.45;
+        let (candidate_grid, achieved_density) = self.candidate_grid(self.max_density);
+        self.density_scale = achieved_density;
+        if achieved_density < 0.999 && !self.warned_density_clamp {
+            log::warn!(
+                "foliage density clamped to {:.0}% of the authored value: a tile's \
+                 {} candidates do not fit its {}-blade arena slab. Grass will be uniformly \
+                 thinner. Raise FoliageQuality::blade_arena_bytes or lower the authored \
+                 density.",
+                achieved_density * 100.0,
+                (self.max_density
+                    * self.quality.density_multiplier()
+                    * FOLIAGE_TILE_SIZE_METERS
+                    * FOLIAGE_TILE_SIZE_METERS)
+                    .ceil(),
+                self.blades_per_tile,
+            );
+            self.warned_density_clamp = true;
+        }
+
+        // The ground's chart around the eye. Tiles of one chart only are resident: a new
+        // chart (another cube face under the eye, another ground) places every tile again.
+        let world_origin = ctx.world_origin.unwrap_or(DVec3::ZERO);
+        let position_near = ctx.camera_data.position_near;
+        let camera = glam::Vec3::new(position_near[0], position_near[1], position_near[2]);
+        let eye = world_origin + camera.as_dvec3();
+        let Some(chart) = self.ground.geometry().chart(eye) else {
+            // The ground cannot tile yet (not loaded): draw what is resident.
+            self.place_tile_count = 0;
+            self.queued_tile_count = 0;
+            return self.prepare_cull(ctx, type_count, max_foliage_height);
+        };
+        let chart_changed = self.chart != Some(chart.id);
+        self.chart = Some(chart.id);
+        let origin_moved = self.world_origin != Some(world_origin);
+        self.world_origin = Some(world_origin);
+
+        // Residency is keyed on (tile_coord, generation): a tile is re-placed whenever
+        // the type or layer table's contents, or the chart, change. The blades' seed
+        // follows the type table alone, so a tile re-placed because only the layers
+        // changed grows the same blades wherever its layers still cover it. Truncated to
+        // 32 bits because that is what `blade_seed` mixes; a collision only means one
+        // tile keeps its blades through an edit it should have re-rolled.
+        let mix = |handle: &helio_core::BufferHandle| {
+            handle.epoch ^ handle.content_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        };
+        let seed_generation = mix(type_handle) as u32;
+        let layers = ctx.scene_buffers.get(BufferKey::of("foliage_layers"));
+        let generation = (mix(type_handle)
+            ^ layers.map_or(0, |h| mix(h).rotate_left(29))
+            ^ chart.id.wrapping_mul(0xc2b2_ae3d_27d4_eb4f).rotate_left(13)) as u32;
+        if chart_changed {
+            self.asked.clear();
+        }
+        let ring_eye = [chart.eye[0] as f32, chart.eye[1] as f32];
+        let ring_update = self.ring.update(ring_eye, generation);
+        if ring_update.evicted > 0 {
+            log::debug!(
+                "foliage ring evicted {} resident tiles to make room; the ring capacity is \
+                 smaller than its window and placement is no longer amortised",
+                ring_update.evicted
+            );
+        }
+
+        // Last frame's tiles, placed from their answers where they came: the ground
+        // answered the batch (the built-in plane always does), the origin the queries
+        // were written in still holds, and the slot still holds the tile. The others are
+        // asked again.
+        let answered = !self.ground.is_external() || self.ground.answered() == Some(self.batch);
+        let asked = std::mem::take(&mut self.asked);
+        self.queue_scratch.clear();
+        for (index, a) in asked.iter().enumerate() {
+            let held = self.ring.slot_coord(a.slot) == Some(a.coord);
+            if held && answered && !origin_moved && !ring_update.invalidated {
+                self.queue_scratch.push(a.slot | ((index as u32) << 16));
+            } else if held {
+                self.ring.refresh(a.coord);
+            }
+        }
+        self.place_tile_count = self.queue_scratch.len() as u32;
+
+        // The ground's changes since last frame: the resident tiles under them are placed
+        // again (budgeted with the entering ones next frame; their blades draw meanwhile).
+        let size = f64::from(FOLIAGE_TILE_SIZE_METERS);
+        for [lo, hi] in self.ground.take_changes() {
+            let mut range: Option<([i32; 2], [i32; 2])> = None;
+            for corner in 0..8 {
+                let p = DVec3::new(
+                    if corner & 1 == 0 { lo.x } else { hi.x },
+                    if corner & 2 == 0 { lo.y } else { hi.y },
+                    if corner & 4 == 0 { lo.z } else { hi.z },
+                );
+                let Some(at) = self.ground.geometry().locate(chart.id, p) else { continue };
+                let tile = [(at[0] / size).floor() as i32, (at[1] / size).floor() as i32];
+                range = Some(match range {
+                    None => (tile, tile),
+                    Some((a, b)) => ([a[0].min(tile[0]), a[1].min(tile[1])], [b[0].max(tile[0]), b[1].max(tile[1])]),
+                });
+            }
+            if let Some((a, b)) = range {
+                for coord in self.ring.resident_within(a, b) {
+                    self.ring.refresh(coord);
+                }
+            }
+        }
+
+        // This frame's questions: the entering tiles (budgeted by the ring), then those
+        // placed again.
+        self.upload_tile_headers(ctx, seed_generation, chart.id, world_origin, origin_moved || chart_changed);
+        let questions: Vec<u32> = self.ring.place_queue().iter().chain(self.ring.refresh_queue()).copied().collect();
+        let cells = candidate_grid * candidate_grid;
+        let fit = (self.query_capacity / cells.max(1)) as usize;
+        for &slot in questions.iter().take(fit) {
+            if let Some(coord) = self.ring.slot_coord(slot) {
+                self.asked.push(Asked { slot, coord });
+                self.queue_scratch.push(slot);
+            }
+        }
+        for &slot in questions.iter().skip(fit) {
+            if let Some(coord) = self.ring.slot_coord(slot) {
+                self.ring.refresh(coord);
+            }
+        }
+        self.queued_tile_count = self.asked.len() as u32;
+        if self.queued_tile_count > 0 {
+            self.batch += 1;
+            if self.ground.is_external() {
+                // What the answering pass needs besides the queries: each tile's frame and
+                // where its queries start (as `cs_query` takes it, in f64).
+                let tiles = self
+                    .asked
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, a)| {
+                        let frame = self.ground.geometry().tile_frame(chart.id, a.coord)?;
+                        let up = frame.up.normalize_or(DVec3::Y);
+                        Some(crate::AskedTile {
+                            frame,
+                            start_height: (eye - frame.origin).dot(up) + f64::from(SEARCH_ABOVE_METRES),
+                            first: index as u32 * cells,
+                            count: cells,
+                        })
+                    })
+                    .collect();
+                self.ground.ask(self.batch, tiles);
+            }
+        }
+        if !self.queue_scratch.is_empty() {
+            ctx.write_buffer(&self.place_queue, 0, bytemuck::cast_slice(&self.queue_scratch));
+        }
+
+        let (terrain_origin, terrain_extent, terrain_valid) = match self.terrain_transform {
+            Some((origin, extent)) if ctx.registry.contains("foliage_terrain") => {
+                (origin, extent, 1)
+            }
+            _ => ([0.0, 0.0], 1.0, 0),
+        };
+
+        ctx.write_buffer(
+            &self.place_uniforms,
+            0,
+            bytemuck::bytes_of(&PlaceUniforms {
+                tile_size: FOLIAGE_TILE_SIZE_METERS,
+                candidate_grid,
+                cluster_edge: isqrt(self.cluster_size).max(1),
+                slab_capacity: self.blades_per_tile,
+                place_tile_count: self.place_tile_count,
+                query_tile_count: self.queued_tile_count,
+                density_multiplier: self.quality.density_multiplier(),
+                grid_density: cells as f32 / (FOLIAGE_TILE_SIZE_METERS * FOLIAGE_TILE_SIZE_METERS),
+                type_count,
+                max_foliage_height,
+                terrain_valid,
+                terrain_origin_x: terrain_origin[0],
+                terrain_origin_z: terrain_origin[1],
+                terrain_extent,
+                layer_count,
+                search_above: SEARCH_ABOVE_METRES,
+                search_below: SEARCH_BELOW_METRES,
+                eye: camera.to_array(),
+            }),
+        );
+        self.prepare_cull(ctx, type_count, max_foliage_height)
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -1045,6 +1291,10 @@ impl RenderPass for FoliagePlacePass {
                             binding: 8,
                             resource: layer_buffer.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry { binding: 9, resource: self.tile_frames.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 10, resource: self.queries.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 11, resource: self.hits.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 12, resource: self.ground_args.as_entire_binding() },
                     ],
                 }));
             self.place_bind_group_key = Some(place_key);
@@ -1104,6 +1354,7 @@ impl RenderPass for FoliagePlacePass {
                         binding: 10,
                         resource: wgpu::BindingResource::Sampler(hiz_sampler),
                     },
+                    wgpu::BindGroupEntry { binding: 11, resource: self.tile_frames.as_entire_binding() },
                 ],
             }));
             self.cull_bind_group_key = Some(key);
@@ -1123,20 +1374,33 @@ impl RenderPass for FoliagePlacePass {
         // frame does not look like a permanent budget failure.
         encoder.clear_buffer(&self.counters, 0, None);
 
-        if self.queued_tile_count > 0 {
+        if self.place_tile_count > 0 || self.queued_tile_count > 0 {
+            let Some(place_bg) = self.place_bind_group.as_ref() else {
+                return Ok(());
+            };
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Foliage Place"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.place_pipeline);
-            let Some(place_bg) = self.place_bind_group.as_ref() else {
-                return Ok(());
-            };
             pass.set_bind_group(0, place_bg, &[]);
-            // One workgroup per queued tile, bounded by `max_tiles_per_frame`. This is
-            // what turns a teleport into a few frames of progressive fill-in instead of
-            // a hitch.
-            pass.dispatch_workgroups(self.queued_tile_count, 1, 1);
+            // Last frame's tiles from their answers (before this frame's queries take
+            // their place in the exchange buffers), one workgroup a tile. Bounded by
+            // `max_tiles_per_frame`: a teleport is a few frames of progressive fill-in,
+            // not a hitch.
+            if self.place_tile_count > 0 {
+                pass.set_pipeline(&self.place_pipeline);
+                pass.dispatch_workgroups(self.place_tile_count, 1, 1);
+            }
+            // This frame's questions; the built-in ground answers them at once, another
+            // ground in its own pass later in the frame.
+            if self.queued_tile_count > 0 {
+                pass.set_pipeline(&self.query_pipeline);
+                pass.dispatch_workgroups(self.queued_tile_count, 1, 1);
+                if !self.ground.is_external() {
+                    pass.set_pipeline(&self.ground_plane_pipeline);
+                    pass.dispatch_workgroups_indirect(&self.ground_args, 0);
+                }
+            }
         }
 
         {
@@ -1314,6 +1578,7 @@ mod tests {
     #[test]
     fn gpu_record_sizes_match_the_wgsl_mirrors() {
         assert_eq!(TILE_BYTES, 32);
+        assert_eq!(FRAME_BYTES, 64);
         assert_eq!(BLADE_BYTES, 16);
         assert_eq!(TYPE_BYTES, 96);
         assert_eq!(LAYER_BYTES, 32);

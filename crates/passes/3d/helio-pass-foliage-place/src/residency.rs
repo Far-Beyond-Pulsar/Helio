@@ -70,6 +70,11 @@ pub struct TileRing {
 
     place_queue: Vec<u32>,
     dirty: Vec<u32>,
+    /// Resident tiles whose ground changed, to be placed again over the blades they
+    /// keep meanwhile ([`TileRing::refresh`]), and those drained this frame.
+    refresh: VecDeque<[i32; 2]>,
+    refresh_set: HashSet<[i32; 2]>,
+    refresh_queue: Vec<u32>,
 
     touch_counter: u64,
     last_visited: usize,
@@ -112,6 +117,9 @@ impl TileRing {
             pending_set: HashSet::new(),
             place_queue: Vec::with_capacity(max_tiles_per_frame.max(1) as usize),
             dirty: Vec::new(),
+            refresh: VecDeque::new(),
+            refresh_set: HashSet::new(),
+            refresh_queue: Vec::new(),
             touch_counter: 0,
             last_visited: 0,
         }
@@ -154,6 +162,43 @@ impl TileRing {
     #[inline]
     pub fn place_queue(&self) -> &[u32] {
         &self.place_queue
+    }
+
+    /// Resident slots placed again this frame ([`TileRing::refresh`]), after the place
+    /// queue's within the same budget. Their headers stay: their blades draw until the
+    /// new ones land.
+    #[inline]
+    pub fn refresh_queue(&self) -> &[u32] {
+        &self.refresh_queue
+    }
+
+    /// Place resident tile `coord` again (its ground changed) when the budget allows,
+    /// keeping its blades until then. Returns whether it is resident.
+    pub fn refresh(&mut self, coord: [i32; 2]) -> bool {
+        if !self.occupied.contains_key(&coord) {
+            return false;
+        }
+        if self.refresh_set.insert(coord) {
+            self.refresh.push_back(coord);
+        }
+        true
+    }
+
+    /// Resident tile coordinates within the inclusive tile bounds `lo..=hi`.
+    pub fn resident_within(&self, lo: [i32; 2], hi: [i32; 2]) -> Vec<[i32; 2]> {
+        let span = (i64::from(hi[0]) - i64::from(lo[0]) + 1).max(0) * (i64::from(hi[1]) - i64::from(lo[1]) + 1).max(0);
+        if span > self.occupied.len() as i64 {
+            return self.occupied.keys().filter(|c| c[0] >= lo[0] && c[0] <= hi[0] && c[1] >= lo[1] && c[1] <= hi[1]).copied().collect();
+        }
+        let mut out = Vec::new();
+        for x in lo[0]..=hi[0] {
+            for z in lo[1]..=hi[1] {
+                if self.occupied.contains_key(&[x, z]) {
+                    out.push([x, z]);
+                }
+            }
+        }
+        out
     }
 
     /// Slots whose GPU header must be re-uploaded this frame — newly placed tiles and
@@ -201,6 +246,8 @@ impl TileRing {
         }
         self.pending.clear();
         self.pending_set.clear();
+        self.refresh.clear();
+        self.refresh_set.clear();
         if self.has_center {
             let center = self.center;
             self.request_window(center);
@@ -220,6 +267,7 @@ impl TileRing {
     pub fn update(&mut self, camera_xz: [f32; 2], generation: u32) -> RingUpdate {
         self.place_queue.clear();
         self.dirty.clear();
+        self.refresh_queue.clear();
         self.last_visited = 0;
 
         let mut update = RingUpdate::default();
@@ -252,6 +300,16 @@ impl TileRing {
         }
 
         let (placed, evicted) = self.drain_pending();
+        // Tiles placed again share the budget, after the entering ones.
+        while (self.place_queue.len() + self.refresh_queue.len()) < self.max_tiles_per_frame as usize {
+            let Some(coord) = self.refresh.pop_front() else { break };
+            self.refresh_set.remove(&coord);
+            if let Some(&slot) = self.occupied.get(&coord) {
+                if !self.place_queue.contains(&slot) {
+                    self.refresh_queue.push(slot);
+                }
+            }
+        }
         update.placed = placed;
         update.evicted = evicted;
         update.pending = self.pending_count();
@@ -709,6 +767,30 @@ mod tests {
             assert_eq!(ring.resident_count(), before);
             assert_eq!(ring.last_visited(), 0);
         }
+    }
+
+    /// A resident tile whose ground changed is placed again within the budget, after
+    /// the entering tiles, without a new header (its blades draw until then); a tile not
+    /// resident cannot be.
+    #[test]
+    fn a_refreshed_tile_is_placed_again_without_a_new_header() {
+        let mut r = ring(4, 64);
+        settle(&mut r, [0.0, 0.0]);
+        let coord = [0, 0];
+        assert!(r.is_resident(coord));
+        assert!(r.refresh(coord));
+        assert!(!r.refresh([100, 100]));
+        r.update([0.0, 0.0], 0);
+        assert_eq!(r.refresh_queue().len(), 1);
+        assert!(r.place_queue().is_empty());
+        assert!(r.dirty_slots().is_empty(), "a refresh rewrote a header");
+        assert_eq!(r.slot_coord(r.refresh_queue()[0]), Some(coord));
+        // Done: not again.
+        r.update([0.0, 0.0], 0);
+        assert!(r.refresh_queue().is_empty());
+        // Within a box: only the resident ones.
+        assert_eq!(r.resident_within([-1, -1], [0, 0]).len(), 4);
+        assert!(r.resident_within([50, 50], [60, 60]).is_empty());
     }
 
     #[test]

@@ -44,6 +44,10 @@ pub struct ChunkPass {
     gi_eye: Option<DVec3>,
     /// The last frame's projection jitter (NDC).
     last_jitter: Vec2,
+    /// The terrain as the ground foliage grows on (`chunks::ground`): shared with a
+    /// foliage placement pass ([`Self::foliage_ground`]), its tiling and its answers.
+    planet_ground: std::sync::Arc<super::ground::PlanetGround>,
+    foliage_ground: std::sync::Arc<helio_pass_foliage_place::GroundLink>,
 }
 
 impl ChunkPass {
@@ -55,6 +59,8 @@ impl ChunkPass {
     /// With residency settings `config` (its pixel angle follows the
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
+        let planet_ground = std::sync::Arc::new(super::ground::PlanetGround::default());
+        let foliage_ground = std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(Box::new(planet_ground.clone())));
         Self {
             source,
             config,
@@ -74,7 +80,16 @@ impl ChunkPass {
             steady_shadows: false,
             gi_eye: None,
             last_jitter: Vec2::ZERO,
+            planet_ground,
+            foliage_ground,
         }
+    }
+
+    /// The terrain as the ground foliage grows on: give it to a foliage placement pass
+    /// (`FoliagePlacePass::set_ground`); this pass answers its queries and reports where
+    /// the terrain changed under it.
+    pub fn foliage_ground(&self) -> std::sync::Arc<helio_pass_foliage_place::GroundLink> {
+        self.foliage_ground.clone()
     }
 
     /// Voxel materials shown as the host's scene materials: `map` says which
@@ -238,6 +253,9 @@ impl RenderPass for ChunkPass {
             return false;
         }
         self.world = previous.world.take();
+        // Foliage keeps the ground it was given.
+        self.planet_ground = previous.planet_ground.clone();
+        self.foliage_ground = previous.foliage_ground.clone();
         self.debug_mode = previous.debug_mode;
         if let Some(world) = &mut self.world {
             world.set_debug_mode(self.debug_mode);
@@ -396,6 +414,7 @@ impl ChunkPass {
                 world.set_appearance(appearance);
             }
             self.kept_loaded = frame.kept.as_ref().map(|kept| world.load_kept(&frame.planet, kept));
+            self.planet_ground.set_grid(*frame.planet.grid());
             self.world = Some(world);
             self.built_for = Some(recipe);
             self.last_eye = None;
@@ -554,6 +573,16 @@ impl ChunkPass {
             .as_ref(),
             gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
         );
+        // Foliage's ground: where the drawn terrain changed, and this frame's
+        // questions (`chunks::ground`) answered against the cut just drawn.
+        self.foliage_ground.push_changes(world.take_ground_changes());
+        if let Some(question) = self.foliage_ground.take_question() {
+            let exchange = (binding(helio_pass_foliage_place::GROUND_QUERIES), binding(helio_pass_foliage_place::GROUND_HITS));
+            if let (Some(queries), Some(hits)) = exchange {
+                world.probe_ground(encoder, &queries, &hits, &question.tiles, &frame.planet, frame.eye, at);
+                self.foliage_ground.answer(question.batch);
+            }
+        }
         // The sun's occlusion by the terrain, for what else the sun lights
         // (volumetric fog): a level of its clipmap a frame.
         world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);

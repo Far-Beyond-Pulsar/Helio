@@ -94,7 +94,7 @@ struct FoliageType {
     mesh_or_impostor_id:   u32,
     base_color:            u32,
     roughness_metallic:    u32,
-    _pad0:                 u32,
+    ground_mask:           u32,
 }
 
 /// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).
@@ -103,10 +103,18 @@ struct FoliageTile {
     tile_coord_z:    i32,
     blade_offset:    u32,
     blade_count:     u32,
-    bounds_center_y: f32,
-    bounds_half_y:   f32,
+    bounds_center: f32,
+    bounds_half:   f32,
     state:           u32,
     generation:      u32,
+}
+
+/// Mirrors `crate::GpuTileFrame` (Rust, 64 bytes): where a tile's blades stand.
+struct TileFrame {
+    origin: vec3<f32>,
+    axis_u: vec3<f32>,
+    axis_v: vec3<f32>,
+    up:     vec3<f32>,
 }
 
 /// Mirrors `crate::GpuBladeInstance` (Rust, 16 bytes).
@@ -136,6 +144,7 @@ struct DrawIndirect {
 @group(0) @binding(8)  var<storage, read_write> tile_visible: array<u32>;
 @group(0) @binding(9)  var hiz_tex: texture_2d<f32>;
 @group(0) @binding(10) var hiz_samp: sampler;
+@group(0) @binding(11) var<storage, read> frames: array<TileFrame>;
 
 var<workgroup> wg_planes: array<vec4<f32>, 5>;
 
@@ -312,17 +321,12 @@ fn select_blade_lod(
     return FOLIAGE_LOD_NONE;
 }
 
-fn blade_world_position(tile: FoliageTile, blade: BladeInstance) -> vec3<f32> {
-    let origin_x = f32(tile.tile_coord_x) * cull.tile_size;
-    let origin_z = f32(tile.tile_coord_z) * cull.tile_size;
+fn blade_world_position(tile: FoliageTile, frame: TileFrame, blade: BladeInstance) -> vec3<f32> {
     let local_u = f32(blade.packed_pos & 0xffffu) * (1.0 / 65535.0);
     let local_v = f32(blade.packed_pos >> 16u) * (1.0 / 65535.0);
     let height_offset = unpack2x16float(blade.packed_height_yaw).x;
-    return vec3<f32>(
-        origin_x + local_u * cull.tile_size,
-        tile.bounds_center_y + height_offset,
-        origin_z + local_v * cull.tile_size,
-    );
+    return frame.origin + frame.axis_u * local_u + frame.axis_v * local_v
+        + frame.up * (tile.bounds_center + height_offset);
 }
 
 // ── Stage 2a: tile cull ─────────────────────────────────────────────────────────
@@ -347,22 +351,13 @@ fn cs_tile_cull(
     if (tile.state == TILE_STATE_RESIDENT || tile.state == TILE_STATE_EVICTING)
         && tile.blade_count > 0u
     {
-        let origin_x = f32(tile.tile_coord_x) * cull.tile_size;
-        let origin_z = f32(tile.tile_coord_z) * cull.tile_size;
-        let center = vec3<f32>(
-            origin_x + cull.tile_size * 0.5,
-            tile.bounds_center_y,
-            origin_z + cull.tile_size * 0.5,
-        );
+        let frame = frames[slot];
+        let center = frame.origin + (frame.axis_u + frame.axis_v) * 0.5 + frame.up * tile.bounds_center;
         // Dilate by the tallest foliage plus its wind displacement before testing.
         // Under-dilating here is the classic wind-culling bug: blades blow outside the
         // tile bounds and the tile is culled while its geometry is still on screen.
-        let half = vec3<f32>(
-            cull.tile_size * 0.5,
-            tile.bounds_half_y + cull.max_foliage_height + cull.wpo_extent,
-            cull.tile_size * 0.5,
-        );
-        let radius = length(half);
+        let radius = 0.5 * max(length(frame.axis_u + frame.axis_v), length(frame.axis_u - frame.axis_v))
+            + tile.bounds_half + cull.max_foliage_height + cull.wpo_extent;
         if sphere_visible(center, radius) && !hiz_occluded(center, radius) {
             visible = 1u;
         }
@@ -396,6 +391,7 @@ fn cs_cluster_cull(
     }
 
     let tile = tiles[slot];
+    let frame = frames[slot];
     let cluster_size = max(cull.cluster_size, 1u);
     let first = cluster * cluster_size;
     if first >= tile.blade_count {
@@ -414,7 +410,7 @@ fn cs_cluster_cull(
         if arena_index >= arrayLength(&blades) {
             break;
         }
-        let position = blade_world_position(tile, blades[arena_index]);
+        let position = blade_world_position(tile, frame, blades[arena_index]);
         bounds_min = min(bounds_min, position);
         bounds_max = max(bounds_max, position);
         sampled = sampled + 1u;
@@ -515,7 +511,7 @@ fn emit_cluster(lod: u32, count: u32, slot: u32, first: u32) {
         if out_index < arrayLength(&visible_blades) {
             // Packed reference, NOT a flat arena index: tile slot in the high 16 bits,
             // tile-local blade index in the low 16. `FoliageGBufferPass` needs the tile
-            // anyway (for `tile_coord` and `bounds_center_y`, which is how a blade's
+            // anyway (for `tile_coord` and `bounds_center`, which is how a blade's
             // world position is reconstructed), so handing it the slot directly saves a
             // division per *vertex* in the hottest shader in the foliage path. The
             // consumer mirrors this as `VISIBLE_TILE_SHIFT` / `VISIBLE_LOCAL_MASK`; the
