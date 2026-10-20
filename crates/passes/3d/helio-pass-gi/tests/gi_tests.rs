@@ -227,3 +227,68 @@ fn the_resolve_reads_the_probes_at_pixels() {
         assert!((e - Vec3::ONE).abs().max_element() < 0.03 && (ba[1] - 1.0).abs() < 1e-3, "pixel {p}: {e} held {}", ba[1]);
     }
 }
+
+/// Unit `n` packed as the tracers pack normals.
+fn pack(n: Vec3) -> u32 {
+    let e = (n * 0.5 + 0.5).clamp(Vec3::ZERO, Vec3::ONE) * 1023.0 + 0.5;
+    e.x as u32 | ((e.y as u32) << 10) | ((e.z as u32) << 20)
+}
+
+/// No sky; the sun (illuminance 2) straight down on a canopy at height 4.5
+/// that lets a leaf's share of light through (0.3; albedo about 0.5, its
+/// far side seen by the sun). A probe under it sees the canopy's underside
+/// give that share of the light on its top: radiance 0.3 a 2 / pi above
+/// (within a tenth), nothing below.
+#[test]
+fn light_through_a_canopy_lights_probes_under_it() {
+    let Some(gpu) = gpu() else { return };
+    let mut pass = GiPass::new(&gpu.device);
+    let sun = sun_down(gpu, 2.0);
+    let eye = DVec3::new(0.3, 1.7, -0.2);
+    let canopy = |rays: &[u32]| -> Vec<u32> {
+        let mut hits = vec![0u32; rays.len() / 2];
+        for (k, ray) in rays.chunks(8).enumerate() {
+            let f = |w: u32| f32::from_bits(w);
+            let origin = Vec3::new(f(ray[0]), f(ray[1]), f(ray[2])).as_dvec3() + eye;
+            let dir = Vec3::new(f(ray[4]), f(ray[5]), f(ray[6]));
+            let albedo = 128 | (128 << 8) | (128 << 16);
+            let t = ((4.5 - origin.y) / f64::from(dir.y)) as f32;
+            let hit = if origin.y < 4.5 && dir.y > 0.0 {
+                // The underside: facing away from the sun, a leaf's share
+                // (77/255) let through, the sun on its far side.
+                Some((t, pack(Vec3::NEG_Y), albedo, 1 | (77 << 8) | (255 << 16)))
+            } else if origin.y > 4.5 && dir.y < 0.0 {
+                Some((t, pack(Vec3::Y), albedo | (255 << 24), 1 | (77 << 8)))
+            } else {
+                None
+            };
+            if let Some((t, n, albedo, light)) = hit {
+                hits[k * 4..k * 4 + 4].copy_from_slice(&[t.to_bits(), n, albedo, light]);
+            }
+        }
+        hits
+    };
+    for n in 0..4 {
+        frame(gpu, &mut pass, eye, n, 0.0, Some(&sun), Some(&canopy));
+    }
+    let clipmap = Clipmap::around(eye);
+    let words = read(gpu, pass.buffers()[1]);
+    let above = 77.0 / 255.0 * 128.0 / 255.0 * 2.0 / std::f32::consts::PI;
+    let mut under = 0;
+    for index in 0..PROBES {
+        let (_, state) = probe(&words, index, Vec3::Y);
+        let y = clipmap.position(index).y;
+        if state >> 8 == 0 || !(0.0..4.0).contains(&y) {
+            continue;
+        }
+        under += 1;
+        let up = probe(&words, index, Vec3::Y).0;
+        let down = probe(&words, index, Vec3::NEG_Y).0;
+        // Within a tenth: the light on the canopy's far side is the probes'
+        // there, and those just under it (a spacing away) leak a little of
+        // their own through the visibility test (DDGI's thin occluders).
+        assert!((up - Vec3::splat(above)).abs().max_element() < 0.1 * above, "probe {index} at {y}: up {up}, want {above}");
+        assert!(down.max_element() < 0.06 * above, "probe {index} at {y}: down {down}");
+    }
+    assert!(under > 500, "{under} under the canopy");
+}

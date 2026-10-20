@@ -131,9 +131,18 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
         if dot(n, dir) > 0.0 {
             atomicAdd(&w_inside, 1u);
         } else {
+            // Lambertian on the side the ray meets; a surface that lets
+            // light through adds that share of its far side's light.
             let albedo = unpack4x8unorm(hit.albedo);
-            let sun = gi_sun[1].rgb * albedo.a * max(dot(n, gi_sun[0].xyz), 0.0) / PI;
-            radiance = albedo.rgb * (sun + gi_irradiance(probe + dir * hit.t, n).rgb);
+            let at = probe + dir * hit.t;
+            let front = gi_sun[1].rgb * albedo.a * max(dot(n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, n).rgb;
+            let through = f32((hit.light >> 8u) & 255u) / 255.0;
+            var back = vec3<f32>(0.0);
+            if through > 0.0 {
+                let seen = f32((hit.light >> 16u) & 255u) / 255.0;
+                back = gi_sun[1].rgb * seen * max(dot(-n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, -n).rgb;
+            }
+            radiance = albedo.rgb * (front + through * back);
         }
     } else {
         radiance = sky_radiance(probe * 0.001, dir);

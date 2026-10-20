@@ -121,6 +121,8 @@ pub fn load(device: &wgpu::Device, queue: &wgpu::Queue, world: &mut World) -> Bl
         appearance.materials[slot].lip = None;
         appearance.materials[slot].fleck = None;
         appearance.materials[slot].speck_host = None;
+        // Leaves let a third of the light through (global illumination).
+        appearance.materials[slot].transmission = if block.surfaces().iter().any(|s| matches!(s, Surface::Leaves(..))) { 0.3 } else { 0.0 };
     }
     // The planet's generated fleck and speck blends reference these slots.
     for slot in [helio_pass_voxel_planet::terrain::material::STONE, helio_pass_voxel_planet::terrain::material::DARK_STONE, helio_pass_voxel_planet::terrain::material::SANDSTONE] {

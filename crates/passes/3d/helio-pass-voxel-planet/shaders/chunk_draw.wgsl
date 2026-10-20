@@ -127,6 +127,7 @@ struct MaterialGpu {
     colour: vec4<f32>,            // linear colour, roughness
     patches: array<vec4<f32>, 3>, // linear dry/middle/lush patch colours; patches[0].w 1: varies
     links: vec4<u32>,             // lip, fleck, speck host, fleck share
+    light: vec4<f32>,             // transmission
 }
 struct Materials {
     m: array<MaterialGpu, 32>,
@@ -2271,11 +2272,21 @@ fn mesh_point(q: vec2<u32>, size: vec2<u32>) -> vec4<f32> {
 }
 
 // Whether the mesh point `org` (eye-relative) at pixel `q` sees along `dir`
-// to distance `range`: a walk from the node of the cut it is in, placed in
-// the frame of the chunk of `v` (the hit behind it) to its cells'
-// precision; without a hit finer than the exact levels, from the exact
-// level's node over it (planet-centred: to half a metre on an Earth).
+// to distance `range` (`point_walk`).
 fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> f32 {
+    return select(1.0, 0.0, point_walk(q, org, v, dir, range).hit);
+}
+
+// What the point `org` (eye-relative) at pixel `q` meets along `dir` within
+// `range`: a walk from the node of the cut it is in, placed in the frame of
+// the chunk of `v` (a hit by it) to its cells' precision; without a hit
+// finer than the exact levels, from the exact level's node over it
+// (planet-centred: to half a metre on an Earth). In rock or a Buried node,
+// a hit at once with no chunk (slot NONE).
+fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> WalkEnd {
+    let rock = WalkEnd(true, 0.0, NONE, vec3<i32>(0), 0u, 0u, 0u);
+    var none = rock;
+    none.hit = false;
     let r = fade_dither(q);
     var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
     var t0 = 0.0;
@@ -2292,9 +2303,9 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
         let n = i32(params.table.y >> u32(level));
         let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
         if crossed {
-            if PLANE_WORLD { return 1.0; }
+            if PLANE_WORLD { return none; }
             let across = across_edge(face, cell, frac, n);
-            if !across.ok { return 1.0; }
+            if !across.ok { return none; }
             face = across.face;
             cell = across.cell;
             frac = across.frac;
@@ -2303,9 +2314,9 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
         if at.slot != NONE {
             start = Walk(at.slot, chunk_keys[at.slot], vec3<i32>(0), vec3<i32>(64), true);
         } else if at.level == ROCK || at.level == BURIED {
-            return 0.0;
+            return rock;
         } else if at.level == LOST {
-            return 1.0;
+            return none;
         } else if exact_level(at.level) {
             start = Walk(v.x, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
         } else {
@@ -2316,7 +2327,7 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
         // Off the surface a mesh stands on: a twentieth of the hit's cell.
         t0 = 0.05 * length(frame.m0.xyz);
     } else {
-        if PLANE_WORLD { return 1.0; }
+        if PLANE_WORLD { return none; }
         // The face the point is over (planet-centred).
         let c = params.up.xyz * params.up.w + org;
         let a = abs(c);
@@ -2327,11 +2338,10 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
             normal = vec3<i32>(0, select(-1, 1, c.y > 0.0), 0);
         }
         let level = min(i32(params.planet.z), i32(params.cut.x));
-        if !exact_level(level) { return 1.0; }
+        if !exact_level(level) { return none; }
         start.key = vec4<i32>(face_with_normal(normal) | (level << 8u), 0, 0, 0);
     }
-    let end = walk(start, org, dir, t0, range, r, 96u, false, q);
-    return select(1.0, 0.0, end.hit);
+    return walk(start, org, dir, t0, range, r, 96u, false, q);
 }
 
 @compute @workgroup_size(8, 8)
@@ -2725,9 +2735,34 @@ fn probe_start(c: vec4<i32>, org: vec3<f32>, r: i32) -> ProbeStart {
     return out;
 }
 
+// The share of the sun's light reaching eye-relative point `at` (beside a
+// cell of chunk `slot`, pixel `q` for the dither): none past an opaque
+// cell; through cells that let light through, their transmission each
+// (crossed in a cell and three quarters, at most GI_THROUGH of them).
+const GI_THROUGH: u32 = 4u;
+
+fn sun_through(q: vec2<u32>, at: vec3<f32>, slot: u32) -> f32 {
+    var origin = at;
+    var near = slot;
+    var light = 1.0;
+    for (var i = 0u; i <= GI_THROUGH; i++) {
+        let end = point_walk(q, origin, vec2<u32>(near, 0u), gi_sun[0].xyz, 1e30);
+        if !end.hit { return light; }
+        if end.slot == NONE || i == GI_THROUGH { return 0.0; }
+        let m = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
+        light *= clamp(materials.m[min(m, 31u)].light.x, 0.0, 1.0);
+        if light <= 0.0 { return 0.0; }
+        origin += gi_sun[0].xyz * (end.t + 1.75 * length(cell_frame(end.slot, end.cell).m0.xyz));
+        near = end.slot;
+    }
+    return 0.0;
+}
+
 // A thread a ray: its hit (distance, the face's normal, the material's
-// colour, whether the sun reaches it), or none; from rock, a back face at
-// once.
+// colour, the share of the sun reaching it through what lets light
+// through (`sun_through`); for a material that lets light through, its
+// transmission and the sun's share on its cell's far side), or none; from
+// rock, a back face at once.
 @compute @workgroup_size(64)
 fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= frame_gi.counts.x * GI_RAYS { return; }
@@ -2746,11 +2781,19 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let axis = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
     let n = normalize(axis) * select(-1.0, 1.0, end.sign == 1u);
     let material = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
-    // The sun from off the hit's face by half its cell.
+    // The sun from off the hit's face by half its cell; through a cell
+    // that lets light through, from off its far side.
+    let hit = ray.origin.xyz + ray.dir * end.t;
+    let cell = length(c.m0.xyz);
+    let towards = dot(n, gi_sun[0].xyz);
+    let through = clamp(materials.m[min(material, 31u)].light.x, 0.0, 1.0);
     var sun = 0.0;
-    if dot(n, gi_sun[0].xyz) > 0.0 {
-        let at = ray.origin.xyz + ray.dir * end.t + n * (0.5 * length(c.m0.xyz));
-        sun = mesh_walk(q, at, vec2<u32>(end.slot, 0u), gi_sun[0].xyz, 1e30);
+    var back = 0.0;
+    if towards > 0.0 {
+        sun = sun_through(q, hit + n * (0.5 * cell), end.slot);
+    } else if through > 0.0 && towards < 0.0 {
+        back = sun_through(q, hit - n * (1.5 * cell), end.slot);
     }
-    gi_hits[id.x] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), 1u);
+    let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u);
+    gi_hits[id.x] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), light);
 }

@@ -1750,6 +1750,130 @@ fn read_words(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<u32> {
     bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
 }
 
+/// What the terrain's GI rays met against CPU rays (`trace_gi_rays`).
+#[derive(Debug, Default)]
+struct GiRayCheck {
+    /// Probes in rock and those not reported so (rays).
+    rock: usize,
+    rock_wrong: usize,
+    /// Hits in view near the eye (level 0) and those off the CPU's.
+    compared: usize,
+    wrong: usize,
+    /// Hits facing the sun, those the CPU finds mostly shadowed, and
+    /// disagreements on the sun's share (by more than 0.05).
+    lit: usize,
+    shadowed: usize,
+    sun_wrong: usize,
+    /// Hits on leaves, those whose transmission is not the material's, and
+    /// of those facing away from the sun, the sun's share on the leaf
+    /// cell's far side: compared, none, disagreements.
+    leaves: usize,
+    through_wrong: usize,
+    back: usize,
+    back_shadowed: usize,
+    back_wrong: usize,
+}
+
+/// GI rays from the finest level's middle 8^3 probes around `eye` (64
+/// random rays each), traced by the settled terrain of `view`, against CPU
+/// rays.
+fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCheck {
+    let view_proj = view.view_proj(planet);
+    let clipmap = helio_pass_gi::Clipmap::around(eye);
+    let mut probes = Vec::new();
+    for z in 8..16 {
+        for y in 8..16 {
+            for x in 8..16 {
+                probes.push(helio_pass_gi::Clipmap::index(0, clipmap.first[0] + glam::I64Vec3::new(x, y, z)));
+            }
+        }
+    }
+    let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+    let mut unit = || loop {
+        let v = DVec3::new(next() as f64, next() as f64, next() as f64) / u64::MAX as f64 * 2.0 - 1.0;
+        if v.length_squared() > 1e-4 && v.length_squared() <= 1.0 {
+            return v.normalize();
+        }
+    };
+    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize).map(|_| unit()).collect();
+    let mut world = World::new(gpu, planet);
+    world.gi = Some(gi_rays(gpu, eye, &probes, &dirs.iter().map(|d| d.as_vec3()).collect::<Vec<_>>(), world.sun));
+    world.settle(gpu, planet, view);
+    // One frame's hits (the GI pass clears them each frame).
+    let gi = world.gi.as_ref().unwrap();
+    gpu.queue.write_buffer(&gi[2], 0, &vec![0u8; gi[2].size() as usize]);
+    world.frame(gpu, planet, view, None);
+    let hits = read_words(gpu, &world.gi.as_ref().unwrap()[2]);
+    let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
+    let voxel = planet.grid().voxel_size();
+    let sun = world.sun.as_dvec3();
+    let leaf = planet.field().appearance().materials[material::LEAVES as usize].transmission;
+    let leaf_through = (leaf * 255.0 + 0.5) as u32;
+    // The sun's share at `from` as the tracer finds it: through leaves,
+    // theirs each (crossed in a cell and three quarters, four at most).
+    let sun_through = |mut from: DVec3| {
+        let mut light = 1.0;
+        for i in 0..=4 {
+            let Some(h) = planet.raycast(from, sun, 200.0) else { return light };
+            if i == 4 || planet.material(h.cell) != material::LEAVES {
+                return 0.0;
+            }
+            light *= f64::from(leaf);
+            from += sun * (h.distance + 1.75 * voxel);
+        }
+        0.0
+    };
+    let mut c = GiRayCheck::default();
+    for (k, d) in dirs.iter().enumerate() {
+        let probe = probes[k / helio_pass_gi::RAYS as usize];
+        let origin = clipmap.position(probe);
+        let hit = &hits[k * 4..k * 4 + 4];
+        let t = f32::from_bits(hit[0]);
+        if planet.solid(planet.grid().locate(origin).0) {
+            c.rock += 1;
+            c.rock_wrong += usize::from(t != 1e-3);
+            continue;
+        }
+        let Some(cpu) = planet.raycast(origin, *d, 60.0) else { continue };
+        let at = origin + *d * cpu.distance;
+        let clip = view_proj * (at - eye).as_vec3().extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        if clip.w <= 0.0 || ndc.x.abs() > 0.95 || ndc.y.abs() > 0.95 || (at - eye).length() > near {
+            continue;
+        }
+        c.compared += 1;
+        let p = DVec3::new(f64::from(hit[1] & 1023), f64::from((hit[1] >> 10) & 1023), f64::from((hit[1] >> 20) & 1023)) / 1023.0 * 2.0 - 1.0;
+        let n = p.normalize_or_zero();
+        let exact = t > 0.0 && (f64::from(t) - cpu.distance).abs() <= 2e-3 + cpu.distance * 1e-5 && n.dot(cpu.normal) > 0.99;
+        if !exact {
+            c.wrong += 1;
+            if c.wrong < 8 {
+                eprintln!("ray {k}: drawn t {t} n {n}, cpu {} n {}", cpu.distance, cpu.normal);
+            }
+            continue;
+        }
+        let leaf = planet.material(cpu.cell) == material::LEAVES;
+        c.leaves += usize::from(leaf);
+        c.through_wrong += usize::from((hit[3] >> 8) & 255 != if leaf { leaf_through } else { 0 });
+        let facing = cpu.normal.dot(sun);
+        if facing > 0.2 {
+            // From where the tracer's sun walk starts: half a cell off the face.
+            let seen = sun_through(at + cpu.normal * (0.5 * voxel));
+            c.lit += 1;
+            c.shadowed += usize::from(seen < 0.5);
+            c.sun_wrong += usize::from((seen - f64::from(hit[2] >> 24) / 255.0).abs() > 0.05);
+        } else if leaf && facing < -0.2 {
+            // Past the leaf cell, half a cell off its far side.
+            let seen = sun_through(at - cpu.normal * (1.5 * voxel));
+            c.back += 1;
+            c.back_shadowed += usize::from(seen == 0.0);
+            c.back_wrong += usize::from((seen - f64::from((hit[3] >> 16) & 255) / 255.0).abs() > 0.05);
+        }
+    }
+    eprintln!("{c:?}");
+    c
+}
+
 /// The terrain traces the GI probes' rays: from the finest level's probes
 /// around the eye (a ball raised on the ground beside them), a probe in the
 /// ground reports rock (a back face at once); every other ray whose CPU hit
@@ -1768,78 +1892,41 @@ fn terrain_traces_gi_probe_rays() {
     planet.apply(Brush { center: (ground + fwd * 2.0 + up * 0.8).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
     let eye = ground + up * 3.0 - fwd * 4.0 + side * 1.5;
     let view = View::new(eye, ((ground + fwd * 2.5) - eye).normalize().as_vec3(), [320, 180]);
-    let view_proj = view.view_proj(&planet);
-    // The finest level's middle 8^3 probes, 64 random rays each.
-    let clipmap = helio_pass_gi::Clipmap::around(eye);
-    let mut probes = Vec::new();
-    for z in 8..16 {
-        for y in 8..16 {
-            for x in 8..16 {
-                probes.push(helio_pass_gi::Clipmap::index(0, clipmap.first[0] + glam::I64Vec3::new(x, y, z)));
-            }
-        }
-    }
-    let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
-    let mut unit = || loop {
-        let v = DVec3::new(next() as f64, next() as f64, next() as f64) / u64::MAX as f64 * 2.0 - 1.0;
-        if v.length_squared() > 1e-4 && v.length_squared() <= 1.0 {
-            return v.normalize();
-        }
-    };
-    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize).map(|_| unit()).collect();
-    let mut world = World::new(&gpu, &planet);
-    world.gi = Some(gi_rays(&gpu, eye, &probes, &dirs.iter().map(|d| d.as_vec3()).collect::<Vec<_>>(), world.sun));
-    world.settle(&gpu, &planet, &view);
-    // One frame's hits (the GI pass clears them each frame).
-    let gi = world.gi.as_ref().unwrap();
-    gpu.queue.write_buffer(&gi[2], 0, &vec![0u8; gi[2].size() as usize]);
-    world.frame(&gpu, &planet, &view, None);
-    let hits = read_words(&gpu, &world.gi.as_ref().unwrap()[2]);
-    let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
-    let sun = world.sun.as_dvec3();
-    let (mut rock, mut rock_wrong, mut compared, mut wrong, mut lit_compared, mut shadowed, mut sun_wrong) = (0, 0, 0, 0, 0, 0, 0);
-    for (k, d) in dirs.iter().enumerate() {
-        let probe = probes[k / helio_pass_gi::RAYS as usize];
-        let origin = clipmap.position(probe);
-        let hit = &hits[k * 4..k * 4 + 4];
-        let t = f32::from_bits(hit[0]);
-        if planet.solid(planet.grid().locate(origin).0) {
-            rock += 1;
-            rock_wrong += usize::from(t != 1e-3);
-            continue;
-        }
-        let Some(cpu) = planet.raycast(origin, *d, 60.0) else { continue };
-        let at = origin + *d * cpu.distance;
-        let clip = view_proj * (at - eye).as_vec3().extend(1.0);
-        let ndc = clip.truncate() / clip.w;
-        if clip.w <= 0.0 || ndc.x.abs() > 0.95 || ndc.y.abs() > 0.95 || (at - eye).length() > near {
-            continue;
-        }
-        compared += 1;
-        let p = DVec3::new(f64::from(hit[1] & 1023), f64::from((hit[1] >> 10) & 1023), f64::from((hit[1] >> 20) & 1023)) / 1023.0 * 2.0 - 1.0;
-        let n = p.normalize_or_zero();
-        let exact = t > 0.0 && (f64::from(t) - cpu.distance).abs() <= 2e-3 + cpu.distance * 1e-5 && n.dot(cpu.normal) > 0.99;
-        if !exact {
-            wrong += 1;
-            if wrong < 8 {
-                eprintln!("ray {k}: drawn t {t} n {n}, cpu {} n {}", cpu.distance, cpu.normal);
-            }
-            continue;
-        }
-        if cpu.normal.dot(sun) < 0.2 {
-            continue;
-        }
-        // From where the tracer's sun walk starts: half a cell off the face.
-        let seen = planet.raycast(at + cpu.normal * (0.5 * planet.grid().voxel_size()), sun, 200.0).is_none();
-        lit_compared += 1;
-        shadowed += usize::from(!seen);
-        if seen != ((hit[2] >> 24) > 127) {
-            sun_wrong += 1;
-        }
-    }
-    eprintln!("rock {rock} ({rock_wrong} wrong), compared {compared}, wrong {wrong}; sun compared {lit_compared}, shadowed {shadowed}, wrong {sun_wrong}");
-    assert!(rock > 50 && rock_wrong == 0, "{rock_wrong} of {rock} rock probes wrong");
-    assert!(compared > 1500, "{compared} compared");
-    assert!(wrong * 100 <= compared, "{wrong} of {compared} wrong");
-    assert!(shadowed > 50 && sun_wrong * 100 <= lit_compared, "{sun_wrong} of {lit_compared} sun wrong, {shadowed} shadowed");
+    let c = trace_gi_rays(gpu, &planet, eye, &view);
+    assert!(c.rock > 50 && c.rock_wrong == 0, "{c:?}");
+    assert!(c.compared > 1500 && c.wrong * 100 <= c.compared, "{c:?}");
+    assert!(c.shadowed > 50 && c.sun_wrong * 100 <= c.lit, "{c:?}");
+    assert_eq!(c.through_wrong, 0, "{c:?}");
+}
+
+/// Leaves let light through for GI: among a forest's trees, a GI ray's hit
+/// on leaves carries the leaves' transmission (nothing else does), and the
+/// sun's share at a hit, and at a leaf cell's far side when the leaf faces
+/// away, is the CPU's through the leaves on the way (theirs each).
+#[test]
+fn gi_rays_see_light_through_leaves() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir) = forest_planet();
+    // Under a tree: a column topped by leaves, the eye a metre beside its
+    // trunk under the canopy, looking up at it.
+    let grid = *planet.grid();
+    let (c, _) = grid.locate(planet.surface_point(dir, 0.0));
+    // A trunk: wood with the crown's leaves ten cells over it.
+    let trunk = (0..200 * 200)
+        .map(|n| (c.i + n % 200 - 100, c.j + n / 200 - 100))
+        .find_map(|(i, j)| {
+            let top = planet.column_top(c.face, i, j, 0);
+            (top - 2..top + 3).map(|k| Cell::new(c.face, i, j, k)).find(|&w| planet.material(w) == material::WOOD && planet.material(Cell::new(w.face, w.i, w.j, w.k + 10)) == material::LEAVES)
+        })
+        .expect("a tree");
+    let trunk = grid.cell_center(Cell::new(trunk.face, trunk.i, trunk.j, trunk.k + 9));
+    let up = grid.up(trunk);
+    let side = up.any_orthonormal_vector();
+    let eye = planet.surface_point(trunk.normalize(), 0.0) + up * 0.5 + side * 0.15;
+    let view = View::new(eye, (trunk - eye).normalize().as_vec3(), [320, 180]);
+    let c = trace_gi_rays(gpu, &planet, eye, &view);
+    assert!(c.compared > 500 && c.wrong * 100 <= c.compared, "{c:?}");
+    assert!(c.leaves > 100 && c.through_wrong == 0, "{c:?}");
+    assert!(c.back > 20 && c.back_shadowed < c.back && c.back_wrong * 20 <= c.back, "{c:?}");
+    assert!(c.sun_wrong * 50 <= c.lit, "{c:?}");
 }

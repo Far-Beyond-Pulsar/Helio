@@ -277,11 +277,16 @@ pub struct MaterialAppearance {
     pub fleck: Option<(u8, f32)>,
     /// Material a filtered single-voxel speck of this one blends into.
     pub speck_host: Option<u8>,
+    /// The share of light on one side of a cell of this material that
+    /// leaves the other, tinted by its colour (foliage lets some through;
+    /// 0: opaque). Global illumination lights the shade under canopies
+    /// with it.
+    pub transmission: f32,
 }
 
 impl Default for MaterialAppearance {
     fn default() -> Self {
-        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None }
+        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None, transmission: 0.0 }
     }
 }
 
@@ -350,6 +355,8 @@ impl Default for TerrainAppearance {
         materials[MARE as usize].patches = Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
         materials[BOULDER as usize].patches = Some([unit([130, 128, 123]), unit([112, 110, 106]), unit([90, 89, 86])]);
         materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
+        // A leaf passes about a third of the light on it (green).
+        materials[LEAVES as usize].transmission = 0.3;
         // Voxels a pixel wide or more are lit by their own faces: slopes read
         // as their steps (no step softness).
         Self { materials, detail: [0.3, 0.4, 0.08, 0.0], shade: [0.0; 4] }

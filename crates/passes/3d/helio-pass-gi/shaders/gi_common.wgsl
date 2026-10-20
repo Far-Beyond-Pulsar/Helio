@@ -52,12 +52,15 @@ struct GiRay {
 
 // A tracer's hit (`gi_hits`, one a ray): its distance (0: none), its normal
 // (packed, `gi_pack_unit`), albedo (RGB8) and the sun's visibility from it
-// (a byte in the albedo word's alpha), and the tracer.
+// (a byte in the albedo word's alpha); and in `light`, bytes: the tracer
+// (bits 0..8), the share of light the surface lets through from its far
+// side, tinted by its albedo (bits 8..16: foliage), and the sun's
+// visibility from that far side (bits 16..24).
 struct GiHit {
     t: f32,
     normal: u32,
     albedo: u32,
-    tracer: u32,
+    light: u32,
 }
 
 fn gi_pack_unit(n: vec3<f32>) -> u32 {
