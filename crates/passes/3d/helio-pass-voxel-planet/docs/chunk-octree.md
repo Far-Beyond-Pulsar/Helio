@@ -306,14 +306,18 @@ once. A plan that changes a switch under way ends it at once.
    nothing more and ends: the sky.
 3. **Sun shadows**: walks toward the sun from a quarter of the hits (one a
    2x2 block, the pixel moving each frame), a hundredth of a cell off their
-   face. Every hit takes the sample of its block or a neighbouring one that
+   face, each towards a point of the sun's disk (the atmosphere's angular
+   radius, else Earth's 0.27 degrees; a pixel's own R2 sequence over the
+   frames), so a penumbra widens with the occluder's distance. Every hit takes the sample of its block or a neighbouring one that
    walked within four of its cells; the rest (silhouettes) are listed and
    walk in an indirect dispatch of their own. Mesh pixels nearer than the
    terrain hit, or with only sky behind (the scene's depth before the
    chunks publish), walk from the mesh point (`mesh_walk`), so terrain
-   shadows fall on meshes. The result is Helio's `directional_visibility`;
-   its deferred lighting applies it. `set_steady_shadows` walks every hit
-   instead.
+   shadows fall on meshes. The denoiser (7) turns the samples into
+   Helio's `directional_visibility`; its deferred lighting applies it.
+   `set_steady_shadows` walks every hit instead, 32 rays over the disk
+   (the denoiser passes the walks' own on: the reference for its error).
+   Meshes in front of the terrain walk towards the disk's centre.
 4. **Local lights' shadows**: the terrain shadows Helio's point and spot
    lights the same way (meshes cast into the lights' shadow maps). With a
    frame's lights (`SceneLights`: the scene's lights, light culling's tile
@@ -321,13 +325,50 @@ once. A plan that changes a switch under way ends it at once.
    tile's list that reaches it, the walk ending at the light
    (`local_sample`); each hit takes its block's or a neighbour's word
    within reach, else walks its own; mesh pixels in front of the terrain
-   walk from the mesh point. Bit i of a pixel's word of Helio's
-   `local_visibility` (a buffer, a word a pixel) is the tile's light i
-   (the first 32); deferred lighting zeroes a light whose bit is clear.
+   walk from the mesh point. Bit i of a pixel's word (`local_seen`) is
+   the tile's light i (the first 32); the denoiser (7) turns them into
+   Helio's `local_visibility`, by which deferred lighting scales each
+   light.
 5. **Sky visibility**: four cosine-weighted rays about the planet's up
    from one hit a 4x4 block, 48 cells long, turned each frame; each hit
    takes its block's or a neighbour's sample.
 6. **Ray reports** (`feedback`), then **publish** (below).
+7. **Denoising** (`temporal`, `filter_first`, `filter_second`,
+   `resolve`; `local_gate`, `local_temporal`, `local_filter`; cf.
+   NVIDIA's SIGMA). Each term (sun, sky, each local light) accumulates
+   along the hits' motion: the last frame's history at the hit's point
+   reprojected (`prev_view_proj`, its jitter replaced by this frame's).
+   A still camera (the projections differ by their jitter alone, to their
+   rounding: `DrawParams::rays`) reads the texel it lands on; a moving one
+   reads sharp (Catmull-Rom less its corners) over the texels of the same
+   surface (view depth within its slope, normal within 37 degrees),
+   bilinear where some are not, none past a disocclusion. A pixel's own
+   sample (its walk, once a sample block's cycle) weighs 1, a neighbour's
+   lent one 0.05, so the history keeps to the pixel's own shadow. A long
+   history (32 frames for the sun, 64 for the sky, 16 for a light) and a
+   short one (a cycle: 4, 8, 4) are kept; the sun's and the lights' are
+   clamped to the range of this frame's samples in the 9x9 pixels around,
+   so a moved sun or light, or an edit, shows at once where the samples
+   agree; where the short history leaves the long one (beside a moved
+   shadow's edge), the long one restarts from it. Two 3x3 à-trous passes
+   (steps 1 and 2; one for lights) then filter the terms of pixels not yet
+   settled, weighing neighbours by their distance off the pixel's plane,
+   their normal and how far their value lies in the term's standard
+   deviations (its mean's variance: the binary sun's m(1 - m), the sky's
+   moments, over the frames accumulated; a fresh history's widened);
+   settled ones pass as they are. `resolve` reads the result where this
+   frame's jitter put each pixel's sample (TSR takes a pixel's value as of
+   that point; read at its centre, TSR would blur it by the jitter's
+   spread). A pixel tracks the four lights of least scene index that reach
+   it, each an entry of its history; `local_visibility` is three words a
+   pixel: those lights' tile slots, their visibility (a byte each), the
+   other slots' bits. Without a point or spot light in the scene the
+   lights' passes do not run (`local_gate`'s indirect dispatch). Meshes in
+   front of the terrain and the sky pass their own walks on. The
+   denoiser's data are storage buffers (wgpu bounds-checks an image load
+   with two size queries) and its tiled kernels skip workgroup memory's
+   zeroing. Cost at 1920x1080 on an RTX 3060: 1.15 ms (the sampled walks:
+   3.4 ms; every hit walking: about three times those).
 
 Steps near surfaces dominate: a step heatmap (debug mode 32; with
 trace counters, `Capacity::counters`, also counted) is hot on

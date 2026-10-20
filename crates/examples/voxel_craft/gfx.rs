@@ -152,7 +152,6 @@ impl Gfx {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
             pass.set_scene_materials(map, voxel_scene_materials());
-            pass.set_steady_shadows(true);
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());

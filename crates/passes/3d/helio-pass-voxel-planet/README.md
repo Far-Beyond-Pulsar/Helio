@@ -235,8 +235,12 @@ frame of `ChunkPass`:
 5. **Light.** Sun shadows are walks toward the sun from quarter-resolution
    samples with a compacted fallback for hits no sample serves; local
    lights' shadows are walks to each light of a pixel's light tile, shared
-   the same way (`local_visibility`, a bit a light); sky visibility is four
-   short rays per 4x4 block. All use the same walk.
+   the same way; sky visibility is four short rays per 4x4 block. All use
+   the same walk. A denoiser accumulates each term along the hits' motion
+   (reprojected, rejected across disocclusions, clamped to the frame's
+   samples, restarted where it lags) and filters it by its variance
+   within a surface: `directional_visibility`, the gbuffer's sky and
+   `local_visibility` (a value a tracked light).
 6. **Publish.** Material colour (patches, pigment, edge darkening), corner
    AO and the shading normal go to Helio's gbuffer; Helio's deferred
    lighting, atmosphere and TSR do the rest.

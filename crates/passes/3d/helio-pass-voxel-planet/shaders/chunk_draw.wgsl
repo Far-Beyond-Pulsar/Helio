@@ -53,12 +53,22 @@ struct DrawParams {
     // lights are bound (`local_shadow`).
     light_eye: vec4<f32>,
     // x: how far the sky rays reach (m), when GI probes light the sky's
-    // larger occlusion (0: SKY_RANGE_CELLS cells).
+    // larger occlusion (0: SKY_RANGE_CELLS cells); y: the sun's angular
+    // radius (radians); z: the cosine of the atmosphere's, where a host's
+    // atmosphere gives one (copied from its frame on the GPU; else 0).
     sky: vec4<f32>,
     // An orthographic view (`ortho_view`): its rays' direction (xyz, unit;
     // zero for the camera's perspective) and the near plane's offset along
     // it (w: a point's distance along its ray is dot(p, xyz) - w).
     ortho: vec4<f32>,
+    // xy: this frame's projection jitter less the last frame's; zw: this
+    // frame's (NDC).
+    history: vec4<f32>,
+    // The pixels' rays as points a view depth unit beyond the eye's
+    // (`RayPlane`): pixel (0, 0)'s and the eye's view depth (w), a pixel's
+    // step along x, along y; [1].w 1 when the camera holds still since the
+    // last frame (its projections differ by their jitter alone).
+    rays: array<vec4<f32>, 3>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -1537,6 +1547,8 @@ fn resolve_vertex(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32>
 
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
 @group(1) @binding(14) var hit_normal: texture_2d<f32>;
+// The sky's visibility, denoised (`filter_last`).
+@group(1) @binding(28) var hit_sky: texture_2d<f32>;
 @group(1) @binding(25) var uv_reference_texture: texture_2d<f32>;
 @group(1) @binding(26) var uv_reference_sampler: sampler;
 
@@ -1708,9 +1720,47 @@ fn plain_colour() -> bool {
 
 // Steady shadows (`ChunkWorld::set_steady_shadows`): every hit walks its own
 // sun ray and the sky rays hold still, instead of samples that move each
-// frame for TSR to gather (dearer, and nothing shimmers).
+// frame for the denoiser to gather (dearer; the walks' own values, a
+// reference for the denoised ones).
 fn steady_shadows() -> bool {
     return (params.debug.x & 0x1000u) != 0u;
+}
+
+// The sun is a disk (the atmosphere's angular radius, else the host's):
+// each sun walk aims at a point of it, so a shadow's penumbra widens with
+// the occluder's distance. Sampled walks take a point a frame, a pixel's
+// own low-discrepancy sequence (R2, rotated by a hash of the pixel), and
+// the denoiser integrates them; steady shadows average SUN_DISK_RAYS
+// points (the reference).
+const SUN_DISK_RAYS: u32 = 32u;
+
+fn sun_disk_cos() -> f32 {
+    return select(cos(params.sky.y), params.sky.z, params.sky.z > 0.99);
+}
+
+// The direction towards point `u` ([0, 1)^2, uniform over the disk) of the
+// sun's disk.
+fn sun_ray(u: vec2<f32>) -> vec3<f32> {
+    let s = params.sun.xyz;
+    let c = sun_disk_cos();
+    let spread = sqrt(max(1.0 - c * c, 0.0)) / c * sqrt(u.x);
+    let t1 = normalize(select(cross(s, vec3<f32>(0.0, 0.0, 1.0)), cross(s, vec3<f32>(1.0, 0.0, 0.0)), abs(s.z) > 0.9));
+    let a = 6.2831853 * u.y;
+    return normalize(s + (t1 * cos(a) + cross(s, t1) * sin(a)) * spread);
+}
+
+// Pixel `q`'s point of the disk this frame.
+fn sun_point(q: vec2<u32>) -> vec2<f32> {
+    let h = key_hash(vec4<i32>(vec2<i32>(q), 0x51ed27, 0x2c1b3c6d));
+    let n = params.table.w;
+    // R2's steps (the plastic number's), in 32-bit fixed point.
+    let x = vec2<u32>(n * 3242174889u + h, n * 2447445413u + (h * 0x9E3779B1u));
+    return vec2<f32>(x >> vec2<u32>(8u)) / 16777216.0;
+}
+
+// Point `i` of SUN_DISK_RAYS spread evenly over the disk.
+fn sun_disk_point(i: u32) -> vec2<f32> {
+    return vec2<f32>((f32(i) + 0.5) / f32(SUN_DISK_RAYS), fract(f32(i) * 0.618034));
 }
 
 fn voxel_face_uv(c: ChunkDraw, cell: vec3<i32>, axis: u32, position: vec3<f32>) -> vec2<f32> {
@@ -1846,8 +1896,8 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     // a fill light by albedo stands in for the sky's bounce (both 0 by
     // default).
     let shade = materials.shade;
-    out.orm = vec4<f32>(mix(shade.w, 1.0, look.ao * shading.w) * occlusion, clamp(roughness, 0.04, 1.0), 0.0, f0);
-    emissive += albedo * shade.rgb * mix(0.55, 1.0, shading.w);
+    out.orm = vec4<f32>(mix(shade.w, 1.0, look.ao * textureLoad(hit_sky, p, 0).r) * occlusion, clamp(roughness, 0.04, 1.0), 0.0, f0);
+    emissive += albedo * shade.rgb * mix(0.55, 1.0, textureLoad(hit_sky, p, 0).r);
     out.emissive = vec4<f32>(emissive, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).
     out.lightmap_uv = vec2<f32>(-1.0, -2.0);
@@ -1866,17 +1916,28 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
 
 // ---- 4. Sun shadows ----
 // A walk towards the sun from a quarter of the hits (one a 2x2 block, the
-// pixel moving each frame: TSR gathers them all), a hundredth of a cell
-// off their face; every hit then takes the sample of its block, or of a
-// neighbouring one, that walked within four of its cells; the others
-// (silhouettes) are listed and walk in a pass of their own, so a few of
-// them do not hold whole warps. The samples also measure the slope's
-// normal (smooth: it serves the block).
+// pixel moving each frame: the denoiser gathers them all, 4c), a
+// hundredth of a cell off their face; every hit then takes the sample of
+// its block, or of a neighbouring one, that walked within four of its
+// cells; the others (silhouettes) are listed and walk in a pass of their
+// own, so a few of them do not hold whole warps. The samples also measure
+// the slope's normal (smooth: it serves the block).
 
-// Helio's directional visibility: x lit (0 or 1), yzw the sun it is for.
+// Helio's directional visibility (`filter_last`): x the sun's visibility,
+// yzw the sun it is for.
 @group(1) @binding(8) var out_sun: texture_storage_2d<rgba16float, write>;
-// The normal each hit is lit with (`Face::shading`) and its sky visibility,
-// for the gbuffer.
+// Each pixel's sun as its walk (or its block's) found it, 0 or 1; 1 where
+// it is its own (its walk, or none needed), 0 where a neighbour's; 1 where
+// a terrain hit is shown (`sun_raw`, `walked_sun`): bytes of a word a
+// pixel, rows of the frame. (The denoiser's own data are buffers: an
+// image load is bounds-checked by two size queries.)
+@group(1) @binding(41) var<storage, read_write> out_sun_raw: array<u32>;
+
+fn store_walked(p: vec2<i32>, size: vec2<u32>, lit: f32, own: f32, terrain: f32) {
+    out_sun_raw[u32(p.y) * size.x + u32(p.x)] = pack4x8unorm(vec4<f32>(lit, own, terrain, 0.0));
+}
+// The normal each hit is lit with (`Face::shading`) and its sky sample
+// (zero where a mesh is in front of the hit, or the sky).
 @group(1) @binding(13) var out_normal: texture_storage_2d<rgba16float, write>;
 // Samples: lit (bit 0), walked (it faced the sun, bit 1), a hit (bit 2);
 // its distance's bits; its slope's normal (`pack_unit`, 0: none).
@@ -2176,7 +2237,7 @@ fn hit_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face, dir: vec3
 
 // The share of the sky the hit at pixel `q` (distance `t`, face `f`, chunk
 // `slot`) sees: cosine-weighted rays about the planet's up, turned each
-// frame (TSR gathers them); an occluder near the range end shades less (no
+// frame (the denoiser gathers them); an occluder near the range end shades less (no
 // edge at the range). A ceiling looks out sideways. With GI probes, only
 // the occlusion nearer than their spacing (`params.sky`).
 fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
@@ -2289,7 +2350,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, params.sun.xyz, 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2308,7 +2369,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, params.sun.xyz, 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2412,13 +2473,15 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     // A mesh in front of the hit (or the sky): its own walk, listed.
     let mesh = mesh_point(id.xy, size);
     if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
+        textureStore(out_normal, p, vec4<f32>(0.0));
         let n = atomicAdd(&fallbacks.count, 1u);
         fallbacks.pixels[n] = id.x | MESH_PIXEL | (id.y << 16u);
         atomicMax(&fallback_groups[0], n / 64u + 1u);
         return;
     }
     if v.x == NONE {
-        textureStore(out_sun, p, vec4<f32>(1.0, sun));
+        textureStore(out_normal, p, vec4<f32>(0.0));
+        store_walked(p, size, 1.0, 1.0, 0.0);
         return;
     }
     let t = textureLoad(hit_distance, p, 0).r;
@@ -2434,6 +2497,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let blocks = array<vec2<i32>, 4>(block, block + vec2<i32>(toward.x, 0), block + vec2<i32>(0, toward.y), block + toward);
     var ground = vec3<f32>(0.0);
     var sampled = 0u;
+    var own = 0.0;
     let steady = steady_shadows();
     for (var b = 0u; b < 4u; b++) {
         let at = blocks[b];
@@ -2441,12 +2505,17 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         let s = textureLoad(sun_samples, at, 0);
         if (s.x & 4u) == 0u || distance(pixel_ray(sample_pixel(vec2<u32>(at), size), size) * bitcast<f32>(s.y), at_hit) > reach { continue; }
         if dot(ground, ground) == 0.0 && s.z != 0u { ground = unpack_unit(s.z); }
-        if sampled == 0u && (s.x & 2u) != 0u { sampled = 2u | (s.x & 1u); }
+        if sampled == 0u && (s.x & 2u) != 0u {
+            sampled = 2u | (s.x & 1u);
+            own = select(0.0, 1.0, all(sample_pixel(vec2<u32>(at), size) == id.xy));
+        }
     }
     let f = hit_face(v, ground, id.xy, size, t);
     textureStore(out_normal, p, vec4<f32>(f.shading, sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
-    if dot(f.shading, sun) > 0.0 {
+    if dot(f.shading, sun) <= 0.0 {
+        own = 1.0;
+    } else {
         let found = sampled != 0u;
         lit = f32(sampled & 1u);
         if !found {
@@ -2456,16 +2525,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
             return;
         }
     }
-    store_sun(p, v, f, lit);
-}
-
-fn store_sun(p: vec2<i32>, v: vec2<u32>, f: Face, lit: f32) {
-    let sun = params.sun.xyz;
-    textureStore(out_sun, p, vec4<f32>(lit, sun));
-    if plain_colour() && debug_mode() == 0u {
-        let material = (v.y >> 21u) & 31u;
-        textureStore(out_colour, p, vec4<f32>(palette(material).rgb * (0.25 + 0.75 * max(dot(f.shading, sun), 0.0) * lit), 1.0));
-    }
+    store_walked(p, size, lit, own, 1.0);
 }
 
 // The listed hits' and meshes' own walks: dispatched indirectly, 64 a
@@ -2478,12 +2538,22 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     if (packed & MESH_PIXEL) != 0u {
-        textureStore(out_sun, vec2<i32>(q), vec4<f32>(mesh_walk(q, mesh_point(q, size).xyz, v, params.sun.xyz, 1e30), params.sun.xyz));
+        store_walked(vec2<i32>(q), size, mesh_walk(q, mesh_point(q, size).xyz, v, params.sun.xyz, 1e30), 1.0, 0.0);
         return;
     }
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     let f = hit_face(v, vec3<f32>(0.0), q, size, t);
-    store_sun(vec2<i32>(q), v, f, hit_walk(q, size, v.x, t, f, params.sun.xyz, 1e30));
+    // Steady shadows: the disk's points averaged (the reference).
+    var lit = 0.0;
+    if steady_shadows() {
+        for (var i = 0u; i < SUN_DISK_RAYS; i++) {
+            lit += hit_walk(q, size, v.x, t, f, sun_ray(sun_disk_point(i)), 1e30);
+        }
+        lit /= f32(SUN_DISK_RAYS);
+    } else {
+        lit = hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30);
+    }
+    store_walked(vec2<i32>(q), size, lit, 1.0, 1.0);
 }
 
 // ---- 4b. Local lights' terrain shadows ----
@@ -2491,15 +2561,17 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
 // sun: meshes cast into the lights' shadow maps, the terrain by walks. A
 // pixel's lights are those of its tile's list (Helio's light culling: 16 px
 // tiles, 64 lights a tile) that are shadowed and reach it; bit i of its
-// word of `out_local` (a row of the frame after another) says whether it
+// first word of `local_seen` (a row of the frame after another) says whether it
 // sees the tile's light i past the terrain (the first 32; the others, and
-// pixels without terrain, are seen). Deferred lighting multiplies each
-// light by its bit. As the sun's: a hit of each 2x2 block (turning each
+// pixels without terrain, are seen); the denoiser (4c) turns those into
+// what deferred lighting multiplies each light by. As the sun's: a hit of each 2x2 block (turning each
 // frame) walks to all its lights (`local_sample`), its block's hits within
 // reach take its word, the others (and meshes in front of the terrain)
 // walk their own.
 @group(1) @binding(29) var hit_normals: texture_2d<f32>;
-@group(1) @binding(30) var<storage, read_write> out_local: array<u32>;
+// The second: 1 where the word is the pixel's own walks', 0 where a
+// neighbour's.
+@group(1) @binding(30) var<storage, read_write> local_seen: array<vec2<u32>>;
 // Helio's lights (`GpuLight`, 128 bytes) and its tile light lists.
 struct SceneLight {
     position_range: vec4<f32>,
@@ -2639,6 +2711,13 @@ fn local_reuse(p: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
     return NONE;
 }
 
+// `local_reuse`, and whether the word is the pixel's own (its block's
+// sample this frame, or NONE: its walks to come).
+fn local_word(p: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> vec2<u32> {
+    let word = local_reuse(p, size, slot, t);
+    return vec2<u32>(word, u32(word == NONE || all(sample_pixel(p / 2u, size) == p)));
+}
+
 // The fine levels' hits (no mesh in front of them): a sample's word, else
 // their own walks.
 @compute @workgroup_size(8, 8)
@@ -2648,12 +2727,12 @@ fn local_shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let v = textureLoad(hit_visibility, vec2<i32>(id.xy), 0).xy;
     let t = textureLoad(hit_distance, vec2<i32>(id.xy), 0).r;
     if !local_hit(id.xy, size, v, t, true) { return; }
-    var seen = 0xffffffffu;
+    var seen = vec2<u32>(0xffffffffu, 1u);
     if params.light_eye.w > 0.0 {
-        seen = local_reuse(id.xy, size, v.x, t);
-        if seen == NONE { seen = hit_lights_fine(id.xy, size, v.x, t); }
+        seen = local_word(id.xy, size, v.x, t);
+        if seen.x == NONE { seen.x = hit_lights_fine(id.xy, size, v.x, t); }
     }
-    out_local[id.y * size.x + id.x] = seen;
+    local_seen[id.y * size.x + id.x] = seen;
 }
 
 // Every other pixel (after `local_shadow`): the exact levels' hits (as the
@@ -2667,21 +2746,874 @@ fn local_shadow_far(@builtin(global_invocation_id) id: vec3<u32>) {
     let v = textureLoad(hit_visibility, p, 0).xy;
     let t = textureLoad(hit_distance, p, 0).r;
     if local_hit(id.xy, size, v, t, true) { return; }
-    var seen = 0xffffffffu;
+    var seen = vec2<u32>(0xffffffffu, 1u);
     if params.light_eye.w > 0.0 {
         let mesh = mesh_point(id.xy, size);
         if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < t) {
             let list = light_tile(id.xy, size);
             for (var i = 0u; i < list.y; i++) {
                 let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], mesh.xyz, vec3<f32>(0.0));
-                if reach.walk && mesh_walk(id.xy, mesh.xyz, v, reach.dir, reach.range) < 0.5 { seen &= ~(1u << i); }
+                if reach.walk && mesh_walk(id.xy, mesh.xyz, v, reach.dir, reach.range) < 0.5 { seen.x &= ~(1u << i); }
             }
         } else if v.x != NONE {
-            seen = local_reuse(id.xy, size, v.x, t);
-            if seen == NONE { seen = hit_lights(id.xy, size, v.x, t); }
+            seen = local_word(id.xy, size, v.x, t);
+            if seen.x == NONE { seen.x = hit_lights(id.xy, size, v.x, t); }
         }
     }
-    out_local[id.y * size.x + id.x] = seen;
+    local_seen[id.y * size.x + id.x] = seen;
+}
+
+// ---- 4c. Denoising ----
+// The walks above sample: a sun ray a 2x2 block, sky rays a 4x4 block,
+// local lights a 2x2 block, the sampled pixel turning each frame, every
+// hit taking a sample near it. These passes turn that into each term's
+// visibility (cf. NVIDIA's SIGMA): a temporal accumulation of each term
+// along the hits' motion, filters guided by the terms' variance that keep
+// to a surface (its plane and normal), and a resolve to where this frame's
+// jitter put each pixel's sample.
+//
+// Each term keeps a long history (stable) and a short one (a sample
+// block's cycle). A pixel's own sample (its walk, once a cycle) weighs more
+// than one lent by a neighbour, so the history keeps to the pixel's own
+// shadow, sharp. The sun's and the lights' histories are clamped to the
+// range of what the samples around show this frame, so a moved light or
+// sun, an edit, shows at once where they all agree; where the short history
+// leaves the long one (beside a moved shadow's edge; the sky's anywhere),
+// the long one restarts from it. Steady shadows (every hit its own walk)
+// pass the walks' own.
+//
+// Kept two frames in turn, two words a pixel (rows of the frame): `history`,
+// the sun's mean, the sky's mean and second moment, the sky's frames
+// accumulated (halves); `history_short`, the short histories and the sun's
+// samples' weight accumulated (halves); `geometry`, the hits they are for:
+// view depth (f32 bits, 0: no terrain hit) and normal (`pack_unit`). The
+// filters read only `geometry` and their terms (the means and their
+// variance, halves).
+
+// Frames a term accumulates at most: the sun's samples visit a block's
+// pixels in 4 frames, the sky's in 16 (their rays turn over 64); the short
+// histories' (a cycle).
+const SUN_FRAMES: f32 = 32.0;
+// A pixel's sun sample weighs 1 where it is its own, this where a
+// neighbour's; a frame's mean weight.
+const SUN_BORROWED: f32 = 0.05;
+const SUN_FRAME_WEIGHT: f32 = 0.25 + 0.75 * SUN_BORROWED;
+const SKY_FRAMES: f32 = 64.0;
+const SUN_SHORT: f32 = 4.0;
+const SKY_SHORT: f32 = 8.0;
+// How far the long history may stray from the short one before it
+// restarts from it (a cycle's own swing stays inside).
+const SUN_LAG: f32 = 0.3;
+const SKY_LAG: f32 = 0.25;
+// A pixel's neighbourhood for the history's clamp: 9x9 pixels, a few of
+// each term's sample blocks. (The sky's samples, four rays a 4x4 block,
+// swing too far from frame to frame for a clamp to their neighbourhood.)
+const CLAMP_RADIUS: i32 = 4;
+
+// The walked sun (`shadow`, `shadow_fallback`): x lit, y 1 where the
+// pixel's own walk's, z 1 where a terrain hit is shown (no mesh in front
+// of it, not the sky).
+@group(1) @binding(40) var<storage, read> sun_raw: array<u32>;
+@group(1) @binding(42) var<storage, read> history_prev: array<vec2<u32>>;
+@group(1) @binding(43) var<storage, read> geometry_prev: array<vec2<u32>>;
+@group(1) @binding(44) var<storage, read_write> out_history: array<vec2<u32>>;
+@group(1) @binding(45) var<storage, read_write> out_geometry: array<vec2<u32>>;
+@group(1) @binding(54) var<storage, read> history_short_prev: array<vec2<u32>>;
+@group(1) @binding(55) var<storage, read_write> out_history_short: array<vec2<u32>>;
+@group(1) @binding(46) var<storage, read> filter_in: array<vec2<u32>>;
+@group(1) @binding(47) var<storage, read> geometry: array<vec2<u32>>;
+@group(1) @binding(48) var<storage, read_write> out_filter: array<vec2<u32>>;
+
+// Pixel `q`'s word in a frame's rows.
+fn texel(q: vec2<i32>, size: vec2<u32>) -> u32 {
+    return u32(q.y) * size.x + u32(q.x);
+}
+
+fn halves(v: vec2<u32>) -> vec4<f32> {
+    return vec4<f32>(unpack2x16float(v.x), unpack2x16float(v.y));
+}
+
+fn to_halves(v: vec4<f32>) -> vec2<u32> {
+    return vec2<u32>(pack2x16float(v.xy), pack2x16float(v.zw));
+}
+
+// Pixel `q`'s walked sun: lit, own, terrain.
+fn walked_sun(q: vec2<i32>, size: vec2<u32>) -> vec3<f32> {
+    return unpack4x8unorm(sun_raw[texel(q, size)]).xyz;
+}
+@group(1) @binding(49) var out_sky: texture_storage_2d<r32float, write>;
+
+// A pixel's hit as the filters see it: eye-relative, its view depth (0:
+// none to filter), normal, width (m).
+struct Surface {
+    at: vec3<f32>,
+    depth: f32,
+    normal: vec3<f32>,
+    pixel_m: f32,
+}
+
+fn view_depth(at: vec3<f32>) -> f32 {
+    return (params.view_proj * vec4<f32>(at, 1.0)).w;
+}
+
+// The pixels' rays as points a view depth unit beyond the eye's (`base`,
+// the view depth of the eye itself): affine in the pixel, pixel q's at
+// `origin + q.x dx + q.y dy`; its hit at view depth z is that point times
+// z - base (`params.rays`, made on the CPU: a filter's taps cost no
+// unprojection).
+struct RayPlane {
+    origin: vec3<f32>,
+    dx: vec3<f32>,
+    dy: vec3<f32>,
+    base: f32,
+}
+
+fn ray_plane(size: vec2<u32>) -> RayPlane {
+    return RayPlane(params.rays[0].xyz, params.rays[1].xyz, params.rays[2].xyz, params.rays[0].w);
+}
+
+fn plane_ray(rp: RayPlane, q: vec2<i32>) -> vec3<f32> {
+    return rp.origin + f32(q.x) * rp.dx + f32(q.y) * rp.dy;
+}
+
+fn inside(q: vec2<i32>, size: vec2<u32>) -> bool {
+    return all(q >= vec2<i32>(0)) && all(q < vec2<i32>(size));
+}
+
+// Pixel `p`'s terrain hit (none where a mesh is in front of it, or the
+// sky: `shadow` writes those a zero normal).
+fn surface(p: vec2<i32>, rp: RayPlane) -> Surface {
+    let n = textureLoad(hit_normals, p, 0).xyz;
+    if dot(n, n) == 0.0 { return Surface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), 0.0); }
+    let d = plane_ray(rp, p);
+    let z = textureLoad(hit_distance, p, 0).r / length(d);
+    return Surface(d * z, rp.base + z, n, length(rp.dx) * z);
+}
+
+// Its view depth alone, from its distance and walked sun (0: none).
+fn surface_depth(q: vec2<i32>, walked: vec3<f32>, rp: RayPlane) -> f32 {
+    if walked.z < 0.5 { return 0.0; }
+    return rp.base + textureLoad(hit_distance, q, 0).r / length(plane_ray(rp, q));
+}
+
+// Pixel `q`'s hit from `geometry` (this frame's, by `temporal`): its view
+// depth past the eye's (0: none) and normal.
+fn stored_hit(q: vec2<i32>, size: vec2<u32>, rp: RayPlane) -> vec4<f32> {
+    if !inside(q, size) { return vec4<f32>(0.0); }
+    let g = geometry[texel(q, size)];
+    if g.x == 0u { return vec4<f32>(0.0); }
+    return vec4<f32>(bitcast<f32>(g.x) - rp.base, unpack_unit(g.y));
+}
+
+// Where pixel `p`'s hit `s` was last frame: its place among the history's
+// texels (`base` the texel at or before it, `f` the fraction past it) and
+// how far its view depth then (`depth`) may differ from a texel's of the
+// same surface (by its depth's slope); none (depth 0: behind the eye). A
+// texel's history is its pixel's, whatever point the projection's jitter
+// had it sample: the point is placed as this frame's jitter would have it
+// (a still camera reads its own texel).
+struct Reprojection {
+    base: vec2<i32>,
+    f: vec2<f32>,
+    depth: f32,
+    tolerance: f32,
+}
+
+fn reproject(s: Surface, size: vec2<u32>) -> Reprojection {
+    var r: Reprojection;
+    let clip = params.prev_view_proj * vec4<f32>(s.at, 1.0);
+    if clip.w <= 0.0 { return r; }
+    let ndc = clip.xy / clip.w + params.history.xy;
+    let uv = (vec2<f32>(ndc.x, -ndc.y) * 0.5 + 0.5) * vec2<f32>(size) - 0.5;
+    r.base = vec2<i32>(floor(uv));
+    r.f = uv - floor(uv);
+    r.depth = clip.w;
+    // The depth a pixel's width moves over the surface, seen this steeply.
+    let facing = abs(dot(s.normal, normalize(s.at)));
+    r.tolerance = 0.01 * clip.w + 2.0 * s.pixel_m / max(facing, 0.1);
+    return r;
+}
+
+// Whether `geometry_prev` texel `g` holds the surface (normal `n`, packed
+// `packed`) the reprojection `r` is of (not another one, disoccluded).
+fn same_surface(r: Reprojection, g: vec2<u32>, n: vec3<f32>, packed: u32) -> bool {
+    if r.depth <= 0.0 || g.x == 0u || abs(bitcast<f32>(g.x) - r.depth) > r.tolerance { return false; }
+    return g.y == packed || dot(unpack_unit(g.y), n) >= 0.8;
+}
+
+// The bilinear weight of texel `i` (of the 2x2 at `base`).
+fn bilinear_weight(f: vec2<f32>, i: u32) -> f32 {
+    let w = select(1.0 - f, f, vec2<bool>((i & 1u) != 0u, (i >> 1u) != 0u));
+    return w.x * w.y;
+}
+
+// Catmull-Rom's weights for the four texels about fraction `f`.
+fn catmull_rom(f: f32) -> vec4<f32> {
+    return vec4<f32>(f * (-0.5 + f * (1.0 - 0.5 * f)), 1.0 + f * f * (-2.5 + 1.5 * f), f * (0.5 + f * (2.0 - 1.5 * f)), f * f * (-0.5 + 0.5 * f));
+}
+
+// The sun's and the sky's history at reprojection `r` of a hit (normal
+// `n`): read sharp (Catmull-Rom over 4x4 texels less the corners, which
+// weigh little) where they all hold its surface,
+// else bilinear over those of the 2x2 that do (a camera's slow drift
+// would otherwise blur it a little more each frame); `found` false where
+// none does.
+struct History {
+    h: vec4<f32>,
+    short: vec4<f32>,
+    found: bool,
+}
+
+fn history_at(r: Reprojection, n: vec3<f32>, size: vec2<u32>) -> History {
+    var out: History;
+    let packed = pack_unit(n);
+    // A still camera: the texel it lands on (its matrices' rounding moves
+    // a near point by a few hundredths of a pixel).
+    let near = round(r.f);
+    if params.rays[1].w > 0.5 {
+        let q = r.base + vec2<i32>(near);
+        if inside(q, size) && same_surface(r, geometry_prev[texel(q, size)], n, packed) {
+            return History(halves(history_prev[texel(q, size)]), halves(history_short_prev[texel(q, size)]), true);
+        }
+        return out;
+    }
+    let wx = catmull_rom(r.f.x);
+    let wy = catmull_rom(r.f.y);
+    var sharp = true;
+    var c = History(vec4<f32>(0.0), vec4<f32>(0.0), true);
+    var b = History(vec4<f32>(0.0), vec4<f32>(0.0), true);
+    var b_total = 0.0;
+    for (var j = 0; j < 4; j++) {
+        for (var i = 0; i < 4; i++) {
+            let edge = vec2<bool>(i == 0 || i == 3, j == 0 || j == 3);
+            if all(edge) { continue; }
+            let q = r.base + vec2<i32>(i - 1, j - 1);
+            let inner = !any(edge);
+            let k = wx[i] * wy[j];
+            let w = select(0.0, bilinear_weight(r.f, u32(i - 1) | (u32(j - 1) << 1u)), inner);
+            var g = vec2<u32>(0u);
+            if inside(q, size) { g = geometry_prev[texel(q, size)]; }
+            if !same_surface(r, g, n, packed) {
+                sharp = false;
+                continue;
+            }
+            let h = halves(history_prev[texel(q, size)]);
+            let short = halves(history_short_prev[texel(q, size)]);
+            c.h += k * h;
+            c.short += k * short;
+            if inner {
+                b.h += w * h;
+                b.short += w * short;
+                b_total += w;
+            }
+        }
+    }
+    if sharp {
+        // The weights without the corners.
+        let total = (wx[1] + wx[2]) * (wy[0] + wy[1] + wy[2] + wy[3]) + (wx[0] + wx[3]) * (wy[1] + wy[2]);
+        c.h = max(c.h / total, vec4<f32>(0.0));
+        c.short = max(c.short / total, vec4<f32>(0.0));
+        return c;
+    }
+    if b_total <= 0.01 { return out; }
+    return History(b.h / b_total, b.short / b_total, true);
+}
+
+// A pass over 16x16 pixels a workgroup, with a tile of pixels around them
+// in workgroup memory.
+const GROUP: i32 = 16;
+
+// The clamp's tile: this frame's walked sun about the workgroup (-1: no
+// terrain hit), then each tile row's range over the window's width.
+const CLAMP_TILE: i32 = GROUP + 2 * CLAMP_RADIUS;
+var<workgroup> w_sun: array<f32, 576>;
+var<workgroup> w_lo: array<f32, 384>;
+var<workgroup> w_hi: array<f32, 384>;
+
+// The sun's and the sky's history (`history_prev`, `history_short_prev`
+// along the hits' motion, the sun's clamped to the range of this frame's
+// samples in the 9x9 pixels around) and this frame's samples, accumulated,
+// and the hits they are for (`out_geometry`); the filters' terms
+// (`out_filter`: the means and their variance: the binary sun's m(1 - m),
+// the sky's moments, over the frames accumulated; a fresh history's
+// widened to its samples' blocks' spread).
+@compute @workgroup_size(16, 16)
+fn temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let size = textureDimensions(hit_distance);
+    let rp = ray_plane(size);
+    let origin = vec2<i32>(group.xy) * GROUP - CLAMP_RADIUS;
+    for (var i = li; i < u32(CLAMP_TILE * CLAMP_TILE); i += 256u) {
+        let q = origin + vec2<i32>(i32(i) % CLAMP_TILE, i32(i) / CLAMP_TILE);
+        var sun = -1.0;
+        if inside(q, size) {
+            let walked = walked_sun(q, size);
+            sun = select(-1.0, walked.x, walked.z > 0.5);
+        }
+        w_sun[i] = sun;
+    }
+    workgroupBarrier();
+    // The window's range, a row's then a column's (no terrain hit: none).
+    for (var i = li; i < u32(CLAMP_TILE * GROUP); i += 256u) {
+        let row = i32(i) / GROUP;
+        let column = i32(i) % GROUP;
+        var lo = 1.0;
+        var hi = 0.0;
+        for (var k = 0; k <= 2 * CLAMP_RADIUS; k++) {
+            let v = w_sun[row * CLAMP_TILE + column + k];
+            if v >= 0.0 {
+                lo = min(lo, v);
+                hi = max(hi, v);
+            }
+        }
+        w_lo[i] = lo;
+        w_hi[i] = hi;
+    }
+    workgroupBarrier();
+    if id.x >= size.x || id.y >= size.y { return; }
+    let p = vec2<i32>(id.xy);
+    let pixel = texel(p, size);
+    let walked = walked_sun(p, size);
+    let sun = walked.x;
+    let weight = select(SUN_BORROWED, 1.0, walked.y > 0.5);
+    let s = surface(p, rp);
+    if s.depth <= 0.0 {
+        out_history[pixel] = to_halves(vec4<f32>(sun, 1.0, 1.0, 0.0));
+        out_history_short[pixel] = to_halves(vec4<f32>(sun, 1.0, 0.0, 0.0));
+        out_geometry[pixel] = vec2<u32>(0u);
+        out_filter[pixel] = to_halves(vec4<f32>(sun, 1.0, 0.0, 0.0));
+        return;
+    }
+    let sky = textureLoad(hit_normals, p, 0).w;
+    var lo = sun;
+    var hi = sun;
+    for (var k = 0; k <= 2 * CLAMP_RADIUS; k++) {
+        let i = (i32(local.y) + k) * GROUP + i32(local.x);
+        lo = min(lo, w_lo[i]);
+        hi = max(hi, w_hi[i]);
+    }
+    // The histories along the motion (none: this frame's samples).
+    let last = history_at(reproject(s, size), s.normal, size);
+    var h = vec4<f32>(sun, sky, sky * sky, 0.0);
+    var short = vec2<f32>(sun, sky);
+    var sun_weight = 0.0;
+    if last.found {
+        h = last.h;
+        short = last.short.xy;
+        sun_weight = last.short.z;
+        h.x = clamp(h.x, lo, hi);
+        short.x = clamp(short.x, lo, hi);
+    }
+    // The short histories: the sun's weighted as the long one (a cycle's
+    // weight), so both keep to the same mean.
+    var frames = vec2<f32>(sun_weight / SUN_FRAME_WEIGHT, h.w) + 1.0;
+    short.x = mix(short.x, sun, weight / (min(sun_weight, SUN_SHORT * SUN_FRAME_WEIGHT) + weight));
+    short.y = mix(short.y, sky, 1.0 / min(frames.y, SKY_SHORT));
+    // The long histories restart from the short ones they leave.
+    // (In a penumbra the samples themselves swing between 0 and 1: their
+    // spread, the long history's m(1 - m), widens the bound.)
+    if abs(h.x - short.x) > SUN_LAG + 0.5 * sqrt(h.x * (1.0 - h.x)) {
+        h.x = short.x;
+        sun_weight = min(sun_weight, SUN_SHORT * SUN_FRAME_WEIGHT);
+    }
+    if abs(h.y - short.y) > SKY_LAG {
+        h.z += short.y * short.y - h.y * h.y;
+        h.y = short.y;
+        frames.y = min(frames.y, SKY_SHORT);
+    }
+    sun_weight = min(sun_weight + weight, SUN_FRAMES * SUN_FRAME_WEIGHT);
+    let a = vec2<f32>(weight / sun_weight, 1.0 / min(frames.y, SKY_FRAMES));
+    let out = vec4<f32>(mix(h.x, sun, a.x), mix(h.y, sky, a.y), mix(h.z, sky * sky, a.y), min(frames.y, SKY_FRAMES));
+    out_history[pixel] = to_halves(out);
+    out_history_short[pixel] = to_halves(vec4<f32>(short, sun_weight, 0.0));
+    out_geometry[pixel] = vec2<u32>(bitcast<u32>(s.depth), pack_unit(s.normal));
+    // The sun's samples counted as own samples (a lent one is worth 0.05 of
+    // one), the sky's as frames.
+    let accumulated = vec2<f32>(sun_weight, out.w);
+    let variance = vec2<f32>(out.x * (1.0 - out.x), max(out.z - out.y * out.y, 0.0)) / max(accumulated, vec2<f32>(1.0));
+    // Few frames: the samples' blocks' own spread, whatever they showed.
+    let fresh = max(4.0 - accumulated, vec2<f32>(0.0)) * 0.0625;
+    out_filter[pixel] = to_halves(vec4<f32>(out.xy, variance + fresh));
+}
+
+// The filters' tile: the workgroup's pixels and FILTER_APRON around, each
+// pixel's hit as its view depth past the eye's (0: no terrain hit) and
+// normal, and its terms and their variance (two halves each), decoded once
+// for the workgroup's taps.
+const FILTER_APRON: i32 = 2;
+const FILTER_SIDE: i32 = GROUP + 2 * FILTER_APRON;
+var<workgroup> t_hit: array<vec4<f32>, 400>;
+var<workgroup> t_terms: array<vec2<u32>, 400>;
+
+fn load_filter_tile(group: vec2<u32>, li: u32, size: vec2<u32>, rp: RayPlane) {
+    let origin = vec2<i32>(group) * GROUP - FILTER_APRON;
+    for (var i = li; i < u32(FILTER_SIDE * FILTER_SIDE); i += 256u) {
+        let q = origin + vec2<i32>(i32(i) % FILTER_SIDE, i32(i) / FILTER_SIDE);
+        var hit = vec4<f32>(0.0);
+        var terms = vec2<u32>(0u);
+        if inside(q, size) {
+            let g = geometry[texel(q, size)];
+            if g.x != 0u { hit = vec4<f32>(bitcast<f32>(g.x) - rp.base, unpack_unit(g.y)); }
+            terms = filter_in[texel(q, size)];
+        }
+        t_hit[i] = hit;
+        t_terms[i] = terms;
+    }
+    workgroupBarrier();
+}
+
+// A pixel's surface as its neighbours are weighed against it: its plane
+// (a pixel q's hit at view depth z past the eye's lies
+// `(a + q.x bx + q.y by) z - c` off it), its normal, and the plane distance
+// that weighs 1/e (`reach`: a pixel's width at the filter's step).
+struct Plane {
+    a: f32,
+    bx: f32,
+    by: f32,
+    c: f32,
+    normal: vec3<f32>,
+    reach: f32,
+}
+
+fn hit_plane(p: vec2<i32>, hit: vec4<f32>, rp: RayPlane, step: f32) -> Plane {
+    let n = hit.yzw;
+    return Plane(dot(n, rp.origin), dot(n, rp.dx), dot(n, rp.dy), dot(n, plane_ray(rp, p) * hit.x), n, length(rp.dx) * hit.x * step + 1e-3 * (hit.x + rp.base));
+}
+
+// Whether pixel `q`'s hit `hit` is of plane `pl`'s surface: within half
+// its reach of the plane, its normal within 11 degrees (`same_plane` a
+// half or more).
+fn on_plane(pl: Plane, q: vec2<i32>, hit: vec4<f32>) -> bool {
+    return hit.x > 0.0 && abs((pl.a + f32(q.x) * pl.bx + f32(q.y) * pl.by) * hit.x - pl.c) <= 0.5 * pl.reach && dot(pl.normal, hit.yzw) >= 0.98;
+}
+
+// How much pixel `q`'s hit `hit` (none: 0) belongs to plane `pl`'s
+// surface: its distance off the plane, its normal's turn.
+fn same_plane(pl: Plane, q: vec2<i32>, hit: vec4<f32>) -> f32 {
+    if hit.x <= 0.0 { return 0.0; }
+    let off = abs((pl.a + f32(q.x) * pl.bx + f32(q.y) * pl.by) * hit.x - pl.c);
+    let n = max(dot(pl.normal, hit.yzw), 0.0);
+    let n2 = n * n;
+    let n4 = n2 * n2;
+    let n16 = n4 * n4 * n4 * n4;
+    return exp2(-1.442695 * off / pl.reach) * n16 * n16;
+}
+
+// À-trous filter weights (3x3, a B-spline's: 1/4, 1/2, 1/4 a side).
+fn spline(i: i32) -> f32 {
+    return select(0.25, 0.5, i == 0);
+}
+// How many of a pixel's standard deviations a neighbour's value may stray
+// and still weigh (1/e).
+const FILTER_SIGMAS: f32 = 1.5;
+
+// One à-trous pass (3x3 taps `step` pixels apart) for pixel `p`, at
+// `local` in the tile: the sun's and the sky's mean and their means'
+// variance. Each term's neighbours weigh by how far their value lies from
+// the pixel's, in its standard deviations: a settled history barely
+// blurs, a fresh one blurs over its samples' blocks.
+struct Filtered {
+    value: vec2<f32>,
+    variance: vec2<f32>,
+}
+
+fn atrous(p: vec2<i32>, local: vec2<i32>, step: i32, rp: RayPlane) -> Filtered {
+    let c = local.y * FILTER_SIDE + local.x;
+    let centre = Filtered(unpack2x16float(t_terms[c].x), unpack2x16float(t_terms[c].y));
+    if t_hit[c].x <= 0.0 { return centre; }
+    let pl = hit_plane(p, t_hit[c], rp, f32(step));
+    let sigma = FILTER_SIGMAS * sqrt(centre.variance) + 1e-3;
+    var sum = centre.value * 0.25;
+    var weights = vec2<f32>(0.25);
+    var variance = centre.variance * 0.0625;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            if dx == 0 && dy == 0 { continue; }
+            let d = vec2<i32>(dx, dy) * step;
+            let i = (local.y + d.y) * FILTER_SIDE + local.x + d.x;
+            // Past the frame: no terrain hit there (depth 0).
+            let g = same_plane(pl, p + d, t_hit[i]);
+            if g <= 1e-4 { continue; }
+            let v = unpack2x16float(t_terms[i].x);
+            let w = spline(dx) * spline(dy) * g * exp2(-1.442695 * abs(v - centre.value) / sigma);
+            sum += w * v;
+            weights += w;
+            variance += w * w * unpack2x16float(t_terms[i].y);
+        }
+    }
+    return Filtered(sum / weights, variance / (weights * weights));
+}
+
+// A pixel's terms settled enough to pass the filters as they are: both
+// variances under this (a settled history's binary sun at an edge, 0.25
+// over its 32 frames, is under it; a fresh one's, widened, far over).
+const SETTLED: f32 = 0.01;
+var<workgroup> w_unsettled: u32;
+
+// A filter pass (`step`): pixels with settled terms pass as they are, and
+// a workgroup with none else loads no tile.
+fn filter_pass(id: vec2<u32>, group: vec2<u32>, local: vec2<u32>, li: u32, step: i32) {
+    let size = textureDimensions(hit_distance);
+    let p = vec2<i32>(id);
+    let shown = all(id < size);
+    if li == 0u { w_unsettled = 0u; }
+    workgroupBarrier();
+    var own = vec2<u32>(0u);
+    var settled = true;
+    if shown {
+        own = filter_in[texel(p, size)];
+        settled = all(halves(own).zw <= vec2<f32>(SETTLED)) || geometry[texel(p, size)].x == 0u;
+        // (Every unsettled pixel writes the same word.)
+        if !settled { w_unsettled = 1u; }
+    }
+    if workgroupUniformLoad(&w_unsettled) == 0u {
+        if shown { out_filter[texel(p, size)] = own; }
+        return;
+    }
+    let rp = ray_plane(size);
+    load_filter_tile(group, li, size, rp);
+    if !shown { return; }
+    if settled {
+        out_filter[texel(p, size)] = own;
+        return;
+    }
+    let f = atrous(p, vec2<i32>(local) + FILTER_APRON, step, rp);
+    out_filter[texel(p, size)] = to_halves(vec4<f32>(f.value, f.variance));
+}
+
+@compute @workgroup_size(16, 16)
+fn filter_first(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    filter_pass(id.xy, group.xy, local.xy, li, 1);
+}
+
+@compute @workgroup_size(16, 16)
+fn filter_second(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    filter_pass(id.xy, group.xy, local.xy, li, 2);
+}
+
+// The terms as lighting takes them (Helio's directional visibility, the
+// sky's for the gbuffer): the filtered terms, which are of pixels (their
+// whole area), read where this frame's jitter put the pixel's sample, as
+// a host's TSR takes it (read at the pixel's centre, TSR would blur them
+// by the jitter's spread); sharp (Catmull-Rom less its corners) over the
+// neighbours of the same surface, else bilinear over those, else the
+// pixel's own. A mesh's
+// or the sky's own walk as it was; steady shadows: the walks' own.
+@compute @workgroup_size(16, 16)
+fn resolve(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let size = textureDimensions(hit_distance);
+    let rp = ray_plane(size);
+    load_filter_tile(group.xy, li, size, rp);
+    if id.x >= size.x || id.y >= size.y { return; }
+    let p = vec2<i32>(id.xy);
+    let local = vec2<i32>(local_id.xy) + FILTER_APRON;
+    let c = local.y * FILTER_SIDE + local.x;
+    var value: vec2<f32>;
+    if t_hit[c].x <= 0.0 || steady_shadows() {
+        value = vec2<f32>(walked_sun(p, size).x, textureLoad(hit_normals, p, 0).w);
+    } else {
+        let pl = hit_plane(p, t_hit[c], rp, 1.0);
+        value = unpack2x16float(t_terms[c].x);
+        // The sample's place among the pixels: within half a pixel.
+        let offset = vec2<f32>(-params.history.z, params.history.w) * vec2<f32>(size) * 0.5;
+        let base = vec2<i32>(floor(offset));
+        let f = offset - floor(offset);
+        let wx = catmull_rom(f.x);
+        let wy = catmull_rom(f.y);
+        var sharp = vec2<f32>(0.0);
+        var all_same = true;
+        var bilinear = vec2<f32>(0.0);
+        var total = 0.0;
+        for (var j = 0; j < 4; j++) {
+            for (var i = 0; i < 4; i++) {
+                if (i == 0 || i == 3) && (j == 0 || j == 3) { continue; }
+                let d = base + vec2<i32>(i - 1, j - 1);
+                let t = (local.y + d.y) * FILTER_SIDE + local.x + d.x;
+                if !on_plane(pl, p + d, t_hit[t]) {
+                    all_same = false;
+                    continue;
+                }
+                let v = unpack2x16float(t_terms[t].x);
+                sharp += wx[i] * wy[j] * v;
+                if i >= 1 && i <= 2 && j >= 1 && j <= 2 {
+                    let w = bilinear_weight(f, u32(i - 1) | (u32(j - 1) << 1u));
+                    bilinear += w * v;
+                    total += w;
+                }
+            }
+        }
+        if all_same {
+            // The weights without the corners.
+            let weights = (wx[1] + wx[2]) * (wy[0] + wy[1] + wy[2] + wy[3]) + (wx[0] + wx[3]) * (wy[1] + wy[2]);
+            value = clamp(sharp / weights, vec2<f32>(0.0), vec2<f32>(1.0));
+        } else if total > 0.01 {
+            value = bilinear / total;
+        }
+    }
+    textureStore(out_sun, p, vec4<f32>(value.x, params.sun.xyz));
+    textureStore(out_sky, p, vec4<f32>(value.y));
+    if plain_colour() && debug_mode() == 0u {
+        let v = textureLoad(hit_visibility, p, 0).xy;
+        if v.x != NONE {
+            let n = textureLoad(hit_normals, p, 0).xyz;
+            let material = (v.y >> 21u) & 31u;
+            textureStore(out_colour, p, vec4<f32>(palette(material).rgb * (0.25 + 0.75 * max(dot(n, params.sun.xyz), 0.0) * value.x), 1.0));
+        }
+    }
+}
+
+// Local lights: as the sun, by light (its index in the scene's lights,
+// which its tile slots name). A pixel tracks the four lights reaching it
+// with the least indices (`LOCAL_TRACKED`): its history (`local_history`)
+// an entry each, (index + 1) << 16 | long visibility << 8 (8 bits) |
+// short visibility << 3 (5 bits) | samples' weight (3 bits, of
+// `LOCAL_WEIGHT`); lights
+// past those, or of larger indices (`LOCAL_IDS`), keep their walks' bits.
+// Lighting's words a pixel (`out_local`, Helio's `local_visibility`): the
+// tracked lights' tile slots (a byte each, 0xff: none), their visibility
+// (a byte each), the other slots' bits (1: seen).
+const LOCAL_TRACKED: u32 = 4u;
+// The long history's frames once settled, and its samples' weight then.
+const LOCAL_FRAMES: f32 = 16.0;
+const LOCAL_WEIGHT: f32 = LOCAL_FRAMES * SUN_FRAME_WEIGHT;
+// Light indices an entry holds (16 bits, less the empty one).
+const LOCAL_IDS: u32 = 0xfffeu;
+
+@group(1) @binding(51) var<storage, read> local_history_prev: array<vec4<u32>>;
+@group(1) @binding(52) var<storage, read_write> local_history: array<vec4<u32>>;
+@group(1) @binding(53) var<storage, read_write> out_local: array<u32>;
+// The local lights' passes' indirect dispatch (x, y, z: none without a
+// point or spot light in the scene) and whether the scene had one this
+// frame and the last (`local_gate`; `local_present` as `local_temporal`
+// reads it).
+@group(1) @binding(56) var<storage, read_write> local_dispatch: array<u32, 5>;
+@group(1) @binding(57) var<storage, read> local_present: array<u32, 5>;
+
+var<workgroup> w_present: atomic<u32>;
+
+// Whether the scene has a point or spot light, and the local lights'
+// passes' workgroups (8x8 pixels each) if so.
+@compute @workgroup_size(64)
+fn local_gate(@builtin(local_invocation_index) li: u32) {
+    if li == 0u { atomicStore(&w_present, 0u); }
+    workgroupBarrier();
+    for (var i = li; i < arrayLength(&scene_lights); i += 64u) {
+        let light = scene_lights[i];
+        if light.light_type != 0u && light.color_intensity.w > 0.0 { atomicOr(&w_present, 1u); }
+    }
+    workgroupBarrier();
+    if li != 0u { return; }
+    let present = atomicLoad(&w_present);
+    let groups = (textureDimensions(hit_distance) + 7u) / 8u;
+    local_dispatch[0] = select(0u, groups.x, present != 0u);
+    local_dispatch[1] = groups.y;
+    local_dispatch[2] = 1u;
+    local_dispatch[4] = local_dispatch[3];
+    local_dispatch[3] = present;
+}
+
+// The clamp's tile (8x8 pixels a workgroup, in one light tile).
+const LOCAL_TILE: i32 = 8 + 2 * CLAMP_RADIUS;
+var<workgroup> w_seen: array<u32, 256>;
+var<workgroup> l_depth: array<f32, 256>;
+
+fn entry_light(e: u32) -> u32 {
+    return e >> 16u;
+}
+
+fn entry_visibility(e: u32) -> f32 {
+    return f32((e >> 8u) & 255u) / 255.0;
+}
+
+fn entry_short(e: u32) -> f32 {
+    return f32((e >> 3u) & 31u) / 31.0;
+}
+
+// The samples' weight accumulated.
+fn entry_weight(e: u32) -> f32 {
+    return f32(e & 7u) / 7.0 * LOCAL_WEIGHT;
+}
+
+// A visibility to `steps` (255: 8 bits), rounded by a dither that changes
+// each frame (a history taking small steps keeps moving).
+fn visibility_steps(v: f32, steps: f32, p: vec2<u32>, k: u32) -> u32 {
+    let q = vec2<f32>(p) + 5.588238 * f32((params.table.w + 7u * k) % 64u);
+    let r = fract(52.9829189 * fract(0.06711056 * q.x + 0.00583715 * q.y));
+    return u32(clamp(v * steps + r, 0.0, steps));
+}
+
+// The tracked lights' history and this frame's walks (`local_seen`),
+// accumulated as the sun's (`temporal`), the clamp's neighbourhood within
+// the pixel's light tile (whose slots name the same lights); lighting's
+// words.
+@compute @workgroup_size(8, 8)
+fn local_temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let size = textureDimensions(hit_distance);
+    let rp = ray_plane(size);
+    let origin = vec2<i32>(group.xy) * 8 - CLAMP_RADIUS;
+    // A workgroup lies in one light tile (8 divides LIGHT_TILE). Without a
+    // point or spot light in it, nothing tracked (lighting reads none of
+    // its words: they are only for those lights).
+    let tile_lo = (vec2<i32>(group.xy) * 8 / i32(LIGHT_TILE)) * i32(LIGHT_TILE);
+    let tile_list = light_tile(vec2<u32>(tile_lo), size);
+    var local_lights = false;
+    for (var i = 0u; i < tile_list.y; i++) {
+        local_lights = local_lights || scene_lights[tile_light_lists[tile_list.x + i]].light_type != 0u;
+    }
+    if !local_lights {
+        if id.x < size.x && id.y < size.y { local_history[id.y * size.x + id.x] = vec4<u32>(0u); }
+        return;
+    }
+    for (var i = li; i < u32(LOCAL_TILE * LOCAL_TILE); i += 64u) {
+        let q = origin + vec2<i32>(i32(i) % LOCAL_TILE, i32(i) / LOCAL_TILE);
+        var depth = 0.0;
+        var seen = 0u;
+        if all(q >= tile_lo) && all(q < min(tile_lo + i32(LIGHT_TILE), vec2<i32>(size))) {
+            depth = surface_depth(q, walked_sun(q, size), rp);
+            seen = local_seen[u32(q.y) * size.x + u32(q.x)].x;
+        }
+        l_depth[i] = depth;
+        w_seen[i] = seen;
+    }
+    workgroupBarrier();
+    if id.x >= size.x || id.y >= size.y { return; }
+    let pixel = id.y * size.x + id.x;
+    let walked = local_seen[pixel];
+    let seen = walked.x;
+    let weight = select(SUN_BORROWED, 1.0, walked.y != 0u);
+    var tracked_slots = 0xffffffffu;
+    var tracked = 0u;
+    var entries = vec4<u32>(0u);
+    let s = surface(vec2<i32>(id.xy), rp);
+    if s.depth > 0.0 && !steady_shadows() && params.light_eye.w > 0.0 {
+        // The shadowed lights reaching the hit, those of least index first.
+        let list = light_tile(id.xy, size);
+        var lights = array<u32, 4>(NONE, NONE, NONE, NONE);
+        var slots = array<u32, 4>(0u, 0u, 0u, 0u);
+        for (var i = 0u; i < list.y; i++) {
+            var light = tile_light_lists[list.x + i];
+            if light > LOCAL_IDS || !light_reach(scene_lights[light], s.at, s.normal).walk { continue; }
+            var slot = i;
+            for (var k = 0u; k < LOCAL_TRACKED; k++) {
+                if light < lights[k] {
+                    let l = lights[k];
+                    let o = slots[k];
+                    lights[k] = light;
+                    slots[k] = slot;
+                    light = l;
+                    slot = o;
+                }
+            }
+        }
+        // The 2x2 texels about the hit last frame that hold its surface.
+        // No history after a frame without local lights (none was kept).
+        var r = reproject(s, size);
+        if local_present[4] == 0u { r.depth = 0.0; }
+        let packed = pack_unit(s.normal);
+        var texels: array<u32, 4>;
+        var weights = vec4<f32>(0.0);
+        for (var i = 0u; i < 4u; i++) {
+            let q = r.base + vec2<i32>(i32(i & 1u), i32(i >> 1u));
+            if inside(q, size) && same_surface(r, geometry_prev[texel(q, size)], s.normal, packed) {
+                texels[i] = u32(q.y) * size.x + u32(q.x);
+                weights[i] = bilinear_weight(r.f, i);
+            }
+        }
+        let centre = vec2<i32>(id.xy) - origin;
+        for (var k = 0u; k < LOCAL_TRACKED; k++) {
+            if lights[k] == NONE { break; }
+            let slot = slots[k];
+            let now = f32((seen >> slot) & 1u);
+            // The long and the short history, their frames.
+            var h = vec3<f32>(0.0);
+            var total = 0.0;
+            for (var i = 0u; i < 4u; i++) {
+                if weights[i] == 0.0 { continue; }
+                let e = local_history_prev[texels[i]];
+                for (var j = 0u; j < LOCAL_TRACKED; j++) {
+                    if entry_light(e[j]) == lights[k] + 1u {
+                        h += weights[i] * vec3<f32>(entry_visibility(e[j]), entry_short(e[j]), entry_weight(e[j]));
+                        total += weights[i];
+                    }
+                }
+            }
+            var v = vec2<f32>(now);
+            var accumulated = weight;
+            if total > 0.01 {
+                var lo = now;
+                var hi = now;
+                for (var dy = -CLAMP_RADIUS; dy <= CLAMP_RADIUS; dy++) {
+                    for (var dx = -CLAMP_RADIUS; dx <= CLAMP_RADIUS; dx++) {
+                        let i = (centre.y + dy) * LOCAL_TILE + centre.x + dx;
+                        if abs(l_depth[i] - s.depth) > 0.1 * s.depth { continue; }
+                        let b = f32((w_seen[i] >> slot) & 1u);
+                        lo = min(lo, b);
+                        hi = max(hi, b);
+                    }
+                }
+                h /= total;
+                // Weighted as the sun's: the pixel's own walks count most.
+                let short = mix(clamp(h.y, lo, hi), now, weight / (min(h.z, SUN_SHORT * SUN_FRAME_WEIGHT) + weight));
+                var long = clamp(h.x, lo, hi);
+                // Restarts from the short history it leaves.
+                if abs(long - short) > SUN_LAG + 0.5 * sqrt(long * (1.0 - long)) {
+                    long = short;
+                    h.z = min(h.z, SUN_SHORT * SUN_FRAME_WEIGHT);
+                }
+                accumulated = min(h.z + weight, LOCAL_WEIGHT);
+                v = vec2<f32>(mix(long, now, weight / accumulated), short);
+            }
+            let byte = visibility_steps(v.x, 255.0, id.xy, k);
+            entries[k] = ((lights[k] + 1u) << 16u) | (byte << 8u) | (visibility_steps(v.y, 31.0, id.xy, k + 4u) << 3u) | visibility_steps(accumulated / LOCAL_WEIGHT, 7.0, id.xy, k + 8u);
+            tracked_slots = (tracked_slots & ~(0xffu << (8u * k))) | (slot << (8u * k));
+            tracked |= byte << (8u * k);
+        }
+    }
+    local_history[pixel] = entries;
+    out_local[pixel * 3u] = tracked_slots;
+    out_local[pixel * 3u + 1u] = tracked;
+    out_local[pixel * 3u + 2u] = seen;
+}
+
+// The tracked lights' visibility filtered as the sun's (one 3x3 pass, the
+// neighbours' entries for the same light).
+@compute @workgroup_size(8, 8)
+fn local_filter(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    if id.x >= size.x || id.y >= size.y || steady_shadows() { return; }
+    let p = vec2<i32>(id.xy);
+    let pixel = id.y * size.x + id.x;
+    let entries = local_history[pixel];
+    if entries.x == 0u { return; }
+    let rp = ray_plane(size);
+    let pl = hit_plane(p, stored_hit(p, size, rp), rp, 1.0);
+    var tracked = 0u;
+    for (var k = 0u; k < LOCAL_TRACKED; k++) {
+        let light = entry_light(entries[k]);
+        if light == 0u { break; }
+        let v = entry_visibility(entries[k]);
+        let frames = entry_weight(entries[k]) / SUN_FRAME_WEIGHT;
+        let sigma = FILTER_SIGMAS * sqrt(v * (1.0 - v) / max(frames, 1.0) + max(4.0 - frames, 0.0) * 0.0625) + 1e-3;
+        var sum = v * 0.25;
+        var weights = 0.25;
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                if dx == 0 && dy == 0 { continue; }
+                let q = p + vec2<i32>(dx, dy);
+                let g = same_plane(pl, q, stored_hit(q, size, rp));
+                if g <= 1e-4 { continue; }
+                let e = local_history[u32(q.y) * size.x + u32(q.x)];
+                for (var j = 0u; j < LOCAL_TRACKED; j++) {
+                    if entry_light(e[j]) != light { continue; }
+                    let vq = entry_visibility(e[j]);
+                    let w = spline(dx) * spline(dy) * g * exp2(-1.442695 * abs(vq - v) / sigma);
+                    sum += w * vq;
+                    weights += w;
+                }
+            }
+        }
+        tracked |= u32(clamp(sum / weights, 0.0, 1.0) * 255.0 + 0.5) << (8u * k);
+    }
+    out_local[pixel * 3u + 1u] = tracked;
 }
 
 // ---- 5. Ray reports ----

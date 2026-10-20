@@ -77,6 +77,11 @@ struct World {
     gi: Option<[wgpu::Buffer; 4]>,
     /// Whether each frame draws a level of the sun's occlusion.
     sun_occlusion: bool,
+    /// The projection jittered each frame as Helio's (`r1_r2_jitter`): the
+    /// next frame's place in the jitter's sequence.
+    jitter: Option<u64>,
+    /// The last frame's view-projection and jitter (NDC).
+    last: Option<(Mat4, glam::Vec2)>,
 }
 
 impl World {
@@ -93,6 +98,8 @@ impl World {
             lights: None,
             gi: None,
             sun_occlusion: false,
+            jitter: None,
+            last: None,
         }
     }
 
@@ -114,7 +121,14 @@ impl World {
     }
 
     fn frame_picked(&mut self, gpu: &Gpu, planet: &Planet, view: &View, config: &ResidencyConfig, picks: Option<&SharedPicks>) -> helio_pass_voxel_planet::chunks::UpdateStats {
-        let view_proj = view.view_proj(planet);
+        let mut view_proj = view.view_proj(planet);
+        let mut jitter = glam::Vec2::ZERO;
+        if let Some(n) = self.jitter.as_mut() {
+            jitter = glam::Vec2::from(helio_core::temporal::r1_r2_jitter(*n)) * 2.0 / glam::Vec2::new(view.size[0] as f32, view.size[1] as f32);
+            *n += 1;
+            view_proj = Mat4::from_translation(jitter.extend(0.0)) * view_proj;
+        }
+        let (prev_view_proj, prev_jitter) = self.last.replace((view_proj, jitter)).unwrap_or((view_proj, jitter));
         let tan_y = f64::from((FOV_Y * 0.5).tan());
         let tan_x = tan_y * f64::from(view.size[0]) / f64::from(view.size[1]);
         let cone = residency::View { forward: view.forward.as_dvec3(), cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos() };
@@ -126,7 +140,7 @@ impl World {
             self.chunks.follow_gi(helio_pass_gi::Clipmap::around(view.eye), view.eye, view.eye);
         }
         let gi = self.gi.as_ref().map(|[frame, rays, hits, sun]| GiRays { frame, rays, hits, sun });
-        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, self.sun, view.size, self.scene_depth.as_ref(), lights.as_ref(), gi.as_ref());
+        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, prev_view_proj, [jitter, prev_jitter], view.near, self.sun, view.size, self.scene_depth.as_ref(), lights.as_ref(), gi.as_ref());
         if self.sun_occlusion {
             self.chunks.draw_sun_occlusion(&mut recorder, self.frame, view.eye, self.sun);
         }
@@ -1405,7 +1419,7 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
             let to = light - point;
             let light_blocked = planet.raycast(point + to.normalize() * (0.05 * voxel), to.normalize(), to.length() - voxel).is_some();
             light_blocked_points += usize::from(light_blocked);
-            light_mismatched += usize::from((seen[(y * view.size[0] + x) as usize] & 1 != 0) == light_blocked);
+            light_mismatched += usize::from((seen[(y * view.size[0] + x) as usize] > 0.5) == light_blocked);
         }
     }
     eprintln!("the light: {light_blocked_points} blocked, {light_mismatched} mismatched");
@@ -1416,6 +1430,300 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
     assert!(shaded_sky > 10, "{shaded_sky} shaded before the sky");
     assert!(shaded > 100 && sunny > 100, "{shaded} shaded, {sunny} sunny");
     assert!(mismatched * 100 <= before_hits + before_sky, "{mismatched} mismatched");
+}
+
+/// An f16's value.
+fn f16_value(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = i32::from((bits >> 10) & 0x1f);
+    let mantissa = f32::from(bits & 0x3ff);
+    sign * match exponent {
+        0 => mantissa / 1024.0 * 2f32.powi(-14),
+        31 => f32::INFINITY,
+        e => (1.0 + mantissa / 1024.0) * 2f32.powi(e - 15),
+    }
+}
+
+/// Channel `channel` of an Rgba16Float target, row by row.
+fn read_rgba16(gpu: &Gpu, texture: &wgpu::Texture, channel: usize) -> Vec<f32> {
+    let [w, h] = [texture.width(), texture.height()];
+    let row = (w * 8).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
+    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+        let at = (y * row + x * 8) as usize + channel * 2;
+        f16_value(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
+    }).collect()
+}
+
+/// The sun's visibility as lighting takes it (`directional_visibility`'s x).
+fn read_sun_visibility(gpu: &Gpu, world: &World) -> Vec<f32> {
+    read_rgba16(gpu, &world.chunks.targets().expect("drawn").sun, 0)
+}
+
+/// The sun as the walks found it (each pixel's or its block's sample).
+fn read_sun_walked(gpu: &Gpu, world: &World) -> Vec<f32> {
+    read_words(gpu, &world.chunks.targets().expect("drawn").sun_walked).iter().map(|w| (w & 0xff) as f32 / 255.0).collect()
+}
+
+/// The sky's visibility as the gbuffer takes it, and the walks' own
+/// (each pixel's block's sample).
+fn read_sky_visibility(gpu: &Gpu, world: &World) -> Vec<f32> {
+    read_f32(gpu, &world.chunks.targets().expect("drawn").sky, 1, 0)
+}
+
+fn read_sky_samples(gpu: &Gpu, world: &World) -> Vec<f32> {
+    read_rgba16(gpu, &world.chunks.targets().expect("drawn").normal, 3)
+}
+
+/// Channel `channel` of a 32-bit float target of `channels`, row by row.
+fn read_f32(gpu: &Gpu, texture: &wgpu::Texture, channels: u32, channel: u32) -> Vec<f32> {
+    let [w, h] = [texture.width(), texture.height()];
+    let row = (w * 4 * channels).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
+    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+        let at = (y * row + (x * channels + channel) * 4) as usize;
+        f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }).collect()
+}
+
+/// Frame to frame change of one visibility term over `frames` (mean
+/// absolute change, share of pixels changing by more than a tenth) at the
+/// pixels of `mask`.
+fn flicker(frames: &[Vec<f32>], mask: &[bool]) -> (f64, f64) {
+    let (mut sum, mut big, mut n) = (0.0, 0usize, 0usize);
+    for pair in frames.windows(2) {
+        for (i, _) in mask.iter().enumerate().filter(|(_, m)| **m) {
+            let d = f64::from((pair[1][i] - pair[0][i]).abs());
+            sum += d;
+            big += usize::from(d > 0.1);
+            n += 1;
+        }
+    }
+    (sum / n.max(1) as f64, big as f64 / n.max(1) as f64)
+}
+
+/// Error of `frames` against `truth` at the pixels of `mask`: mean absolute,
+/// share off by more than a half.
+fn error(frames: &[Vec<f32>], truth: &[f32], mask: &[bool]) -> (f64, f64) {
+    let (mut sum, mut wrong, mut n) = (0.0, 0usize, 0usize);
+    for frame in frames {
+        for (i, _) in mask.iter().enumerate().filter(|(_, m)| **m) {
+            let d = f64::from((frame[i] - truth[i]).abs());
+            sum += d;
+            wrong += usize::from(d > 0.5);
+            n += 1;
+        }
+    }
+    (sum / n.max(1) as f64, wrong as f64 / n.max(1) as f64)
+}
+
+/// A ground view with a raised ball between it and a low sun: natural
+/// steps, the ball and its shadow over the ground.
+fn shadowed_ground() -> (Planet, View, Vec3) {
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let view = ground_view(&planet, land(&planet, 4, 0.37, 0.61), [320, 180]);
+    let forward = view.forward.as_dvec3();
+    let up = planet.grid().up(view.eye);
+    let side = up.cross(forward).normalize();
+    let sun = (up * 0.45 + side * 0.8 + forward * 0.3).normalize();
+    let ball = view.eye + forward * 9.0 + up * 1.5 + sun * 4.0;
+    planet.apply(Brush { center: ball.to_array(), radius: 2.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    (planet, view, sun.as_vec3())
+}
+
+/// The sun's and the sky's visibility as lighting takes them (denoised),
+/// against steady shadows (every hit walking SUN_DISK_RAYS rays over the
+/// sun's disk: the sun's truth, penumbrae included) and the walks' own sky samples averaged over many frames (the
+/// sky's), with a still camera: within a small error, and steadier from
+/// frame to frame than the walks' own by far. A sudden turn of the sun
+/// shows within a few frames. Then with the projection jittered as a
+/// host's TSR jitters it: on pixels whose hits the jitter leaves alone,
+/// the denoised sun (read where each frame's jitter puts the pixel's
+/// sample) follows steady shadows frame by frame (the same jitter),
+/// changing no more than they do, and the sky stays near steady.
+/// Then the shadow stage's and the denoiser's GPU time.
+#[test]
+fn terrain_shadows_match_steady_shadows() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, view, sun) = shadowed_ground();
+    // Later the sun turns 20 degrees about the vertical and sinks a little.
+    let up = planet.grid().up(view.eye).as_vec3();
+    let turned = (glam::Quat::from_axis_angle(up, 20f32.to_radians()) * sun - up * 0.08).normalize();
+    let mut world = World::new(gpu, &planet);
+    world.sun = turned;
+    world.chunks.set_steady_shadows(true);
+    let hits = world.settle(gpu, &planet, &view);
+    for _ in 0..4 {
+        world.frame(gpu, &planet, &view, None);
+    }
+    let truth_turned = read_sun_visibility(gpu, &world);
+    world.sun = sun;
+    for _ in 0..4 {
+        world.frame(gpu, &planet, &view, None);
+    }
+    let truth = read_sun_visibility(gpu, &world);
+    let terrain: Vec<bool> = hits.iter().map(|h| h.is_some()).collect();
+    let lit = terrain.iter().zip(&truth).filter(|(t, s)| **t && **s > 0.5).count();
+    let terrain_count = terrain.iter().filter(|t| **t).count();
+    eprintln!("terrain pixels {terrain_count}, lit {lit}");
+    assert!(lit > terrain_count / 5 && lit * 5 < terrain_count * 4, "{lit} of {terrain_count} lit");
+    world.chunks.set_steady_shadows(false);
+    // The sky's reference: the walks' samples over 256 frames.
+    let mut reference = vec![0.0f32; terrain.len()];
+    for _ in 0..256 {
+        world.frame(gpu, &planet, &view, None);
+        for (r, s) in reference.iter_mut().zip(read_sky_samples(gpu, &world)) {
+            *r += s / 256.0;
+        }
+    }
+    let (mut suns, mut skies, mut walked_suns, mut walked_skies) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..16 {
+        world.frame(gpu, &planet, &view, None);
+        suns.push(read_sun_visibility(gpu, &world));
+        skies.push(read_sky_visibility(gpu, &world));
+        walked_suns.push(read_sun_walked(gpu, &world));
+        walked_skies.push(read_sky_samples(gpu, &world));
+    }
+    let report = |name: &str, frames: &[Vec<f32>], truth: &[f32], mask: &[bool]| {
+        let (e, w) = error(frames, truth, mask);
+        let (f, j) = flicker(frames, mask);
+        eprintln!("{name}: error {e:.4} (off by > 0.5: {:.2}%), flicker {f:.4} (> 0.1: {:.2}%)", w * 100.0, j * 100.0);
+        (e, w, f, j)
+    };
+    let sun_before = report("sun, walked", &walked_suns, &truth, &terrain);
+    let sun_after = report("sun, denoised", &suns, &truth, &terrain);
+    let in_penumbra: Vec<bool> = terrain.iter().zip(&truth).map(|(t, s)| *t && *s > 0.05 && *s < 0.95).collect();
+    report("sun in penumbrae, walked", &walked_suns, &truth, &in_penumbra);
+    report("sun in penumbrae, denoised", &suns, &truth, &in_penumbra);
+    let sky_before = report("sky, walked", &walked_skies, &reference, &terrain);
+    let sky_after = report("sky, denoised", &skies, &reference, &terrain);
+    assert!(sun_after.0 <= 0.01 && sun_after.1 <= 0.002, "sun against steady shadows: {sun_after:?}");
+    assert!(sun_after.2 * 10.0 <= sun_before.2 && sun_after.3 * 10.0 <= sun_before.3, "sun flicker {sun_after:?} against the walks' {sun_before:?}");
+    assert!(sky_after.0 <= 0.03 && sky_after.2 * 10.0 <= sky_before.2 && sky_after.3 * 10.0 <= sky_before.3, "sky {sky_after:?} against the walks' {sky_before:?}");
+    // A sudden turn of the sun: the error frame by frame after it.
+    world.sun = turned;
+    let (mut after, mut walked) = (Vec::new(), Vec::new());
+    for _ in 0..16 {
+        world.frame(gpu, &planet, &view, None);
+        after.push(error(&[read_sun_visibility(gpu, &world)], &truth_turned, &terrain));
+        walked.push(read_sun_walked(gpu, &world));
+    }
+    for _ in 0..48 {
+        world.frame(gpu, &planet, &view, None);
+    }
+    let settled = error(&[read_sun_visibility(gpu, &world)], &truth_turned, &terrain);
+    let walked = error(&walked, &truth_turned, &terrain);
+    let line: Vec<String> = after.iter().enumerate().map(|(k, (e, w))| format!("{}: {e:.4}/{:.2}%", k + 1, w * 100.0)).collect();
+    eprintln!("sun turned 20 degrees, error (mean/off by > 0.5) by frames after: {}; 64 frames after: {:.4}/{:.2}%; the walks' own: {:.4}/{:.2}%", line.join(", "), settled.0, settled.1 * 100.0, walked.0, walked.1 * 100.0);
+    // Within a few frames as near as the walks themselves, and settling.
+    assert!(after[3].1 <= walked.1 && after[3].1 <= settled.1 + 0.01, "4 frames after the sun turned: {:?}, the walks' {walked:?}, settled {settled:?}", after[3]);
+    // Jittered: steady shadows, then denoised, on the pixels whose hits
+    // (level, face, distance within 2%) hold through every jittered frame.
+    world.sun = sun;
+    world.jitter = Some(0);
+    let mut stable = terrain.clone();
+    let jittered = |world: &mut World, stable: &mut Vec<bool>, steady: bool| {
+        world.chunks.set_steady_shadows(steady);
+        for _ in 0..64 {
+            world.frame(gpu, &planet, &view, None);
+        }
+        // Both runs measured over the same jitter.
+        world.jitter = Some(0);
+        let (mut suns, mut skies) = (Vec::new(), Vec::new());
+        for _ in 0..16 {
+            world.frame(gpu, &planet, &view, None);
+            suns.push(read_sun_visibility(gpu, &world));
+            skies.push(read_sky_visibility(gpu, &world));
+            for (s, (now, then)) in stable.iter_mut().zip(world.chunks.read_hits().iter().zip(&hits)) {
+                *s &= now.zip(*then).is_some_and(|(a, b)| a.level == b.level && a.entered == b.entered && (a.distance - b.distance).abs() < 0.02 * b.distance);
+            }
+        }
+        (suns, skies)
+    };
+    let (steady_suns, _) = jittered(&mut world, &mut stable, true);
+    let (suns, skies) = jittered(&mut world, &mut stable, false);
+    eprintln!("jittered: {} of {terrain_count} pixels' hits hold", stable.iter().filter(|s| **s).count());
+    let (mut e, mut w, mut n) = (0.0, 0usize, 0usize);
+    for (a, b) in suns.iter().zip(&steady_suns) {
+        for i in (0..a.len()).filter(|i| stable[*i]) {
+            let d = f64::from((a[i] - b[i]).abs());
+            e += d;
+            w += usize::from(d > 0.5);
+            n += 1;
+        }
+    }
+    let (sun_error, sun_wrong) = (e / n.max(1) as f64, w as f64 / n.max(1) as f64);
+    let (steady_flicker, steady_jumps) = flicker(&steady_suns, &stable);
+    let (sun_flicker, sun_jumps) = flicker(&suns, &stable);
+    eprintln!("sun, jittered, frame by frame against steady shadows: error {sun_error:.4} (off by > 0.5: {:.2}%); flicker {sun_flicker:.4} (> 0.1: {:.2}%), steady shadows' {steady_flicker:.4} (> 0.1: {:.2}%)", sun_wrong * 100.0, sun_jumps * 100.0, steady_jumps * 100.0);
+    let sky_jittered = report("sky, denoised, jittered", &skies, &reference, &stable);
+    // (Read at the jittered points, both change with the jitter at edges:
+    // TSR gathers that as it does the edges of the hits themselves.)
+    assert!(sun_error <= 0.02 && sun_wrong <= 0.01 && sun_flicker <= steady_flicker, "jittered sun: error {sun_error}, wrong {sun_wrong}, flicker {sun_flicker} (steady {steady_flicker})");
+    assert!(sky_jittered.0 <= 0.03 && sky_jittered.2 <= 0.01, "jittered sky {sky_jittered:?}");
+    world.chunks.take_timings();
+    for _ in 0..60 {
+        world.frame(gpu, &planet, &view, None);
+    }
+    let t = world.chunks.take_timings();
+    let n = t.len().max(1) as f64;
+    eprintln!("shadow stage {:.3} ms, denoiser {:.3} ms ({} frames timed)", t.iter().map(|f| f.shadow).sum::<f64>() / n, t.iter().map(|f| f.denoise).sum::<f64>() / n, t.len());
+}
+
+/// The shadow stage's and the denoiser's GPU time at 1920x1080 over the
+/// shadowed ground (`cargo test --release --test chunks -- --ignored
+/// shadow_denoise_cost --nocapture`): steady shadows (every hit walking),
+/// samples shared and denoised.
+#[test]
+#[ignore]
+fn shadow_denoise_cost() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, mut view, sun) = shadowed_ground();
+    view.size = [1920, 1080];
+    let mut world = World::new(gpu, &planet);
+    world.sun = sun;
+    // Residency fills most of the view (a full one outgrows the tests'
+    // capacity), then the stages are timed.
+    for _ in 0..400 {
+        world.frame(gpu, &planet, &view, None);
+    }
+    let stage = |world: &mut World| {
+        for _ in 0..30 {
+            world.frame(gpu, &planet, &view, None);
+        }
+        world.chunks.take_timings();
+        for _ in 0..240 {
+            world.frame(gpu, &planet, &view, None);
+        }
+        let mut t = world.chunks.take_timings();
+        t.sort_by(|a, b| (a.shadow + a.denoise).total_cmp(&(b.shadow + b.denoise)));
+        let mid = t[t.len() / 2];
+        (mid.shadow, mid.denoise)
+    };
+    let sampled = stage(&mut world);
+    world.chunks.set_steady_shadows(true);
+    let steady = stage(&mut world);
+    eprintln!("1920x1080, median frame: samples shared: shadow stage {:.3} ms, denoiser {:.3} ms; every hit walking: shadow stage {:.3} ms", sampled.0, sampled.1, steady.0);
 }
 
 /// Tools ask for the terrain hit under a view point (the editor's brush):
@@ -1617,17 +1925,22 @@ fn feature_generation_cost() {
     }
 }
 
-/// The local lights each pixel sees past the terrain
-/// (`local_visibility`'s words).
-fn read_local(gpu: &Gpu, world: &World) -> Vec<u32> {
-    let buffer = world.chunks.local_visibility().expect("drawn");
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: buffer.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-    let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
-    gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
+/// How much of a tile's light 0 each pixel sees past the terrain, as
+/// lighting takes it (`local_visibility`: the tracked lights' slots, their
+/// visibility, the other slots' bits).
+fn read_local(gpu: &Gpu, world: &World) -> Vec<f32> {
+    let words = read_words(gpu, world.chunks.local_visibility().expect("drawn with lights"));
+    words.chunks(3).map(|w| {
+        match (0..4).find(|k| (w[0] >> (8 * k)) & 0xff == 0) {
+            Some(k) => ((w[1] >> (8 * k)) & 0xff) as f32 / 255.0,
+            None => (w[2] & 1) as f32,
+        }
+    }).collect()
+}
+
+/// The same as the walks found it (each pixel's or its block's).
+fn read_local_walked(gpu: &Gpu, world: &World) -> Vec<f32> {
+    read_words(gpu, world.chunks.local_walked().expect("drawn")).chunks(2).map(|w| (w[0] & 1) as f32).collect()
 }
 
 /// Helio's lights and tile lists for one point light at `at`
@@ -1647,10 +1960,13 @@ fn one_light(gpu: &Gpu, at: Vec3, range: f32, size: [u32; 2]) -> [wgpu::Buffer; 
 
 /// The terrain shadows local lights: a point light 1 m over the ground
 /// beside a raised ball, seen from above. With steady shadows (every hit
-/// walks its own), every pixel facing the light sees it (its bit of
+/// walks its own), every pixel facing the light sees it (in
 /// `local_visibility`) where a CPU ray from its hit to the light reaches
-/// it; a hundredth may differ (grazing cells). Then the shadow stage's GPU
-/// time: every hit walking, a 2x2 block's sample shared, no light.
+/// it; a hundredth may differ (grazing cells). Denoised (samples shared,
+/// turning each frame), the same within a small error and steady from
+/// frame to frame; moved, its shadow follows within a few frames. Then the
+/// shadow stage's and the denoiser's GPU time: every hit walking, a 2x2
+/// block's sample shared, no light.
 #[test]
 fn terrain_shadows_local_lights() {
     let Some(gpu) = gpu() else { return };
@@ -1673,6 +1989,7 @@ fn terrain_shadows_local_lights() {
     let view_proj = view.view_proj(&planet);
     let cell = planet.grid().voxel_size();
     let (mut compared, mut wrong, mut shadowed) = (0, 0, 0);
+    let mut lit_pixels = vec![false; mask.len()];
     for y in (0..view.size[1]).step_by(2) {
         for x in (0..view.size[0]).step_by(2) {
             let ray = view.pixel_dir(view_proj, x, y);
@@ -1688,7 +2005,8 @@ fn terrain_shadows_local_lights() {
             let seen = planet.raycast(at + cpu.normal * 1e-3, to.normalize(), to.length() - cell).is_none();
             compared += 1;
             shadowed += usize::from(!seen);
-            if seen != (mask[(y * view.size[0] + x) as usize] & 1 != 0) {
+            lit_pixels[(y * view.size[0] + x) as usize] = true;
+            if seen != (mask[(y * view.size[0] + x) as usize] > 0.5) {
                 wrong += 1;
                 if wrong < 8 {
                     eprintln!("pixel {x},{y}: cpu {}, drawn {}", if seen { "lit" } else { "shadowed" }, if seen { "shadowed" } else { "lit" });
@@ -1697,23 +2015,71 @@ fn terrain_shadows_local_lights() {
         }
     }
     eprintln!("compared {compared}, shadowed {shadowed}, wrong {wrong}");
-    // The shadow stage's GPU time with the light and without.
+    assert!(compared > 2000 && shadowed > 200, "{compared} compared, {shadowed} shadowed");
+    assert!(wrong * 100 <= compared, "{wrong} of {compared} wrong");
+    // Against steady shadows: the walks' own (each pixel taking its
+    // block's sample) and denoised.
+    world.chunks.set_steady_shadows(false);
+    for _ in 0..64 {
+        world.frame(&gpu, &planet, &view, None);
+    }
+    let (mut walked, mut denoised) = (Vec::new(), Vec::new());
+    for _ in 0..16 {
+        world.frame(&gpu, &planet, &view, None);
+        walked.push(read_local_walked(&gpu, &world));
+        denoised.push(read_local(&gpu, &world));
+    }
+    let report = |name: &str, frames: &[Vec<f32>]| {
+        let (e, w) = error(frames, &mask, &lit_pixels);
+        let (f, j) = flicker(frames, &lit_pixels);
+        eprintln!("light, {name}: error {e:.4} (off by > 0.5: {:.2}%), flicker {f:.4} (> 0.1: {:.2}%)", w * 100.0, j * 100.0);
+        (e, w, f, j)
+    };
+    let before = report("walked", &walked);
+    let after = report("denoised", &denoised);
+    assert!(after.0 <= 0.01 && after.1 <= 0.005, "denoised against steady: {after:?}");
+    assert!(after.2 * 10.0 <= before.2 && after.3 * 10.0 <= before.3, "denoised flicker {after:?} against the walks' {before:?}");
+    // The light moves a metre aside: the steady shadows there, then frames
+    // until the denoised ones follow.
+    let moved = light + side * 1.0;
+    world.lights = Some(one_light(&gpu, (moved - eye).as_vec3(), range, view.size));
+    world.chunks.set_steady_shadows(true);
+    for _ in 0..2 {
+        world.frame(&gpu, &planet, &view, None);
+    }
+    let truth = read_local(&gpu, &world);
+    world.chunks.set_steady_shadows(false);
+    world.lights = Some(one_light(&gpu, (light - eye).as_vec3(), range, view.size));
+    for _ in 0..64 {
+        world.frame(&gpu, &planet, &view, None);
+    }
+    world.lights = Some(one_light(&gpu, (moved - eye).as_vec3(), range, view.size));
+    let mut after_move = Vec::new();
+    for _ in 0..8 {
+        world.frame(&gpu, &planet, &view, None);
+        after_move.push(error(&[read_local(&gpu, &world)], &truth, &lit_pixels));
+    }
+    let line: Vec<String> = after_move.iter().enumerate().map(|(k, (e, w))| format!("{}: {e:.4}/{:.2}%", k + 1, w * 100.0)).collect();
+    eprintln!("light moved 1 m, error (mean/off by > 0.5) by frames after: {}", line.join(", "));
+    assert!(after_move[3].1 <= 0.02, "4 frames after the light moved: {:?}", after_move[3]);
+    // The shadow stage's and the denoiser's GPU time with the light and
+    // without.
     let mut stage = |world: &mut World| {
         world.chunks.take_timings();
         for _ in 0..60 {
             world.frame(&gpu, &planet, &view, None);
         }
         let t = world.chunks.take_timings();
-        t.iter().map(|f| f.shadow).sum::<f64>() / t.len().max(1) as f64
+        let n = t.len().max(1) as f64;
+        (t.iter().map(|f| f.shadow).sum::<f64>() / n, t.iter().map(|f| f.denoise).sum::<f64>() / n)
     };
+    world.chunks.set_steady_shadows(true);
     let steady = stage(&mut world);
     world.chunks.set_steady_shadows(false);
     let sampled = stage(&mut world);
     world.lights = None;
     let unlit = stage(&mut world);
-    eprintln!("shadow stage: {steady:.3} ms with the light (every hit walking), {sampled:.3} ms (samples shared), {unlit:.3} ms without");
-    assert!(compared > 2000 && shadowed > 200, "{compared} compared, {shadowed} shadowed");
-    assert!(wrong * 100 <= compared, "{wrong} of {compared} wrong");
+    eprintln!("shadow stage, denoiser: {:.3}, {:.3} ms with the light (every hit walking); {:.3}, {:.3} ms (samples shared); {:.3}, {:.3} ms without", steady.0, steady.1, sampled.0, sampled.1, unlit.0, unlit.1);
 }
 
 /// GI probe rays (`GiRays`) from probes `probes` of the clipmap around

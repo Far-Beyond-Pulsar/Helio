@@ -312,10 +312,25 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 const PORTAL_MAX_LIGHTS: u32 = 256u;
 @group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
 @group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
-// The voxel terrain's shadows of local lights: a word a pixel (rows of the
-// frame), bit i whether the pixel sees its tile list's light i (the first
-// 32). One word (or none past its end): every light seen.
+// The voxel terrain's shadows of local lights (its denoiser's): three words
+// a pixel (rows of the frame): the tile slots of up to four lights it
+// tracks (a byte each, 0xff none), their visibility (a byte each), and for
+// the other slots (the first 32) bit i whether the pixel sees the tile
+// list's light i. One word (or none past its end): every light seen.
 @group(3) @binding(2) var<storage, read> local_visibility: array<u32>;
+
+// How much of tile slot `slot`'s light the terrain lets reach the pixel
+// whose words start at `at`.
+fn terrain_light_visibility(at: u32, slot: u32) -> f32 {
+    if arrayLength(&local_visibility) <= 3u || at + 2u >= arrayLength(&local_visibility) { return 1.0; }
+    let tracked = local_visibility[at];
+    for (var k = 0u; k < 4u; k++) {
+        if ((tracked >> (8u * k)) & 0xffu) == slot {
+            return f32((local_visibility[at + 1u] >> (8u * k)) & 0xffu) / 255.0;
+        }
+    }
+    return f32((local_visibility[at + 2u] >> slot) & 1u);
+}
 // The GI probes' irradiance / pi a pixel (rows of the frame, helio-pass-gi's
 // `gi_resolve`): rgb and how much the probes hold the point, half floats.
 // One entry (none held): no GI pass.
@@ -1388,8 +1403,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if in_portal {
             light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS);
         }
-        let local_word = u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x);
-        let terrain_seen = select(0xffffffffu, local_visibility[local_word], local_word < arrayLength(&local_visibility) && arrayLength(&local_visibility) > 1u);
+        let local_words = 3u * (u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x));
         for (var i = 0u; i < light_pass_count; i++) {
             var light_idx = i;
             if !in_portal {
@@ -1430,8 +1444,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 }
             }
             // The terrain's shadow of a local light (`local_visibility`).
-            if !in_portal && light.light_type != 0u && i < 32u && ((terrain_seen >> i) & 1u) == 0u {
-                sf = 0.0;
+            if !in_portal && light.light_type != 0u && i < 32u {
+                sf *= terrain_light_visibility(local_words, i);
             }
             if !in_portal && light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
