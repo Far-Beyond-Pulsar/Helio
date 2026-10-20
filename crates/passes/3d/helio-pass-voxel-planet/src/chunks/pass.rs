@@ -5,7 +5,7 @@
 
 use super::{residency, ChunkWorld, FrameTimings, ResidencyConfig, UpdateStats};
 use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec2, Vec3};
 use helio_core::Result as HelioResult;
 use helio_core::{
     DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
@@ -42,6 +42,8 @@ pub struct ChunkPass {
     /// The eye's world position this frame (`helio_pass_gi::eye`), for the
     /// GI clipmap the terrain traces rays of.
     gi_eye: Option<DVec3>,
+    /// The last frame's projection jitter (NDC).
+    last_jitter: Vec2,
 }
 
 impl ChunkPass {
@@ -71,6 +73,7 @@ impl ChunkPass {
             scene: None,
             steady_shadows: false,
             gi_eye: None,
+            last_jitter: Vec2::ZERO,
         }
     }
 
@@ -84,8 +87,9 @@ impl ChunkPass {
     }
 
     /// Steady shadows: every hit walks its own sun ray and the sky rays hold
-    /// still, instead of samples that move each frame (dearer; nothing
-    /// shimmers where TSR cannot gather them).
+    /// still, instead of samples that move each frame for the denoiser to
+    /// gather (about three times dearer; a reference for the denoised
+    /// shadows).
     pub fn set_steady_shadows(&mut self, on: bool) {
         self.steady_shadows = on;
     }
@@ -153,7 +157,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
             self.settled(),
             self.kept_loaded,
             s.kept_chunks,
@@ -184,6 +188,7 @@ impl ChunkPass {
             s.cpu_ms,
             gpu.map(|t| t.draw),
             gpu.map(|t| t.shadow),
+            gpu.map(|t| t.denoise),
             gpu.map(|t| t.generate),
         )
     }
@@ -446,6 +451,8 @@ impl ChunkPass {
         // coordinates (rebased when the origin moves), the same way.
         let prev_view_proj =
             Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
+        let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
+        let jitter = [jitter, std::mem::replace(&mut self.last_jitter, jitter)];
         let now = std::time::Instant::now();
         let interval = self
             .last_eye
@@ -524,6 +531,7 @@ impl ChunkPass {
             frame.eye,
             view_proj,
             prev_view_proj,
+            jitter,
             near,
             frame.sun,
             [ctx.width, ctx.height],

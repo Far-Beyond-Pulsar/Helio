@@ -25,7 +25,7 @@ use crate::engine::{terrain_bytes, terrain_source, WorldGpu};
 use crate::grid::Grid;
 use crate::planet::{Edits, Planet};
 use bytemuck::{Pod, Zeroable};
-use glam::{DMat3, DVec3, Mat4, Vec3};
+use glam::{DMat3, DVec3, Mat4, Vec2, Vec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 use wgpu::util::DeviceExt;
 
@@ -276,6 +276,28 @@ struct DrawParams {
     light_eye: [f32; 4],
     /// x: the sky rays' reach (m) with GI probes, else 0.
     sky: [f32; 4],
+    /// xy: this frame's projection jitter less the last frame's; zw: this
+    /// frame's (NDC): the denoiser's history is of pixels, not of their
+    /// jittered points, and its output of those points again.
+    history: [f32; 4],
+    /// The pixels' rays as points a view depth unit beyond the eye's
+    /// (`ray_plane`): pixel (0, 0)'s and the eye's view depth, a pixel's
+    /// step along x, along y; [1][3] 1 when the camera holds still.
+    rays: [[f32; 4]; 3],
+}
+
+/// `DrawParams::rays` for `view_proj` (eye-relative) at `size` pixels: the
+/// pixels' rays as `pixel_ray` makes them, scaled to a view depth unit.
+fn ray_plane(view_proj: Mat4, size: [u32; 2]) -> [[f32; 4]; 3] {
+    let inverse = view_proj.inverse();
+    let ray = |x: f32, y: f32| {
+        let ndc = glam::Vec4::new((x + 0.5) / size[0] as f32 * 2.0 - 1.0, 1.0 - (y + 0.5) / size[1] as f32 * 2.0, 0.5, 1.0);
+        let far = inverse * ndc;
+        let r = (far.truncate() / far.w).normalize();
+        r / (view_proj * r.extend(0.0)).w
+    };
+    let (origin, x, y) = (ray(0.0, 0.0), ray(1.0, 0.0), ray(0.0, 1.0));
+    [origin.extend((view_proj * glam::Vec4::W).w).to_array(), (x - origin).extend(0.0).to_array(), (y - origin).extend(0.0).to_array()]
 }
 
 /// A frame's scene lights, for the terrain's shadows of them
@@ -877,6 +899,9 @@ pub struct FrameTimings {
     pub draw: f64,
     pub seed: f64,
     pub shadow: f64,
+    /// The shadows' denoiser (from the shadows' end: a pass's start
+    /// timestamp may come before the work ahead of it is done).
+    pub denoise: f64,
     /// The update's eviction and generation, and the tiles and chunks it
     /// generated.
     pub generate: f64,
@@ -892,8 +917,9 @@ pub struct FrameTimings {
 
 /// Timestamps a frame writes: generation start, tile halos end, seed start
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
-/// tile nodes end, tile columns end, tile features end.
-const QUERIES: u32 = 11;
+/// tile nodes end, tile columns end, tile features end, the shadows'
+/// denoiser end.
+const QUERIES: u32 = 12;
 
 /// `Buried`'s size: a count and 4095 keys.
 const BURIED_BYTES: u64 = 16 * 4096;
@@ -1153,6 +1179,19 @@ pub struct ChunkWorld {
     local_sample_far: wgpu::ComputePipeline,
     local_shadow: wgpu::ComputePipeline,
     local_shadow_far: wgpu::ComputePipeline,
+    /// The shadows' denoiser (`chunk_draw.wgsl` 4c): the sun's and the
+    /// sky's history, two filter passes, their resolve; the local lights'
+    /// history, a filter pass.
+    temporal_layout: wgpu::BindGroupLayout,
+    temporal: wgpu::ComputePipeline,
+    filter_layout: wgpu::BindGroupLayout,
+    filter: [wgpu::ComputePipeline; 2],
+    resolve_shadows_layout: wgpu::BindGroupLayout,
+    resolve_shadows: wgpu::ComputePipeline,
+    local_denoise_layout: [wgpu::BindGroupLayout; 3],
+    local_gate: wgpu::ComputePipeline,
+    local_temporal: wgpu::ComputePipeline,
+    local_filter: wgpu::ComputePipeline,
     /// The GI probes' rays (`gi_trace`), from each probe's base cell
     /// (`gi_cells`, and its CPU copy) in the clipmap they were located for.
     gi_layout: wgpu::BindGroupLayout,
@@ -1456,17 +1495,43 @@ pub struct Targets {
     pub distance: wgpu::Texture,
     /// Where each ray left its last box without a hit (R32Float).
     exits: wgpu::Texture,
-    /// Sun visibility at each hit, and the sun's direction
+    /// The sun's visibility at each hit, denoised, and the sun's direction
     /// (Rgba16Float, Helio's `directional_visibility`), and its view.
     pub sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
-    /// The local lights each pixel sees past the terrain: a word a pixel,
-    /// row by row, bit i the tile list's light i (`local_visibility`).
-    pub local: wgpu::Buffer,
+    /// Each pixel's sun as the walks found it, 0 or 1; whether it is its
+    /// own walk's (1) or a neighbour's (0); whether a terrain hit is shown
+    /// (bytes of a word a pixel, rows of the frame).
+    pub sun_walked: wgpu::Buffer,
+    /// The sky's visibility at each hit, denoised, for the gbuffer
+    /// (R32Float).
+    pub sky: wgpu::Texture,
+    /// The local lights each pixel's walks see past the terrain: two words
+    /// a pixel, row by row: bit i the tile list's light i; 1 where they are
+    /// its own walks', 0 a neighbour's.
+    local_seen: wgpu::Buffer,
+    /// The denoised local lights (`LocalTargets`), made with the first
+    /// draw that has lights.
+    local: Option<LocalTargets>,
     /// A local lights' sample a 2x2 block: word, distance.
     local_samples: wgpu::Buffer,
-    /// The normal each hit is lit with (Rgba16Float).
-    normal: wgpu::Texture,
+    /// The normal each hit is lit with and its sky sample (Rgba16Float;
+    /// zero where no terrain hit is shown).
+    pub normal: wgpu::Texture,
+    /// The denoiser's history, this frame's and the last in turn
+    /// (`denoised`'s parity), two words a pixel (rows of the frame): the
+    /// sun's mean, the sky's mean and second moment, the sky's frames
+    /// accumulated; the short histories, the sun's samples' weight
+    /// accumulated (halves); the hits they are for: view depth, packed
+    /// normal.
+    history: [wgpu::Buffer; 2],
+    history_short: [wgpu::Buffer; 2],
+    geometry: [wgpu::Buffer; 2],
+    /// The filters' sun and sky and their variance (halves), in turn: the
+    /// history's, the first pass's, the second's.
+    filtered: [wgpu::Buffer; 2],
+    /// Frames denoised into these targets.
+    denoised: u64,
     /// A sun sample a 2x2 block: flags, distance, slope (Rgba32Uint).
     sun_samples: wgpu::Texture,
     /// A sky visibility sample a 4x4 block: visibility, distance
@@ -1475,6 +1540,28 @@ pub struct Targets {
     /// Hits no sample serves: count, pixels; their indirect workgroups.
     fallbacks: wgpu::Buffer,
     fallback_groups: wgpu::Buffer,
+}
+
+/// The denoised local lights: Helio's `local_visibility` (three words a
+/// pixel: the tracked lights' tile slots, their visibility, a byte each;
+/// the other slots' bits) and the tracked lights' history, this frame's
+/// and the last in turn (four words a pixel).
+pub struct LocalTargets {
+    pub visibility: wgpu::Buffer,
+    history: [wgpu::Buffer; 2],
+    /// The local lights' passes' indirect dispatch, and whether the scene
+    /// had local lights this frame and the last (`local_gate`).
+    dispatch: wgpu::Buffer,
+}
+
+impl LocalTargets {
+    fn new(device: &wgpu::Device, size: [u32; 2]) -> Self {
+        let pixels = u64::from(size[0]) * u64::from(size[1]);
+        let buffer = |label: &str, bytes: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: pixels * bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let history = [buffer("chunk local light history", 16), buffer("chunk local light history", 16)];
+        let dispatch = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local light dispatch"), size: 20, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT, mapped_at_creation: false });
+        Self { visibility: buffer("chunk local lights", 12), history, dispatch }
+    }
 }
 
 const SEED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
@@ -1497,6 +1584,9 @@ impl Targets {
         let a = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let s = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
         let sun = texture("chunk sun", wgpu::TextureFormat::Rgba16Float, s);
+        let pixels = u64::from(size[0]) * u64::from(size[1]);
+        let buffer = |label: &str, bytes: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: pixels * bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let pair = |label: &str| [buffer(label, 8), buffer(label, 8)];
         Self {
             size,
             seed: texture("chunk seed", SEED_FORMAT, a),
@@ -1507,7 +1597,15 @@ impl Targets {
             exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
             sun_view: view(&sun),
             sun,
-            local: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local lights"), size: u64::from(size[0]) * u64::from(size[1]) * 4, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
+            sun_walked: buffer("chunk walked sun", 4),
+            sky: texture("chunk sky", wgpu::TextureFormat::R32Float, s),
+            local_seen: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local lights walked"), size: u64::from(size[0]) * u64::from(size[1]) * 8, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
+            local: None,
+            history: pair("chunk shadow history"),
+            history_short: pair("chunk shadow short history"),
+            geometry: pair("chunk shadow history hits"),
+            filtered: pair("chunk shadow filtered"),
+            denoised: 0,
             local_samples: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local light samples"), size: u64::from(size[0].div_ceil(2)) * u64::from(size[1].div_ceil(2)) * 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
             normal: texture("chunk normal", wgpu::TextureFormat::Rgba16Float, s),
             sun_samples: device.create_texture(&wgpu::TextureDescriptor {
@@ -1897,6 +1995,7 @@ impl ChunkWorld {
                 texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(28, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(25, wgpu::TextureSampleType::Float { filterable: true }, wgpu::ShaderStages::FRAGMENT),
                 sampler_entry(26, wgpu::ShaderStages::FRAGMENT),
             ],
@@ -1946,8 +2045,7 @@ impl ChunkWorld {
             entries: &[
                 hits[0],
                 hits[1],
-                storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
-                storage_texture(8, wgpu::TextureFormat::Rgba16Float),
+                storage(41, false, wgpu::ShaderStages::COMPUTE),
                 texture_entry(10, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
                 storage(11, false, wgpu::ShaderStages::COMPUTE),
                 storage(12, false, wgpu::ShaderStages::COMPUTE),
@@ -1963,7 +2061,7 @@ impl ChunkWorld {
         // The fallbacks' walks: their workgroups are the dispatch's.
         let shadow_fallback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk shadow fallbacks"),
-            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE), storage_texture(13, wgpu::TextureFormat::Rgba16Float), scene_depth],
+            entries: &[hits[0], hits[1], storage(41, false, wgpu::ShaderStages::COMPUTE), storage(11, false, wgpu::ShaderStages::COMPUTE), scene_depth],
         });
         let compute = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1972,6 +2070,19 @@ impl ChunkWorld {
                 module: &draw_module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        // Kernels that fill their workgroup tiles before reading them: no
+        // zeroing first (naga zeroes workgroup memory from one invocation
+        // while the others wait, longer than the kernels' own work).
+        let tiled = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                module: &draw_module,
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions { zero_initialize_workgroup_memory: false, ..Default::default() },
                 cache: None,
             })
         };
@@ -2001,6 +2112,77 @@ impl ChunkWorld {
         let local_sample_far = compute("chunk far local light samples", &layout(&local_layout), "local_sample_far");
         let local_shadow = compute("chunk local shadows", &layout(&local_layout), "local_shadow");
         let local_shadow_far = compute("chunk far local shadows", &layout(&local_layout), "local_shadow_far");
+        // The denoiser: the hits, their normals and sky samples, the walked
+        // sun, the history (the last frame's read, this frame's written).
+        let float = |binding| texture_entry(binding, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE);
+        let read = |binding| storage(binding, true, wgpu::ShaderStages::COMPUTE);
+        let write = |binding| storage(binding, false, wgpu::ShaderStages::COMPUTE);
+        let temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk shadow history"),
+            entries: &[
+                hits[0],
+                float(29),
+                read(40),
+                read(42),
+                read(43),
+                read(54),
+                write(44),
+                write(45),
+                write(55),
+                write(48),
+            ],
+        });
+        let filter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk shadow filter"),
+            entries: &[hits[0], read(46), read(47), write(48)],
+        });
+        let resolve_shadows_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk shadow resolve"),
+                entries: &[
+                    hits[0],
+                    hits[1],
+                    float(29),
+                    read(40),
+                    read(46),
+                    read(47),
+                    storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
+                    storage_texture(8, wgpu::TextureFormat::Rgba16Float),
+                    storage_texture(49, wgpu::TextureFormat::R32Float),
+                ],
+            });
+        let local_denoise_layout = [
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk local light history"),
+                entries: &[
+                    hits[0],
+                    float(29),
+                    read(40),
+                    read(43),
+                    storage(30, false, wgpu::ShaderStages::COMPUTE),
+                    storage(31, true, wgpu::ShaderStages::COMPUTE),
+                    storage(32, true, wgpu::ShaderStages::COMPUTE),
+                    storage(33, true, wgpu::ShaderStages::COMPUTE),
+                    storage(51, true, wgpu::ShaderStages::COMPUTE),
+                    storage(52, false, wgpu::ShaderStages::COMPUTE),
+                    storage(53, false, wgpu::ShaderStages::COMPUTE),
+                    read(57),
+                ],
+            }),
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk local light filter"),
+                entries: &[hits[0], read(47), storage(52, false, wgpu::ShaderStages::COMPUTE), storage(53, false, wgpu::ShaderStages::COMPUTE)],
+            }),
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk local light gate"),
+                entries: &[hits[0], read(31), write(56)],
+            }),
+        ];
+        let temporal = tiled("chunk shadow history", &layout(&temporal_layout), "temporal");
+        let filter = [tiled("chunk shadow filter", &layout(&filter_layout), "filter_first"), tiled("chunk shadow filter", &layout(&filter_layout), "filter_second")];
+        let resolve_shadows = tiled("chunk shadow resolve", &layout(&resolve_shadows_layout), "resolve");
+        let local_gate = compute("chunk local light gate", &layout(&local_denoise_layout[2]), "local_gate");
+        let local_temporal = tiled("chunk local light history", &layout(&local_denoise_layout[0]), "local_temporal");
+        let local_filter = compute("chunk local light filter", &layout(&local_denoise_layout[1]), "local_filter");
         // GI probe rays: the frame, rays, hits, the probes' cells, the sun.
         let gi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk GI rays"),
@@ -2155,6 +2337,16 @@ impl ChunkWorld {
             local_sample_far,
             local_shadow,
             local_shadow_far,
+            temporal_layout,
+            temporal,
+            filter_layout,
+            filter,
+            resolve_shadows_layout,
+            resolve_shadows,
+            local_denoise_layout,
+            local_gate,
+            local_temporal,
+            local_filter,
             gi_layout,
             gi_trace,
             gi_cells: buffer("chunk GI probe cells", u64::from(helio_pass_gi::PROBES) * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
@@ -3388,7 +3580,7 @@ impl ChunkWorld {
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[10]), ms(t[10], t[5]), ms(t[5], t[6])];
                     let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1]), ms(t[1], t[10])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
                     // Footprints computed and chunks generated are measured
                     // apart: with the footprint pool a frame may generate
                     // chunks of footprints it does not compute.
@@ -3558,15 +3750,21 @@ impl ChunkWorld {
         self.targets.as_ref()
     }
 
-    /// Draw the chunks seen from `eye` (camera-relative `view_proj`) at
-    /// `size` pixels into [`Self::targets`], timing it as draw number
-    /// `frame` ([`Self::draw_ms`]).
+    /// Draw the chunks seen from `eye` (camera-relative `view_proj`; the
+    /// last frame's `prev_view_proj`; `jitter` this frame's projection
+    /// jitter and the last frame's, in NDC) at `size` pixels into
+    /// [`Self::targets`], timing it as draw number `frame`
+    /// ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>) {
+    pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, jitter: [Vec2; 2], near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>) {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
+        let targets = self.targets.as_mut().unwrap();
+        if lights.is_some() && targets.local.is_none() {
+            targets.local = Some(LocalTargets::new(&self.device, size));
+        }
+        targets.denoised += 1;
         if self.timing_now.is_none() {
             self.claim_timing(frame);
         }
@@ -3620,6 +3818,18 @@ impl ChunkWorld {
             // Two of the finest probes' spacings: the probes' visibility
             // holds the occlusion past them.
             sky: [if gi.is_some() { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, 0.0, 0.0, 0.0],
+            history: [jitter[0].x - jitter[1].x, jitter[0].y - jitter[1].y, jitter[0].x, jitter[0].y],
+            rays: {
+                let mut rays = ray_plane(view_proj, size);
+                // Still: the projections less their jitter agree (to their
+                // rounding).
+                let unjittered = |m: Mat4, j: Vec2| Mat4::from_translation(-j.extend(0.0)) * m;
+                let (now, last) = (unjittered(view_proj, jitter[0]), unjittered(prev_view_proj, jitter[1]));
+                let scale = now.to_cols_array().iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                let still = now.to_cols_array().iter().zip(last.to_cols_array()).all(|(a, b)| (a - b).abs() <= 1e-4 * scale);
+                rays[1][3] = f32::from(u8::from(still));
+                rays
+            },
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.buried, 0, &[0u8; 16]);
@@ -3733,7 +3943,7 @@ impl ChunkWorld {
             // 4. Sun shadows: samples, then every hit, and meshes before
             // their hits (`scene_depth`: the meshes', the frame's size).
             let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
-            let (distance, visibility, samples, colour, normal, sky) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour), view(&targets.normal), view(&targets.sky_samples));
+            let (distance, visibility, samples, normal, sky) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.normal), view(&targets.sky_samples));
             let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
                 layout: &self.shadow_sample_layout,
@@ -3742,7 +3952,7 @@ impl ChunkWorld {
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(41, &targets.sun_walked), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth)],
             });
             let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sky samples"),
@@ -3752,7 +3962,7 @@ impl ChunkWorld {
             let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow fallbacks"),
                 layout: &self.shadow_fallback_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks), view_entry(13, &normal), view_entry(27, scene_depth)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(41, &targets.sun_walked), entry(11, &targets.fallbacks), view_entry(27, scene_depth)],
             });
             // No fallbacks yet.
             self.queue.write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
@@ -3791,7 +4001,7 @@ impl ChunkWorld {
                     view_entry(7, &visibility),
                     view_entry(27, scene_depth),
                     view_entry(29, &normal),
-                    entry(30, &targets.local),
+                    entry(30, &targets.local_seen),
                     entry(31, lights.map_or(&self.no_lights, |l| l.lights)),
                     entry(32, lights.map_or(&self.no_lights, |l| l.tile_lists)),
                     entry(33, lights.map_or(&self.no_lights, |l| l.tile_counts)),
@@ -3819,6 +4029,8 @@ impl ChunkWorld {
                 pass.set_pipeline(&self.gi_trace);
                 pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
             }
+            drop(pass);
+            self.denoise(encoder, &group, size, lights, timing);
         }
         // Ray reports, back without waiting (a frame's copy when a slot is
         // free): the node each block of pixels' sampled hit wants, and the
@@ -3937,8 +4149,16 @@ impl ChunkWorld {
     }
 
     /// The last draw's local light visibility (Helio's `local_visibility`).
+    /// None before a draw with lights (every light seen).
     pub fn local_visibility(&self) -> Option<&wgpu::Buffer> {
-        self.targets.as_ref().map(|t| &t.local)
+        self.targets.as_ref().and_then(|t| t.local.as_ref()).map(|l| &l.visibility)
+    }
+
+    /// The local lights the last draw's walks saw past the terrain, before
+    /// denoising: two words a pixel, bit i of the first the tile list's
+    /// light i, the second 1 where they are its own walks'.
+    pub fn local_walked(&self) -> Option<&wgpu::Buffer> {
+        self.targets.as_ref().map(|t| &t.local_seen)
     }
 
     /// The last draw's hits into Helio's gbuffer (`engine::GBUFFER_FORMATS`)
@@ -3957,8 +4177,112 @@ impl ChunkWorld {
         }
     }
 
+    /// 4c. The shadows' denoiser (`chunk_draw.wgsl`): the sun's and the
+    /// sky's history and two filter passes into `directional_visibility`
+    /// and the gbuffer's sky; with lights, theirs into `local_visibility`.
+    fn denoise(&self, encoder: &mut helio_core::CommandRecorder<'_>, group: &wgpu::BindGroup, size: [u32; 2], lights: Option<&SceneLights<'_>>, timing: Option<(&wgpu::QuerySet, &wgpu::Buffer, u32)>) {
+        let targets = self.targets.as_ref().unwrap();
+        let (now, last) = ((targets.denoised & 1) as usize, (!targets.denoised & 1) as usize);
+        let (distance, visibility, normal, sun_walked) = (view(&targets.distance), view(&targets.visibility), view(&targets.normal), &targets.sun_walked);
+        let (history, history_last, geometry, geometry_last) = (&targets.history[now], &targets.history[last], &targets.geometry[now], &targets.geometry[last]);
+        let (short, short_last) = (&targets.history_short[now], &targets.history_short[last]);
+        let filtered = &targets.filtered;
+        let temporal = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk shadow history"),
+            layout: &self.temporal_layout,
+            entries: &[
+                view_entry(4, &distance),
+                view_entry(29, &normal),
+                entry(40, sun_walked),
+                entry(42, history_last),
+                entry(43, geometry_last),
+                entry(54, short_last),
+                entry(44, history),
+                entry(45, geometry),
+                entry(55, short),
+                entry(48, &filtered[0]),
+            ],
+        });
+        let first = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk shadow filter"),
+            layout: &self.filter_layout,
+            entries: &[view_entry(4, &distance), entry(46, &filtered[0]), entry(47, geometry), entry(48, &filtered[1])],
+        });
+        let second = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk shadow filter"),
+            layout: &self.filter_layout,
+            entries: &[view_entry(4, &distance), entry(46, &filtered[1]), entry(47, geometry), entry(48, &filtered[0])],
+        });
+        let resolve = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk shadow resolve"),
+            layout: &self.resolve_shadows_layout,
+            entries: &[
+                view_entry(4, &distance),
+                view_entry(7, &visibility),
+                view_entry(29, &normal),
+                entry(40, sun_walked),
+                entry(46, &filtered[0]),
+                entry(47, geometry),
+                view_entry(2, &view(&targets.colour)),
+                view_entry(8, &targets.sun_view),
+                view_entry(49, &view(&targets.sky)),
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("chunk shadow denoise"),
+            timestamp_writes: timing.map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 11) }),
+        });
+        // 16x16 pixels a workgroup (the local lights': 8x8, in a light tile).
+        pass.set_bind_group(0, group, &[]);
+        for (pipeline, bind) in [(&self.temporal, &temporal), (&self.filter[0], &first), (&self.filter[1], &second), (&self.resolve_shadows, &resolve)] {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(1, bind, &[]);
+            pass.dispatch_workgroups(size[0].div_ceil(16), size[1].div_ceil(16), 1);
+        }
+        if let (Some(lights), Some(local)) = (lights, &targets.local) {
+            let history = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk local light history"),
+                layout: &self.local_denoise_layout[0],
+                entries: &[
+                    view_entry(4, &distance),
+                    view_entry(29, &normal),
+                    entry(40, sun_walked),
+                    entry(43, geometry_last),
+                    entry(30, &targets.local_seen),
+                    entry(31, lights.lights),
+                    entry(32, lights.tile_lists),
+                    entry(33, lights.tile_counts),
+                    entry(51, &local.history[last]),
+                    entry(52, &local.history[now]),
+                    entry(53, &local.visibility),
+                    entry(57, &local.dispatch),
+                ],
+            });
+            let gate = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk local light gate"),
+                layout: &self.local_denoise_layout[2],
+                entries: &[view_entry(4, &distance), entry(31, lights.lights), entry(56, &local.dispatch)],
+            });
+            // None without local lights in the scene.
+            pass.set_pipeline(&self.local_gate);
+            pass.set_bind_group(1, &gate, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            let filter = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk local light filter"),
+                layout: &self.local_denoise_layout[1],
+                entries: &[view_entry(4, &distance), entry(47, geometry), entry(52, &local.history[now]), entry(53, &local.visibility)],
+            });
+            for (pipeline, bind) in [(&self.local_temporal, &history), (&self.local_filter, &filter)] {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(1, bind, &[]);
+                pass.dispatch_workgroups_indirect(&local.dispatch, 0);
+            }
+        }
+    }
+
     /// Every hit walks its own sun ray and the sky rays hold still (steady
-    /// shadows, dearer) instead of samples that move each frame.
+    /// shadows, dearer) instead of samples that move each frame; the
+    /// denoiser passes the walks' own values on.
     pub fn set_steady_shadows(&mut self, on: bool) {
         self.steady_shadows = on;
     }
@@ -3975,6 +4299,7 @@ impl ChunkWorld {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
                 wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&view(&targets.normal)) },
+                view_entry(28, &view(&targets.sky)),
                 view_entry(25, &self.uv_grid_view),
                 wgpu::BindGroupEntry { binding: 26, resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler) },
             ],
