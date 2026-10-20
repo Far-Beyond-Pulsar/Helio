@@ -1,22 +1,10 @@
 //! The block palette: what each block is made of (a voxel planet material
-//! id) and which surface it shows on its top, sides and bottom.
+//! id) and how it looks (`look`: colour, patches, light through and given
+//! off). Blocks are small voxels of procedural colour; the planet varies each
+//! voxel's pigment and each region's patches, so nothing is textured.
 
 use helio_pass_voxel_planet::terrain::material;
-
-/// A look drawn on a block face. Most are baked physically based materials
-/// (colour, normal and occlusion-roughness-metalness maps); a few are
-/// tiles of the pixel pack, and leaves are composed from its sprigs
-/// (`textures::compose`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Surface {
-    /// A baked material (`assets/textures/pbr`, `tools/bake_textures.py`),
-    /// by name.
-    Pbr(&'static str),
-    /// A tile of the pack, by file stem.
-    File(&'static str),
-    /// A dense leaf tile built from the pack's leaf sprig, tinted.
-    Leaves(&'static str, [f32; 3]),
-}
+use helio_pass_voxel_planet::terrain::MaterialAppearance;
 
 /// Every placeable block. The voxel planet stores a block as its material id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -153,36 +141,58 @@ impl Block {
         }
     }
 
-    /// The surfaces of the top, side and bottom faces.
-    pub fn surfaces(self) -> [Surface; 3] {
-        use Surface::{File, Pbr};
-        let all = |s| [s, s, s];
-        let log = |side, end| [Pbr(end), Pbr(side), Pbr(end)];
+    /// The block's colour (sRGB) and, for natural ones, its dry, middle
+    /// and lush patch colours over the land.
+    fn colours(self) -> ([u8; 3], Option<[[u8; 3]; 3]>) {
         match self {
-            Block::Grass => [Pbr("grass_top"), Pbr("grass_side"), Pbr("dirt")],
-            Block::Dirt => all(Pbr("dirt")),
-            Block::Stone => all(Pbr("stone")),
-            Block::Sand => all(Pbr("sand")),
-            Block::Snow => all(Pbr("snow")),
-            Block::Gravel => all(Pbr("gravel")),
-            Block::Sandstone => [Pbr("sandstone_top"), Pbr("sandstone"), Pbr("sandstone_top")],
-            Block::Andesite => all(Pbr("andesite")),
-            Block::OakLog => log("oak_log", "oak_log_top"),
-            Block::OakLeaves => all(Surface::Leaves("oak_leaves", [0.62, 0.95, 0.42])),
-            Block::Clay => all(Pbr("clay")),
-            Block::Bricks => all(Pbr("bricks")),
-            Block::OakPlanks => all(Pbr("oak_planks")),
-            Block::Cobblestone => all(Pbr("cobblestone")),
-            Block::BirchLog => log("birch_log", "birch_log_top"),
-            Block::BirchLeaves => all(Surface::Leaves("birch_leaves", [0.78, 1.0, 0.45])),
-            Block::SpruceLog => log("spruce_log", "spruce_log_top"),
-            Block::SpruceLeaves => all(Surface::Leaves("spruce_leaves", [0.38, 0.72, 0.46])),
-            Block::JungleLog => log("jungle_log", "jungle_log_top"),
-            Block::JungleLeaves => all(Surface::Leaves("jungle_leaves", [0.45, 1.0, 0.36])),
-            Block::Cactus => [File("cactus_top"), File("cactus_side"), File("cactus_bottom")],
-            Block::Glowstone => all(File("glowstone")),
-            Block::StoneBricks => all(Pbr("stone_bricks")),
-            Block::DarkOakPlanks => all(Pbr("dark_oak_planks")),
+            Block::Grass => ([74, 104, 50], Some([[128, 128, 72], [74, 104, 50], [48, 84, 42]])),
+            Block::Dirt => ([116, 86, 60], Some([[130, 100, 72], [116, 86, 60], [92, 68, 50]])),
+            Block::Stone => ([128, 130, 130], Some([[156, 152, 142], [128, 130, 130], [98, 102, 106]])),
+            Block::Sand => ([212, 194, 150], Some([[224, 208, 164], [212, 194, 150], [192, 172, 130]])),
+            Block::Snow => ([234, 240, 246], None),
+            Block::Gravel => ([124, 120, 114], Some([[142, 138, 130], [124, 120, 114], [98, 96, 92]])),
+            Block::Sandstone => ([206, 176, 128], Some([[218, 190, 142], [206, 176, 128], [182, 150, 106]])),
+            Block::Andesite => ([104, 108, 112], Some([[126, 124, 120], [104, 108, 112], [80, 84, 90]])),
+            Block::OakLog => ([98, 74, 52], None),
+            Block::OakLeaves => ([52, 86, 40], Some([[86, 110, 48], [52, 86, 40], [36, 68, 34]])),
+            Block::Clay => ([160, 142, 130], None),
+            Block::Bricks => ([152, 74, 58], None),
+            Block::OakPlanks => ([172, 132, 86], None),
+            Block::Cobblestone => ([118, 118, 116], None),
+            Block::BirchLog => ([218, 214, 202], None),
+            Block::BirchLeaves => ([96, 124, 54], Some([[130, 138, 60], [96, 124, 54], [68, 104, 46]])),
+            Block::SpruceLog => ([80, 58, 42], None),
+            Block::SpruceLeaves => ([38, 68, 46], Some([[60, 86, 52], [38, 68, 46], [28, 54, 40]])),
+            Block::JungleLog => ([112, 90, 62], None),
+            Block::JungleLeaves => ([48, 108, 40], Some([[84, 132, 46], [48, 108, 40], [32, 88, 34]])),
+            Block::Cactus => ([70, 118, 58], None),
+            Block::Glowstone => ([242, 204, 124], None),
+            Block::StoneBricks => ([132, 132, 130], None),
+            Block::DarkOakPlanks => ([88, 62, 40], None),
+        }
+    }
+
+    /// The block's colour in linear light, for things that look like it
+    /// (the block in hand).
+    pub fn linear_colour(self) -> [f32; 3] {
+        self.colours().0.map(|v| (f32::from(v) / 255.0).powf(2.2))
+    }
+
+    /// How the voxel planet draws the block.
+    pub fn look(self) -> MaterialAppearance {
+        let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
+        let (colour, patches) = self.colours();
+        let [r, g, b] = unit(colour);
+        let leaves = matches!(self, Block::OakLeaves | Block::BirchLeaves | Block::SpruceLeaves | Block::JungleLeaves);
+        MaterialAppearance {
+            colour: [r, g, b, self.roughness()],
+            patches: patches.map(|p| p.map(unit)),
+            lip: (self == Block::Grass).then_some(material::DIRT as u8),
+            // Leaves let a third of the light through (global illumination).
+            transmission: if leaves { 0.3 } else { 0.0 },
+            // Glowing blocks light their surroundings.
+            emission: self.emission().map_or(0.0, |(_, strength)| strength),
+            ..MaterialAppearance::default()
         }
     }
 

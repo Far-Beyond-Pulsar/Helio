@@ -1,29 +1,30 @@
-//! Voxel Craft: a Minecraft-style sandbox on a voxel planet.
+//! Voxel Craft: a sandbox on a voxel planet of 10 cm voxels.
 //!
-//! Walk, jump, fly, break and place blocks on a 16 km cube-sphere planet of
-//! 1 m blocks drawn by Helio's voxel planet pass (`VoxelTerrainComponent`'s
-//! renderer), with a blocky character, procedurally grown trees (oak, birch,
-//! spruce, pine and jungle giants), cottages, towers, ruins, wells and
-//! pyramids, a day-night cycle, and block textures from the Modernized 128x
-//! pack (MIT) applied through ordinary Helio scene materials.
+//! Walk, jump, fly, dig and build on a 16 km cube-sphere planet drawn by
+//! Helio's voxel planet pass (`VoxelTerrainComponent`'s renderer): meadows,
+//! deserts, mountains and caves; procedurally grown trees of shapes (oak,
+//! birch, spruce, pine and jungle giants), bushes, boulders and cacti;
+//! cottages, towers, ruins, wells and pyramids; a day-night cycle. Every
+//! voxel's colour is procedural (its block's palette, varied voxel by voxel
+//! and patch by patch): nothing is textured.
 //!
 //! ```text
 //! cargo run -p examples --release --bin voxel_craft
 //! ```
 //!
 //! Controls: WASD move, Space jump (tap twice, or F, to fly), Ctrl sprint,
-//! left mouse break, right mouse place, middle mouse pick, mouse wheel or 1-9
-//! pick from the hotbar, V third-person camera, T speed up time, R respawn,
-//! Esc release the mouse.
+//! left mouse dig, right mouse build a half-metre block, middle mouse pick,
+//! mouse wheel or 1-9 pick from the hotbar, V third-person camera, T speed
+//! up time, R respawn, Esc release the mouse.
 //!
 //! Environment: `VOXEL_CRAFT_QUALITY` (performance|balanced|quality|native),
 //! `VOXEL_CRAFT_LOD` (cells per pixel, 0.6), `VOXEL_CRAFT_DISTANCE` (view
-//! distance in metres), `VOXEL_CRAFT_PIXELATED=1` (crisp block pixels);
-//! `VOXEL_CRAFT_SHOTS=<dir>` runs the screenshot tour (see the README).
+//! distance in metres); `VOXEL_CRAFT_SHOTS=<dir>` runs the screenshot tour
+//! (see the README).
 //!
 //! Layout: `terrain/` the planet's recipe and biomes, `world/` edits, the
 //! worker thread and decoration, `trees/` and `structures/` the generators,
-//! `textures/` the block materials, `player/` movement, interaction and the
+//! `palette.rs` the blocks' look, `player/` movement, interaction and the
 //! character, `gfx.rs` the renderer, `game.rs` one frame.
 
 #[path = "../v3_demo_common.rs"]
@@ -36,10 +37,10 @@ mod config;
 mod game;
 mod gfx;
 mod input;
+mod palette;
 mod player;
 mod structures;
 mod terrain;
-mod textures;
 mod trees;
 mod world;
 

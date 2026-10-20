@@ -2,7 +2,7 @@
 //! pyramids, each a [`Blueprint`] built from a seed (so the same site always
 //! gets the same building).
 
-mod blueprint;
+pub mod blueprint;
 
 pub use blueprint::Blueprint;
 
@@ -153,8 +153,7 @@ fn tower(rng: &mut Rng) -> Blueprint {
     }
     // A weathered tower: a few bricks lost to age (rolled in a fixed
     // order: a site's tower is the same whenever it is built).
-    let mut upper: Vec<[i32; 3]> = b.stamp.cells().filter(|(p, v)| p[1] > 8 && v.is_some()).map(|(p, _)| p).collect();
-    upper.sort_unstable();
+    let upper: Vec<[i32; 3]> = b.solid_blocks().into_iter().filter(|p| p[1] > 8).collect();
     let lost: Vec<[i32; 3]> = upper.into_iter().filter(|_| rng.f64() < 0.03).collect();
     for p in lost {
         b.clear(p);

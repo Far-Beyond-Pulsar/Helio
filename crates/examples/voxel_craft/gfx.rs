@@ -3,11 +3,11 @@
 //! drawing a frame for the player's camera.
 
 use crate::player::avatar::Avatar;
-use crate::textures::{self, BlockTextures};
+use crate::palette;
 use crate::v3_demo_common::{directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle, set_camera_postprocess, spawn_light, update_light};
 use glam::{DMat4, DVec3, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig};
-use helio_default_graphs::{build_default_graph_external_with_voxel_passes, voxel_scene_materials, VoxelPassFactory};
+use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::ResidencyConfig;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
@@ -71,7 +71,7 @@ fn tsr_quality() -> helio_pass_tsr::TsrQuality {
 }
 
 impl Gfx {
-    pub fn new(window: Arc<Window>, planet: &Planet, blocks: impl FnOnce(&wgpu::Device, &wgpu::Queue, &mut pulsar_scenedb::World) -> BlockTextures) -> Self {
+    pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
@@ -119,7 +119,7 @@ impl Gfx {
         // The scene: SceneDB rows for the sun, the air, the blocks' materials
         // and the character.
         let mut scene = new_scene_db_with_gpu_mirror(&device, &queue);
-        let textures = blocks(&device, &queue, &mut scene.world);
+        let palette = palette::load(&mut scene.world);
         let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
         let air = scene.world.spawn();
         scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
@@ -133,35 +133,33 @@ impl Gfx {
                 .around_planet([0.0; 3], planet.grid().radius()),
         );
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
-        // AgX: sunlit leaves and grass roll toward white, not lime.
-        post.tonemap_operator = helio::TonemapOperator::Agx;
-        post.tonemap_exposure = 2.2;
-        post.color_saturation = [1.3; 3];
+        // AgX with its punchy look: sunlit leaves and grass roll toward
+        // white, not lime, and the sky stays blue.
+        post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
+        post.tonemap_exposure = 2.0;
         post.color_contrast = [1.06; 3];
         post.exposure_mode = helio_pass_postprocess::ExposureMode::Manual;
         set_camera_postprocess(&mut scene.world, 0, &post);
-        let avatar = Avatar::spawn(&mut scene.world, |block| textures.side_material(block));
+        let avatar = Avatar::spawn(&mut scene.world, |block| palette.hand_material(block));
         scene.world.flush_gpu_mirror(&queue);
 
         // The planet pass draws the world's latest snapshot.
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
-        let (map, appearance) = (textures.map, textures.appearance);
+        let appearance = palette.appearance;
         let config = chunk_config(size[1]);
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
-            pass.set_scene_materials(map, voxel_scene_materials());
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());
         renderer_config.enable_foliage = false;
-        let handle = scene_db_handle(&scene).with_texture_store(textures.store).expect("texture store");
+        let handle = scene_db_handle(&scene);
         let mut renderer = RendererBuilder::new(renderer_config, handle)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], surface_format);
-        textures::configure_sampler(&mut renderer);
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         // `VOXEL_CRAFT_DEBUG=<mode>`: one of the renderer's debug views.
         if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {

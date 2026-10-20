@@ -164,7 +164,7 @@ impl Game {
         if let Some(t) = &self.tour {
             if t.trunk && self.total_frames == 700 {
                 let here = self.world.cell_at(self.player.position);
-                match nearest_wood(&self.world, here, 45) {
+                match nearest_wood(&self.world, here, (15.0 / crate::config::VOXEL_M) as i32) {
                     Some((cell, block)) => {
                         log::info!("TRUNK {:?} at {:?} is {:?}, drawn material {}", block, cell, self.world.block_at(cell), block.material());
                         let target = self.world.cell_centre(cell);

@@ -9,7 +9,7 @@ mod worker;
 
 use crate::blocks::Block;
 use crate::config::VOXEL_M;
-use edits::BlockEdit;
+use edits::Edit;
 use glam::DVec3;
 use helio_pass_voxel_planet::{Cell, Planet, RayHit};
 use std::collections::HashMap;
@@ -47,7 +47,7 @@ impl World {
     }
 
     /// Applies `edits` (off-thread); queries see them immediately.
-    pub fn edit(&mut self, edits: &[BlockEdit]) {
+    pub fn edit(&mut self, edits: &[Edit]) {
         if edits.is_empty() {
             return;
         }
@@ -56,7 +56,9 @@ impl World {
         let grid = *self.snapshot.grid();
         let brushes = edits.iter().map(|e| e.brush(&grid)).collect();
         for e in edits {
-            self.pending.insert(e.cell, (ticket, e.block));
+            for (cell, block) in e.cells(&grid) {
+                self.pending.insert(cell, (ticket, block));
+            }
         }
         self.worker.submit(Job::Edit(Batch { ticket, brushes }));
     }
