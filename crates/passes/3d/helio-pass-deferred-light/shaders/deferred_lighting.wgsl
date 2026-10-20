@@ -316,6 +316,10 @@ const PORTAL_MAX_LIGHTS: u32 = 256u;
 // frame), bit i whether the pixel sees its tile list's light i (the first
 // 32). One word (or none past its end): every light seen.
 @group(3) @binding(2) var<storage, read> local_visibility: array<u32>;
+// The GI probes' irradiance / pi a pixel (rows of the frame, helio-pass-gi's
+// `gi_resolve`): rgb and how much the probes hold the point, half floats.
+// One entry (none held): no GI pass.
+@group(3) @binding(3) var<storage, read> gi_irradiance: array<vec2<u32>>;
 // cluster bindings removed - GPU-driven architecture
 
 // Cluster constants removed - GPU-driven architecture
@@ -1499,6 +1503,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let hemi_t       = N.y * 0.5 + 0.5;
         hemi             = mix(ground_color, sky_color, hemi_t) * albedo;
     }
+    // Where the GI probes hold the point, their irradiance replaces the
+    // sky's: bounce light, and no sky where the world hides it (a portal
+    // pixel's probes are the host's: it keeps the sky).
+    let gi_word = u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x);
+    var gi_weight = 0.0;
+    var gi = vec3<f32>(0.0);
+    if !in_portal && arrayLength(&gi_irradiance) > 1u && gi_word < arrayLength(&gi_irradiance) {
+        let g = gi_irradiance[gi_word];
+        let ba = unpack2x16float(g.y);
+        gi = vec3<f32>(unpack2x16float(g.x), ba.x);
+        gi_weight = clamp(ba.y, 0.0, 1.0);
+        hemi = mix(hemi, gi * albedo, gi_weight);
+    }
+    if globals.debug_mode == 28u {
+        return vec4<f32>(select(vec3<f32>(0.25, 0.0, 0.25), gi, gi_weight > 0.0), 1.0);
+    }
 
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
@@ -1507,7 +1527,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let lm_weight      = select(0.0, 1.0, has_lightmap);
 
     if globals.debug_mode == 27u {
-        return vec4<f32>(0.0, rc_weight, lm_weight, 1.0);
+        return vec4<f32>(gi_weight, rc_weight, lm_weight, 1.0);
     }
 
     // Blend between hemisphere fallback, RC-based GI, and baked lightmap:
@@ -1585,6 +1605,7 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 22u || globals.debug_mode == 23u
         || globals.debug_mode == 24u || globals.debug_mode == 25u
         || globals.debug_mode == 26u || globals.debug_mode == 27u
+        || globals.debug_mode == 28u
         || globals.debug_mode == 20u || globals.debug_mode == 21u
         || globals.debug_mode == 32u || globals.debug_mode == 33u {
         return vec4<f32>(0.0);

@@ -1638,6 +1638,7 @@ dependencies = [
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
+ "helio-pass-gi",
  "helio-pass-hiz",
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
@@ -1768,6 +1769,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-mats",
+ "helio-pass-gi",
  "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
@@ -1884,6 +1886,7 @@ dependencies = [
  "glam 0.33.5",
  "helio-core",
  "helio-pass-sky",
+ "pollster 0.4.0",
  "wgpu",
 ]
 

@@ -141,6 +141,10 @@ impl Gfx {
             .build(device.clone(), queue.clone(), size[0], size[1], surface_format);
         textures::configure_sampler(&mut renderer);
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
+        // `VOXEL_CRAFT_DEBUG=<mode>`: one of the renderer's debug views.
+        if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {
+            renderer.set_debug_mode(mode);
+        }
         Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size }
     }
 

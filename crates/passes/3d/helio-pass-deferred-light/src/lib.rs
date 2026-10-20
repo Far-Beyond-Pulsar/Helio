@@ -104,7 +104,7 @@ pub struct DeferredLightPass {
         [wgpu::Sampler; 4],
         wgpu::Buffer,
     )>,
-    bind_group_3_key: Option<[wgpu::Buffer; 3]>,
+    bind_group_3_key: Option<[wgpu::Buffer; 4]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     reflection_bind_group_2_key: Option<(
         [wgpu::TextureView; 5],
@@ -115,6 +115,8 @@ pub struct DeferredLightPass {
     fallback_tile_counts: wgpu::Buffer,
     /// One word, every light seen: no terrain shadows local lights.
     fallback_local_visibility: wgpu::Buffer,
+    /// One pixel's `gi_irradiance` (none held): no GI pass in the graph.
+    fallback_gi_irradiance: wgpu::Buffer,
     pre_aa_format: wgpu::TextureFormat,
     fallback_shadow_view: wgpu::TextureView,
     fallback_static_shadow_view: wgpu::TextureView,
@@ -180,6 +182,12 @@ impl DeferredLightPass {
         });
         fallback_local_visibility.slice(..).get_mapped_range_mut().expect("mapped at creation").copy_from_slice(&u32::MAX.to_le_bytes());
         fallback_local_visibility.unmap();
+        let fallback_gi_irradiance = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback GI Irradiance"),
+            size: 8,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         // `//!use pbr_eval` pulls helio-mats' PBR evaluation library in ahead
         // of the shader, exactly what the hand-rolled concatenation used to do.
         let shader = helio_core::shader::module_with(
@@ -341,6 +349,7 @@ impl DeferredLightPass {
                 storage_entry(0), // tile_light_lists
                 storage_entry(1), // tile_light_counts
                 storage_entry(2), // local_visibility (terrain shadows of the tile's lights)
+                storage_entry(3), // gi_irradiance (the GI probes' irradiance a pixel)
             ],
         });
 
@@ -797,6 +806,7 @@ impl DeferredLightPass {
             fallback_tile_lists,
             fallback_tile_counts,
             fallback_local_visibility,
+            fallback_gi_irradiance,
             pre_aa_format,
             fallback_shadow_view,
             fallback_static_shadow_view,
@@ -871,6 +881,7 @@ impl RenderPass for DeferredLightPass {
             "ssao",
             "tile_light_lists",
             "tile_light_counts",
+            helio_pass_gi::GI_IRRADIANCE,
             "render_environment",
             "water_caustics",
             "pre_aa",
@@ -1329,7 +1340,12 @@ impl RenderPass for DeferredLightPass {
             .registry
             .buffer_binding("local_visibility")
             .unwrap_or(&self.fallback_local_visibility);
-        let tile_key = [tile_lists.clone(), tile_counts.clone(), local_visibility.clone()];
+        // The GI probes' irradiance a pixel (helio-pass-gi's resolve).
+        let gi_irradiance = ctx
+            .registry
+            .buffer_binding(helio_pass_gi::GI_IRRADIANCE)
+            .unwrap_or(&self.fallback_gi_irradiance);
+        let tile_key = [tile_lists.clone(), tile_counts.clone(), local_visibility.clone(), gi_irradiance.clone()];
         if self.bind_group_3_key.as_ref() != Some(&tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG3"),
@@ -1346,6 +1362,10 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: local_visibility.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: gi_irradiance.as_entire_binding(),
                     },
                 ],
             }));
@@ -1552,7 +1572,12 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "GI Blend",
                 debug_mode: 27,
-                description: "Green=runtime radiance-cascade weight, blue=baked lightmap weight",
+                description: "Red=GI probe weight, green=runtime radiance-cascade weight, blue=baked lightmap weight",
+            },
+            DebugViewDescriptor {
+                name: "GI Irradiance",
+                debug_mode: 28,
+                description: "Irradiance / pi from the GI probes at each pixel (purple: none)",
             },
             DebugViewDescriptor {
                 name: "Ray Trace vs Raster",

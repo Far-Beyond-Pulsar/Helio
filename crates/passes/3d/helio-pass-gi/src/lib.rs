@@ -283,7 +283,7 @@ struct Probes {
 
 impl Probes {
     fn new(device: &wgpu::Device) -> Self {
-        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         Self {
             frame: buffer(device, "GI frame", FRAME_BYTES, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             probes: buffer(device, "GI probes", u64::from(PROBES * PROBE_WORDS) * 4, storage),
@@ -312,9 +312,11 @@ pub struct GiPass {
     fallback_sky_table: wgpu::Buffer,
     fallback_lights: wgpu::Buffer,
     group: Option<(wgpu::BindGroup, [wgpu::Buffer; 3])>,
-    /// This frame's probe counts: updated, reset.
+    /// This frame's probe counts: updated, reset; its probes to update,
+    /// and its rays' rotation.
     counts: [u32; 2],
     list: Vec<u32>,
+    rotation: [f32; 4],
 }
 
 impl GiPass {
@@ -368,7 +370,104 @@ impl GiPass {
             group: None,
             counts: [0; 2],
             list: Vec::with_capacity(MAX_UPDATES as usize),
+            rotation: [0.0, 0.0, 0.0, 1.0],
         }
+    }
+}
+
+impl GiPass {
+    /// Starts frame `frame` with the eye at world point `eye`; without an
+    /// atmosphere the sky's radiance is `sky` above the horizon and
+    /// `ground` below it.
+    pub fn begin(&mut self, queue: &wgpu::Queue, eye: DVec3, frame: u64, sky: Vec3, ground: Vec3) {
+        let state = &mut self.state;
+        let clipmap = Clipmap::around(eye);
+        let entered = clipmap.entered(state.clipmap.as_ref());
+        for &index in &entered {
+            state.schedule.enter(index);
+        }
+        state.clipmap = Some(clipmap);
+        state.schedule.next(&mut self.list);
+        let parity = 1 - state.parity;
+        self.rotation = rotation(frame);
+        let gpu = GpuFrame {
+            levels: clipmap.levels(eye),
+            sky: sky.extend(0.0).to_array(),
+            ground: ground.extend(0.0).to_array(),
+            counts: [self.list.len() as u32, state.updated, entered.len() as u32, parity],
+            rotation: self.rotation,
+            prev_rotation: state.prev_rotation,
+        };
+        helio_core::upload::write_buffer(queue, &state.frame, 0, bytemuck::bytes_of(&gpu));
+        helio_core::upload::write_buffer(queue, &state.lists, u64::from(parity * MAX_UPDATES) * 4, bytemuck::cast_slice(&self.list));
+        if !entered.is_empty() {
+            helio_core::upload::write_buffer(queue, &state.lists, u64::from(2 * MAX_UPDATES) * 4, bytemuck::cast_slice(&entered));
+        }
+        self.counts = [self.list.len() as u32, entered.len() as u32];
+    }
+
+    /// Records the frame `begin` started: the sun, last frame's hits
+    /// integrated, the probes that came in reset, this frame's rays, the
+    /// hits cleared for the tracers. `atmosphere`, `sky_table` and `lights`
+    /// are the atmosphere's and the scene's (none: no atmosphere, no sun).
+    pub fn record(&mut self, device: &wgpu::Device, cmds: &mut helio_core::CommandRecorder<'_>, atmosphere: Option<&wgpu::Buffer>, sky_table: Option<&wgpu::Buffer>, lights: Option<&wgpu::Buffer>) {
+        let atmosphere = atmosphere.unwrap_or(&self.fallback_atmosphere);
+        let sky_table = sky_table.unwrap_or(&self.fallback_sky_table);
+        let lights = lights.unwrap_or(&self.fallback_lights);
+        let key = [atmosphere.clone(), sky_table.clone(), lights.clone()];
+        if self.group.as_ref().is_none_or(|(_, k)| *k != key) {
+            let s = &self.state;
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GI update"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: s.frame.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: s.probes.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: s.rays.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: s.hits.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: s.lists.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: s.sun.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: atmosphere.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: sky_table.as_entire_binding() },
+                ],
+            });
+            self.group = Some((group, key));
+        }
+        let Some((group, _)) = &self.group else { return };
+        let state = &mut self.state;
+        {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI update"), timestamp_writes: None });
+            pass.set_bind_group(0, Some(group), &[]);
+            pass.set_pipeline(&self.sun);
+            pass.dispatch_workgroups(1, 1, 1);
+            if state.updated > 0 {
+                pass.set_pipeline(&self.integrate);
+                pass.dispatch_workgroups(state.updated, 1, 1);
+            }
+            if self.counts[1] > 0 {
+                pass.set_pipeline(&self.reset);
+                pass.dispatch_workgroups(self.counts[1].div_ceil(64), 1, 1);
+            }
+            pass.set_pipeline(&self.rays);
+            pass.dispatch_workgroups((self.counts[0] * RAYS).div_ceil(64), 1, 1);
+        }
+        // The tracers write each ray's hit, or leave it none.
+        cmds.clear_buffer(&state.hits, 0, None);
+        state.updated = self.counts[0];
+        state.parity = 1 - state.parity;
+        state.prev_rotation = self.rotation;
+    }
+
+    /// The probes' buffers: frame, probes, rays, hits, sun.
+    pub fn buffers(&self) -> [&wgpu::Buffer; 5] {
+        let s = &self.state;
+        [&s.frame, &s.probes, &s.rays, &s.hits, &s.sun]
+    }
+
+    /// The probes this frame updates (storage indices, in ray order).
+    pub fn updates(&self) -> &[u32] {
+        &self.list
     }
 }
 
@@ -403,85 +502,19 @@ impl RenderPass for GiPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let state = &mut self.state;
-        let eye = eye(ctx);
-        let clipmap = Clipmap::around(eye);
-        let entered = clipmap.entered(state.clipmap.as_ref());
-        for &index in &entered {
-            state.schedule.enter(index);
-        }
-        state.clipmap = Some(clipmap);
-        state.schedule.next(&mut self.list);
-        let parity = 1 - state.parity;
-        let rotation = rotation(ctx.frame_num);
         let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
         let (ambient, intensity) = environment.map_or(([0.5, 0.5, 0.6], 1.0), |e| (e.ambient_color, e.ambient_intensity));
         let sky = Vec3::from(ambient) * intensity;
-        let frame = GpuFrame {
-            levels: clipmap.levels(eye),
-            sky: sky.extend(0.0).to_array(),
-            ground: (sky * 0.15).extend(0.0).to_array(),
-            counts: [self.list.len() as u32, state.updated, entered.len() as u32, parity],
-            rotation,
-            prev_rotation: state.prev_rotation,
-        };
-        ctx.write_buffer(&state.frame, 0, bytemuck::bytes_of(&frame));
-        ctx.write_buffer(&state.lists, u64::from(parity * MAX_UPDATES) * 4, bytemuck::cast_slice(&self.list));
-        if !entered.is_empty() {
-            ctx.write_buffer(&state.lists, u64::from(2 * MAX_UPDATES) * 4, bytemuck::cast_slice(&entered));
-        }
-        self.counts = [self.list.len() as u32, entered.len() as u32];
+        self.begin(ctx.queue, eye(ctx), ctx.frame_num, sky, sky * 0.15);
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let atmosphere = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)).unwrap_or(&self.fallback_atmosphere);
-        let sky_table = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE)).unwrap_or(&self.fallback_sky_table);
-        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map_or(&self.fallback_lights, |h| &h.buffer);
-        let key = [atmosphere.clone(), sky_table.clone(), lights.clone()];
-        if self.group.as_ref().is_none_or(|(_, k)| *k != key) {
-            let s = &self.state;
-            let group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GI update"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: s.frame.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: s.probes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: s.rays.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: s.hits.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: s.lists.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: s.sun.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: atmosphere.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: sky_table.as_entire_binding() },
-                ],
-            });
-            self.group = Some((group, key));
-        }
-        let Some((group, _)) = &self.group else { return Ok(()) };
-        let state = &mut self.state;
+        let atmosphere = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)).cloned();
+        let sky_table = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE)).cloned();
+        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
         let mut cmds = ctx.graphics_cmds();
-        {
-            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI update"), timestamp_writes: None });
-            pass.set_bind_group(0, Some(group), &[]);
-            pass.set_pipeline(&self.sun);
-            pass.dispatch_workgroups(1, 1, 1);
-            if state.updated > 0 {
-                pass.set_pipeline(&self.integrate);
-                pass.dispatch_workgroups(state.updated, 1, 1);
-            }
-            if self.counts[1] > 0 {
-                pass.set_pipeline(&self.reset);
-                pass.dispatch_workgroups(self.counts[1].div_ceil(64), 1, 1);
-            }
-            pass.set_pipeline(&self.rays);
-            pass.dispatch_workgroups((self.counts[0] * RAYS).div_ceil(64), 1, 1);
-        }
-        // The tracers write each ray's hit, or leave it none.
-        cmds.clear_buffer(&state.hits, 0, None);
-        state.updated = self.counts[0];
-        state.parity = 1 - state.parity;
-        state.prev_rotation = rotation(ctx.frame_num);
+        self.record(ctx.device, &mut cmds, atmosphere.as_ref(), sky_table.as_ref(), lights.as_ref());
         Ok(())
     }
 
@@ -501,7 +534,6 @@ pub struct GiResolvePass {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     out: Option<(wgpu::Buffer, [u32; 2])>,
-    group: Option<(wgpu::BindGroup, (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, usize, usize, wgpu::Buffer))>,
 }
 
 impl GiResolvePass {
@@ -546,7 +578,41 @@ impl GiResolvePass {
             compilation_options: Default::default(),
             cache: None,
         });
-        Self { layout, pipeline, out: None, group: None }
+        Self { layout, pipeline, out: None }
+    }
+
+    /// Records the probes' irradiance at each pixel of a `size` frame
+    /// (`gi_irradiance`) from `frame`, `probes` and `camera` (GiPass's
+    /// frame and probes, Helio's camera) and the G-buffer's normals and
+    /// depth.
+    pub fn record(&mut self, device: &wgpu::Device, cmds: &mut helio_core::CommandRecorder<'_>, [frame, probes, camera]: [&wgpu::Buffer; 3], normal: &wgpu::TextureView, depth: &wgpu::TextureView, size: [u32; 2]) {
+        let size = [size[0].max(1), size[1].max(1)];
+        if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
+            let bytes = u64::from(size[0]) * u64::from(size[1]) * 8;
+            self.out = Some((buffer(device, "GI irradiance", bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC), size));
+        }
+        let Some((out, _)) = &self.out else { return };
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("GI resolve"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: frame.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: probes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: camera.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(normal) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
+                wgpu::BindGroupEntry { binding: 5, resource: out.as_entire_binding() },
+            ],
+        });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI resolve"), timestamp_writes: None });
+        pass.set_bind_group(0, Some(&group), &[]);
+        pass.set_pipeline(&self.pipeline);
+        pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+    }
+
+    /// The last frame's `gi_irradiance` (none before one).
+    pub fn irradiance(&self) -> Option<&wgpu::Buffer> {
+        self.out.as_ref().map(|(b, _)| b)
     }
 }
 
@@ -584,44 +650,8 @@ impl RenderPass for GiResolvePass {
         let Some(gbuffer) = ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new("gbuffer")) else {
             return Err(helio_core::Error::ResourceNotFound("gbuffer".into()));
         };
-        let size = [ctx.width.max(1), ctx.height.max(1)];
-        if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
-            let bytes = u64::from(size[0]) * u64::from(size[1]) * 8;
-            self.out = Some((buffer(ctx.device, "GI irradiance", bytes, wgpu::BufferUsages::STORAGE), size));
-        }
-        let Some((out, _)) = &self.out else { return Ok(()) };
-        // Views have no identity to compare: their addresses stand in (the
-        // graph keeps its views for the frame's lifetime and rebuilds them
-        // on resize, with a new `out`).
-        let key = (
-            frame.clone(),
-            probes.clone(),
-            ctx.camera.clone(),
-            gbuffer.views[1] as *const wgpu::TextureView as usize,
-            ctx.depth as *const wgpu::TextureView as usize,
-            out.clone(),
-        );
-        if self.group.as_ref().is_none_or(|(_, k)| *k != key) {
-            let group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GI resolve"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: frame.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: probes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: ctx.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(gbuffer.views[1]) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 5, resource: out.as_entire_binding() },
-                ],
-            });
-            self.group = Some((group, key));
-        }
-        let Some((group, _)) = &self.group else { return Ok(()) };
         let mut cmds = ctx.graphics_cmds();
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI resolve"), timestamp_writes: None });
-        pass.set_bind_group(0, Some(group), &[]);
-        pass.set_pipeline(&self.pipeline);
-        pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+        self.record(ctx.device, &mut cmds, [frame, probes, ctx.camera], gbuffer.views[1], ctx.depth, [ctx.width, ctx.height]);
         Ok(())
     }
 

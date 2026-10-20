@@ -44,6 +44,7 @@ use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
+use helio_pass_gi::{GiPass, GiResolvePass};
 use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass};
 
 use background::BackgroundPass;
@@ -179,6 +180,8 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<IndirectDispatchPass>()
         .independent::<BackgroundPass>()
         .independent::<AtmospherePass>()
+        .independent::<GiPass>()
+        .independent::<GiResolvePass>()
         .independent::<AtmosphereCompositePass>()
         .independent::<LightCullPass>()
         .independent::<DecalPass>()
@@ -1049,6 +1052,13 @@ fn build_default_graph_internal_with_lens_user(
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
+    // World-space GI (helio-pass-gi): its probes' rays are traced by the
+    // voxel terrain, so they run with voxel passes, the update before them
+    // and the resolve once the G-buffer is complete.
+    let gi = !voxel_passes.is_empty();
+    if gi {
+        graph.add_pass(Box::new(GiPass::new(device)));
+    }
     for factory in &voxel_passes {
         graph.add_pass(factory(device, queue, iw, ih));
     }
@@ -1085,6 +1095,9 @@ fn build_default_graph_internal_with_lens_user(
         )));
     }
 
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
