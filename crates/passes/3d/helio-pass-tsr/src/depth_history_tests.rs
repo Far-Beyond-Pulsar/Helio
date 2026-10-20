@@ -90,7 +90,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
             .flat_map(|_| [0x3800, 0x3800, 0x3800, 0x3c00])
             .collect();
         queue.write_texture(
-            pass.histories[1].color.as_image_copy(),
+            pass.history_texture.as_image_copy(),
             bytemuck::cast_slice(&history),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
@@ -114,11 +114,49 @@ fn run_depth_history_fixture(translated_origin: bool) {
             contents: bytemuck::cast_slice(&[camera, camera]),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
-        // The fixture never executes, so the resolve always writes
-        // histories[0] and reads histories[1].
         let create_bind = |pass: &TsrPass| {
-            make_resolve_bg(&device, &pass.bgl, &pass.histories[1], &current_view, &depth_view,
-                &coverage_view, &pass.linear_sampler, &cameras, &pass.uniform_buf)
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pass.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&current_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&pass.history_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&pass.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&pass.point_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: cameras.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: pass.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&coverage_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&pass.history_depth_view),
+                    },
+                ],
+            })
         };
         let mut bind = create_bind(&pass);
         let probe = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -163,11 +201,11 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&pass.histories[0].color_view),
+                        resource: wgpu::BindingResource::TextureView(&pass.output_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&pass.histories[0].depth_view),
+                        resource: wgpu::BindingResource::TextureView(&pass.output_depth_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -240,7 +278,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 .flat_map(|_| [0x3800, 0x3800, 0x3800, previous_coverage])
                 .collect();
             queue.write_texture(
-                pass.histories[1].color.as_image_copy(),
+                pass.history_texture.as_image_copy(),
                 bytemuck::cast_slice(&history),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
@@ -250,7 +288,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 extent,
             );
             queue.write_texture(
-                pass.histories[1].depth.as_image_copy(),
+                pass.history_depth.as_image_copy(),
                 bytemuck::cast_slice(&vec![stored_depth; 512]),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
@@ -259,13 +297,13 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 },
                 extent,
             );
-            seed_weight(&queue, &pass);
             let uniform = TsrUniform {
                 jitter_offset: [0.0; 2],
                 reactivity,
                 flags,
+                time_delta,
+                tap_radius: 2,
                 previous_jitter_uv: [0.0; 2],
-                _pad: [0.0; 2],
                 previous_view: identity,
             };
             queue.write_buffer(&pass.uniform_buf, 0, bytemuck::bytes_of(&uniform));
@@ -464,7 +502,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     // Seed the replacement texture with otherwise valid history.
                     // This distinguishes reset from incidental cleared-depth rejection.
                     queue.write_texture(
-                        pass.histories[1].color.as_image_copy(),
+                        pass.history_texture.as_image_copy(),
                         bytemuck::cast_slice(&history),
                         wgpu::TexelCopyBufferLayout {
                             offset: 0,
@@ -474,7 +512,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         extent,
                     );
                     queue.write_texture(
-                        pass.histories[1].depth.as_image_copy(),
+                        pass.history_depth.as_image_copy(),
                         bytemuck::cast_slice(&vec![stored_depth; 512]),
                         wgpu::TexelCopyBufferLayout {
                             offset: 0,
@@ -483,7 +521,6 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         },
                         extent,
                     );
-                    seed_weight(&queue, &pass);
                     pass.prepare(&PrepareContext {
                         device: &device,
                         queue: &queue,
@@ -527,18 +564,26 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 });
             }
             {
-                let history = &pass.histories[0];
-                let attachments = [&history.color_view, &history.depth_view, &history.state_view, &history.noise_view].map(|view| {
+                let attachments = [
                     Some(wgpu::RenderPassColorAttachment {
-                        view,
+                        view: &pass.output_view,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                             store: wgpu::StoreOp::Store,
                         },
-                    })
-                });
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &pass.output_depth_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ];
                 let mut draw = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: None,
                     color_attachments: &attachments,
@@ -649,18 +694,6 @@ fn run_depth_history_fixture(translated_origin: bool) {
             }
         }
     });
-}
-
-/// Accumulated history of a settled pixel (weight 8, no lock): with no
-/// weight, history would contribute nothing whatever its depth.
-fn seed_weight(queue: &wgpu::Queue, pass: &TsrPass) {
-    let state: Vec<u16> = (0..512).flat_map(|_| [0x4800, 0, 0, 0]).collect();
-    queue.write_texture(
-        pass.histories[1].state.as_image_copy(),
-        bytemuck::cast_slice(&state),
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(512), rows_per_image: Some(8) },
-        wgpu::Extent3d { width: 64, height: 8, depth_or_array_layers: 1 },
-    );
 }
 
 #[test]

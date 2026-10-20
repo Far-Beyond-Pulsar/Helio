@@ -12,5 +12,3 @@ bytemuck   = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 pollster = { workspace = true }
-glam     = { workspace = true }
-half     = { version = "2", features = ["bytemuck"] }
