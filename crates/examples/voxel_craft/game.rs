@@ -195,6 +195,7 @@ impl Game {
             sun: self.sun(),
             outline: &outline,
             time: self.started.elapsed().as_secs_f64(),
+            weather: self.time,
             screenshot: shot.as_deref(),
         };
         self.gfx.draw(&view);

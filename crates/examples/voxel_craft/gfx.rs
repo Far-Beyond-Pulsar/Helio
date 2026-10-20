@@ -34,6 +34,9 @@ pub struct Gfx {
     /// The renderer's world origin of the last frame.
     pub origin: DVec3,
     size: [u32; 2],
+    /// The weather's clock at the last frame (game seconds): the renderer's
+    /// frame clock (the clouds' wind) advances with it.
+    clock: f64,
 }
 
 /// Residency settings for chunk trees at a window of height `h`.
@@ -123,7 +126,22 @@ impl Gfx {
         crate::meadow::plant(&mut scene.world);
         let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
         let air = scene.world.spawn();
-        scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
+        // Fair-weather cumulus, sized for the small planet: a layer from 0.9
+        // to 2.2 km over the ground, drifting with a light breeze
+        // (`VOXEL_CRAFT_NO_CLOUDS`: a clear sky).
+        let clouds = helio_pass_sky::CloudLayer {
+            bottom_km: 0.9,
+            top_km: 2.2,
+            coverage: 0.45,
+            weather_km: 7.0,
+            shape_km: 1.8,
+            detail_km: 0.3,
+            wind: [6.0, 0.0, 2.5],
+            ..helio_pass_sky::CloudLayer::cumulus()
+        };
+        let sky = helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius());
+        let sky = if std::env::var_os("VOXEL_CRAFT_NO_CLOUDS").is_some() { sky } else { sky.with_clouds(clouds) };
+        scene.world.insert(air, sky);
         // A light ground haze, thinning with altitude over the planet, the
         // sun scatters forward through: shafts past trees and ridges (the
         // terrain's sun occlusion shadows it).
@@ -170,7 +188,7 @@ impl Gfx {
         if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {
             renderer.set_debug_mode(mode);
         }
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size }
+        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size, clock: 0.0 }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -225,6 +243,8 @@ impl Gfx {
                 },
             ),
         );
+        self.renderer.set_frame_clock_delta(Some((view.weather - self.clock).clamp(0.0, 0.1) as f32));
+        self.clock = view.weather;
         self.origin = Self::origin_for(eye);
         self.renderer.set_world_origin(Some(self.origin));
         let origin = self.origin;
@@ -316,7 +336,11 @@ pub struct View<'a> {
     pub sun: DVec3,
     /// Edges to outline (the targeted block), planet-centred.
     pub outline: &'a [(DVec3, DVec3)],
+    /// Seconds since the game started (the character's animation).
     pub time: f64,
+    /// Game seconds (they hold still in the tour and race with `T`): the
+    /// clouds drift with them.
+    pub weather: f64,
     /// Save this frame to a PNG at this path.
     pub screenshot: Option<&'a str>,
 }

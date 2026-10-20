@@ -7,6 +7,11 @@
 // perspective, alpha = transmittance). Without an atmosphere it writes
 // (0, 1): the scene is unchanged.
 //
+// The clouds (`cloud_trace.wgsl`, half resolution) lie in front of
+// whatever is behind them: the sky, or geometry farther than their front.
+// With the air in front of them already applied, the pixel becomes
+// behind * (1 - opacity) + clouds.
+//
 // Inside the atmosphere the sky comes from the sky-view LUT and the air in
 // front of geometry from the aerial-perspective volume. From space both
 // would spend their resolution on empty space around a thin shell (and the
@@ -21,6 +26,11 @@
 @group(0) @binding(5) var depth_texture: texture_depth_2d;
 @group(0) @binding(6) var lut_sampler: sampler;
 @group(0) @binding(7) var multi_scattering_lut: texture_2d<f32>;
+@group(0) @binding(8) var cloud_color: texture_2d<f32>;
+@group(0) @binding(9) var cloud_depth: texture_2d<f32>;
+
+// A cloud footprint reaching the sky (`cloud_trace.wgsl`), km.
+const CLOUD_UNLIMITED: f32 = 60000.0;
 
 const SPACE_STEPS: f32 = 32.0;
 
@@ -65,6 +75,40 @@ fn march_from_space(eye: vec3<f32>, d: vec3<f32>, limit: f32) -> Scattering {
     return out;
 }
 
+// The clouds in front of a pixel at `uv` whose geometry is `distance` km
+// away (CLOUD_UNLIMITED: sky): rgb their light, a their opacity. Of the four
+// half-resolution texels around it, those whose footprint reached at least
+// as far count (the others stopped at nearer geometry and saw less sky);
+// a texel's clouds count only where their front is nearer than the
+// geometry.
+fn clouds_in_front(uv: vec2<f32>, distance: f32) -> vec4<f32> {
+    if !atmosphere_has_clouds(frame) { return vec4<f32>(0.0); }
+    let size = vec2<i32>(textureDimensions(cloud_color));
+    let at = uv * vec2<f32>(size) - 0.5;
+    let base = vec2<i32>(floor(at));
+    let f = at - floor(at);
+    var matched = vec4<f32>(0.0);
+    var matched_weight = 0.0;
+    var unmatched = vec4<f32>(0.0);
+    for (var k = 0; k < 4; k++) {
+        let o = vec2<i32>(k & 1, k >> 1);
+        let q = clamp(base + o, vec2<i32>(0), size - 1);
+        let weight = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        let depth = textureLoad(cloud_depth, q, 0);
+        var clouds = textureLoad(cloud_color, q, 0);
+        if distance < CLOUD_UNLIMITED * 0.98 {
+            clouds *= clamp((distance - depth.x) / max(depth.x * 0.05, 0.05), 0.0, 1.0);
+        }
+        unmatched += clouds * weight;
+        if depth.y >= min(distance, CLOUD_UNLIMITED) * 0.98 {
+            matched += clouds * weight;
+            matched_weight += weight;
+        }
+    }
+    if matched_weight > 1e-3 { return matched / matched_weight; }
+    return unmatched;
+}
+
 @fragment
 fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
     if frame.planet.w < 0.5 { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
@@ -101,12 +145,15 @@ fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
             let limb = 0.4 + 0.6 * sqrt(edge);
             radiance += sun / solid_angle * limb * through;
         }
-        return vec4<f32>(radiance, 0.0);
+        let clouds = clouds_in_front(in.uv, CLOUD_UNLIMITED);
+        return vec4<f32>(radiance * (1.0 - clouds.a) + clouds.rgb, 0.0);
     }
     let distance = length(ray) * helio_view_depth(camera.proj, depth) * 0.001;
+    let clouds = clouds_in_front(in.uv, distance);
+    let clear = 1.0 - clouds.a;
     if in_space {
         let air = march_from_space(eye, d, distance);
-        return vec4<f32>(air.radiance * sun, dot(air.transmittance, vec3<f32>(1.0 / 3.0)));
+        return vec4<f32>(air.radiance * sun * clear + clouds.rgb, dot(air.transmittance, vec3<f32>(1.0 / 3.0)) * clear);
     }
     let range = frame.sun_illuminance.w;
     // Slices hold values at their centres; the first fades in from the eye.
@@ -116,5 +163,5 @@ fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
     if slice < 0.0 {
         aerial = mix(vec4<f32>(0.0, 0.0, 0.0, 1.0), aerial, clamp(slice + 1.0, 0.0, 1.0));
     }
-    return vec4<f32>(aerial.rgb * sun, aerial.a);
+    return vec4<f32>(aerial.rgb * sun * clear + clouds.rgb, aerial.a * clear);
 }

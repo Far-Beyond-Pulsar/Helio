@@ -128,6 +128,7 @@ impl Flight {
         helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut store, 16, &device);
         helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut store, 16, &device);
         helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(&mut store, 4, &device);
         let mirror = GpuMirrorHandle::new(Arc::new(store), queue.clone());
         let mut scene = pulsar_scenedb::SceneDb::new();
         scene.world.attach_gpu_mirror(mirror.clone());
@@ -153,9 +154,23 @@ impl Flight {
                 ..Default::default()
             }),
         );
-        // Earth's air around the planet, centred on the world origin.
+        // Earth's air around the planet, centred on the world origin, with
+        // fair-weather cumulus (`HELIO_VOXEL_FLIGHT_NO_CLOUDS`: a clear
+        // sky) and a ground haze thinning with altitude over the planet
+        // (`HELIO_VOXEL_FLIGHT_NO_HAZE`): the planet's own scale stresses
+        // both.
         let air = scene.world.spawn();
-        scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
+        let sky = helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius());
+        let sky = if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLOUDS").is_some() { sky } else { sky.with_clouds(helio_pass_sky::CloudLayer::cumulus()) };
+        scene.world.insert(air, sky);
+        if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HAZE").is_none() {
+            let haze = scene.world.spawn();
+            scene.world.insert(
+                haze,
+                helio_pass_volumetric_fog::GlobalFogComponent { mode: 1, extinction: 0.0006, height_falloff: 0.004, anisotropy: 0.6, ..Default::default() }
+                    .around_planet([0.0; 3], planet.grid().radius()),
+            );
+        }
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
@@ -172,12 +187,12 @@ impl Flight {
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], config.surface_format);
         // HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation": the camera
-        // post-process of an outdoor look (ACES tone map and a grade).
+        // post-process of an outdoor look (AgX punchy tone map and a grade).
         if let Ok(look) = std::env::var("HELIO_VOXEL_FLIGHT_LOOK") {
             let v: Vec<f32> = look.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             let at = |i: usize, d: f32| v.get(i).copied().unwrap_or(d);
             let mut post = helio_pass_postprocess::PostProcessSettings::default();
-            post.tonemap_operator = helio::TonemapOperator::Aces;
+            post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
             post.tonemap_exposure = at(0, 1.0);
             post.color_contrast = [at(1, 1.0); 3];
             post.color_saturation = [at(2, 1.0); 3];

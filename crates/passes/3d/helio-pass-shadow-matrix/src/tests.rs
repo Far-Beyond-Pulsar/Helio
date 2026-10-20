@@ -43,6 +43,15 @@ fn production_shadow_shaders_validate() {
                 source
             );
         }
+        for (marker, file) in [
+            ("//!use atmosphere_sky_table", "helio-pass-sky/src/shaders/atmosphere_sky_table.wgsl"),
+            ("//!use cloud_shadow", "helio-pass-sky/src/shaders/cloud_shadow.wgsl"),
+        ] {
+            if source.contains(marker) {
+                source = format!("{}
+{}", std::fs::read_to_string(root.join(file)).unwrap(), source);
+            }
+        }
         if source.contains("//!use atmosphere") {
             source = format!(
                 "{}\n{}",

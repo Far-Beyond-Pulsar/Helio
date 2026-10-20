@@ -1,5 +1,6 @@
 //!use helio_prelude
 //!use sun_occlusion
+//!use cloud_shadow
 //
 // Volumetric fog — froxel grid (Hillaire, "Physically Based and Unified Volumetric
 // Rendering in Frostbite", SIGGRAPH 2015).
@@ -124,6 +125,10 @@ const NO_SHADOW: u32 = 4294967295u;
 // `sun_occlusion`), its levels 0 when none is published.
 @group(0) @binding(22) var               sun_occlusion_maps: texture_2d_array<f32>;
 @group(0) @binding(23) var<uniform>      sun_occlusion_frame: SunOcclusionFrame;
+// The clouds' shadow along the sun (helio-pass-sky's `cloud_shadow`), its
+// frame zero when no clouds are published.
+@group(0) @binding(24) var               cloud_shadow_map: texture_2d<f32>;
+@group(0) @binding(25) var<uniform>      cloud_shadow_frame: CloudShadowFrame;
 /// Previous frame's scattering grid, for temporal reprojection.
 @group(0) @binding(7) var                scatter_history: texture_3d<f32>;
 @group(0) @binding(8) var                linear_samp:     sampler;
@@ -834,11 +839,12 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
 
 /// Fraction of `light_idx` reaching `p`. 1.0 = fully lit: its shadow maps,
 /// and for the sun the terrain's occlusion (shafts through canopies and past
-/// ridges of terrain the shadow maps do not hold).
+/// ridges of terrain the shadow maps do not hold) and the clouds' shadow.
 fn shaft_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
     var lit = shadow_map_visibility(light_idx, p0);
     if lights[light_idx].light_type == LIGHT_DIRECTIONAL {
-        lit *= sun_occlusion(p0 - cameras[0].position_near.xyz);
+        let from_camera = p0 - cameras[0].position_near.xyz;
+        lit *= sun_occlusion(from_camera) * cloud_shadow(from_camera);
     }
     return lit;
 }

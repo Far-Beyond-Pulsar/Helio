@@ -20,7 +20,7 @@ use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
 use helio_pass_sky::atmosphere::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
-    ATMOSPHERE_SNIPPET,
+    ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
 };
 use std::collections::VecDeque;
 
@@ -342,7 +342,7 @@ impl GiPass {
             device,
             "GI update",
             helio_core::include_wgsl!("../shaders/gi_update.wgsl"),
-            &[ATMOSPHERE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET],
+            &[ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GI update"),
@@ -775,7 +775,7 @@ mod shader_tests {
 
     #[test]
     fn shaders_validate() {
-        validate("gi_update", include_str!("../shaders/gi_update.wgsl"), &[ATMOSPHERE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
+        validate("gi_update", include_str!("../shaders/gi_update.wgsl"), &[ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
         validate("gi_resolve", include_str!("../shaders/gi_resolve.wgsl"), &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
     }
 }

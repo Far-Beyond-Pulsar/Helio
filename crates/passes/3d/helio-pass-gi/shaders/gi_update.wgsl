@@ -1,4 +1,5 @@
 //!use atmosphere
+//!use atmosphere_sky_table
 //!use gi_common
 //!use gi_sample
 // Probe updates (README.md): the sun found, last frame's rays integrated
@@ -59,36 +60,8 @@ fn gi_sun_main() {
 // an atmosphere, the flat sky and ground.
 fn sky_radiance(from_camera: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if atmosphere.planet.w < 0.5 { return select(frame_gi.ground.rgb, frame_gi.sky.rgb, d.y >= 0.0); }
-    let bottom = atmosphere.params.bottom_radius;
-    let top = atmosphere.params.top_radius;
-    let pos = from_camera - atmosphere.planet.xyz;
-    let r = max(length(pos), bottom);
-    let up = normalize(pos);
-    let sun = atmosphere.sun.xyz;
-    let mu_s = dot(up, sun);
-    var x = sun - up * mu_s;
-    if dot(x, x) < 1e-8 { x = cross(up, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(up.x) > 0.9)); }
-    x = normalize(x);
-    let z = cross(x, up);
-    let l = vec3<f32>(dot(d, x), dot(d, up), dot(d, z));
-    let height = clamp((r - bottom) / (top - bottom), 0.0, 1.0);
-    let fr = sqrt(height) * f32(SKY_TABLE_R - 1u);
-    let fm = clamp((mu_s - SKY_TABLE_MU_LO) / (1.0 - SKY_TABLE_MU_LO), 0.0, 1.0) * f32(SKY_TABLE_MU - 1u);
-    let r0 = min(u32(fr), SKY_TABLE_R - 2u);
-    let m0 = min(u32(fm), SKY_TABLE_MU - 2u);
-    let w = vec2<f32>(fr - f32(r0), fm - f32(m0));
     // The basis over each band's convolution (1, 2/3, 1/4).
-    let basis = array<f32, 6>(0.282095, 0.488603 * l.y * 1.5, 0.488603 * l.x * 1.5, 1.092548 * l.x * l.y * 4.0, 0.315392 * (3.0 * l.z * l.z - 1.0) * 4.0, 0.546274 * (l.x * l.x - l.y * l.y) * 4.0);
-    var e = vec3<f32>(0.0);
-    for (var k = 0u; k < SKY_TABLE_COEFFS; k++) {
-        let a = (r0 * SKY_TABLE_MU + m0) * SKY_TABLE_COEFFS + k;
-        let b = a + SKY_TABLE_COEFFS;
-        let c = a + SKY_TABLE_MU * SKY_TABLE_COEFFS;
-        let dd = c + SKY_TABLE_COEFFS;
-        let v = mix(mix(atmosphere_sky_table[a].rgb, atmosphere_sky_table[b].rgb, w.y), mix(atmosphere_sky_table[c].rgb, atmosphere_sky_table[dd].rgb, w.y), w.x);
-        e += v * basis[k];
-    }
-    return max(e, vec3<f32>(0.0)) * atmosphere.sun_illuminance.rgb;
+    return atmosphere_sky_table_eval(atmosphere, from_camera, d, vec3<f32>(1.0, 1.5, 4.0));
 }
 
 // Probes that came into the clipmap (after `gi_integrate`, which may have

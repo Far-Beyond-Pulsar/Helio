@@ -24,7 +24,8 @@ cargo run -p examples --release --bin voxel_craft
 
 Environment: `VOXEL_CRAFT_QUALITY=performance|balanced|quality|native`,
 `VOXEL_CRAFT_LOD` (cells per pixel, default 0.6), `VOXEL_CRAFT_DISTANCE`
-(view distance in metres, default 12 000).
+(view distance in metres, default 12 000), `VOXEL_CRAFT_NO_CLOUDS=1` (a
+clear sky).
 
 ### Screenshot tour
 

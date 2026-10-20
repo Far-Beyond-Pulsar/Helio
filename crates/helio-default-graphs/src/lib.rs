@@ -45,7 +45,7 @@ use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_gi::{GiPass, GiResolvePass};
-use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass};
+use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
 
 use background::BackgroundPass;
 use helio_pass_ssr::SsrPass;
@@ -182,6 +182,7 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<AtmospherePass>()
         .independent::<GiPass>()
         .independent::<GiResolvePass>()
+        .independent::<CloudTracePass>()
         .independent::<AtmosphereCompositePass>()
         .independent::<LightCullPass>()
         .independent::<DecalPass>()
@@ -378,6 +379,12 @@ fn add_common_early_passes(
     perf_overlay_shared
 }
 
+/// The clouds' trace, once the depth is complete and before deferred
+/// lighting, which takes the sun's visibility under the clouds from it.
+fn add_cloud_trace(graph: &mut RenderGraph, device: &Arc<wgpu::Device>) {
+    graph.add_pass(Box::new(CloudTracePass::new(device)));
+}
+
 fn add_geometry_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -509,9 +516,15 @@ fn add_late_passes(
     h: u32,
     _scene_db: helio::SceneDbHandle,
 ) {
+    // The clouds, where a graph has not traced them before its lighting
+    // (`add_cloud_trace`).
+    if graph.find_pass::<CloudTracePass>().is_none() {
+        graph.add_pass(Box::new(CloudTracePass::new(device)));
+    }
     // The atmosphere over everything lit: the sky where nothing was drawn,
-    // aerial perspective over geometry. Before the overlays (billboards,
-    // coronas, debug draw), which are not seen through the air.
+    // aerial perspective over geometry, the clouds in front of both. Before
+    // the overlays (billboards, coronas, debug draw), which are not seen
+    // through the air.
     graph.add_pass(Box::new(AtmosphereCompositePass::new(device, config.surface_format)));
     let lights_buf = scene_buffer_or_dummy(
         &_scene_db,
@@ -1111,6 +1124,7 @@ fn build_default_graph_internal_with_lens_user(
     if gi {
         graph.add_pass(Box::new(GiResolvePass::new(device)));
     }
+    add_cloud_trace(&mut graph, device);
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -1346,6 +1360,7 @@ fn build_fxaa_graph_internal(
         )));
     }
 
+    add_cloud_trace(&mut graph, device);
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);

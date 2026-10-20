@@ -779,11 +779,8 @@ impl RenderPass for RadianceCascadesPass {
             .scene_buffers
             .get(helio_core::BufferKey::of("scene_lights"))
             .map_or(0, |lights| lights.row_capacity());
-        let sky = ctx
-            .registry
-            .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))
-            .map(|sky| sky.sky_color)
-            .unwrap_or([0.0, 0.0, 0.0]);
+        // No flat sky colour: the sky is the atmosphere's.
+        let sky = [0.0f32; 3];
         let volume = self.volume(ctx.camera_data.position_near);
         let dyn_data = RCDynamic {
             world_min: [volume.world_min[0], volume.world_min[1], volume.world_min[2], 0.0],

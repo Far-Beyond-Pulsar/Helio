@@ -29,6 +29,12 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_mats::SPECULAR_AA_SNIPPET,
     helio_pass_foliage_place::WIND_SNIPPET,
     helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
+    helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE_SNIPPET,
+    helio_pass_sky::clouds::CLOUD_SHADOW_SNIPPET,
+    helio_pass_sky::clouds::CLOUDS_SNIPPET,
+    helio_pass_gi::GI_COMMON_SNIPPET,
+    helio_pass_gi::GI_SAMPLE_SNIPPET,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
 ];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -100,6 +106,8 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
         "helio-default-graphs/shaders/scene_join_meshes.wgsl",
         "helio-default-graphs/shaders/scene_join_lights.wgsl",
         "helio-default-graphs/shaders/environment_join.wgsl",
+        "helio-default-graphs/shaders/hierarchy_resolve.wgsl",
+        "helio-default-graphs/shaders/scene_join_moved.wgsl",
     ];
     if JOINS.iter().any(|suffix| normalized.ends_with(suffix)) {
         let common = root.join("crates/helio-default-graphs/shaders/scene_join_common.wgsl");
@@ -218,7 +226,9 @@ fn composed_shaders_parse_and_validate() {
     let failures: Vec<String> = sources
         .iter()
         .filter_map(|(name, source)| {
-            let source = helio_core::shader::resolve_with(source, SNIPPETS);
+            // The fog's source holds its snippets already (`shader_source`):
+            // its pass resolves the prelude alone.
+            let source = if name == "volumetric_fog.wgsl" { helio_core::shader::resolve(source).into_owned() } else { helio_core::shader::resolve_with(source, SNIPPETS).into_owned() };
             let module = match naga::front::wgsl::parse_str(&source) {
                 Ok(module) => module,
                 Err(e) => return Some(format!("{name}:
