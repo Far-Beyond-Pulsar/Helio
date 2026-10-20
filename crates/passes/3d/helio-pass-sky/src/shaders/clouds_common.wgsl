@@ -82,7 +82,7 @@ fn cloud_weather_at(c: CloudLayerParams, anchor: vec3<f32>) -> vec2<f32> {
     let weather = textureSampleLevel(cloud_weather, cloud_noise_sampler, anchor * c.inv_weather + c.weather_offset, 0.0);
     let climate = textureSampleLevel(cloud_weather, cloud_noise_sampler,
         anchor * (c.inv_weather / CLOUD_CLIMATE) + c.climate_offset, 0.0);
-    let field = weather.r * 0.7 + climate.g * 0.3;
+    let field = weather.r * 0.6 + climate.g * 0.4;
     // The coverage's quantile of the field: the share of the sky with clouds.
     let threshold = mix(0.78, 0.22, c.coverage);
     let cover = smoothstep(threshold - 0.12, threshold + 0.12, field);

@@ -22,9 +22,10 @@
 //
 // Outputs (half resolution): colour (rgb radiance, a opacity: one minus
 // the transmittance, so zero is clear sky) and
-// depth (r: distance to the clouds' front, the transmittance-weighted mean
-// depth, km; g: the geometry the pixel's footprint ends at, km, or
-// CLOUD_UNLIMITED where it reaches the sky), which the composite reads.
+// depth (Rg32Float, full precision for planets seen from orbit; r: distance
+// to the clouds' front, the transmittance-weighted mean depth, km; g: the
+// geometry the pixel's footprint ends at, km, or CLOUD_UNLIMITED where it
+// reaches the sky), which the composite reads.
 
 struct TraceParams {
     full: vec2<u32>,
@@ -52,13 +53,13 @@ struct TraceParams {
 @group(0) @binding(11) var lut_sampler: sampler;
 @group(0) @binding(12) var<uniform> params: TraceParams;
 @group(0) @binding(13) var trace_color_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(14) var trace_depth_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(14) var trace_depth_out: texture_storage_2d<rg32float, write>;
 @group(0) @binding(15) var trace_color: texture_2d<f32>;
 @group(0) @binding(16) var trace_depth: texture_2d<f32>;
 @group(0) @binding(17) var history_color: texture_2d<f32>;
 @group(0) @binding(18) var history_depth: texture_2d<f32>;
 @group(0) @binding(19) var color_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(20) var depth_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(20) var depth_out: texture_storage_2d<rg32float, write>;
 @group(0) @binding(21) var<uniform> cloud_shadow_frame: CloudShadowFrame;
 @group(0) @binding(22) var cloud_shadow_map: texture_2d<f32>;
 @group(0) @binding(23) var directional_visibility: texture_2d<f32>;
@@ -262,11 +263,17 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
     let c01 = load_trace(base + vec2<i32>(0, 1));
     let c11 = load_trace(base + vec2<i32>(1, 1));
     var current = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    // The clouds' front only means something where there are clouds: a
+    // trace without any stores its limit (the sky's is CLOUD_UNLIMITED), so
+    // fronts average by opacity, never blending that in.
     let d00 = load_trace_depth(base).x;
     let d10 = load_trace_depth(base + vec2<i32>(1, 0)).x;
     let d01 = load_trace_depth(base + vec2<i32>(0, 1)).x;
     let d11 = load_trace_depth(base + vec2<i32>(1, 1)).x;
-    var front = mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
+    let w = vec4<f32>((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y)
+        * vec4<f32>(c00.a, c10.a, c01.a, c11.a);
+    let opacity_sum = w.x + w.y + w.z + w.w;
+    var front = select(limit, dot(w, vec4<f32>(d00, d10, d01, d11)) / opacity_sum, opacity_sum > 1e-4);
     let traced = all(p % 2u == params.sub);
     if traced {
         current = c00;
@@ -294,15 +301,18 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
     var out_front = front;
     if valid {
         let history = clamp(textureSampleLevel(history_color, lut_sampler, prev_uv, 0.0), low, high);
-        let history_front = textureSampleLevel(history_depth, lut_sampler, prev_uv, 0.0).x;
-        if traced {
-            color = mix(current, history, CLOUD_HISTORY_WEIGHT);
-            out_front = mix(front, history_front, CLOUD_HISTORY_WEIGHT);
-        } else {
-            color = history;
-            out_front = history_front;
+        let history_size = vec2<i32>(textureDimensions(history_depth));
+        let history_front = textureLoad(history_depth, clamp(vec2<i32>(prev_uv * vec2<f32>(history_size)), vec2<i32>(0), history_size - 1), 0).x;
+        // Fronts blend by the opacity each brings, as above.
+        let keep = select(1.0, CLOUD_HISTORY_WEIGHT, traced);
+        let mine = select(0.0, (1.0 - CLOUD_HISTORY_WEIGHT) * current.a, traced);
+        let theirs = keep * history.a;
+        color = select(history, mix(current, history, CLOUD_HISTORY_WEIGHT), traced);
+        if mine + theirs > 1e-4 {
+            out_front = (mine * front + theirs * history_front) / (mine + theirs);
         }
     }
+    if color.a <= 1e-4 { out_front = limit; }
     textureStore(color_out, p, color);
     textureStore(depth_out, p, vec4<f32>(out_front, limit, 0.0, 0.0));
 }

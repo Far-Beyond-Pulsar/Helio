@@ -54,10 +54,10 @@ pub const CLOUDS_MARKER: &str = "//!use atmosphere_clouds";
 pub const CLOUDS_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(CLOUDS_MARKER, "shaders/clouds_common.wgsl");
 
-/// Graph keys of the clouds seen from the camera (half resolution,
-/// `Rgba16Float`): colour (radiance, opacity: one minus the transmittance)
-/// and depth (the clouds'
-/// front and the footprint's geometry, km).
+/// Graph keys of the clouds seen from the camera (half resolution): colour
+/// (`Rgba16Float`: radiance, opacity: one minus the transmittance) and depth
+/// (`Rg32Float`, unfilterable: the clouds' front and the footprint's
+/// geometry, km).
 pub const ATMOSPHERE_CLOUDS: &str = "atmosphere_clouds";
 pub const ATMOSPHERE_CLOUD_DEPTH: &str = "atmosphere_cloud_depth";
 /// Graph key of the sun's visibility at each pixel (full resolution,
@@ -76,6 +76,10 @@ const SHAPE_SIDE: u32 = 128;
 const DETAIL_SIDE: u32 = 32;
 const NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const CLOUD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The clouds' depths (km) at full precision: a half float's step is a
+/// quarter kilometre at 400 km, more than the gap between a cloud and the
+/// ground under it seen from orbit.
+const CLOUD_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 
 fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None }
@@ -85,6 +89,14 @@ fn sampled(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::BindGro
     entry(binding, wgpu::BindingType::Texture {
         sample_type: wgpu::TextureSampleType::Float { filterable: true },
         view_dimension: dimension,
+        multisampled: false,
+    })
+}
+
+fn unfilterable(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    entry(binding, wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+        view_dimension: wgpu::TextureViewDimension::D2,
         multisampled: false,
     })
 }
@@ -367,7 +379,7 @@ impl Targets {
     fn new(device: &wgpu::Device, full: [u32; 2]) -> Self {
         let half = full.map(|v| v.div_ceil(2).max(1));
         let quarter = half.map(|v| v.div_ceil(2).max(1));
-        let target = |label: &str, size: [u32; 2]| {
+        let target = |label: &str, size: [u32; 2], format: wgpu::TextureFormat| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -375,7 +387,7 @@ impl Targets {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: CLOUD_FORMAT,
+                    format,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
                     view_formats: &[],
                 })
@@ -385,11 +397,11 @@ impl Targets {
             full,
             half,
             quarter,
-            trace_color: target("Cloud trace", quarter),
-            trace_depth: target("Cloud trace depth", quarter),
-            color: [target("Clouds A", half), target("Clouds B", half)],
-            depth: [target("Cloud depth A", half), target("Cloud depth B", half)],
-            sun_visibility: target("Sun visibility", full),
+            trace_color: target("Cloud trace", quarter, CLOUD_FORMAT),
+            trace_depth: target("Cloud trace depth", quarter, CLOUD_DEPTH_FORMAT),
+            color: [target("Clouds A", half, CLOUD_FORMAT), target("Clouds B", half, CLOUD_FORMAT)],
+            depth: [target("Cloud depth A", half, CLOUD_DEPTH_FORMAT), target("Cloud depth B", half, CLOUD_DEPTH_FORMAT)],
+            sun_visibility: target("Sun visibility", full, CLOUD_FORMAT),
         }
     }
 }
@@ -454,7 +466,7 @@ impl CloudTracePass {
                 sampler_entry(11),
                 buffer(12, wgpu::BufferBindingType::Uniform),
                 storage_texture(13, CLOUD_FORMAT, d2),
-                storage_texture(14, CLOUD_FORMAT, d2),
+                storage_texture(14, CLOUD_DEPTH_FORMAT, d2),
             ],
         });
         let reconstruct_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -465,11 +477,11 @@ impl CloudTracePass {
                 sampler_entry(11),
                 buffer(12, wgpu::BufferBindingType::Uniform),
                 sampled(15, d2),
-                sampled(16, d2),
+                unfilterable(16),
                 sampled(17, d2),
-                sampled(18, d2),
+                unfilterable(18),
                 storage_texture(19, CLOUD_FORMAT, d2),
-                storage_texture(20, CLOUD_FORMAT, d2),
+                storage_texture(20, CLOUD_DEPTH_FORMAT, d2),
             ],
         });
         let visibility_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

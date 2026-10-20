@@ -90,9 +90,10 @@ const TRANSMITTANCE_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
 const MULTI_SCATTERING_SIZE: f32 = 32.0;
 const SKY_VIEW_SIZE: vec2<f32> = vec2<f32>(192.0, 108.0);
 const AERIAL_SLICES: f32 = 32.0;
-// The climate (the weather's large-scale modulation) is this many times
-// larger than the weather.
-const CLOUD_CLIMATE: f32 = 2.7;
+// The climate (the weather's large-scale modulation: fronts and clear
+// regions hundreds of kilometres across on Earth) is this many times larger
+// than the weather.
+const CLOUD_CLIMATE: f32 = 12.0;
 
 struct Medium {
     rayleigh: vec3<f32>,
