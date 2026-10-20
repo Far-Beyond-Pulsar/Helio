@@ -87,6 +87,10 @@ fn clouds_in_front(uv: vec2<f32>, distance: f32) -> vec4<f32> {
     let at = uv * vec2<f32>(size) - 0.5;
     let base = vec2<i32>(floor(at));
     let f = at - floor(at);
+    // Geometry within this of the clouds' front is partly in front of them:
+    // a sliver of the layer's thickness, so terrain under a cloud seen from
+    // orbit (2 km below it, 400 km away) stays behind it.
+    let thickness = frame.params.cloud_top - frame.params.cloud_bottom;
     var matched = vec4<f32>(0.0);
     var matched_weight = 0.0;
     var unmatched = vec4<f32>(0.0);
@@ -97,7 +101,8 @@ fn clouds_in_front(uv: vec2<f32>, distance: f32) -> vec4<f32> {
         let depth = textureLoad(cloud_depth, q, 0);
         var clouds = textureLoad(cloud_color, q, 0);
         if distance < CLOUD_UNLIMITED * 0.98 {
-            clouds *= clamp((distance - depth.x) / max(depth.x * 0.05, 0.05), 0.0, 1.0);
+            let band = clamp(depth.x * 0.01, 0.005, 0.25 * thickness);
+            clouds *= clamp((distance - depth.x) / band, 0.0, 1.0);
         }
         unmatched += clouds * weight;
         if depth.y >= min(distance, CLOUD_UNLIMITED) * 0.98 {

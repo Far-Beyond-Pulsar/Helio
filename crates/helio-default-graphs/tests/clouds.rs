@@ -289,7 +289,7 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     let clouds = CloudLayer {
         bottom_km: 3.0,
         top_km: 4.5,
-        coverage: 0.35,
+        coverage: 0.45,
         kind: 0.7,
         weather_km: 4.0,
         shape_km: 1.2,
@@ -384,6 +384,62 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     assert!(mean_darkening > 1.5, "the clouds cast no shadow: {mean_darkening:.2}");
     assert!(r > 0.5, "the shadow is not under the clouds along the sun: r = {r:.3}");
     assert!(r > r_above + 0.2, "the shadow falls straight down, not along the sun: {r:.3} vs {r_above:.3}");
+    assert!(pollster::block_on(validation.pop()).is_none());
+}
+
+/// From orbit the clouds lie over the ground: 400 km above an Earth-sized
+/// voxel planet, a cloud is a few kilometres in front of the terrain under
+/// it, a sliver of its distance, and must not be taken for being behind it.
+#[test]
+fn clouds_seen_from_orbit_lie_over_the_ground() {
+    const SIZE: u32 = 128;
+    let Some(mut view) = view(SIZE, SIZE, true) else { return };
+    let validation = view.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let radius = planet.grid().radius();
+    let below = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
+    let up = below.normalize();
+    let sun = (up + up.any_orthonormal_vector() * 0.3).normalize().as_vec3();
+    // Small, dense clouds: several in the 14 km the view holds.
+    let clouds = CloudLayer {
+        bottom_km: 2.0,
+        top_km: 4.0,
+        coverage: 0.7,
+        weather_km: 4.0,
+        shape_km: 1.2,
+        detail_km: 0.3,
+        wind: [0.0; 3],
+        ..CloudLayer::cumulus()
+    };
+    let altitude = 400_000.0;
+    let eye = below + up * altitude;
+    view.renderer.set_world_origin(Some(eye));
+    let camera = Camera::perspective_look_at(Vec3::ZERO, -up.as_vec3(), up.any_orthonormal_vector().as_vec3(),
+        // About 14 km of ground.
+        2.0 * (7000.0 / altitude as f32).atan(), 1.0, 1.0, 1.0e9);
+    let source = view.ground.clone().unwrap();
+    *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun, picks: None, kept: None, export: None });
+    let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+    let mut images = Vec::new();
+    for air in [air, air.with_clouds(clouds)] {
+        view.set_sky(sun, air);
+        let started = std::time::Instant::now();
+        loop {
+            view.render(&camera);
+            let pass = view.renderer.find_pass::<ChunkPass>().unwrap();
+            if (pass.has_world() && pass.settled()) || started.elapsed().as_secs() > 300 {
+                break;
+            }
+        }
+        images.push(view.settle(&camera, 16));
+    }
+    view.capture("orbit_clear", &images[0]);
+    view.capture("orbit_cloudy", &images[1]);
+    let brightness = |pixels: &[[u8; 4]]| pixels.iter().map(|p| luminance(*p)).sum::<f64>() / pixels.len() as f64;
+    let (clear, cloudy) = (brightness(&images[0]), brightness(&images[1]));
+    eprintln!("CLOUD_ORBIT from 400 km: mean luminance over the ground clear {clear:.2}, cloudy {cloudy:.2}");
+    // Sunlit cloud tops are brighter than the ground they hide.
+    assert!(cloudy > clear + 4.0, "no clouds over the ground from orbit ({clear:.2} -> {cloudy:.2})");
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 

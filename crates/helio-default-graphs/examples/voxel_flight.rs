@@ -811,11 +811,33 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
 fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
     let started = Instant::now();
     let mut frames = 0;
+    // The graph's GPU time by pass while the view settles.
+    let mut settling: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
+    let mut settle_seen = 0;
+    let (mut draw_ms, mut wait_ms) = (Vec::new(), Vec::new());
     loop {
+        let drawn = Instant::now();
         flight.draw(eye, forward);
+        draw_ms.push(drawn.elapsed().as_secs_f64() * 1e3);
         frames += 1;
+        let waited = Instant::now();
         let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        wait_ms.push(waited.elapsed().as_secs_f64() * 1e3);
+        if *wait_ms.last().unwrap() > 100.0 {
+            eprintln!("CHUNKENGINE {view} settling frame {frames}: gpu wait {:.0} ms", wait_ms.last().unwrap());
+        }
         std::thread::sleep(std::time::Duration::from_millis(6));
+        let snapshot = flight.renderer.timing_snapshot();
+        if snapshot.generation != settle_seen {
+            settle_seen = snapshot.generation;
+            for p in &snapshot.passes {
+                if let Some(ms) = p.gpu_ms {
+                    let entry = settling.entry(p.name).or_default();
+                    entry.0 += f64::from(ms);
+                    entry.1 += 1;
+                }
+            }
+        }
         if frames > 10 && flight.renderer.find_pass::<ChunkPass>().is_some_and(ChunkPass::settled) {
             break;
         }
@@ -826,6 +848,10 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     }
     let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
     eprintln!("CHUNKENGINE {view} settled in {:.2} s ({frames} frames): {}", started.elapsed().as_secs_f64(), pass.diagnostics());
+    let mut by_pass: Vec<(&str, f64)> = settling.iter().map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1)))).collect();
+    by_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("CHUNKENGINE {view} settling frames: draw cpu p50 {:.1} ms (max {:.1}), gpu wait p50 {:.1} ms (max {:.1})", percentile(&draw_ms, 0.5), draw_ms.iter().copied().fold(0.0, f64::max), percentile(&wait_ms, 0.5), wait_ms.iter().copied().fold(0.0, f64::max));
+    eprintln!("CHUNKENGINE {view} settling gpu mean by pass: {}", by_pass.iter().filter(|p| p.1 >= 0.05).map(|(n, ms)| format!("{n} {ms:.2}")).collect::<Vec<_>>().join(", "));
     pass.take_timings();
     let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
     let held = Instant::now();
