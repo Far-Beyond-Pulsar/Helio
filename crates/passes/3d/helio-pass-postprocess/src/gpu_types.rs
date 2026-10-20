@@ -15,6 +15,10 @@ pub enum TonemapOperator {
     /// and a sigmoid. Bright saturated colours roll toward white instead of
     /// skewing in hue (sunlit grass stays green, not lime).
     Agx = 6,
+    /// AgX with its punchy look (Blender's): contrast and saturation in its
+    /// display encoding, before it leaves its working space; a deep sky and
+    /// rich foliage without AgX's base wash.
+    AgxPunchy = 7,
 }
 
 // ── Exposure mode ──────────────────────────────────────────────────────────────

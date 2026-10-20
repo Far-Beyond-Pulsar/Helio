@@ -39,6 +39,8 @@ pub enum TonemapOperator {
     Lottes,
     /// Hue-preserving filmic curve: bright saturated colours roll to white.
     Agx,
+    /// AgX with its punchy look: more contrast and saturation.
+    AgxPunchy,
 }
 impl Default for TonemapOperator {
     fn default() -> Self {
@@ -622,6 +624,7 @@ impl PostProcessSettingsProps {
                 TonemapOperator::Uncharted2 => HelioTonemapOperator::Uncharted2,
                 TonemapOperator::Lottes => HelioTonemapOperator::Lottes,
                 TonemapOperator::Agx => HelioTonemapOperator::Agx,
+                TonemapOperator::AgxPunchy => HelioTonemapOperator::AgxPunchy,
             },
             tonemap_exposure: self.tonemap_exposure,
             tonemap_white_point: self.tonemap_white_point,

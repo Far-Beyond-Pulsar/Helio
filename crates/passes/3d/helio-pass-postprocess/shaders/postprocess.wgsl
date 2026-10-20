@@ -745,7 +745,7 @@ fn agx_sigmoid(x: vec3<f32>) -> vec3<f32> {
     return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
 }
 
-fn tonemap_agx(x: vec3<f32>) -> vec3<f32> {
+fn tonemap_agx(x: vec3<f32>, punchy: bool) -> vec3<f32> {
     let inset = mat3x3<f32>(
         vec3<f32>(0.842479062253094, 0.0423282422610123, 0.0423756549057051),
         vec3<f32>(0.0784335999999992, 0.878468636469772, 0.0784336),
@@ -757,7 +757,14 @@ fn tonemap_agx(x: vec3<f32>) -> vec3<f32> {
         vec3<f32>(-0.0990297440797205, -0.0989611768448433, 1.15107367264116),
     );
     let encoded = clamp(log2(max(inset * x, vec3<f32>(1e-10))), vec3<f32>(AGX_MIN_EV), vec3<f32>(AGX_MAX_EV));
-    let display = outset * agx_sigmoid((encoded - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV));
+    var v = agx_sigmoid((encoded - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV));
+    if punchy {
+        // The punchy look: power 1.35, saturation 1.4 (Rec.709 luma).
+        v = pow(saturate(v), vec3<f32>(1.35));
+        let luma = dot(v, vec3<f32>(0.2126, 0.7152, 0.0722));
+        v = vec3<f32>(luma) + 1.4 * (v - vec3<f32>(luma));
+    }
+    let display = outset * v;
     return pow(saturate(display), vec3<f32>(2.2));
 }
 
@@ -771,7 +778,8 @@ fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
     if op == 2u { return tonemap_reinhard(c); }
     if op == 3u { return tonemap_uncharted2(c); }
     if op == 4u { return tonemap_lottes(c); }
-    if op == 6u { return tonemap_agx(c); }
+    if op == 6u { return tonemap_agx(c, false); }
+    if op == 7u { return tonemap_agx(c, true); }
     return c; // fallback: pass through
 }
 
