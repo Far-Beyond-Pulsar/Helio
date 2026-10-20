@@ -206,7 +206,10 @@ const READS: &[&str] = &[
     helio_pass_gi::GI_FRAME,
     helio_pass_gi::GI_RAYS,
     helio_pass_gi::GI_SUN,
+    ATMOSPHERE_FRAME,
 ];
+/// helio-pass-sky's frame of the atmosphere (its sun's disk).
+const ATMOSPHERE_FRAME: &str = "atmosphere_frame";
 const WRITES: &[&str] = &[
     "gbuffer",
     "gbuffer_lightmap_uv",
@@ -525,6 +528,8 @@ impl ChunkPass {
             world.set_material_map(map);
         }
         world.set_steady_shadows(self.steady_shadows);
+        // The atmosphere's sun disk sizes the shadows' penumbrae.
+        world.set_atmosphere_frame(ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME)).map(|b| (*b).clone()));
         world.draw(
             encoder,
             ctx.frame_num,

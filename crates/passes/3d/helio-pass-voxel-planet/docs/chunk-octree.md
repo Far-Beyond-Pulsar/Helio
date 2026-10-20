@@ -306,15 +306,18 @@ once. A plan that changes a switch under way ends it at once.
    nothing more and ends: the sky.
 3. **Sun shadows**: walks toward the sun from a quarter of the hits (one a
    2x2 block, the pixel moving each frame), a hundredth of a cell off their
-   face. Every hit takes the sample of its block or a neighbouring one that
+   face, each towards a point of the sun's disk (the atmosphere's angular
+   radius, else Earth's 0.27 degrees; a pixel's own R2 sequence over the
+   frames), so a penumbra widens with the occluder's distance. Every hit takes the sample of its block or a neighbouring one that
    walked within four of its cells; the rest (silhouettes) are listed and
    walk in an indirect dispatch of their own. Mesh pixels nearer than the
    terrain hit, or with only sky behind (the scene's depth before the
    chunks publish), walk from the mesh point (`mesh_walk`), so terrain
    shadows fall on meshes. The denoiser (7) turns the samples into
    Helio's `directional_visibility`; its deferred lighting applies it.
-   `set_steady_shadows` walks every hit instead (the denoiser passes the
-   walks' own on: the reference for its error).
+   `set_steady_shadows` walks every hit instead, 32 rays over the disk
+   (the denoiser passes the walks' own on: the reference for its error).
+   Meshes in front of the terrain walk towards the disk's centre.
 4. **Local lights' shadows**: the terrain shadows Helio's point and spot
    lights the same way (meshes cast into the lights' shadow maps). With a
    frame's lights (`SceneLights`: the scene's lights, light culling's tile

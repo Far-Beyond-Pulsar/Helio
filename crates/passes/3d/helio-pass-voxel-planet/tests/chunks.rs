@@ -1546,8 +1546,8 @@ fn shadowed_ground() -> (Planet, View, Vec3) {
 }
 
 /// The sun's and the sky's visibility as lighting takes them (denoised),
-/// against steady shadows (every hit walking its own sun ray: the sun's
-/// truth) and the walks' own sky samples averaged over many frames (the
+/// against steady shadows (every hit walking SUN_DISK_RAYS rays over the
+/// sun's disk: the sun's truth, penumbrae included) and the walks' own sky samples averaged over many frames (the
 /// sky's), with a still camera: within a small error, and steadier from
 /// frame to frame than the walks' own by far. A sudden turn of the sun
 /// shows within a few frames. Then with the projection jittered as a
@@ -1606,6 +1606,9 @@ fn terrain_shadows_match_steady_shadows() {
     };
     let sun_before = report("sun, walked", &walked_suns, &truth, &terrain);
     let sun_after = report("sun, denoised", &suns, &truth, &terrain);
+    let in_penumbra: Vec<bool> = terrain.iter().zip(&truth).map(|(t, s)| *t && *s > 0.05 && *s < 0.95).collect();
+    report("sun in penumbrae, walked", &walked_suns, &truth, &in_penumbra);
+    report("sun in penumbrae, denoised", &suns, &truth, &in_penumbra);
     let sky_before = report("sky, walked", &walked_skies, &reference, &terrain);
     let sky_after = report("sky, denoised", &skies, &reference, &terrain);
     assert!(sun_after.0 <= 0.01 && sun_after.1 <= 0.002, "sun against steady shadows: {sun_after:?}");

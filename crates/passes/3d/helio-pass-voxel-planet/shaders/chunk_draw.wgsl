@@ -53,7 +53,9 @@ struct DrawParams {
     // lights are bound (`local_shadow`).
     light_eye: vec4<f32>,
     // x: how far the sky rays reach (m), when GI probes light the sky's
-    // larger occlusion (0: SKY_RANGE_CELLS cells).
+    // larger occlusion (0: SKY_RANGE_CELLS cells); y: the sun's angular
+    // radius (radians); z: the cosine of the atmosphere's, where a host's
+    // atmosphere gives one (copied from its frame on the GPU; else 0).
     sky: vec4<f32>,
     // xy: this frame's projection jitter less the last frame's; zw: this
     // frame's (NDC).
@@ -1696,6 +1698,43 @@ fn steady_shadows() -> bool {
     return (params.debug.x & 0x1000u) != 0u;
 }
 
+// The sun is a disk (the atmosphere's angular radius, else the host's):
+// each sun walk aims at a point of it, so a shadow's penumbra widens with
+// the occluder's distance. Sampled walks take a point a frame, a pixel's
+// own low-discrepancy sequence (R2, rotated by a hash of the pixel), and
+// the denoiser integrates them; steady shadows average SUN_DISK_RAYS
+// points (the reference).
+const SUN_DISK_RAYS: u32 = 32u;
+
+fn sun_disk_cos() -> f32 {
+    return select(cos(params.sky.y), params.sky.z, params.sky.z > 0.99);
+}
+
+// The direction towards point `u` ([0, 1)^2, uniform over the disk) of the
+// sun's disk.
+fn sun_ray(u: vec2<f32>) -> vec3<f32> {
+    let s = params.sun.xyz;
+    let c = sun_disk_cos();
+    let spread = sqrt(max(1.0 - c * c, 0.0)) / c * sqrt(u.x);
+    let t1 = normalize(select(cross(s, vec3<f32>(0.0, 0.0, 1.0)), cross(s, vec3<f32>(1.0, 0.0, 0.0)), abs(s.z) > 0.9));
+    let a = 6.2831853 * u.y;
+    return normalize(s + (t1 * cos(a) + cross(s, t1) * sin(a)) * spread);
+}
+
+// Pixel `q`'s point of the disk this frame.
+fn sun_point(q: vec2<u32>) -> vec2<f32> {
+    let h = key_hash(vec4<i32>(vec2<i32>(q), 0x51ed27, 0x2c1b3c6d));
+    let n = params.table.w;
+    // R2's steps (the plastic number's), in 32-bit fixed point.
+    let x = vec2<u32>(n * 3242174889u + h, n * 2447445413u + (h * 0x9E3779B1u));
+    return vec2<f32>(x >> vec2<u32>(8u)) / 16777216.0;
+}
+
+// Point `i` of SUN_DISK_RAYS spread evenly over the disk.
+fn sun_disk_point(i: u32) -> vec2<f32> {
+    return vec2<f32>((f32(i) + 0.5) / f32(SUN_DISK_RAYS), fract(f32(i) * 0.618034));
+}
+
 fn voxel_face_uv(c: ChunkDraw, cell: vec3<i32>, axis: u32, position: vec3<f32>) -> vec2<f32> {
     let frame_position = vec3<f32>(c.i0.w, c.i1.w, c.i2.w)
         + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
@@ -2281,7 +2320,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, params.sun.xyz, 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2300,7 +2339,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, params.sun.xyz, 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2474,7 +2513,17 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     let f = hit_face(v, vec3<f32>(0.0), q, size, t);
-    store_walked(vec2<i32>(q), size, hit_walk(q, size, v.x, t, f, params.sun.xyz, 1e30), 1.0, 1.0);
+    // Steady shadows: the disk's points averaged (the reference).
+    var lit = 0.0;
+    if steady_shadows() {
+        for (var i = 0u; i < SUN_DISK_RAYS; i++) {
+            lit += hit_walk(q, size, v.x, t, f, sun_ray(sun_disk_point(i)), 1e30);
+        }
+        lit /= f32(SUN_DISK_RAYS);
+    } else {
+        lit = hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30);
+    }
+    store_walked(vec2<i32>(q), size, lit, 1.0, 1.0);
 }
 
 // ---- 4b. Local lights' terrain shadows ----
@@ -3030,7 +3079,9 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id)
     short.x = mix(short.x, sun, weight / (min(sun_weight, SUN_SHORT * SUN_FRAME_WEIGHT) + weight));
     short.y = mix(short.y, sky, 1.0 / min(frames.y, SKY_SHORT));
     // The long histories restart from the short ones they leave.
-    if abs(h.x - short.x) > SUN_LAG {
+    // (In a penumbra the samples themselves swing between 0 and 1: their
+    // spread, the long history's m(1 - m), widens the bound.)
+    if abs(h.x - short.x) > SUN_LAG + 0.5 * sqrt(h.x * (1.0 - h.x)) {
         h.x = short.x;
         sun_weight = min(sun_weight, SUN_SHORT * SUN_FRAME_WEIGHT);
     }
@@ -3045,7 +3096,9 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id)
     out_history[pixel] = to_halves(out);
     out_history_short[pixel] = to_halves(vec4<f32>(short, sun_weight, 0.0));
     out_geometry[pixel] = vec2<u32>(bitcast<u32>(s.depth), pack_unit(s.normal));
-    let accumulated = vec2<f32>(sun_weight / SUN_FRAME_WEIGHT, out.w);
+    // The sun's samples counted as own samples (a lent one is worth 0.05 of
+    // one), the sky's as frames.
+    let accumulated = vec2<f32>(sun_weight, out.w);
     let variance = vec2<f32>(out.x * (1.0 - out.x), max(out.z - out.y * out.y, 0.0)) / max(accumulated, vec2<f32>(1.0));
     // Few frames: the samples' blocks' own spread, whatever they showed.
     let fresh = max(4.0 - accumulated, vec2<f32>(0.0)) * 0.0625;
@@ -3472,7 +3525,7 @@ fn local_temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgro
                 let short = mix(clamp(h.y, lo, hi), now, weight / (min(h.z, SUN_SHORT * SUN_FRAME_WEIGHT) + weight));
                 var long = clamp(h.x, lo, hi);
                 // Restarts from the short history it leaves.
-                if abs(long - short) > SUN_LAG {
+                if abs(long - short) > SUN_LAG + 0.5 * sqrt(long * (1.0 - long)) {
                     long = short;
                     h.z = min(h.z, SUN_SHORT * SUN_FRAME_WEIGHT);
                 }

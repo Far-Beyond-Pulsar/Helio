@@ -274,7 +274,9 @@ struct DrawParams {
     cut: [u32; 4],
     /// The eye in the scene lights' coordinates; w 1 with lights bound.
     light_eye: [f32; 4],
-    /// x: the sky rays' reach (m) with GI probes, else 0.
+    /// x: the sky rays' reach (m) with GI probes, else 0; y: the sun's
+    /// angular radius (radians); z: the cosine of the atmosphere's
+    /// (`set_atmosphere_frame`: copied from its frame on the GPU).
     sky: [f32; 4],
     /// xy: this frame's projection jitter less the last frame's; zw: this
     /// frame's (NDC): the denoiser's history is of pixels, not of their
@@ -285,6 +287,13 @@ struct DrawParams {
     /// step along x, along y; [1][3] 1 when the camera holds still.
     rays: [[f32; 4]; 3],
 }
+
+/// The sun's angular radius as seen from Earth (radians).
+pub const EARTH_SUN_ANGULAR_RADIUS: f32 = 0.004675;
+
+/// Where helio-pass-sky's atmosphere frame keeps the cosine of the sun
+/// disk's angular radius (`AtmosphereFrame::sun.w`).
+const ATMOSPHERE_SUN_DISK: u64 = 28;
 
 /// `DrawParams::rays` for `view_proj` (eye-relative) at `size` pixels: the
 /// pixels' rays as `pixel_ray` makes them, scaled to a view depth unit.
@@ -1205,6 +1214,10 @@ pub struct ChunkWorld {
     scene: Option<SceneState>,
     /// Whether every hit walks its own sun ray (`set_steady_shadows`).
     steady_shadows: bool,
+    /// The sun's angular radius (radians), and the host's atmosphere frame
+    /// (helio-pass-sky's `atmosphere_frame`) whose sun disk wins when given.
+    sun_angular_radius: f32,
+    atmosphere_frame: Option<wgpu::Buffer>,
     /// The last draw's bind group (its parameters and chunk storage).
     last_group: Option<wgpu::BindGroup>,
     targets: Option<Targets>,
@@ -2356,6 +2369,8 @@ impl ChunkWorld {
             publish,
             scene,
             steady_shadows: false,
+            sun_angular_radius: EARTH_SUN_ANGULAR_RADIUS,
+            atmosphere_frame: None,
             last_group: None,
             targets: None,
             rounds: 1,
@@ -3817,7 +3832,7 @@ impl ChunkWorld {
             light_eye: lights.map_or([0.0; 4], |l| l.eye.extend(1.0).to_array()),
             // Two of the finest probes' spacings: the probes' visibility
             // holds the occlusion past them.
-            sky: [if gi.is_some() { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, 0.0, 0.0, 0.0],
+            sky: [if gi.is_some() { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, self.sun_angular_radius, 0.0, 0.0],
             history: [jitter[0].x - jitter[1].x, jitter[0].y - jitter[1].y, jitter[0].x, jitter[0].y],
             rays: {
                 let mut rays = ray_plane(view_proj, size);
@@ -3832,6 +3847,11 @@ impl ChunkWorld {
             },
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        // The atmosphere's sun disk (its frame's `sun.w`, the cosine of its
+        // angular radius) into `sky.z`.
+        if let Some(frame) = &self.atmosphere_frame {
+            encoder.copy_buffer_to_buffer(frame, ATMOSPHERE_SUN_DISK, &self.params, std::mem::offset_of!(DrawParams, sky) as u64 + 8, 4);
+        }
         self.queue.write_buffer(&self.buried, 0, &[0u8; 16]);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
@@ -4280,9 +4300,22 @@ impl ChunkWorld {
         }
     }
 
-    /// Every hit walks its own sun ray and the sky rays hold still (steady
-    /// shadows, dearer) instead of samples that move each frame; the
-    /// denoiser passes the walks' own values on.
+    /// The sun's angular radius (radians; Earth's by default) where no
+    /// atmosphere frame gives one: its shadows' penumbrae.
+    pub fn set_sun_angular_radius(&mut self, radians: f32) {
+        self.sun_angular_radius = radians;
+    }
+
+    /// The host's atmosphere frame (helio-pass-sky's `atmosphere_frame`):
+    /// its sun disk's angular radius, read on the GPU, sizes the shadows'
+    /// penumbrae.
+    pub fn set_atmosphere_frame(&mut self, frame: Option<wgpu::Buffer>) {
+        self.atmosphere_frame = frame;
+    }
+
+    /// Every hit walks the sun's disk (SUN_DISK_RAYS rays) and the sky rays
+    /// hold still (steady shadows, dearer: the reference) instead of
+    /// samples that move each frame; the denoiser passes the walks' own on.
     pub fn set_steady_shadows(&mut self, on: bool) {
         self.steady_shadows = on;
     }
