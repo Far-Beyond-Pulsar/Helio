@@ -17,16 +17,17 @@ pub use executor::{
     DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData, GraphTimelineData,
     GraphTimelinePass, RenderGraph,
 };
-pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
+pub(crate) use pipeline_cache::driver_cache_for_device;
 pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
     PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
 };
-pub use swap::{
-    align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity,
-    SwapPlan, SwapPolicy,
-};
+pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,
     ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize, TextureDescriptor,
+};
+pub use swap::{
+    align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity, SwapPlan,
+    SwapPolicy,
 };

@@ -37,7 +37,8 @@ impl PortalSegmentBuffers {
 }
 
 fn segment_buffer(device: &wgpu::Device, label: &str, size: u64, indirect: bool) -> wgpu::Buffer {
-    let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+    let mut usage =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
     if indirect {
         usage |= wgpu::BufferUsages::INDIRECT;
     }
@@ -122,14 +123,17 @@ impl PortalCompaction {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("PortalCull Compaction Pipeline"),
-            layout: Some(&layout),
-            module: &shader,
-            entry_point: Some("compact_ranges"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("PortalCull Compaction Pipeline"),
+                layout: Some(&layout),
+                module: &shader,
+                entry_point: Some("compact_ranges"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         Self {
             pipeline,
             bgl,
@@ -158,8 +162,12 @@ impl PortalCompaction {
     ) {
         let mut shared = self.segments.lock().unwrap_or_else(|p| p.into_inner());
         if shared.indirect.size() < culled.indirect.size() {
-            shared.indirect =
-                segment_buffer(device, "PortalCull/SegmentIndirect", culled.indirect.size(), true);
+            shared.indirect = segment_buffer(
+                device,
+                "PortalCull/SegmentIndirect",
+                culled.indirect.size(),
+                true,
+            );
             shared.generation += 1;
         }
         let counts_wanted = culled.counts.map_or(4, |c| c.size());

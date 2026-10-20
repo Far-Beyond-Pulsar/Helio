@@ -163,14 +163,17 @@ impl SsrPass {
             immediate_size: 0,
         });
 
-        let default_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SSR Trace Pipeline"),
-            layout: Some(&default_pl),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let default_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("SSR Trace Pipeline"),
+                layout: Some(&default_pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         // ── RT pipeline (Hi-Z + ray query) ──────────────────────────────
         let rt_pipeline = use_rt.then(|| {
@@ -188,14 +191,17 @@ impl SsrPass {
                 bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(bgl_2.as_ref().unwrap())],
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("SSR Hybrid Trace Pipeline"),
-                layout: Some(&rt_pl),
-                module: &rt_shader,
-                entry_point: Some("cs_rt"),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some("SSR Hybrid Trace Pipeline"),
+                    layout: Some(&rt_pl),
+                    module: &rt_shader,
+                    entry_point: Some("cs_rt"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         });
 
         let bg_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {

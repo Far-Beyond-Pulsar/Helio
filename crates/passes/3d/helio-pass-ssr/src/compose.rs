@@ -53,34 +53,37 @@ impl SsrCompositePass {
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("SSR additive composition"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("SSR additive composition"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState {
+                            color: additive,
+                            alpha: additive,
+                        }),
+                        write_mask: wgpu::ColorWrites::COLOR,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState {
-                        color: additive,
-                        alpha: additive,
-                    }),
-                    write_mask: wgpu::ColorWrites::COLOR,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         Self {
             pipeline,
             camera,
@@ -271,7 +274,11 @@ mod tests {
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                             view: &depth,
                             depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(if background { helio_core::depth::CLEAR } else { 0.5 }),
+                                load: wgpu::LoadOp::Clear(if background {
+                                    helio_core::depth::CLEAR
+                                } else {
+                                    0.5
+                                }),
                                 store: wgpu::StoreOp::Store,
                             }),
                             stencil_ops: None,

@@ -92,7 +92,11 @@ impl ShadowDirtyPass {
     /// Allocate all GPU resources.  Pass the shared buffers to `ShadowPass::new()`.
     pub fn new(device: &wgpu::Device, light_dirty_buf: Arc<wgpu::Buffer>) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
-        let shader = helio_core::shader::module(device, "ShadowDirty Shader", helio_core::include_wgsl!("../shaders/shadow_dirty.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "ShadowDirty Shader",
+            helio_core::include_wgsl!("../shaders/shadow_dirty.wgsl"),
+        );
 
         // ── Bind Group Layout ─────────────────────────────────────────────────
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -262,14 +266,17 @@ impl ShadowDirtyPass {
         });
 
         let pipeline = |entry_point: &'static str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(entry_point),
-                layout: Some(&pl),
-                module: &shader,
-                entry_point: Some(entry_point),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(entry_point),
+                    layout: Some(&pl),
+                    module: &shader,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
         let pipelines = [
             pipeline("casters"),
@@ -299,12 +306,14 @@ impl ShadowDirtyPass {
 
         // Starts at u32::MAX, which no live count equals: the first dispatch
         // dirties every face.
-        let last_movable_count_buf =
-            wgpu::util::DeviceExt::create_buffer_init(device, &wgpu::util::BufferInitDescriptor {
+        let last_movable_count_buf = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("ShadowDirty/LastMovableCount"),
                 contents: &u32::MAX.to_le_bytes(),
                 usage: wgpu::BufferUsages::STORAGE,
-            });
+            },
+        );
 
         // face_dirty: one atomic<u32> per shadow face. Cleared by the command
         // encoder before the compute dispatch, which provides ordering across
@@ -588,10 +597,10 @@ impl RenderPass for ShadowDirtyPass {
             pass.set_bind_group(0, bg, &[]);
             // Dispatches in one pass run in order with their storage writes
             // visible to the next: casters -> detect -> faces -> finish.
-            for (pipeline, groups) in self
-                .pipelines
-                .iter()
-                .zip([caster_groups, draw_groups, face_groups, 1])
+            for (pipeline, groups) in
+                self.pipelines
+                    .iter()
+                    .zip([caster_groups, draw_groups, face_groups, 1])
             {
                 pass.set_pipeline(pipeline);
                 pass.dispatch_workgroups(groups, 1, 1);

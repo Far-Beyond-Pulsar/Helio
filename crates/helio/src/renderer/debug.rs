@@ -270,7 +270,11 @@ impl DebugPass {
         target_format: wgpu::TextureFormat,
         depth_test: bool,
     ) -> Self {
-        let shader = helio_core::shader::module(device, "Debug Draw Shader", helio_core::include_wgsl!("../../shaders/debug_draw.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Debug Draw Shader",
+            helio_core::include_wgsl!("../../shaders/debug_draw.wgsl"),
+        );
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Debug Draw BGL"),
@@ -299,99 +303,105 @@ impl DebugPass {
             mapped_at_creation: false,
         });
 
-        let pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Draw Pipeline Depth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
+        let pipeline_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Draw Pipeline Depth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 16,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
-        let pipeline_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Draw Pipeline NoDepth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
+        let pipeline_no_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Draw Pipeline NoDepth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 16,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let tri_attribs = [
             wgpu::VertexAttribute {
@@ -421,36 +431,40 @@ impl DebugPass {
             ..Default::default()
         };
 
-        let pipeline_tri_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Tri Pipeline Depth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(tri_vbl.clone())],
+        let pipeline_tri_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Tri Pipeline Depth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(tri_vbl.clone())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(tri_target.clone())],
+                }),
+                primitive: tri_prim,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(tri_target.clone())],
-            }),
-            primitive: tri_prim,
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
-        let pipeline_tri_no_depth =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_tri_no_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
                 label: Some("Debug Tri Pipeline NoDepth"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -470,7 +484,8 @@ impl DebugPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
 
         let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Tri Buffer"),
@@ -791,7 +806,11 @@ impl DebugDrawPass {
         // against real geometry rather than painting over it.
         pass.set_use_scene_depth(editor_mode && depth_test);
 
-        let grid_shader = helio_core::shader::module(device, "Infinite Debug Grid Shader", helio_core::include_wgsl!("../../shaders/infinite_grid.wgsl"));
+        let grid_shader = helio_core::shader::module(
+            device,
+            "Infinite Debug Grid Shader",
+            helio_core::include_wgsl!("../../shaders/infinite_grid.wgsl"),
+        );
         let grid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Infinite Debug Grid BGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -810,42 +829,45 @@ impl DebugDrawPass {
             bind_group_layouts: &[Some(&grid_bgl)],
             immediate_size: 0,
         });
-        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Infinite Debug Grid Pipeline"),
-            layout: Some(&grid_layout),
-            vertex: wgpu::VertexState {
-                module: &grid_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let grid_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Infinite Debug Grid Pipeline"),
+                layout: Some(&grid_layout),
+                vertex: wgpu::VertexState {
+                    module: &grid_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &grid_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                // `infinite_grid.wgsl` writes `frag_depth`, so this pipeline must
+                // always declare a depth attachment. It is only submitted by the
+                // editor pass, whose render-pass descriptor supplies the matching
+                // depth view. The ordinary debug pass constructs this pipeline but
+                // never uses it.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: helio_core::depth::bias_toward_camera(1, 1.0, 1.0),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &grid_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            // `infinite_grid.wgsl` writes `frag_depth`, so this pipeline must
-            // always declare a depth attachment. It is only submitted by the
-            // editor pass, whose render-pass descriptor supplies the matching
-            // depth view. The ordinary debug pass constructs this pipeline but
-            // never uses it.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: helio_core::depth::bias_toward_camera(1, 1.0, 1.0),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let grid_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Infinite Debug Grid Uniform"),
             size: std::mem::size_of::<InfiniteGridUniform>() as u64,
@@ -920,7 +942,6 @@ impl DebugDrawPass {
         self.editor_volume_cache.clear();
         self.editor_volume_cache.extend_from_slice(volume_lines);
     }
-
 }
 
 impl RenderPass for DebugDrawPass {
@@ -994,7 +1015,9 @@ impl RenderPass for DebugDrawPass {
                     .editor_volume_cache
                     .iter()
                     .map(|v| DebugVertex {
-                        position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin).as_vec3().to_array(),
+                        position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin)
+                            .as_vec3()
+                            .to_array(),
                         ..*v
                     })
                     .collect();
@@ -1022,13 +1045,16 @@ impl RenderPass for DebugDrawPass {
             vertices
                 .iter()
                 .map(|v| DebugVertex {
-                    position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin).as_vec3().to_array(),
+                    position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin)
+                        .as_vec3()
+                        .to_array(),
                     ..*v
                 })
                 .collect()
         };
         if user_lines_generation != self.cached_line_gen || moved {
-            self.pass.update_lines(ctx.queue, &rebase(&state.user_lines));
+            self.pass
+                .update_lines(ctx.queue, &rebase(&state.user_lines));
             self.cached_line_gen = user_lines_generation;
         }
         if user_tris_generation != self.cached_tri_gen || moved {
@@ -1093,13 +1119,30 @@ impl Renderer {
                 [*min_x, *max_y, *max_z],
             ];
             const EDGES: [(usize, usize); 12] = [
-                (0, 1), (1, 2), (2, 3), (3, 0),
-                (4, 5), (5, 6), (6, 7), (7, 4),
-                (0, 4), (1, 5), (2, 6), (3, 7),
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 0),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 4),
+                (0, 4),
+                (1, 5),
+                (2, 6),
+                (3, 7),
             ];
             for (a, b) in EDGES {
-                lines.push(DebugVertex { position: corners[a], _pad: 0.0, color: COLOR });
-                lines.push(DebugVertex { position: corners[b], _pad: 0.0, color: COLOR });
+                lines.push(DebugVertex {
+                    position: corners[a],
+                    _pad: 0.0,
+                    color: COLOR,
+                });
+                lines.push(DebugVertex {
+                    position: corners[b],
+                    _pad: 0.0,
+                    color: COLOR,
+                });
             }
         }
 

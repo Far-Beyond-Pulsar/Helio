@@ -42,7 +42,13 @@ pub struct FogCompositePass {
     fallback_medium: wgpu::TextureView,
     fallback_parameters: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::Buffer, wgpu::Buffer)>,
+    bind_group_key: Option<(
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::Buffer,
+        wgpu::Buffer,
+    )>,
     /// SceneDB media rows VolumetricFogPass classifies; any non-zero row
     /// counts as a possible medium.
     global_media: helio_core::SceneBufferLiveness,
@@ -71,13 +77,21 @@ impl FogCompositePass {
         let texture = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: fragment,
-            ty: wgpu::BindingType::Texture { sample_type, view_dimension, multisampled: false },
+            ty: wgpu::BindingType::Texture {
+                sample_type,
+                view_dimension,
+                multisampled: false,
+            },
             count: None,
         };
         let buffer = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: fragment,
-            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -85,9 +99,21 @@ impl FogCompositePass {
             entries: &[
                 buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer(1, wgpu::BufferBindingType::Uniform),
-                texture(2, wgpu::TextureSampleType::Float { filterable: false }, wgpu::TextureViewDimension::D2),
-                texture(3, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2),
-                texture(4, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D3),
+                texture(
+                    2,
+                    wgpu::TextureSampleType::Float { filterable: false },
+                    wgpu::TextureViewDimension::D2,
+                ),
+                texture(
+                    3,
+                    wgpu::TextureSampleType::Depth,
+                    wgpu::TextureViewDimension::D2,
+                ),
+                texture(
+                    4,
+                    wgpu::TextureSampleType::Float { filterable: true },
+                    wgpu::TextureViewDimension::D3,
+                ),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: fragment,
@@ -101,31 +127,34 @@ impl FogCompositePass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Fog Composite"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Fog Composite"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_composite"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_composite"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Fog Composite Sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -143,7 +172,11 @@ impl FogCompositePass {
         let fallback_medium = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Fog Composite Neutral Medium"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D3,
@@ -256,8 +289,8 @@ impl RenderPass for FogCompositePass {
             return None;
         }
         let target = resources.get(ResourceKey::new(FOGGED_HDR))?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -310,12 +343,30 @@ impl RenderPass for FogCompositePass {
                 label: Some("Fog Composite BG"),
                 layout: &self.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: parameters.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(input) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(medium) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: parameters.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(input),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(medium),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);

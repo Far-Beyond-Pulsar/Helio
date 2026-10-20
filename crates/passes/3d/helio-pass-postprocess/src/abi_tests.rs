@@ -30,7 +30,11 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     };
     let storage = |read_only| wgpu::BufferBindingType::Storage { read_only };
@@ -45,26 +49,32 @@ fn resolver_matches_the_rust_blender_property_by_property() {
             entry(22, wgpu::BufferBindingType::Uniform),
         ],
     });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("PostProcess ABI resolver"),
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        })),
-        module: &shader,
-        entry_point: Some("cs_volume_blend"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+    let pipeline = helio_core::shader::create_compute_pipeline(
+        &device,
+        wgpu::ComputePipelineDescriptor {
+            label: Some("PostProcess ABI resolver"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                }),
+            ),
+            module: &shader,
+            entry_point: Some("cs_volume_blend"),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+    );
 
     // Baseline all zero; the volume's settings every word distinct and
     // non-zero, so overriding a property is visible and unambiguous.
     let baseline: GpuPostProcessUniforms = bytemuck::Zeroable::zeroed();
     let mut volume_settings: GpuPostProcessUniforms = bytemuck::Zeroable::zeroed();
-    for (i, word) in bytemuck::cast_slice_mut::<_, f32>(bytemuck::bytes_of_mut(&mut volume_settings))
-        .iter_mut()
-        .enumerate()
+    for (i, word) in
+        bytemuck::cast_slice_mut::<_, f32>(bytemuck::bytes_of_mut(&mut volume_settings))
+            .iter_mut()
+            .enumerate()
     {
         *word = 1.0 + i as f32 * 0.0625;
     }
@@ -76,8 +86,16 @@ fn resolver_matches_the_rust_blender_property_by_property() {
             usage,
         })
     };
-    let defaults = buffer("defaults", bytemuck::bytes_of(&baseline), wgpu::BufferUsages::UNIFORM);
-    let cameras = buffer("cameras", &[0u8; 2 * std::mem::size_of::<helio_core::GpuCameraUniforms>()], wgpu::BufferUsages::STORAGE);
+    let defaults = buffer(
+        "defaults",
+        bytemuck::bytes_of(&baseline),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let cameras = buffer(
+        "cameras",
+        &[0u8; 2 * std::mem::size_of::<helio_core::GpuCameraUniforms>()],
+        wgpu::BufferUsages::STORAGE,
+    );
     let camera_rows = buffer(
         "camera rows",
         &[0u8; std::mem::size_of::<CameraPostProcessComponent>()],
@@ -108,17 +126,39 @@ fn resolver_matches_the_rust_blender_property_by_property() {
             override_mask,
             settings: volume_settings,
         };
-        let volumes = buffer("volumes", bytemuck::bytes_of(&volume), wgpu::BufferUsages::STORAGE);
+        let volumes = buffer(
+            "volumes",
+            bytemuck::bytes_of(&volume),
+            wgpu::BufferUsages::STORAGE,
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: defaults.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: cameras.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 15, resource: volumes.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: output.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 20, resource: camera_rows.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 22, resource: origin.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: defaults.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: cameras.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: volumes.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: output.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 20,
+                    resource: camera_rows.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: origin.as_entire_binding(),
+                },
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -131,7 +171,9 @@ fn resolver_matches_the_rust_blender_property_by_property() {
         encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
         queue.submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
-        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
         let gpu = readback.slice(..).get_mapped_range().unwrap().to_vec();
@@ -152,17 +194,29 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     // reserved: no property may write them.
     use std::mem::{offset_of as off, size_of as sz};
     let reserved = [
-        off!(GpuPostProcessUniforms, reserved_ca)..off!(GpuPostProcessUniforms, reserved_ca) + sz::<[f32; 4]>(),
-        off!(GpuPostProcessUniforms, reserved_lens_vignette)..off!(GpuPostProcessUniforms, reserved_lens_vignette) + 4,
+        off!(GpuPostProcessUniforms, reserved_ca)
+            ..off!(GpuPostProcessUniforms, reserved_ca) + sz::<[f32; 4]>(),
+        off!(GpuPostProcessUniforms, reserved_lens_vignette)
+            ..off!(GpuPostProcessUniforms, reserved_lens_vignette) + 4,
     ];
     for property in 0..PostProcessProperty::COUNT {
         let (gpu, cpu) = resolve(property);
-        assert_eq!(gpu, cpu, "property {property}: the resolver and the Rust blender disagree");
+        assert_eq!(
+            gpu, cpu,
+            "property {property}: the resolver and the Rust blender disagree"
+        );
         for range in &reserved {
-            assert_eq!(gpu[range.clone()], reference[range.clone()], "property {property} wrote a reserved word");
+            assert_eq!(
+                gpu[range.clone()],
+                reference[range.clone()],
+                "property {property} wrote a reserved word"
+            );
         }
         // The medium's density and range only show once its block is enabled.
-        let gated = [PostProcessProperty::FOG_DENSITY, PostProcessProperty::FOG_MAX_DISTANCE];
+        let gated = [
+            PostProcessProperty::FOG_DENSITY,
+            PostProcessProperty::FOG_MAX_DISTANCE,
+        ];
         if !gated.contains(&property) {
             assert!(gpu != reference, "property {property} overrides nothing");
         }
@@ -171,14 +225,46 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     // Named properties land on their fields: only those bytes change.
     use std::mem::{offset_of, size_of};
     let fields: [(usize, usize, usize); 8] = [
-        (PostProcessProperty::BLOOM_TINT, offset_of!(GpuPostProcessUniforms, bloom_tint), 12),
-        (PostProcessProperty::MOTION_BLUR_ENABLED, offset_of!(GpuPostProcessUniforms, motion_blur_enabled), 4),
-        (PostProcessProperty::BLEND_WEIGHT_EXPOSURE, offset_of!(GpuPostProcessUniforms, blend_weight_exposure), 4),
-        (PostProcessProperty::FOG_COLOR, offset_of!(GpuPostProcessUniforms, fog_color), 12),
-        (PostProcessProperty::GAIN_COLOR, offset_of!(GpuPostProcessUniforms, gain_color), 12),
-        (PostProcessProperty::LUT_PLATFORM, offset_of!(GpuPostProcessUniforms, lut_platform), 4),
-        (PostProcessProperty::LENS_ENABLED, offset_of!(GpuPostProcessUniforms, lens_enabled), 4),
-        (PostProcessProperty::LENS_RESPONSE_TIME, offset_of!(GpuPostProcessUniforms, lens_response_time), 4),
+        (
+            PostProcessProperty::BLOOM_TINT,
+            offset_of!(GpuPostProcessUniforms, bloom_tint),
+            12,
+        ),
+        (
+            PostProcessProperty::MOTION_BLUR_ENABLED,
+            offset_of!(GpuPostProcessUniforms, motion_blur_enabled),
+            4,
+        ),
+        (
+            PostProcessProperty::BLEND_WEIGHT_EXPOSURE,
+            offset_of!(GpuPostProcessUniforms, blend_weight_exposure),
+            4,
+        ),
+        (
+            PostProcessProperty::FOG_COLOR,
+            offset_of!(GpuPostProcessUniforms, fog_color),
+            12,
+        ),
+        (
+            PostProcessProperty::GAIN_COLOR,
+            offset_of!(GpuPostProcessUniforms, gain_color),
+            12,
+        ),
+        (
+            PostProcessProperty::LUT_PLATFORM,
+            offset_of!(GpuPostProcessUniforms, lut_platform),
+            4,
+        ),
+        (
+            PostProcessProperty::LENS_ENABLED,
+            offset_of!(GpuPostProcessUniforms, lens_enabled),
+            4,
+        ),
+        (
+            PostProcessProperty::LENS_RESPONSE_TIME,
+            offset_of!(GpuPostProcessUniforms, lens_response_time),
+            4,
+        ),
     ];
     for (property, offset, len) in fields {
         let (gpu, _) = resolve(property);
@@ -198,6 +284,12 @@ fn resolver_matches_the_rust_blender_property_by_property() {
 #[test]
 fn the_uber_pipeline_builds_against_the_layout() {
     let (device, queue) = gpu();
-    let _pass =
-        PostProcessPass::new_with_user_effects(&device, &queue, 64, 64, wgpu::TextureFormat::Rgba8Unorm, None);
+    let _pass = PostProcessPass::new_with_user_effects(
+        &device,
+        &queue,
+        64,
+        64,
+        wgpu::TextureFormat::Rgba8Unorm,
+        None,
+    );
 }

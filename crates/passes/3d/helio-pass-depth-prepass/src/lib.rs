@@ -25,7 +25,11 @@ impl DepthPrepassPass {
     ///
     /// * `depth_format` – format of the depth attachment (e.g. `Depth32Float`)
     pub fn new(device: &wgpu::Device, depth_format: wgpu::TextureFormat) -> Self {
-        let shader = helio_core::shader::module(device, "DepthPrepass Shader", helio_core::include_wgsl!("../shaders/depth_prepass.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "DepthPrepass Shader",
+            helio_core::include_wgsl!("../shaders/depth_prepass.wgsl"),
+        );
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DepthPrepass BGL"),
@@ -100,48 +104,54 @@ impl DepthPrepassPass {
         //   offset 24 — tex_coords1   (Float32x2) — skipped here
         //   offset 32 — normal        (Uint32,    location 3) — skipped here
         //   offset 36 — tangent       (Uint32,    location 4) — skipped here
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("DepthPrepass Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 40, // PackedVertex: pos(12)+bitan(4)+uv0(8)+uv1(8)+normal(4)+tangent(4)
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 16,
-                            shader_location: 2,
-                        },
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("DepthPrepass Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: 40, // PackedVertex: pos(12)+bitan(4)+uv0(8)+uv1(8)+normal(4)+tangent(4)
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 16,
+                                    shader_location: 2,
+                                },
+                            ],
+                        }),
+                        Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT),
                     ],
-                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
+                },
+                // Depth-only: no fragment stage, no color outputs.
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth_format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(helio_core::depth::NEARER),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            // Depth-only: no fragment stage, no color outputs.
-            fragment: None,
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(helio_core::depth::NEARER),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let fallback_skeletal_storage = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Empty skeletal storage"),
@@ -202,10 +212,20 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx
+            .registry
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
+                "object_batch",
+            ))
+        else {
             return Ok(());
         };
-        let Some(culled) = ctx.registry.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx
+            .registry
+            .get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new(
+                "culled_batch",
+            ))
+        else {
             return Ok(());
         };
         // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.
@@ -229,10 +249,18 @@ impl RenderPass for DepthPrepassPass {
                     "DepthPrepass requires builtin_mesh_index".to_string(),
                 )
             })?;
-        let skin = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices"));
-        let palette = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette"));
-        let skin_buffer = skin.map(|h| &h.buffer).unwrap_or(&self.fallback_skeletal_storage);
-        let palette_buffer = palette.map(|h| &h.buffer).unwrap_or(&self.fallback_skeletal_storage);
+        let skin = ctx
+            .scene_buffers
+            .get(BufferKey::of("skeletal_skin_vertices"));
+        let palette = ctx
+            .scene_buffers
+            .get(BufferKey::of("skeletal_bone_palette"));
+        let skin_buffer = skin
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.fallback_skeletal_storage);
+        let palette_buffer = palette
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.fallback_skeletal_storage);
 
         // Extract before the mutable encoder borrow.
         let key = [
@@ -287,19 +315,10 @@ impl RenderPass for DepthPrepassPass {
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
         pass.set_vertex_buffer(1, slots.slice(..));
-        pass.set_index_buffer(
-            indices.buffer.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
         helio_pass_gbuffer::multi_draw_indexed_indirect(
-            &mut pass,
-            indirect,
-            0,
-            max_draws,
-            draw_count,
+            &mut pass, indirect, 0, max_draws, draw_count,
         );
         Ok(())
     }
 }
-
-

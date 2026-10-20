@@ -144,7 +144,10 @@ struct TsrUniform {
 // Matrices use column-major GPU layout; only the translation column changes.
 // Compose in f64, matching the renderer's previous-projection rebasing.
 fn rebase_previous_view(previous: [f32; 16], origin_shift: [f64; 3]) -> [f32; 16] {
-    assert!(origin_shift.iter().all(|v| v.is_finite()), "camera origin shift must be finite");
+    assert!(
+        origin_shift.iter().all(|v| v.is_finite()),
+        "camera origin shift must be finite"
+    );
     let mut rebased = previous;
     for row in 0..4 {
         rebased[12 + row] = (f64::from(previous[row]) * origin_shift[0]
@@ -251,7 +254,11 @@ impl TsrPass {
         format: wgpu::TextureFormat,
         quality: TsrQuality,
     ) -> Self {
-        let tsr_shader = helio_core::shader::module(device, "TSR Shader", helio_core::include_wgsl!("../shaders/tsr_main.wgsl"));
+        let tsr_shader = helio_core::shader::module(
+            device,
+            "TSR Shader",
+            helio_core::include_wgsl!("../shaders/tsr_main.wgsl"),
+        );
         let blit_shader = helio_core::shader::module(device, "TSR Blit Shader", BLIT_WGSL);
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -281,18 +288,34 @@ impl TsrPass {
         let output_width = output_width.max(1);
         let output_height = output_height.max(1);
 
-        let (history_texture, history_view, output_texture, output_view) =
-            Self::create_textures(device, output_width, output_height, wgpu::TextureFormat::Rgba16Float);
+        let (history_texture, history_view, output_texture, output_view) = Self::create_textures(
+            device,
+            output_width,
+            output_height,
+            wgpu::TextureFormat::Rgba16Float,
+        );
         let (history_depth, history_depth_view, output_depth, output_depth_view) =
-            Self::create_textures(device, output_width, output_height, wgpu::TextureFormat::R32Float);
+            Self::create_textures(
+                device,
+                output_width,
+                output_height,
+                wgpu::TextureFormat::R32Float,
+            );
 
         // Zero-initialized fallback keeps graphs without transparency unchanged.
         let reactivity_fallback = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("TSR zero reactivity"),
-            size: wgpu::Extent3d {width:1,height:1,depth_or_array_layers:1},
-            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
-            format:wgpu::TextureFormat::R8Unorm,usage:wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats:&[],
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
         });
         let reactivity_fallback_view = reactivity_fallback.create_view(&Default::default());
 
@@ -308,7 +331,7 @@ impl TsrPass {
                 camera_storage_entry(5),                                           // camera
                 tex_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
                 tex_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
-                uniform_entry(6),                                                  // tsr
+                uniform_entry(6), // tsr
             ],
         });
 
@@ -329,37 +352,45 @@ impl TsrPass {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("TSR Pipeline"),
-            layout: Some(&tsr_pl),
-            vertex: wgpu::VertexState {
-                module: &tsr_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("TSR Pipeline"),
+                layout: Some(&tsr_pl),
+                vertex: wgpu::VertexState {
+                    module: &tsr_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &tsr_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            // Rgba16Float so the full HDR range of the resolved image is preserved.
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::R32Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::RED,
+                        }),
+                    ],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &tsr_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // Rgba16Float so the full HDR range of the resolved image is preserved.
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                }), Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R32Float, blend: None, write_mask: wgpu::ColorWrites::RED,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         // ── Blit pipeline ─────────────────────────────────────────────────────
         let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -367,34 +398,37 @@ impl TsrPass {
             bind_group_layouts: &[Some(&blit_bgl)],
             immediate_size: 0,
         });
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("TSR Blit Pipeline"),
-            layout: Some(&blit_pl),
-            vertex: wgpu::VertexState {
-                module: &blit_shader,
-                entry_point: Some("vs_blit"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let blit_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("TSR Blit Pipeline"),
+                layout: Some(&blit_pl),
+                vertex: wgpu::VertexState {
+                    module: &blit_shader,
+                    entry_point: Some("vs_blit"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blit_shader,
+                    entry_point: Some("fs_blit"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_shader,
-                entry_point: Some("fs_blit"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
             color_input: "pre_aa",
@@ -415,7 +449,10 @@ impl TsrPass {
             history_view,
             output_texture,
             output_view,
-            history_depth, history_depth_view, output_depth, output_depth_view,
+            history_depth,
+            history_depth_view,
+            output_depth,
+            output_depth_view,
             linear_sampler,
             point_sampler,
             internal_width,
@@ -444,7 +481,9 @@ impl TsrPass {
 
     /// Optional GPU timestamps around resolve, history copies and final blit.
     pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+        if !device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
             return false;
         }
         self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -608,7 +647,9 @@ impl RenderPass for TsrPass {
         "TSR"
     }
 
-    fn writes(&self) -> &'static [&'static str] { &["tsr_color"] }
+    fn writes(&self) -> &'static [&'static str] {
+        &["tsr_color"]
+    }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // The pass owns this view for the graph lifetime; frame registries
@@ -634,18 +675,34 @@ impl RenderPass for TsrPass {
         builder.read(self.color_input);
         // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
         // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" { builder.read("pre_aa"); }
-        if self.transparency_reactivity { builder.read("transparency_reactivity"); }
+        if self.color_input == "fogged_hdr" {
+            builder.read("pre_aa");
+        }
+        if self.transparency_reactivity {
+            builder.read("transparency_reactivity");
+        }
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.output_width = width.max(1);
         self.output_height = height.max(1);
 
-        let (ht, hv, ot, ov) = Self::create_textures(device, self.output_width, self.output_height, wgpu::TextureFormat::Rgba16Float);
-        let (hd, hdv, od, odv) = Self::create_textures(device, self.output_width, self.output_height, wgpu::TextureFormat::R32Float);
-        self.history_depth=hd; self.history_depth_view=hdv;
-        self.output_depth=od; self.output_depth_view=odv;
+        let (ht, hv, ot, ov) = Self::create_textures(
+            device,
+            self.output_width,
+            self.output_height,
+            wgpu::TextureFormat::Rgba16Float,
+        );
+        let (hd, hdv, od, odv) = Self::create_textures(
+            device,
+            self.output_width,
+            self.output_height,
+            wgpu::TextureFormat::R32Float,
+        );
+        self.history_depth = hd;
+        self.history_depth_view = hdv;
+        self.output_depth = od;
+        self.output_depth_view = odv;
         self.history_texture = ht;
         self.history_view = hv;
         self.output_texture = ot;
@@ -677,19 +734,25 @@ impl RenderPass for TsrPass {
         ];
         let world_origin = ctx.world_origin.map(|origin| origin.to_array());
         let view_id = ndc[3].to_bits();
-        let coordinate_mode_changed = self.previous_world_origin.is_some() != world_origin.is_some();
-        let view_changed = self.previous_view_id.is_some_and(|previous| previous != view_id);
+        let coordinate_mode_changed =
+            self.previous_world_origin.is_some() != world_origin.is_some();
+        let view_changed = self
+            .previous_view_id
+            .is_some_and(|previous| previous != view_id);
         let reset = u32::from(self.first_frame || coordinate_mode_changed || view_changed);
         self.first_frame = false;
         let previous_view = if reset != 0 {
             ctx.camera_data.view
         } else {
             match (self.previous_world_origin, world_origin) {
-                (Some(previous), Some(current)) => rebase_previous_view(self.previous_view, [
-                    current[0] - previous[0],
-                    current[1] - previous[1],
-                    current[2] - previous[2],
-                ]),
+                (Some(previous), Some(current)) => rebase_previous_view(
+                    self.previous_view,
+                    [
+                        current[0] - previous[0],
+                        current[1] - previous[1],
+                        current[2] - previous[2],
+                    ],
+                ),
                 _ => self.previous_view,
             }
         };
@@ -717,25 +780,47 @@ impl RenderPass for TsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new(self.color_input), "TSR").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
-            )
-        })?;
+        let pre_aa_view: &wgpu::TextureView = ctx
+            .registry
+            .read(helio_core::ResourceKey::new(self.color_input), "TSR")
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
+                )
+            })?;
 
         let reactive_view = if self.transparency_reactivity {
-            ctx.registry.read_texture_view(helio_core::ResourceKey::new("transparency_reactivity"), "TSR")
-                .ok_or_else(|| helio_core::Error::InvalidPassConfig(
-                    "TSR coverage mode requires transparency_reactivity".into()))?
-        } else { &self.reactivity_fallback_view };
-        let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone());
+            ctx.registry
+                .read_texture_view(
+                    helio_core::ResourceKey::new("transparency_reactivity"),
+                    "TSR",
+                )
+                .ok_or_else(|| {
+                    helio_core::Error::InvalidPassConfig(
+                        "TSR coverage mode requires transparency_reactivity".into(),
+                    )
+                })?
+        } else {
+            &self.reactivity_fallback_view
+        };
+        let key = (
+            pre_aa_view.clone(),
+            ctx.depth.clone(),
+            reactive_view.clone(),
+        );
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TSR BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry {binding:8,resource:wgpu::BindingResource::TextureView(reactive_view)},
-                    wgpu::BindGroupEntry {binding:7,resource:wgpu::BindingResource::TextureView(&self.history_depth_view)},
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(reactive_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&self.history_depth_view),
+                    },
                     wgpu::BindGroupEntry {
                         binding: 0,
                         resource: wgpu::BindingResource::TextureView(pre_aa_view),
@@ -775,18 +860,26 @@ impl RenderPass for TsrPass {
             cmds.write_timestamp(query, 0);
         }
         {
-            let attachments = [Some(wgpu::RenderPassColorAttachment {
-                view: &self.output_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            }), Some(wgpu::RenderPassColorAttachment {
-                view: &self.output_depth_view, resolve_target: None, depth_slice: None,
-                ops: wgpu::Operations {load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store},
-            })];
+            let attachments = [
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.output_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.output_depth_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ];
             let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TSR Resolve"),
                 color_attachments: &attachments,
@@ -815,8 +908,13 @@ impl RenderPass for TsrPass {
         );
 
         cmds.copy_texture_to_texture(
-            self.output_depth.as_image_copy(), self.history_depth.as_image_copy(),
-            wgpu::Extent3d {width:self.output_width,height:self.output_height,depth_or_array_layers:1},
+            self.output_depth.as_image_copy(),
+            self.history_depth.as_image_copy(),
+            wgpu::Extent3d {
+                width: self.output_width,
+                height: self.output_height,
+                depth_or_array_layers: 1,
+            },
         );
         if let Some(query) = &self.timing_query {
             cmds.write_timestamp(query, 2);

@@ -220,35 +220,56 @@ impl SdfPass {
             buf
         };
 
-        let scroll_shader = helio_core::shader::module(device, "SDF Scroll", helio_core::include_wgsl!("../shaders/sdf_scroll.wgsl"));
-        let scroll_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SDF Scroll Pipeline"),
-            layout: None,
-            module: &scroll_shader,
-            entry_point: Some("cs_scroll"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let scroll_shader = helio_core::shader::module(
+            device,
+            "SDF Scroll",
+            helio_core::include_wgsl!("../shaders/sdf_scroll.wgsl"),
+        );
+        let scroll_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("SDF Scroll Pipeline"),
+                layout: None,
+                module: &scroll_shader,
+                entry_point: Some("cs_scroll"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
-        let classify_shader = helio_core::shader::module(device, "SDF Classify", helio_core::include_wgsl!("../shaders/sdf_classify.wgsl"));
-        let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SDF Classify Pipeline"),
-            layout: None,
-            module: &classify_shader,
-            entry_point: Some("cs_classify"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let classify_shader = helio_core::shader::module(
+            device,
+            "SDF Classify",
+            helio_core::include_wgsl!("../shaders/sdf_classify.wgsl"),
+        );
+        let classify_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("SDF Classify Pipeline"),
+                layout: None,
+                module: &classify_shader,
+                entry_point: Some("cs_classify"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
-        let eval_shader = helio_core::shader::module(device, "SDF Evaluate", helio_core::include_wgsl!("../shaders/sdf_evaluate.wgsl"));
-        let eval_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("SDF Evaluate Pipeline"),
-            layout: None,
-            module: &eval_shader,
-            entry_point: Some("cs_evaluate_sparse"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let eval_shader = helio_core::shader::module(
+            device,
+            "SDF Evaluate",
+            helio_core::include_wgsl!("../shaders/sdf_evaluate.wgsl"),
+        );
+        let eval_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("SDF Evaluate Pipeline"),
+                layout: None,
+                module: &eval_shader,
+                entry_point: Some("cs_evaluate_sparse"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let classify_bgl = classify_pipeline.get_bind_group_layout(0);
         let classify_bg = Self::build_classify_bg_impl(
@@ -277,7 +298,11 @@ impl SdfPass {
             &terrain_params_buffer,
         );
 
-        let march_shader = helio_core::shader::module(device, "SDF Ray March", helio_core::include_wgsl!("../shaders/sdf_ray_march.wgsl"));
+        let march_shader = helio_core::shader::module(
+            device,
+            "SDF Ray March",
+            helio_core::include_wgsl!("../shaders/sdf_ray_march.wgsl"),
+        );
 
         let march_bgl = Self::build_march_bgl(device, level_count as usize);
         let march_pipeline_layout =
@@ -286,40 +311,43 @@ impl SdfPass {
                 bind_group_layouts: &[Some(&march_bgl)],
                 immediate_size: 0,
             });
-        let march_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("SDF Ray March Pipeline"),
-            layout: Some(&march_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &march_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let march_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("SDF Ray March Pipeline"),
+                layout: Some(&march_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &march_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &march_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(helio_core::depth::NEARER),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &march_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(helio_core::depth::NEARER),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
             scroll_pipeline,
@@ -850,7 +878,10 @@ impl RenderPass for SdfPass {
         }
 
         {
-            let depth_view = ctx.registry.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(ctx.depth);
+            let depth_view = ctx
+                .registry
+                .get(helio_core::ResourceKey::new("full_res_depth"))
+                .unwrap_or(ctx.depth);
             let color_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load
             } else {

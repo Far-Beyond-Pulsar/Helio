@@ -332,7 +332,11 @@ impl RadianceCascades2DPass {
         });
 
         // ── Scene build ───────────────────────────────────────────────────
-        let scene_shader = helio_core::shader::module(device, "RC Scene Shader", helio_core::include_wgsl!("../shaders/rc_scene.wgsl"));
+        let scene_shader = helio_core::shader::module(
+            device,
+            "RC Scene Shader",
+            helio_core::include_wgsl!("../shaders/rc_scene.wgsl"),
+        );
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Scene BGL"),
             entries: &[
@@ -347,14 +351,17 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&scene_bgl)],
             immediate_size: 0,
         });
-        let scene_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("RC Scene Pipeline"),
-            layout: Some(&scene_pl),
-            module: &scene_shader,
-            entry_point: Some("cs_build_scene"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let scene_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("RC Scene Pipeline"),
+                layout: Some(&scene_pl),
+                module: &scene_shader,
+                entry_point: Some("cs_build_scene"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let scene_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RC Scene Uniforms"),
             size: std::mem::size_of::<SceneUniforms>() as u64,
@@ -385,7 +392,11 @@ impl RadianceCascades2DPass {
         });
 
         // ── Jump-flood seed + step ──────────────────────────────────────
-        let jfa_shader = helio_core::shader::module(device, "RC JFA Shader", helio_core::include_wgsl!("../shaders/rc_jfa.wgsl"));
+        let jfa_shader = helio_core::shader::module(
+            device,
+            "RC JFA Shader",
+            helio_core::include_wgsl!("../shaders/rc_jfa.wgsl"),
+        );
         let jfa_dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RC Dims Uniform"),
             size: std::mem::size_of::<DimsUniform>() as u64,
@@ -415,14 +426,17 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&seed_bgl)],
             immediate_size: 0,
         });
-        let seed_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("RC JFA Seed Pipeline"),
-            layout: Some(&seed_pl),
-            module: &jfa_shader,
-            entry_point: Some("cs_jfa_seed"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let seed_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("RC JFA Seed Pipeline"),
+                layout: Some(&seed_pl),
+                module: &jfa_shader,
+                entry_point: Some("cs_jfa_seed"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         // Seed always writes into JFA texture A.
         let seed_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("RC JFA Seed BG"),
@@ -457,14 +471,17 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&step_bgl)],
             immediate_size: 0,
         });
-        let step_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("RC JFA Step Pipeline"),
-            layout: Some(&step_pl),
-            module: &jfa_shader,
-            entry_point: Some("cs_jfa_step"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let step_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("RC JFA Step Pipeline"),
+                layout: Some(&step_pl),
+                module: &jfa_shader,
+                entry_point: Some("cs_jfa_step"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         // Seed wrote A; step 0 reads A writes B, step 1 reads B writes A, ...
         let mut jfa_step_bind_groups = Vec::with_capacity(jfa_passes as usize);
@@ -524,7 +541,11 @@ impl RadianceCascades2DPass {
         };
 
         // ── Distance field ──────────────────────────────────────────────
-        let dist_shader = helio_core::shader::module(device, "RC Distance Shader", helio_core::include_wgsl!("../shaders/rc_distance.wgsl"));
+        let dist_shader = helio_core::shader::module(
+            device,
+            "RC Distance Shader",
+            helio_core::include_wgsl!("../shaders/rc_distance.wgsl"),
+        );
         let dist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Distance BGL"),
             entries: &[
@@ -538,14 +559,17 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&dist_bgl)],
             immediate_size: 0,
         });
-        let dist_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("RC Distance Pipeline"),
-            layout: Some(&dist_pl),
-            module: &dist_shader,
-            entry_point: Some("cs_distance_field"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let dist_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("RC Distance Pipeline"),
+                layout: Some(&dist_pl),
+                module: &dist_shader,
+                entry_point: Some("cs_distance_field"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let dist_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("RC Distance BG"),
             layout: &dist_bgl,
@@ -566,7 +590,11 @@ impl RadianceCascades2DPass {
         });
 
         // ── Cascades ────────────────────────────────────────────────────
-        let cascade_shader = helio_core::shader::module(device, "RC Cascade Shader", helio_core::include_wgsl!("../shaders/rc_cascade.wgsl"));
+        let cascade_shader = helio_core::shader::module(
+            device,
+            "RC Cascade Shader",
+            helio_core::include_wgsl!("../shaders/rc_cascade.wgsl"),
+        );
         let cascade_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Cascade BGL"),
             entries: &[
@@ -583,14 +611,17 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&cascade_bgl)],
             immediate_size: 0,
         });
-        let cascade_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("RC Cascade Pipeline"),
-            layout: Some(&cascade_pl),
-            module: &cascade_shader,
-            entry_point: Some("cs_cascade"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let cascade_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("RC Cascade Pipeline"),
+                layout: Some(&cascade_pl),
+                module: &cascade_shader,
+                entry_point: Some("cs_cascade"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         // Dispatched i = cascade_count-1 downto 0; k = that loop's 0-based
         // iteration count. Output ping-pongs A/B by k's parity; `last_tex`
@@ -841,7 +872,11 @@ impl RadianceCascadesCompositePass {
         ambient: [f32; 3],
         exposure: f32,
     ) -> Self {
-        let shader = helio_core::shader::module(device, "RC Composite Shader", helio_core::include_wgsl!("../shaders/rc_composite.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "RC Composite Shader",
+            helio_core::include_wgsl!("../shaders/rc_composite.wgsl"),
+        );
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Composite BGL"),
             entries: &[
@@ -894,48 +929,51 @@ impl RadianceCascadesCompositePass {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("RC Composite Pipeline"),
-            layout: Some(&pl),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("RC Composite Pipeline"),
+                layout: Some(&pl),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        // Multiply blend against the existing target contents —
+                        // no framebuffer texture read needed.
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Dst,
+                                dst_factor: wgpu::BlendFactor::Zero,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::Zero,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    // Multiply blend against the existing target contents —
-                    // no framebuffer texture read needed.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Dst,
-                            dst_factor: wgpu::BlendFactor::Zero,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::Zero,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
             pipeline,
@@ -956,8 +994,8 @@ impl RenderPass for RadianceCascadesCompositePass {
         _resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
@@ -990,5 +1028,3 @@ impl RenderPass for RadianceCascadesCompositePass {
         Ok(())
     }
 }
-
-

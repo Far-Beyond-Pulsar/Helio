@@ -16,36 +16,43 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                     .into(),
             ),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &shader,
-            entry_point: Some("select_key"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &shader,
+                entry_point: Some("select_key"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("production light compaction"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/compact_lights.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_lights.wgsl").into()),
         });
-        let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("production light compaction"),
-            layout: None,
-            module: &compact_shader,
-            entry_point: Some("compact"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let live_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("production live light list"),
-            layout: None,
-            module: &compact_shader,
-            entry_point: Some("list_live"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let compact_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("production light compaction"),
+                layout: None,
+                module: &compact_shader,
+                entry_point: Some("compact"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let live_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("production live light list"),
+                layout: None,
+                module: &compact_shader,
+                entry_point: Some("list_live"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let live_read = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 4,
@@ -227,8 +234,9 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 rx.recv().unwrap().unwrap();
                 rx.recv().unwrap().unwrap();
-                let live_count =
-                    bytemuck::cast_slice::<u8, u32>(&live_read.slice(..).get_mapped_range().unwrap())[0];
+                let live_count = bytemuck::cast_slice::<u8, u32>(
+                    &live_read.slice(..).get_mapped_range().unwrap(),
+                )[0];
                 live_read.unmap();
                 // Pulsar-Native#838: the list holds live rows only, however
                 // sparse the allocation.
@@ -242,8 +250,11 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                 let key = words[5];
                 assert_eq!(key,expected,"count={count} capacity={capacity} sun={sun} dominant={dominant} invalid_sun={invalid_sun} flags={flags}");
                 let active_count = count - usize::from(sun && invalid_sun);
-                assert_eq!(f32::from_bits(words[1]), active_count as f32,
-                    "active emitter count must ignore sparse allocation and invalid lights");
+                assert_eq!(
+                    f32::from_bits(words[1]),
+                    active_count as f32,
+                    "active emitter count must ignore sparse allocation and invalid lights"
+                );
                 drop(bytes);
                 read.unmap();
             }

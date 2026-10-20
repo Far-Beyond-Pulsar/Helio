@@ -68,14 +68,18 @@ const ACTIVE_MEDIA_HEADER_BYTES: u64 = (32 + 64 * 3) * 4;
 /// Stride of a `"scene_lights"` row (the shader's full 128-byte `GpuLight`).
 const LIGHT_ROW_BYTES: u64 = 128;
 // FogVolume's WGSL opaque prefix/suffix must agree with the PP row ABI.
-const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET.is_multiple_of(16));
+const _: () =
+    assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET.is_multiple_of(16));
 
 /// Assemble the legacy PP row layout from its Rust ABI: the opaque words
 /// before and after the fog block follow wherever PP places it.
 pub fn shader_source() -> String {
     use helio_pass_postprocess::GpuPostProcessUniforms as Uniforms;
     let head = Uniforms::FOG_BLOCK_OFFSET / 16;
-    let tail = (std::mem::size_of::<Uniforms>() as u64 - Uniforms::FOG_BLOCK_OFFSET - Uniforms::FOG_BLOCK_SIZE) / 16;
+    let tail = (std::mem::size_of::<Uniforms>() as u64
+        - Uniforms::FOG_BLOCK_OFFSET
+        - Uniforms::FOG_BLOCK_SIZE)
+        / 16;
     include_str!("../shaders/volumetric_fog.wgsl")
         .replace("__PP_HEAD_VEC4__", &head.to_string())
         .replace("__PP_TAIL_VEC4__", &tail.to_string())
@@ -424,46 +428,61 @@ impl VolumetricFogPass {
             bind_group_layouts: &[Some(&resolve_bgl)],
             immediate_size: 0,
         });
-        let resolve_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Fog SceneDB Resolve"),
-            layout: Some(&resolve_pl),
-            module: &shader,
-            entry_point: Some("cs_resolve"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Fog Cluster Lights"),
-            layout: Some(&inject_pl),
-            module: &shader,
-            entry_point: Some("cs_cull"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Volumetric Fog Classify"),
-            layout: Some(&classify_pl),
-            module: &shader,
-            entry_point: Some("cs_classify"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let inject_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Volumetric Fog Inject"),
-            layout: Some(&inject_pl),
-            module: &shader,
-            entry_point: Some("cs_inject"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let integrate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Volumetric Fog Integrate"),
-            layout: Some(&integrate_pl),
-            module: &shader,
-            entry_point: Some("cs_integrate"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let resolve_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Fog SceneDB Resolve"),
+                layout: Some(&resolve_pl),
+                module: &shader,
+                entry_point: Some("cs_resolve"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let cull_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Fog Cluster Lights"),
+                layout: Some(&inject_pl),
+                module: &shader,
+                entry_point: Some("cs_cull"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let classify_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Volumetric Fog Classify"),
+                layout: Some(&classify_pl),
+                module: &shader,
+                entry_point: Some("cs_classify"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let inject_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Volumetric Fog Inject"),
+                layout: Some(&inject_pl),
+                module: &shader,
+                entry_point: Some("cs_inject"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let integrate_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Volumetric Fog Integrate"),
+                layout: Some(&integrate_pl),
+                module: &shader,
+                entry_point: Some("cs_integrate"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let fog_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Volumetric Fog Uniforms"),
@@ -559,7 +578,8 @@ impl VolumetricFogPass {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor {
@@ -668,7 +688,13 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["shadow_atlas", "static_shadow_atlas", "shadow_transmittance", "shadow_matrices", "postprocess_uniforms"]
+        &[
+            "shadow_atlas",
+            "static_shadow_atlas",
+            "shadow_transmittance",
+            "shadow_matrices",
+            "postprocess_uniforms",
+        ]
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -758,11 +784,13 @@ impl RenderPass for VolumetricFogPass {
             self.classify_bg = None;
             self.history_valid = false;
         }
-        let prev_jitter = self
-            .previous_camera
-            .map_or([ctx.camera_data.jitter_frame[0], ctx.camera_data.jitter_frame[1]], |c| {
-                [c.jitter_frame[0], c.jitter_frame[1]]
-            });
+        let prev_jitter = self.previous_camera.map_or(
+            [
+                ctx.camera_data.jitter_frame[0],
+                ctx.camera_data.jitter_frame[1],
+            ],
+            |c| [c.jitter_frame[0], c.jitter_frame[1]],
+        );
         self.previous_camera = Some(*ctx.camera_data);
 
         let globals = FogGlobals {
@@ -776,7 +804,9 @@ impl RenderPass for VolumetricFogPass {
             delta_time: ctx.delta_time.clamp(0.0, 0.25),
             grid: self.grid,
             enabled: self.active as u32,
-            world_origin: ctx.world_origin.map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
+            world_origin: ctx
+                .world_origin
+                .map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
         };
         ctx.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -871,8 +901,11 @@ impl RenderPass for VolumetricFogPass {
             // pair, so a stale one would read the grid it is also writing.
             self.inject_bg = [None, None];
             self.inject_bg_key = Some(key);
-            self.inject_shadow =
-                Some((shadow_atlas.clone(), static_shadow_atlas.clone(), transmittance.clone()));
+            self.inject_shadow = Some((
+                shadow_atlas.clone(),
+                static_shadow_atlas.clone(),
+                transmittance.clone(),
+            ));
             self.integrate_g0_bg = None;
             self.resolve_bg = None;
             self.classify_bg = None;
@@ -1086,13 +1119,7 @@ impl RenderPass for VolumetricFogPass {
             pass.set_bind_group(0, self.resolve_bg.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        cmds.copy_buffer_to_buffer(
-            &self.resolved_fog_buf,
-            0,
-            &self.fog_uniform_buf,
-            0,
-            64,
-        );
+        cmds.copy_buffer_to_buffer(&self.resolved_fog_buf, 0, &self.fog_uniform_buf, 0, 64);
         {
             let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Volumetric Fog Classify"),
@@ -1148,7 +1175,11 @@ impl RenderPass for VolumetricFogPass {
                 // no medium exists, so an empty scene pays nothing here.
                 cpass.dispatch_workgroups_indirect(&self.indirect_buf, 24);
             } else {
-                cpass.dispatch_workgroups(self.grid[0].div_ceil(WG_X), self.grid[1].div_ceil(WG_Y), 1);
+                cpass.dispatch_workgroups(
+                    self.grid[0].div_ceil(WG_X),
+                    self.grid[1].div_ceil(WG_Y),
+                    1,
+                );
                 self.integrate_initialized = true;
             }
         }
@@ -1169,7 +1200,11 @@ fn clear_transmittance(device: &wgpu::Device) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("Fog Fallback Transmittance"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

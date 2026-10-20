@@ -69,7 +69,11 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let color_compare_shader = helio_core::shader::module(device, "PerfOverlay Color Compare Shader", helio_core::include_wgsl!("../shaders/analyze_color_overdraw.wgsl"));
+        let color_compare_shader = helio_core::shader::module(
+            device,
+            "PerfOverlay Color Compare Shader",
+            helio_core::include_wgsl!("../shaders/analyze_color_overdraw.wgsl"),
+        );
 
         let color_compare_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Color Compare BGL"),
@@ -124,15 +128,17 @@ impl PerfOverlayShared {
                 immediate_size: 0,
             });
 
-        let color_compare_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let color_compare_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
                 label: Some("PerfOverlay Color Compare Pipeline"),
                 layout: Some(&color_compare_pipeline_layout),
                 module: &color_compare_shader,
                 entry_point: Some("analyze_color_overdraw"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
 
         let color_compare_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Color Compare Params"),
@@ -141,7 +147,11 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let blit_shader = helio_core::shader::module(device, "PerfOverlay Blit Shader", helio_core::include_wgsl!("../shaders/blit_color.wgsl"));
+        let blit_shader = helio_core::shader::module(
+            device,
+            "PerfOverlay Blit Shader",
+            helio_core::include_wgsl!("../shaders/blit_color.wgsl"),
+        );
 
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Blit BGL"),
@@ -175,14 +185,17 @@ impl PerfOverlayShared {
             immediate_size: 0,
         });
 
-        let blit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("PerfOverlay Blit Pipeline"),
-            layout: Some(&blit_pipeline_layout),
-            module: &blit_shader,
-            entry_point: Some("blit_color"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let blit_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("PerfOverlay Blit Pipeline"),
+                layout: Some(&blit_pipeline_layout),
+                module: &blit_shader,
+                entry_point: Some("blit_color"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let shader_cost_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Shader Cost"),
@@ -198,7 +211,11 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let cost_compute_shader = helio_core::shader::module(device, "PerfOverlay Cost Compute Shader", helio_core::include_wgsl!("../shaders/compute_shader_cost.wgsl"));
+        let cost_compute_shader = helio_core::shader::module(
+            device,
+            "PerfOverlay Cost Compute Shader",
+            helio_core::include_wgsl!("../shaders/compute_shader_cost.wgsl"),
+        );
 
         let cost_compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Cost Compute BGL"),
@@ -273,15 +290,17 @@ impl PerfOverlayShared {
                 immediate_size: 0,
             });
 
-        let cost_compute_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let cost_compute_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
                 label: Some("PerfOverlay Cost Compute Pipeline"),
                 layout: Some(&cost_compute_pipeline_layout),
                 module: &cost_compute_shader,
                 entry_point: Some("cs_compute_shader_cost"),
                 compilation_options: Default::default(),
                 cache: None,
-            });
+            },
+        );
 
         let cost_compute_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Cost Compute Params"),
@@ -388,7 +407,11 @@ impl PerfOverlayPass {
             .expect("tile grid overflow: viewport dimensions too large");
         drop(shared_guard);
 
-        let aggregate_shader = helio_core::shader::module(device, "PerfOverlay Aggregate Shader", helio_core::include_wgsl!("../shaders/aggregate_tiles.wgsl"));
+        let aggregate_shader = helio_core::shader::module(
+            device,
+            "PerfOverlay Aggregate Shader",
+            helio_core::include_wgsl!("../shaders/aggregate_tiles.wgsl"),
+        );
 
         let aggregate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Aggregate BGL"),
@@ -453,14 +476,17 @@ impl PerfOverlayPass {
                 immediate_size: 0,
             });
 
-        let aggregate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("PerfOverlay Aggregate Pipeline"),
-            layout: Some(&aggregate_pipeline_layout),
-            module: &aggregate_shader,
-            entry_point: Some("cs_aggregate_tiles"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let aggregate_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("PerfOverlay Aggregate Pipeline"),
+                layout: Some(&aggregate_pipeline_layout),
+                module: &aggregate_shader,
+                entry_point: Some("cs_aggregate_tiles"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let aggregate_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Aggregate Params"),
@@ -476,7 +502,11 @@ impl PerfOverlayPass {
             mapped_at_creation: false,
         });
 
-        let visualize_shader = helio_core::shader::module(device, "PerfOverlay Visualize Shader", helio_core::include_wgsl!("../shaders/visualize.wgsl"));
+        let visualize_shader = helio_core::shader::module(
+            device,
+            "PerfOverlay Visualize Shader",
+            helio_core::include_wgsl!("../shaders/visualize.wgsl"),
+        );
 
         let visualize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Visualize BGL"),
@@ -541,34 +571,37 @@ impl PerfOverlayPass {
                 immediate_size: 0,
             });
 
-        let visualize_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("PerfOverlay Visualize Pipeline"),
-            layout: Some(&visualize_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &visualize_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let visualize_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("PerfOverlay Visualize Pipeline"),
+                layout: Some(&visualize_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &visualize_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &visualize_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &visualize_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let visualize_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Visualize Params"),
@@ -664,8 +697,8 @@ impl RenderPass for PerfOverlayPass {
         _resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -692,8 +725,10 @@ impl RenderPass for PerfOverlayPass {
         }
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
-            ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
-            ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
+            ctx.registry
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+            ctx.registry
+                .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
@@ -740,9 +775,12 @@ impl RenderPass for PerfOverlayPass {
             pass.dispatch_workgroups(num_tiles.div_ceil(256), 1, 1);
         }
 
-        if let (Some(_pre_aa), Some(gbuffer)) =
-            (ctx.registry.read_texture_view(helio_core::ResourceKey::new("pre_aa"), "PerfOverlay"), ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")))
-        {
+        if let (Some(_pre_aa), Some(gbuffer)) = (
+            ctx.registry
+                .read_texture_view(helio_core::ResourceKey::new("pre_aa"), "PerfOverlay"),
+            ctx.registry
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+        ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let key = gbuffer_orm_ptr;
 
@@ -867,7 +905,11 @@ impl MaterialProfiler {
             mapped_at_creation: false,
         });
 
-        let profile_shader = helio_core::shader::module(device, "Material Profile Shader", helio_core::include_wgsl!("../shaders/profile_material.wgsl"));
+        let profile_shader = helio_core::shader::module(
+            device,
+            "Material Profile Shader",
+            helio_core::include_wgsl!("../shaders/profile_material.wgsl"),
+        );
 
         let profile_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Material Profile BGL"),
@@ -902,31 +944,34 @@ impl MaterialProfiler {
                 immediate_size: 0,
             });
 
-        let profile_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Material Profile Pipeline"),
-            layout: Some(&profile_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &profile_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let profile_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Material Profile Pipeline"),
+                layout: Some(&profile_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &profile_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &profile_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &profile_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let configs = Self::get_material_configs();
         let mut profile_params_bufs = Vec::with_capacity(configs.len());
@@ -1122,5 +1167,3 @@ impl MaterialProfiler {
         &self.timing_table
     }
 }
-
-

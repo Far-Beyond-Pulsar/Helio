@@ -500,7 +500,13 @@ pub struct FoliageGBufferPass {
     placeholder_sampler: wgpu::Sampler,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(wgpu::Buffer, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer)>,
+    bind_group_0_key: Option<(
+        wgpu::Buffer,
+        wgpu::TextureView,
+        wgpu::Sampler,
+        wgpu::Buffer,
+        wgpu::Buffer,
+    )>,
     bind_group_1: wgpu::BindGroup,
 
     /// Elements per `visible_blades` region. See [`visible_region_offset`].
@@ -741,50 +747,53 @@ impl FoliageGBufferPass {
             immediate_size: 0,
         });
         let targets = color_target_states();
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("FoliageGBuffer Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                // No vertex buffer. Every attribute is derived from `vertex_index` and
-                // the packed instance record — see `geometry`.
-                buffers: &[],
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("FoliageGBuffer Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    // No vertex buffer. Every attribute is derived from `vertex_index` and
+                    // the packed instance record — see `geometry`.
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &targets,
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    // No effect on a non-indexed draw, but on Vulkan a `Some` value sets
+                    // `primitiveRestartEnable`, and `None` is the correct state here.
+                    strip_index_format: None,
+                    // Blades are two-sided: a grass blade is a surface with no back. The
+                    // fragment shader flips the normal by `@builtin(front_facing)`.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    // Grass is opaque geometry and must occlude what is behind it. The
+                    // stochastic cross-fade is a discard, not a blend, so a surviving
+                    // fragment is fully opaque and writing depth is correct.
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                // Single-sampled, like every other Helio raster pass. This is also why the
+                // cross-fade cannot use alpha-to-coverage: WebGPU rejects
+                // `alphaToCoverageEnabled` when `count == 1`.
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                // No effect on a non-indexed draw, but on Vulkan a `Some` value sets
-                // `primitiveRestartEnable`, and `None` is the correct state here.
-                strip_index_format: None,
-                // Blades are two-sided: a grass blade is a surface with no back. The
-                // fragment shader flips the normal by `@builtin(front_facing)`.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                // Grass is opaque geometry and must occlude what is behind it. The
-                // stochastic cross-fade is a discard, not a blend, so a surviving
-                // fragment is fully opaque and writing depth is correct.
-                depth_write_enabled: Some(true),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            // Single-sampled, like every other Helio raster pass. This is also why the
-            // cross-fade cannot use alpha-to-coverage: WebGPU rejects
-            // `alphaToCoverageEnabled` when `count == 1`.
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
             pipeline,
@@ -919,11 +928,26 @@ impl RenderPass for FoliageGBufferPass {
         //
         // The views must be byte-identical to `GBufferPass`'s, in the same order:
         // `compute_chains` requires an exact attachment match before it will fuse.
-        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "FoliageGBuffer")?;
-        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "FoliageGBuffer")?;
-        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "FoliageGBuffer")?;
-        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "FoliageGBuffer")?;
-        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "FoliageGBuffer")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(
+            helio_core::ResourceKey::new("gbuffer"),
+            "FoliageGBuffer",
+        )?;
+        let lightmap_uv = resources.read(
+            helio_core::ResourceKey::new("gbuffer_lightmap_uv"),
+            "FoliageGBuffer",
+        )?;
+        let sss_target = resources.read(
+            helio_core::ResourceKey::new("gbuffer_sss"),
+            "FoliageGBuffer",
+        )?;
+        let extra_target = resources.read(
+            helio_core::ResourceKey::new("gbuffer_extra"),
+            "FoliageGBuffer",
+        )?;
+        let velocity_target = resources.read(
+            helio_core::ResourceKey::new("gbuffer_velocity"),
+            "FoliageGBuffer",
+        )?;
 
         // `LoadOp::Load` on all eight: this pass adds geometry to a G-buffer that
         // `GBufferPass` has already filled. A clear here would erase the scene.
@@ -935,8 +959,8 @@ impl RenderPass for FoliageGBufferPass {
             load: wgpu::LoadOp::Load,
             store: wgpu::StoreOp::Store,
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -1008,7 +1032,8 @@ impl RenderPass for FoliageGBufferPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let type_handle = ctx.scene_buffers.get(BufferKey::of("foliage_types"));
-        self.type_liveness.update(ctx.device, ctx.queue, type_handle);
+        self.type_liveness
+            .update(ctx.device, ctx.queue, type_handle);
         let type_handle = type_handle.filter(|handle| self.type_liveness.maybe_live(handle));
         let wind_handle = ctx.scene_buffers.get(BufferKey::of("foliage_wind"));
         let tables = type_handle.map(|handle| FoliageTables {
@@ -1047,8 +1072,14 @@ impl RenderPass for FoliageGBufferPass {
         // forget: a published view with no published origin would bend every blade in
         // the world against a 64 m field sitting at the world origin, which looks like a
         // wind bug rather than a wiring bug.
-        let interaction_valid = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("foliage_interaction")).is_some()
-            && ctx.registry.get::<&wgpu::Sampler>(helio_core::ResourceKey::new("foliage_interaction_sampler")).is_some()
+        let interaction_valid = ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("foliage_interaction"))
+            .is_some()
+            && ctx
+                .registry
+                .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("foliage_interaction_sampler"))
+                .is_some()
             && self.interaction_field_published;
         let extent = self.interaction_field[2].max(1.0e-3);
         let globals = FoliageGlobals {
@@ -1239,5 +1270,3 @@ mod tests {
         assert_eq!(offsets, vec![0, 1024, 2048, 3072]);
     }
 }
-
-

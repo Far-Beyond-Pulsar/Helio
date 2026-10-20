@@ -171,14 +171,17 @@ fn compute(
     entry: &str,
     layout: &wgpu::PipelineLayout,
 ) -> wgpu::ComputePipeline {
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(layout),
-        module: shader,
-        entry_point: Some(entry),
-        compilation_options: Default::default(),
-        cache: None,
-    })
+    helio_core::shader::create_compute_pipeline(
+        &device,
+        wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(layout),
+            module: shader,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+    )
 }
 
 /// The visibility backend owns only its sampling pipelines. Grid construction,
@@ -326,8 +329,27 @@ impl Pipelines {
             self.rt_bgl.as_ref(),
             false,
         );
-        self.transmission_visibility = Some(VisibilityPipelines::new(device, mode, presampled, &self.common_bgl, &self.gbuffer_bgl, &self.sample_bgl, self.rt_bgl.as_ref(), true));
-        self.transmission_composite = Some(composite_pipeline(device, self.output_format, mode, presampled, &self.common_bgl, &self.gbuffer_bgl, &self.composite_bgl, self.rt_bgl.as_ref(), true));
+        self.transmission_visibility = Some(VisibilityPipelines::new(
+            device,
+            mode,
+            presampled,
+            &self.common_bgl,
+            &self.gbuffer_bgl,
+            &self.sample_bgl,
+            self.rt_bgl.as_ref(),
+            true,
+        ));
+        self.transmission_composite = Some(composite_pipeline(
+            device,
+            self.output_format,
+            mode,
+            presampled,
+            &self.common_bgl,
+            &self.gbuffer_bgl,
+            &self.composite_bgl,
+            self.rt_bgl.as_ref(),
+            true,
+        ));
     }
 
     pub fn new(
@@ -349,7 +371,11 @@ impl Pipelines {
                 entry(3, uniform(), S::COMPUTE),
             ],
         );
-        let compact_shader = helio_core::shader::module(device, "HLFS light compaction", helio_core::include_wgsl!("../shaders/compact_lights.wgsl"));
+        let compact_shader = helio_core::shader::module(
+            device,
+            "HLFS light compaction",
+            helio_core::include_wgsl!("../shaders/compact_lights.wgsl"),
+        );
         let compact_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("HLFS light compaction"),
             bind_group_layouts: &[Some(&compact_bgl)],
@@ -376,13 +402,16 @@ impl Pipelines {
                 bgl(
                     device,
                     "HLFS ray-query layout",
-                    &[entry(
-                        0,
-                        wgpu::BindingType::AccelerationStructure {
-                            vertex_return: false,
-                        },
-                        all,
-                    ), entry(1, storage(true), all)],
+                    &[
+                        entry(
+                            0,
+                            wgpu::BindingType::AccelerationStructure {
+                                vertex_return: false,
+                            },
+                            all,
+                        ),
+                        entry(1, storage(true), all),
+                    ],
                 )
             });
         let common_bgl = bgl(
@@ -413,7 +442,11 @@ impl Pipelines {
                     },
                     all,
                 ),
-                entry(10, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), all),
+                entry(
+                    10,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    all,
+                ),
                 // Live light rows (Pulsar-Native#838), see common.wgsl.
                 entry(11, storage(true), all),
             ],
@@ -585,8 +618,27 @@ impl Pipelines {
             compact_bgl,
             compact,
             list_live,
-            transmission_visibility: Some(VisibilityPipelines::new(device, mode, presampled, &common_bgl, &gbuffer_bgl, &sample_bgl, rt_bgl.as_ref(), true)),
-            transmission_composite: Some(composite_pipeline(device, output_format, mode, presampled, &common_bgl, &gbuffer_bgl, &composite_bgl, rt_bgl.as_ref(), true)),
+            transmission_visibility: Some(VisibilityPipelines::new(
+                device,
+                mode,
+                presampled,
+                &common_bgl,
+                &gbuffer_bgl,
+                &sample_bgl,
+                rt_bgl.as_ref(),
+                true,
+            )),
+            transmission_composite: Some(composite_pipeline(
+                device,
+                output_format,
+                mode,
+                presampled,
+                &common_bgl,
+                &gbuffer_bgl,
+                &composite_bgl,
+                rt_bgl.as_ref(),
+                true,
+            )),
             common_bgl,
             gbuffer_bgl,
             depth_bgl,
@@ -639,29 +691,32 @@ fn composite_pipeline(
         bind_group_layouts: &layouts,
         immediate_size: 0,
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("HLFS denoise and composite"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &composite_shader,
-            entry_point: Some("vs_main"),
-            compilation_options: Default::default(),
-            buffers: &[],
+    helio_core::shader::create_render_pipeline(
+        &device,
+        wgpu::RenderPipelineDescriptor {
+            label: Some("HLFS denoise and composite"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: output_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         },
-        fragment: Some(wgpu::FragmentState {
-            module: &composite_shader,
-            entry_point: Some("fs_main"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: output_format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        primitive: Default::default(),
-        depth_stencil: None,
-        multisample: Default::default(),
-        multiview_mask: None,
-        cache: None,
-    })
+    )
 }

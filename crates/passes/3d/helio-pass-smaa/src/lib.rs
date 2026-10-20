@@ -57,9 +57,21 @@ impl SmaaPass {
         height: u32,
         target_format: wgpu::TextureFormat,
     ) -> Self {
-        let edge_shader = helio_core::shader::module(device, "SMAA Edge Shader", helio_core::include_wgsl!("../shaders/smaa_edge.wgsl"));
-        let blend_shader = helio_core::shader::module(device, "SMAA Blend Shader", helio_core::include_wgsl!("../shaders/smaa_blend.wgsl"));
-        let neighbor_shader = helio_core::shader::module(device, "SMAA Neighbor Shader", helio_core::include_wgsl!("../shaders/smaa_neighbor.wgsl"));
+        let edge_shader = helio_core::shader::module(
+            device,
+            "SMAA Edge Shader",
+            helio_core::include_wgsl!("../shaders/smaa_edge.wgsl"),
+        );
+        let blend_shader = helio_core::shader::module(
+            device,
+            "SMAA Blend Shader",
+            helio_core::include_wgsl!("../shaders/smaa_blend.wgsl"),
+        );
+        let neighbor_shader = helio_core::shader::module(
+            device,
+            "SMAA Neighbor Shader",
+            helio_core::include_wgsl!("../shaders/smaa_neighbor.wgsl"),
+        );
 
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("SMAA Linear Sampler"),
@@ -125,34 +137,37 @@ impl SmaaPass {
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
+            helio_core::shader::create_render_pipeline(
+                &device,
+                wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: fmt,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: fmt,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
+            )
         };
 
         let edge_bgl = make_bgl("SMAA Edge BGL", true);
@@ -299,11 +314,14 @@ impl RenderPass for SmaaPass {
         // ── Lazy bind group rebuild ───────────────────────────────────────────
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
         // They are rebuilt whenever that view's handle changes (e.g. after resize).
-        let pre_aa = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "SMAA").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
-            )
-        })?;
+        let pre_aa = ctx
+            .registry
+            .read(helio_core::ResourceKey::new("pre_aa"), "SMAA")
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
+                )
+            })?;
         if self.input_key.as_ref() != Some(pre_aa) {
             self.edge_bind_group = Some(Self::make_bg(
                 ctx.device,
@@ -430,4 +448,3 @@ impl RenderPass for SmaaPass {
         self.input_key = None;
     }
 }
-

@@ -155,7 +155,12 @@ impl SegmentKeys {
         }
         let frame = self.frame;
         let live = |seen: &u64| frame - seen <= SEGMENT_EVICT_FRAMES;
-        let mut keep = self.last_seen.iter().map(live).collect::<Vec<_>>().into_iter();
+        let mut keep = self
+            .last_seen
+            .iter()
+            .map(live)
+            .collect::<Vec<_>>()
+            .into_iter();
         let before = self.segments.len();
         self.segments.retain(|_| keep.next().unwrap());
         self.last_seen.retain(live);
@@ -269,7 +274,12 @@ impl SegmentTable {
     }
 }
 
-fn create_segment_buf(device: &wgpu::Device, label: &str, size: u64, indirect: bool) -> wgpu::Buffer {
+fn create_segment_buf(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    indirect: bool,
+) -> wgpu::Buffer {
     let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
     if indirect {
         usage |= wgpu::BufferUsages::INDIRECT;
@@ -355,7 +365,11 @@ impl OcclusionCullPass {
         screen_height: u32,
         cull_stats_buf: wgpu::Buffer,
     ) -> Self {
-        let shader = helio_core::shader::module(device, "OcclusionCull Shader", helio_core::include_wgsl!("../shaders/occlusion_cull.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "OcclusionCull Shader",
+            helio_core::include_wgsl!("../shaders/occlusion_cull.wgsl"),
+        );
 
         let cull_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("OcclusionCull CullParams"),
@@ -507,14 +521,17 @@ impl OcclusionCullPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("OcclusionCull Pipeline"),
-            layout: Some(&pl),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("OcclusionCull Pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let range_compact_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("OcclusionCull RangeCompaction BGL"),
@@ -543,23 +560,24 @@ impl OcclusionCullPass {
         });
         let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("OcclusionCull RangeCompaction Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/compact_ranges.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_ranges.wgsl").into()),
         });
         let compact_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("OcclusionCull RangeCompaction PL"),
             bind_group_layouts: &[Some(&range_compact_bgl)],
             immediate_size: 0,
         });
-        let range_compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("OcclusionCull RangeCompaction Pipeline"),
-            layout: Some(&compact_layout),
-            module: &compact_shader,
-            entry_point: Some("compact_ranges"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let range_compact_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("OcclusionCull RangeCompaction Pipeline"),
+                layout: Some(&compact_layout),
+                module: &compact_shader,
+                entry_point: Some("compact_ranges"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let range_compact_params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("OcclusionCull RangeCompaction Params"),
             size: 768,
@@ -618,7 +636,9 @@ impl OcclusionCullPass {
     ) {
         let mut cmds = ctx.graphics_cmds();
         // Every group the GPU can produce; the live count is GPU-only.
-        let bytes = source_indirect.size().min(self.compacted_indirect_buf.size());
+        let bytes = source_indirect
+            .size()
+            .min(self.compacted_indirect_buf.size());
         cmds.copy_buffer_to_buffer(source_indirect, 0, &self.compacted_indirect_buf, 0, bytes);
 
         // Legacy/test frames can have no GPU range slots; preserve the
@@ -640,27 +660,28 @@ impl OcclusionCullPass {
             self.segments.counts_buf.clone(),
         ];
         if self.range_compact_key.as_ref() != Some(&key) {
-            self.range_compact_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("OcclusionCull RangeCompaction BG"),
-                layout: &self.range_compact_bgl,
-                entries: &[
-                    buffer_entry(0, source_indirect),
-                    buffer_entry(1, &self.compacted_indirect_buf),
-                    buffer_entry(2, batch.range_counts_gpu),
-                    buffer_entry(3, batch.opaque_ranges_gpu),
-                    buffer_entry(4, batch.transparent_ranges_gpu),
-                    buffer_entry(5, batch.forward_ranges_gpu),
-                    buffer_entry(6, batch.draw_counts_gpu),
-                    uniform_range_entry(
-                        7,
-                        &self.range_compact_params,
-                        std::mem::size_of::<RangeCompactParams>() as u64,
-                    ),
-                    buffer_entry(8, &self.segments.table_buf),
-                    buffer_entry(9, &self.segments.indirect_buf),
-                    buffer_entry(10, &self.segments.counts_buf),
-                ],
-            }));
+            self.range_compact_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("OcclusionCull RangeCompaction BG"),
+                    layout: &self.range_compact_bgl,
+                    entries: &[
+                        buffer_entry(0, source_indirect),
+                        buffer_entry(1, &self.compacted_indirect_buf),
+                        buffer_entry(2, batch.range_counts_gpu),
+                        buffer_entry(3, batch.opaque_ranges_gpu),
+                        buffer_entry(4, batch.transparent_ranges_gpu),
+                        buffer_entry(5, batch.forward_ranges_gpu),
+                        buffer_entry(6, batch.draw_counts_gpu),
+                        uniform_range_entry(
+                            7,
+                            &self.range_compact_params,
+                            std::mem::size_of::<RangeCompactParams>() as u64,
+                        ),
+                        buffer_entry(8, &self.segments.table_buf),
+                        buffer_entry(9, &self.segments.indirect_buf),
+                        buffer_entry(10, &self.segments.counts_buf),
+                    ],
+                }));
             self.range_compact_key = Some(key);
         }
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -703,9 +724,9 @@ impl OcclusionCullPass {
         let baked = ctx
             .registry
             .get::<helio_bake_types::BakedPvsRef<'_>>(helio_core::ResourceKey::new("baked_pvs"));
-        let Some(pvs) = baked.filter(|pvs| {
-            pvs.cell_size > 0.0 && pvs.words_per_cell > 0 && !pvs.bits.is_empty()
-        }) else {
+        let Some(pvs) = baked
+            .filter(|pvs| pvs.cell_size > 0.0 && pvs.words_per_cell > 0 && !pvs.bits.is_empty())
+        else {
             self.pvs_grid = None;
             return;
         };
@@ -794,11 +815,7 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "hiz",
-            "object_batch",
-            "indirect_dispatch",
-        ]
+        &["hiz", "object_batch", "indirect_dispatch"]
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
@@ -818,14 +835,21 @@ impl RenderPass for OcclusionCullPass {
         // below already handles absence gracefully, but `frame.read()`
         // falls through to a debug-only panic on a missing key before ever
         // returning `None`, defeating that.
-        let Some(_indirect_dispatch) = frame.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
+        let Some(_indirect_dispatch) = frame
+            .get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(
+                helio_core::ResourceKey::new("indirect_dispatch"),
+            )
+        else {
             return;
         };
-        let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };
-        let indirect: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indirect_buf) };
+        let compacted_indices: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };
+        let indirect: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.compacted_indirect_buf) };
         // Same frame-scoped lifetime bridge as the buffers above.
         let segments: &'a SegmentTable = unsafe { std::mem::transmute(&self.segments) };
-        frame.write(helio_core::ResourceKey::new("culled_batch"), 
+        frame.write(
+            helio_core::ResourceKey::new("culled_batch"),
             crate::CulledBatchFrameData {
                 indirect,
                 compacted_indices,
@@ -870,7 +894,11 @@ impl RenderPass for OcclusionCullPass {
             self.set_screen_size(ctx.width.max(1), ctx.height.max(1));
         }
 
-        let batch = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
+        let batch = ctx
+            .registry
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
+                "object_batch",
+            ));
         let draw_capacity = batch.map(|b| b.group_capacity).unwrap_or(0);
         let range_slots = batch.map(|b| b.range_slot_capacity).unwrap_or(0);
         if let Some(batch) = batch.as_ref() {
@@ -914,13 +942,27 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx
+            .registry
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
+                "object_batch",
+            ))
+        else {
             return Ok(());
         };
-        let Some(indirect_dispatch) = ctx.registry.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'_>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
+        let Some(indirect_dispatch) = ctx
+            .registry
+            .get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'_>>(
+            helio_core::ResourceKey::new("indirect_dispatch"),
+        ) else {
             return Ok(());
         };
-        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
+        let Some(coord_data) = ctx
+            .registry
+            .get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(
+                helio_core::resource_keys::coordinate_spaces(),
+            )
+        else {
             return Ok(());
         };
         // This frame's segments start empty: counts at zero, and records past
@@ -964,10 +1006,10 @@ impl RenderPass for OcclusionCullPass {
 
         // Lazy bind-group rebuild: rebuild whenever any buffer or the
         // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
-        let hiz_view =
-            ctx.registry.read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull").expect(
-                "OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?",
-            );
+        let hiz_view = ctx
+            .registry
+            .read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull")
+            .expect("OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?");
 
         let key = (
             [
@@ -1045,14 +1087,17 @@ impl RenderPass for OcclusionCullPass {
         // frame — its 64 lanes cooperatively Hi-Z-test and compact that
         // group's frustum survivors.
         {
-        let mut cmds = ctx.graphics_cmds();
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("OcclusionCull"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups_indirect(batch.group_dispatch.buffer, batch.group_dispatch.offset);
+            let mut cmds = ctx.graphics_cmds();
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("OcclusionCull"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups_indirect(
+                batch.group_dispatch.buffer,
+                batch.group_dispatch.offset,
+            );
         }
         self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect);
         Ok(())
@@ -1080,10 +1125,16 @@ mod segment_tests {
     fn keys_sharing_ranges_get_one_segment_sized_for_their_sum() {
         let mut keys = SegmentKeys::default();
         // Class 7 spans two ranges; class 3 one.
-        assert!(observe(&mut keys, &[(7, 1, 0, 40), (3, 0, 40, 5), (7, 1, 45, 30)]));
+        assert!(observe(
+            &mut keys,
+            &[(7, 1, 0, 40), (3, 0, 40, 5), (7, 1, 45, 30)]
+        ));
         let segments = &keys.segments;
         assert_eq!(segments.len(), 2);
-        assert_eq!((segments[0].material_class, segments[0].capacity), (7, segment_capacity(70)));
+        assert_eq!(
+            (segments[0].material_class, segments[0].capacity),
+            (7, segment_capacity(70))
+        );
         assert_eq!(segments[0].first, 0);
         assert_eq!(segments[1].material_class, 3);
         assert_eq!(segments[1].first, segments[0].capacity);
@@ -1104,7 +1155,10 @@ mod segment_tests {
         let mut keys = SegmentKeys::default();
         observe(&mut keys, &[(7, 0, 0, 10), (3, 0, 10, 10)]);
         let capacity = keys.segments[0].capacity;
-        assert!(observe(&mut keys, &[(7, 0, 0, capacity + 1), (3, 0, 0, 10)]));
+        assert!(observe(
+            &mut keys,
+            &[(7, 0, 0, capacity + 1), (3, 0, 0, 10)]
+        ));
         assert_eq!(keys.segments[0].capacity, segment_capacity(capacity + 1));
         assert_eq!(keys.segments[1].first, keys.segments[0].capacity);
     }
@@ -1117,11 +1171,18 @@ mod segment_tests {
             (ShadingBucket::Transparent, &[(1, 0, 1, 1)]),
             (ShadingBucket::Forward, &[]),
         ]);
-        assert_eq!(keys.segments.len(), 2, "same material in two buckets: two segments");
+        assert_eq!(
+            keys.segments.len(),
+            2,
+            "same material in two buckets: two segments"
+        );
         for _ in 0..SEGMENT_EVICT_FRAMES {
             assert!(!observe(&mut keys, &[(1, 0, 0, 1)]));
         }
-        assert!(observe(&mut keys, &[(1, 0, 0, 1)]), "the transparent key expires");
+        assert!(
+            observe(&mut keys, &[(1, 0, 0, 1)]),
+            "the transparent key expires"
+        );
         assert_eq!(keys.segments.len(), 1);
         assert_eq!(keys.segments[0].bucket, ShadingBucket::Opaque);
         assert_eq!(keys.segments[0].first, 0);
