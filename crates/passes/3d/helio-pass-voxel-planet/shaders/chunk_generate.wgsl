@@ -1505,10 +1505,13 @@ fn restore_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
 // Per chunk job, a bit per column (`FEATURE_JOB_WORDS` words) whose cells
 // features changed: their cells' materials are stored as edited ones are.
 @group(0) @binding(38) var<storage, read_write> job_features: array<atomic<u32>>;
-// Each `tile_features_main` workgroup's node quad table (FEATURE_QUADS
-// keys: `quad_key`, 0 a free entry), probed linearly from `quad_probe`,
-// at most half full (`CompiledFeatures::new`).
-@group(0) @binding(39) var<storage, read_write> feature_quads: array<atomic<u32>>;
+// Candidate blocks (`chunks::candidates`): spawns' raw candidates by blocks
+// of 8x8 squares (a square's word pair at `BLOCK_WORDS` words a pool slot),
+// each evaluated once while the pool keeps it; then the batch's block jobs
+// (`BlockJob`), each job's node quads (count, origins) and reads (a quad
+// a candidate's ground read, `BLOCK_READS` a job), and each computed
+// footprint's blocks (`tile_block_word`). Offsets: `FEATURE_*_AT`.
+@group(0) @binding(39) var<storage, read_write> feature_blocks: array<u32>;
 const FEATURE_JOB_WORDS: u32 = 128u;
 
 const MAX_SPAWNS: u32 = 32u;
@@ -1570,15 +1573,28 @@ fn tile_placement(tile: TileJob, s: u32, g: vec2<i32>) -> Placed {
     return p;
 }
 
-// Spawn `s`'s raw candidate on square `g` from footprint `tile`'s.
-fn tile_candidate(tile: TileJob, s: u32, g: vec2<i32>) -> Placed {
-    var p: Placed;
+// Spawn `s`'s squares in footprint `tile`: the first, and the index of
+// square `g` among them (-1: none of them).
+fn tile_square(tile: TileJob, s: u32, g: vec2<i32>) -> i32 {
     let grid = feature_grid(tile.level, s);
     let sp = i32(spawn_word(s, 0u));
     let first = vec2<i32>(div_floor((tile.cx * 64 << tile.level) - grid.z, sp), div_floor((tile.cy * 64 << tile.level) - grid.z, sp));
     let n = g - first;
-    if any(n < vec2<i32>(0)) || any(n >= vec2<i32>(grid.y)) { return p; }
-    let e = tile_placements[tile.slot * features[4] + u32(grid.x + n.y * grid.y + n.x)];
+    if any(n < vec2<i32>(0)) || any(n >= vec2<i32>(grid.y)) { return -1; }
+    return n.y * grid.y + n.x;
+}
+
+// Spawn `s`'s raw candidate on square `g` from footprint `tile`'s.
+fn tile_candidate(tile: TileJob, s: u32, g: vec2<i32>) -> Placed {
+    let n = tile_square(tile, s, g);
+    if n < 0 { return Placed(); }
+    return placed_of(s, g, tile_placements[tile.slot * features[4] + u32(i32(feature_grid(tile.level, s).x) + n)]);
+}
+
+// Spawn `s`'s candidate on square `g` from its word pair `e`.
+fn placed_of(s: u32, g: vec2<i32>, e: vec2<u32>) -> Placed {
+    var p: Placed;
+    let sp = i32(spawn_word(s, 0u));
     if e.x == 0u { return p; }
     p.valid = true;
     p.excluded = ((e.x >> 28u) & 1u) != 0u;
@@ -1830,46 +1846,25 @@ fn feature_material(c: FeatureColumn, z: u32) -> u32 {
     return (words[z >> 2u] >> ((z & 3u) * 8u)) & 0xffu;
 }
 
-// A footprint's level-0 node quads (`feature_lattice`): the node grid
-// keying them (its origin and side), its workgroup's first node slot and
-// its table's first key; quad `e` of the table (`feature_quads`) holds the
-// four nodes a column blends at slots `base + 4 e` on.
-struct FeatureLattice {
-    origin: vec2<i32>,
-    side: u32,
-    base: u32,
-    keys: u32,
+// A candidate block job (`chunks::candidates`): spawn `spawn`'s squares
+// `block * 8` to `block * 8 + 7` each way on face `face`, into pool slot
+// `slot` of `feature_blocks`.
+struct BlockJob {
+    face: u32,
+    spawn: u32,
+    block: vec2<i32>,
+    slot: u32,
 }
 
-// The node quads workgroup `group` keeps for footprint `job`: over every
-// column its candidates read (the level's reach past the footprint).
-fn feature_lattice(job: TileJob, group: u32) -> FeatureLattice {
-    if job.level >= NEAR_LEVELS { return FeatureLattice(vec2<i32>(0), 0u, 0u, 0u); }
-    let at = features[3] + job.level * 4u * (1u + MAX_SPAWNS);
-    let reach = i32(features[at + 2u]);
-    let first = (vec2<i32>(job.cx, job.cy) * 64 << vec2<u32>(job.level)) - reach;
-    return FeatureLattice(first & vec2<i32>(~(NODE_COLUMNS - 1)), features[at + 3u], FEATURE_LATTICE_AT + group * features[5], group * FEATURE_QUADS);
+fn block_job(n: u32) -> BlockJob {
+    let at = FEATURE_JOBS_AT + 4u * n;
+    let block = vec2<i32>(bitcast<i32>(feature_blocks[at + 1u]), bitcast<i32>(feature_blocks[at + 2u]));
+    return BlockJob(feature_blocks[at] & 7u, feature_blocks[at] >> 3u, block, feature_blocks[at + 3u]);
 }
 
-// The key of the node quad column `(i, j)` blends (0: none).
-fn quad_key(l: FeatureLattice, i: i32, j: i32) -> u32 {
-    let n = vec2<u32>(((vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1))) - l.origin) / NODE_COLUMNS);
-    return n.y * l.side + n.x + 1u;
-}
-
-// Where key `key` lies in the quad table: its first probe.
-fn quad_probe(key: u32) -> u32 {
-    return (key * 0x9e3779b1u) % FEATURE_QUADS;
-}
-
-// The terrain's level-0 column `(i, j)` (height, surface word) from the
-// footprint's node quads.
-fn feature_ground(l: FeatureLattice, face: u32, i: i32, j: i32) -> vec2<i32> {
-    let key = quad_key(l, i, j);
-    var e = quad_probe(key);
-    for (var n = 0u; n < FEATURE_QUADS && atomicLoad(&feature_quads[l.keys + e]) != key; n++) { e = (e + 1u) % FEATURE_QUADS; }
-    let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
-    return generation_grid_column(l.base + 4u * e, 2u, first, face, i, j, 0u, false);
+// Lane `li`'s square of block job `job` (row by row).
+fn block_square(job: BlockJob, li: u32) -> vec2<i32> {
+    return job.block * 8 + vec2<i32>(i32(li & 7u), i32(li >> 3u));
 }
 
 // Spawn `s`'s candidate anchor on square `g` of `face`, where its rules
@@ -1899,12 +1894,27 @@ fn candidate_anchor(face: u32, s: u32, g: vec2<i32>) -> vec4<i32> {
     return vec4<i32>(i, j, d, 1);
 }
 
-// Spawn `s`'s raw candidate on square `g` of footprint `job`
-// (`CompiledFeatures::candidate`): its word pair, or none.
-// Heights are the terrain's at base columns, from the lattice `l`.
-fn feature_candidate(job: TileJob, l: FeatureLattice, s: u32, g: vec2<i32>) -> vec2<u32> {
+// The column a candidate's ground read `c` is (0 its anchor, 1-4 its
+// footprint's corners).
+fn candidate_read(a: vec4<i32>, c: u32) -> vec2<i32> {
+    if c == 0u { return a.xy; }
+    return a.xy + vec2<i32>(select(-a.z, a.z, ((c - 1u) & 1u) != 0u), select(-a.z, a.z, c >= 3u));
+}
+
+// The terrain's level-0 column `(i, j)` (height, surface word): read `r`
+// of block job `job` (the node quad its nodes are in).
+fn feature_ground(job: u32, r: u32, face: u32, i: i32, j: i32) -> vec2<i32> {
+    let quad = job * BLOCK_READS + feature_blocks[FEATURE_READS_AT + job * BLOCK_READS + r];
+    let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    return generation_grid_column(FEATURE_LATTICE_AT + 4u * quad, 2u, first, face, i, j, 0u, false);
+}
+
+// Spawn `s`'s raw candidate on square `g` of `face` (`CompiledFeatures::
+// candidate`): its word pair, or none. Heights are the terrain's at base
+// columns, from block job `job`'s node quads (its square's reads from
+// `reads`).
+fn feature_candidate(job: u32, reads: u32, face: u32, s: u32, g: vec2<i32>) -> vec2<u32> {
     let none = vec2<u32>(0u);
-    let face = job.face;
     let f = i32(face);
     let sp = i32(spawn_word(s, 0u));
     let seed = spawn_word(s, 5u);
@@ -1912,7 +1922,7 @@ fn feature_candidate(job: TileJob, l: FeatureLattice, s: u32, g: vec2<i32>) -> v
     if anchor.w == 0 { return none; }
     let i = anchor.x;
     let j = anchor.y;
-    let column = feature_ground(l, face, i, j);
+    let column = feature_ground(job, reads, face, i, j);
     let ground = div_floor(column.x, world.grid.y);
     if ground < bitcast<i32>(spawn_word(s, 8u)) || ground > bitcast<i32>(spawn_word(s, 9u)) { return none; }
     if (spawn_word(s, 6u) | spawn_word(s, 7u)) != 0u {
@@ -1925,12 +1935,11 @@ fn feature_candidate(job: TileJob, l: FeatureLattice, s: u32, g: vec2<i32>) -> v
     let max_relief = bitcast<i32>(spawn_word(s, 10u));
     if max_relief < NO_RELIEF {
         // Its anchor's and its footprint's corners' grounds.
-        let d = anchor.z;
         var lo = ground;
         var hi = ground;
-        for (var c = 0u; c < 4u; c++) {
-            let at = vec2<i32>(i + select(-d, d, (c & 1u) != 0u), j + select(-d, d, c >= 2u));
-            let h = div_floor(feature_ground(l, face, at.x, at.y).x, world.grid.y);
+        for (var c = 1u; c < 5u; c++) {
+            let at = candidate_read(anchor, c);
+            let h = div_floor(feature_ground(job, reads + c, face, at.x, at.y).x, world.grid.y);
             lo = min(lo, h);
             hi = max(hi, h);
         }
@@ -1940,126 +1949,165 @@ fn feature_candidate(job: TileJob, l: FeatureLattice, s: u32, g: vec2<i32>) -> v
     return vec2<u32>(1u | (u32(i - g.x * sp) << 1u) | (u32(j - g.y * sp) << 11u) | (index << 21u) | (((v >> 8u) & 3u) << 29u) | (((v >> 10u) & 1u) << 31u), bitcast<u32>(k));
 }
 
-var<workgroup> w_feature_tiles: u32;
-var<workgroup> w_feature_near: u32;
-// Keeps the node quad column `(i, j)` blends.
-fn need_column(l: FeatureLattice, i: i32, j: i32) {
-    let key = quad_key(l, i, j);
-    var e = quad_probe(key);
-    for (var n = 0u; n < FEATURE_QUADS; n++) {
-        let held = atomicCompareExchangeWeak(&feature_quads[l.keys + e], 0u, key);
-        if held.exchanged || held.old_value == key { return; }
+// A block job's node quads: a table of the quads its candidates' reads
+// fall in (keys their quad's coordinates, low bits: a block spans far
+// fewer quads; 0 free), each entry's quad in the job's list, its origin,
+// and each read's entry.
+const BLOCK_TABLE: u32 = 512u;
+var<workgroup> w_block_keys: array<atomic<u32>, BLOCK_TABLE>;
+var<workgroup> w_block_dense: array<u32, BLOCK_TABLE>;
+var<workgroup> w_block_origin: array<vec2<i32>, BLOCK_TABLE>;
+var<workgroup> w_block_reads: array<u32, BLOCK_READS>;
+var<workgroup> w_block_count: atomic<u32>;
+
+// The table entry of the node quad column `(i, j)` blends, kept.
+fn block_need(i: i32, j: i32) -> u32 {
+    let q = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    let key = 0x80000000u | ((u32(q.y >> 4u) & 0x7fffu) << 16u) | (u32(q.x >> 4u) & 0xffffu);
+    var e = (key * 0x9e3779b1u) >> 23u;
+    for (var n = 0u; n < BLOCK_TABLE; n++) {
+        let held = atomicCompareExchangeWeak(&w_block_keys[e], 0u, key);
+        if held.exchanged {
+            w_block_origin[e] = q;
+            return e;
+        }
+        if held.old_value == key { return e; }
         // A spurious failure retries the entry; another key moves on.
-        if held.old_value != 0u { e = (e + 1u) % FEATURE_QUADS; }
+        if held.old_value != 0u { e = (e + 1u) % BLOCK_TABLE; }
     }
+    return e;
 }
 
-// Each computed footprint's near spawns' candidates, then which are placed
-// (exclusion reads raw candidates), into its pool slot; the
-// footprint's ranges raised over the placements reaching its columns and
-// its far forms' canopies. Tiles `wg.x`, `wg.x + FEATURE_GROUPS`, ..: each
-// evaluates the level-0 nodes its candidates' heights read once, into the
-// workgroup's lattice, before any candidate.
+// Block jobs' node quads (a workgroup a job): the quads its squares'
+// candidates read (anchors whose rules that read no terrain pass, their
+// footprints' corners), listed once each, and each read's quad.
+@compute @workgroup_size(64)
+fn feature_block_quads_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = block_job(wg.x);
+    for (var e = li; e < BLOCK_TABLE; e += 64u) { atomicStore(&w_block_keys[e], 0u); }
+    if li == 0u { atomicStore(&w_block_count, 0u); }
+    workgroupBarrier();
+    let a = candidate_anchor(job.face, job.spawn, block_square(job, li));
+    let reads = select(0u, select(1u, 5u, a.z > 0), a.w != 0);
+    for (var c = 0u; c < reads; c++) {
+        let at = candidate_read(a, c);
+        w_block_reads[li * 5u + c] = block_need(at.x, at.y);
+    }
+    workgroupBarrier();
+    for (var e = li; e < BLOCK_TABLE; e += 64u) {
+        if atomicLoad(&w_block_keys[e]) != 0u {
+            let d = atomicAdd(&w_block_count, 1u);
+            w_block_dense[e] = d;
+            let at = FEATURE_QUADS_AT + 2u * (wg.x * BLOCK_READS + d);
+            feature_blocks[at] = bitcast<u32>(w_block_origin[e].x);
+            feature_blocks[at + 1u] = bitcast<u32>(w_block_origin[e].y);
+        }
+    }
+    workgroupBarrier();
+    for (var c = 0u; c < reads; c++) {
+        feature_blocks[FEATURE_READS_AT + wg.x * BLOCK_READS + li * 5u + c] = w_block_dense[w_block_reads[li * 5u + c]];
+    }
+    if li == 0u { feature_blocks[FEATURE_COUNTS_AT + wg.x] = atomicLoad(&w_block_count); }
+}
+
+// The block jobs' node quads' nodes (`wg.y` a job; a lane a node), each
+// quad's four at node slots from `FEATURE_LATTICE_AT + 4 q`.
+@compute @workgroup_size(64)
+fn feature_block_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let n = wg.x * 64u + li;
+    if n >= 4u * feature_blocks[FEATURE_COUNTS_AT + wg.y] { return; }
+    let q = wg.y * BLOCK_READS + (n >> 2u);
+    let origin = vec2<i32>(bitcast<i32>(feature_blocks[FEATURE_QUADS_AT + 2u * q]), bitcast<i32>(feature_blocks[FEATURE_QUADS_AT + 2u * q + 1u]));
+    generation_grid_nodes(FEATURE_LATTICE_AT + 4u * q, 2u, block_job(wg.y).face, origin, 2u, 0u, n & 3u);
+}
+
+// The block jobs' raw candidates (a workgroup a job, a lane a square) into
+// their pool slots.
+@compute @workgroup_size(64)
+fn feature_block_candidates_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = block_job(wg.x);
+    let word = feature_candidate(wg.x, li * 5u, job.face, job.spawn, block_square(job, li));
+    let at = job.slot * BLOCK_WORDS + 2u * li;
+    feature_blocks[at] = word.x;
+    feature_blocks[at + 1u] = word.y;
+}
+
+// Spawn `s`'s raw candidate word pair on square `g` of computed footprint
+// `t` (one of its squares, `tile_square`): from the block holding it, as
+// the footprint's block table places it (per spawn: its first block, the
+// blocks a row, where its slots start).
+fn tile_block_word(t: u32, s: u32, g: vec2<i32>) -> vec2<u32> {
+    let at = FEATURE_TILES_AT + 4u * (t * MAX_SPAWNS + s);
+    let b = (g >> vec2<u32>(3u)) - vec2<i32>(bitcast<i32>(feature_blocks[at]), bitcast<i32>(feature_blocks[at + 1u]));
+    let slot = feature_blocks[FEATURE_SLOTS_AT + feature_blocks[at + 3u] + u32(b.y) * feature_blocks[at + 2u] + u32(b.x)];
+    let w = slot * BLOCK_WORDS + 2u * u32((g.y & 7) * 8 + (g.x & 7));
+    return vec2<u32>(feature_blocks[w], feature_blocks[w + 1u]);
+}
+
+// Spawn `s`'s raw candidate on square `g` for computed footprint `t`
+// (none past its squares).
+fn tile_block_candidate(t: u32, job: TileJob, s: u32, g: vec2<i32>) -> Placed {
+    if tile_square(job, s, g) < 0 { return Placed(); }
+    return placed_of(s, g, tile_block_word(t, s, g));
+}
+
+// Each computed footprint's near spawns' candidates (`wg.y` a footprint, a
+// lane a square) into its pool slot: their raw candidates from the blocks,
+// excluded where it reaches the footprint and an earlier spawn's raw
+// candidate meets its footprint, else placed (the footprint's ranges
+// raised over it); and the ranges raised over its far forms' canopies.
 @compute @workgroup_size(64)
 fn tile_features_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    if li == 0u { w_feature_tiles = u32(atomicLoad(&tile_ranges[arrayLength(&tile_ranges) - 1u])); }
-    let tiles = workgroupUniformLoad(&w_feature_tiles);
-    for (var t = wg.x; t < tiles; t += FEATURE_GROUPS) {
-        let job = tile_jobs[t];
-        workgroupBarrier();
-        if li == 0u {
-            w_feature_near = feature_near(job.level);
-            // Far forms' canopies stand over the ground's highest top.
-            var rise = 0;
-            for (var s = 0u; s < features[0] && job.level > 0u; s++) {
-                if !feature_drawn(job.level, s) && spawn_word(s, 14u) != 0u { rise = max(rise, ((i32(spawn_word(s, 15u)) + (1 << job.level) - 1) >> job.level) + 1); }
-            }
-            if rise > 0 { atomicMax(&tile_ranges[t * 4u + 1u], atomicLoad(&tile_ranges[t * 4u + 3u]) + rise); }
+    let t = wg.y;
+    let job = tile_jobs[t];
+    if wg.x == 0u && li == 0u && job.level > 0u {
+        // Far forms' canopies stand over the ground's highest top.
+        var rise = 0;
+        for (var s = 0u; s < features[0]; s++) {
+            if !feature_drawn(job.level, s) && spawn_word(s, 14u) != 0u { rise = max(rise, ((i32(spawn_word(s, 15u)) + (1 << job.level) - 1) >> job.level) + 1); }
         }
-        let near = workgroupUniformLoad(&w_feature_near);
-        let lattice = feature_lattice(job, wg.x);
-        let first = vec2<i32>(job.cx * 64, job.cy * 64) << vec2<u32>(job.level);
-        // The level-0 node quads the candidates' heights read (anchors
-        // whose rules that read no terrain pass, their footprints'
-        // corners), each evaluated once into the workgroup's slots.
-        for (var e = li; e < FEATURE_QUADS; e += 64u) { atomicStore(&feature_quads[lattice.keys + e], 0u); }
-        storageBarrier();
-        workgroupBarrier();
-        for (var s = 0u; s < near; s++) {
-            let grid = feature_grid(job.level, s);
-            let sp = i32(spawn_word(s, 0u));
-            let g0 = vec2<i32>(div_floor(first.x - grid.z, sp), div_floor(first.y - grid.z, sp));
-            for (var n = li; n < u32(grid.y * grid.y); n += 64u) {
-                let a = candidate_anchor(job.face, s, g0 + vec2<i32>(i32(n % u32(grid.y)), i32(n / u32(grid.y))));
-                if a.w == 0 { continue; }
-                need_column(lattice, a.x, a.y);
-                if a.z > 0 {
-                    for (var c = 0u; c < 4u; c++) { need_column(lattice, a.x + select(-a.z, a.z, (c & 1u) != 0u), a.y + select(-a.z, a.z, c >= 2u)); }
-                }
-            }
-        }
-        storageBarrier();
-        workgroupBarrier();
-        for (var n = li; n < 4u * FEATURE_QUADS; n += 64u) {
-            let key = atomicLoad(&feature_quads[lattice.keys + (n >> 2u)]);
-            if key != 0u {
-                let at = vec2<u32>((key - 1u) % lattice.side, (key - 1u) / lattice.side);
-                let first = lattice.origin + vec2<i32>(at) * NODE_COLUMNS;
-                generation_grid_nodes(lattice.base + 4u * (n >> 2u), 2u, job.face, first, 2u, 0u, n & 3u);
-            }
-        }
-        storageBarrier();
-        workgroupBarrier();
-        let last = first + (64 << job.level) - 1;
-        // Every spawn's raw candidates (their own rules alone).
-        for (var s = 0u; s < near; s++) {
-            let grid = feature_grid(job.level, s);
-            let sp = i32(spawn_word(s, 0u));
-            let g0 = vec2<i32>(div_floor(first.x - grid.z, sp), div_floor(first.y - grid.z, sp));
-            for (var n = li; n < u32(grid.y * grid.y); n += 64u) {
-                let g = g0 + vec2<i32>(i32(n % u32(grid.y)), i32(n / u32(grid.y)));
-                tile_placements[job.slot * features[4] + u32(grid.x) + n] = feature_candidate(job, lattice, s, g);
-            }
-        }
-        storageBarrier();
-        workgroupBarrier();
-        // The candidates reaching the footprint: excluded where an earlier
-        // spawn's raw candidate meets their footprint, else placed (the
-        // footprint's ranges raised over them).
-        for (var s = 0u; s < near; s++) {
-            let grid = feature_grid(job.level, s);
-            let sp = i32(spawn_word(s, 0u));
-            let g0 = vec2<i32>(div_floor(first.x - grid.z, sp), div_floor(first.y - grid.z, sp));
-            for (var n = li; n < u32(grid.y * grid.y); n += 64u) {
-                let g = g0 + vec2<i32>(i32(n % u32(grid.y)), i32(n / u32(grid.y)));
-                let p = tile_candidate(job, s, g);
-                if !placed_meets(p, first, last) { continue; }
-                let flo = p.anchor.xz - p.reach;
-                let fhi = p.anchor.xz + p.reach;
-                var excluded = false;
-                for (var e = 0u; e < s && !excluded; e++) {
-                    let ge = reaching_squares(e, flo, fhi);
-                    for (var gy = ge.y; gy <= ge.w && !excluded; gy++) {
-                        for (var gx = ge.x; gx <= ge.z && !excluded; gx++) {
-                            excluded = placed_meets(tile_candidate(job, e, vec2<i32>(gx, gy)), flo, fhi);
-                        }
-                    }
-                }
-                let at = job.slot * features[4] + u32(grid.x) + n;
-                if excluded {
-                    tile_placements[at].x |= 1u << 28u;
-                    continue;
-                }
-                let lo = p.anchor.y + bitcast<i32>(stamp_word(p.stamp, 1u));
-                let hi = ((lo + i32(stamp_word(p.stamp, 5u)) - 1) >> job.level) + 1;
-                atomicMin(&tile_ranges[t * 4u], lo >> job.level);
-                atomicMax(&tile_ranges[t * 4u + 1u], hi);
-                atomicMin(&tile_ranges[t * 4u + 2u], lo >> job.level);
-            }
-        }
-        storageBarrier();
-        workgroupBarrier();
+        if rise > 0 { atomicMax(&tile_ranges[t * 4u + 1u], atomicLoad(&tile_ranges[t * 4u + 3u]) + rise); }
     }
+    let near = feature_near(job.level);
+    let n = wg.x * 64u + li;
+    // The square's spawn (squares go spawn by spawn).
+    var s = 0u;
+    var grid = vec3<i32>(0);
+    for (; s < near; s++) {
+        grid = feature_grid(job.level, s);
+        if n < u32(grid.x + grid.y * grid.y) { break; }
+    }
+    if s >= near { return; }
+    let local = i32(n) - grid.x;
+    let sp = i32(spawn_word(s, 0u));
+    let first = vec2<i32>(job.cx * 64, job.cy * 64) << vec2<u32>(job.level);
+    let g = vec2<i32>(div_floor(first.x - grid.z, sp), div_floor(first.y - grid.z, sp)) + vec2<i32>(local % grid.y, local / grid.y);
+    var word = tile_block_word(t, s, g);
+    let p = placed_of(s, g, word);
+    let last = first + (64 << job.level) - 1;
+    if placed_meets(p, first, last) {
+        let flo = p.anchor.xz - p.reach;
+        let fhi = p.anchor.xz + p.reach;
+        var excluded = false;
+        for (var e = 0u; e < s && !excluded; e++) {
+            let ge = reaching_squares(e, flo, fhi);
+            for (var gy = ge.y; gy <= ge.w && !excluded; gy++) {
+                for (var gx = ge.x; gx <= ge.z && !excluded; gx++) {
+                    excluded = placed_meets(tile_block_candidate(t, job, e, vec2<i32>(gx, gy)), flo, fhi);
+                }
+            }
+        }
+        if excluded {
+            word.x |= 1u << 28u;
+        } else {
+            let lo = p.anchor.y + bitcast<i32>(stamp_word(p.stamp, 1u));
+            let hi = ((lo + i32(stamp_word(p.stamp, 5u)) - 1) >> job.level) + 1;
+            atomicMin(&tile_ranges[t * 4u], lo >> job.level);
+            atomicMax(&tile_ranges[t * 4u + 1u], hi);
+            atomicMin(&tile_ranges[t * 4u + 2u], lo >> job.level);
+        }
+    }
+    tile_placements[job.slot * features[4] + n] = word;
 }
 
 // Whether features changed cells of column `(x, y)` of chunk job `n`.

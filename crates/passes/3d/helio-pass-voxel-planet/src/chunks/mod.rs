@@ -11,6 +11,7 @@
 //! through the cut in a compute pass (shaders/chunk_draw.wgsl), and reports
 //! what rays met so detail goes where it is seen.
 
+mod candidates;
 pub mod classify;
 mod drawn;
 pub mod ground;
@@ -148,15 +149,16 @@ impl Default for Capacity {
     }
 }
 
-/// Footprints whose columns (and lean halos) stay on the GPU across frames,
-/// so a footprint's columns are computed once while it stays in use,
-/// whichever of its nodes are generated when (they were 60-75 % of a
-/// chunk's generation). They depend only on the terrain, never on edits.
-/// Least recently used slots are reused (a clock), never one this frame's
-/// batch uses.
-struct FootprintPool {
-    slots: FxHashMap<Footprint, u32>,
-    keys: Vec<Option<Footprint>>,
+/// GPU slots of data kept across frames by key: footprints' columns (and
+/// lean halos), so a footprint's columns are computed once while it stays
+/// in use, whichever of its nodes are generated when (they were 60-75 % of
+/// a chunk's generation), and feature candidate blocks
+/// (`candidates::CandidateBlocks`). Both depend only on the terrain, never
+/// on edits. Least recently used slots are reused (a clock), never one
+/// this frame's batch uses.
+struct SlotPool<K> {
+    slots: FxHashMap<K, u32>,
+    keys: Vec<Option<K>>,
     /// The frame each slot was last used in, and whether it was used since
     /// the clock's hand last passed.
     used: Vec<u64>,
@@ -164,15 +166,15 @@ struct FootprintPool {
     hand: usize,
 }
 
-impl FootprintPool {
+impl<K: Copy + Eq + std::hash::Hash> SlotPool<K> {
     fn new(size: usize) -> Self {
         Self { slots: FxHashMap::default(), keys: vec![None; size], used: vec![u64::MAX; size], referenced: vec![false; size], hand: 0 }
     }
 
-    /// `fp`'s slot at `frame`, and whether its columns are there already;
+    /// `key`'s slot at `frame`, and whether its data is there already;
     /// none when every slot serves this frame.
-    fn take(&mut self, fp: Footprint, frame: u64) -> Option<(u32, bool)> {
-        if let Some(&slot) = self.slots.get(&fp) {
+    fn take(&mut self, key: K, frame: u64) -> Option<(u32, bool)> {
+        if let Some(&slot) = self.slots.get(&key) {
             self.used[slot as usize] = frame;
             self.referenced[slot as usize] = true;
             return Some((slot, true));
@@ -190,8 +192,8 @@ impl FootprintPool {
             if let Some(old) = self.keys[h].take() {
                 self.slots.remove(&old);
             }
-            self.keys[h] = Some(fp);
-            self.slots.insert(fp, h as u32);
+            self.keys[h] = Some(key);
+            self.slots.insert(key, h as u32);
             self.used[h] = frame;
             self.referenced[h] = true;
             return Some((h as u32, false));
@@ -1275,6 +1277,9 @@ pub struct ChunkWorld {
     tile_slope_nodes: wgpu::ComputePipeline,
     tile_slope_heights: wgpu::ComputePipeline,
     tile_slopes: wgpu::ComputePipeline,
+    feature_block_quads: wgpu::ComputePipeline,
+    feature_block_nodes: wgpu::ComputePipeline,
+    feature_block_candidates: wgpu::ComputePipeline,
     tile_features: wgpu::ComputePipeline,
     chunk_columns: wgpu::ComputePipeline,
     chunk_build: wgpu::ComputePipeline,
@@ -1388,8 +1393,12 @@ pub struct ChunkWorld {
     feature_set: wgpu::Buffer,
     tile_placements: wgpu::Buffer,
     job_features: wgpu::Buffer,
-    /// Each feature workgroup's node quad table (`feature_quads`).
-    feature_quads: wgpu::Buffer,
+    /// Feature candidate blocks and the batch's block jobs and footprint
+    /// tables (`candidates`), the blocks kept, and the world's features
+    /// (their squares by level).
+    feature_blocks: wgpu::Buffer,
+    blocks: candidates::CandidateBlocks,
+    features: crate::features::CompiledFeatures,
     has_features: bool,
     tile_ranges: wgpu::Buffer,
     chunk_jobs: wgpu::Buffer,
@@ -1539,7 +1548,7 @@ pub struct ChunkWorld {
     plan: residency::Plan,
     events: Vec<residency::Event>,
     /// Footprints whose columns are on the GPU, and this update's frame.
-    pool: FootprintPool,
+    pool: SlotPool<Footprint>,
     frame_now: u64,
     /// Generated nodes with a chunk, and their layers by footprint.
     nodes: FxHashMap<NodeKey, Resident>,
@@ -1977,7 +1986,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("PLANE_WORLD", if plane { "true" } else { "false" })
         .replace("SCENE_MATERIALS", scene::STUB);
-    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\nconst FEATURE_GROUPS: u32 = {}u;\nconst FEATURE_QUADS: u32 = {}u;\n", crate::engine::HALO_GROUPS, crate::engine::FEATURE_GROUPS, crate::features::FEATURE_QUADS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
+    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS) + &candidates::wgsl_constants() + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
 impl ChunkWorld {
@@ -2060,6 +2069,9 @@ impl ChunkWorld {
         let tile_slope_nodes = compute("tile_slope_nodes_main");
         let tile_slope_heights = compute("tile_slope_heights_main");
         let tile_slopes = compute("tile_slopes_main");
+        let feature_block_quads = compute("feature_block_quads_main");
+        let feature_block_nodes = compute("feature_block_nodes_main");
+        let feature_block_candidates = compute("feature_block_candidates_main");
         let tile_features = compute("tile_features_main");
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
@@ -2506,6 +2518,9 @@ impl ChunkWorld {
             tile_slope_nodes,
             tile_slope_heights,
             tile_slopes,
+            feature_block_quads,
+            feature_block_nodes,
+            feature_block_candidates,
             tile_features,
             chunk_columns,
             chunk_build,
@@ -2577,19 +2592,22 @@ impl ChunkWorld {
             tile_jobs: buffer("chunk tile jobs", (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64, s),
             tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, wgpu::BufferUsages::STORAGE),
             // The tiles' nodes, the scratch nodes, the tiles' slope lattice
-            // rings, and the 8 a column's node words read past the last.
+            // rings, the block jobs' node quads, and the 8 a column's node
+            // words read past the last.
             tile_node_data: buffer(
                 "chunk tile nodes",
-                (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + u64::from(crate::engine::FEATURE_GROUPS) * planet.features().lattice_nodes as u64 + 8) * u64::from(crate::engine::node_words(&program)) * 4,
+                (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + if features.is_empty() { 0 } else { 4 * (candidates::BLOCK_JOBS * candidates::BLOCK_READS) as u64 } + 8) * u64::from(crate::engine::node_words(&program)) * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
             tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, wgpu::BufferUsages::STORAGE),
             tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, wgpu::BufferUsages::STORAGE),
             slope_lattice: buffer("chunk slope lattices", TILE_BATCH as u64 * SLOPE_LATTICE * 4, wgpu::BufferUsages::STORAGE),
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk features"), contents: bytemuck::cast_slice(&features.gpu_words()), usage: wgpu::BufferUsages::STORAGE }),
-            tile_placements: buffer("chunk footprint placements", (pool_size as u64 * placement_stride).max(8), wgpu::BufferUsages::STORAGE),
+            tile_placements: buffer("chunk footprint placements", (pool_size as u64 * placement_stride).max(8), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
             job_features: buffer("chunk job features", CHUNK_BATCH as u64 * FEATURE_JOB_WORDS * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
-            feature_quads: buffer("chunk feature node quads", u64::from(crate::engine::FEATURE_GROUPS) * crate::features::FEATURE_QUADS as u64 * 4, wgpu::BufferUsages::STORAGE),
+            feature_blocks: buffer("chunk feature candidate blocks", candidates::words(features) as u64 * 4, s),
+            blocks: candidates::CandidateBlocks::new(),
+            features: features.clone(),
             has_features: !features.is_empty(),
             // Four words a tile, then the batch's tile count.
             tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
@@ -2711,7 +2729,7 @@ impl ChunkWorld {
             worker: None,
             plan: Default::default(),
             events: Vec::new(),
-            pool: FootprintPool::new(pool_size),
+            pool: SlotPool::new(pool_size),
             frame_now: 0,
             nodes: Default::default(),
             footprint_nodes: Default::default(),
@@ -2763,7 +2781,7 @@ impl ChunkWorld {
                 entry(36, &self.feature_set),
                 entry(37, &self.tile_placements),
                 entry(38, &self.job_features),
-                entry(39, &self.feature_quads),
+                entry(39, &self.feature_blocks),
                 entry(4, &self.tile_ranges),
                 entry(5, &self.chunk_jobs),
                 entry(6, &self.column_masks),
@@ -2941,6 +2959,10 @@ impl ChunkWorld {
             chunks.push((cz, refs, detailed));
         }
         if chunks.is_empty() {
+            return 0;
+        }
+        // A footprint to compute keeps its candidate blocks this frame.
+        if self.has_features && !self.pool.slots.contains_key(&fp) && !self.blocks.reserve(&self.features, fp, self.frame_now) {
             return 0;
         }
         let Some((pool_slot, cached)) = self.pool.take(fp, self.frame_now) else { return 0 };
@@ -3537,6 +3559,23 @@ impl ChunkWorld {
             self.queue.write_buffer(&self.tile_ranges, 0, bytemuck::cast_slice(&empty));
             self.queue.write_buffer(&self.tile_ranges, (TILE_BATCH * 16) as u64, bytemuck::bytes_of(&(computed_count as i32)));
         }
+        // The frame's candidate block jobs and its computed footprints'
+        // block tables.
+        let block_jobs = if self.has_features && computed_count > 0 {
+            let computed = tile_jobs[..computed_count].iter().map(|t| Footprint { face: t.face as u8, level: t.level, cx: t.cx, cy: t.cy });
+            let (jobs, tiles, slots) = self.blocks.take_batch(&self.features, computed);
+            let words = |at: usize| at as u64 * 4;
+            if !jobs.is_empty() {
+                self.queue.write_buffer(&self.feature_blocks, words(candidates::JOBS_AT), bytemuck::cast_slice(&jobs));
+            }
+            self.queue.write_buffer(&self.feature_blocks, words(candidates::TILES_AT), bytemuck::cast_slice(&tiles));
+            if !slots.is_empty() {
+                self.queue.write_buffer(&self.feature_blocks, words(candidates::SLOTS_AT), bytemuck::cast_slice(&slots));
+            }
+            jobs.len() as u32
+        } else {
+            0
+        };
         if !chunk_jobs.is_empty() {
             self.queue.write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
             if self.has_features {
@@ -3592,9 +3631,17 @@ impl ChunkWorld {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile features"), timestamp_writes: stamp(None, 10) });
             pass.set_bind_group(0, &group, &[]);
+            if block_jobs > 0 {
+                pass.set_pipeline(&self.feature_block_quads);
+                pass.dispatch_workgroups(block_jobs, 1, 1);
+                pass.set_pipeline(&self.feature_block_nodes);
+                pass.dispatch_workgroups((4 * candidates::BLOCK_READS as u32).div_ceil(64), block_jobs, 1);
+                pass.set_pipeline(&self.feature_block_candidates);
+                pass.dispatch_workgroups(block_jobs, 1, 1);
+            }
             if computed_count > 0 && self.has_features {
                 pass.set_pipeline(&self.tile_features);
-                pass.dispatch_workgroups((computed_count as u32).min(crate::engine::FEATURE_GROUPS), 1, 1);
+                pass.dispatch_workgroups((self.features.stride as u32).div_ceil(64).max(1), computed_count as u32, 1);
             }
         }
         {
@@ -4897,6 +4944,14 @@ impl ChunkWorld {
     pub fn regenerate_all(&mut self) {
         let keys: Vec<NodeKey> = self.nodes.keys().copied().collect();
         self.stale.extend(keys);
+    }
+
+    /// The footprints the pool keeps with their slots, and the buffer of
+    /// their placements (`CompiledFeatures::stride` word pairs a slot, a
+    /// footprint's near spawns' squares as its level lays them out): what
+    /// tests compare with the CPU's.
+    pub fn footprint_placements(&self) -> (Vec<(Footprint, u32)>, &wgpu::Buffer) {
+        (self.pool.slots.iter().map(|(&fp, &slot)| (fp, slot)).collect(), &self.tile_placements)
     }
 }
 

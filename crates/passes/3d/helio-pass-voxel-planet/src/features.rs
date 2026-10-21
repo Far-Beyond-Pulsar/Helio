@@ -33,7 +33,8 @@
 //! stamps eight cells wide or more: legible). Each footprint of a level keeps the placements
 //! of the spawns up to its last near one (those the near ones' exclusion
 //! reads) on the GPU (`tile_features_main`), square by square over the
-//! footprint and a margin ([`CompiledFeatures::layout`]).
+//! footprint and a margin ([`CompiledFeatures::layout`]), copied from
+//! candidate blocks the GPU evaluates once each (`chunks::candidates`).
 //!
 //! Past them a spawn with a far form (a forest: `far_material`) draws as
 //! canopy over the area it grows in, as a mountain is drawn by its
@@ -64,13 +65,10 @@ pub const MAX_SPACING: u32 = 1024;
 pub const NEAR_LEVELS: u32 = 10;
 /// Most placement squares a footprint keeps (8 bytes each).
 pub const MAX_FOOTPRINT_SQUARES: usize = 16384;
-/// Node quads (the four level-0 terrain nodes a column blends) a
-/// `tile_features_main` workgroup keeps for its footprint's candidates: a
-/// table of the quads they read (`feature_quads`), kept at most half full,
-/// however wide the footprint (`LevelLayout::quads`).
-pub const FEATURE_QUADS: usize = 8192;
-/// Base columns between the terrain's nodes (`engine::NODE_COLUMNS`).
-const NODE_COLUMNS: i64 = 16;
+/// Squares along a side of a candidate block (`chunks::candidates`: a
+/// spawn's raw candidates are evaluated on the GPU by blocks of
+/// `BLOCK_SIDE` x `BLOCK_SIDE` squares, each once while kept).
+pub const BLOCK_SIDE: i32 = 8;
 
 /// A world's features: stamps and the spawns that place them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -226,28 +224,21 @@ pub struct CompiledFeatures {
     /// Most layers a placement's stamp reaches over and under its ground.
     pub above: i32,
     pub below: i32,
-    /// Each near level's placement squares ([`Self::layout`]), and the most
-    /// any footprint keeps; the most level-0 nodes a footprint's lattice
-    /// holds.
+    /// Each near level's placement squares ([`Self::layout`]), the most
+    /// any footprint keeps, and the most candidate blocks they span.
     pub levels: Vec<LevelLayout>,
     pub stride: usize,
-    /// Node slots a workgroup keeps (`FEATURE_QUADS` quads, four nodes
-    /// each), or none without near spawns.
-    pub lattice_nodes: usize,
+    pub blocks: usize,
 }
 
 /// A level's near spawns (a prefix of the set) and, for each, where its
-/// squares lie in a footprint's placements; the columns past a footprint
-/// its candidates read heights of (their anchors and footprints' corners),
-/// the nodes a side of the level-0 node grid over them (node quads are
-/// keyed by their place in it), and the most node quads its candidates
-/// read.
+/// squares lie in a footprint's placements; the squares a footprint keeps,
+/// and the most candidate blocks (`BLOCK_SIDE` squares a side) they span.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LevelLayout {
     pub spawns: Vec<SquareGrid>,
-    pub reach: i32,
-    pub lattice: u32,
-    pub quads: usize,
+    pub squares: u32,
+    pub blocks: usize,
 }
 
 /// A spawn's squares in a footprint's placements: from `offset`, `side` x
@@ -372,16 +363,12 @@ impl CompiledFeatures {
                 cover: ((1.0 - (-f64::from(s.density.clamp(0.0, 1.0)) * area / f64::from(s.spacing * s.spacing)).exp()) * 65_536.0).round() as u32,
             });
         }
-        let mut features = Self { stamps, spawns, above: above.max(0), below: below.max(0), levels: Vec::new(), stride: 0, lattice_nodes: 0 };
+        let mut features = Self { stamps, spawns, above: above.max(0), below: below.max(0), levels: Vec::new(), stride: 0, blocks: 0 };
         features.levels = (0..NEAR_LEVELS).map(|level| features.layout(level)).collect();
-        features.stride = features.levels.iter().map(|l| l.spawns.last().map_or(0, |g| (g.offset + g.side * g.side) as usize)).max().unwrap_or(0);
-        features.lattice_nodes = if features.levels.iter().any(|l| !l.spawns.is_empty()) { 4 * FEATURE_QUADS } else { 0 };
-        let quads = features.levels.iter().map(|l| l.quads).max().unwrap_or(0);
+        features.stride = features.levels.iter().map(|l| l.squares as usize).max().unwrap_or(0);
+        features.blocks = features.levels.iter().map(|l| l.blocks).max().unwrap_or(0);
         if features.stride > MAX_FOOTPRINT_SQUARES {
             return Err(format!("the spawns' placements take {} squares a footprint, more than {MAX_FOOTPRINT_SQUARES}: fewer spawns of narrow spacing", features.stride));
-        }
-        if 2 * quads > FEATURE_QUADS {
-            return Err(format!("a footprint's candidates read up to {quads} terrain node quads, more than {}: fewer spawns of narrow spacing", FEATURE_QUADS / 2));
         }
         Ok(features)
     }
@@ -471,26 +458,27 @@ impl CompiledFeatures {
             g.offset = offset;
             offset += g.side * g.side;
         }
-        // Anchors lie in squares meeting their grid's margin, an inset
-        // inside them, their footprints' corners a reach (at least a
-        // column) past them.
-        let reach = (0..near).map(|s| { let sp = &self.spawns[s]; margins[s] + i64::from(sp.spacing - sp.inset + sp.reach.max(1)) }).max().unwrap_or(0);
-        let lattice = if near == 0 { 0 } else { ((width + 2 * reach) / NODE_COLUMNS + 3) as u32 };
-        // A candidate reads its anchor's column, and its footprint's four
-        // corners' with a relief rule: no more quads than the grid holds.
-        let read: usize = (0..near).map(|s| (spawns[s].side * spawns[s].side) as usize * if self.spawns[s].max_relief < i32::MAX { 5 } else { 1 }).sum();
-        let quads = read.min((lattice * lattice) as usize);
-        LevelLayout { spawns, reach: reach as i32, lattice, quads }
+        // `side` squares from anywhere span this many blocks a side.
+        let blocks = spawns.iter().map(|g| (g.side as usize).div_ceil(BLOCK_SIDE as usize) + 1).map(|b| b * b).sum();
+        LevelLayout { spawns, squares: offset, blocks }
+    }
+
+    /// Spawn `s`'s squares in a footprint of `level` at columns `first`
+    /// (its first column, each way): the first square, and how many a side
+    /// (as `tile_features_main` of chunk_generate.wgsl lays them out).
+    pub fn squares(&self, level: u32, s: usize, first: [i32; 2]) -> ([i32; 2], i32) {
+        let g = &self.levels[level as usize].spawns[s];
+        let sp = self.spawns[s].spacing;
+        (first.map(|f| (f - g.margin).div_euclid(sp)), g.side as i32)
     }
 
     /// The set as `chunk_generate.wgsl` reads it (`feature_*`): a header
     /// (spawn count, where spawns, stamps and levels start, the footprint
-    /// stride, the lattice nodes), 24 words a spawn, 16 a stamp (its box's
-    /// lowest offset, reach, size, part count, where its parts start),
-    /// `4 (1 + MAX_SPAWNS)` a near level (the spawns whose placements it
-    /// keeps, the mask of those it draws, its lattice's reach and side, then
-    /// each spawn's offset, side, margin), then spawns' stamp lists and
-    /// stamps' parts (`CompiledPart::gpu_words`).
+    /// stride), 24 words a spawn, 16 a stamp (its box's lowest offset,
+    /// reach, size, part count, where its parts start), `4 (1 + MAX_SPAWNS)`
+    /// a near level (the spawns whose placements it keeps, the mask of those
+    /// it draws, its squares, then each spawn's offset, side, margin), then
+    /// spawns' stamp lists and stamps' parts (`CompiledPart::gpu_words`).
     pub fn gpu_words(&self) -> Vec<u32> {
         const HEADER: usize = 8;
         let spawns_at = HEADER;
@@ -498,7 +486,7 @@ impl CompiledFeatures {
         let levels_at = stamps_at + 16 * self.stamps.len();
         let mut data = levels_at + 4 * (1 + MAX_SPAWNS) * NEAR_LEVELS as usize;
         let mut w = vec![0u32; data];
-        w[..6].copy_from_slice(&[self.spawns.len() as u32, spawns_at as u32, stamps_at as u32, levels_at as u32, self.stride as u32, self.lattice_nodes as u32]);
+        w[..5].copy_from_slice(&[self.spawns.len() as u32, spawns_at as u32, stamps_at as u32, levels_at as u32, self.stride as u32]);
         let mut tail: Vec<u32> = Vec::new();
         let put = |tail: &mut Vec<u32>, words: &[u32]| {
             let at = data + tail.len();
@@ -545,8 +533,7 @@ impl CompiledFeatures {
             let at = levels_at + 4 * (1 + MAX_SPAWNS) * level;
             w[at] = l.spawns.len() as u32;
             w[at + 1] = (0..l.spawns.len()).filter(|&s| self.drawn(s, level as u32)).fold(0, |m, s| m | 1 << s);
-            w[at + 2] = l.reach as u32;
-            w[at + 3] = l.lattice;
+            w[at + 2] = l.squares;
             for (s, g) in l.spawns.iter().enumerate() {
                 w[at + 4 * (1 + s)..at + 4 * (1 + s) + 3].copy_from_slice(&[g.offset, g.side, g.margin as u32]);
             }

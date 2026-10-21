@@ -1894,6 +1894,61 @@ fn coarse_features_match(gpu: &Gpu, planet: &Planet, dir: DVec3, height: f64, do
     assert_eq!(wrong, 0);
 }
 
+/// Every footprint's placements are the CPU's, square by square, at every
+/// near level (the forest's: 0 and 1): from the ground and 60 m up, each
+/// square of each near spawn holds its raw candidate
+/// (`CompiledFeatures::candidate`), marked excluded where it reaches the
+/// footprint and an earlier spawn's raw candidate meets its own
+/// (`FeatureEval::placement`).
+#[test]
+fn footprint_placements_are_the_cpus() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, dir) = forest_planet();
+    let (features, grid) = (planet.features(), planet.grid());
+    let top = |f: u8, i: i32, j: i32| helio_pass_voxel_planet::features::ground(grid, planet.field(), f, i, j, 0, planet.column_height(f, i, j, 0));
+    let mut cache = Default::default();
+    let mut eval = helio_pass_voxel_planet::features::FeatureEval::new(features, grid, &top, &mut cache);
+    let mut by_level = [0usize; 10];
+    let (mut placed, mut excluded) = (0, 0);
+    for (height, down) in [(1.7, 0.3), (60.0, 0.8)] {
+        let eye = planet.surface_point(dir, height);
+        let up = eye.normalize();
+        let view = View::new(eye, (up.any_orthonormal_vector() - up * down).normalize().as_vec3(), [320, 180]);
+        let mut world = World::new(&gpu, &planet);
+        world.settle(&gpu, &planet, &view);
+        let (footprints, buffer) = world.chunks.footprint_placements();
+        let words = read_words(&gpu, buffer);
+        for (fp, slot) in footprints {
+            let near = features.near(fp.level);
+            let first = [fp.cx * 64 << fp.level, fp.cy * 64 << fp.level];
+            let last = first.map(|f| f + (64 << fp.level) - 1);
+            for s in 0..near {
+                let sp = &features.spawns[s];
+                let (g0, side) = features.squares(fp.level, s, first);
+                let offset = features.levels[fp.level as usize].spawns[s].offset as usize;
+                for n in 0..(side * side) as usize {
+                    let (gx, gy) = (g0[0] + n as i32 % side, g0[1] + n as i32 / side);
+                    let at = 2 * (slot as usize * features.stride + offset + n);
+                    let (x, y) = (words[at], words[at + 1]);
+                    let want = features.candidate(s, grid, &top, fp.face, gx, gy);
+                    let got = (x != 0).then(|| (sp.stamps[((x >> 21) & 0x7f) as usize], gx * sp.spacing + ((x >> 1) & 1023) as i32, gy * sp.spacing + ((x >> 11) & 1023) as i32, y as i32, (x >> 29) & 3, x >> 31 == 1));
+                    assert_eq!(got, want.map(|p| (p.stamp, p.i, p.j, p.k, p.turn, p.mirror)), "level {} footprint {fp:?} spawn {s} square {gx},{gy}", fp.level);
+                    let Some(p) = want else { continue };
+                    let r = features.stamps[p.stamp as usize].reach;
+                    let reaches = p.i - r <= last[0] && p.i + r >= first[0] && p.j - r <= last[1] && p.j + r >= first[1];
+                    let out = reaches && eval.placement(s, fp.face, gx, gy).is_none();
+                    assert_eq!((x >> 28) & 1 == 1, out, "level {} footprint {fp:?} spawn {s} square {gx},{gy}: excluded", fp.level);
+                    by_level[fp.level as usize] += 1;
+                    placed += usize::from(reaches && !out);
+                    excluded += usize::from(out);
+                }
+            }
+        }
+    }
+    eprintln!("candidates compared by level {by_level:?}: {placed} placed and {excluded} excluded over their footprints");
+    assert!(by_level[..2].iter().all(|&n| n > 1000) && placed > 1000 && excluded > 100, "{by_level:?} {placed} {excluded}");
+}
+
 /// What features cost to generate (`cargo test --release --test chunks
 /// feature_generation_cost -- --ignored --nocapture`): the bare planet's
 /// and the forest's views settled, generated again in full three times,

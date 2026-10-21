@@ -252,10 +252,6 @@ pub(crate) const TILE_NODES: u32 = 7;
 /// per lane of `tile_halo_main`'s `HALO_GROUPS` workgroups.
 pub(crate) const HALO_GROUPS: u32 = 128;
 pub(crate) const NODE_SCRATCH: u32 = HALO_GROUPS * 64;
-/// Workgroups of `tile_features_main`, each with its own level-0 node
-/// lattice in `tile_nodes` (after the slope rings,
-/// `CompiledFeatures::lattice_nodes` each).
-pub(crate) const FEATURE_GROUPS: u32 = 32;
 
 /// The column functions, each one call site of the program (compilers
 /// inline every call, and each copy of a large program is compile time):
@@ -400,8 +396,8 @@ fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lan
 // `origin`, node (x, y) at node slot `base + y row + x` of `tile_nodes`:
 // the material slopes' rings (`tile_slopes_main`: a ring a footprint of
 // the batch after the scratch nodes, at most 5x5 in rows of TILE_NODES)
-// and the features' level-0 lattices (`tile_features_main`: one a
-// workgroup after the rings, FEATURE_LATTICE_NODES each).
+// and the features' candidate block jobs' level-0 node quads after the
+// rings (`feature_block_nodes_main`: 2x2 grids, `BLOCK_READS` a job).
 const LATTICE_AT: u32 = NODE_SCRATCH_AT + {scratch}u;
 const FEATURE_LATTICE_AT: u32 = LATTICE_AT + {rings}u;
 
