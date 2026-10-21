@@ -175,7 +175,7 @@ fn resolved_view_publication_follows_resize() {
             .unwrap();
         assert_eq!(published, &pass.output_view);
         for history in &pass.histories {
-            for texture in [&history.color, &history.depth, &history.state, &history.noise, &history.coarse] {
+            for texture in [&history.color, &history.depth_coarse, &history.state, &history.noise] {
                 assert_eq!(texture.size(), pass.output_texture.size());
             }
         }
