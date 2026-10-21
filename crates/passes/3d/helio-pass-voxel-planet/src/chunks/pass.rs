@@ -233,6 +233,8 @@ const WRITES: &[&str] = &[
     "gbuffer_velocity",
     "directional_visibility",
     "local_visibility",
+    // helio-pass-tsr's STOCHASTIC_MASK.
+    "tsr_stochastic",
     helio_pass_gi::GI_HITS,
     helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
     helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
@@ -296,6 +298,9 @@ impl RenderPass for ChunkPass {
         result
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(view) = self.world.as_ref().and_then(ChunkWorld::stochastic_view) {
+            frame.write_texture_binding("tsr_stochastic", view, self.name());
+        }
         if let Some(view) = self.world.as_ref().and_then(ChunkWorld::sun_view) {
             frame.write_texture_binding("directional_visibility", view, self.name());
         }

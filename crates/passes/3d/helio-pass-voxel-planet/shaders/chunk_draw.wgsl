@@ -2385,6 +2385,12 @@ fn sky_at(p: vec2<i32>, at_hit: vec3<f32>, reach: f32, size: vec2<u32>) -> f32 {
     return textureLoad(sky_samples, block, 0).x;
 }
 
+// Whether hit face `f` at pixel `q` (distance `t`) is of cells under a
+// pixel and a half: the sun's occlusion maps light it (`shadow`).
+fn sub_pixel(f: Face, q: vec2<u32>, size: vec2<u32>, t: f32) -> bool {
+    return f.cell < 1.5 * pixel_width(q, size, t);
+}
+
 // The pixel block `b` samples this frame.
 fn sample_pixel(b: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
     let turn = params.table.w & 3u;
@@ -2405,7 +2411,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 && !sub_pixel(f, q, size, t) { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2424,7 +2430,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 && !sub_pixel(f, q, size, t) { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2518,6 +2524,27 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
     return walk(start, org, dir, t0, range, r, 96u, false, q);
 }
 
+// The share of each pixel's light its sun samples give stochastically
+// (helio-pass-tsr's STOCHASTIC_MASK: TSR integrates it rather than reject
+// history): a terrain hit facing the sun whose cells are one and a half to
+// three pixels wide, where the 2x2 blocks' rotating samples and the sun
+// disk's points cross cells the denoiser cannot tell apart. Steady
+// shadows, meshes and smaller cells (`sun_occlusion`), faces turned from
+// the sun and larger cells: none.
+@group(1) @binding(64) var out_stochastic: texture_storage_2d<rgba8unorm, write>;
+
+fn stochastic_share(p: vec2<i32>, size: vec2<u32>, v: vec2<u32>, mesh: vec4<f32>) -> f32 {
+    if v.x == NONE || steady_shadows() { return 0.0; }
+    let t = textureLoad(hit_distance, p, 0).r;
+    if mesh.w > 0.0 && length(mesh.xyz) < t { return 0.0; }
+    let c = chunk_frame(v.x);
+    let axis = (v.y >> 18u) & 3u;
+    let n = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u) * select(-1.0, 1.0, ((v.y >> 20u) & 1u) == 1u);
+    if dot(n, params.sun.xyz) <= 0.0 { return 0.0; }
+    let cells = length(c.m0.xyz) / max(pixel_width(vec2<u32>(p), size, t), 1e-6);
+    return select(1.0 - smoothstep(1.5, 3.0, cells), 0.0, cells < 1.5);
+}
+
 @compute @workgroup_size(8, 8)
 fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
@@ -2525,6 +2552,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = vec2<i32>(id.xy);
     let sun = params.sun.xyz;
     let v = textureLoad(hit_visibility, p, 0).xy;
+    textureStore(out_stochastic, p, vec4<f32>(stochastic_share(p, size, v, mesh_point(id.xy, size)), 0.0, 0.0, 0.0));
     // A mesh in front of the hit (or the sky): near the eye, the sun's
     // occlusion maps' finest level (a texture read where a walk cost a
     // pixel's own, and steady from frame to frame: shared walks flicker
@@ -2586,6 +2614,13 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         if dot(f.normal, sun) < 0.0 && through > 0.0 {
             lit = clamp(through, 0.0, 1.0) * sun_occlusion(at_hit - f.normal * (1.5 * f.cell));
         }
+    } else if sub_pixel(f, id.xy, size, t) && !steady {
+        // Cells under a pixel and a half: their own sun is aliasing (each
+        // frame's jitter and samples land on other cells), so the sun's
+        // occlusion maps', steady from frame to frame and no finer than
+        // the pixel sees.
+        lit = sun_occlusion(at_hit + f.normal * (0.5 * f.cell));
+        own = 1.0;
     } else {
         let found = sampled != 0u;
         lit = f32(sampled & 1u);

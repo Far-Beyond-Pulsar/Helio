@@ -1658,6 +1658,10 @@ pub struct Targets {
     /// (Rgba16Float, Helio's `directional_visibility`), and its view.
     pub sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
+    /// The share of each pixel's light its sun samples give stochastically
+    /// (helio-pass-tsr's `tsr_stochastic`; r, the rest unused).
+    stochastic: wgpu::Texture,
+    stochastic_view: wgpu::TextureView,
     /// Each pixel's sun as the walks found it, 0 or 1; whether it is its
     /// own walk's (1) or a neighbour's (0); whether a terrain hit is shown
     /// (bytes of a word a pixel, rows of the frame).
@@ -1743,6 +1747,7 @@ impl Targets {
         let a = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let s = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
         let sun = texture("chunk sun", wgpu::TextureFormat::Rgba16Float, s);
+        let stochastic = texture("chunk stochastic sun", wgpu::TextureFormat::Rgba8Unorm, s);
         let pixels = u64::from(size[0]) * u64::from(size[1]);
         let buffer = |label: &str, bytes: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: pixels * bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let pair = |label: &str| [buffer(label, 8), buffer(label, 8)];
@@ -1756,6 +1761,8 @@ impl Targets {
             exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
             sun_view: view(&sun),
             sun,
+            stochastic_view: view(&stochastic),
+            stochastic,
             sun_walked: buffer("chunk walked sun", 4),
             sky: texture("chunk sky", wgpu::TextureFormat::R32Float, s),
             local_seen: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local lights walked"), size: u64::from(size[0]) * u64::from(size[1]) * 8, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),
@@ -2229,6 +2236,7 @@ impl ChunkWorld {
                 scene_depth,
                 uniform(62, wgpu::ShaderStages::COMPUTE),
                 sun_occlusion_maps_entry(63),
+                storage_texture(64, wgpu::TextureFormat::Rgba8Unorm),
             ],
         });
         let sky_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -4353,7 +4361,7 @@ impl ChunkWorld {
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(41, &targets.sun_walked), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth), entry(62, &occlusion.frame), view_entry(63, &occlusion.maps_view)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(41, &targets.sun_walked), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth), entry(62, &occlusion.frame), view_entry(63, &occlusion.maps_view), view_entry(64, &targets.stochastic_view)],
             });
             let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sky samples"),
@@ -4610,6 +4618,12 @@ impl ChunkWorld {
     pub fn set_appearance(&mut self, appearance: &crate::engine::TerrainAppearance) {
         let (materials, detail) = crate::engine::material_table(appearance);
         self.queue.write_buffer(&self.materials, 0, bytemuck::bytes_of(&ChunkMaterials { materials, detail }));
+    }
+
+    /// The share of each pixel's light the last draw's sun samples gave
+    /// stochastically (helio-pass-tsr's `tsr_stochastic`).
+    pub fn stochastic_view(&self) -> Option<&wgpu::TextureView> {
+        self.targets.as_ref().map(|t| &t.stochastic_view)
     }
 
     /// The last draw's sun visibility (Helio's `directional_visibility`).

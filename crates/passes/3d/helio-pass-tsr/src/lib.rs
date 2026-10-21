@@ -892,10 +892,11 @@ impl RenderPass for TsrPass {
                 .ok_or_else(|| helio_core::Error::InvalidPassConfig(
                     "TSR coverage mode requires transparency_reactivity".into()))?
         } else { &self.reactivity_fallback_view };
+        // A frame no pass published the mask for (its writer has nothing
+        // drawn yet) reads zero: deterministic shading.
         let stochastic_view = if self.stochastic_mask {
             ctx.registry.read_texture_view(helio_core::ResourceKey::new(STOCHASTIC_MASK), "TSR")
-                .ok_or_else(|| helio_core::Error::InvalidPassConfig(
-                    format!("TSR stochastic mask mode requires {STOCHASTIC_MASK}")))?
+                .unwrap_or(&self.reactivity_fallback_view)
         } else { &self.reactivity_fallback_view };
         let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone(), stochastic_view.clone());
         if self.bind_group_key.as_ref() != Some(&key) {

@@ -1155,16 +1155,13 @@ fn build_default_graph_internal_with_lens_user(
     // When TSR is active it provides superior temporal anti-aliasing, so FXAA
     // would only add blur on top of an already-sharp image.  Gate FXAA behind
     // the TSR flag so the two don't compete.
+    // The voxel terrain's sun samples rotate over blocks of pixels: where its
+    // cells are a pixel or two wide, TSR integrates them (`tsr_stochastic`).
     let aa = match config.tsr_quality {
-        Some(quality) => SceneAa::Tsr(TsrPass::new(
-            device,
-            iw,
-            ih,
-            config.width,
-            config.height,
-            config.surface_format,
-            quality,
-        )),
+        Some(quality) => {
+            let tsr = TsrPass::new(device, iw, ih, config.width, config.height, config.surface_format, quality);
+            SceneAa::Tsr(if gi { tsr.with_stochastic_mask() } else { tsr })
+        }
         None => SceneAa::Fxaa,
     };
     // Transparent pass — alpha-blended geometry (simple fixed shader).
