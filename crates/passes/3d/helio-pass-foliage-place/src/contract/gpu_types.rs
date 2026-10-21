@@ -112,7 +112,7 @@ pub struct BladeParams {
     pub aux: u8,
     /// Index into the foliage type descriptor array.
     pub type_id: u8,
-    /// Free-form variant selector consumed by the material.
+    /// Variant selector consumed by the material.
     pub variant: u8,
     /// The ground's linear colour under the tuft (RGB565), or `None`.
     pub colour: Option<[f32; 3]>,
@@ -441,8 +441,8 @@ pub enum FoliageKind {
     /// height rounds to, at most [`crate::FOLIAGE_STACK_CUBES`]) upright on one grid,
     /// no yaw. Placement stands each on a cube's centre (no two share one) and shapes
     /// tufts: stacks lean out of their tuft in whole-cube steps, tallest at its centre.
-    /// Wind moves each cube whole. Drawn as procedural strips of the faces turned to
-    /// the eye ([`crate::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`]).
+    /// Wind moves each cube whole. Drawn as boxes, the faces turned to the eye
+    /// (`FoliageBoxesPass` expands them, the draw places nine corners a box).
     Block = 3,
 }
 
@@ -1206,13 +1206,13 @@ mod tests {
     fn blade_accessors_agree_with_the_unpacked_view() {
         let params = BladeParams {
             type_id: 42,
-            variant: 200,
+            variant: 2,
             seed: 0x1234,
             ..BladeParams::default()
         };
         let instance = pack_blade(params);
         assert_eq!(instance.type_id(), 42);
-        assert_eq!(instance.variant(), 200);
+        assert_eq!(instance.variant(), 2);
         assert_eq!(instance.seed(), 0x1234);
         let decoded = unpack_blade(&instance);
         assert_eq!(decoded.type_id, instance.type_id());

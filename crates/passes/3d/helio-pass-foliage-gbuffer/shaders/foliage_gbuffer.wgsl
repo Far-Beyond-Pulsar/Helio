@@ -43,8 +43,8 @@
 //
 // ── Motion vectors ──────────────────────────────────────────────────────────
 //
-// `helio_wind_offset` is evaluated TWICE per vertex, at `globals.clock.x` and at
-// `globals.clock.y` (the frame clock and its previous value), producing a current and
+// The wind is evaluated for two times per vertex (`helio_wind_offset_pair`), at
+// `globals.clock.x` and at `globals.clock.y` (the frame clock and its previous value), producing a current and
 // a previous world position. Without the pair every blade reports zero motion and TAA
 // smears moving grass.
 
@@ -65,13 +65,10 @@ const FOLIAGE_FLAG_DEBUG_LOD: u32 = 2u;
 const FOLIAGE_VISIBLE_TILE_SHIFT: u32 = 16u;
 const FOLIAGE_VISIBLE_LOCAL_MASK: u32 = 0xffffu;
 
-/// Cubes a blocky blade rises by at most (`FOLIAGE_STACK_CUBES`), and the boxes its strip
-/// holds at L0 and L1 (`FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`: 11 vertices a box, less 2).
-const FOLIAGE_STACK_CUBES: u32 = 24u;
+/// The boxes a blocky blade draws at most at L0 and L1, and the sideways steps an L1
+/// blade takes at most (its runs fit 5 boxes; L0's are `FOLIAGE_STACK_STEPS`).
 const FOLIAGE_L0_BOXES: u32 = 8u;
 const FOLIAGE_L1_BOXES: u32 = 5u;
-/// Cubes a blocky blade steps sideways by at most at L0, and at L1 (its runs fit 5 boxes).
-const FOLIAGE_STACK_STEPS: u32 = 4u;
 const FOLIAGE_L1_STEPS: u32 = 2u;
 
 /// How far a blocky blade's shading normal leans from the ground's up towards its face's
@@ -108,7 +105,8 @@ struct FoliageGlobals {
     lod_fade_band: f32,
     /// Global multiplier on how far interactors press foliage over.
     interaction_strength: f32,
-    _pad: f32,
+    /// Elements per `visible_blades` region (a LOD's).
+    region_stride: u32,
 }
 
 /// An interactor as `FoliagePlacePass` gathers them (`foliage_interactors.wgsl`):
@@ -153,6 +151,46 @@ struct FoliageLod {
 @group(0) @binding(10) var<uniform> foliage_bands: FoliageBands;
 
 @group(1) @binding(0) var<uniform> lod_info: FoliageLod;
+
+/// Blocky foliage as boxes: `cs_boxes` writes them (group 2), `vs_box` draws them.
+struct FoliageBox {
+    /// Render-space centre across the ground, at the shape's root height; its tile (the
+    /// basis).
+    centre: vec3<f32>,
+    slot: u32,
+    /// Half extents along the tile's u and v.
+    half: vec2<f32>,
+    /// Bottom and top over the root (f16 pair).
+    heights: u32,
+    /// The shape's height and the height fraction its tip colour starts at (f16 pair).
+    shape: u32,
+    /// Displacement this frame (wind, interactors), render space.
+    now: vec3<f32>,
+    /// The ground's colour (RGB565; 0 none), the type (bits 16..24), the LOD (24..26).
+    look: u32,
+    /// Displacement last frame.
+    prev: vec3<f32>,
+    /// Tint (two unorm8).
+    tint: u32,
+}
+
+/// The boxes so far, those that did not fit, and the box draw's indirect arguments.
+struct BoxState {
+    count: atomic<u32>,
+    overflow: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+}
+
+@group(0) @binding(11) var<storage, read> boxes: array<FoliageBox>;
+@group(2) @binding(0) var<storage, read_write> boxes_out: array<FoliageBox>;
+@group(2) @binding(1) var<storage, read_write> box_state: BoxState;
+/// The cull's draws (`DrawIndirectArgs` per LOD): each LOD's visible records.
+@group(2) @binding(2) var<storage, read> lod_draws: array<vec4<u32>>;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Small helpers
@@ -238,50 +276,6 @@ fn foliage_pressed(press: vec4<f32>, up: vec3<f32>, height: f32, lowest: f32) ->
 // Blades of a tuft
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// One blade of a tuft, from its tuft's seed, its index `j` of `n` and its type: how far
-/// out it stands (0 the centre blade, 1 the rim), its direction (radians, and as one of
-/// the grid's eight compass steps for blocky blades), its lean (run over rise), its curve
-/// (extra lean at the tip), whether it lies over, its height and width (metres, before
-/// the tuft's scale) and a tint.
-struct Blade {
-    rim: f32,
-    angle: f32,
-    compass: u32,
-    lean: f32,
-    curve: f32,
-    fallen: bool,
-    height: f32,
-    width: f32,
-    tint: vec2<f32>,
-    seed: u32,
-}
-
-fn tuft_blade(ty: FoliageType, record: BladeInstance, j: u32, n: u32) -> Blade {
-    let seed = record.packed_colour_seed >> 16u;
-    let h = foliage_hash(seed * 0x9e3779b1u + j * 0x85ebca6bu + 0x27d4eb2fu);
-    let h2 = foliage_hash(h ^ 0x165667b1u);
-    let turn = f32((record.packed_scale_type >> 8u) & 0xffu) / 256.0;
-    var b: Blade;
-    // The first blade is the tuft's centre; the others spread over the rim.
-    b.rim = select(0.35 + 0.65 * foliage_unit(h), 0.0, j == 0u);
-    b.angle = TAU * (turn + (f32(j) + 0.35 * foliage_unit(h2)) / f32(max(n, 1u)));
-    // Eight compass steps, the blades taking every third so up to eight point apart.
-    b.compass = (u32(turn * 8.0) + j * 3u) % 8u;
-    b.fallen = foliage_unit(foliage_hash(h ^ 0x9e3779b9u)) < ty.fall_chance && j != 0u;
-    b.lean = mix(ty.lean_min, ty.lean_max, b.rim) * (0.75 + 0.5 * foliage_unit(h2 >> 3u));
-    b.curve = ty.curve * (0.6 + 0.8 * foliage_unit(h >> 5u));
-    let tuft_height = mix(ty.height_min, ty.height_max, f32(record.packed_scale_type & 0xffu) / 255.0);
-    b.height = tuft_height * (1.0 - 0.35 * b.rim) * (0.75 + 0.5 * foliage_unit(h >> 11u));
-    if b.fallen {
-        b.lean = max(b.lean, 1.0) * 2.5;
-        b.height = b.height * 0.6;
-    }
-    b.width = mix(ty.width_min, ty.width_max, foliage_unit(h2 >> 7u));
-    b.tint = vec2<f32>(foliage_unit(h2 >> 13u), foliage_unit(h >> 17u));
-    b.seed = foliage_hash(h2) & 0xffffu;
-    return b;
-}
-
 // ── Smooth blades ───────────────────────────────────────────────────────────────
 
 /// A point of a smooth blade's spine at `s` (0 root, 1 tip) in its own frame (+z its lean
@@ -363,17 +357,6 @@ struct Box {
     y1: f32,
 }
 
-/// How many cubes a blocky blade rises and steps sideways (`v`, `h`), for cubes of edge
-/// `cube`: its height in cubes, and its lean (and curve) over that rise, at most `steps`.
-fn block_steps(b: Blade, cube: f32, scale: f32, steps: u32) -> vec2<u32> {
-    let rise = min(u32(round(b.height * scale / cube)), FOLIAGE_STACK_CUBES);
-    if rise == 0u {
-        return vec2<u32>(0u);
-    }
-    let side = min(u32(round(f32(rise) * max(b.lean + b.curve, 0.0))), steps);
-    return vec2<u32>(rise, side);
-}
-
 /// The sideways step the path has reached after rising to cube `v` of `rise`: it leans
 /// out by `lean` and bends by `curve` over the rise, reaching `side` steps at the top.
 fn block_target(b: Blade, v: u32, rise: u32, side: u32) -> u32 {
@@ -385,12 +368,42 @@ fn block_target(b: Blade, v: u32, rise: u32, side: u32) -> u32 {
     return min(u32(round(f32(side) * clamp(g, 0.0, 1.0))), side);
 }
 
-/// Box `want` of a blocky blade drawn in runs (at most `max_steps` sideways), and how many
-/// there are. The blade is a connected staircase of cubes: from the root
-/// cube, each next cube one up or one step along its compass direction, stepping out as
-/// its lean demands. A straight run up is one box (no hidden tops inside it); an axis step
-/// sideways too; diagonal steps are a cube each. Blades past the tuft's first share its
-/// root column, so they start at their first sideways step (no two blades draw one cube).
+/// The level (cube up) a blocky blade takes its `h`-th sideways step at: the first whose
+/// target (`block_target`) reaches `h`, else the top. From the lean curve's inverse, then
+/// checked against the target itself, so it is exactly where a cube-by-cube walk steps
+/// (`geometry::block_level`).
+fn block_level(b: Blade, h: u32, rise: u32, side: u32) -> u32 {
+    if rise <= 1u {
+        return 0u;
+    }
+    let top = rise - 1u;
+    let q = (f32(h) - 0.5) / f32(max(side, 1u)) * max(b.lean + b.curve, 1.0e-4);
+    var t = 1.0;
+    if b.curve > 1.0e-6 {
+        t = (-b.lean + sqrt(max(b.lean * b.lean + 4.0 * b.curve * q, 0.0))) / (2.0 * b.curve);
+    } else if b.lean > 1.0e-6 {
+        t = q / b.lean;
+    }
+    var v = min(u32(max(ceil(t * f32(top)), 0.0)), top);
+    loop {
+        if v == 0u || block_target(b, v - 1u, rise, side) < h { break; }
+        v -= 1u;
+    }
+    loop {
+        if v >= top || block_target(b, v, rise, side) >= h { break; }
+        v += 1u;
+    }
+    return v;
+}
+
+/// Box `want` of a blocky blade (at most `max_steps` sideways), and how many there are.
+/// The blade is a connected staircase of cubes: from the root cube, each next one up or
+/// one step along its compass direction, stepping out as its lean demands. A run up a
+/// column is one box (no hidden tops inside it), an axis step's cubes at one level one
+/// box, diagonal steps a cube each. Blades past the tuft's first share its root column,
+/// so they start at their first sideways step (no two blades draw one cube). Found from
+/// the levels of the (at most four) sideways steps, not by walking cube by cube
+/// (`geometry::block_boxes_by_levels`).
 struct BlockPath {
     found: Box,
     boxes: u32,
@@ -398,7 +411,6 @@ struct BlockPath {
 
 fn block_path(b: Blade, j: u32, cube: f32, scale: f32, leafy: bool, want: u32, max_steps: u32) -> BlockPath {
     var out = BlockPath(Box(vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0), 0u);
-    let merge = FOLIAGE_STACK_CUBES;
     let steps = block_steps(b, cube, scale, max_steps);
     let rise = steps.x;
     // A blade past the first steps out of the shared root column at least once, or it
@@ -413,68 +425,69 @@ fn block_path(b: Blade, j: u32, cube: f32, scale: f32, leafy: bool, want: u32, m
     // smaller never fights it for depth.
     let size = cube * select(1.0, 0.86, j >= 8u);
     let height = cube * select(1.0, 0.6, leafy);
-    // A leaf is a plate across its direction (the type's width), a blade a cube.
+    // A leaf is a plate across its direction (the type's width), a blade a cube; along
+    // the direction a run up is a cube.
     let across = select(size, max(b.width, size), leafy);
+    let perp = vec2<f32>(abs(dir.y), abs(dir.x)) * 0.5 * across;
+    let column_half = select(max(abs(dir) * (0.5 * size), perp), vec2<f32>(0.5 * size), diagonal);
     var h = 0u;
-    var v = 0u;
-    // The current run: its first cube and how many, and which way it runs (0 up,
-    // 1 sideways).
-    var run_h = 0u;
-    var run_v = 0u;
-    var run_len = 1u;
-    var run_way = 0u;
-    var started = j == 0u;
+    var start_v = 0u;
+    var step = 1u;
+    var level = 0u;
+    if side > 0u {
+        level = block_level(b, 1u, rise, side);
+    }
     loop {
-        // The next move: sideways while behind the lean's target, else up.
-        var way = 2u;
-        if h < block_target(b, v, rise, side) {
-            way = 1u;
-        } else if v + 1u < rise {
-            way = 0u;
-        } else if h < side {
-            way = 1u;
+        if step > side {
+            break;
         }
-        let last = way == 2u;
-        // A run ends at a turn, after `merge` cubes up, at a diagonal step, or at the end.
-        let breaks = last || way != run_way || (way == 0u && run_len >= merge) || (way == 1u && diagonal) || !started;
-        if breaks && started {
-            if out.boxes == want || (last && out.boxes < want) {
-                let first = dir * f32(run_h) * size;
-                var extent = vec2<f32>(0.0);
-                if run_way == 1u && !diagonal {
-                    extent = dir * f32(run_len - 1u) * size;
-                }
-                let centre = first + extent * 0.5;
-                // Half extents across the ground: along the blade's direction a cube (a
-                // run's length sideways), across it the blade's width.
-                let along = abs(dir) * (0.5 * size) + abs(extent) * 0.5;
-                let other = vec2<f32>(abs(dir.y), abs(dir.x)) * 0.5 * across;
-                var half = max(along, other);
-                if diagonal {
-                    half = vec2<f32>(0.5 * size);
-                }
-                let up_len = select(1u, run_len, run_way == 0u);
-                out.found = Box(centre, half, f32(run_v) * height, f32(run_v + up_len) * height);
+        // Up the column to this step's level (the shared root column is the first
+        // blade's).
+        if h > 0u || j == 0u {
+            if out.boxes == want {
+                out.found = Box(dir * f32(h) * size, column_half, f32(start_v) * height, f32(level + 1u) * height);
             }
             out.boxes += 1u;
         }
-        if last {
-            break;
+        // The steps taken at this level, and the next level.
+        var last = step;
+        var next = rise;
+        loop {
+            if last >= side {
+                break;
+            }
+            next = block_level(b, last + 1u, rise, side);
+            if next != level {
+                break;
+            }
+            last += 1u;
         }
-        if way == 0u {
-            v += 1u;
+        let y0 = f32(level) * height;
+        if diagonal {
+            if want >= out.boxes && want <= out.boxes + (last - step) {
+                out.found = Box(dir * f32(step + want - out.boxes) * size, vec2<f32>(0.5 * size), y0, y0 + height);
+            }
+            out.boxes += last - step + 1u;
         } else {
-            h += 1u;
+            if out.boxes == want {
+                let first = dir * f32(step) * size;
+                let extent = dir * f32(last - step) * size;
+                let along = abs(dir) * (0.5 * size) + abs(extent) * 0.5;
+                out.found = Box(first + extent * 0.5, max(along, perp), y0, y0 + height);
+            }
+            out.boxes += 1u;
         }
-        if breaks {
-            run_h = h;
-            run_v = v;
-            run_len = 1u;
-            run_way = way;
-            started = started || way == 1u;
-        } else {
-            run_len += 1u;
+        h = last;
+        start_v = level + 1u;
+        step = last + 1u;
+        level = next;
+    }
+    // Up to the top.
+    if start_v < rise && (h > 0u || j == 0u) {
+        if out.boxes == want {
+            out.found = Box(dir * f32(h) * size, column_half, f32(start_v) * height, f32(rise) * height);
         }
+        out.boxes += 1u;
     }
     return out;
 }
@@ -511,31 +524,6 @@ fn box_vertex(bx: Box, eye: vec2<f32>, k: u32) -> BoxVertex {
     );
 }
 
-/// Strip position `vertex_index` over boxes of 11 vertices each (9 faces, then the box's
-/// last vertex again and the next box's first): the box and its vertex, and whether the
-/// position is past the strip's end (index 9 of the last box repeats its last vertex;
-/// later ones are a zero-area tail).
-struct StripSlot {
-    box_index: u32,
-    k: u32,
-    past: bool,
-}
-
-fn strip_slot(vertex_index: u32, boxes: u32) -> StripSlot {
-    if boxes == 0u || vertex_index > 11u * (boxes - 1u) + 9u {
-        return StripSlot(0u, 0u, true);
-    }
-    var b = vertex_index / 11u;
-    var k = vertex_index % 11u;
-    if k == 9u {
-        k = 8u;
-    } else if k == 10u {
-        b += 1u;
-        k = 0u;
-    }
-    return StripSlot(b, k, false);
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Vertex stage
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -568,63 +556,74 @@ fn tail() -> VertexOutput {
     return out;
 }
 
+/// A visible record and what every shape drawn from it starts from.
+struct Instance {
+    drawn: bool,
+    record: BladeInstance,
+    slot: u32,
+    basis: BladeBasis,
+    root: vec3<f32>,
+    ty: FoliageType,
+    blocky: bool,
+    n: u32,
+    scale: f32,
+}
+
+/// Visible record `index` of LOD `lod` (its region at `region_base`): its tile, frame
+/// and type, and the scale it draws at; not drawn where its band has faded it, the kept
+/// share has dropped it, the type's reach has ended, or (the near band) the other LOD
+/// draws it: tufts switch from L0 to L1 a tuft at a time, by their own hash against the
+/// share of the switch band behind them (no dithered, see-through blades).
+fn foliage_instance(lod: u32, region_base: u32, index: u32) -> Instance {
+    var out: Instance;
+    let reference = visible_blades[region_base + index];
+    out.slot = reference >> FOLIAGE_VISIBLE_TILE_SHIFT;
+    let tile = tile_table[out.slot];
+    out.record = blade_arena[tile.blade_offset + (reference & FOLIAGE_VISIBLE_LOCAL_MASK)];
+    let frame = tile_frames[out.slot];
+    out.basis = foliage_basis(frame);
+    out.root = foliage_blade_root(tile, frame, out.record);
+    out.ty = foliage_types[(out.record.packed_scale_type >> 16u) & 0xffu];
+    out.blocky = (out.ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK;
+    out.n = foliage_tuft_blades(out.record);
+    let band = foliage_bands.bands[foliage_band_of_slot(out.slot)];
+    let d = distance(out.root, cameras[0].position_near.xyz);
+    out.scale = foliage_tuft_scale(band, d, foliage_tuft_rank(out.record)) * foliage_type_reach(out.ty, d);
+    out.drawn = out.scale > 0.0;
+    if lod <= 1u {
+        let boundary = out.ty.lod0 * globals.lod_quality_scale;
+        let f = smoothstep(boundary - globals.lod_fade_band, boundary, d);
+        let t = foliage_unit(foliage_hash((out.record.packed_colour_seed >> 16u) ^ 0x6c8e9cf5u));
+        out.drawn = out.drawn && ((lod == 0u) == (t < 1.0 - f));
+    }
+    return out;
+}
+
+/// Smooth foliage, a strip a record: L0 and L1 a blade, L2 a tuft of cards, L3 a tuft as
+/// three broad blades. Blocky foliage is drawn as boxes (`cs_boxes`, `vs_box`).
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> VertexOutput {
-    // ── Resolve the record ────────────────────────────────────────────────────
     // `instance_index` is relative to this draw (the producer writes `first_instance =
     // 0`); the LOD's region base comes from the per-LOD uniform.
-    let reference = visible_blades[lod_info.region_base + instance_index];
-    let slot = reference >> FOLIAGE_VISIBLE_TILE_SHIFT;
-    let tile = tile_table[slot];
-    let frame = tile_frames[slot];
-    let record = blade_arena[tile.blade_offset + (reference & FOLIAGE_VISIBLE_LOCAL_MASK)];
-    let basis = foliage_basis(frame);
-    let band = foliage_bands.bands[foliage_band_of_slot(slot)];
-    let root = foliage_blade_root(tile, frame, record);
-    let ty = foliage_types[(record.packed_scale_type >> 16u) & 0xffu];
-    let camera_pos = cameras[0].position_near.xyz;
-    let distance_to_camera = distance(root, camera_pos);
-
-    // ── How big the tuft draws ────────────────────────────────────────────────
-    let scale = foliage_tuft_scale(band, distance_to_camera, foliage_tuft_rank(record))
-        * foliage_type_reach(ty, distance_to_camera);
-    if scale <= 0.0 {
+    let lod = lod_info.lod;
+    let it = foliage_instance(lod, lod_info.region_base, instance_index);
+    if it.blocky || !it.drawn {
         return tail();
     }
-    // The near band's tufts switch from L0 to L1 across the type's L0 distance, each whole
-    // at one level (no dithered, see-through blades): by its own hash against the share
-    // of the band behind it.
-    let lod = lod_info.lod;
-    if lod <= 1u {
-        let boundary = ty.lod0 * globals.lod_quality_scale;
-        let f = smoothstep(boundary - globals.lod_fade_band, boundary, distance_to_camera);
-        let t = foliage_unit(foliage_hash((record.packed_colour_seed >> 16u) ^ 0x6c8e9cf5u));
-        if (lod == 0u) != (t < 1.0 - f) {
-            return tail();
-        }
-    }
-
-    let n = foliage_tuft_blades(record);
-    let blocky = (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK;
-    let eye = camera_pos - root;
-    let eye_local = vec2<f32>(dot(eye, basis.tangent), dot(eye, basis.bitangent));
+    let ty = it.ty;
+    let record = it.record;
+    let basis = it.basis;
+    let root = it.root;
+    let n = it.n;
+    let scale = it.scale;
 
     var local = vec3<f32>(0.0);
     var normal = vec3<f32>(0.0, 1.0, 0.0);
     var height_frac = 0.0;
-    var total = 1.0e-3;
-    // Where the wind is evaluated: the vertex, or (blocky) its box's centre, whole.
-    var anchor = vec3<f32>(0.0);
-    var anchor_frac = 0.0;
-    // How high the lowest point moving with the anchor stands (a box's bottom; a smooth
-    // vertex's own height): the wind may lower it to the ground, never under it.
-    var lowest = 0.0;
-    // The height fraction the tip colour starts at (a blocky blade's top cube).
-    var tip_from = 0.72;
     var blade_seed = record.packed_colour_seed >> 16u;
     var tint = vec2<f32>(0.5);
 
-    if lod <= 1u && !blocky {
+    if lod <= 1u {
         // One smooth blade of the tuft.
         let j = foliage_blade_index(record);
         let b = tuft_blade(ty, record, j, n);
@@ -637,36 +636,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
         local = v.local;
         normal = v.normal;
         height_frac = v.height_frac;
-        anchor = local;
-        anchor_frac = height_frac;
         blade_seed = b.seed;
         tint = b.tint;
-    } else if lod <= 1u {
-        // One blocky blade of the tuft: its runs of cubes, at L1 with fewer jogs sideways.
-        let j = foliage_blade_index(record);
-        let b = tuft_blade(ty, record, j, n);
-        let cube = max(ty.width_min, 1.0e-3);
-        let leafy = ty.width_max > 1.5 * ty.width_min;
-        let max_steps = select(FOLIAGE_L1_STEPS, FOLIAGE_STACK_STEPS, lod == 0u);
-        let count = block_path(b, j, cube, scale, leafy, 0xffffffffu, max_steps).boxes;
-        let s = strip_slot(vertex_index, min(count, select(FOLIAGE_L1_BOXES, FOLIAGE_L0_BOXES, lod == 0u)));
-        if s.past {
-            return tail();
-        }
-        let bx = block_path(b, j, cube, scale, leafy, s.box_index, max_steps).found;
-        let corner = box_vertex(bx, eye_local, s.k);
-        local = corner.local;
-        normal = corner.normal;
-        let rise = block_steps(b, cube, scale, max_steps).x;
-        total = f32(rise) * cube * select(1.0, 0.6, leafy);
-        height_frac = local.y / max(total, 1.0e-3);
-        anchor = vec3<f32>(bx.centre.x, 0.5 * (bx.y0 + bx.y1), bx.centre.y);
-        anchor_frac = anchor.y / max(total, 1.0e-3);
-        lowest = bx.y0;
-        tip_from = 1.0 - 1.0 / f32(max(rise, 1u)) - 1.0e-3;
-        blade_seed = b.seed;
-        tint = b.tint;
-    } else if lod == 2u && !blocky {
+    } else if lod == 2u {
         // A whole smooth tuft, each blade a card: 4 vertices and 2 joins each.
         let j = vertex_index / 6u;
         var k = vertex_index % 6u;
@@ -685,41 +657,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
         local = v.local;
         normal = v.normal;
         height_frac = v.height_frac;
-        anchor = local;
-        anchor_frac = height_frac;
         tint = b.tint;
-    } else if lod == 2u {
-        // A whole blocky tuft, each blade one box from its root to its top.
-        let s = strip_slot(vertex_index, n);
-        if s.past {
-            return tail();
-        }
-        let b = tuft_blade(ty, record, s.box_index, n);
-        let cube = max(ty.width_min, 1.0e-3);
-        let leafy = ty.width_max > 1.5 * ty.width_min;
-        let steps = block_steps(b, cube, scale, FOLIAGE_STACK_STEPS);
-        if steps.x == 0u {
-            return tail();
-        }
-        let dir = compass_step(b.compass);
-        let half_out = 0.5 * f32(steps.y) * cube;
-        let across = select(cube, max(b.width, cube), leafy);
-        let bx = Box(
-            dir * half_out,
-            max(abs(dir) * (0.5 * cube + half_out * 0.5), vec2<f32>(abs(dir.y), abs(dir.x)) * 0.5 * across),
-            0.0,
-            f32(steps.x) * cube * select(1.0, 0.6, leafy),
-        );
-        let corner = box_vertex(bx, eye_local, s.k);
-        local = corner.local;
-        normal = corner.normal;
-        total = bx.y1;
-        height_frac = local.y / max(total, 1.0e-3);
-        anchor = vec3<f32>(bx.centre.x, 0.5 * bx.y1, bx.centre.y);
-        anchor_frac = 0.5;
-        tip_from = 1.0 - 1.0 / f32(steps.x) - 1.0e-3;
-        tint = b.tint;
-    } else if !blocky {
+    } else {
         // A smooth tuft as one shape: three broad blades fanned out (3 vertices each, 2
         // joins between).
         let j = vertex_index / 5u;
@@ -745,73 +684,220 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
         local = blade_turn(corners[k], angle);
         normal = blade_turn(normalize(vec3<f32>(0.0, 0.3, 1.0)), angle);
         height_frac = select(0.0, 1.0, k == 2u);
-        anchor = local;
-        anchor_frac = height_frac;
-    } else {
-        // A blocky tuft as one shape: two crossed boxes as wide as its blades reach.
-        let s = strip_slot(vertex_index, 2u);
-        if s.past {
-            return tail();
-        }
-        let cube = max(ty.width_min, 1.0e-3);
-        let tuft_height = mix(ty.height_min, ty.height_max, f32(record.packed_scale_type & 0xffu) / 255.0) * scale;
-        let reach = 0.5 * cube + tuft_height * mix(ty.lean_min, ty.lean_max, 0.6) * 0.8;
-        let half = select(vec2<f32>(0.5 * cube, reach), vec2<f32>(reach, 0.5 * cube), s.box_index == 0u);
-        let bx = Box(vec2<f32>(0.0), half, 0.0, tuft_height * 0.8);
-        let corner = box_vertex(bx, eye_local, s.k);
-        local = corner.local;
-        normal = corner.normal;
-        total = bx.y1;
-        height_frac = local.y / max(total, 1.0e-3);
-        anchor = vec3<f32>(0.0, 0.5 * bx.y1, 0.0);
-        anchor_frac = 0.5;
     }
 
     let world_base = root + foliage_to_world(basis, local);
-    let wind_at = root + foliage_to_world(basis, anchor);
-    var world_normal = foliage_to_world(basis, normal);
-    var face_normal = world_normal;
-    if blocky {
-        face_normal = world_normal;
-        world_normal = basis.up;
-    }
-
-    // ── Wind, evaluated at BOTH timestamps ────────────────────────────────────
+    // The wind at the vertex, never lowering it under the ground (its arc-length drop
+    // assumes an upright stem; a blade lying over would sink through in a gust).
     let response = vec3<f32>(ty.wind_trunk, ty.wind_branch, ty.wind_leaf);
-    // Its arc-length drop assumes an upright stem: a blade lying over would sink through
-    // the ground in a gust.
-    if !blocky {
-        lowest = local.y;
-    }
-    var sway_now = helio_wind_offset(wind, wind_at, root, anchor_frac, blade_seed, response, globals.clock.x);
-    var sway_prev = helio_wind_offset(wind, wind_at, root, anchor_frac, blade_seed, response, globals.clock.y);
-    sway_now.y = max(sway_now.y, -lowest);
-    sway_prev.y = max(sway_prev.y, -lowest);
-    let wind_now = foliage_to_world(basis, sway_now);
-    let wind_prev = foliage_to_world(basis, sway_prev);
-    // Pushed aside by interactors, now and last frame (for the motion vectors): a smooth
-    // blade bends round its root, a blocky one moves each cube whole.
+    let sway = helio_wind_offset_pair(wind, world_base, root, height_frac, blade_seed, response, globals.clock.x, globals.clock.y);
+    var sway_now = sway.now;
+    var sway_prev = sway.prev;
+    sway_now.y = max(sway_now.y, -local.y);
+    sway_prev.y = max(sway_prev.y, -local.y);
+    // Pushed aside by interactors, now and last frame (for the motion vectors): the blade
+    // bends round its root.
     var bend = vec3<f32>(0.0);
     var bend_prev = vec3<f32>(0.0);
     if (ty.kind_and_flags & FOLIAGE_TYPE_FLAG_RECEIVES_INTERACTION) != 0u {
         let response = globals.interaction_strength / max(ty.interaction_stiffness, 0.25);
-        let lift = select(local.y, anchor.y, blocky);
-        bend = foliage_pressed(foliage_press(root, basis.up, 0.0, response), basis.up, lift, lowest);
-        bend_prev = foliage_pressed(foliage_press(root, basis.up, globals.clock.x - globals.clock.y, response), basis.up, lift, lowest);
+        bend = foliage_pressed(foliage_press(root, basis.up, 0.0, response), basis.up, local.y, local.y);
+        bend_prev = foliage_pressed(foliage_press(root, basis.up, globals.clock.x - globals.clock.y, response), basis.up, local.y, local.y);
     }
 
     var out: VertexOutput;
-    out.clip_position = cameras[0].view_proj * vec4<f32>(world_base + wind_now + bend, 1.0);
-    out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(world_base + wind_prev + bend_prev, 1.0);
-    out.world_normal = world_normal;
-    out.face_normal = face_normal;
-    out.blocky = u32(blocky);
+    out.clip_position = cameras[0].view_proj * vec4<f32>(world_base + foliage_to_world(basis, sway_now) + bend, 1.0);
+    out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(world_base + foliage_to_world(basis, sway_prev) + bend_prev, 1.0);
+    out.world_normal = foliage_to_world(basis, normal);
+    out.face_normal = out.world_normal;
+    out.blocky = 0u;
     out.height_frac = clamp(height_frac, 0.0, 1.0);
     out.tint = tint;
     out.lod = lod;
     out.material = vec2<u32>(ty.base_color, ty.roughness_metallic);
     out.ground_colour = select(vec4<f32>(0.0), foliage_ground_colour(record), (ty.kind_and_flags & FOLIAGE_TYPE_FLAG_GROUND_COLOUR) != 0u);
-    out.tip = vec2<u32>(ty.tip_color, bitcast<u32>(tip_from));
+    out.tip = vec2<u32>(ty.tip_color, bitcast<u32>(0.72));
+    return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Blocky foliage: boxes
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// A blocky shape is boxes (a blade's runs of cubes, a tuft's blades, a far tuft's
+// crossed pair), each drawn as the three faces turned to the eye. Everything a box shares
+// (the record, the blade, its staircase, the wind and interactors at its centre) is
+// worked out once a box in `cs_boxes`, not once a vertex: `vs_box` reads it and places
+// nine corners.
+
+/// `count` boxes' room in `boxes_out` (its first), or the overflow counted.
+fn foliage_box_room(count: u32) -> u32 {
+    let first = atomicAdd(&box_state.count, count);
+    let room = arrayLength(&boxes_out);
+    if first + count > room {
+        atomicAdd(&box_state.overflow, first + count - min(first + count, max(first, room)));
+    }
+    return first;
+}
+
+/// Box `bx` of a shape of record `it` (its height `total`, its tip colour from
+/// `tip_from`), at `at`: its centre in render space and its displacement by the wind (at
+/// the box's centre, whole, never under the ground) and the interactors, now and last
+/// frame.
+fn foliage_box_write(at: u32, it: Instance, bx: Box, total: f32, tip_from: f32, seed: u32, tint: vec2<f32>, lod: u32) {
+    if at >= arrayLength(&boxes_out) {
+        return;
+    }
+    let ty = it.ty;
+    let anchor = vec3<f32>(bx.centre.x, 0.5 * (bx.y0 + bx.y1), bx.centre.y);
+    let response = vec3<f32>(ty.wind_trunk, ty.wind_branch, ty.wind_leaf);
+    let sway = helio_wind_offset_pair(wind, it.root + foliage_to_world(it.basis, anchor), it.root, anchor.y / max(total, 1.0e-3), seed, response, globals.clock.x, globals.clock.y);
+    var now = sway.now;
+    var prev = sway.prev;
+    now.y = max(now.y, -bx.y0);
+    prev.y = max(prev.y, -bx.y0);
+    var moved = foliage_to_world(it.basis, now);
+    var moved_prev = foliage_to_world(it.basis, prev);
+    if (ty.kind_and_flags & FOLIAGE_TYPE_FLAG_RECEIVES_INTERACTION) != 0u {
+        let pressed = globals.interaction_strength / max(ty.interaction_stiffness, 0.25);
+        moved += foliage_pressed(foliage_press(it.root, it.basis.up, 0.0, pressed), it.basis.up, anchor.y, bx.y0);
+        moved_prev += foliage_pressed(foliage_press(it.root, it.basis.up, globals.clock.x - globals.clock.y, pressed), it.basis.up, anchor.y, bx.y0);
+    }
+    var ground = 0u;
+    if (ty.kind_and_flags & FOLIAGE_TYPE_FLAG_GROUND_COLOUR) != 0u {
+        ground = it.record.packed_colour_seed & 0xffffu;
+    }
+    boxes_out[at] = FoliageBox(
+        it.root + foliage_to_world(it.basis, vec3<f32>(bx.centre.x, 0.0, bx.centre.y)),
+        it.slot,
+        bx.half,
+        pack2x16float(vec2<f32>(bx.y0, bx.y1)),
+        pack2x16float(vec2<f32>(total, tip_from)),
+        moved,
+        ground | (((it.record.packed_scale_type >> 16u) & 0xffu) << 16u) | ((lod & 3u) << 24u),
+        moved_prev,
+        pack4x8unorm(vec4<f32>(tint, 0.0, 0.0)),
+    );
+}
+
+/// The boxes of visible record `index` of LOD `lod`, if its type is blocky: L0 and L1 a
+/// blade's runs of cubes (at L1 with fewer jogs sideways), L2 a tuft's blades a box each
+/// from root to top, L3 a tuft as two crossed boxes as wide as its blades reach.
+fn foliage_expand(lod: u32, index: u32) {
+    let it = foliage_instance(lod, lod * globals.region_stride, index);
+    if !it.blocky || !it.drawn {
+        return;
+    }
+    let ty = it.ty;
+    let cube = max(ty.width_min, 1.0e-3);
+    let leafy = ty.width_max > 1.5 * ty.width_min;
+    let tall = select(1.0, 0.6, leafy);
+    if lod <= 1u {
+        let j = foliage_blade_index(it.record);
+        let b = tuft_blade(ty, it.record, j, it.n);
+        let max_steps = select(FOLIAGE_L1_STEPS, FOLIAGE_STACK_STEPS, lod == 0u);
+        let steps = block_steps(b, cube, it.scale, max_steps);
+        if steps.x == 0u {
+            return;
+        }
+        let count = min(block_path(b, j, cube, it.scale, leafy, 0xffffffffu, max_steps).boxes, select(FOLIAGE_L1_BOXES, FOLIAGE_L0_BOXES, lod == 0u));
+        let total = f32(steps.x) * cube * tall;
+        let tip_from = 1.0 - 1.0 / f32(steps.x) - 1.0e-3;
+        let first = foliage_box_room(count);
+        for (var k = 0u; k < count; k++) {
+            foliage_box_write(first + k, it, block_path(b, j, cube, it.scale, leafy, k, max_steps).found, total, tip_from, b.seed, b.tint, lod);
+        }
+    } else if lod == 2u {
+        let first = foliage_box_room(it.n);
+        for (var s = 0u; s < it.n; s++) {
+            let b = tuft_blade(ty, it.record, s, it.n);
+            let steps = block_steps(b, cube, it.scale, FOLIAGE_STACK_STEPS);
+            let dir = compass_step(b.compass);
+            let half_out = 0.5 * f32(steps.y) * cube;
+            let across = select(cube, max(b.width, cube), leafy);
+            let top = f32(steps.x) * cube * tall;
+            let bx = Box(
+                dir * half_out,
+                max(abs(dir) * (0.5 * cube + half_out * 0.5), vec2<f32>(abs(dir.y), abs(dir.x)) * 0.5 * across) * select(0.0, 1.0, steps.x > 0u),
+                0.0,
+                top,
+            );
+            foliage_box_write(first + s, it, bx, top, 1.0 - 1.0 / f32(max(steps.x, 1u)) - 1.0e-3, it.record.packed_colour_seed >> 16u, b.tint, lod);
+        }
+    } else {
+        let tuft_height = mix(ty.height_min, ty.height_max, f32(it.record.packed_scale_type & 0xffu) / 255.0) * it.scale;
+        let reach = 0.5 * cube + tuft_height * mix(ty.lean_min, ty.lean_max, 0.6) * 0.8;
+        let first = foliage_box_room(2u);
+        for (var k = 0u; k < 2u; k++) {
+            let half = select(vec2<f32>(0.5 * cube, reach), vec2<f32>(reach, 0.5 * cube), k == 0u);
+            foliage_box_write(first + k, it, Box(vec2<f32>(0.0), half, 0.0, tuft_height * 0.8), tuft_height * 0.8, 0.72, it.record.packed_colour_seed >> 16u, vec2<f32>(0.5), lod);
+        }
+    }
+}
+
+/// Every LOD's visible records (`lod_draws`' instance counts, one after another), the
+/// grid's threads striding over them.
+@compute @workgroup_size(64)
+fn cs_boxes(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    if arrayLength(&lod_draws) < 4u {
+        return;
+    }
+    let counts = vec4<u32>(lod_draws[0].y, lod_draws[1].y, lod_draws[2].y, lod_draws[3].y);
+    let total = counts.x + counts.y + counts.z + counts.w;
+    let stride = groups.x * 64u;
+    for (var i = id.x; i < total; i += stride) {
+        var lod = 0u;
+        var index = i;
+        if index >= counts.x {
+            index -= counts.x;
+            lod = 1u;
+            if index >= counts.y {
+                index -= counts.y;
+                lod = 2u;
+                if index >= counts.z {
+                    index -= counts.z;
+                    lod = 3u;
+                }
+            }
+        }
+        foliage_expand(lod, index);
+    }
+}
+
+/// The box draw's arguments: nine corners a box, the boxes that fit.
+@compute @workgroup_size(1)
+fn cs_boxes_finish() {
+    box_state.vertex_count = 9u;
+    box_state.instance_count = min(atomicLoad(&box_state.count), arrayLength(&boxes_out));
+    box_state.first_vertex = 0u;
+    box_state.first_instance = 0u;
+}
+
+/// A box (`cs_boxes`): its three faces turned to the eye, a strip of nine corners.
+@vertex
+fn vs_box(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+    let bx = boxes[instance_index];
+    let basis = foliage_basis(tile_frames[bx.slot]);
+    let heights = unpack2x16float(bx.heights);
+    let shape = unpack2x16float(bx.shape);
+    let eye = cameras[0].position_near.xyz - bx.centre;
+    let corner = box_vertex(Box(vec2<f32>(0.0), bx.half, heights.x, heights.y), vec2<f32>(dot(eye, basis.tangent), dot(eye, basis.bitangent)), min(vertex_index, 8u));
+    let world = bx.centre + foliage_to_world(basis, corner.local);
+    let ty = foliage_types[(bx.look >> 16u) & 0xffu];
+    var out: VertexOutput;
+    out.clip_position = cameras[0].view_proj * vec4<f32>(world + bx.now, 1.0);
+    out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(world + bx.prev, 1.0);
+    // A blocky shape lights as the ground it grows on, its faces telling apart.
+    out.world_normal = basis.up;
+    out.face_normal = foliage_to_world(basis, corner.normal);
+    out.blocky = 1u;
+    out.height_frac = clamp(corner.local.y / max(shape.x, 1.0e-3), 0.0, 1.0);
+    out.tint = unpack4x8unorm(bx.tint).xy;
+    out.lod = (bx.look >> 24u) & 3u;
+    out.material = vec2<u32>(ty.base_color, ty.roughness_metallic);
+    let ground = bx.look & 0xffffu;
+    out.ground_colour = select(vec4<f32>(0.0), vec4<f32>(f32(ground & 31u) / 31.0, f32((ground >> 5u) & 63u) / 63.0, f32(ground >> 11u) / 31.0, 1.0), ground != 0u);
+    out.tip = vec2<u32>(ty.tip_color, bitcast<u32>(shape.y));
     return out;
 }
 

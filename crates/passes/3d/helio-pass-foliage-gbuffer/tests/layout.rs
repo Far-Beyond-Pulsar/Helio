@@ -57,9 +57,9 @@ fn draw_indirect_stride_matches_draw_indirect_args() {
 
 #[test]
 fn the_ladder_has_no_vertex_or_index_buffer_and_the_counts_are_pinned() {
-    // The whole foliage path is four non-indexed instanced strip draws. These vertex
-    // counts are what `FoliagePlacePass` writes into the indirect buffer (smooth blades;
-    // blocky ones draw `FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`): L0 and L1 a blade strip with a
+    // Smooth foliage is four non-indexed instanced strip draws. These vertex counts are
+    // what `FoliagePlacePass` writes into the indirect buffer (blocky foliage is drawn
+    // as boxes, a fifth draw): L0 and L1 a blade strip with a
     // collapsed tip, L2 a tuft's blades as cards (four vertices and two joins each), L3 a
     // fan of three blades (three vertices and two joins each).
     assert_eq!(LOD_VERTEX_COUNTS, [11, 7, 88, 13]);

@@ -413,7 +413,8 @@ fn add_geometry_passes(
                 ..defaults
             },
         );
-        let handles = (
+        let mut draw = FoliageGBufferPass::new(
+            device,
             Arc::clone(&place_pass.blade_arena),
             Arc::clone(&place_pass.tile_table),
             Arc::clone(&place_pass.tile_frames),
@@ -422,8 +423,12 @@ fn add_geometry_passes(
             Arc::clone(&place_pass.bands_buffer),
             Arc::clone(&place_pass.interactors),
         );
+        draw.quality = config.foliage_quality;
         graph.add_pass(Box::new(place_pass));
-        handles
+        // Blocky foliage expanded into boxes, before the G-buffer: between the two raster
+        // passes it would break their fusion.
+        graph.add_pass(Box::new(draw.boxes_pass(device)));
+        draw
     });
 
     graph.add_pass(Box::new(GBufferPass::new(device)));
@@ -467,11 +472,8 @@ fn add_geometry_passes(
     // run of exact-attachment-match passes); before VirtualGeometry because VG
     // binds only seven attachments — it omits gbuffer_velocity — so anything
     // downstream of VG can never fuse with the G-buffer.
-    if let Some((blade_arena, tile_table, tile_frames, visible_blades, foliage_indirect, bands, interactors)) = foliage_buffers {
-        let mut pass =
-            FoliageGBufferPass::new(device, blade_arena, tile_table, tile_frames, visible_blades, foliage_indirect, bands, interactors);
-        pass.quality = config.foliage_quality;
-        graph.add_pass(Box::new(pass));
+    if let Some(draw) = foliage_buffers {
+        graph.add_pass(Box::new(draw));
     }
 
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);

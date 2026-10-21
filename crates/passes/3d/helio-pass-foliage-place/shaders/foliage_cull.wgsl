@@ -374,29 +374,29 @@ fn cs_finalize(@builtin(local_invocation_index) lane: u32) {
         return;
     }
 
-    // The longest strip of the kinds present at each LOD (FOLIAGE_LOD_VERTEX_COUNTS for
-    // smooth blades, FOLIAGE_BLOCK_LOD_VERTEX_COUNTS for cube stacks), all `TriangleStrip`
-    // with no vertex or index buffer; a shorter strip ends in a zero-area tail. Written as
-    // a branch rather than a const array because indexing a `const` array with a runtime
-    // value is not portable across WGSL front-ends.
+    // Smooth foliage's strip at each LOD (FOLIAGE_LOD_VERTEX_COUNTS), a `TriangleStrip`
+    // with no vertex or index buffer; none without a smooth type. Blocky foliage is drawn
+    // as boxes the draw expands from these same instances. Written as a branch rather than
+    // a const array because indexing a `const` array with a runtime value is not portable
+    // across WGSL front-ends.
     var vertex_count = 13u;
-    var block_count = 20u;
     if lane == 0u {
         vertex_count = 11u;
-        block_count = 86u;
     } else if lane == 1u {
         vertex_count = 7u;
-        block_count = 53u;
     } else if lane == 2u {
         vertex_count = 88u;
-        block_count = 163u;
     }
+    var any_smooth = false;
     let rows = min(cull.type_count, arrayLength(&types));
     for (var t = 0u; t < rows; t++) {
-        if (types[t].kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK && types[t].density > 0.0 {
-            vertex_count = max(vertex_count, block_count);
+        if (types[t].kind_and_flags & 0xffu) != FOLIAGE_KIND_BLOCK && types[t].density > 0.0 {
+            any_smooth = true;
             break;
         }
+    }
+    if !any_smooth {
+        vertex_count = 0u;
     }
 
     let raw = atomicLoad(&counters[lane]);

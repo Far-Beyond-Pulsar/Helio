@@ -161,3 +161,31 @@ fn a_tufts_blades_spread_around_it() {
         assert!(tuft[1..].iter().all(|(_, b)| b.rim >= 0.35));
     }
 }
+
+#[test]
+fn boxes_by_levels_are_the_walks_boxes() {
+    // The draw finds a blade's boxes from its sideways steps' levels; they must be the
+    // cube-by-cube walk's, box for box.
+    let mut checked = 0;
+    for (lean, curve, fall, width) in [([0.0, 0.3], 0.15, 0.05, [0.05, 0.05]), ([0.2, 1.2], 0.6, 0.15, [0.05, 0.05]), ([0.9, 1.6], 0.3, 0.0, [0.05, 0.15]), ([0.0, 0.0], 0.0, 0.0, [0.05, 0.05])] {
+        let ty = block_type(lean, curve, fall, width);
+        let leafy = width[1] > 1.5 * width[0];
+        for tuft in tufts(&ty, 300) {
+            for (j, b) in tuft {
+                for scale in [0.6, 1.0, 1.7] {
+                    for steps in [STACK_STEPS, L1_STEPS] {
+                        let walk = block_boxes(&b, j, 0.05, scale, leafy, steps);
+                        let levels = block_boxes_by_levels(&b, j, 0.05, scale, leafy, steps);
+                        assert_eq!(walk.len(), levels.len(), "blade {j} {b:?} scale {scale} steps {steps}");
+                        for (w, l) in walk.iter().zip(&levels) {
+                            let close = |a: f32, b: f32| (a - b).abs() <= 1.0e-5;
+                            assert!(close(w.centre[0], l.centre[0]) && close(w.centre[1], l.centre[1]) && close(w.half[0], l.half[0]) && close(w.half[1], l.half[1]) && close(w.y0, l.y0) && close(w.y1, l.y1), "blade {j}: {w:?} vs {l:?}");
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 10_000);
+}

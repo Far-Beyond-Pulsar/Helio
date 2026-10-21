@@ -81,9 +81,10 @@ struct PlaceUniforms {
     eye_y:              f32,
 
     eye_z:              f32,
+    /// Parts (`parts`) of the tiles placed, then of the tiles queried.
+    place_part_count:   u32,
+    query_part_count:   u32,
     _pad0:              u32,
-    _pad1:              u32,
-    _pad2:              u32,
 }
 
 /// Mirrors `crate::GpuFoliageLayer` (Rust, 32 bytes).
@@ -129,13 +130,17 @@ struct GroundArgs {
 @group(0) @binding(11) var<storage, read_write> hits: array<GroundHit>;
 @group(0) @binding(12) var<storage, read_write> ground_args: GroundArgs;
 @group(0) @binding(13) var<uniform> foliage_bands: FoliageBands;
+/// Tiles' candidates in parts a workgroup each: (queue entry, first candidate, end, 0);
+/// the placed tiles' parts first, then the queried tiles'.
+@group(0) @binding(14) var<storage, read> parts: array<vec4<u32>>;
+/// Per placed tile (by queue entry): its ground's lowest and highest heights (`ordered`)
+/// and its records so far.
+@group(0) @binding(15) var<storage, read_write> place_scratch: array<atomic<i32>>;
 
 var<workgroup> wg_scan: array<u32, WG_SIZE>;
 var<workgroup> wg_base: u32;
-var<workgroup> wg_low: atomic<i32>;
-var<workgroup> wg_high: atomic<i32>;
 var<workgroup> wg_live_types: atomic<u32>;
-var<workgroup> wg_cells: u32;
+var<workgroup> wg_part: vec4<u32>;
 
 // ── Hash, transcribed from crate::placement ────────────────────────
 
@@ -373,29 +378,32 @@ fn cs_query(
         ground_args.groups = vec3<u32>((place.query_count + WG_SIZE - 1u) / WG_SIZE, 1u, 1u);
         ground_args.count = place.query_count;
     }
-    if workgroup_id.x >= place.query_tile_count { return; }
-    let at = place.place_tile_count + workgroup_id.x;
-    if at >= arrayLength(&tile_queue) { return; }
-    let entry = tile_queue[at];
-    let slot = entry.x;
-    if slot >= arrayLength(&tiles) { return; }
-    let tile = tiles[slot];
-    let frame = frames[slot];
-    let band_index = foliage_band_of_slot(slot);
+    // A part of a queried tile a workgroup: the parts after the placed tiles'.
+    let index = place.place_part_count + workgroup_id.x;
+    if workgroup_id.x >= place.query_part_count || index >= arrayLength(&parts) {
+        return;
+    }
+    let part = parts[index];
+    let entry = part_tile(part.x);
+    if !entry.valid {
+        return;
+    }
+    let tile = tiles[entry.slot];
+    let frame = frames[entry.slot];
+    let band_index = foliage_band_of_slot(entry.slot);
     let band = foliage_bands.bands[band_index];
     let generation = band_generation(tile.generation, band_index);
     // Every query of the tile starts the same height over its datum: the eye's, raised.
     let eye_h = dot(vec3<f32>(place.eye_x, place.eye_y, place.eye_z) - frame.origin, frame.up);
     let start_h = eye_h + place.search_above;
     let length = place.search_above + place.search_below;
-    let cells = band.candidate_grid * band.candidate_grid;
     let cubes = cube_cells(frame);
-    for (var candidate = lane; candidate < cells; candidate += WG_SIZE) {
+    for (var candidate = part.y + lane; candidate < part.z; candidate += WG_SIZE) {
         let seed = blade_seed(tile.tile_coord_x, tile.tile_coord_z, candidate, generation);
         let uv = max(candidate_uv(candidate, seed, cubes, band), vec2<f32>(0.0));
-        let index = entry.y + candidate;
-        if index < arrayLength(&queries) {
-            queries[index] = GroundQuery(frame_point(frame, uv, start_h), length, frame.up, 0u);
+        let at = entry.first + candidate;
+        if at < arrayLength(&queries) {
+            queries[at] = GroundQuery(frame_point(frame, uv, start_h), length, frame.up, 0u);
         }
     }
 }
@@ -495,27 +503,95 @@ fn tuft_blades(ty: FoliageType, pick: f32) -> u32 {
     return min(lo + u32(pick * f32(hi - lo + 1u)), hi);
 }
 
+/// A part's tile: its slot and first query (`tile_queue[entry]`).
+struct PartTile {
+    slot: u32,
+    first: u32,
+    valid: bool,
+}
+
+fn part_tile(entry: u32) -> PartTile {
+    if entry >= arrayLength(&tile_queue) {
+        return PartTile(0u, 0u, false);
+    }
+    let e = tile_queue[entry];
+    return PartTile(e.x, e.y, e.x < arrayLength(&tiles));
+}
+
+/// Placement, 1 of 4: each placed tile's height range and record count start empty.
+@compute @workgroup_size(64)
+fn cs_place_reset(@builtin(global_invocation_id) id: vec3<u32>) {
+    let t = id.x;
+    if t >= place.place_tile_count || 4u * t + 2u >= arrayLength(&place_scratch) {
+        return;
+    }
+    atomicStore(&place_scratch[4u * t], ordered(3.0e38));
+    atomicStore(&place_scratch[4u * t + 1u], ordered(-3.0e38));
+    atomicStore(&place_scratch[4u * t + 2u], 0);
+}
+
+/// 2 of 4: each part's ground widens its tile's height range (records store a height
+/// offset from the tile's centre, so the whole range is known before any is packed).
+@compute @workgroup_size(64)
+fn cs_place_bounds(@builtin(workgroup_id) workgroup_id: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
+    if workgroup_id.x >= place.place_part_count || workgroup_id.x >= arrayLength(&parts) {
+        return;
+    }
+    let part = parts[workgroup_id.x];
+    let tile = part_tile(part.x);
+    if !tile.valid || 4u * part.x + 1u >= arrayLength(&place_scratch) {
+        return;
+    }
+    let frame = frames[tile.slot];
+    let eye_h = dot(vec3<f32>(place.eye_x, place.eye_y, place.eye_z) - frame.origin, frame.up);
+    let start_h = eye_h + place.search_above;
+    let length = place.search_above + place.search_below;
+    var low = 3.0e38;
+    var high = -3.0e38;
+    for (var candidate = part.y + lane; candidate < part.z; candidate += WG_SIZE) {
+        let g = answered_ground(tile.first + candidate, frame, start_h, length);
+        if g.ok {
+            low = min(low, g.h);
+            high = max(high, g.h);
+        }
+    }
+    if low <= high {
+        atomicMin(&place_scratch[4u * part.x], ordered(low));
+        atomicMax(&place_scratch[4u * part.x + 1u], ordered(high));
+    }
+}
+
+/// 3 of 4: a part's candidates, a workgroup a part: the ground's answers, the types that
+/// grow there and the tufts they grow, packed into the tile's slab where its records so
+/// far end (an atomic a chunk of 64 candidates; their order within the slab is free).
 @compute @workgroup_size(64)
 fn cs_place(
     @builtin(workgroup_id) workgroup_id: vec3<u32>,
     @builtin(local_invocation_index) lane: u32,
 ) {
-    // The whole workgroup takes the same path up to the scan: a workgroup whose tile is
-    // not valid still runs the loops (and their barriers) and only guards the writes.
-    var slot = 0u;
-    var first = 0u;
-    var valid = false;
-    if workgroup_id.x < place.place_tile_count && workgroup_id.x < arrayLength(&tile_queue) {
-        let entry = tile_queue[workgroup_id.x];
-        slot = entry.x;
-        first = entry.y;
-        valid = slot < arrayLength(&tiles);
+    // The part is the same for the whole workgroup, but it comes from storage: broadcast
+    // it so the loops around the scan's barriers are uniform.
+    if lane == 0u {
+        var part = vec4<u32>(0u);
+        if workgroup_id.x < place.place_part_count && workgroup_id.x < arrayLength(&parts) {
+            part = parts[workgroup_id.x];
+        }
+        wg_part = part;
+        atomicStore(&wg_live_types, 0u);
     }
+    let part = workgroupUniformLoad(&wg_part);
+    let entry = part_tile(part.x);
+    let valid = entry.valid && 4u * part.x + 2u < arrayLength(&place_scratch);
+    let slot = entry.slot;
     var tile: FoliageTile;
     var frame: TileFrame;
+    var low = 3.0e38;
+    var high = -3.0e38;
     if valid {
         tile = tiles[slot];
         frame = frames[slot];
+        low = unordered(atomicLoad(&place_scratch[4u * part.x]));
+        high = unordered(atomicLoad(&place_scratch[4u * part.x + 1u]));
     }
     let band_index = foliage_band_of_slot(slot);
     let band = foliage_bands.bands[band_index];
@@ -526,31 +602,8 @@ fn cs_place(
     let cubes = cube_cells(frame);
     let coord = vec2<i32>(tile.tile_coord_x, tile.tile_coord_z);
     let blade_records = band.lod == FOLIAGE_BAND_LOD_BLADES;
+    let center = select(0.0, (low + high) * 0.5, low <= high);
 
-    // The candidate count is the same for the whole workgroup (one tile), but it comes
-    // from storage: broadcast it so the loops around the scan's barriers are uniform.
-    if lane == 0u {
-        wg_cells = band.candidate_grid * band.candidate_grid;
-    }
-    let cells = workgroupUniformLoad(&wg_cells);
-
-    if lane == 0u {
-        atomicStore(&wg_low, ordered(3.0e38));
-        atomicStore(&wg_high, ordered(-3.0e38));
-        atomicStore(&wg_live_types, 0u);
-        wg_base = 0u;
-    }
-    workgroupBarrier();
-
-    // The tile's height range along its up: records store a height *offset* from its
-    // centre, so it is known before any is packed.
-    for (var candidate = lane; candidate < cells; candidate += WG_SIZE) {
-        let g = answered_ground(first + candidate, frame, start_h, length);
-        if g.ok {
-            atomicMin(&wg_low, ordered(g.h));
-            atomicMax(&wg_high, ordered(g.h));
-        }
-    }
     // Types are the leading rows up to the last one with a density: a publisher keeping
     // a fixed-capacity, packed table must not pay for its empty rows.
     let type_rows = min(place.type_count, arrayLength(&types));
@@ -560,24 +613,13 @@ fn cs_place(
         }
     }
     workgroupBarrier();
-    let low = unordered(atomicLoad(&wg_low));
-    let high = unordered(atomicLoad(&wg_high));
-    let any_ground = low <= high;
-    let center = select(0.0, (low + high) * 0.5, any_ground);
     let type_limit = atomicLoad(&wg_live_types);
-    if lane == 0u && valid {
-        tiles[slot].bounds_center = center;
-        tiles[slot].bounds_half = select(0.0, (high - low) * 0.5, any_ground) + place.max_foliage_height;
-        tiles[slot].blade_count = 0u;
-        tiles[slot].state = TILE_STATE_PLACING;
-    }
-    workgroupBarrier();
 
-    // `cells` is a workgroup-uniform load, so this loop and every barrier inside it are in
+    // `part` is a workgroup-uniform load, so this loop and every barrier inside it are in
     // uniform control flow for the whole workgroup.
-    var chunk = 0u;
+    var chunk = part.y;
     loop {
-        if chunk >= cells {
+        if chunk >= part.z {
             break;
         }
 
@@ -585,10 +627,10 @@ fn cs_place(
         var count = 0u;
         var record = BladeInstance(0u, 0u, 0u, 0u);
 
-        if valid && candidate < cells {
+        if valid && candidate < part.z {
             let seed = blade_seed(coord.x, coord.y, candidate, generation);
             let uv = candidate_uv(candidate, seed, cubes, band);
-            let g = answered_ground(first + candidate, frame, start_h, length);
+            let g = answered_ground(entry.first + candidate, frame, start_h, length);
             if g.ok && uv.x >= 0.0 && within_any_layer(frame_point(frame, uv, g.h)) {
                 // The types that grow here, by their densities and patches: the band's
                 // grid holds `grid_density` candidates a square metre for `share` of the
@@ -651,6 +693,15 @@ fn cs_place(
 
         let inclusive = wg_scan[lane];
         let exclusive = inclusive - count;
+        // The chunk's records go where the tile's end so far: one atomic a chunk.
+        if lane == WG_SIZE - 1u {
+            var base = 0u;
+            if valid && inclusive > 0u {
+                base = u32(atomicAdd(&place_scratch[4u * part.x + 2u], i32(inclusive)));
+            }
+            wg_base = base;
+        }
+        workgroupBarrier();
         let base = wg_base;
         if valid && count > 0u {
             for (var j = 0u; j < count; j++) {
@@ -665,17 +716,30 @@ fn cs_place(
             }
         }
         workgroupBarrier();
-        if lane == WG_SIZE - 1u {
-            wg_base = base + inclusive;
-        }
-        workgroupBarrier();
         chunk = chunk + WG_SIZE;
     }
+}
 
-    if lane == 0u && valid {
-        let placed = min(wg_base, band.slab);
-        tiles[slot].blade_count = placed;
-        tiles[slot].state = TILE_STATE_RESIDENT;
-        atomicAdd(&counters[COUNTER_PLACED_BLADES], placed);
+/// 4 of 4: each placed tile's header: its height range and its records, resident.
+@compute @workgroup_size(64)
+fn cs_place_finish(@builtin(global_invocation_id) id: vec3<u32>) {
+    let t = id.x;
+    if t >= place.place_tile_count || 4u * t + 2u >= arrayLength(&place_scratch) {
+        return;
     }
+    let entry = part_tile(t);
+    if !entry.valid {
+        return;
+    }
+    let slot = entry.slot;
+    let band = foliage_bands.bands[foliage_band_of_slot(slot)];
+    let low = unordered(atomicLoad(&place_scratch[4u * t]));
+    let high = unordered(atomicLoad(&place_scratch[4u * t + 1u]));
+    let any_ground = low <= high;
+    let placed = min(u32(max(atomicLoad(&place_scratch[4u * t + 2u]), 0)), band.slab);
+    tiles[slot].bounds_center = select(0.0, (low + high) * 0.5, any_ground);
+    tiles[slot].bounds_half = select(0.0, (high - low) * 0.5, any_ground) + place.max_foliage_height;
+    tiles[slot].blade_count = placed;
+    tiles[slot].state = TILE_STATE_RESIDENT;
+    atomicAdd(&counters[COUNTER_PLACED_BLADES], placed);
 }
