@@ -553,6 +553,10 @@ impl ChunkPass {
         world.set_steady_shadows(self.steady_shadows);
         // The atmosphere's sun disk sizes the shadows' penumbrae.
         world.set_atmosphere_frame(ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME)).map(|b| (*b).clone()));
+        // The sun's occlusion by the terrain, for what else the sun lights
+        // (the GI probes' hits in this draw, volumetric fog): a level of its
+        // clipmap a frame.
+        world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
         world.draw(
             encoder,
             ctx.frame_num,
@@ -581,9 +585,6 @@ impl ChunkPass {
                 self.foliage_ground.answer(question.batch);
             }
         }
-        // The sun's occlusion by the terrain, for what else the sun lights
-        // (volumetric fog): a level of its clipmap a frame.
-        world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
         let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
         world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);
         if let Some(picks) = &frame.picks {

@@ -1009,6 +1009,9 @@ pub struct FrameTimings {
     pub draw: f64,
     pub seed: f64,
     pub shadow: f64,
+    /// The shadows' parts: sun samples, sky samples, every hit's sun (and
+    /// the fallbacks' walks), local lights, the GI probes' rays.
+    pub shadow_stages: [f64; 5],
     /// The shadows' denoiser (from the shadows' end: a pass's start
     /// timestamp may come before the work ahead of it is done).
     pub denoise: f64,
@@ -1028,8 +1031,9 @@ pub struct FrameTimings {
 /// Timestamps a frame writes: generation start, tile halos end, seed start
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
 /// tile nodes end, tile columns end, tile features end, the shadows'
-/// denoiser end.
-const QUERIES: u32 = 12;
+/// denoiser end; the shadows' parts: sun samples end, sky samples end,
+/// every hit's sun end, local lights end (the GI rays end at shadows end).
+const QUERIES: u32 = 16;
 
 /// `Buried`'s size: a count and 4095 keys.
 const BURIED_BYTES: u64 = 16 * 4096;
@@ -1901,7 +1905,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}") } else { heat }
     };
     // The noise library (materials' patches), then the draw.
-    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + helio_pass_gi::GI_COMMON_SNIPPET.source + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
+    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -2313,7 +2317,8 @@ impl ChunkWorld {
         let local_gate = compute("chunk local light gate", &layout(&local_denoise_layout[2]), "local_gate");
         let local_temporal = tiled("chunk local light history", &layout(&local_denoise_layout[0]), "local_temporal");
         let local_filter = compute("chunk local light filter", &layout(&local_denoise_layout[1]), "local_filter");
-        // GI probe rays: the frame, rays, hits, the probes' cells, the sun.
+        // GI probe rays: the frame, rays, hits, the probes' cells, the sun,
+        // the sun's occlusion (frame, maps).
         let gi_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk GI rays"),
             entries: &[
@@ -2322,6 +2327,13 @@ impl ChunkWorld {
                 storage(37, false, wgpu::ShaderStages::COMPUTE),
                 storage(38, true, wgpu::ShaderStages::COMPUTE),
                 storage(39, true, wgpu::ShaderStages::COMPUTE),
+                uniform(62, wgpu::ShaderStages::COMPUTE),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 63,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
+                    count: None,
+                },
             ],
         });
         let gi_trace = compute("chunk GI rays", &layout(&gi_layout), "gi_trace");
@@ -3766,7 +3778,8 @@ impl ChunkWorld {
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[10]), ms(t[10], t[5]), ms(t[5], t[6])];
                     let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1]), ms(t[1], t[10])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
+                    let shadow_stages = [ms(t[4], t[12]), ms(t[12], t[13]), ms(t[13], t[14]), ms(t[14], t[15]), ms(t[15], t[7])];
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), shadow_stages, denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
                     // Footprints computed and chunks generated are measured
                     // apart: with the footprint pool a frame may generate
                     // chunks of footprints it does not compute.
@@ -4228,6 +4241,11 @@ impl ChunkWorld {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
+        // GI hits see the sun by its occlusion maps (`draw_sun_occlusion`;
+        // none drawn yet: lit).
+        if gi.is_some() && self.sun_occlusion.is_none() {
+            self.sun_occlusion = Some(SunOcclusion::new(&self.device));
+        }
         let targets = self.targets.as_mut().unwrap();
         if lights.is_some() && targets.local.is_none() {
             targets.local = Some(LocalTargets::new(&self.device, size));
@@ -4279,24 +4297,27 @@ impl ChunkWorld {
             // No fallbacks yet.
             self.queue.write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
             self.queue.write_buffer(&targets.fallback_groups, 0, bytemuck::cast_slice(&[0u32, 1, 1]));
+            // Each part its own pass, its end timestamped (`shadow_stages`).
+            let end = |index: u32| timing.map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + index) });
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sun samples"), timestamp_writes: None });
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sun samples"), timestamp_writes: end(12) });
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &sample_group, &[]);
                 for pipeline in [&self.shadow_sample, &self.shadow_sample_far] {
                     pass.set_pipeline(pipeline);
                     pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
                 }
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sky samples"), timestamp_writes: end(13) });
+                pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &sky_group, &[]);
                 for pipeline in [&self.sky_sample, &self.sky_sample_far] {
                     pass.set_pipeline(pipeline);
                     pass.dispatch_workgroups(size[0].div_ceil(4).div_ceil(8), size[1].div_ceil(4).div_ceil(8), 1);
                 }
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("chunk shadow"),
-                timestamp_writes: timing.map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 7) }),
-            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk shadow"), timestamp_writes: end(14) });
             pass.set_pipeline(&self.shadow);
             pass.set_bind_group(0, &group, &[]);
             pass.set_bind_group(1, &shadow_group, &[]);
@@ -4304,6 +4325,9 @@ impl ChunkWorld {
             pass.set_pipeline(&self.shadow_fallback);
             pass.set_bind_group(1, &fallback_group, &[]);
             pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
+            drop(pass);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk local shadows"), timestamp_writes: end(15) });
+            pass.set_bind_group(0, &group, &[]);
             // 4b. Local lights' terrain shadows, with the hits' normals.
             let local_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk local shadows"),
@@ -4329,13 +4353,17 @@ impl ChunkWorld {
                 pass.set_pipeline(pipeline);
                 pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
             }
+            drop(pass);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk GI rays"), timestamp_writes: end(7) });
+            pass.set_bind_group(0, &group, &[]);
             // 6. The GI probes' rays (a thread a ray, past the frame's
             // count none).
-            if let (Some(gi), true) = (gi, self.gi_clipmap.is_some()) {
+            if let (Some(gi), true, Some(occlusion)) = (gi, self.gi_clipmap.is_some(), &self.sun_occlusion) {
+                // Hits see the sun by its occlusion maps (none drawn: lit).
                 let gi_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("chunk GI rays"),
                     layout: &self.gi_layout,
-                    entries: &[entry(35, gi.frame), entry(36, gi.rays), entry(37, gi.hits), entry(38, &self.gi_cells), entry(39, gi.sun)],
+                    entries: &[entry(35, gi.frame), entry(36, gi.rays), entry(37, gi.hits), entry(38, &self.gi_cells), entry(39, gi.sun), entry(62, &occlusion.frame), view_entry(63, &occlusion.maps_view)],
                 });
                 pass.set_bind_group(1, &gi_group, &[]);
                 pass.set_pipeline(&self.gi_trace);

@@ -3727,7 +3727,9 @@ fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
 
 // ---- 6. GI probe rays ----
 // The terrain as a tracer of the probes' rays (helio-pass-gi): a ray walks
-// the cut from its probe's place, and its hit walks to the sun. A probe's
+// the cut from its probe's place, and its hit sees the sun by the sun's
+// occlusion maps (`sun_occlusion`: a texture read where a walk to the sun
+// cost several times the ray's own). A probe's
 // place (`gi_cells`: base cell i, j, k and face | 8) is located on the CPU
 // in f64 when the probe comes into the clipmap.
 @group(1) @binding(35) var<uniform> frame_gi: GiFrame;
@@ -3735,6 +3737,8 @@ fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
 @group(1) @binding(37) var<storage, read_write> gi_hits: array<GiHit>;
 @group(1) @binding(38) var<storage, read> gi_cells: array<vec4<i32>>;
 @group(1) @binding(39) var<storage, read> gi_sun: array<vec4<f32>, 2>;
+@group(1) @binding(62) var<uniform> sun_occlusion_frame: SunOcclusionFrame;
+@group(1) @binding(63) var sun_occlusion_maps: texture_2d_array<f32>;
 
 // Where a walk from eye-relative point `org` in base cell `c` starts: its
 // chunk, rock, or the air box it is in, crossed in the frame of a drawn
@@ -3807,8 +3811,8 @@ fn light_through(q: vec2<u32>, at: vec3<f32>, slot: u32, dir: vec3<f32>) -> f32 
 }
 
 // A thread a ray: its hit (distance, the face's normal, the material's
-// colour, the share of the sun reaching it through what lets light
-// through (`light_through`); for a material that lets light through, its
+// colour, the share of the sun reaching it (`sun_occlusion`); for a
+// material that lets light through, its
 // transmission and the sun's share on its cell's far side; the light it
 // gives off), or none; from rock, a back face at once.
 @compute @workgroup_size(64)
@@ -3838,9 +3842,9 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var sun = 0.0;
     var back = 0.0;
     if towards > 0.0 {
-        sun = light_through(q, hit + n * (0.5 * cell), end.slot, gi_sun[0].xyz);
+        sun = sun_occlusion(hit + n * (0.5 * cell));
     } else if through > 0.0 && towards < 0.0 {
-        back = light_through(q, hit - n * (1.5 * cell), end.slot, gi_sun[0].xyz);
+        back = sun_occlusion(hit - n * (1.5 * cell));
     }
     let glow = u32(clamp(materials.m[min(material, 31u)].light.y, 0.0, 15.9375) * 16.0 + 0.5);
     let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u) | (glow << 24u);

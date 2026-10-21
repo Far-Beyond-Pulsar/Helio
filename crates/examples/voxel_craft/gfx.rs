@@ -52,12 +52,22 @@ struct PassTimings {
     last: u64,
     total: f64,
     passes: std::collections::BTreeMap<&'static str, f64>,
+    /// The voxel pass's stages over the window: frames, then draw (seed and
+    /// trace), seed, sun shadows, denoiser, generation (ms summed).
+    voxel: (u32, [f64; 10]),
 }
 
 impl PassTimings {
     /// Adds the renderer's latest completed GPU frame, and logs the means every
     /// `window` frames.
-    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, size: [u32; 2]) {
+    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, voxel: &[helio_pass_voxel_planet::chunks::FrameTimings], size: [u32; 2]) {
+        for t in voxel {
+            self.voxel.0 += 1;
+            let [a, b, c, d, e] = t.shadow_stages;
+            for (sum, ms) in self.voxel.1.iter_mut().zip([t.draw, t.seed, t.shadow, t.denoise, t.generate, a, b, c, d, e]) {
+                *sum += ms;
+            }
+        }
         let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else { return };
         self.last = frame;
         self.frames += 1;
@@ -73,6 +83,11 @@ impl PassTimings {
         passes.sort_by(|a, b| b.1.total_cmp(&a.1));
         let list: Vec<String> = passes.iter().take(14).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
         log::info!("[timings] {}x{} over {} frames: gpu {:.3} ms; {}", size[0], size[1], self.frames, self.total / n, list.join(", "));
+        if self.voxel.0 > 0 {
+            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
+            log::info!("[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3}, local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}", self.voxel.0);
+        }
+        self.voxel = (0, [0.0; 10]);
         self.frames = 0;
         self.total = 0.0;
         self.passes.clear();
@@ -246,6 +261,7 @@ impl Gfx {
             last: u64::MAX,
             total: 0.0,
             passes: Default::default(),
+            voxel: (0, [0.0; 10]),
         });
         Self { window, surface, surface_format, device, queue, renderer, scene, avatar, feet, source, sun_light, origin: DVec3::ZERO, size, clock: 0.0, timings }
     }
@@ -348,7 +364,8 @@ impl Gfx {
             log::error!("render: {error:?}");
         }
         if let Some(timings) = &mut self.timings {
-            timings.add(self.renderer.timing_snapshot(), self.size);
+            let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
+            timings.add(self.renderer.timing_snapshot(), &voxel, self.size);
         }
         if let Some(path) = view.screenshot {
             self.save_screenshot(&output.texture, path);

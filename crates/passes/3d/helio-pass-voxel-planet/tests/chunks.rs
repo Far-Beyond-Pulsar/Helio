@@ -140,10 +140,11 @@ impl World {
             self.chunks.follow_gi(helio_pass_gi::Clipmap::around(view.eye), view.eye, view.eye);
         }
         let gi = self.gi.as_ref().map(|[frame, rays, hits, sun]| GiRays { frame, rays, hits, sun });
-        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, prev_view_proj, [jitter, prev_jitter], view.near, self.sun, view.size, self.scene_depth.as_ref(), lights.as_ref(), gi.as_ref());
+        // As the pass: the sun's occlusion before the draw (its GI hits read it).
         if self.sun_occlusion {
             self.chunks.draw_sun_occlusion(&mut recorder, self.frame, view.eye, self.sun);
         }
+        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, prev_view_proj, [jitter, prev_jitter], view.near, self.sun, view.size, self.scene_depth.as_ref(), lights.as_ref(), gi.as_ref());
         if let Some(picks) = picks {
             self.chunks.copy_picks(&mut recorder, picks);
         }
@@ -2143,14 +2144,14 @@ struct GiRayCheck {
     /// Hits in view near the eye (level 0) and those off the CPU's.
     compared: usize,
     wrong: usize,
-    /// Hits facing the sun, those the CPU finds mostly shadowed, and
-    /// disagreements on the sun's share (by more than 0.05).
+    /// Hits facing the sun the sun's occlusion maps hold, those the maps
+    /// shadow, and disagreements with the maps (by more than half).
     lit: usize,
     shadowed: usize,
     sun_wrong: usize,
     /// Hits on leaves, those whose transmission is not the material's, and
-    /// of those facing away from the sun, the sun's share on the leaf
-    /// cell's far side: compared, none, disagreements.
+    /// of those facing away from the sun, the sun on the leaf cell's far
+    /// side by the maps: compared, none, disagreements.
     leaves: usize,
     through_wrong: usize,
     back: usize,
@@ -2160,7 +2161,7 @@ struct GiRayCheck {
 
 /// GI rays from the finest level's middle 8^3 probes around `eye` (64
 /// random rays each), traced by the settled terrain of `view`, against CPU
-/// rays.
+/// rays; their hits' sun against the sun's occlusion maps read back.
 fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCheck {
     let view_proj = view.view_proj(planet);
     let clipmap = helio_pass_gi::Clipmap::around(eye);
@@ -2182,31 +2183,25 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
     let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize).map(|_| unit()).collect();
     let mut world = World::new(gpu, planet);
     world.gi = Some(gi_rays(gpu, eye, &probes, &dirs.iter().map(|d| d.as_vec3()).collect::<Vec<_>>(), world.sun));
+    world.sun_occlusion = true;
     world.settle(gpu, planet, view);
+    // Every level of the sun's occlusion drawn for this eye.
+    for _ in 0..4 {
+        world.frame(gpu, planet, view, None);
+    }
     // One frame's hits (the GI pass clears them each frame).
     let gi = world.gi.as_ref().unwrap();
     gpu.queue.write_buffer(&gi[2], 0, &vec![0u8; gi[2].size() as usize]);
     world.frame(gpu, planet, view, None);
     let hits = read_words(gpu, &world.gi.as_ref().unwrap()[2]);
+    let (maps, occlusion) = world.chunks.read_sun_occlusion().expect("drawn");
     let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
     let voxel = planet.grid().voxel_size();
     let sun = world.sun.as_dvec3();
     let leaf = planet.field().appearance().materials[material::LEAVES as usize].transmission;
     let leaf_through = (leaf * 255.0 + 0.5) as u32;
-    // The sun's share at `from` as the tracer finds it: through leaves,
-    // theirs each (crossed in a cell and three quarters, four at most).
-    let sun_through = |mut from: DVec3| {
-        let mut light = 1.0;
-        for i in 0..=4 {
-            let Some(h) = planet.raycast(from, sun, 200.0) else { return light };
-            if i == 4 || planet.material(h.cell) != material::LEAVES {
-                return 0.0;
-            }
-            light *= f64::from(leaf);
-            from += sun * (h.distance + 1.75 * voxel);
-        }
-        0.0
-    };
+    // The sun at `from` by the maps (none: near a texel's edge, or past them).
+    let sun_seen = |from: DVec3| occlusion_lit(&maps, &occlusion, eye, from).map(|(lit, ..)| if lit { 1.0 } else { 0.0 });
     let mut c = GiRayCheck::default();
     for (k, d) in dirs.iter().enumerate() {
         let probe = probes[k / helio_pass_gi::RAYS as usize];
@@ -2241,17 +2236,17 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
         c.through_wrong += usize::from((hit[3] >> 8) & 255 != if leaf { leaf_through } else { 0 });
         let facing = cpu.normal.dot(sun);
         if facing > 0.2 {
-            // From where the tracer's sun walk starts: half a cell off the face.
-            let seen = sun_through(at + cpu.normal * (0.5 * voxel));
+            // Where the tracer reads the maps: half a cell off the face.
+            let Some(seen) = sun_seen(at + cpu.normal * (0.5 * voxel)) else { continue };
             c.lit += 1;
             c.shadowed += usize::from(seen < 0.5);
-            c.sun_wrong += usize::from((seen - f64::from(hit[2] >> 24) / 255.0).abs() > 0.05);
+            c.sun_wrong += usize::from((seen - f64::from(hit[2] >> 24) / 255.0).abs() > 0.5);
         } else if leaf && facing < -0.2 {
             // Past the leaf cell, half a cell off its far side.
-            let seen = sun_through(at - cpu.normal * (1.5 * voxel));
+            let Some(seen) = sun_seen(at - cpu.normal * (1.5 * voxel)) else { continue };
             c.back += 1;
             c.back_shadowed += usize::from(seen == 0.0);
-            c.back_wrong += usize::from((seen - f64::from((hit[3] >> 16) & 255) / 255.0).abs() > 0.05);
+            c.back_wrong += usize::from((seen - f64::from((hit[3] >> 16) & 255) / 255.0).abs() > 0.5);
         }
     }
     eprintln!("{c:?}");
@@ -2262,8 +2257,8 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
 /// around the eye (a ball raised on the ground beside them), a probe in the
 /// ground reports rock (a back face at once); every other ray whose CPU hit
 /// is in view near the eye (level 0 drawn there) hits at the CPU's distance
-/// with the CPU's face, and sees the sun from half a cell off it as a CPU
-/// ray does; a hundredth may differ (grazing cells).
+/// with the CPU's face, and sees the sun from half a cell off it as the
+/// sun's occlusion maps do; a hundredth may differ (grazing cells).
 #[test]
 fn terrain_traces_gi_probe_rays() {
     let Some(gpu) = gpu() else { return };
@@ -2279,14 +2274,15 @@ fn terrain_traces_gi_probe_rays() {
     let c = trace_gi_rays(gpu, &planet, eye, &view);
     assert!(c.rock > 50 && c.rock_wrong == 0, "{c:?}");
     assert!(c.compared > 1500 && c.wrong * 100 <= c.compared, "{c:?}");
-    assert!(c.shadowed > 50 && c.sun_wrong * 100 <= c.lit, "{c:?}");
+    // The maps answer for the hits away from their texels' edges (a third).
+    assert!(c.shadowed > 10 && c.sun_wrong * 100 <= c.lit, "{c:?}");
     assert_eq!(c.through_wrong, 0, "{c:?}");
 }
 
 /// Leaves let light through for GI: among a forest's trees, a GI ray's hit
 /// on leaves carries the leaves' transmission (nothing else does), and the
-/// sun's share at a hit, and at a leaf cell's far side when the leaf faces
-/// away, is the CPU's through the leaves on the way (theirs each).
+/// sun at a hit, and at a leaf cell's far side when the leaf faces away, is
+/// the sun's occlusion maps'.
 #[test]
 fn gi_rays_see_light_through_leaves() {
     let Some(gpu) = gpu() else { return };
@@ -2311,9 +2307,8 @@ fn gi_rays_see_light_through_leaves() {
     let c = trace_gi_rays(gpu, &planet, eye, &view);
     assert!(c.compared > 400 && c.wrong * 100 <= c.compared, "{c:?}");
     assert!(c.leaves > 100 && c.through_wrong == 0, "{c:?}");
-    // A sparse crown's far sides see the sun past more leaf edges: a tenth
-    // may differ (a cell's corner along the way).
-    assert!(c.back > 20 && c.back_shadowed < c.back && c.back_wrong * 10 <= c.back, "{c:?}");
+    // The maps' 2x2 filter against their nearest texel: a tenth may differ.
+    assert!(c.back > 8 && c.back_wrong * 10 <= c.back, "{c:?}");
     assert!(c.sun_wrong * 50 <= c.lit, "{c:?}");
 }
 
