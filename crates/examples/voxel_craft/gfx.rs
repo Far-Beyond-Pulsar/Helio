@@ -54,7 +54,7 @@ struct PassTimings {
     passes: std::collections::BTreeMap<&'static str, f64>,
     /// The voxel pass's stages over the window: frames, then draw (seed and
     /// trace), seed, sun shadows, denoiser, generation (ms summed).
-    voxel: (u32, [f64; 11]),
+    voxel: (u32, [f64; 12]),
 }
 
 impl PassTimings {
@@ -64,7 +64,7 @@ impl PassTimings {
         for t in voxel {
             self.voxel.0 += 1;
             let [a, b, c, d, e] = t.shadow_stages;
-            for (sum, ms) in self.voxel.1.iter_mut().zip([t.draw, t.seed, t.shadow, t.denoise, t.generate, a, b, c, d, e, t.occlusion]) {
+            for (sum, ms) in self.voxel.1.iter_mut().zip([t.draw, t.seed, t.shadow, t.denoise, t.generate, a, b, c, d, e, t.occlusion, t.fallbacks]) {
                 *sum += ms;
             }
         }
@@ -84,10 +84,10 @@ impl PassTimings {
         let list: Vec<String> = passes.iter().take(14).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
         log::info!("[timings] {}x{} over {} frames: gpu {:.3} ms; {}", size[0], size[1], self.frames, self.total / n, list.join(", "));
         if self.voxel.0 > 0 {
-            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
-            log::info!("[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3}, local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}, sun occlusion {occlusion:.3}", self.voxel.0);
+            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion, fallbacks] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
+            log::info!("[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3} (fallbacks {fallbacks:.3}), local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}, sun occlusion {occlusion:.3}", self.voxel.0);
         }
-        self.voxel = (0, [0.0; 11]);
+        self.voxel = (0, [0.0; 12]);
         self.frames = 0;
         self.total = 0.0;
         self.passes.clear();
@@ -261,7 +261,7 @@ impl Gfx {
             last: u64::MAX,
             total: 0.0,
             passes: Default::default(),
-            voxel: (0, [0.0; 11]),
+            voxel: (0, [0.0; 12]),
         });
         Self { window, surface, surface_format, device, queue, renderer, scene, avatar, feet, source, sun_light, origin: DVec3::ZERO, size, clock: 0.0, timings }
     }

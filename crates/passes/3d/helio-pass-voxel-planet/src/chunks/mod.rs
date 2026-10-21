@@ -1027,6 +1027,8 @@ pub struct FrameTimings {
     /// The shadows' parts: sun samples, sky samples, every hit's sun (and
     /// the fallbacks' walks), local lights, the GI probes' rays.
     pub shadow_stages: [f64; 5],
+    /// Of every hit's sun: the fallbacks' walks.
+    pub fallbacks: f64,
     /// The sun's occlusion clipmap's level drawn this frame.
     pub occlusion: f64,
     /// The shadows' denoiser (from the shadows' end: a pass's start
@@ -1050,8 +1052,9 @@ pub struct FrameTimings {
 /// tile nodes end, tile columns end, tile features end, the shadows'
 /// denoiser end; the shadows' parts: sun samples end, sky samples end,
 /// every hit's sun end, local lights end (the GI rays end at shadows end);
-/// the sun's occlusion start and end.
-const QUERIES: u32 = 18;
+/// the sun's occlusion start and end; every hit's own sun end (before the
+/// fallbacks' walks).
+const QUERIES: u32 = 19;
 
 /// `Buried`'s size: a count and 4095 keys.
 const BURIED_BYTES: u64 = 16 * 4096;
@@ -3797,7 +3800,7 @@ impl ChunkWorld {
                     let stages = [ms(t[0], t[10]), ms(t[10], t[5]), ms(t[5], t[6])];
                     let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1]), ms(t[1], t[10])];
                     let shadow_stages = [ms(t[4], t[12]), ms(t[12], t[13]), ms(t[13], t[14]), ms(t[14], t[15]), ms(t[15], t[7])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), shadow_stages, occlusion: ms(t[16], t[17]), denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), shadow_stages, fallbacks: ms(t[18], t[14]), occlusion: ms(t[16], t[17]), denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
                     // Footprints computed and chunks generated are measured
                     // apart: with the footprint pool a frame may generate
                     // chunks of footprints it does not compute.
@@ -4357,11 +4360,14 @@ impl ChunkWorld {
                     pass.dispatch_workgroups(size[0].div_ceil(4).div_ceil(8), size[1].div_ceil(4).div_ceil(8), 1);
                 }
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk shadow"), timestamp_writes: end(14) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk shadow"), timestamp_writes: end(18) });
             pass.set_pipeline(&self.shadow);
             pass.set_bind_group(0, &group, &[]);
             pass.set_bind_group(1, &shadow_group, &[]);
             pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+            drop(pass);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk shadow fallbacks"), timestamp_writes: end(14) });
+            pass.set_bind_group(0, &group, &[]);
             pass.set_pipeline(&self.shadow_fallback);
             pass.set_bind_group(1, &fallback_group, &[]);
             pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
