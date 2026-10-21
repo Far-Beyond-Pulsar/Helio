@@ -139,7 +139,9 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 # wgpu 30.0.1 with reusable command buffers (Helio#330 part 5): the upstream
-# v30.0.1 tag plus one patch, on Far-Beyond-Pulsar/wgpu. Every crate of the
+# v30.0.1 tag plus Helio's patches, on Far-Beyond-Pulsar/wgpu (reusable
+# command buffers; texture tracker start states, which put HiZ mips in the
+# wrong Vulkan layout). Every crate of the
 # wgpu workspace is patched together so naga and wgpu-types stay one version.
 # Pulsar-Native's root manifest carries the same section.
 [patch.crates-io]
