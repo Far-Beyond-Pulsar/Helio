@@ -8,7 +8,7 @@ const GI_LEVEL_PROBES: u32 = 13824u; // GI_SIDE^3
 const GI_PROBES: u32 = 82944u;
 const GI_RAYS: u32 = 64u;
 // Probes updated a frame at most (`gi_lists`' two update lists).
-const GI_MAX_UPDATES: u32 = 4080u;
+const GI_MAX_UPDATES: u32 = 2720u;
 // A probe's record in `gi_probes` (words): irradiance / pi as L1 spherical
 // harmonics (RGB, half floats in 6 words), its state, then its distance
 // moments (8x8 octahedral texels: mean, mean^2 as half floats).

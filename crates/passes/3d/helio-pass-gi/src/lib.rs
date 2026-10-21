@@ -34,9 +34,19 @@ pub const PROBES: u32 = LEVEL_PROBES * LEVELS as u32;
 pub const FINEST_SPACING: f64 = 1.0;
 /// Rays a probe update traces.
 pub const RAYS: u32 = 64;
-/// Probes updated a frame, a level.
-pub const LEVEL_UPDATES: usize = 680;
-pub const MAX_UPDATES: u32 = (LEVEL_UPDATES * LEVELS) as u32;
+/// Probes updated a frame, by level: the two finest every 20 frames or so,
+/// the coarser (the far surroundings, slow to change, their rays the
+/// longest walks) half as often.
+pub const LEVEL_UPDATES: [usize; LEVELS] = [680, 680, 340, 340, 340, 340];
+pub const MAX_UPDATES: u32 = {
+    let mut sum = 0;
+    let mut level = 0;
+    while level < LEVELS {
+        sum += LEVEL_UPDATES[level];
+        level += 1;
+    }
+    sum as u32
+};
 pub const MAX_RAYS: u32 = MAX_UPDATES * RAYS;
 /// Words of a probe's record (`gi_common.wgsl`).
 pub const PROBE_WORDS: u32 = 72;
@@ -205,12 +215,12 @@ impl Schedule {
         out.clear();
         for level in 0..LEVELS {
             let start = out.len();
-            while out.len() - start < LEVEL_UPDATES {
+            while out.len() - start < LEVEL_UPDATES[level] {
                 let Some(index) = self.entered[level].pop_front() else { break };
                 self.queued[index as usize] = false;
                 out.push(index);
             }
-            while out.len() - start < LEVEL_UPDATES {
+            while out.len() - start < LEVEL_UPDATES[level] {
                 out.push(level as u32 * LEVEL_PROBES + self.cursor[level]);
                 self.cursor[level] = (self.cursor[level] + 1) % LEVEL_PROBES;
             }
@@ -728,6 +738,15 @@ mod tests {
         }
     }
 
+    /// The shaders' copies of the layout constants (`gi_common.wgsl`).
+    #[test]
+    fn shader_constants_match() {
+        let source = GI_COMMON_SNIPPET.source;
+        for (name, value) in [("GI_LEVELS", LEVELS as u32), ("GI_SIDE", SIDE as u32), ("GI_LEVEL_PROBES", LEVEL_PROBES), ("GI_PROBES", PROBES), ("GI_RAYS", RAYS), ("GI_MAX_UPDATES", MAX_UPDATES), ("GI_PROBE_WORDS", PROBE_WORDS)] {
+            assert!(source.contains(&format!("const {name}: u32 = {value}u;")), "{name} is not {value} in gi_common.wgsl");
+        }
+    }
+
     #[test]
     fn updates_take_entered_probes_first_then_all_in_turn() {
         let mut s = Schedule::new();
@@ -739,12 +758,12 @@ mod tests {
         assert_eq!(out.len(), MAX_UPDATES as usize);
         assert_eq!(out[0], 5);
         assert_eq!(out[1], 0);
-        assert_eq!(out[LEVEL_UPDATES], LEVEL_PROBES + 7);
-        // Every probe of a level comes round.
-        let mut seen = vec![false; LEVEL_PROBES as usize];
-        for _ in 0..(LEVEL_PROBES as usize).div_ceil(LEVEL_UPDATES) + 1 {
+        assert_eq!(out[LEVEL_UPDATES[0]], LEVEL_PROBES + 7);
+        // Every probe of every level comes round.
+        let mut seen = vec![false; PROBES as usize];
+        for _ in 0..(LEVEL_PROBES as usize).div_ceil(LEVEL_UPDATES[LEVELS - 1]) + 1 {
             s.next(&mut out);
-            for &i in &out[..LEVEL_UPDATES] {
+            for &i in &out {
                 seen[i as usize] = true;
             }
         }

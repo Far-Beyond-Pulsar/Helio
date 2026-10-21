@@ -111,7 +111,7 @@ fn a_uniform_sky_lights_probes_evenly() {
         }
         assert!((e - Vec3::ONE).abs().max_element() < 0.02);
     }
-    assert!(updated >= 3 * 4080, "{updated} probes updated");
+    assert!(updated >= 3 * helio_pass_gi::MAX_UPDATES, "{updated} probes updated");
 }
 
 /// No sky; the sun (illuminance 2) straight down on flat ground of albedo

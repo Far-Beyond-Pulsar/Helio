@@ -25,8 +25,10 @@ or under overhangs, and light that changes as the world is dug and built.
 
   A probe whose rays mostly meet back faces is inside the ground: inactive,
   so it takes no weight.
-- **Updates.** Each frame updates `LEVEL_UPDATES` (680) probes per level:
-  those that came in first, oldest first, then the others in turn. Each
+- **Updates.** Each frame updates `LEVEL_UPDATES` probes per level (680
+  on the two finest, 340 on the coarser, whose far surroundings change
+  slowly and whose rays walk farthest): those that came in first, oldest
+  first, then the others in turn. Each
   update traces 64 rays along a spherical Fibonacci set turned by a random
   rotation each frame. Results blend into the probe with hysteresis (1/n
   for its first updates, then 3% for irradiance and 5% for moments).
