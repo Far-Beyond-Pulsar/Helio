@@ -128,9 +128,10 @@ pub fn run_scene_animated(
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let (width, height) = match std::env::var("HLFS_RESOLUTION").as_deref() {
+            Ok("1080p") => (1920, 1080),
             Ok("1440p") => (2560, 1440),
             Ok("4k") => (3840, 2160),
-            Ok(other) => panic!("unsupported HLFS_RESOLUTION: {other}; use 1440p or 4k"),
+            Ok(other) => panic!("unsupported HLFS_RESOLUTION: {other}; use 1080p, 1440p or 4k"),
             Err(_) => (640, 360),
         };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -320,6 +321,17 @@ pub fn run_scene_animated(
             (query, resolve, read)
         });
         let mut tsr_timing_csv = String::from("frame,resolve_ms,copies_ms,blit_ms,tsr_ms\n");
+        // HLFS_NO_LOCAL_EXPOSURE: post-process defaults without local exposure.
+        if std::env::var_os("HLFS_NO_LOCAL_EXPOSURE").is_some() {
+            let blend = renderer
+                .find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+                .expect("post-process resolver");
+            let mut settings = blend.defaults().clone();
+            settings.local_exposure_highlight_contrast = 1.0;
+            settings.local_exposure_shadow_contrast = 1.0;
+            settings.local_exposure_detail_strength = 1.0;
+            blend.set_defaults(&queue, &settings);
+        }
         let postprocess_timing = std::env::var_os("HLFS_POSTPROCESS_TIMINGS").map(|_| {
             let pass = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>().expect("postprocess pass");
             assert!(pass.enable_uber_timing(&device), "GPU timestamps unavailable");
@@ -342,18 +354,18 @@ pub fn run_scene_animated(
             assert!(pass.enable_compute_timing(&device), "GPU timestamps unavailable");
             let query = pass.compute_timing_query().unwrap().clone();
             let resolve = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Postprocess compute timestamps"), size: 24,
+                label: Some("Postprocess compute timestamps"), size: 32,
                 usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             let read = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Postprocess compute timing readback"), size: 24,
+                label: Some("Postprocess compute timing readback"), size: 32,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             (query, resolve, read)
         });
-        let mut postprocess_compute_timing_csv = String::from("frame,exposure_ms,bloom_ms,postprocess_compute_ms\n");
+        let mut postprocess_compute_timing_csv = String::from("frame,exposure_ms,local_exposure_ms,bloom_ms,postprocess_compute_ms\n");
         let transparent_timing = std::env::var_os("HLFS_TRANSPARENT_TIMINGS").map(|_| {
             let pass = renderer.find_pass_mut::<helio_pass_transparent::TransparentPass>().expect("transparent pass");
             assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
@@ -566,8 +578,8 @@ pub fn run_scene_animated(
             }
             if let Some((query, resolve, read)) = &postprocess_compute_timing {
                 let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.resolve_query_set(query, 0..3, resolve, 0);
-                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 24);
+                encoder.resolve_query_set(query, 0..4, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 32);
                 queue.submit([encoder.finish()]);
                 let (tx, rx) = std::sync::mpsc::channel();
                 read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
@@ -575,9 +587,9 @@ pub fn run_scene_animated(
                 rx.recv().unwrap().unwrap();
                 let bytes = read.slice(..).get_mapped_range().unwrap();
                 let ticks: &[u64] = bytemuck::cast_slice(&bytes);
-                let exposure = (ticks[1] - ticks[0]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
-                let bloom = (ticks[2] - ticks[1]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
-                postprocess_compute_timing_csv.push_str(&format!("{frame},{exposure},{bloom},{}\n", exposure + bloom));
+                let ms = |a: usize, b: usize| (ticks[b] - ticks[a]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                let (exposure, local, bloom) = (ms(0, 1), ms(1, 2), ms(2, 3));
+                postprocess_compute_timing_csv.push_str(&format!("{frame},{exposure},{local},{bloom},{}\n", exposure + local + bloom));
                 drop(bytes);
                 read.unmap();
             }
