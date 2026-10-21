@@ -1178,6 +1178,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // the stored terrain visibility path instead.
     let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
+    // Foliage tags itself (-1, -1.5) for the same reason: a meadow's dense blades
+    // fill the kernel and turn whole fields black; blades carry their own
+    // height AO.
+    let is_foliage = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -1.5;
     // The voxel pass's debug colours (trace cost, levels) unlit.
     if globals.debug_mode == 32u || globals.debug_mode == 34u || (globals.debug_mode == 35u && pix.x * 2 < i32(textureDimensions(gbuf_albedo).x)) {
         if is_stored_voxel {
@@ -1191,7 +1195,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(1.0, 0.36, 0.08, 1.0);
     }
-    let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel);
+    let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel || is_foliage);
     // Combined AO: material AO from G-buffer × screen-space AO.
     let ao_combined  = ao * ssao_factor;
 

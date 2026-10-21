@@ -3846,3 +3846,108 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u) | (glow << 24u);
     gi_hits[id.x] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), light);
 }
+
+// ---- 7. Foliage ground probes ----
+// The terrain as the ground foliage grows on (`chunks::ground`): each query
+// is a segment down a foliage tile's up, from a point its tile's
+// `probe_tiles` entry places in a base cell (located on the CPU in f64, as
+// GI probes are); it walks the drawn cut, and where it meets a top face it
+// answers the distance, the face's normal and its cell's material (the
+// ground id foliage types are keyed by). Walls, rock and nothing drawn are
+// no ground. A switch between levels shows its new side (dither 0): the
+// ground changes when it starts and again when it ends.
+struct GroundQuery {
+    start: vec3<f32>,
+    length: f32,
+    up: vec3<f32>,
+    pad: u32,
+}
+
+struct GroundHit {
+    distance: u32,
+    normal: u32,
+    ground: u32,
+    // The ground's linear colour there, RGBA8 (0: none).
+    colour: u32,
+}
+
+struct ProbeTile {
+    cell: vec4<i32>,
+    frac: vec4<f32>,
+    at: vec4<f32>,
+    j0: vec4<f32>,
+    j1: vec4<f32>,
+    j2: vec4<f32>,
+}
+
+// The eye in the queries' space; x the queries in all, y the blocks (their first
+// queries ascending, in `at.w`).
+struct ProbeFrame {
+    eye: vec4<f32>,
+    counts: vec4<u32>,
+}
+
+// Starts a probe tries, PROBE_STEP metres apart downwards.
+const PROBE_ATTEMPTS: u32 = 4u;
+const PROBE_STEP: f32 = 4.0;
+
+@group(1) @binding(58) var<uniform> probe_frame: ProbeFrame;
+@group(1) @binding(59) var<storage, read> ground_queries: array<GroundQuery>;
+@group(1) @binding(60) var<storage, read_write> ground_hits: array<GroundHit>;
+@group(1) @binding(61) var<storage, read> probe_tiles: array<ProbeTile>;
+
+@compute @workgroup_size(64)
+fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= probe_frame.counts.x || id.x >= arrayLength(&ground_queries) || id.x >= arrayLength(&ground_hits) { return; }
+    var hit = GroundHit(bitcast<u32>(-1.0), 0u, 0xffffffffu, 0u);
+    // The block holding the query: the last whose first query is at or before it.
+    var lo = 0u;
+    var hi = min(probe_frame.counts.y, arrayLength(&probe_tiles));
+    if hi == 0u || id.x < bitcast<u32>(probe_tiles[0].at.w) {
+        ground_hits[id.x] = hit;
+        return;
+    }
+    loop {
+        if hi - lo <= 1u { break; }
+        let mid = (lo + hi) / 2u;
+        if bitcast<u32>(probe_tiles[mid].at.w) <= id.x { lo = mid; } else { hi = mid; }
+    }
+    let t = lo;
+    let query = ground_queries[id.x];
+    let tile = probe_tiles[t];
+    // Walked from under the query start by the tile drop (`frac.w`), where drawn
+    // chunks are near; lower, a step at a time, where none is near enough to start
+    // from (rock ends it: the ground is over the start there).
+    let up = normalize(query.up);
+    var drop = tile.frac.w;
+    var org = vec3<f32>(0.0);
+    var start: ProbeStart;
+    for (var attempt = 0u; attempt < PROBE_ATTEMPTS; attempt++) {
+        org = query.start - probe_frame.eye.xyz - up * drop;
+        let d = org - tile.at.xyz;
+        let c = tile.frac.xyz + vec3<f32>(dot(tile.j0.xyz, d), dot(tile.j1.xyz, d), dot(tile.j2.xyz, d));
+        start = probe_start(vec4<i32>(tile.cell.xyz + vec3<i32>(floor(c)), tile.cell.w), org, 0);
+        if start.ok || start.rock { break; }
+        drop += PROBE_STEP;
+    }
+    if start.ok {
+        let end = walk(start.walk, org, -up, 0.0, query.length - drop, 0, 96u, false, vec2<u32>(id.x & 63u, id.x >> 6u));
+        if end.hit && end.slot != NONE && end.t >= 0.0 && end.t + drop <= query.length {
+            let f = cell_frame(end.slot, end.cell);
+            let axis = select(select(f.m2.xyz, f.m1.xyz, end.axis == 1u), f.m0.xyz, end.axis == 0u);
+            let n = normalize(axis) * select(-1.0, 1.0, end.sign == 1u);
+            if dot(n, up) > 0.5 {
+                let m = shown_material(end.material, end.slot, end.cell, true);
+                // The turf's colour there as the draw shows it from a few metres: the
+                // material's patches and clumps, without each cube's pigment. Grass of
+                // ground-coloured types takes it, so past the last blades the ground
+                // already reads as the meadow.
+                let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
+                let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
+                let colour = material_albedo(min(m, 31u), p, 0u, 0.4, 0.0);
+                hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(n), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
+            }
+        }
+    }
+    ground_hits[id.x] = hit;
+}

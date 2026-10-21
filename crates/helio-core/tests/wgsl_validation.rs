@@ -28,6 +28,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_mats::PBR_EVAL_SNIPPET,
     helio_mats::SPECULAR_AA_SNIPPET,
     helio_pass_foliage_place::WIND_SNIPPET,
+    helio_pass_foliage_place::COMMON_SNIPPET,
     helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
     helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_pass_sky::clouds::CLOUD_SHADOW_SNIPPET,

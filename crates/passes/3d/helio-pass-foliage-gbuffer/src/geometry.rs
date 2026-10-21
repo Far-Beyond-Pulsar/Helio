@@ -1,245 +1,251 @@
-//! CPU mirror of the procedural blade geometry in `foliage_gbuffer.wgsl`.
+//! CPU mirror of the procedural tuft geometry in `foliage_gbuffer.wgsl`.
 //!
-//! There is no vertex buffer and no index buffer anywhere in the grass path. Every
-//! vertex of every blade is derived from `@builtin(vertex_index)` and the per-instance
-//! [`GpuBladeInstance`](helio_pass_foliage_place::GpuBladeInstance), which is what makes the
-//! whole world's grass four `draw_indirect` calls (the plan's §6.3). The cost of that is
-//! that the geometry only exists inside a shader, where nothing can look at it — so it is
-//! written twice, here and in WGSL, and the two are pinned against each other by the
-//! tests in `tests/geometry.rs`.
+//! There is no vertex buffer and no index buffer anywhere in the grass path. Every vertex
+//! is derived from `@builtin(vertex_index)` and a 16-byte record
+//! ([`GpuBladeInstance`](helio_pass_foliage_place::GpuBladeInstance)), which is what makes
+//! the world's foliage four `draw_indirect` calls. The cost of that is that the geometry
+//! only exists inside a shader, where nothing can look at it — so its shapes are written
+//! twice, here and in WGSL, and the tests in `tests/geometry.rs` check this copy's
+//! properties: blocky blades are connected staircases that never share a cube, strips fit
+//! their LOD's vertex count, smooth blades keep their length.
 //!
-//! This is the same arrangement `helio-pass-foliage-place::placement` uses for the LOD maths,
-//! and for the same reason: when a blade comes out inside-out or a strip has a fold in
-//! it, the failure is a screenful of flickering polygons with no intermediate state to
-//! inspect. A CPU mirror turns that into an assertion on three floats.
-//!
-//! # Strip topology
-//!
-//! Vertices are emitted in **row-major, side-minor** order:
-//!
-//! ```text
-//!  index:  0        1        2        3        4        5   ...  2n
-//!  row:    0        0        1        1        2        2        n (tip)
-//!  side:  -1       +1       -1       +1       -1       +1        0
-//! ```
-//!
-//! which is exactly a triangle strip up the blade. The final vertex of a blade LOD is a
-//! single tip vertex (`side = 0`), so a 5-segment blade is 11 vertices rather than 12 —
-//! collapsing the tip is what keeps the silhouette from ending in a flat chisel.
-//!
-//! Card LODs have no tip vertex: they are a plain 4-vertex quad strip (two rows of two),
-//! which is why [`LOD_VERTEX_COUNTS`] is `[11, 7, 4, 4]` and not `2n + 1` throughout.
-//!
-//! Each instance is an independent strip. That is guaranteed by the WebGPU spec's
-//! primitive-assembly algorithm — assembly runs per instance, and a strip is only split
-//! on the restart value for *indexed* draws — so a non-indexed instanced strip draw can
-//! never span an instance boundary and no degenerate stitch triangles are needed.
+//! A tuft's blades are a function of its seed, the blade's index and the type
+//! ([`tuft_blade`]): they fan out from a tight base, lean out more at the rim, bend more
+//! towards the tip, and some lie over.
+
+use helio_pass_foliage_place::{hash_to_unit, GpuFoliageType, FOLIAGE_LOD_VERTEX_COUNTS};
 
 /// Number of drawable foliage LOD levels.
-///
-/// Mirrors `helio_pass_foliage_place::FOLIAGE_LOD_COUNT` as a `usize`, so it can size the
-/// tables below without a cast at every use. Named differently on purpose: the two are
-/// the same number in different types, and a glob-importing caller that got the `u32`
-/// where it wanted the `usize` would fail in a way that reads like a borrow error.
 pub const LOD_COUNT: usize = 4;
 
-/// Segments up the blade at each LOD (the plan's §6.3 ladder).
-///
-/// L2/L3 are cards, so their "segment" count is 1 in the sense of "one quad tall"; the
-/// tip-collapse and the width taper are both switched off for them by [`LOD_IS_CARD`].
+/// Segments up a smooth blade at each LOD: L0 and L1 strips, L2 cards (1), L3 a fan (1).
 pub const LOD_SEGMENTS: [u32; LOD_COUNT] = [5, 3, 1, 1];
 
-/// Vertices per instance at each LOD — the `vertex_count` the producer must write into
-/// each `DrawIndirectArgs`.
-///
-/// `2 * segments + 1` for the blade LODs (tip collapsed to one vertex) and 4 for the
-/// card LODs. These numbers are part of the interface with `FoliagePlacePass`: it writes
-/// them into the indirect buffer, this pass never overrides them, and a mismatch draws
-/// either a truncated blade or a strip that runs off the end of its own topology.
-pub const LOD_VERTEX_COUNTS: [u32; LOD_COUNT] = [11, 7, 4, 4];
+/// Vertices per instance at each LOD for smooth blades (the producer's
+/// [`FOLIAGE_LOD_VERTEX_COUNTS`]; blocky blades draw `FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`).
+pub const LOD_VERTEX_COUNTS: [u32; LOD_COUNT] = FOLIAGE_LOD_VERTEX_COUNTS;
 
-/// Whether each LOD draws a card (flat quad) rather than a tapered blade strip.
-pub const LOD_IS_CARD: [bool; LOD_COUNT] = [false, false, true, true];
+/// Cubes a blocky blade rises by at most (`FOLIAGE_STACK_CUBES`).
+pub const STACK_CUBES: u32 = helio_pass_foliage_place::FOLIAGE_STACK_CUBES;
+/// Cubes a blocky blade steps sideways by at most at L0 and at L1 (`FOLIAGE_L1_STEPS`).
+pub const STACK_STEPS: u32 = 4;
+pub const L1_STEPS: u32 = 2;
+/// Boxes a blocky blade's strip holds at L0 and L1.
+pub const L0_BOXES: u32 = 8;
+pub const L1_BOXES: u32 = 5;
+/// A smooth tuft's base: its blades root within this many metres of its centre.
+pub const TUFT_BASE: f32 = 0.03;
 
-/// Forward curl of a blade at its tip, as a fraction of the blade's height.
-///
-/// A blade modelled as a flat vertical strip reads as a spike of plastic. The curl is
-/// what gives grass its silhouette, and it also does real work for the wind model: the
-/// arc-length correction in `helio_wind_offset` assumes the stem has length, so a blade
-/// that is a straight vertical line has no lateral reach to trade against.
-///
-/// Applied as `curve * height_frac²`, i.e. a cantilever mode shape, so the root leaves
-/// the ground vertically. A linear curl would visibly shear the blade out of the terrain
-/// at its base, which is the same failure `helio_wind_sway` squares `height_frac` to
-/// avoid.
-pub const BLADE_CURVE_FRACTION: f32 = 0.35;
+/// `foliage_hash` (PCG output permutation).
+pub fn hash(x: u32) -> u32 {
+    helio_pass_foliage_place::foliage_hash(x)
+}
 
-/// The LOD index of the clump card — the one LOD that draws a single instance per
-/// *cluster* rather than per blade.
-///
-/// Must agree with `FOLIAGE_LOD_CLUMP` in `foliage_cull.wgsl`, which is what decides to
-/// emit one index per cluster for this level. If the two ever disagree, one side emits
-/// per-blade while the other sizes per-cluster and the far ring is off by the cluster
-/// size — a density discontinuity, not a crash.
-pub const CLUMP_LOD: usize = 3;
-
-/// Width multiplier applied to the L3 clump card.
-///
-/// L3 is one card per 4×4 cluster (the plan's §6.3), so it must cover roughly the
-/// footprint of sixteen blades rather than one. Getting this wrong is not subtle: too
-/// narrow and the far ring visibly thins out at the L2→L3 boundary, too wide and the
-/// ground turns into a solid mat.
-pub const CLUMP_CARD_WIDTH_SCALE: f32 = 2.5;
-
-/// Height multiplier applied to the L3 clump card.
-///
-/// Slightly taller than a single blade because a clump's silhouette is set by its
-/// tallest members, not its mean.
-pub const CLUMP_CARD_HEIGHT_SCALE: f32 = 1.35;
-
-/// Per-LOD width multiplier, indexed by LOD. See [`CLUMP_CARD_WIDTH_SCALE`].
-pub const LOD_WIDTH_SCALE: [f32; LOD_COUNT] = [1.0, 1.0, 1.0, CLUMP_CARD_WIDTH_SCALE];
-
-/// Per-LOD height multiplier, indexed by LOD. See [`CLUMP_CARD_HEIGHT_SCALE`].
-pub const LOD_HEIGHT_SCALE: [f32; LOD_COUNT] = [1.0, 1.0, 1.0, CLUMP_CARD_HEIGHT_SCALE];
-
-/// One derived blade vertex, before any per-instance scaling, rotation or wind.
-///
-/// Deliberately dimensionless: everything here is a fraction, so the same values feed a
-/// 0.15 m blade and a 0.45 m one. [`blade_local_position`] is where dimensions enter.
+/// One blade of a tuft (`Blade` in the shader).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BladeVertex {
-    /// Row index up the blade, `0..=segments`.
-    pub row: u32,
-    /// Which edge of the strip: `-1.0`, `+1.0`, or `0.0` at a collapsed tip.
-    pub side: f32,
-    /// Normalised height along the blade, 0 at the root and 1 at the tip.
-    ///
-    /// This is the value every wind band scales with, so it must be exactly 0 at the
-    /// root: `helio_wind_offset` returns identically zero there, which is what keeps the
-    /// blade attached to the terrain instead of revealing the ground plane under it.
-    pub height_frac: f32,
-    /// Width taper at this row, as a fraction of the blade's full width.
-    pub width_frac: f32,
-    /// Whether this is the collapsed tip vertex.
-    pub is_tip: bool,
+pub struct Blade {
+    pub rim: f32,
+    pub angle: f32,
+    pub compass: u32,
+    pub lean: f32,
+    pub curve: f32,
+    pub fallen: bool,
+    pub height: f32,
+    pub width: f32,
 }
 
-/// Derive one vertex of the blade strip.
-///
-/// `lod` is clamped rather than asserted: this is called with a value that ultimately
-/// came off the GPU-side LOD uniform, and the WGSL cannot panic. Both sides clamp so the
-/// mirror stays a transcription.
-///
-/// A `vertex_index` past the LOD's vertex count clamps to the top row rather than
-/// wrapping. That never happens in a correct draw — the vertex count is fixed by
-/// [`LOD_VERTEX_COUNTS`] — but a producer writing the wrong `vertex_count` should draw a
-/// degenerate sliver, not a blade folded back through itself.
-pub fn blade_vertex(lod: u32, vertex_index: u32) -> BladeVertex {
-    let lod = (lod as usize).min(LOD_COUNT - 1);
-    let segments = LOD_SEGMENTS[lod];
-    let is_card = LOD_IS_CARD[lod];
-
-    // Cards have no collapsed tip. Using a sentinel that no legal vertex index can reach
-    // keeps the two cases one branch apart instead of two code paths.
-    let tip_index = if is_card { u32::MAX } else { 2 * segments };
-    let is_tip = vertex_index == tip_index;
-
-    let row = if is_tip {
-        segments
-    } else {
-        (vertex_index >> 1).min(segments)
-    };
-    let side = if is_tip {
-        0.0
-    } else if vertex_index & 1 == 1 {
-        1.0
-    } else {
-        -1.0
-    };
-
-    let height_frac = row as f32 / segments as f32;
-    // Parabolic taper on blades, none on cards. The square (rather than a linear taper)
-    // keeps the blade wide through its lower half, where the silhouette is actually
-    // read, and pinches only near the tip.
-    let width_frac = if is_card {
-        1.0
-    } else {
-        1.0 - height_frac * height_frac
-    };
-
-    BladeVertex {
-        row,
-        side,
-        height_frac,
-        width_frac,
-        is_tip,
+/// Blade `j` of `n` of the tuft of `seed` (the record's seed half), `turn` (its aux byte
+/// over 256) and `height_lerp` (its height byte over 255), of type `ty` (`tuft_blade`).
+pub fn tuft_blade(ty: &GpuFoliageType, seed: u32, turn: f32, height_lerp: f32, j: u32, n: u32) -> Blade {
+    let h = hash(seed.wrapping_mul(0x9e37_79b1).wrapping_add(j.wrapping_mul(0x85eb_ca6b)).wrapping_add(0x27d4_eb2f));
+    let h2 = hash(h ^ 0x1656_67b1);
+    let unit = hash_to_unit;
+    let rim = if j == 0 { 0.0 } else { 0.35 + 0.65 * unit(h) };
+    let angle = std::f32::consts::TAU * (turn + (j as f32 + 0.35 * unit(h2)) / n.max(1) as f32);
+    let compass = ((turn * 8.0) as u32 + j * 3) % 8;
+    let fallen = unit(hash(h ^ 0x9e37_79b9)) < ty.fall_chance && j != 0;
+    let mut lean = (ty.lean_range[0] + (ty.lean_range[1] - ty.lean_range[0]) * rim) * (0.75 + 0.5 * unit(h2 >> 3));
+    let curve = ty.curve * (0.6 + 0.8 * unit(h >> 5));
+    let tuft_height = ty.height_range[0] + (ty.height_range[1] - ty.height_range[0]) * height_lerp;
+    let mut height = tuft_height * (1.0 - 0.35 * rim) * (0.75 + 0.5 * unit(h >> 11));
+    if fallen {
+        lean = lean.max(1.0) * 2.5;
+        height *= 0.6;
     }
+    let width = ty.width_range[0] + (ty.width_range[1] - ty.width_range[0]) * unit(h2 >> 7);
+    Blade { rim, angle, compass, lean, curve, fallen, height, width }
 }
 
-/// Blade-local position of one vertex, in metres, before yaw rotation and wind.
-///
-/// Local frame: `+X` across the blade, `+Y` up the blade from its root, `+Z` in the
-/// direction the blade curls. The root is the origin, so translating by the blade's
-/// world position is the whole of the model transform — there is no matrix anywhere in
-/// this path.
-///
-/// `height` and `width` are the already-resolved per-instance dimensions (the type's
-/// range lerped by the packed `height_scale` / `width_scale`, times the LOD's scale from
-/// [`LOD_WIDTH_SCALE`] / [`LOD_HEIGHT_SCALE`], times the ring scale-in factor).
-pub fn blade_local_position(lod: u32, vertex_index: u32, height: f32, width: f32) -> [f32; 3] {
-    let clamped_lod = (lod as usize).min(LOD_COUNT - 1);
-    let v = blade_vertex(lod, vertex_index);
-    // Cards are flat by construction: a curled card would break the yaw-continuity rule
-    // in the plan's §6.3, because the curl direction would swing the silhouette at the
-    // L1→L2 boundary where the blade it replaces is still nearly straight.
-    let curve = if LOD_IS_CARD[clamped_lod] {
-        0.0
-    } else {
-        height * BLADE_CURVE_FRACTION
-    };
-    [
-        v.side * 0.5 * width * v.width_frac,
-        height * v.height_frac,
-        curve * v.height_frac * v.height_frac,
-    ]
+/// A grid compass step (`compass_step`): the eight neighbours of a cube, axis steps first.
+pub fn compass_step(i: u32) -> [f32; 2] {
+    [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]][(i & 7) as usize]
 }
 
-/// Blade-local surface normal at one vertex, before yaw rotation.
-///
-/// Analytic rather than differenced: the strip is only two vertices wide, so a
-/// finite-difference normal at the collapsed tip would divide by a zero-width edge. The
-/// blade's along-stem tangent is `d/dt (0, height·t, curve·t²) = (0, height, 2·curve·t)`
-/// and its across-stem tangent is `+X`, so the normal is their cross product.
-///
-/// The result faces `-Z` (against the curl) for a positive curve. Which face that is
-/// does not matter downstream — the pipeline sets `cull_mode: None` because blades are
-/// two-sided, and the fragment shader flips the normal by `@builtin(front_facing)`.
-pub fn blade_local_normal(lod: u32, vertex_index: u32, height: f32) -> [f32; 3] {
-    let clamped_lod = (lod as usize).min(LOD_COUNT - 1);
-    let v = blade_vertex(lod, vertex_index);
-    let curve = if LOD_IS_CARD[clamped_lod] {
-        0.0
-    } else {
-        height * BLADE_CURVE_FRACTION
-    };
-    // cross((1,0,0), (0, height, 2·curve·t)) = (0, -2·curve·t, height)
-    let n = [0.0f32, -2.0 * curve * v.height_frac, height.max(1.0e-6)];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    [n[0] / len, n[1] / len, n[2] / len]
+/// How many cubes a blocky blade rises and steps sideways, at most `steps` (`block_steps`).
+pub fn block_steps(b: &Blade, cube: f32, scale: f32, steps: u32) -> [u32; 2] {
+    let rise = ((b.height * scale / cube).round() as u32).min(STACK_CUBES);
+    if rise == 0 {
+        return [0, 0];
+    }
+    let side = ((rise as f32 * (b.lean + b.curve).max(0.0)).round() as u32).min(steps);
+    [rise, side]
 }
 
-/// The three vertex indices of triangle `triangle` in a `TriangleStrip`, in the order
-/// the rasteriser assembles them.
-///
-/// WebGPU flips the first two vertices of every odd triangle so that consecutive
-/// triangles in a strip share a winding direction. This is here because the winding test
-/// would otherwise be asserting a property of the test's own assumption rather than of
-/// the geometry.
-pub fn strip_triangle(triangle: u32) -> [u32; 3] {
-    if triangle % 2 == 0 {
-        [triangle, triangle + 1, triangle + 2]
-    } else {
-        [triangle + 1, triangle, triangle + 2]
+/// The sideways step the path has reached after rising to cube `v` (`block_target`).
+pub fn block_target(b: &Blade, v: u32, rise: u32, side: u32) -> u32 {
+    if rise <= 1 || side == 0 {
+        return if rise <= 1 { side } else { 0 };
+    }
+    let t = v as f32 / (rise - 1) as f32;
+    let g = (b.lean * t + b.curve * t * t) / (b.lean + b.curve).max(1.0e-4);
+    ((side as f32 * g.clamp(0.0, 1.0)).round() as u32).min(side)
+}
+
+/// A box of a blocky shape: centre across the ground, half extents, bottom and top.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BlockBox {
+    pub centre: [f32; 2],
+    pub half: [f32; 2],
+    pub y0: f32,
+    pub y1: f32,
+}
+
+/// The cubes of a blocky blade's staircase, in order, as `(sideways step, rise)`; blades
+/// past the tuft's first leave out the shared root column (`block_path`'s walk).
+pub fn block_cubes(b: &Blade, j: u32, cube: f32, scale: f32) -> Vec<[u32; 2]> {
+    let [rise, side] = block_steps(b, cube, scale, STACK_STEPS);
+    if rise == 0 {
+        return Vec::new();
+    }
+    let side = if j > 0 { side.max(1) } else { side };
+    let (mut h, mut v) = (0u32, 0u32);
+    let mut cubes = vec![[0, 0]];
+    loop {
+        let way = if h < block_target(b, v, rise, side) {
+            1
+        } else if v + 1 < rise {
+            0
+        } else if h < side {
+            1
+        } else {
+            break;
+        };
+        if way == 0 {
+            v += 1;
+        } else {
+            h += 1;
+        }
+        cubes.push([h, v]);
+    }
+    if j > 0 {
+        // The shared column (step 0) belongs to the tuft's first blade.
+        cubes.retain(|c| c[0] > 0);
+    }
+    cubes
+}
+
+/// The boxes of a blocky blade stepping sideways at most `max_steps` (`block_path`, all of
+/// them): runs up merged, axis runs sideways merged, diagonal steps a cube each.
+pub fn block_boxes(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bool, max_steps: u32) -> Vec<BlockBox> {
+    let merge = STACK_CUBES;
+    let [rise, side_steps] = block_steps(b, cube, scale, max_steps);
+    let mut out = Vec::new();
+    if rise == 0 {
+        return out;
+    }
+    let side = if j > 0 { side_steps.max(1) } else { side_steps };
+    let dir = compass_step(b.compass);
+    let diagonal = b.compass >= 4;
+    let size = cube * if j >= 8 { 0.86 } else { 1.0 };
+    let height = cube * if leafy { 0.6 } else { 1.0 };
+    let across = if leafy { b.width.max(size) } else { size };
+    let (mut h, mut v) = (0u32, 0u32);
+    let (mut run_h, mut run_v, mut run_len, mut run_way) = (0u32, 0u32, 1u32, 0u32);
+    let mut started = j == 0;
+    loop {
+        let way = if h < block_target(b, v, rise, side) {
+            1
+        } else if v + 1 < rise {
+            0
+        } else if h < side {
+            1
+        } else {
+            2
+        };
+        let last = way == 2;
+        let breaks = last || way != run_way || (way == 0 && run_len >= merge) || (way == 1 && diagonal) || !started;
+        if breaks && started {
+            let first = [dir[0] * run_h as f32 * size, dir[1] * run_h as f32 * size];
+            let extent = if run_way == 1 && !diagonal {
+                [dir[0] * (run_len - 1) as f32 * size, dir[1] * (run_len - 1) as f32 * size]
+            } else {
+                [0.0, 0.0]
+            };
+            let centre = [first[0] + extent[0] * 0.5, first[1] + extent[1] * 0.5];
+            let along = [dir[0].abs() * 0.5 * size + extent[0].abs() * 0.5, dir[1].abs() * 0.5 * size + extent[1].abs() * 0.5];
+            let other = [dir[1].abs() * 0.5 * across, dir[0].abs() * 0.5 * across];
+            let half = if diagonal { [0.5 * size; 2] } else { [along[0].max(other[0]), along[1].max(other[1])] };
+            let up_len = if run_way == 0 { run_len } else { 1 };
+            out.push(BlockBox { centre, half, y0: run_v as f32 * height, y1: (run_v + up_len) as f32 * height });
+        }
+        if last {
+            break;
+        }
+        if way == 0 {
+            v += 1;
+        } else {
+            h += 1;
+        }
+        if breaks {
+            run_h = h;
+            run_v = v;
+            run_len = 1;
+            run_way = way;
+            started = started || way == 1;
+        } else {
+            run_len += 1;
+        }
+    }
+    out
+}
+
+/// Strip position `vertex_index` over boxes of 11 vertices (`strip_slot`): the box and its
+/// vertex, or `None` past the strip's end.
+pub fn strip_slot(vertex_index: u32, boxes: u32) -> Option<(u32, u32)> {
+    if boxes == 0 || vertex_index > 11 * (boxes - 1) + 9 {
+        return None;
+    }
+    let (b, k) = (vertex_index / 11, vertex_index % 11);
+    Some(match k {
+        9 => (b, 8),
+        10 => (b + 1, 0),
+        _ => (b, k),
+    })
+}
+
+/// A point of a smooth blade's spine at `s` in its own frame (+z its lean direction, +y
+/// up), and its unit tangent (`blade_spine`).
+pub fn blade_spine(b: &Blade, height: f32, s: f32) -> ([f32; 3], [f32; 3]) {
+    let slope = b.lean + 2.0 * b.curve * s;
+    let reach = height * (b.lean * s + b.curve * s * s);
+    let lean_here = b.lean + b.curve * s;
+    let rise = height * s / (1.0 + lean_here * lean_here).sqrt();
+    let len = (1.0 + slope * slope).sqrt();
+    ([0.0, rise, reach], [0.0, 1.0 / len, slope / len])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_fit_their_draws() {
+        assert_eq!(strip_slot(0, 1), Some((0, 0)));
+        assert_eq!(strip_slot(9, 1), Some((0, 8)));
+        assert_eq!(strip_slot(10, 1), None);
+        assert_eq!(strip_slot(10, 2), Some((1, 0)));
+        assert_eq!(strip_slot(11 * L0_BOXES - 3, L0_BOXES), Some((L0_BOXES - 1, 8)));
+        assert_eq!(11 * L0_BOXES - 2, helio_pass_foliage_place::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS[0]);
+        assert_eq!(11 * L1_BOXES - 2, helio_pass_foliage_place::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS[1]);
     }
 }

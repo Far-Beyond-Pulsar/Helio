@@ -64,7 +64,6 @@ use bytemuck::{Pod, Zeroable};
 
 mod contract;
 pub use contract::*;
-pub use contract::{gpu_types::*, packing::*, placement::*, quality::*};
 
 pub mod components;
 mod frame_data;
@@ -75,8 +74,11 @@ mod uniforms;
 pub mod wind;
 
 pub use frame_data::FoliageTerrainViews;
-pub use pass::{FoliagePlacePass, MAX_FOLIAGE_LAYERS, MAX_FOLIAGE_TYPES};
-pub use reference::{place_tile_reference, ReferenceCandidate, ReferencePlacement};
+pub use pass::{FoliagePlacePass, INTERACTOR_BYTES, MAX_FOLIAGE_LAYERS, MAX_FOLIAGE_TYPES};
+pub use reference::{
+    chart_noise, flat_ground, foliage_hash, patch_weight, place_tile_reference, type_grows, ReferenceCandidate, ReferenceGround,
+    ReferencePlacement,
+};
 pub use residency::{RingUpdate, TileRing};
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
 pub use wind::{GpuWind, Wind};
@@ -94,6 +96,18 @@ pub const WIND: &str = include_str!("../shaders/foliage_wind.wgsl");
 pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(WIND_MARKER, "../shaders/foliage_wind.wgsl");
 
+/// Marker opting a shader into [`COMMON`]. Must appear in the source.
+pub const COMMON_MARKER: &str = "//!use helio_foliage_common";
+
+/// The records placement, the cull and the draw share (type, tile, frame, blade, bands)
+/// and the bands' functions, as a `helio-core` shader snippet. A shader including it
+/// declares `foliage_bands: FoliageBands` (a uniform).
+pub const COMMON: &str = include_str!("../shaders/foliage_common.wgsl");
+
+/// [`helio_core::shader::ShaderSnippet`] for [`COMMON`].
+pub const COMMON_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(COMMON_MARKER, "../shaders/foliage_common.wgsl");
+
 /// Vertices emitted per instance for each foliage LOD, from the plan's §6.3 ladder:
 /// a 5-segment blade, a 3-segment blade, a card and a clump card.
 ///
@@ -109,7 +123,27 @@ pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
 ///
 /// These are duplicated in `cs_finalize`, which is what actually writes them into the
 /// indirect args. Changing one without the other draws a truncated or over-long strip.
-pub const FOLIAGE_LOD_VERTEX_COUNTS: [u32; 4] = [11, 7, 4, 4];
+///
+/// L0 and L1 draw one blade (5 and 3 segments); L2 a whole tuft's blades as cards (up to
+/// [`crate::FOLIAGE_MAX_TUFT_BLADES`] × 4 vertices and 2 joins); L3 a tuft as a fan of
+/// three blades.
+pub const FOLIAGE_LOD_VERTEX_COUNTS: [u32; 4] = [11, 7, 6 * crate::FOLIAGE_MAX_TUFT_BLADES - 2, 13];
+
+/// Cubes in the tallest blocky blade ([`FoliageKind::Block`]): a stack of the type's
+/// cube (`width_range[0]`) as tall as its height rounds to, at most this many.
+pub const FOLIAGE_STACK_CUBES: u32 = 24;
+
+/// Interactors the foliage draw looks at, at most: the first gathered each frame
+/// (`FoliagePlacePass::interactors`).
+pub const FOLIAGE_MAX_INTERACTORS: u32 = 16;
+
+/// Vertices a blocky blade draws at each LOD: per box its three faces turned to the eye
+/// (9) and two degenerate joins to the next (2), the last box without them. L0 draws a
+/// blade's every run of cubes (up to 8), L1 its staircase in cubes twice the size (up to 5), L2 a
+/// tuft's blades one box each, L3 a tuft as two crossed boxes. `cs_finalize` draws the larger of these and
+/// [`FOLIAGE_LOD_VERTEX_COUNTS`] at each LOD while any blocky type has a density; a
+/// shorter strip ends in a zero-area tail.
+pub const FOLIAGE_BLOCK_LOD_VERTEX_COUNTS: [u32; 4] = [11 * 8 - 2, 11 * 5 - 2, 11 * crate::FOLIAGE_MAX_TUFT_BLADES - 2, 11 * 2 - 2];
 
 /// Number of `u32` blade indices reserved for each LOD region of `visible_blades`.
 ///
@@ -269,8 +303,14 @@ mod tests {
     }
 
     #[test]
+    fn block_vertex_counts_hold_their_boxes() {
+        // Duplicated in foliage_cull.wgsl (`cs_finalize`) and foliage_gbuffer.wgsl.
+        assert_eq!(FOLIAGE_BLOCK_LOD_VERTEX_COUNTS, [86, 53, 163, 20]);
+    }
+
+    #[test]
     fn lod_vertex_counts_match_the_ladder() {
-        assert_eq!(FOLIAGE_LOD_VERTEX_COUNTS, [11, 7, 4, 4]);
+        assert_eq!(FOLIAGE_LOD_VERTEX_COUNTS, [11, 7, 88, 13]);
         assert_eq!(FOLIAGE_LOD_VERTEX_COUNTS.len(), 4);
         // A `TriangleStrip` needs at least 3 vertices to emit anything at all.
         for count in FOLIAGE_LOD_VERTEX_COUNTS {

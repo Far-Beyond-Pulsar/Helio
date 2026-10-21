@@ -2425,3 +2425,137 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     assert!(compared.iter().zip(shadowed).all(|(&c, s)| c > 40 && s > 8), "{compared:?} compared, {shadowed:?} shadowed");
     assert!(wrong * 50 <= total, "{wrong} of {total} wrong");
 }
+
+/// Ground probes for foliage (`chunks::ground`) over a 3x3 block of tiles around the
+/// eye, 16x16 queries a tile, as `FoliagePlacePass` asks them: queries in render space
+/// (origin at the eye), each a segment 768 m down its tile's up from 256 m over the eye.
+struct Probes {
+    starts: Vec<DVec3>,
+    ups: Vec<DVec3>,
+    tiles: Vec<helio_pass_foliage_place::AskedTile>,
+    queries: wgpu::Buffer,
+    hits: wgpu::Buffer,
+}
+
+const PROBE_SIDE: u32 = 16;
+const PROBE_LENGTH: f32 = 768.0;
+
+fn ground_probes(gpu: &Gpu, planet: &Planet, eye: DVec3) -> Probes {
+    use helio_pass_foliage_place::{AskedTile, GpuGroundQuery, GroundGeometry};
+    use wgpu::util::DeviceExt;
+    let ground = helio_pass_voxel_planet::chunks::ground::PlanetGround::default();
+    ground.set_grid(*planet.grid());
+    let chart = ground.chart(eye).unwrap();
+    let centre = [(chart.eye[0] / 8.0).floor() as i32, (chart.eye[1] / 8.0).floor() as i32];
+    let (mut starts, mut ups, mut tiles, mut queries) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for dj in -1..=1 {
+        for di in -1..=1 {
+            let frame = ground.tile_frame(chart.id, [centre[0] + di, centre[1] + dj], 1).unwrap();
+            let start_height = (eye - frame.origin).dot(frame.up) + 256.0;
+            tiles.push(AskedTile { frame, start_height, first: queries.len() as u32, count: PROBE_SIDE * PROBE_SIDE });
+            for b in 0..PROBE_SIDE {
+                for a in 0..PROBE_SIDE {
+                    let (u, v) = ((f64::from(a) + 0.37) / f64::from(PROBE_SIDE), (f64::from(b) + 0.61) / f64::from(PROBE_SIDE));
+                    let start = frame.origin + frame.axis_u * u + frame.axis_v * v + frame.up * start_height;
+                    starts.push(start);
+                    ups.push(frame.up);
+                    queries.push(GpuGroundQuery { start: (start - eye).as_vec3().to_array(), length: PROBE_LENGTH, up: frame.up.as_vec3().to_array(), _pad: 0 });
+                }
+            }
+        }
+    }
+    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    let hits = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: queries.len() as u64 * 16, usage, mapped_at_creation: false });
+    let queries = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&queries), usage });
+    Probes { starts, ups, tiles, queries, hits }
+}
+
+/// The probes answered against the world's last drawn cut (eye at render origin).
+fn probe(gpu: &Gpu, world: &mut World, planet: &Planet, probes: &Probes, eye: DVec3) -> Vec<helio_pass_foliage_place::GpuGroundHit> {
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
+    world.chunks.probe_ground(&mut recorder, &probes.queries, &probes.hits, &probes.tiles, planet, eye, Vec3::ZERO);
+    drop(recorder);
+    gpu.queue.submit([encoder.finish()]);
+    let bytes = common::read_buffer(gpu, &probes.hits, probes.starts.len() as u64 * 16);
+    bytemuck::cast_slice(&bytes).to_vec()
+}
+
+/// Probe hits against CPU ray casts down the same segments: where the CPU meets a
+/// top face within the level-0 range, the GPU meets it at the same distance with the
+/// cell's material; where it meets a wall or nothing, no ground. (compared, wrong.)
+fn probes_match(planet: &Planet, probes: &Probes, hits: &[helio_pass_foliage_place::GpuGroundHit], eye: DVec3, near: f64) -> (usize, usize) {
+    let (mut compared, mut wrong) = (0, 0);
+    for (n, hit) in hits.iter().enumerate() {
+        let (start, up) = (probes.starts[n], probes.ups[n]);
+        let cpu = planet.raycast(start, -up, f64::from(PROBE_LENGTH));
+        let Some(cpu) = cpu else {
+            compared += 1;
+            wrong += usize::from(hit.ground != helio_pass_foliage_place::GROUND_NONE);
+            continue;
+        };
+        let at = start - up * cpu.distance;
+        if (at - eye).length() > near {
+            continue;
+        }
+        compared += 1;
+        let top = cpu.normal.dot(up) > 0.5;
+        let gpu = f32::from_bits(hit.distance);
+        let ok = if top {
+            hit.ground == planet.material(cpu.cell) && (f64::from(gpu) - cpu.distance).abs() < 2e-3
+        } else {
+            hit.ground == helio_pass_foliage_place::GROUND_NONE
+        };
+        if !ok {
+            wrong += 1;
+            if wrong < 8 {
+                eprintln!("query {n}: gpu {gpu} ground {}, cpu {:?} at {} top {top} material {}", hit.ground, cpu.cell, cpu.distance, planet.material(cpu.cell));
+            }
+        }
+    }
+    (compared, wrong)
+}
+
+/// Foliage's ground (`chunks::ground`): probes down the drawn cut meet the terrain's
+/// top faces where the CPU does, at the same distance, with their cells' materials;
+/// a still eye's world reports no ground changes and answers the same; a dig reports
+/// its box and the probes over it meet the pit's floor.
+#[test]
+fn ground_probes_meet_the_drawn_surface() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 2, 0.47, 0.53);
+    let view = ground_view(&planet, dir, [320, 180]);
+    let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
+    let mut world = World::new(&gpu, &planet);
+    world.settle(&gpu, &planet, &view);
+    let probes = ground_probes(&gpu, &planet, view.eye);
+    let hits = probe(&gpu, &mut world, &planet, &probes, view.eye);
+    let (compared, wrong) = probes_match(&planet, &probes, &hits, view.eye, near);
+    let grounded = hits.iter().filter(|h| h.ground != helio_pass_foliage_place::GROUND_NONE).count();
+    eprintln!("compared {compared}, wrong {wrong}, {grounded} of {} on ground", hits.len());
+    assert!(compared > 1000 && grounded > 1000, "{compared} compared, {grounded} grounded");
+    assert_eq!(wrong, 0);
+    // Still: no changes, the same answers.
+    world.chunks.take_ground_changes();
+    for _ in 0..(4 + 17) {
+        world.frame(&gpu, &planet, &view, None);
+    }
+    let quiet = world.chunks.take_ground_changes();
+    assert!(quiet.is_empty(), "{} ground changes under a still eye", quiet.len());
+    assert_eq!(probe(&gpu, &mut world, &planet, &probes, view.eye), hits);
+    // A dig 3 m from the eye's column: its box changes, and the probes see the pit.
+    let up = view.eye.normalize();
+    let ground = planet.surface_point(dir, 0.0) + up.any_orthonormal_vector() * 3.0;
+    planet.apply(Brush { center: ground.to_array(), radius: 1.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    world.sync(&gpu, &planet);
+    world.settle(&gpu, &planet, &view);
+    let changes = world.chunks.take_ground_changes();
+    assert!(changes.iter().any(|[lo, hi]| ground.cmpge(*lo - DVec3::splat(1e-6)).all() && ground.cmple(*hi + DVec3::splat(1e-6)).all()), "no change over the dig in {}", changes.len());
+    let dug = probe(&gpu, &mut world, &planet, &probes, view.eye);
+    let (compared, wrong) = probes_match(&planet, &probes, &dug, view.eye, near);
+    let moved = dug.iter().zip(&hits).filter(|(a, b)| a != b).count();
+    eprintln!("after the dig: compared {compared}, wrong {wrong}, {moved} answers changed");
+    assert!(moved > 20, "{moved} answers changed over the pit");
+    assert_eq!(wrong, 0);
+}

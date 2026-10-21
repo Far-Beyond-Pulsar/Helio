@@ -284,15 +284,22 @@ pub struct RendererConfig {
     /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
     /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
     pub enable_foliage: bool,
-    /// Foliage density budget in blades per square metre, or `None` for the quality
-    /// preset default.
+    /// Densest foliage ground in tufts per square metre, or `None` for the default (8).
+    /// Sizes the bands' candidate grids at graph-build time: a type's `density` (tufts a
+    /// square metre) above this is thinned to it.
+    pub foliage_tufts_per_m2: Option<f32>,
+    /// Blades a tuft averages, or `None` for the default (8): sizes the near band's
+    /// slabs (a record per blade).
+    pub foliage_blades_per_tuft: Option<f32>,
+    /// Foliage quality preset: the default range, the density multiplier, the near LOD
+    /// distance's scale and the cull granularity. Default [`FoliageQuality::Medium`].
     ///
-    /// Sizes the blade arena at graph-build time: `blades_per_tile = density * 64`, times
-    /// the ring's tile count, times 16 bytes. Density is a ceiling set by allocation, so
-    /// raising it here is the only way to get denser grass — raising the quality preset
-    /// does not, because a wider ring grows the tile count as its square and the per-tile
-    /// slab barely moves. Range and density are separate axes.
-    pub foliage_blades_per_m2: Option<f32>,
+    /// [`FoliageQuality::Medium`]: helio_pass_foliage_place::FoliageQuality::Medium
+    pub foliage_quality: helio_pass_foliage_place::FoliageQuality,
+    /// Metres foliage reaches, or `None` for the quality preset's. Bands of tiles
+    /// (`helio_pass_foliage_place::plan_bands`) carry it out there at a cost that grows
+    /// with the number of bands, one per doubling of the range.
+    pub foliage_range: Option<f32>,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -369,7 +376,10 @@ impl RendererConfig {
             shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
             enable_foliage: true,
-            foliage_blades_per_m2: None,
+            foliage_tufts_per_m2: None,
+            foliage_blades_per_tuft: None,
+            foliage_quality: helio_pass_foliage_place::FoliageQuality::Medium,
+            foliage_range: None,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,

@@ -2303,6 +2303,7 @@ dependencies = [
  "glam 0.33.5",
  "helio-core",
  "helio-mats",
+ "helio-pass-foliage-place",
  "helio-pass-gi",
  "helio-pass-shadow-matrix",
  "image",
