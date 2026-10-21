@@ -291,7 +291,7 @@ Make the **planet body the single source of truth** and derive rendering rows fr
 ### 5.1 BRDF and lights
 
 - Cook-Torrance GGX + Schlick-GGX (k = (r+1)^2/8) + Schlick Fresnel + Lambert
-  (`crates/helio/shaders/pbr_eval.wgsl:12-66`, `deferred_lighting.wgsl:870-911`). Correct UE4-style
+  (`crates/helio-mats/shaders/pbr_eval.wgsl:12-66`, `deferred_lighting.wgsl:870-911`). Correct UE4-style
   baseline (Karis 2013).
 - AAA gaps (P2): height-correlated Smith (Heitz 2014; Frostbite), multi-scatter energy compensation
   (Kulla & Conty 2017 / Fdez-Aguera 2019) - small for F0 0.03 terrain, visible on rough metals;

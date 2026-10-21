@@ -830,29 +830,14 @@ fn sample_reflection_environment(P: vec3<f32>, R: vec3<f32>, lod: f32) -> vec3<f
     return accum;
 }
 
-// Evaluate one direct light with the full Cook-Torrance BRDF.
-// `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
-// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
-// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
-// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
-// transmission through the subsurface, tinted by subsurface_color.
-fn pbr_direct_light(
-    light:     GpuLight,
-    world_pos: vec3<f32>,
-    N:         vec3<f32>,
-    V:         vec3<f32>,
-    F0:        vec3<f32>,
-    albedo:    vec3<f32>,
-    roughness: f32,
-    metallic:  f32,
-    sf:        f32,
-    is_anisotropic: bool,
-    T:         vec3<f32>,
-    ax:        f32,
-    ay:        f32,
-    has_subsurface: bool,
-    subsurface_color: vec3<f32>,
-) -> vec3<f32> {
+// A light's direction from `world_pos` (toward it) and its radiance there
+// (none past its range).
+struct Incidence {
+    L: vec3<f32>,
+    radiance: vec3<f32>,
+}
+
+fn light_incidence(light: GpuLight, world_pos: vec3<f32>) -> Incidence {
     var L:        vec3<f32>;
     var radiance: vec3<f32>;
 
@@ -865,7 +850,7 @@ fn pbr_direct_light(
     } else {  // Point or spot light
         let to_light = light.position_range.xyz - world_pos;
         let dist     = length(to_light);
-        if dist > light.position_range.w { return vec3<f32>(0.0); }
+        if dist > light.position_range.w { return Incidence(to_light / max(dist, 1e-6), vec3<f32>(0.0)); }
         L = to_light / dist;
         var atten = 1.0 / (dist * dist + 0.0001);
         let normalized_dist = dist / light.position_range.w;
@@ -917,6 +902,36 @@ fn pbr_direct_light(
         }
         radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
     }
+
+    return Incidence(L, radiance);
+}
+
+// Evaluate one direct light with the full Cook-Torrance BRDF.
+// `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
+// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
+// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
+// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
+// transmission through the subsurface, tinted by subsurface_color.
+fn pbr_direct_light(
+    light:     GpuLight,
+    world_pos: vec3<f32>,
+    N:         vec3<f32>,
+    V:         vec3<f32>,
+    F0:        vec3<f32>,
+    albedo:    vec3<f32>,
+    roughness: f32,
+    metallic:  f32,
+    sf:        f32,
+    is_anisotropic: bool,
+    T:         vec3<f32>,
+    ax:        f32,
+    ay:        f32,
+    has_subsurface: bool,
+    subsurface_color: vec3<f32>,
+) -> vec3<f32> {
+    let incidence = light_incidence(light, world_pos);
+    let L = incidence.L;
+    let radiance = incidence.radiance;
 
     let NdL = max(dot(N, L), 0.0);
     if NdL == 0.0 { return vec3<f32>(0.0); }
@@ -1307,6 +1322,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
     let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
     let low_specular   = (surface_flags & SURFACE_FLAG_LOW_SPECULAR) != 0u;
+    let two_sided      = (surface_flags & SURFACE_FLAG_TWO_SIDED) != 0u;
 
     if globals.debug_mode == 15u {
         return vec4<f32>(sss_r.rgb, 1.0);
@@ -1393,7 +1409,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 let to_light = light.position_range.xyz - world_pos;
                 to_light_dir = to_light / length(to_light);
             }
-            if dot(N, to_light_dir) < -1e-4 { continue; }
+            // Two-sided foliage takes light from behind through itself
+            // (`SURFACE_FLAG_TWO_SIDED`), shadowed as its back face.
+            let back = dot(N, to_light_dir) < -1e-4;
+            if back && !two_sided { continue; }
+            let N_lit = select(N, -N, back);
             // VG geometry does not render into shadow maps, so shadow_factor
             // would incorrectly occlude VG pixels with unrelated regular geometry.
             // Skip shadow evaluation for VG surfaces. Must be a real `if`, not
@@ -1404,9 +1424,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             var sf = 1.0;
             var transmit = vec3<f32>(1.0);
             if !is_vg && !in_portal {
-                sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+                sf = shadow_factor(light_idx, world_pos, N_lit, in.clip_pos.xy, globals.frame);
                 if sf > 0.0 {
-                    transmit = light_transmittance(light_idx, world_pos, N);
+                    transmit = light_transmittance(light_idx, world_pos, N_lit);
                 }
             }
             // The terrain's shadow of a local light (`local_visibility`).
@@ -1418,6 +1438,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 if dot(normalize(sun_seen.yzw), light_direction) > 0.99999 {
                     sf *= clamp(sun_seen.x, 0.0, 1.0);
                 }
+            }
+            if back {
+                let incidence = light_incidence(light, world_pos);
+                Lo += transmit * sss_r.rgb / PI * incidence.radiance * max(-dot(N, incidence.L), 0.0) * sf;
+                continue;
             }
             let sss_color = sss_r.rgb;
             Lo += transmit * pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
