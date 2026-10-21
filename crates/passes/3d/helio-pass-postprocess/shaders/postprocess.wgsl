@@ -941,7 +941,7 @@ fn agx_sigmoid(x: vec3<f32>) -> vec3<f32> {
     return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
 }
 
-fn tonemap_agx(x: vec3<f32>, punchy: bool) -> vec3<f32> {
+fn agx_curve(x: vec3<f32>, punchy: bool) -> vec3<f32> {
     let inset = mat3x3<f32>(
         vec3<f32>(0.842479062253094, 0.0423282422610123, 0.0423756549057051),
         vec3<f32>(0.0784335999999992, 0.878468636469772, 0.0784336),
@@ -962,6 +962,30 @@ fn tonemap_agx(x: vec3<f32>, punchy: bool) -> vec3<f32> {
     }
     let display = outset * v;
     return pow(saturate(display), vec3<f32>(2.2));
+}
+
+// Scene luminance (at the curve's input) below which AgX punchy keeps a
+// colour's hue and saturation: one EV under middle grey.
+const AGX_PUNCHY_CHROMA_LUMINANCE: f32 = 0.09;
+
+fn tonemap_agx(x: vec3<f32>, punchy: bool) -> vec3<f32> {
+    let mapped = agx_curve(x, punchy);
+    // AgX's toe separates a dark colour's channels more the darker it is,
+    // and the punchy look (a power and a saturation boost per channel)
+    // multiplies that: grass in shade lost its yellow to pure green, and
+    // with it the variation between its tiles. Below the reference
+    // luminance, punchy takes the hue and saturation the same colour has at
+    // the reference, at its own luminance: a darker colour is darker, not
+    // purer. A smooth maximum of the two luminances joins the two without a
+    // kink; from four times the reference up nothing changes.
+    let y = dot(x, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if !punchy || !(y > 1e-10) || y >= 4.0 * AGX_PUNCHY_CHROMA_LUMINANCE { return mapped; }
+    let k = y / AGX_PUNCHY_CHROMA_LUMINANCE;
+    let reference = agx_curve(x * (pow(1.0 + k * k * k * k, 0.25) / k), true);
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let reference_luma = dot(reference, luma);
+    if !(reference_luma > 0.0) { return mapped; }
+    return saturate(reference * (dot(mapped, luma) / reference_luma));
 }
 
 fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {

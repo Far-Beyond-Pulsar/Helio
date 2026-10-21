@@ -109,3 +109,33 @@ fn agx_punchy_saturates_and_keeps_grey() {
         assert!(saturation(punchy[n]) > saturation(base[n]) + 0.1, "{:?} vs {:?}", punchy[n], base[n]);
     }
 }
+
+/// AgX punchy keeps a dark colour's hue: grass under sky light from one to
+/// five EV under middle grey (shade) keeps the hue it has at one EV under,
+/// never clips a channel to zero, still darkens monotonically, and two
+/// grass tiles stay as far apart in hue as at the reference.
+#[test]
+#[ignore = "requires a GPU"]
+fn agx_punchy_keeps_the_hue_of_dark_colours() {
+    let sky = [0.45f32, 0.58, 0.8];
+    let tiles = [[0.34f32, 0.45, 0.07], [0.24, 0.47, 0.08]];
+    let evs = [-1.0f32, -2.0, -3.0, -4.0, -5.0];
+    let at = |tile: [f32; 3], ev: f32| {
+        let c = [tile[0] * sky[0], tile[1] * sky[1], tile[2] * sky[2]];
+        let y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        c.map(|v| v / y * 0.18 * ev.exp2())
+    };
+    let inputs: Vec<[f32; 3]> = tiles.iter().flat_map(|&t| evs.iter().map(move |&ev| at(t, ev))).collect();
+    let out = agx(&inputs, true);
+    let luma = |c: &[f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    for (t, row) in out.chunks(evs.len()).enumerate() {
+        let reference = hue(row[0]);
+        for (ev, c) in evs.iter().zip(row) {
+            assert!(c.iter().all(|&v| v > 0.0), "tile {t} at {ev} EV clipped a channel: {c:?}");
+            assert!((hue(*c) - reference).abs() < 2.0, "tile {t} at {ev} EV: hue {} vs {reference}", hue(*c));
+        }
+        assert!(row.windows(2).all(|w| luma(&w[1]) < luma(&w[0])), "tile {t} darkens: {row:?}");
+    }
+    let apart = |i: usize| (hue(out[i]) - hue(out[evs.len() + i])).abs();
+    assert!(apart(3) > 0.9 * apart(0), "tiles at -4 EV {} degrees apart, at -1 EV {}", apart(3), apart(0));
+}
