@@ -319,10 +319,29 @@ const SUN_OCCLUSION_SIDE: u32 = 512;
 /// 8 m.
 const SUN_OCCLUSION_HALF: [f64; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS] = [32.0, 128.0, 512.0, 2048.0];
 
+/// A drawn level of the sun's occlusion: its near plane's origin
+/// (planet-centred), half extent and axes (right, up, forward), and the
+/// eye, frame and edits it was drawn for.
+#[derive(Clone, Copy)]
+struct OcclusionLevel {
+    origin: DVec3,
+    half: f64,
+    axes: [DVec3; 3],
+    eye: DVec3,
+    frame: u64,
+    edits: u64,
+}
+
+/// What makes a drawn level stale, each at 1: its age (frames), the eye's
+/// shift past it (a share of its half extent), the sun's turn since (rad:
+/// shadows that much off their direction), an edit since.
+const OCCLUSION_MAX_AGE: f64 = 30.0;
+const OCCLUSION_SHIFT: f64 = 1.0 / 8.0;
+const OCCLUSION_TURN: f64 = 0.002;
+
 /// The sun's occlusion by the terrain (`ChunkWorld::draw_sun_occlusion`): the
-/// sun's views' own buffers and targets, the maps (a layer a level) and the
-/// frame, the direction they were rendered from, each rendered level's near
-/// plane origin (planet-centred) and half extent, and the level next.
+/// sun's views' own buffers and targets, the maps (a layer a level), the
+/// frame, and each drawn level.
 struct SunOcclusion {
     params: wgpu::Buffer,
     cull_state: wgpu::Buffer,
@@ -335,9 +354,7 @@ struct SunOcclusion {
     maps: wgpu::Texture,
     maps_view: wgpu::TextureView,
     frame: wgpu::Buffer,
-    forward: DVec3,
-    levels: [Option<(DVec3, f64)>; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS],
-    next: usize,
+    levels: [Option<OcclusionLevel>; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS],
 }
 
 impl SunOcclusion {
@@ -368,9 +385,7 @@ impl SunOcclusion {
             maps_view: maps.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() }),
             maps,
             frame,
-            forward: DVec3::ZERO,
             levels: [None; helio_pass_shadow_matrix::SUN_OCCLUSION_LEVELS],
-            next: 0,
         }
     }
 }
@@ -1012,6 +1027,8 @@ pub struct FrameTimings {
     /// The shadows' parts: sun samples, sky samples, every hit's sun (and
     /// the fallbacks' walks), local lights, the GI probes' rays.
     pub shadow_stages: [f64; 5],
+    /// The sun's occlusion clipmap's level drawn this frame.
+    pub occlusion: f64,
     /// The shadows' denoiser (from the shadows' end: a pass's start
     /// timestamp may come before the work ahead of it is done).
     pub denoise: f64,
@@ -1032,8 +1049,9 @@ pub struct FrameTimings {
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
 /// tile nodes end, tile columns end, tile features end, the shadows'
 /// denoiser end; the shadows' parts: sun samples end, sky samples end,
-/// every hit's sun end, local lights end (the GI rays end at shadows end).
-const QUERIES: u32 = 16;
+/// every hit's sun end, local lights end (the GI rays end at shadows end);
+/// the sun's occlusion start and end.
+const QUERIES: u32 = 18;
 
 /// `Buried`'s size: a count and 4095 keys.
 const BURIED_BYTES: u64 = 16 * 4096;
@@ -3779,7 +3797,7 @@ impl ChunkWorld {
                     let stages = [ms(t[0], t[10]), ms(t[10], t[5]), ms(t[5], t[6])];
                     let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1]), ms(t[1], t[10])];
                     let shadow_stages = [ms(t[4], t[12]), ms(t[12], t[13]), ms(t[13], t[14]), ms(t[14], t[15]), ms(t[15], t[7])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), shadow_stages, denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), shadow_stages, occlusion: ms(t[16], t[17]), denoise: ms(t[7], t[11]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
                     // Footprints computed and chunks generated are measured
                     // apart: with the footprint pool a frame may generate
                     // chunks of footprints it does not compute.
@@ -4016,28 +4034,62 @@ impl ChunkWorld {
     }
 
     /// The sun's occlusion by the terrain (`helio_pass_shadow_matrix::
-    /// sun_occlusion`): one level of the clipmap a frame, rendered as an
-    /// orthographic view along the sun (`trace_view`) around `eye`
-    /// (planet-centred), the sun toward `sun`; then the frame (every
-    /// rendered level relative to the eye). A new sun direction renders
-    /// the levels again, the stale ones left out until then.
+    /// sun_occlusion`): the stalest level of the clipmap, when stale
+    /// (`OCCLUSION_*`: age, the eye's shift, the sun's turn, an edit; one
+    /// never drawn first), rendered as an orthographic view along the sun
+    /// (`trace_view`) around `eye` (planet-centred), the sun toward `sun`;
+    /// then the frame (every drawn level relative to the eye, with the axes
+    /// it was drawn with). Nothing stale, nothing drawn.
     pub fn draw_sun_occlusion(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, sun: Vec3) {
         use helio_pass_shadow_matrix::{SunOcclusionFrame, SUN_OCCLUSION_LEVELS};
         let forward = -sun.as_dvec3().normalize();
         if !forward.is_finite() {
             return;
         }
-        let o = self.sun_occlusion.get_or_insert_with(|| SunOcclusion::new(&self.device));
-        // Levels rendered for another sun are left out until rendered again.
-        if o.forward.dot(forward) < 0.999_999 {
-            o.forward = forward;
-            o.levels = [None; SUN_OCCLUSION_LEVELS];
+        if self.timing_now.is_none() {
+            self.claim_timing(frame);
         }
+        let ring = self.timing_now.filter(|&r| r == (frame % TIMING_RING) as usize).map(|r| r as u32);
+        let stamp = |world: &Self, encoder: &mut helio_core::CommandRecorder<'_>, index: u32| {
+            if let (Some((set, _)), Some(ring)) = (world.queries.as_ref(), ring) {
+                drop(encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sun occlusion time"), timestamp_writes: Some(wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + index) }) }));
+            }
+        };
+        stamp(self, encoder, 16);
+        let edits = self.edits.version;
+        let o = self.sun_occlusion.get_or_insert_with(|| SunOcclusion::new(&self.device));
+        let staleness = |l: &Option<OcclusionLevel>| {
+            l.map_or(f64::INFINITY, |l| {
+                let age = frame.saturating_sub(l.frame) as f64 / OCCLUSION_MAX_AGE;
+                let shift = (eye - l.eye).length() / (l.half * OCCLUSION_SHIFT);
+                let turn = l.axes[2].dot(forward).clamp(-1.0, 1.0).acos() / OCCLUSION_TURN;
+                let edited = if l.edits != edits { 1.0 } else { 0.0 };
+                age.max(shift).max(turn).max(edited)
+            })
+        };
+        let (level, stale) = o.levels.iter().map(staleness).enumerate().fold((0, f64::NEG_INFINITY), |best, (i, s)| if s > best.1 { (i, s) } else { best });
+        if stale >= 1.0 {
+            self.draw_occlusion_level(encoder, frame, eye, sun, forward, level, edits);
+        }
+        stamp(self, encoder, 17);
+        let o = self.sun_occlusion.as_ref().unwrap();
+        let mut gpu = SunOcclusionFrame { info: [SUN_OCCLUSION_LEVELS as f32, SUN_OCCLUSION_SIDE as f32, 0.0, 0.0], ..Default::default() };
+        for (out, l) in gpu.levels.iter_mut().zip(o.levels) {
+            if let Some(l) = l {
+                let [right, up, forward] = l.axes.map(|a| a.as_vec3().extend(0.0).to_array());
+                *out = helio_pass_shadow_matrix::SunOcclusionLevel { centre: (l.origin - eye).as_vec3().extend(l.half as f32).to_array(), right, up, forward };
+            }
+        }
+        self.queue.write_buffer(&o.frame, 0, bytemuck::bytes_of(&gpu));
+    }
+
+    /// Level `level` of the sun's occlusion drawn around `eye` along
+    /// `forward` (from the sun), for edits `edits`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_occlusion_level(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, sun: Vec3, forward: DVec3, level: usize, edits: u64) {
         let hint = if forward.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
         let right = forward.cross(hint).normalize();
         let up = right.cross(forward);
-        let level = o.next;
-        o.next = (o.next + 1) % SUN_OCCLUSION_LEVELS;
         // Texel-snapped in the sun's plane (planet-centred, so the texels
         // stay put as the eye moves), the near plane high above.
         let half = SUN_OCCLUSION_HALF[level];
@@ -4064,19 +4116,7 @@ impl ChunkWorld {
             wgpu::Extent3d { width: SUN_OCCLUSION_SIDE, height: SUN_OCCLUSION_SIDE, depth_or_array_layers: 1 },
         );
         let o = self.sun_occlusion.as_mut().unwrap();
-        o.levels[level] = Some((origin, half));
-        let mut gpu = SunOcclusionFrame {
-            right: right.as_vec3().extend(SUN_OCCLUSION_LEVELS as f32).to_array(),
-            up: up.as_vec3().extend(0.0).to_array(),
-            forward: forward.as_vec3().extend(SUN_OCCLUSION_SIDE as f32).to_array(),
-            levels: [[0.0; 4]; SUN_OCCLUSION_LEVELS],
-        };
-        for (out, l) in gpu.levels.iter_mut().zip(o.levels) {
-            if let Some((origin, half)) = l {
-                *out = (origin - eye).as_vec3().extend(half as f32).to_array();
-            }
-        }
-        self.queue.write_buffer(&o.frame, 0, bytemuck::bytes_of(&gpu));
+        o.levels[level] = Some(OcclusionLevel { origin, half, axes: [right, up, forward], eye, frame, edits });
     }
 
     /// The sun's occlusion maps and frame (`draw_sun_occlusion`), once drawn.

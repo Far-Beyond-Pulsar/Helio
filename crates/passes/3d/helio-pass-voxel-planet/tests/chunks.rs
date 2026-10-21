@@ -2320,15 +2320,16 @@ fn gi_rays_see_light_through_leaves() {
 /// level, its texel (m) and how far it sees toward the sun from `p` (m);
 /// `None` outside every level, or near a texel's edge.
 fn occlusion_lit(maps: &[f32], frame: &helio_pass_shadow_matrix::SunOcclusionFrame, eye: DVec3, p: DVec3) -> Option<(bool, usize, f32, f32)> {
-    let side = frame.forward[3];
+    let side = frame.info[1];
     let v3 = |a: [f32; 4]| Vec3::new(a[0], a[1], a[2]);
     let rel = (p - eye).as_vec3();
     for (level, l) in frame.levels.iter().enumerate() {
-        if l[3] <= 0.0 {
+        let half = l.centre[3];
+        if half <= 0.0 {
             continue;
         }
-        let d = rel - v3(*l);
-        let uv = glam::Vec2::new(d.dot(v3(frame.right)), -d.dot(v3(frame.up))) / l[3] * 0.5 + 0.5;
+        let d = rel - v3(l.centre);
+        let uv = glam::Vec2::new(d.dot(v3(l.right)), -d.dot(v3(l.up))) / half * 0.5 + 0.5;
         if uv.min_element() < 0.02 || uv.max_element() > 0.98 {
             continue;
         }
@@ -2339,8 +2340,8 @@ fn occlusion_lit(maps: &[f32], frame: &helio_pass_shadow_matrix::SunOcclusionFra
         }
         let (x, y) = (at.x as usize, at.y as usize);
         let stored = maps[(level * side as usize + y) * side as usize + x];
-        let t = d.dot(v3(frame.forward));
-        return Some((stored <= 0.0 || t <= stored + 3.0 * l[3] / side, level, 2.0 * l[3] / side, t));
+        let t = d.dot(v3(l.forward));
+        return Some((stored <= 0.0 || t <= stored + 3.0 * half / side, level, 2.0 * half / side, t));
     }
     None
 }
@@ -2351,7 +2352,9 @@ fn occlusion_lit(maps: &[f32], frame: &helio_pass_shadow_matrix::SunOcclusionFra
 /// height (above the coarser terrain the far levels draw) are lit by the
 /// maps as a CPU ray toward the sun (as far as the level sees) finds them,
 /// but for occluders within a few of the level's texels (its bias); a
-/// fiftieth may differ (a texel's edge along a step).
+/// fiftieth may differ (a texel's edge along a step). The same with the sun
+/// turning a little each frame (as a day goes by): each level is read with
+/// the axes it was drawn with, against a CPU ray toward its own sun.
 #[test]
 fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     let Some(gpu) = gpu() else { return };
@@ -2382,43 +2385,55 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     for _ in 0..4 {
         world.frame(gpu, &planet, &view, None);
     }
-    let (maps, frame) = world.chunks.read_sun_occlusion().expect("drawn");
-    let sun = world.sun.as_dvec3();
-    let mut next = xorshift(0x2545_f491_4f6c_dd1d);
-    let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
-    let (mut compared, mut shadowed, mut wrong) = ([0usize; 4], [0usize; 4], 0);
-    for k in 0..960 {
-        let (&(_, height, width), &base) = (&towers[k % 4], &bases[k % 4]);
-        let up = base.normalize();
-        // Beside the tower, from its sunward side out past its shadow.
-        let (a, b) = ((unit() * 2.0 - 0.25) * height, (unit() - 0.5) * 1.5 * width);
-        let ground = planet.surface_point((base - side * a + fwd * b).normalize(), 0.0);
-        let p = ground + ground.normalize() * (0.25 + unit() * 0.5) * height;
-        if planet.solid(planet.grid().locate(p).0) || (p - base).dot(up) < 0.2 * height {
-            continue;
-        }
-        let Some((lit, level, texel, reach)) = occlusion_lit(&maps, &frame, eye, p) else { continue };
-        // As far toward the sun as the level sees: what lies farther is not
-        // in the maps.
-        let hit = planet.raycast(p, sun, f64::from(reach) - 1.0);
-        // Occluders within a few texels: the maps' bias and texels decide.
-        if hit.as_ref().is_some_and(|h| h.distance < 4.0 * f64::from(texel)) {
-            continue;
-        }
-        let cpu = hit.is_none();
-        compared[level] += 1;
-        shadowed[level] += usize::from(!cpu);
-        if lit != cpu {
-            wrong += 1;
-            if wrong < 8 {
-                eprintln!("point {k} level {level} ({a:.1}, {b:.1}): maps {lit}, cpu {cpu}");
+    let check = |world: &World| {
+        let (maps, frame) = world.chunks.read_sun_occlusion().expect("drawn");
+        let mut next = xorshift(0x2545_f491_4f6c_dd1d);
+        let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
+        let (mut compared, mut shadowed, mut wrong) = ([0usize; 4], [0usize; 4], 0);
+        for k in 0..960 {
+            let (&(_, height, width), &base) = (&towers[k % 4], &bases[k % 4]);
+            let up = base.normalize();
+            // Beside the tower, from its sunward side out past its shadow.
+            let (a, b) = ((unit() * 2.0 - 0.25) * height, (unit() - 0.5) * 1.5 * width);
+            let ground = planet.surface_point((base - side * a + fwd * b).normalize(), 0.0);
+            let p = ground + ground.normalize() * (0.25 + unit() * 0.5) * height;
+            if planet.solid(planet.grid().locate(p).0) || (p - base).dot(up) < 0.2 * height {
+                continue;
+            }
+            let Some((lit, level, texel, reach)) = occlusion_lit(&maps, &frame, eye, p) else { continue };
+            // Toward the sun the level was drawn for, as far as it sees: what
+            // lies farther is not in the maps.
+            let f = frame.levels[level].forward;
+            let sun = -DVec3::new(f64::from(f[0]), f64::from(f[1]), f64::from(f[2])).normalize();
+            let hit = planet.raycast(p, sun, f64::from(reach) - 1.0);
+            // Occluders within a few texels: the maps' bias and texels decide.
+            if hit.as_ref().is_some_and(|h| h.distance < 4.0 * f64::from(texel)) {
+                continue;
+            }
+            let cpu = hit.is_none();
+            compared[level] += 1;
+            shadowed[level] += usize::from(!cpu);
+            if lit != cpu {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("point {k} level {level} ({a:.1}, {b:.1}): maps {lit}, cpu {cpu}");
+                }
             }
         }
+        let total: usize = compared.iter().sum();
+        eprintln!("sun occlusion: compared {compared:?}, shadowed {shadowed:?}, wrong {wrong}");
+        assert!(compared.iter().zip(shadowed).all(|(&c, s)| c > 40 && s > 8), "{compared:?} compared, {shadowed:?} shadowed");
+        assert!(wrong * 50 <= total, "{wrong} of {total} wrong");
+    };
+    check(&world);
+    // The sun turns 0.03 degrees a frame for 40 frames: levels drawn under
+    // suns up to a degree apart, each kept with its own.
+    let axis = up.cross(world.sun.as_dvec3()).normalize();
+    for _ in 0..40 {
+        world.sun = glam::DQuat::from_axis_angle(axis, 0.03_f64.to_radians()).mul_vec3(world.sun.as_dvec3()).as_vec3();
+        world.frame(gpu, &planet, &view, None);
     }
-    let total: usize = compared.iter().sum();
-    eprintln!("sun occlusion: compared {compared:?}, shadowed {shadowed:?}, wrong {wrong}");
-    assert!(compared.iter().zip(shadowed).all(|(&c, s)| c > 40 && s > 8), "{compared:?} compared, {shadowed:?} shadowed");
-    assert!(wrong * 50 <= total, "{wrong} of {total} wrong");
+    check(&world);
 }
 
 /// Ground probes for foliage (`chunks::ground`) over a 3x3 block of tiles around the

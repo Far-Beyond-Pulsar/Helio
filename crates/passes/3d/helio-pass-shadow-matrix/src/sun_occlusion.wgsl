@@ -5,31 +5,39 @@
 // and `sun_occlusion_maps` (texture_2d_array<f32>, R32Float, a layer a
 // level).
 
-struct SunOcclusionFrame {
-    // The levels' axes: right, up, and forward (from the sun, unit); w of
-    // `right` the number of levels (0: no occlusion published), w of
-    // `forward` the side in texels.
+// A level: its near plane's centre (camera-relative; w its half extent, 0
+// not drawn) and the axes it was drawn with: right, up, and forward (from
+// the sun, unit).
+struct SunOcclusionLevel {
+    centre: vec4<f32>,
     right: vec4<f32>,
     up: vec4<f32>,
     forward: vec4<f32>,
-    // Per level: its near plane's centre (camera-relative) and half extent.
-    levels: array<vec4<f32>, 4>,
+}
+
+struct SunOcclusionFrame {
+    // x: the number of levels (0: no occlusion published), y: the side in
+    // texels.
+    info: vec4<f32>,
+    levels: array<SunOcclusionLevel, 4>,
 }
 
 // The share of the sun reaching camera-relative point `p`: 0 behind
 // terrain, else 1, from the finest level holding it (a 2x2 percentage
 // filter); 1 outside every level.
 fn sun_occlusion(p: vec3<f32>) -> f32 {
-    let count = u32(sun_occlusion_frame.right.w);
-    let side = sun_occlusion_frame.forward.w;
+    let count = u32(sun_occlusion_frame.info.x);
+    let side = sun_occlusion_frame.info.y;
     for (var level = 0u; level < min(count, 4u); level++) {
         let l = sun_occlusion_frame.levels[level];
-        let d = p - l.xyz;
-        let uv = vec2<f32>(dot(d, sun_occlusion_frame.right.xyz), -dot(d, sun_occlusion_frame.up.xyz)) / l.w * 0.5 + 0.5;
+        let half = l.centre.w;
+        if half <= 0.0 { continue; }
+        let d = p - l.centre.xyz;
+        let uv = vec2<f32>(dot(d, l.right.xyz), -dot(d, l.up.xyz)) / half * 0.5 + 0.5;
         if any(uv < vec2<f32>(0.02)) || any(uv > vec2<f32>(0.98)) { continue; }
-        let t = dot(d, sun_occlusion_frame.forward.xyz);
-        // A texel and a half of slope bias: a texel spans 2 l.w / side.
-        let bias = 3.0 * l.w / side;
+        let t = dot(d, l.forward.xyz);
+        // A texel and a half of slope bias: a texel spans 2 half / side.
+        let bias = 3.0 * half / side;
         let at = uv * side - 0.5;
         let base = vec2<i32>(floor(at));
         let f = at - vec2<f32>(base);

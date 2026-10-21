@@ -26,19 +26,28 @@ pub const SUN_OCCLUSION_MARKER: &str = "//!use sun_occlusion";
 pub const SUN_OCCLUSION_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(SUN_OCCLUSION_MARKER, "sun_occlusion.wgsl");
 
+/// A level of [`SunOcclusionFrame`]: its near plane's centre relative to the
+/// camera (w: its half extent, m; 0: not drawn) and the axes it was drawn
+/// with (right, up, forward from the sun). Each level keeps its own: one
+/// drawn a few frames ago, under a sun since moved, is still read exactly
+/// as drawn (only its shadows' direction is that much older).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct SunOcclusionLevel {
+    pub centre: [f32; 4],
+    pub right: [f32; 4],
+    pub up: [f32; 4],
+    pub forward: [f32; 4],
+}
+
 /// `SunOcclusionFrame` (`sun_occlusion.wgsl`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct SunOcclusionFrame {
-    /// The levels' axes: right (w: the levels published, 0: none), up, and
-    /// forward from the sun (w: the maps' side in texels).
-    pub right: [f32; 4],
-    pub up: [f32; 4],
-    pub forward: [f32; 4],
-    /// Per level: its near plane's centre relative to the camera, and its
-    /// half extent (m).
-    pub levels: [[f32; 4]; SUN_OCCLUSION_LEVELS],
+    /// x: the levels published (0: none), y: the maps' side in texels.
+    pub info: [f32; 4],
+    pub levels: [SunOcclusionLevel; SUN_OCCLUSION_LEVELS],
 }
 
 pub const SUN_OCCLUSION_FRAME_BYTES: u64 = std::mem::size_of::<SunOcclusionFrame>() as u64;
-const _: () = assert!(SUN_OCCLUSION_FRAME_BYTES == 112);
+const _: () = assert!(SUN_OCCLUSION_FRAME_BYTES == 272);
