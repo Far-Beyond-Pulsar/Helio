@@ -15,11 +15,10 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
     LightType, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_lens::{LensComponent, LensElementComponent, LensRegion, ProjectionModel};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle,
-    spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, sphere_mesh,
 };
 
 use winit::{
@@ -32,6 +31,19 @@ use winit::{
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+const LENS_USER_HOOK: &str = r#"
+fn user_ray_map(uv: vec2<f32>, params: array<f32, 16>, t: f32) -> vec2<f32> {
+    let p = uv * 2.0 - vec2<f32>(1.0);
+    return uv + vec2<f32>(p.y, -p.x) * params[0] * dot(p, p);
+}
+fn user_transmission(uv: vec2<f32>, params: array<f32, 16>) -> vec3<f32> {
+    return mix(vec3<f32>(1.0), vec3<f32>(uv.x, uv.y, 1.0), params[1]);
+}
+fn user_focus(uv: vec2<f32>, params: array<f32, 16>, s: f32) -> f32 {
+    let p = uv * 2.0 - vec2<f32>(1.0);
+    return s + params[2] * p.x;
+}"#;
 
 fn main() {
     env_logger::init();
@@ -372,13 +384,19 @@ fn build_scene(
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     let graph_scene_db = scene_db_handle(&scene_db);
     let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+        .with_pass_build_context(Box::new(|ctx| {
+            helio_default_graphs::build_default_graph_with_lens_user_with_context(
+                ctx,
+                LENS_USER_HOOK,
+                None,
+            )
+        }))
         .build(device.clone(), queue.clone(), width, height, format);
 
     // ── Scene objects ──────────────────────────────────────────────────────
     let mat_wall = spawn_material(
         &mut scene_db.world,
-        make_material([0.6, 0.58, 0.55, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
+        make_material([0.32, 0.42, 0.58, 1.0], 0.75, 0.0, [0.0, 0.0, 0.0], 0.0),
     );
     let mat_floor = spawn_material(
         &mut scene_db.world,
@@ -392,13 +410,10 @@ fn build_scene(
     post.tonemap_operator = helio::TonemapOperator::Aces;
     post.bloom_enabled = true;
     post.bloom_intensity = 0.15;
-    post.lens_flare = helio_pass_postprocess::LensFlareSettings {
-        enabled: true,
-        quality: 1,
-        ghost_count: 6,
-        intensity: 0.5,
-        ..Default::default()
-    };
+    // Keep the unrelated lens-flare post effect off so these captures show
+    // the camera-lens element being demonstrated, rather than stacking two
+    // different optical effects into every image.
+    post.lens_flare.enabled = false;
     v3_demo_common::set_camera_postprocess(&mut scene_db.world, 0, &post);
 
     let mat_bulb = spawn_material(
@@ -410,13 +425,10 @@ fn build_scene(
             [1.0, 0.85, 0.55],
             // Radiance x projected area (~0.0144 m^2) matches the 8 cd light inside,
             // so the image path and the analytic light hand over seamlessly.
-            555.0,
+            60.0,
         ),
     );
-    let bulb = spawn_mesh(
-        &mut scene_db.world,
-        box_mesh([-1.5, 2.0, -1.0], [0.06, 0.06, 0.06]),
-    );
+    let bulb = spawn_mesh(&mut scene_db.world, sphere_mesh([-1.5, 2.0, -1.0], 0.075));
     let _ = spawn_object(
         &mut scene_db.world,
         bulb,
@@ -448,20 +460,58 @@ fn build_scene(
         6.0,
     );
 
-    // Some pillars / columns to create depth
-    for (x, z) in &[(-2.5, -2.0), (2.5, -2.0), (-2.5, 2.0), (2.5, 2.0)] {
-        let pillar = spawn_mesh(
-            &mut scene_db.world,
-            box_mesh([*x, 0.5, *z], [0.3, 1.5, 0.3]),
-        );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            pillar,
-            mat_wall,
-            glam::Mat4::IDENTITY,
-            1.0,
-        );
+    // A simple color-and-edge target gives distortion, lateral color, and
+    // localized focus a recognizable reference beyond the point lights.
+    let chart_colors = [
+        [0.92, 0.12, 0.08],
+        [0.96, 0.52, 0.08],
+        [0.92, 0.84, 0.16],
+        [0.12, 0.72, 0.28],
+        [0.08, 0.48, 0.92],
+        [0.52, 0.16, 0.82],
+        [0.88, 0.82, 0.72],
+        [0.16, 0.19, 0.24],
+    ];
+    for row in 0..3 {
+        for col in 0..6 {
+            let color = chart_colors[(row * 2 + col) % chart_colors.len()];
+            let material = spawn_material(
+                &mut scene_db.world,
+                make_material(
+                    [color[0], color[1], color[2], 1.0],
+                    0.45,
+                    0.0,
+                    color,
+                    1.15,
+                ),
+            );
+            let x = (col as f32 - 2.5) * 0.46;
+            let y = 0.58 + row as f32 * 0.48;
+            let mesh = spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([x, y, -4.72], [0.21, 0.21, 0.035]),
+            );
+            let _ = spawn_object(
+                &mut scene_db.world,
+                mesh,
+                material,
+                glam::Mat4::IDENTITY,
+                0.32,
+            );
+        }
     }
+    let hero_material = spawn_material(
+        &mut scene_db.world,
+        make_material([0.92, 0.24, 0.08, 1.0], 0.28, 0.1, [0.35, 0.055, 0.0], 0.6),
+    );
+    let hero_mesh = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 1.12, -2.45], 0.42));
+    let _ = spawn_object(
+        &mut scene_db.world,
+        hero_mesh,
+        hero_material,
+        glam::Mat4::IDENTITY,
+        0.45,
+    );
 
     // ── Lighting ───────────────────────────────────────────────────────────
     // Bright directional light shining toward the scene from above-right-front
@@ -563,7 +613,7 @@ fn build_scene(
         [0.8, 0.24, 1.0],
         [1.0, 0.9, 0.55],
     ];
-    let depths = [-1.35, -2.2, -3.1, -4.1];
+    let depths = [0.1, -1.35, -3.1, -4.1];
     for (i, z) in depths.into_iter().enumerate() {
         for (j, x) in [-2.3_f32, -1.35, -0.4, 0.65, 1.7, 2.45]
             .into_iter()
@@ -572,11 +622,11 @@ fn build_scene(
             let color = colors[(i + j) % colors.len()];
             let material = spawn_material(
                 &mut scene_db.world,
-                make_material([color[0], color[1], color[2], 1.0], 0.4, 0.0, color, 150.0),
+                make_material([color[0], color[1], color[2], 1.0], 0.4, 0.0, color, 15.0),
             );
             let mesh = spawn_mesh(
                 &mut scene_db.world,
-                box_mesh([x, 1.3 + (j % 2) as f32 * 0.55, z], [0.07, 0.07, 0.07]),
+                sphere_mesh([x, 1.3 + (j % 2) as f32 * 0.55, z], 0.085),
             );
             let _ = spawn_object(
                 &mut scene_db.world,
@@ -598,7 +648,7 @@ fn build_scene(
     }
     v3_demo_common::set_camera_lens(&mut scene_db.world, LensComponent::new(0));
 
-    renderer.set_ambient([0.05, 0.05, 0.08], 0.02);
+    renderer.set_ambient([0.10, 0.12, 0.18], 0.04);
     renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);
     (scene_db, renderer)
 }
@@ -662,7 +712,9 @@ fn capture_all() {
     );
     let cases = [
         "baseline",
+        "no-lens",
         "wide-open",
+        "shallow-depth",
         "stopped-down",
         "anamorphic",
         "swirly-bokeh",
@@ -676,6 +728,60 @@ fn capture_all() {
         "halation",
         "star-filter",
         "coma-astigmatism",
+        "iris-rounded-blades",
+        "iris-texture-star",
+        "iris-texture-heart",
+        "iris-texture-triangle",
+        "anamorphic-133",
+        "anamorphic-200",
+        "cats-eye",
+        "spherical-rim",
+        "spherical-soft",
+        "onion-rings",
+        "apodization",
+        "central-obstruction",
+        "split-horizontal",
+        "split-vertical",
+        "split-diagonal",
+        "split-multi-ellipse",
+        "split-radial-band",
+        "split-polygon",
+        "sweet-spot",
+        "tilt-focus",
+        "field-curvature",
+        "autofocus",
+        "division-distortion",
+        "pincushion",
+        "anamorphic-distortion",
+        "lens-shift",
+        "keystone",
+        "panini",
+        "cylindrical",
+        "focus-breathing",
+        "prism-line",
+        "prism-ring",
+        "flat-port",
+        "dome-port",
+        "natural-vignette",
+        "optical-vignette",
+        "circular-hood",
+        "matte-box",
+        "nd-filter",
+        "graduated-nd",
+        "color-filter",
+        "t-stop",
+        "spherical-glow",
+        "corner-softness",
+        "diffusion",
+        "glimmerglass",
+        "fog-diffusion",
+        "water-drops",
+        "smear",
+        "dirt",
+        "prescription-thin-lens",
+        "prescription-cooke",
+        "prescription-double-gauss",
+        "user-hook",
     ];
     for name in cases {
         apply_case(&mut scene_db, name);
@@ -737,14 +843,23 @@ fn capture_all() {
 fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
     use LensRegion::FullFrame as F;
     let mut lens = LensComponent::new(0);
-    lens.f_number = 1.8;
-    lens.focus_distance_m = 3.0;
+    lens.f_number = 2.8;
+    lens.focus_distance_m = 6.0;
     lens.quality = 1;
     let elements: Vec<LensElementComponent> = match name {
         "baseline" => vec![],
+        "no-lens" => {
+            lens.enabled = 0;
+            vec![]
+        }
         "wide-open" => {
             lens.f_number = 1.2;
             lens.aperture_blades = 0;
+            vec![]
+        }
+        "shallow-depth" => {
+            lens.f_number = 1.2;
+            lens.focus_distance_m = 3.4;
             vec![]
         }
         "stopped-down" => {
@@ -785,7 +900,7 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
         "split-diopter" => {
             lens.f_number = 2.0;
             vec![LensElementComponent::diopter(
-                1.5,
+                4.8,
                 LensRegion::HalfPlane {
                     angle: 0.0,
                     offset: 0.0,
@@ -801,8 +916,230 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
             LensElementComponent::coma(0.5, 0.09, F),
             LensElementComponent::astigmatism(0.035, 0.35, F),
         ],
+        "iris-rounded-blades" => vec![LensElementComponent::pupil(F)
+            .with_iris(6, 0.0, 0.25)
+            .with_f_number_rounding(4.0)],
+        "iris-texture-star" => vec![LensElementComponent::pupil(F).with_aperture_texture(0, 1.0)],
+        "iris-texture-heart" => vec![LensElementComponent::pupil(F).with_aperture_texture(1, 1.0)],
+        "iris-texture-triangle" => {
+            vec![LensElementComponent::pupil(F).with_aperture_texture(2, 1.0)]
+        }
+        "anamorphic-133" => vec![LensElementComponent::pupil(F).with_anamorphic(1.33)],
+        "anamorphic-200" => vec![LensElementComponent::pupil(F).with_anamorphic(2.0)],
+        "cats-eye" => vec![LensElementComponent::pupil(F).with_cats_eye(1.4, 1.0)],
+        "spherical-rim" => vec![LensElementComponent::pupil(F).with_spherical_aberration(0.8, 0.0)],
+        "spherical-soft" => {
+            vec![LensElementComponent::pupil(F).with_spherical_aberration(-0.8, 1.0)]
+        }
+        "onion-rings" => vec![LensElementComponent::pupil(F).with_onion_rings(0.9, 8.0)],
+        "apodization" => vec![LensElementComponent::pupil(F).with_apodization(0.38)],
+        "central-obstruction" => {
+            vec![LensElementComponent::pupil(F).with_central_obstruction(0.55)]
+        }
+        "split-horizontal" => vec![LensElementComponent::diopter(
+            4.8,
+            LensRegion::HalfPlane {
+                angle: 0.0,
+                offset: 0.0,
+            },
+        )
+        .with_feather(0.02)],
+        "split-vertical" => vec![LensElementComponent::diopter(
+            4.8,
+            LensRegion::HalfPlane {
+                angle: std::f32::consts::FRAC_PI_2,
+                offset: 0.0,
+            },
+        )
+        .with_feather(0.02)],
+        "split-diagonal" => vec![LensElementComponent::diopter(
+            4.8,
+            LensRegion::HalfPlane {
+                angle: std::f32::consts::FRAC_PI_4,
+                offset: 0.0,
+            },
+        )
+        .with_feather(0.02)],
+        "split-multi-ellipse" => vec![
+            LensElementComponent::diopter(
+                4.8,
+                LensRegion::Ellipse {
+                    center: [-0.22, 0.0],
+                    radii: [0.22, 0.42],
+                    rotation: -0.2,
+                },
+            ),
+            LensElementComponent::diopter(
+                8.0,
+                LensRegion::Ellipse {
+                    center: [0.22, 0.0],
+                    radii: [0.22, 0.42],
+                    rotation: 0.2,
+                },
+            ),
+        ],
+        "split-radial-band" => vec![LensElementComponent::diopter(
+            4.8,
+            LensRegion::RadialBand {
+                r0: 0.18,
+                r1: 0.52,
+                center: [0.5, 0.5],
+            },
+        )],
+        "split-polygon" => vec![LensElementComponent::diopter(
+            4.8,
+            LensRegion::Polygon(&[
+                [-0.55, -0.4],
+                [0.0, -0.48],
+                [0.25, 0.0],
+                [0.0, 0.48],
+                [-0.55, 0.4],
+            ]),
+        )],
+        "sweet-spot" => vec![LensElementComponent::sweet_spot(
+            18.0,
+            LensRegion::Ellipse {
+                center: [0.0, 0.0],
+                radii: [0.27, 0.34],
+                rotation: 0.0,
+            },
+        )
+        .with_feather(0.08)],
+        "tilt-focus" => {
+            lens.tilt_angle = 0.16;
+            lens.tilt_axis = 0.25;
+            vec![]
+        }
+        "field-curvature" => {
+            lens.field_curvature = 0.65;
+            vec![]
+        }
+        "autofocus" => {
+            lens.focus_mode = helio_pass_lens::FOCUS_AUTO_POINT;
+            lens.af_u = 0.28;
+            lens.af_v = 0.48;
+            lens.af_speed = 0.0;
+            vec![]
+        }
+        "division-distortion" => vec![LensElementComponent::division(-0.35, 0.05, F)],
+        "pincushion" => vec![LensElementComponent::brown_conrady(
+            [0.28, 0.02, 0.0, 0.0, 0.0, 0.0],
+            [0.0; 2],
+            F,
+        )],
+        "anamorphic-distortion" => vec![LensElementComponent::anamorphic_distortion(
+            [-0.3, 0.0],
+            [0.25, 0.0],
+            F,
+        )],
+        "lens-shift" => vec![LensElementComponent::shift(0.18, -0.08, F)],
+        "keystone" => vec![LensElementComponent::keystone(0.35, -0.2, F)],
+        "panini" => {
+            vec![LensElementComponent::projection(ProjectionModel::Panini, F).with_panini(0.8, 0.7)]
+        }
+        "cylindrical" => vec![LensElementComponent::projection(
+            ProjectionModel::Cylindrical,
+            F,
+        )],
+        "focus-breathing" => vec![LensElementComponent::focus_breathing(0.35, F)],
+        "prism-line" => {
+            vec![LensElementComponent::prism(4, 0.055, 0.25, F).with_prism_falloff(0.8)]
+        }
+        "prism-ring" => vec![LensElementComponent::prism(5, 0.055, 0.0, F)
+            .with_prism_ring()
+            .with_prism_spin(0.2)
+            .with_prism_falloff(0.75)],
+        "flat-port" => vec![LensElementComponent::flat_port(1.333, 0.02, F)],
+        "dome-port" => vec![LensElementComponent::dome_port(0.18, 0.08, F)],
+        "natural-vignette" => vec![LensElementComponent::natural_vignette(1.0, F)],
+        "optical-vignette" => vec![LensElementComponent::optical_vignette(1.1, 0.8, 2.8, F)],
+        "circular-hood" => vec![LensElementComponent::circular_hood(0.62, 0.12, F)],
+        "matte-box" => vec![LensElementComponent::matte_box([0.46, 0.42], 0.12, 0.08, F)],
+        "nd-filter" => vec![LensElementComponent::nd_filter(1.5, F)],
+        "graduated-nd" => vec![LensElementComponent::graduated_nd(
+            1.8,
+            1.15,
+            0.0,
+            0.2,
+            [1.0, 0.9, 0.75],
+            F,
+        )],
+        "color-filter" => vec![LensElementComponent::color_filter(
+            [0.9, 0.55, 0.35],
+            0.7,
+            F,
+        )],
+        "t-stop" => {
+            lens.f_number = 2.8;
+            lens.t_stop = 5.6;
+            vec![LensElementComponent::t_stop_loss(1.0, F)]
+        }
+        "spherical-glow" => vec![LensElementComponent::spherical_glow(
+            0.7, 2.8, 2.0, 0.025, F,
+        )],
+        "corner-softness" => vec![LensElementComponent::corner_softness(0.022, 0.45, F)],
+        "diffusion" => vec![LensElementComponent::diffusion(0.45, 0.018, F)],
+        "glimmerglass" => vec![LensElementComponent::glimmerglass(0.45, F).with_glint(0.8)],
+        "fog-diffusion" => vec![LensElementComponent::fog(0.45, F)],
+        "water-drops" => vec![LensElementComponent::water_drops(
+            0.025,
+            0,
+            0.008,
+            LensRegion::MaskChannel {
+                layer: 0,
+                channel: 3,
+                invert: false,
+            },
+        )],
+        "smear" => vec![LensElementComponent::smear(0.55, 0.06, 0.35, F)],
+        "dirt" => vec![LensElementComponent::dirt(
+            0.55,
+            0.03,
+            0.12,
+            LensRegion::MaskChannel {
+                layer: 0,
+                channel: 3,
+                invert: false,
+            },
+        )],
+        "prescription-thin-lens" => vec![LensElementComponent::prescription(0, F)],
+        "prescription-cooke" => vec![LensElementComponent::prescription(1, F)],
+        "prescription-double-gauss" => vec![LensElementComponent::prescription(2, F)],
+        "user-hook" => {
+            let mut params = [0.0; 16];
+            params[0] = 0.035;
+            params[1] = 0.65;
+            params[2] = 0.25;
+            vec![LensElementComponent::user(
+                helio_pass_lens::user::MAP
+                    | helio_pass_lens::user::TRANSMISSION
+                    | helio_pass_lens::user::FOCUS
+                    | helio_pass_lens::user::SPECTRAL,
+                params,
+                F,
+            )]
+        }
         _ => panic!("unknown lens case {name}"),
     };
+    if matches!(
+        name,
+        "anamorphic"
+            | "swirly-bokeh"
+            | "iris-rounded-blades"
+            | "iris-texture-star"
+            | "iris-texture-heart"
+            | "iris-texture-triangle"
+            | "anamorphic-133"
+            | "anamorphic-200"
+            | "cats-eye"
+            | "spherical-rim"
+            | "spherical-soft"
+            | "onion-rings"
+            | "apodization"
+            | "central-obstruction"
+    ) {
+        lens.f_number = 1.2;
+    }
     lens.element_count = elements.len() as u32;
     let mut slots: Vec<_> = scene_db
         .world
