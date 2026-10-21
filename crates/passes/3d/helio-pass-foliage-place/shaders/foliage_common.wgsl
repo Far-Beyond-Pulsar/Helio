@@ -90,7 +90,8 @@ struct FoliageBand {
     probe_blocks:   u32,
     lod:            u32,
     grid_density:   f32,
-    _pad:           u32,
+    /// The largest scale a tuft draws at in the band (`GpuFoliageBand::scale_max`).
+    scale_max:      f32,
 }
 
 /// Mirrors `GpuFoliageBands` (Rust, 416 bytes).
@@ -219,4 +220,88 @@ fn foliage_hash(x: u32) -> u32 {
 /// `hash` to `[0, 1)`: its top 24 bits.
 fn foliage_unit(hash: u32) -> f32 {
     return f32(hash >> 8u) * (1.0 / 16777216.0);
+}
+
+// ── A tuft's blades (`crate::blade`): shared by placement and the draw ──────────
+
+const FOLIAGE_TAU: f32 = 6.283185307179586;
+/// Cubes a blocky blade rises by at most (`FOLIAGE_STACK_CUBES`), and steps sideways by
+/// at most (L0's strip; `blade::FOLIAGE_STACK_STEPS`).
+const FOLIAGE_STACK_CUBES: u32 = 24u;
+const FOLIAGE_STACK_STEPS: u32 = 4u;
+
+/// One blade of a tuft, from its tuft's seed, its index `j` of `n` and its type: how far
+/// out it stands (0 the centre blade, 1 the rim), its direction (radians, and as one of
+/// the grid's eight compass steps for blocky blades), its lean (run over rise), its curve
+/// (extra lean at the tip), whether it lies over, its height and width (metres, before
+/// the tuft's scale) and a tint.
+struct Blade {
+    rim: f32,
+    angle: f32,
+    compass: u32,
+    lean: f32,
+    curve: f32,
+    fallen: bool,
+    height: f32,
+    width: f32,
+    tint: vec2<f32>,
+    seed: u32,
+}
+
+fn tuft_blade(ty: FoliageType, record: BladeInstance, j: u32, n: u32) -> Blade {
+    let seed = record.packed_colour_seed >> 16u;
+    let h = foliage_hash(seed * 0x9e3779b1u + j * 0x85ebca6bu + 0x27d4eb2fu);
+    let h2 = foliage_hash(h ^ 0x165667b1u);
+    let turn = f32((record.packed_scale_type >> 8u) & 0xffu) / 256.0;
+    var b: Blade;
+    // The first blade is the tuft's centre; the others spread over the rim.
+    b.rim = select(0.35 + 0.65 * foliage_unit(h), 0.0, j == 0u);
+    b.angle = FOLIAGE_TAU * (turn + (f32(j) + 0.35 * foliage_unit(h2)) / f32(max(n, 1u)));
+    // Eight compass steps, the blades taking every third so up to eight point apart.
+    b.compass = (u32(turn * 8.0) + j * 3u) % 8u;
+    b.fallen = foliage_unit(foliage_hash(h ^ 0x9e3779b9u)) < ty.fall_chance && j != 0u;
+    b.lean = mix(ty.lean_min, ty.lean_max, b.rim) * (0.75 + 0.5 * foliage_unit(h2 >> 3u));
+    b.curve = ty.curve * (0.6 + 0.8 * foliage_unit(h >> 5u));
+    let tuft_height = mix(ty.height_min, ty.height_max, f32(record.packed_scale_type & 0xffu) / 255.0);
+    b.height = tuft_height * (1.0 - 0.35 * b.rim) * (0.75 + 0.5 * foliage_unit(h >> 11u));
+    if b.fallen {
+        b.lean = max(b.lean, 1.0) * 2.5;
+        b.height = b.height * 0.6;
+    }
+    b.width = mix(ty.width_min, ty.width_max, foliage_unit(h2 >> 7u));
+    b.tint = vec2<f32>(foliage_unit(h2 >> 13u), foliage_unit(h >> 17u));
+    b.seed = foliage_hash(h2) & 0xffffu;
+    return b;
+}
+
+/// How many cubes a blocky blade rises and steps sideways (`v`, `h`), for cubes of edge
+/// `cube`: its height in cubes, and its lean (and curve) over that rise, at most `steps`.
+fn block_steps(b: Blade, cube: f32, scale: f32, steps: u32) -> vec2<u32> {
+    let rise = min(u32(round(b.height * scale / cube)), FOLIAGE_STACK_CUBES);
+    if rise == 0u {
+        return vec2<u32>(0u);
+    }
+    let side = min(u32(round(f32(rise) * max(b.lean + b.curve, 0.0))), steps);
+    return vec2<u32>(rise, side);
+}
+
+/// The most boxes blocky blade `j` of `n` of the tuft of `record` draws at any scale up to
+/// `scale_max`: a run up between sideways steps and a box a sideways step, `2 · side + 1`
+/// (at most 15); 0 for a blade that is not blocky (`blade::box_bound`).
+fn foliage_box_bound(ty: FoliageType, record: BladeInstance, j: u32, n: u32, scale_max: f32) -> u32 {
+    if (ty.kind_and_flags & 0xffu) != FOLIAGE_KIND_BLOCK {
+        return 0u;
+    }
+    let b = tuft_blade(ty, record, j, n);
+    let steps = block_steps(b, max(ty.width_min, 1.0e-3), scale_max, FOLIAGE_STACK_STEPS);
+    if steps.x == 0u {
+        return 1u;
+    }
+    let side = select(steps.y, max(steps.y, 1u), j > 0u);
+    return min(2u * side + 1u, 15u);
+}
+
+/// The record's box bound (`foliage_box_bound`; 0: unknown).
+fn foliage_blade_boxes(blade: BladeInstance) -> u32 {
+    return (blade.packed_scale_type >> 26u) & 15u;
 }

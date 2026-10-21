@@ -68,7 +68,11 @@ pub struct PlaceUniforms {
     pub search_below: f32,
     /// The eye in render space.
     pub eye: [f32; 3],
-    pub _pad: [u32; 3],
+    /// Parts (a workgroup's share of a tile's candidates) of the tiles placed, then of
+    /// the tiles queried.
+    pub place_part_count: u32,
+    pub query_part_count: u32,
+    pub _pad: u32,
 }
 
 /// Per-frame constants for the tile cull, cluster cull and finalize dispatches.

@@ -70,6 +70,11 @@ pub const MAX_FOLIAGE_LAYERS: u32 = 64;
 
 /// Compute workgroup size shared by `cs_place`, `cs_tile_cull` and `cs_cluster_cull`.
 const WORKGROUP_SIZE: u32 = 64;
+/// Candidates a placement or query workgroup takes of a tile: a tile is placed by as many
+/// workgroups as it has parts, all at once.
+const PLACE_PART: u32 = 1024;
+/// Parts in a frame at most: every queued tile at the largest candidate grid.
+const MAX_PARTS: u32 = 2 * MAX_QUEUED_TILES * crate::MAX_CANDIDATES_PER_TILE.div_ceil(PLACE_PART);
 /// Bytes of a `FoliageInteractorComponent` row, and of a gathered one.
 const SOURCE_INTERACTOR_BYTES: u64 = std::mem::size_of::<crate::components::FoliageInteractorComponent>() as u64;
 /// Bytes of a gathered interactor (`Interactor` in foliage_interactors.wgsl).
@@ -151,8 +156,18 @@ pub struct FoliagePlacePass {
     place_uniforms: wgpu::Buffer,
     cull_uniforms: wgpu::Buffer,
 
+    place_reset_pipeline: wgpu::ComputePipeline,
+    place_bounds_pipeline: wgpu::ComputePipeline,
     place_pipeline: wgpu::ComputePipeline,
+    place_finish_pipeline: wgpu::ComputePipeline,
     query_pipeline: wgpu::ComputePipeline,
+    /// The frame's parts (`parts` in foliage_place.wgsl), and the placed tiles' height
+    /// ranges and record counts while they are placed.
+    place_parts: wgpu::Buffer,
+    place_scratch: wgpu::Buffer,
+    parts_scratch: Vec<[u32; 4]>,
+    place_part_count: u32,
+    query_part_count: u32,
     ground_plane_pipeline: wgpu::ComputePipeline,
     tile_cull_pipeline: wgpu::ComputePipeline,
     cluster_cull_pipeline: wgpu::ComputePipeline,
@@ -292,6 +307,8 @@ impl FoliagePlacePass {
         let gather_uniforms = plain("Foliage Gather Uniforms", 48, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         // Last frame's answered tiles, then this frame's queried ones: (slot, first query).
         let place_queue = plain("Foliage Place Queue", 2 * MAX_QUEUED_TILES as u64 * 8, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let place_parts = plain("Foliage Place Parts", u64::from(MAX_PARTS) * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let place_scratch = plain("Foliage Place Scratch", 2 * MAX_QUEUED_TILES as u64 * 16, wgpu::BufferUsages::STORAGE);
         let tile_visibility = plain("Foliage Tile Visibility", total_slots as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
         let place_uniforms = plain("Foliage Place Uniforms", std::mem::size_of::<PlaceUniforms>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         let cull_uniforms = plain("Foliage Cull Uniforms", std::mem::size_of::<FoliageCullUniforms>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
@@ -384,6 +401,8 @@ impl FoliagePlacePass {
                 storage_entry(11, false),
                 storage_entry(12, false),
                 uniform_entry(13),
+                storage_entry(14, true),
+                storage_entry(15, false),
             ],
         });
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -430,7 +449,10 @@ impl FoliagePlacePass {
                 cache: None,
             })
         };
+        let place_reset_pipeline = pipeline("Foliage Place Reset Pipeline", &place_layout, &place_shader, "cs_place_reset");
+        let place_bounds_pipeline = pipeline("Foliage Place Bounds Pipeline", &place_layout, &place_shader, "cs_place_bounds");
         let place_pipeline = pipeline("Foliage Place Pipeline", &place_layout, &place_shader, "cs_place");
+        let place_finish_pipeline = pipeline("Foliage Place Finish Pipeline", &place_layout, &place_shader, "cs_place_finish");
         let query_pipeline = pipeline("Foliage Ground Query Pipeline", &place_layout, &place_shader, "cs_query");
         let ground_plane_pipeline = pipeline("Foliage Plane Ground Pipeline", &place_layout, &place_shader, "cs_ground_plane");
         let tile_cull_pipeline = pipeline("Foliage Tile Cull Pipeline", &cull_layout, &cull_shader, "cs_tile_cull");
@@ -472,8 +494,16 @@ impl FoliagePlacePass {
             tile_visibility,
             place_uniforms,
             cull_uniforms,
+            place_reset_pipeline,
+            place_bounds_pipeline,
             place_pipeline,
+            place_finish_pipeline,
             query_pipeline,
+            place_parts,
+            place_scratch,
+            parts_scratch: Vec::new(),
+            place_part_count: 0,
+            query_part_count: 0,
             ground_plane_pipeline,
             tile_cull_pipeline,
             cluster_cull_pipeline,
@@ -996,6 +1026,26 @@ impl RenderPass for FoliagePlacePass {
         if !self.queue_scratch.is_empty() {
             ctx.write_buffer(&self.place_queue, 0, bytemuck::cast_slice(&self.queue_scratch));
         }
+        // Each tile's candidates in parts of a workgroup each: a frame's few tiles are
+        // placed and queried across the GPU, not a workgroup a tile.
+        self.parts_scratch.clear();
+        let mut part_counts = [0u32; 2];
+        for (entry, &[slot, _]) in self.queue_scratch.iter().enumerate() {
+            let Some(band) = self.bands.band_of_slot(slot) else { continue };
+            let cells = self.bands.bands[band].candidate_grid.pow(2);
+            let queried = usize::from(entry as u32 >= self.place_tile_count);
+            let mut start = 0;
+            while start < cells && self.parts_scratch.len() < MAX_PARTS as usize {
+                let end = (start + PLACE_PART).min(cells);
+                self.parts_scratch.push([entry as u32, start, end, 0]);
+                part_counts[queried] += 1;
+                start = end;
+            }
+        }
+        [self.place_part_count, self.query_part_count] = part_counts;
+        if !self.parts_scratch.is_empty() {
+            ctx.write_buffer(&self.place_parts, 0, bytemuck::cast_slice(&self.parts_scratch));
+        }
 
         let (terrain_origin, terrain_extent, terrain_valid) = match self.terrain_transform {
             Some((origin, extent)) if ctx.registry.contains("foliage_terrain") => (origin, extent, 1),
@@ -1020,7 +1070,9 @@ impl RenderPass for FoliagePlacePass {
                 search_above: SEARCH_ABOVE_METRES,
                 search_below: SEARCH_BELOW_METRES,
                 eye: camera.to_array(),
-                _pad: [0; 3],
+                place_part_count: self.place_part_count,
+                query_part_count: self.query_part_count,
+                _pad: 0,
             }),
         );
         self.prepare_cull(ctx, type_count)
@@ -1055,6 +1107,8 @@ impl RenderPass for FoliagePlacePass {
                     entry(11, self.hits.as_entire_binding()),
                     entry(12, self.ground_args.as_entire_binding()),
                     entry(13, self.bands_buffer.as_entire_binding()),
+                    entry(14, self.place_parts.as_entire_binding()),
+                    entry(15, self.place_scratch.as_entire_binding()),
                 ],
             }));
             self.place_bind_group_key = Some(place_key);
@@ -1128,16 +1182,24 @@ impl RenderPass for FoliagePlacePass {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Foliage Place"), timestamp_writes: None });
             pass.set_bind_group(0, place_bg, &[]);
             // Last frame's tiles from their answers (before this frame's queries take
-            // their place in the exchange buffers), one workgroup a tile.
-            if self.place_tile_count > 0 {
+            // their place in the exchange buffers): their ranges, then their tufts, a
+            // workgroup a part, then their headers.
+            if self.place_tile_count > 0 && self.place_part_count > 0 {
+                let tiles = self.place_tile_count.div_ceil(WORKGROUP_SIZE);
+                pass.set_pipeline(&self.place_reset_pipeline);
+                pass.dispatch_workgroups(tiles, 1, 1);
+                pass.set_pipeline(&self.place_bounds_pipeline);
+                pass.dispatch_workgroups(self.place_part_count, 1, 1);
                 pass.set_pipeline(&self.place_pipeline);
-                pass.dispatch_workgroups(self.place_tile_count, 1, 1);
+                pass.dispatch_workgroups(self.place_part_count, 1, 1);
+                pass.set_pipeline(&self.place_finish_pipeline);
+                pass.dispatch_workgroups(tiles, 1, 1);
             }
-            // This frame's questions; the built-in ground answers them at once, another
-            // ground in its own pass later in the frame.
-            if self.queued_tile_count > 0 {
+            // This frame's questions, a workgroup a part; the built-in ground answers them
+            // at once, another ground in its own pass later in the frame.
+            if self.queued_tile_count > 0 && self.query_part_count > 0 {
                 pass.set_pipeline(&self.query_pipeline);
-                pass.dispatch_workgroups(self.queued_tile_count, 1, 1);
+                pass.dispatch_workgroups(self.query_part_count, 1, 1);
                 // Directly: the queries are counted here, and the bind group holds the
                 // indirect header writable (one usage per dispatch).
                 if !self.ground.is_external() {

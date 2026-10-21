@@ -43,8 +43,8 @@
 //
 // ── Motion vectors ──────────────────────────────────────────────────────────
 //
-// `helio_wind_offset` is evaluated TWICE per vertex, at `globals.clock.x` and at
-// `globals.clock.y` (the frame clock and its previous value), producing a current and
+// The wind is evaluated for two times per vertex (`helio_wind_offset_pair`), at
+// `globals.clock.x` and at `globals.clock.y` (the frame clock and its previous value), producing a current and
 // a previous world position. Without the pair every blade reports zero motion and TAA
 // smears moving grass.
 
@@ -65,13 +65,11 @@ const FOLIAGE_FLAG_DEBUG_LOD: u32 = 2u;
 const FOLIAGE_VISIBLE_TILE_SHIFT: u32 = 16u;
 const FOLIAGE_VISIBLE_LOCAL_MASK: u32 = 0xffffu;
 
-/// Cubes a blocky blade rises by at most (`FOLIAGE_STACK_CUBES`), and the boxes its strip
-/// holds at L0 and L1 (`FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`: 11 vertices a box, less 2).
-const FOLIAGE_STACK_CUBES: u32 = 24u;
+/// The boxes a blocky blade's strip holds at L0 and L1 (`FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`:
+/// 11 vertices a box, less 2), and the sideways steps an L1 blade takes at most (its runs
+/// fit 5 boxes; L0's are `FOLIAGE_STACK_STEPS`).
 const FOLIAGE_L0_BOXES: u32 = 8u;
 const FOLIAGE_L1_BOXES: u32 = 5u;
-/// Cubes a blocky blade steps sideways by at most at L0, and at L1 (its runs fit 5 boxes).
-const FOLIAGE_STACK_STEPS: u32 = 4u;
 const FOLIAGE_L1_STEPS: u32 = 2u;
 
 /// How far a blocky blade's shading normal leans from the ground's up towards its face's
@@ -238,50 +236,6 @@ fn foliage_pressed(press: vec4<f32>, up: vec3<f32>, height: f32, lowest: f32) ->
 // Blades of a tuft
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// One blade of a tuft, from its tuft's seed, its index `j` of `n` and its type: how far
-/// out it stands (0 the centre blade, 1 the rim), its direction (radians, and as one of
-/// the grid's eight compass steps for blocky blades), its lean (run over rise), its curve
-/// (extra lean at the tip), whether it lies over, its height and width (metres, before
-/// the tuft's scale) and a tint.
-struct Blade {
-    rim: f32,
-    angle: f32,
-    compass: u32,
-    lean: f32,
-    curve: f32,
-    fallen: bool,
-    height: f32,
-    width: f32,
-    tint: vec2<f32>,
-    seed: u32,
-}
-
-fn tuft_blade(ty: FoliageType, record: BladeInstance, j: u32, n: u32) -> Blade {
-    let seed = record.packed_colour_seed >> 16u;
-    let h = foliage_hash(seed * 0x9e3779b1u + j * 0x85ebca6bu + 0x27d4eb2fu);
-    let h2 = foliage_hash(h ^ 0x165667b1u);
-    let turn = f32((record.packed_scale_type >> 8u) & 0xffu) / 256.0;
-    var b: Blade;
-    // The first blade is the tuft's centre; the others spread over the rim.
-    b.rim = select(0.35 + 0.65 * foliage_unit(h), 0.0, j == 0u);
-    b.angle = TAU * (turn + (f32(j) + 0.35 * foliage_unit(h2)) / f32(max(n, 1u)));
-    // Eight compass steps, the blades taking every third so up to eight point apart.
-    b.compass = (u32(turn * 8.0) + j * 3u) % 8u;
-    b.fallen = foliage_unit(foliage_hash(h ^ 0x9e3779b9u)) < ty.fall_chance && j != 0u;
-    b.lean = mix(ty.lean_min, ty.lean_max, b.rim) * (0.75 + 0.5 * foliage_unit(h2 >> 3u));
-    b.curve = ty.curve * (0.6 + 0.8 * foliage_unit(h >> 5u));
-    let tuft_height = mix(ty.height_min, ty.height_max, f32(record.packed_scale_type & 0xffu) / 255.0);
-    b.height = tuft_height * (1.0 - 0.35 * b.rim) * (0.75 + 0.5 * foliage_unit(h >> 11u));
-    if b.fallen {
-        b.lean = max(b.lean, 1.0) * 2.5;
-        b.height = b.height * 0.6;
-    }
-    b.width = mix(ty.width_min, ty.width_max, foliage_unit(h2 >> 7u));
-    b.tint = vec2<f32>(foliage_unit(h2 >> 13u), foliage_unit(h >> 17u));
-    b.seed = foliage_hash(h2) & 0xffffu;
-    return b;
-}
-
 // ── Smooth blades ───────────────────────────────────────────────────────────────
 
 /// A point of a smooth blade's spine at `s` (0 root, 1 tip) in its own frame (+z its lean
@@ -363,17 +317,6 @@ struct Box {
     y1: f32,
 }
 
-/// How many cubes a blocky blade rises and steps sideways (`v`, `h`), for cubes of edge
-/// `cube`: its height in cubes, and its lean (and curve) over that rise, at most `steps`.
-fn block_steps(b: Blade, cube: f32, scale: f32, steps: u32) -> vec2<u32> {
-    let rise = min(u32(round(b.height * scale / cube)), FOLIAGE_STACK_CUBES);
-    if rise == 0u {
-        return vec2<u32>(0u);
-    }
-    let side = min(u32(round(f32(rise) * max(b.lean + b.curve, 0.0))), steps);
-    return vec2<u32>(rise, side);
-}
-
 /// The sideways step the path has reached after rising to cube `v` of `rise`: it leans
 /// out by `lean` and bends by `curve` over the rise, reaching `side` steps at the top.
 fn block_target(b: Blade, v: u32, rise: u32, side: u32) -> u32 {
@@ -385,12 +328,42 @@ fn block_target(b: Blade, v: u32, rise: u32, side: u32) -> u32 {
     return min(u32(round(f32(side) * clamp(g, 0.0, 1.0))), side);
 }
 
-/// Box `want` of a blocky blade drawn in runs (at most `max_steps` sideways), and how many
-/// there are. The blade is a connected staircase of cubes: from the root
-/// cube, each next cube one up or one step along its compass direction, stepping out as
-/// its lean demands. A straight run up is one box (no hidden tops inside it); an axis step
-/// sideways too; diagonal steps are a cube each. Blades past the tuft's first share its
-/// root column, so they start at their first sideways step (no two blades draw one cube).
+/// The level (cube up) a blocky blade takes its `h`-th sideways step at: the first whose
+/// target (`block_target`) reaches `h`, else the top. From the lean curve's inverse, then
+/// checked against the target itself, so it is exactly where a cube-by-cube walk steps
+/// (`geometry::block_level`).
+fn block_level(b: Blade, h: u32, rise: u32, side: u32) -> u32 {
+    if rise <= 1u {
+        return 0u;
+    }
+    let top = rise - 1u;
+    let q = (f32(h) - 0.5) / f32(max(side, 1u)) * max(b.lean + b.curve, 1.0e-4);
+    var t = 1.0;
+    if b.curve > 1.0e-6 {
+        t = (-b.lean + sqrt(max(b.lean * b.lean + 4.0 * b.curve * q, 0.0))) / (2.0 * b.curve);
+    } else if b.lean > 1.0e-6 {
+        t = q / b.lean;
+    }
+    var v = min(u32(max(ceil(t * f32(top)), 0.0)), top);
+    loop {
+        if v == 0u || block_target(b, v - 1u, rise, side) < h { break; }
+        v -= 1u;
+    }
+    loop {
+        if v >= top || block_target(b, v, rise, side) >= h { break; }
+        v += 1u;
+    }
+    return v;
+}
+
+/// Box `want` of a blocky blade (at most `max_steps` sideways), and how many there are.
+/// The blade is a connected staircase of cubes: from the root cube, each next one up or
+/// one step along its compass direction, stepping out as its lean demands. A run up a
+/// column is one box (no hidden tops inside it), an axis step's cubes at one level one
+/// box, diagonal steps a cube each. Blades past the tuft's first share its root column,
+/// so they start at their first sideways step (no two blades draw one cube). Found from
+/// the levels of the (at most four) sideways steps, not by walking cube by cube
+/// (`geometry::block_boxes_by_levels`).
 struct BlockPath {
     found: Box,
     boxes: u32,
@@ -398,7 +371,6 @@ struct BlockPath {
 
 fn block_path(b: Blade, j: u32, cube: f32, scale: f32, leafy: bool, want: u32, max_steps: u32) -> BlockPath {
     var out = BlockPath(Box(vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0), 0u);
-    let merge = FOLIAGE_STACK_CUBES;
     let steps = block_steps(b, cube, scale, max_steps);
     let rise = steps.x;
     // A blade past the first steps out of the shared root column at least once, or it
@@ -413,68 +385,69 @@ fn block_path(b: Blade, j: u32, cube: f32, scale: f32, leafy: bool, want: u32, m
     // smaller never fights it for depth.
     let size = cube * select(1.0, 0.86, j >= 8u);
     let height = cube * select(1.0, 0.6, leafy);
-    // A leaf is a plate across its direction (the type's width), a blade a cube.
+    // A leaf is a plate across its direction (the type's width), a blade a cube; along
+    // the direction a run up is a cube.
     let across = select(size, max(b.width, size), leafy);
+    let perp = vec2<f32>(abs(dir.y), abs(dir.x)) * 0.5 * across;
+    let column_half = select(max(abs(dir) * (0.5 * size), perp), vec2<f32>(0.5 * size), diagonal);
     var h = 0u;
-    var v = 0u;
-    // The current run: its first cube and how many, and which way it runs (0 up,
-    // 1 sideways).
-    var run_h = 0u;
-    var run_v = 0u;
-    var run_len = 1u;
-    var run_way = 0u;
-    var started = j == 0u;
+    var start_v = 0u;
+    var step = 1u;
+    var level = 0u;
+    if side > 0u {
+        level = block_level(b, 1u, rise, side);
+    }
     loop {
-        // The next move: sideways while behind the lean's target, else up.
-        var way = 2u;
-        if h < block_target(b, v, rise, side) {
-            way = 1u;
-        } else if v + 1u < rise {
-            way = 0u;
-        } else if h < side {
-            way = 1u;
+        if step > side {
+            break;
         }
-        let last = way == 2u;
-        // A run ends at a turn, after `merge` cubes up, at a diagonal step, or at the end.
-        let breaks = last || way != run_way || (way == 0u && run_len >= merge) || (way == 1u && diagonal) || !started;
-        if breaks && started {
-            if out.boxes == want || (last && out.boxes < want) {
-                let first = dir * f32(run_h) * size;
-                var extent = vec2<f32>(0.0);
-                if run_way == 1u && !diagonal {
-                    extent = dir * f32(run_len - 1u) * size;
-                }
-                let centre = first + extent * 0.5;
-                // Half extents across the ground: along the blade's direction a cube (a
-                // run's length sideways), across it the blade's width.
-                let along = abs(dir) * (0.5 * size) + abs(extent) * 0.5;
-                let other = vec2<f32>(abs(dir.y), abs(dir.x)) * 0.5 * across;
-                var half = max(along, other);
-                if diagonal {
-                    half = vec2<f32>(0.5 * size);
-                }
-                let up_len = select(1u, run_len, run_way == 0u);
-                out.found = Box(centre, half, f32(run_v) * height, f32(run_v + up_len) * height);
+        // Up the column to this step's level (the shared root column is the first
+        // blade's).
+        if h > 0u || j == 0u {
+            if out.boxes == want {
+                out.found = Box(dir * f32(h) * size, column_half, f32(start_v) * height, f32(level + 1u) * height);
             }
             out.boxes += 1u;
         }
-        if last {
-            break;
+        // The steps taken at this level, and the next level.
+        var last = step;
+        var next = rise;
+        loop {
+            if last >= side {
+                break;
+            }
+            next = block_level(b, last + 1u, rise, side);
+            if next != level {
+                break;
+            }
+            last += 1u;
         }
-        if way == 0u {
-            v += 1u;
+        let y0 = f32(level) * height;
+        if diagonal {
+            if want >= out.boxes && want <= out.boxes + (last - step) {
+                out.found = Box(dir * f32(step + want - out.boxes) * size, vec2<f32>(0.5 * size), y0, y0 + height);
+            }
+            out.boxes += last - step + 1u;
         } else {
-            h += 1u;
+            if out.boxes == want {
+                let first = dir * f32(step) * size;
+                let extent = dir * f32(last - step) * size;
+                let along = abs(dir) * (0.5 * size) + abs(extent) * 0.5;
+                out.found = Box(first + extent * 0.5, max(along, perp), y0, y0 + height);
+            }
+            out.boxes += 1u;
         }
-        if breaks {
-            run_h = h;
-            run_v = v;
-            run_len = 1u;
-            run_way = way;
-            started = started || way == 1u;
-        } else {
-            run_len += 1u;
+        h = last;
+        start_v = level + 1u;
+        step = last + 1u;
+        level = next;
+    }
+    // Up to the top.
+    if start_v < rise && (h > 0u || j == 0u) {
+        if out.boxes == want {
+            out.found = Box(dir * f32(h) * size, column_half, f32(start_v) * height, f32(rise) * height);
         }
+        out.boxes += 1u;
     }
     return out;
 }
@@ -576,12 +549,25 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     let reference = visible_blades[lod_info.region_base + instance_index];
     let slot = reference >> FOLIAGE_VISIBLE_TILE_SHIFT;
     let tile = tile_table[slot];
-    let frame = tile_frames[slot];
     let record = blade_arena[tile.blade_offset + (reference & FOLIAGE_VISIBLE_LOCAL_MASK)];
+    // A near blocky blade's strip past its box bound (placement's `foliage_box_bound`) is
+    // the draw's tail: dropped before any other work.
+    let bound = foliage_blade_boxes(record);
+    if lod_info.lod <= 1u && bound > 0u && (vertex_index + 1u) / 11u >= bound {
+        return tail();
+    }
+    let frame = tile_frames[slot];
     let basis = foliage_basis(frame);
     let band = foliage_bands.bands[foliage_band_of_slot(slot)];
     let root = foliage_blade_root(tile, frame, record);
     let ty = foliage_types[(record.packed_scale_type >> 16u) & 0xffu];
+    let blocky = (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK;
+    let n = foliage_tuft_blades(record);
+    // A whole tuft's strip (L2) ends with its last blade: the vertices past it are the
+    // draw's tail, dropped before any work.
+    if lod_info.lod == 2u && vertex_index >= select(6u * n - 1u, 11u * n - 1u, blocky) {
+        return tail();
+    }
     let camera_pos = cameras[0].position_near.xyz;
     let distance_to_camera = distance(root, camera_pos);
 
@@ -604,8 +590,6 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
         }
     }
 
-    let n = foliage_tuft_blades(record);
-    let blocky = (ty.kind_and_flags & 0xffu) == FOLIAGE_KIND_BLOCK;
     let eye = camera_pos - root;
     let eye_local = vec2<f32>(dot(eye, basis.tangent), dot(eye, basis.bitangent));
 
@@ -648,16 +632,24 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
         let cube = max(ty.width_min, 1.0e-3);
         let leafy = ty.width_max > 1.5 * ty.width_min;
         let max_steps = select(FOLIAGE_L1_STEPS, FOLIAGE_STACK_STEPS, lod == 0u);
-        let count = block_path(b, j, cube, scale, leafy, 0xffffffffu, max_steps).boxes;
-        let s = strip_slot(vertex_index, min(count, select(FOLIAGE_L1_BOXES, FOLIAGE_L0_BOXES, lod == 0u)));
-        if s.past {
+        // The box this vertex draws (a join, the next box's first), within the strip.
+        let s = strip_slot(vertex_index, select(FOLIAGE_L1_BOXES, FOLIAGE_L0_BOXES, lod == 0u));
+        let steps = block_steps(b, cube, scale, max_steps);
+        // Past the blade's boxes, before walking it: a run up between sideways steps
+        // and a box a sideways step at most (`block_box_bound`).
+        if s.past || steps.x == 0u || s.box_index > 2u * select(steps.y, max(steps.y, 1u), j > 0u) {
             return tail();
         }
-        let bx = block_path(b, j, cube, scale, leafy, s.box_index, max_steps).found;
+        // One walk: the box and how many there are.
+        let path = block_path(b, j, cube, scale, leafy, s.box_index, max_steps);
+        if s.box_index >= path.boxes {
+            return tail();
+        }
+        let bx = path.found;
         let corner = box_vertex(bx, eye_local, s.k);
         local = corner.local;
         normal = corner.normal;
-        let rise = block_steps(b, cube, scale, max_steps).x;
+        let rise = steps.x;
         total = f32(rise) * cube * select(1.0, 0.6, leafy);
         height_frac = local.y / max(total, 1.0e-3);
         anchor = vec3<f32>(bx.centre.x, 0.5 * (bx.y0 + bx.y1), bx.centre.y);
@@ -783,8 +775,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     if !blocky {
         lowest = local.y;
     }
-    var sway_now = helio_wind_offset(wind, wind_at, root, anchor_frac, blade_seed, response, globals.clock.x);
-    var sway_prev = helio_wind_offset(wind, wind_at, root, anchor_frac, blade_seed, response, globals.clock.y);
+    let sway = helio_wind_offset_pair(wind, wind_at, root, anchor_frac, blade_seed, response, globals.clock.x, globals.clock.y);
+    var sway_now = sway.now;
+    var sway_prev = sway.prev;
     sway_now.y = max(sway_now.y, -lowest);
     sway_prev.y = max(sway_prev.y, -lowest);
     let wind_now = foliage_to_world(basis, sway_now);

@@ -80,7 +80,9 @@ pub struct GpuFoliageBand {
     pub lod: u32,
     /// Candidates a square metre: the acceptance's denominator.
     pub grid_density: f32,
-    pub _pad: u32,
+    /// The largest scale a tuft draws at in the band (its growth at the outer edge):
+    /// placement bounds its blades' boxes by it.
+    pub scale_max: f32,
 }
 
 /// The band table (`foliage_common.wgsl`'s `FoliageBands`). 416 bytes.
@@ -211,6 +213,7 @@ pub fn plan_bands(range: &FoliageRange) -> GpuFoliageBands {
         let per_tuft = if lod == BAND_LOD_BLADES { range.blades_per_tuft.max(1.0) * 1.3 } else { 1.0 };
         let slab = ((candidates as f32 * per_tuft).ceil() as u32).clamp(1, crate::MAX_BLADES_PER_TILE);
         let slots = FOLIAGE_BAND_TILES * FOLIAGE_BAND_TILES;
+        let scale_max = growth(&table, outer);
         table.bands[k] = GpuFoliageBand {
             slot_base: slot,
             slot_count: slots,
@@ -227,7 +230,7 @@ pub fn plan_bands(range: &FoliageRange) -> GpuFoliageBands {
             probe_blocks: blocks,
             lod,
             grid_density: candidates as f32 / (tile * tile),
-            _pad: 0,
+            scale_max,
         };
         table.count = k as u32 + 1;
         slot += slots;

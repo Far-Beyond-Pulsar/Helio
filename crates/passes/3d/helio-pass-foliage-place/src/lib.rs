@@ -65,6 +65,7 @@ use bytemuck::{Pod, Zeroable};
 mod contract;
 pub use contract::*;
 
+pub mod blade;
 pub mod components;
 mod frame_data;
 mod pass;
