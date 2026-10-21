@@ -716,10 +716,16 @@ fn capture_all() {
         "lateral-ca",
         "barrel",
         "fisheye",
+        "projection-equisolid",
+        "projection-orthographic",
+        "projection-stereographic",
+        "projection-kannala-brandt",
         "split-diopter",
+        "split-seam",
         "pro-mist",
         "black-pro-mist",
         "halation",
+        "halation-tint",
         "star-filter",
         "coma-astigmatism",
         "iris-rounded-blades",
@@ -754,6 +760,7 @@ fn capture_all() {
         "focus-breathing",
         "prism-line",
         "prism-ring",
+        "anamorphic-squeeze",
         "flat-port",
         "dome-port",
         "natural-vignette",
@@ -767,9 +774,12 @@ fn capture_all() {
         "spherical-glow",
         "corner-softness",
         "diffusion",
+        "diffusion-tail",
+        "glint",
         "glimmerglass",
         "fog-diffusion",
         "water-drops",
+        "water-drops-transformed",
         "smear",
         "dirt",
         "prescription-thin-lens",
@@ -891,6 +901,24 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
                 F,
             )]
         }
+        "projection-equisolid" => vec![LensElementComponent::projection(
+            ProjectionModel::Equisolid,
+            F,
+        )],
+        "projection-orthographic" => vec![LensElementComponent::projection(
+            ProjectionModel::Orthographic,
+            F,
+        )],
+        "projection-stereographic" => vec![LensElementComponent::projection(
+            ProjectionModel::Stereographic,
+            F,
+        )],
+        "projection-kannala-brandt" => {
+            vec![
+                LensElementComponent::projection(ProjectionModel::KannalaBrandt, F)
+                    .with_kannala_brandt([-0.02, 0.003, 0.0, 0.0]),
+            ]
+        }
         "split-diopter" => {
             lens.f_number = 2.0;
             vec![LensElementComponent::diopter(
@@ -905,6 +933,9 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
         "pro-mist" => vec![LensElementComponent::pro_mist(0.45, F)],
         "black-pro-mist" => vec![LensElementComponent::black_pro_mist(0.45, F)],
         "halation" => vec![LensElementComponent::halation(0.7, 0.018, F)],
+        "halation-tint" => {
+            vec![LensElementComponent::halation(0.7, 0.018, F).with_halation_tint([1.0, 0.25, 0.08])]
+        }
         "star-filter" => vec![LensElementComponent::star_filter(6, 0.2, 0.12, 0.5, F)],
         "coma-astigmatism" => vec![
             LensElementComponent::coma(0.5, 0.09, F),
@@ -990,6 +1021,16 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
                 [-0.55, 0.4],
             ]),
         )],
+        "split-seam" => vec![LensElementComponent::diopter(
+            4.8,
+            LensRegion::HalfPlane {
+                angle: std::f32::consts::FRAC_PI_4,
+                offset: 0.08,
+            },
+        )
+        .with_feather(0.06)
+        .with_seam_darkening(0.75)
+        .with_mount_distance(0.04)],
         "sweet-spot" => vec![LensElementComponent::sweet_spot(
             18.0,
             LensRegion::Ellipse {
@@ -1026,6 +1067,7 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
             [0.25, 0.0],
             F,
         )],
+        "anamorphic-squeeze" => vec![LensElementComponent::anamorphic_squeeze(1.8, F)],
         "lens-shift" => vec![LensElementComponent::shift(0.18, -0.08, F)],
         "keystone" => vec![LensElementComponent::keystone(0.35, -0.2, F)],
         "panini" => {
@@ -1073,6 +1115,10 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
         )],
         "corner-softness" => vec![LensElementComponent::corner_softness(0.022, 0.45, F)],
         "diffusion" => vec![LensElementComponent::diffusion(0.45, 0.018, F)],
+        "diffusion-tail" => {
+            vec![LensElementComponent::diffusion(0.45, 0.018, F).with_diffusion_tail(0.9)]
+        }
+        "glint" => vec![LensElementComponent::pro_mist(0.4, F).with_glint(0.8)],
         "glimmerglass" => vec![LensElementComponent::glimmerglass(0.45, F).with_glint(0.8)],
         "fog-diffusion" => vec![LensElementComponent::fog(0.45, F)],
         "water-drops" => vec![LensElementComponent::water_drops(
@@ -1085,6 +1131,17 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
                 invert: false,
             },
         )],
+        "water-drops-transformed" => vec![LensElementComponent::water_drops(
+            0.025,
+            0,
+            0.008,
+            LensRegion::MaskChannel {
+                layer: 0,
+                channel: 3,
+                invert: false,
+            },
+        )
+        .with_mask_transform(1.7, [0.12, -0.08], true)],
         "smear" => vec![LensElementComponent::smear(0.55, 0.06, 0.35, F)],
         "dirt" => vec![LensElementComponent::dirt(
             0.55,
@@ -1154,6 +1211,9 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
         lens.focal_length_mm = 85.0;
         lens.f_number = 1.4;
         lens.focus_distance_m = 8.0;
+    }
+    if name.starts_with("projection-") || name == "fisheye" {
+        lens.focal_length_mm = 16.0;
     }
     v3_demo_common::set_camera_lens(&mut scene_db.world, lens);
 }

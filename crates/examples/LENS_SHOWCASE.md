@@ -14,10 +14,10 @@ Without `--output-dir`, captures go into `lens-showcase` in the current director
 
 - **Exposure and focus:** `baseline`, `no-lens`, `wide-open`, `shallow-depth`, `stopped-down`, `autofocus`, `tilt-focus`, `field-curvature`, `sweet-spot`
 - **Pupil and bokeh:** `anamorphic`, `anamorphic-133`, `anamorphic-200`, `swirly-bokeh`, `cats-eye`, `spherical-rim`, `spherical-soft`, `onion-rings`, `apodization`, `central-obstruction`, `iris-rounded-blades`, `iris-texture-star`, `iris-texture-heart`, `iris-texture-triangle`
-- **Split focus:** `split-diopter`, `split-horizontal`, `split-vertical`, `split-diagonal`, `split-multi-ellipse`, `split-radial-band`, `split-polygon`
-- **Color and mapping:** `longitudinal-ca`, `lateral-ca`, `barrel`, `pincushion`, `division-distortion`, `anamorphic-distortion`, `lens-shift`, `keystone`, `fisheye`, `panini`, `cylindrical`, `focus-breathing`
+- **Split focus:** `split-diopter`, `split-horizontal`, `split-vertical`, `split-diagonal`, `split-multi-ellipse`, `split-radial-band`, `split-polygon`, `split-seam`
+- **Color and mapping:** `longitudinal-ca`, `lateral-ca`, `barrel`, `pincushion`, `division-distortion`, `anamorphic-distortion`, `anamorphic-squeeze`, `lens-shift`, `keystone`, `fisheye`, `projection-equisolid`, `projection-orthographic`, `projection-stereographic`, `projection-kannala-brandt`, `panini`, `cylindrical`, `focus-breathing`
 - **Filters and transmission:** `natural-vignette`, `optical-vignette`, `circular-hood`, `matte-box`, `nd-filter`, `graduated-nd`, `color-filter`, `t-stop`, `flat-port`, `dome-port`, `prism-line`, `prism-ring`
-- **Aberrations and image-space elements:** `spherical-glow`, `coma-astigmatism`, `corner-softness`, `diffusion`, `pro-mist`, `black-pro-mist`, `glimmerglass`, `fog-diffusion`, `halation`, `star-filter`, `water-drops`, `smear`, `dirt`
+- **Aberrations and image-space elements:** `spherical-glow`, `coma-astigmatism`, `corner-softness`, `diffusion`, `diffusion-tail`, `pro-mist`, `black-pro-mist`, `glint`, `glimmerglass`, `fog-diffusion`, `halation`, `halation-tint`, `star-filter`, `water-drops`, `water-drops-transformed`, `smear`, `dirt`
 - **Prescription and custom hook:** `prescription-thin-lens`, `prescription-cooke`, `prescription-double-gauss`, `user-hook`
 
 The scene combines bright point sources at several depths, an emissive color-and-edge chart, a focused foreground subject, and a neutral room. It disables the separate lens-flare post effect so captures isolate the camera lens component. The custom-hook capture supplies example WGSL for ray mapping, transmission, and focus. The prescription cases use the bundled prescription bank and aperture-mask resources.
