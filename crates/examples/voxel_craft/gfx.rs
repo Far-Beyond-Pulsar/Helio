@@ -37,6 +37,10 @@ pub struct Gfx {
     /// The renderer's world origin of the last frame.
     pub origin: DVec3,
     size: [u32; 2],
+    /// The surface's alpha mode, and the size it was configured at (none
+    /// yet: the first frame configures it).
+    alpha_mode: wgpu::CompositeAlphaMode,
+    configured: Option<[u32; 2]>,
     /// The weather's clock at the last frame (game seconds): the renderer's
     /// frame clock (the clouds' wind) advances with it.
     clock: f64,
@@ -132,7 +136,8 @@ impl Gfx {
     pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
+            // `WGPU_VALIDATION=1`, `WGPU_DEBUG=1`: the validation layer, labels.
+            flags: wgpu::InstanceFlags::empty().with_env(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
@@ -157,22 +162,12 @@ impl Gfx {
 
         let caps = surface.get_capabilities(&adapter);
         let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        // The surface is configured at the first frame (`configure`): just
+        // after the window opens its reported size can still be the one
+        // before the display's scale applies, larger than the surface.
+        let alpha_mode = caps.alpha_modes[0];
         let size = window.inner_size();
         let size = [size.width.max(1), size.height.max(1)];
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                format: surface_format,
-                width: size[0],
-                height: size[1],
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-                color_space: wgpu::SurfaceColorSpace::Auto,
-            },
-        );
 
         // The scene: SceneDB rows for the sun, the air, the blocks' materials
         // and the character.
@@ -263,29 +258,39 @@ impl Gfx {
             passes: Default::default(),
             voxel: (0, [0.0; 12]),
         });
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, feet, source, sun_light, origin: DVec3::ZERO, size, clock: 0.0, timings }
+        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
+        if width > 0 && height > 0 {
+            self.configure([width, height]);
+        }
+    }
+
+    /// The surface and the renderer at `size` pixels, unless already.
+    fn configure(&mut self, size: [u32; 2]) {
+        if self.configured == Some(size) {
             return;
         }
-        self.size = [width, height];
         self.surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 format: self.surface_format,
-                width,
-                height,
+                width: size[0],
+                height: size[1],
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                alpha_mode: self.alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
                 color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
-        self.renderer.set_render_size(width, height);
+        if size != self.size {
+            self.renderer.set_render_size(size[0], size[1]);
+        }
+        self.size = size;
+        self.configured = Some(size);
     }
 
     /// Whether the planet pass is still generating terrain for this view.
@@ -344,6 +349,11 @@ impl Gfx {
             }
         }
 
+        // The window's size now (the first frame configures the surface).
+        let now = self.window.inner_size();
+        if now.width > 0 && now.height > 0 {
+            self.configure([now.width, now.height]);
+        }
         let up = eye.normalize().as_vec3();
         let forward = forward.normalize().as_vec3();
         let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
