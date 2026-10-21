@@ -1828,6 +1828,16 @@ fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType, visibility:
     }
 }
 
+/// The sun's occlusion maps (`helio_pass_shadow_matrix::sun_occlusion`).
+fn sun_occlusion_maps_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
+        count: None,
+    }
+}
+
 fn sampler_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry { binding, visibility, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None }
 }
@@ -2207,6 +2217,8 @@ impl ChunkWorld {
                 storage_texture(13, wgpu::TextureFormat::Rgba16Float),
                 texture_entry(16, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
                 scene_depth,
+                uniform(62, wgpu::ShaderStages::COMPUTE),
+                sun_occlusion_maps_entry(63),
             ],
         });
         let sky_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2349,12 +2361,7 @@ impl ChunkWorld {
                 storage(38, true, wgpu::ShaderStages::COMPUTE),
                 storage(39, true, wgpu::ShaderStages::COMPUTE),
                 uniform(62, wgpu::ShaderStages::COMPUTE),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 63,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
-                    count: None,
-                },
+                sun_occlusion_maps_entry(63),
             ],
         });
         let gi_trace = compute("chunk GI rays", &layout(&gi_layout), "gi_trace");
@@ -4284,9 +4291,9 @@ impl ChunkWorld {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
-        // GI hits see the sun by its occlusion maps (`draw_sun_occlusion`;
-        // none drawn yet: lit).
-        if gi.is_some() && self.sun_occlusion.is_none() {
+        // GI hits and meshes near the eye see the sun by its occlusion maps
+        // (`draw_sun_occlusion`; none drawn yet: lit, and meshes walk).
+        if self.sun_occlusion.is_none() {
             self.sun_occlusion = Some(SunOcclusion::new(&self.device));
         }
         let targets = self.targets.as_mut().unwrap();
@@ -4316,6 +4323,7 @@ impl ChunkWorld {
             // 4. Sun shadows: samples, then every hit, and meshes before
             // their hits (`scene_depth`: the meshes', the frame's size).
             let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
+            let occlusion = self.sun_occlusion.as_ref().unwrap();
             let (distance, visibility, samples, normal, sky) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.normal), view(&targets.sky_samples));
             let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
@@ -4325,7 +4333,7 @@ impl ChunkWorld {
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(41, &targets.sun_walked), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(41, &targets.sun_walked), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky), view_entry(27, scene_depth), entry(62, &occlusion.frame), view_entry(63, &occlusion.maps_view)],
             });
             let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sky samples"),

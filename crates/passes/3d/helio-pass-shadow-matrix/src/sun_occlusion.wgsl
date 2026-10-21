@@ -26,7 +26,13 @@ struct SunOcclusionFrame {
 // terrain, else 1, from the finest level holding it (a 2x2 percentage
 // filter); 1 outside every level.
 fn sun_occlusion(p: vec3<f32>) -> f32 {
-    let count = u32(sun_occlusion_frame.info.x);
+    return sun_occlusion_levels(p, 4u).x;
+}
+
+// `sun_occlusion` from the first `levels` levels only: the share, and 1 if
+// one of them held the point (else 0, the share 1).
+fn sun_occlusion_levels(p: vec3<f32>, levels: u32) -> vec2<f32> {
+    let count = min(u32(sun_occlusion_frame.info.x), levels);
     let side = sun_occlusion_frame.info.y;
     for (var level = 0u; level < min(count, 4u); level++) {
         let l = sun_occlusion_frame.levels[level];
@@ -47,7 +53,7 @@ fn sun_occlusion(p: vec3<f32>) -> f32 {
             let stored = textureLoad(sun_occlusion_maps, q, i32(level), 0).r;
             lit[k] = select(0.0, 1.0, stored <= 0.0 || t <= stored + bias);
         }
-        return mix(mix(lit.x, lit.y, f.x), mix(lit.z, lit.w, f.x), f.y);
+        return vec2<f32>(mix(mix(lit.x, lit.y, f.x), mix(lit.z, lit.w, f.x), f.y), 1.0);
     }
-    return 1.0;
+    return vec2<f32>(1.0, 0.0);
 }

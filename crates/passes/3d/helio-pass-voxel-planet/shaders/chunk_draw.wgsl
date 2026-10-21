@@ -2493,10 +2493,18 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = vec2<i32>(id.xy);
     let sun = params.sun.xyz;
     let v = textureLoad(hit_visibility, p, 0).xy;
-    // A mesh in front of the hit (or the sky): its own walk, listed.
+    // A mesh in front of the hit (or the sky): near the eye, the sun's
+    // occlusion maps' finest level (a texture read where a walk cost a
+    // pixel's own, and steady from frame to frame: shared walks flicker
+    // across grass); farther, its own walk, listed.
     let mesh = mesh_point(id.xy, size);
     if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
         textureStore(out_normal, p, vec4<f32>(0.0));
+        let seen = sun_occlusion_levels(mesh.xyz, 1u);
+        if seen.y > 0.0 && !steady_shadows() {
+            store_walked(p, size, seen.x, 1.0, 0.0);
+            return;
+        }
         let n = atomicAdd(&fallbacks.count, 1u);
         fallbacks.pixels[n] = id.x | MESH_PIXEL | (id.y << 16u);
         atomicMax(&fallback_groups[0], n / 64u + 1u);
