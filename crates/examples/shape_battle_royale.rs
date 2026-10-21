@@ -17,8 +17,8 @@ use v3_demo_common::{
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -178,7 +178,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
         let flooring = spawn_material(
@@ -202,7 +208,10 @@ impl ApplicationHandler for App {
             make_material([0.95, 0.85, 0.17, 1.0], 0.45, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
-        let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], ARENA_RADIUS));
+        let floor_mesh = spawn_mesh(
+            &mut scene_db.world,
+            plane_mesh([0.0, 0.0, 0.0], ARENA_RADIUS),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             floor_mesh,
@@ -221,7 +230,10 @@ impl ApplicationHandler for App {
             point_light([-7.0, 6.0, -6.0], [0.7, 0.9, 1.0], 10.0, 20.0),
         );
 
-        let sphere_mesh_id = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.4, 0.4, 0.4]));
+        let sphere_mesh_id = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.4, 0.4, 0.4]),
+        );
         let cuboid_mesh_id = spawn_mesh(
             &mut scene_db.world,
             box_mesh([0.0, 0.0, 0.0], [0.35, 0.55, 0.25]),
@@ -230,7 +242,10 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             box_mesh([0.0, 0.0, 0.0], [0.35, 0.55, 0.35]),
         );
-        let cylinder_mesh_id = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.3, 0.6, 0.3]));
+        let cylinder_mesh_id = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.3, 0.6, 0.3]),
+        );
 
         let meshes = [
             sphere_mesh_id,
@@ -507,7 +522,11 @@ impl AppState {
     fn start_new_round(&mut self) {
         // clear old objects
         for shape in self.battle_shapes.drain(..) {
-            let _ = despawn_object(&mut self.scene_db.world, &mut self.renderer, shape.object_id);
+            let _ = despawn_object(
+                &mut self.scene_db.world,
+                &mut self.renderer,
+                shape.object_id,
+            );
             self.physics_colliders.remove(
                 shape.collider_handle,
                 &mut self.physics_forces,

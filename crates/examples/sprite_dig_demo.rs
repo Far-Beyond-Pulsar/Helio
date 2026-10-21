@@ -1085,16 +1085,7 @@ fn scatter_trees(
         let x = col as f32 * TILE + rng.range_i32(-6, 6) as f32;
         let base = base_names[rng.range_usize(base_names.len())];
         let flip = rng.bool();
-        place_tree(
-            scene,
-            atlas,
-            atlas_layer,
-            objects,
-            base,
-            x,
-            depth,
-            flip,
-        );
+        place_tree(scene, atlas, atlas_layer, objects, base, x, depth, flip);
     }
 }
 

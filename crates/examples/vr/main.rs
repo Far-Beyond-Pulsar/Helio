@@ -455,7 +455,13 @@ impl ApplicationHandler for App {
                 ctx.owns_device = false;
                 build_forward_opaque_graph_with_context(ctx)
             }))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_editor_mode(true);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -600,7 +606,12 @@ impl ApplicationHandler for App {
                 if state.xr_active {
                     state.update_locomotion(dt);
                     let scene_time = state.start_time.elapsed().as_secs_f32();
-                    scene::animate(&mut state.scene_db.world, &mut state.renderer, &mut state.animated, scene_time);
+                    scene::animate(
+                        &mut state.scene_db.world,
+                        &mut state.renderer,
+                        &mut state.animated,
+                        scene_time,
+                    );
                     state.update_hands();
                     // Headset path: render_xr() polls session events, locates the
                     // per-eye poses, uploads the stereo camera and renders both
@@ -635,7 +646,12 @@ impl ApplicationHandler for App {
                 // Desktop mirror path: WASD + mouse free camera.
                 state.input.update(dt);
                 let scene_time = state.start_time.elapsed().as_secs_f32();
-                scene::animate(&mut state.scene_db.world, &mut state.renderer, &mut state.animated, scene_time);
+                scene::animate(
+                    &mut state.scene_db.world,
+                    &mut state.renderer,
+                    &mut state.animated,
+                    scene_time,
+                );
                 let size = state.window.inner_size();
                 let aspect = size.width as f32 / size.height.max(1) as f32;
                 let camera = state.input.camera(aspect);

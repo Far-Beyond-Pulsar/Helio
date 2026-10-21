@@ -44,9 +44,12 @@ impl SceneInputAdapter {
         // Keep the SceneDB-backed sprite storage growable while retaining the demo's established initial pool size.
         SpriteComponent::register_gpu_columns_growable(&mut gpu_store, 4096, ctx.device());
         let gpu_store = Arc::new(gpu_store);
-        scene_db.world.attach_gpu_mirror(
-            pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone()),
-        );
+        scene_db
+            .world
+            .attach_gpu_mirror(pulsar_scenedb::gpu::GpuMirrorHandle::new(
+                gpu_store,
+                queue.clone(),
+            ));
         scenedb_inspector_agent::install_world(&mut scene_db.world);
         Self {
             device,
@@ -87,8 +90,24 @@ impl SceneInputAdapter {
     /// Flush authored rows and refresh the type-erased projection for the next
     /// graph execution. This is the frame boundary between SceneDB and Helio.
     pub fn sync(&mut self) {
-        let sprite_buffer_bytes = self.scene_db.world.gpu_mirror().and_then(|mirror| mirror.store().resolve_buffer(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"))).map(|(buffer, _)| buffer.size()).unwrap_or(0);
-        if self.frame_count == 0 { println!("[sprite_scene_input] SceneDB sprite_instances before flush: {} bytes, {} rows", sprite_buffer_bytes, self.sprite_entities.len()); }
+        let sprite_buffer_bytes = self
+            .scene_db
+            .world
+            .gpu_mirror()
+            .and_then(|mirror| {
+                mirror
+                    .store()
+                    .resolve_buffer(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"))
+            })
+            .map(|(buffer, _)| buffer.size())
+            .unwrap_or(0);
+        if self.frame_count == 0 {
+            println!(
+                "[sprite_scene_input] SceneDB sprite_instances before flush: {} bytes, {} rows",
+                sprite_buffer_bytes,
+                self.sprite_entities.len()
+            );
+        }
         let _ = self.scene_db.world.flush_gpu_mirror(&self.queue);
         self.scene_db.world.publish_inspector_snapshot();
         self.buffers = self
@@ -97,7 +116,21 @@ impl SceneInputAdapter {
             .gpu_mirror()
             .map(|mirror| SceneBufferProjection::from_store_all(mirror.store()))
             .unwrap_or_default();
-        if self.frame_count == 0 { println!("[sprite_scene_input] after flush: projection has sprite_instances={}, bytes={}", self.buffers.contains(helio_core::BufferKey::of("sprite_instances")), self.scene_db.world.gpu_mirror().and_then(|mirror| mirror.store().resolve_buffer(helio_core::BufferKey::of("sprite_instances"))).map(|(buffer, _)| buffer.size()).unwrap_or(0)); }
+        if self.frame_count == 0 {
+            println!(
+                "[sprite_scene_input] after flush: projection has sprite_instances={}, bytes={}",
+                self.buffers
+                    .contains(helio_core::BufferKey::of("sprite_instances")),
+                self.scene_db
+                    .world
+                    .gpu_mirror()
+                    .and_then(|mirror| mirror
+                        .store()
+                        .resolve_buffer(helio_core::BufferKey::of("sprite_instances")))
+                    .map(|(buffer, _)| buffer.size())
+                    .unwrap_or(0)
+            );
+        }
         self.frame_count = self.frame_count.wrapping_add(1);
     }
 }

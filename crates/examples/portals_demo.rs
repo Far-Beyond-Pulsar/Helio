@@ -172,7 +172,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         let mat = spawn_material(
             &mut scene_db.world,
@@ -226,26 +232,36 @@ impl ApplicationHandler for App {
         // for why: bounds-based culling (a real center/radius per instance)
         // works fine here too, since every panel's `radius` already covers
         // its own full extent.
-        let insert_always = |world: &mut pulsar_scenedb::World, mesh, material, transform: glam::Mat4, radius: f32| {
+        let insert_always = |world: &mut pulsar_scenedb::World,
+                             mesh,
+                             material,
+                             transform: glam::Mat4,
+                             radius: f32| {
             let _ = spawn_object(world, mesh, material, transform, radius);
         };
-        insert_always(&mut scene_db.world, floor, mat, glam::Mat4::IDENTITY, HALF_LENGTH);
         insert_always(
-                &mut scene_db.world,
+            &mut scene_db.world,
+            floor,
+            mat,
+            glam::Mat4::IDENTITY,
+            HALF_LENGTH,
+        );
+        insert_always(
+            &mut scene_db.world,
             ceiling,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0 * HALF_HEIGHT, 0.0)),
             HALF_LENGTH,
         );
         insert_always(
-                &mut scene_db.world,
+            &mut scene_db.world,
             wall_l,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-HALF_WIDTH, HALF_HEIGHT, 0.0)),
             HALF_LENGTH,
         );
         insert_always(
-                &mut scene_db.world,
+            &mut scene_db.world,
             wall_r,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(HALF_WIDTH, HALF_HEIGHT, 0.0)),
@@ -307,7 +323,10 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             make_material([0.2, 0.6, 1.0, 1.0], 0.6, 0.0, [0.1, 0.5, 1.0], 2.0),
         );
-        let marker_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.3, 0.3, 0.05]));
+        let marker_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.3, 0.3, 0.05]),
+        );
         insert_always(
             &mut scene_db.world,
             marker_mesh,

@@ -24,8 +24,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_foliage_place::components::{
@@ -38,7 +38,7 @@ use helio_pass_foliage_place::{
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle,
-    sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky, sphere_mesh,
 };
 
 use winit::{

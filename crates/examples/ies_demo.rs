@@ -16,8 +16,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig, TonemapOperator,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig, TonemapOperator,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -196,19 +196,28 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
         renderer.set_editor_mode(true);
 
         // Dark floor
-        let floor_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.15, 0.15, 0.16, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.15, 0.15, 0.16, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
         let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 6.0));
-        let _ = spawn_object(&mut scene_db.world, ground, floor_mat, glam::Mat4::IDENTITY, 6.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            ground,
+            floor_mat,
+            glam::Mat4::IDENTITY,
+            6.0,
+        );
 
         // Spot lights
         let light_ids: [Entity; 3] = std::array::from_fn(|i| {

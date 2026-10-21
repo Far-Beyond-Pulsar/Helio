@@ -20,8 +20,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_billboard::BillboardComponent;
@@ -64,7 +64,12 @@ fn spawn_billboard(
         entity,
         BillboardComponent {
             world_pos: [position[0], position[1], position[2], 0.0],
-            scale_flags: [scale[0], scale[1], if screen_scale { 1.0 } else { 0.0 }, 0.0],
+            scale_flags: [
+                scale[0],
+                scale[1],
+                if screen_scale { 1.0 } else { 0.0 },
+                0.0,
+            ],
             color,
         },
     );
@@ -186,7 +191,13 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
 
         // Ground plane, purely for visual scale/reference and to give
         // `BillboardPass::set_occluded_by_geometry(true)` (set by default in
@@ -201,7 +212,10 @@ impl ApplicationHandler for App {
         // A wall segment directly between the camera's start position and one
         // billboard, to sanity-check occlusion-by-geometry as well as plain
         // visibility.
-        let wall = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.1]));
+        let wall = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.1]),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             wall,
@@ -219,11 +233,41 @@ impl ApplicationHandler for App {
         // deliberately placed behind the wall above (x=8, occluded from a
         // camera at the origin looking down +X), one using `screen_scale` to
         // demonstrate constant-projected-size behavior.
-        spawn_billboard(&mut scene_db.world, [3.0, 1.0, -2.0], [1.0, 1.0], [1.0, 0.2, 0.2, 1.0], false);
-        spawn_billboard(&mut scene_db.world, [3.0, 1.0, 0.0], [1.5, 1.5], [0.2, 1.0, 0.2, 1.0], false);
-        spawn_billboard(&mut scene_db.world, [3.0, 1.0, 2.0], [1.0, 1.0], [0.2, 0.4, 1.0, 1.0], false);
-        spawn_billboard(&mut scene_db.world, [8.0, 1.5, 0.0], [1.2, 1.2], [1.0, 1.0, 0.2, 1.0], false); // behind the wall
-        spawn_billboard(&mut scene_db.world, [3.0, 2.5, 0.0], [0.3, 0.3], [1.0, 0.4, 1.0, 1.0], true); // screen_scale
+        spawn_billboard(
+            &mut scene_db.world,
+            [3.0, 1.0, -2.0],
+            [1.0, 1.0],
+            [1.0, 0.2, 0.2, 1.0],
+            false,
+        );
+        spawn_billboard(
+            &mut scene_db.world,
+            [3.0, 1.0, 0.0],
+            [1.5, 1.5],
+            [0.2, 1.0, 0.2, 1.0],
+            false,
+        );
+        spawn_billboard(
+            &mut scene_db.world,
+            [3.0, 1.0, 2.0],
+            [1.0, 1.0],
+            [0.2, 0.4, 1.0, 1.0],
+            false,
+        );
+        spawn_billboard(
+            &mut scene_db.world,
+            [8.0, 1.5, 0.0],
+            [1.2, 1.2],
+            [1.0, 1.0, 0.2, 1.0],
+            false,
+        ); // behind the wall
+        spawn_billboard(
+            &mut scene_db.world,
+            [3.0, 2.5, 0.0],
+            [0.3, 0.3],
+            [1.0, 0.4, 1.0, 1.0],
+            true,
+        ); // screen_scale
 
         renderer.set_ambient([1.0, 0.97, 0.92], 0.15);
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);

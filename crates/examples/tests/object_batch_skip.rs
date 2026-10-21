@@ -14,7 +14,8 @@ const SIZE: u32 = 64;
 
 #[test]
 fn moving_an_object_after_idle_frames_updates_the_image() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;
@@ -44,13 +45,19 @@ fn moving_an_object_after_idle_frames_updates_the_image() {
         scene_db_handle(&scene_db),
     )
     .with_external_device()
-    .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
+    .with_pass_build_context(Box::new(
+        helio_default_graphs::build_default_graph_external_with_context,
+    ))
     .build(device.clone(), queue.clone(), SIZE, SIZE, format);
     renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
     renderer.set_ambient([0.0; 3], 0.0);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -76,7 +83,10 @@ fn moving_an_object_after_idle_frames_updates_the_image() {
     });
     // Renders `frames` frames and returns the brightness of the centre pixel
     // and of a pixel a quarter of the way in from the right edge.
-    let render = |renderer: &mut helio::Renderer, scene_db: &pulsar_scenedb::SceneDb, frames: usize| -> (u32, u32) {
+    let render = |renderer: &mut helio::Renderer,
+                  scene_db: &pulsar_scenedb::SceneDb,
+                  frames: usize|
+     -> (u32, u32) {
         for _ in 0..frames {
             flush_scene_db(scene_db, &queue);
             renderer.render(&camera, &view).unwrap();
@@ -96,7 +106,9 @@ fn moving_an_object_after_idle_frames_updates_the_image() {
             target.size(),
         );
         queue.submit([encoder.finish()]);
-        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let pixels = staging.slice(..).get_mapped_range().unwrap().to_vec();
         staging.unmap();
@@ -104,12 +116,18 @@ fn moving_an_object_after_idle_frames_updates_the_image() {
             let i = ((y * SIZE + x) * 4) as usize;
             pixels[i] as u32 + pixels[i + 1] as u32 + pixels[i + 2] as u32
         };
-        (brightness(SIZE / 2, SIZE / 2), brightness(SIZE * 3 / 4, SIZE / 2))
+        (
+            brightness(SIZE / 2, SIZE / 2),
+            brightness(SIZE * 3 / 4, SIZE / 2),
+        )
     };
 
     // Many frames with nothing changing: the batch settles and skips.
     let (centre, side) = render(&mut renderer, &scene_db, 12);
-    assert!(centre > side + 60, "object not drawn at the centre: centre {centre}, side {side}");
+    assert!(
+        centre > side + 60,
+        "object not drawn at the centre: centre {centre}, side {side}"
+    );
 
     // Move it right, then leave it alone again.
     update_object_transform(
@@ -120,10 +138,16 @@ fn moving_an_object_after_idle_frames_updates_the_image() {
     )
     .unwrap();
     let (centre, side) = render(&mut renderer, &scene_db, 12);
-    assert!(side > centre + 60, "the move after idle frames never reached the image: centre {centre}, side {side}");
+    assert!(
+        side > centre + 60,
+        "the move after idle frames never reached the image: centre {centre}, side {side}"
+    );
 
     // Despawning removes it from the image.
     despawn_object(&mut scene_db.world, &mut renderer, object).unwrap();
     let (centre, side) = render(&mut renderer, &scene_db, 6);
-    assert!(side < 30 && centre < 30, "despawned object still drawn: centre {centre}, side {side}");
+    assert!(
+        side < 30 && centre < 30,
+        "despawned object still drawn: centre {centre}, side {side}"
+    );
 }

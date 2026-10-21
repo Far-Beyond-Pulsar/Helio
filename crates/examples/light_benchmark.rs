@@ -16,8 +16,8 @@ use v3_demo_common::{
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 
@@ -193,27 +193,18 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.03, 0.03, 0.04], 1.0);
 
         // Materials
-        let mat_floor = spawn_material(&mut scene_db.world, make_material(
-            [0.55, 0.52, 0.45, 1.0],
-            0.85,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_pillar = spawn_material(&mut scene_db.world, make_material(
-            [0.60, 0.60, 0.62, 1.0],
-            0.50,
-            0.30,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_crate = spawn_material(&mut scene_db.world, make_material(
-            [0.50, 0.38, 0.25, 1.0],
-            0.70,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
+        let mat_floor = spawn_material(
+            &mut scene_db.world,
+            make_material([0.55, 0.52, 0.45, 1.0], 0.85, 0.00, [0.0; 3], 0.0),
+        );
+        let mat_pillar = spawn_material(
+            &mut scene_db.world,
+            make_material([0.60, 0.60, 0.62, 1.0], 0.50, 0.30, [0.0; 3], 0.0),
+        );
+        let mat_crate = spawn_material(
+            &mut scene_db.world,
+            make_material([0.50, 0.38, 0.25, 1.0], 0.70, 0.00, [0.0; 3], 0.0),
+        );
 
         let add = |w: &mut World, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
             let m = spawn_mesh(w, box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
@@ -226,7 +217,16 @@ impl ApplicationHandler for App {
             );
         };
 
-        add(&mut scene_db.world, 0.0, -0.05, 0.0, 20.0, 0.05, 20.0, mat_floor);
+        add(
+            &mut scene_db.world,
+            0.0,
+            -0.05,
+            0.0,
+            20.0,
+            0.05,
+            20.0,
+            mat_floor,
+        );
 
         for ix in -2..=3_i32 {
             for iz in -2..=3_i32 {
@@ -261,7 +261,16 @@ impl ApplicationHandler for App {
             ([6.0, 0.3, 17.0], 0.25),
             ([-6.0, 0.3, -17.0], 0.25),
         ] {
-            add(&mut scene_db.world, pos[0], pos[1], pos[2], hs, hs, hs, mat_crate);
+            add(
+                &mut scene_db.world,
+                pos[0],
+                pos[1],
+                pos[2],
+                hs,
+                hs,
+                hs,
+                mat_crate,
+            );
         }
 
         let base_lights = build_light_params();

@@ -14,8 +14,8 @@
 
 mod v3_demo_common;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -213,23 +213,32 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
 
         let mat = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.75, 0.75, 0.75, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ),
+            make_material([0.75, 0.75, 0.75, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
         let _ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
-        let _ = spawn_object(&mut scene_db.world, _ground, mat, glam::Mat4::IDENTITY, 40.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            _ground,
+            mat,
+            glam::Mat4::IDENTITY,
+            40.0,
+        );
 
-        let _road_center = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [4.0, 0.01, 32.0]));
+        let _road_center = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [4.0, 0.01, 32.0]),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             _road_center,
@@ -239,22 +248,22 @@ impl ApplicationHandler for App {
         );
 
         let _sidewalks: Vec<Entity> = vec![
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.35, 0.04, 32.0],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [0.35, 0.04, 32.0],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [32.0, 0.04, 0.35],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [32.0, 0.04, 0.35],
-                )),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [0.35, 0.04, 32.0]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [0.35, 0.04, 32.0]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [32.0, 0.04, 0.35]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [32.0, 0.04, 0.35]),
+            ),
         ];
         for (&m, t) in _sidewalks.iter().zip(
             [
@@ -265,22 +274,18 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = spawn_object(
-            &mut scene_db.world, m, mat, *t, 32.0);
+            let _ = spawn_object(&mut scene_db.world, m, mat, *t, 32.0);
         }
 
         let _buildings: Vec<Entity> = BUILDINGS
             .iter()
             .map(|&(_, _, hw, hd, hh)| {
-                spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [hw, hh, hd],
-                    ))
+                spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [hw, hh, hd]))
             })
             .collect();
         for (&m, &(cx, cz, _hw, _hd, hh)) in _buildings.iter().zip(BUILDINGS.iter()) {
             let _ = spawn_object(
-            &mut scene_db.world,
+                &mut scene_db.world,
                 m,
                 mat,
                 glam::Mat4::from_translation(glam::Vec3::new(cx, hh, cz)),
@@ -291,15 +296,15 @@ impl ApplicationHandler for App {
         let _lamp_poles: Vec<Entity> = LAMPS
             .iter()
             .map(|&(_x, _z)| {
-                spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [0.08, 2.75, 0.08],
-                    ))
+                spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [0.08, 2.75, 0.08]),
+                )
             })
             .collect();
         for (&m, &(x, z)) in _lamp_poles.iter().zip(LAMPS.iter()) {
             let _ = spawn_object(
-            &mut scene_db.world,
+                &mut scene_db.world,
                 m,
                 mat,
                 glam::Mat4::from_translation(glam::Vec3::new(x, 2.75, z)),
@@ -316,7 +321,15 @@ impl ApplicationHandler for App {
             let p = [x, 5.55, z];
             lamp_light_ids.push(spawn_light(
                 &mut scene_db.world,
-                spot_light(p, [0.0, -1.0, 0.0], [1.0, 0.72, 0.30], 0.0, 14.0, 0.96, 1.22),
+                spot_light(
+                    p,
+                    [0.0, -1.0, 0.0],
+                    [1.0, 0.72, 0.30],
+                    0.0,
+                    14.0,
+                    0.96,
+                    1.22,
+                ),
             ));
         }
         let mut neon_light_ids = Vec::new();

@@ -17,8 +17,8 @@ use v3_demo_common::{
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 
@@ -164,23 +164,87 @@ impl ApplicationHandler for App {
         );
 
         // ── Geometry ───────────────────────────────────────────────────────────────
-        let mut add_box = |w: &mut World, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = spawn_mesh(w, box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
-            let _ = spawn_object(
-                w,
-                m,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
-                (hx * hx + hy * hy + hz * hz).sqrt(),
-            );
-        };
-        add_box(&mut scene_db.world, 0.0, -0.05, 0.0, 5.0, 0.05, 5.0, mat_white); // floor
-        add_box(&mut scene_db.world, 0.0, 5.05, 0.0, 5.0, 0.05, 5.0, mat_white); // ceiling
-        add_box(&mut scene_db.world, 0.0, 2.5, -5.05, 5.0, 2.5, 0.05, mat_white); // back wall
-        add_box(&mut scene_db.world, 0.0, 2.5, 5.05, 5.0, 2.5, 0.05, mat_white); // front wall
-        add_box(&mut scene_db.world, 5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_green); // right (green)
-        add_box(&mut scene_db.world, -5.05, 2.5, 0.0, 0.05, 2.5, 5.0, mat_red); // left (red)
-        add_box(&mut scene_db.world, -2.0, 0.5, -2.0, 0.5, 0.5, 0.5, mat_cube);
+        let mut add_box =
+            |w: &mut World, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
+                let m = spawn_mesh(w, box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+                let _ = spawn_object(
+                    w,
+                    m,
+                    mat,
+                    glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
+                    (hx * hx + hy * hy + hz * hz).sqrt(),
+                );
+            };
+        add_box(
+            &mut scene_db.world,
+            0.0,
+            -0.05,
+            0.0,
+            5.0,
+            0.05,
+            5.0,
+            mat_white,
+        ); // floor
+        add_box(
+            &mut scene_db.world,
+            0.0,
+            5.05,
+            0.0,
+            5.0,
+            0.05,
+            5.0,
+            mat_white,
+        ); // ceiling
+        add_box(
+            &mut scene_db.world,
+            0.0,
+            2.5,
+            -5.05,
+            5.0,
+            2.5,
+            0.05,
+            mat_white,
+        ); // back wall
+        add_box(
+            &mut scene_db.world,
+            0.0,
+            2.5,
+            5.05,
+            5.0,
+            2.5,
+            0.05,
+            mat_white,
+        ); // front wall
+        add_box(
+            &mut scene_db.world,
+            5.05,
+            2.5,
+            0.0,
+            0.05,
+            2.5,
+            5.0,
+            mat_green,
+        ); // right (green)
+        add_box(
+            &mut scene_db.world,
+            -5.05,
+            2.5,
+            0.0,
+            0.05,
+            2.5,
+            5.0,
+            mat_red,
+        ); // left (red)
+        add_box(
+            &mut scene_db.world,
+            -2.0,
+            0.5,
+            -2.0,
+            0.5,
+            0.5,
+            0.5,
+            mat_cube,
+        );
         add_box(&mut scene_db.world, 2.0, 0.5, 2.0, 0.5, 0.5, 0.5, mat_cube);
         add_box(&mut scene_db.world, 0.0, 0.7, 0.0, 0.7, 0.7, 0.7, mat_cube);
         add_box(&mut scene_db.world, -3.0, 1.0, 1.5, 1.0, 1.0, 1.0, mat_cube);
@@ -189,7 +253,9 @@ impl ApplicationHandler for App {
         // ── Lights ───────────────────────────────────────────────────────────────
         let light_ids: [Entity; 3] = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| spawn_light(&mut scene_db.world, point_light(pos, col, int, rng)))
+            .map(|&(pos, col, int, rng)| {
+                spawn_light(&mut scene_db.world, point_light(pos, col, int, rng))
+            })
             .collect::<Vec<_>>()
             .try_into()
             .expect("3 lights");

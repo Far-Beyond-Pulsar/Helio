@@ -33,8 +33,7 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_portal_cull::{
-    components::PortalComponent,
-    PortalProjectionBridge, SubLevelContents, SubLevelResolver,
+    components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver,
 };
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{

@@ -11,13 +11,13 @@ mod v3_demo_common;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
-    spawn_object_with_movability, update_object_transform,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, sphere_mesh, update_object_transform,
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use rapier3d::prelude::*;
@@ -159,27 +159,18 @@ impl ApplicationHandler for App {
             .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let floor_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.22, 0.22, 0.28, 1.0],
-            0.88,
-            0.02,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let a_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.8, 0.18, 0.18, 1.0],
-            0.46,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let b_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.18, 0.7, 0.86, 1.0],
-            0.46,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.22, 0.22, 0.28, 1.0], 0.88, 0.02, [0.0, 0.0, 0.0], 0.0),
+        );
+        let a_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.8, 0.18, 0.18, 1.0], 0.46, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let b_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.18, 0.7, 0.86, 1.0], 0.46, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 70.0));
         let _ = spawn_object(
@@ -418,7 +409,10 @@ impl AppState {
             let group = if (i % 2) == 0 { g_a } else { g_b };
             let y = 6.0 + (i / 16) as f32 * 1.5;
 
-            let id = spawn_mesh(&mut self.scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.6, 0.6, 0.6]));
+            let id = spawn_mesh(
+                &mut self.scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [0.6, 0.6, 0.6]),
+            );
             let obj = spawn_object_with_movability(
                 &mut self.scene_db.world,
                 id,

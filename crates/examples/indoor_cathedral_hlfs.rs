@@ -20,10 +20,10 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
-mod hlfs_capture;
 mod architectural_mesh;
 mod cathedral_detail;
 mod cathedral_large;
+mod hlfs_capture;
 mod v3_demo_common;
 
 use helio::{
@@ -34,9 +34,8 @@ use helio_default_graphs::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
-    new_scene_db_with_gpu_mirror, point_light,
-    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light,
-    update_light,
+    new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_indoor_cathedral_sky,
+    spawn_light, update_light,
 };
 
 use std::io::{self, BufRead};
@@ -64,12 +63,12 @@ const GLASS_LIGHTS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // Left wall (x ≈ -10.5), windows between columns
     (-10.3, 9.0, -22.0, 0.8, 0.2, 1.0), // violet
     (-10.3, 9.0, -6.0, 0.2, 0.7, 1.0),  // sky blue
-    (-10.3, 9.0, 10.0, 0.2, 1.0, 0.4),   // emerald
+    (-10.3, 9.0, 10.0, 0.2, 1.0, 0.4),  // emerald
     (-10.3, 9.0, 18.0, 1.0, 0.7, 0.1),  // gold
     // Right wall (x ≈ +10.5)
     (10.3, 9.0, -22.0, 1.0, 0.2, 0.3), // ruby
     (10.3, 9.0, -6.0, 1.0, 0.5, 0.1),  // amber
-    (10.3, 9.0, 10.0, 0.1, 0.8, 0.9),   // teal
+    (10.3, 9.0, 10.0, 0.1, 0.8, 0.9),  // teal
     (10.3, 9.0, 18.0, 0.9, 0.1, 0.7),  // magenta
     // Rose window above entrance (back wall, z ≈ +28)
     (0.0, 13.0, 27.0, 1.0, 0.75, 0.3), // warm gold
@@ -88,8 +87,11 @@ const CANDLES: &[(f32, f32, f32)] = &[
     (3.0, 1.6, -23.5),
 ];
 const LARGE_CANDLES: &[(f32, f32, f32)] = &[
-    (-4.0, 1.6, -64.0), (-2.0, 1.6, -63.5), (0.0, 1.6, -64.0),
-    (2.0, 1.6, -63.5), (4.0, 1.6, -64.0),
+    (-4.0, 1.6, -64.0),
+    (-2.0, 1.6, -63.5),
+    (0.0, 1.6, -64.0),
+    (2.0, 1.6, -63.5),
+    (4.0, 1.6, -64.0),
 ];
 
 fn main() {
@@ -99,13 +101,23 @@ fn main() {
         .filter(|a| a == "--capture")
         .and_then(|_| std::env::args().nth(2))
     {
-        capture(&directory, "cathedral", false, populate_cathedral, |t, aspect| {
-            Camera::perspective_look_at(
-                glam::Vec3::new(2.0 * t, 2.0, 24.0 - 18.0 * t),
-                glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y,
-                std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
-            )
-        });
+        capture(
+            &directory,
+            "cathedral",
+            false,
+            populate_cathedral,
+            |t, aspect| {
+                Camera::perspective_look_at(
+                    glam::Vec3::new(2.0 * t, 2.0, 24.0 - 18.0 * t),
+                    glam::Vec3::new(0.0, 5.0, -20.0),
+                    glam::Vec3::Y,
+                    std::f32::consts::FRAC_PI_4,
+                    aspect,
+                    0.1,
+                    200.0,
+                )
+            },
+        );
         return;
     }
     if let Some(directory) = std::env::args()
@@ -113,7 +125,13 @@ fn main() {
         .filter(|a| a == "--capture-large")
         .and_then(|_| std::env::args().nth(2))
     {
-        capture(&directory, "cathedral_large", true, populate_large_cathedral, large_cathedral_camera);
+        capture(
+            &directory,
+            "cathedral_large",
+            true,
+            populate_large_cathedral,
+            large_cathedral_camera,
+        );
         return;
     }
     let event_loop = EventLoop::new().expect("event loop");
@@ -245,8 +263,10 @@ impl ApplicationHandler for App {
             populate_cathedral(&mut scene_db.world)
         };
         let ray_traced = std::env::var_os("HLFS_RT").is_some();
-        eprintln!("Interactive cathedral: large={large} ray_traced={ray_traced} presampled={}",
-            std::env::var_os("HLFS_PRESAMPLED").is_some());
+        eprintln!(
+            "Interactive cathedral: large={large} ray_traced={ray_traced} presampled={}",
+            std::env::var_os("HLFS_PRESAMPLED").is_some()
+        );
         if ray_traced {
             // The renderer captures SceneDB's initial light flags at build.
             // Match the offscreen path by setting RT flags before building it.
@@ -254,35 +274,65 @@ impl ApplicationHandler for App {
         }
 
         let mut scene_handle = scene_db_handle(&scene_db);
-        let stone_store = hlfs_capture::architectural_materials::load(&device, &queue, &mut scene_db.world);
+        let stone_store =
+            hlfs_capture::architectural_materials::load(&device, &queue, &mut scene_db.world);
         let has_stone = stone_store.is_some();
-        if let Some(store) = stone_store { scene_handle = scene_handle.with_texture_store(store).unwrap(); }
+        if let Some(store) = stone_store {
+            scene_handle = scene_handle.with_texture_store(store).unwrap();
+        }
         let mut renderer = RendererBuilder::new(config, scene_handle)
             .with_external_device()
             .with_editor_mode(false)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
-        if has_stone { hlfs_capture::architectural_materials::configure_sampler(&mut renderer); }
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
+        if has_stone {
+            hlfs_capture::architectural_materials::configure_sampler(&mut renderer);
+        }
         let mut acceleration = if ray_traced {
             let config = if std::env::var_os("HLFS_PRESAMPLED").is_some() {
                 helio_pass_hlfs::HlfsConfig::ray_traced_presampled()
             } else {
-                helio_pass_hlfs::HlfsConfig { mode: helio_pass_hlfs::HlfsMode::RayTraced, ..Default::default() }
+                helio_pass_hlfs::HlfsConfig {
+                    mode: helio_pass_hlfs::HlfsMode::RayTraced,
+                    ..Default::default()
+                }
             };
             renderer.set_graph_rebuild_hook(move |graph, device| {
-                graph.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass")
+                graph
+                    .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
+                    .expect("HLFS pass")
                     .set_config(device, config);
             });
-            eprintln!("Interactive HLFS configuration: {:?}",
-                renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
-            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
-        } else { None };
+            eprintln!(
+                "Interactive HLFS configuration: {:?}",
+                renderer
+                    .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
+                    .unwrap()
+                    .config()
+            );
+            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(
+                device.clone(),
+                queue.clone(),
+            ))
+        } else {
+            None
+        };
         renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let warmup_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cathedral startup warmup"),
-            size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: size.width,
+                height: size.height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -292,18 +342,35 @@ impl ApplicationHandler for App {
         });
         let warmup_view = warmup_texture.create_view(&Default::default());
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let warmup_camera = if large { large_cathedral_camera(0.0, aspect) } else {
+        let warmup_camera = if large {
+            large_cathedral_camera(0.0, aspect)
+        } else {
             let pos = glam::Vec3::new(0.0, 2.0, 24.0);
-            Camera::perspective_look_at(pos,
+            Camera::perspective_look_at(
+                pos,
                 pos + glam::Vec3::new(0.0, 0.065_f32.sin(), -0.065_f32.cos()),
-                glam::Vec3::Y, std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0)
+                glam::Vec3::Y,
+                std::f32::consts::FRAC_PI_4,
+                aspect,
+                0.1,
+                200.0,
+            )
         };
         if let Some(acceleration) = acceleration.as_mut() {
             v3_demo_common::flush_scene_db(&scene_db, &queue);
-            acceleration.prepare(&scene_db.world).expect("cathedral RT geometry");
+            acceleration
+                .prepare(&scene_db.world)
+                .expect("cathedral RT geometry");
         }
-        hlfs_capture::warm_up_cathedral(&scene_db, &mut renderer, acceleration.as_ref(),
-            &device, &queue, &warmup_camera, &warmup_view);
+        hlfs_capture::warm_up_cathedral(
+            &scene_db,
+            &mut renderer,
+            acceleration.as_ref(),
+            &device,
+            &queue,
+            &warmup_camera,
+            &warmup_view,
+        );
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
@@ -338,8 +405,11 @@ impl ApplicationHandler for App {
             scene_db,
             acceleration,
             // Start at entrance, looking toward the altar
-            cam_pos: if large { glam::Vec3::new(0.0, 2.3, 67.0) }
-                else { glam::Vec3::new(0.0, 2.0, 24.0) },
+            cam_pos: if large {
+                glam::Vec3::new(0.0, 2.3, 67.0)
+            } else {
+                glam::Vec3::new(0.0, 2.0, 24.0)
+            },
             cam_yaw: 0.0,
             cam_pitch: 0.065,
             keys: HashSet::new(),
@@ -608,8 +678,14 @@ impl AppState {
             }
         }
 
-        flicker_lights(&mut self.scene_db.world, &self.chandelier_light_ids, &self.candle_light_ids,
-            self.large, time, self.acceleration.is_some());
+        flicker_lights(
+            &mut self.scene_db.world,
+            &self.chandelier_light_ids,
+            &self.candle_light_ids,
+            self.large,
+            time,
+            self.acceleration.is_some(),
+        );
 
         // Scene state is persistent — no per-frame setup needed.
 
@@ -622,15 +698,25 @@ impl AppState {
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Some(acceleration) = &self.acceleration {
-            renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
+            renderer.set_ray_tracing_frame_with_transmission(
+                acceleration.tlas(),
+                acceleration.transmission(),
+            );
         }
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
         if self.acceleration.is_some() {
             static CONFIG_LOGGED: std::sync::Once = std::sync::Once::new();
-            CONFIG_LOGGED.call_once(|| eprintln!("HLFS after first live render: {:?}",
-                renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config()));
+            CONFIG_LOGGED.call_once(|| {
+                eprintln!(
+                    "HLFS after first live render: {:?}",
+                    renderer
+                        .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
+                        .unwrap()
+                        .config()
+                )
+            });
         }
         self.queue.present(output);
     }
@@ -652,7 +738,9 @@ const SUN_DIRECTION: [f32; 3] = [0.58, -0.72, 0.38];
 /// Lets an interior light glow in the incense. These lights have no shadow
 /// maps, so their scattering is unshadowed (decay 0): a soft halo, no shafts.
 fn haze_light(mut light: helio::GpuLight) -> helio::GpuLight {
-    if std::env::var_os("HLFS_NO_HAZE_LIGHTS").is_some() { return light; }
+    if std::env::var_os("HLFS_NO_HAZE_LIGHTS").is_some() {
+        return light;
+    }
     light.god_rays_enabled = 1;
     light.god_rays_density = 1.0;
     light.god_rays_weight = 1.0;
@@ -666,18 +754,28 @@ fn haze_light(mut light: helio::GpuLight) -> helio::GpuLight {
 /// that reaches it, so the shafts take the panes' colours and outlines.
 /// `HLFS_NO_FOG=1` removes it; `HLFS_FOG_DENSITY=<m⁻¹>` overrides extinction.
 fn configure_cathedral_fog(world: &mut World, large: bool) {
-    if std::env::var_os("HLFS_NO_FOG").is_some() { return; }
-    let (half_x, height, half_z, extinction, range) =
-        if large { (22.0, 46.0, 71.5, 0.018, 170.0) } else { (10.7, 21.0, 27.8, 0.03, 70.0) };
-    let extinction = std::env::var("HLFS_FOG_DENSITY").ok()
-        .and_then(|v| v.parse().ok()).unwrap_or(extinction);
+    if std::env::var_os("HLFS_NO_FOG").is_some() {
+        return;
+    }
+    let (half_x, height, half_z, extinction, range) = if large {
+        (22.0, 46.0, 71.5, 0.018, 170.0)
+    } else {
+        (10.7, 21.0, 27.8, 0.03, 70.0)
+    };
+    let extinction = std::env::var("HLFS_FOG_DENSITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(extinction);
     v3_demo_common::spawn_local_fog(
         world,
         [-half_x, 0.0, -half_z],
         [half_x, height, half_z],
         v3_demo_common::GlobalFogComponent {
             // Drifting smoke under a height envelope: incense, not a flat haze.
-            mode: std::env::var("HLFS_FOG_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
+            mode: std::env::var("HLFS_FOG_MODE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
             extinction,
             albedo: [0.92, 0.90, 0.86],
             // Forward-peaked, as smoke is: shafts brighten looking toward the sun.
@@ -690,19 +788,32 @@ fn configure_cathedral_fog(world: &mut World, large: bool) {
         1.0,
     );
     let settings = v3_demo_common::set_volumetric_quality(world, 1, range);
-    if let Some(blend) = std::env::var("HLFS_FOG_BLEND").ok().and_then(|v| v.parse().ok()) {
-        world.insert(settings, v3_demo_common::VolumetricFogSettingsComponent {
-            quality: 1, max_distance: range, light_max_distance: range, temporal_blend: blend,
-            ..Default::default()
-        });
+    if let Some(blend) = std::env::var("HLFS_FOG_BLEND")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        world.insert(
+            settings,
+            v3_demo_common::VolumetricFogSettingsComponent {
+                quality: 1,
+                max_distance: range,
+                light_max_distance: range,
+                temporal_blend: blend,
+                ..Default::default()
+            },
+        );
     }
 }
 
 fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
     let mut camera = Camera::perspective_look_at(
         glam::Vec3::new(4.0 * t, 2.3, 67.0 - 29.0 * t),
-        glam::Vec3::new(0.0, 10.0, -68.0), glam::Vec3::Y,
-        std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
+        glam::Vec3::new(0.0, 10.0, -68.0),
+        glam::Vec3::Y,
+        std::f32::consts::FRAC_PI_4,
+        aspect,
+        0.1,
+        200.0,
     );
     camera
 }
@@ -715,7 +826,11 @@ fn populate_large_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
 }
 
 fn populate_cathedral_lights(world: &mut World, large: bool) -> (Vec<Entity>, Vec<Entity>) {
-    let chandelier_z = if large { LARGE_CHANDELIER_Z } else { CHANDELIER_Z };
+    let chandelier_z = if large {
+        LARGE_CHANDELIER_Z
+    } else {
+        CHANDELIER_Z
+    };
     let candles = if large { LARGE_CANDLES } else { CANDLES };
 
     // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
@@ -723,8 +838,12 @@ fn populate_cathedral_lights(world: &mut World, large: bool) -> (Vec<Entity>, Ve
     for &z in chandelier_z {
         chandelier_light_ids.push(spawn_light(
             world,
-            haze_light(point_light([0.0_f32, if large { 31.0 } else { 15.0 }, z],
-                [1.0, 0.92, 0.78], 160.0, 22.0)),
+            haze_light(point_light(
+                [0.0_f32, if large { 31.0 } else { 15.0 }, z],
+                [1.0, 0.92, 0.78],
+                160.0,
+                22.0,
+            )),
         ));
     }
     // A single exterior sun supplies a coherent daylight direction. It owns the
@@ -733,23 +852,40 @@ fn populate_cathedral_lights(world: &mut World, large: bool) -> (Vec<Entity>, Ve
     // layer; RT: thin-sheet transmission). Keep the older multi-window
     // emitter setup as an explicit transmission stress case.
     if std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_none() {
-        let intensity = std::env::var("HLFS_SUN").ok()
-            .and_then(|v| v.parse().ok()).unwrap_or(20.0);
-        spawn_light(world, v3_demo_common::volumetric_light(
-            v3_demo_common::directional_light(SUN_DIRECTION, [1.0, 0.94, 0.84], intensity),
-            v3_demo_common::SHADOW_BASES[0],
-        ));
+        let intensity = std::env::var("HLFS_SUN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20.0);
+        spawn_light(
+            world,
+            v3_demo_common::volumetric_light(
+                v3_demo_common::directional_light(SUN_DIRECTION, [1.0, 0.94, 0.84], intensity),
+                v3_demo_common::SHADOW_BASES[0],
+            ),
+        );
     } else {
         // Stained glass shafts — static, no need to store ids
         // RT uses white exterior sources: pane materials supply the transmitted tint.
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let (x, y, z) = if large { (x.signum() * 21.5, y * 1.8, z * 2.4) }
-                else { (x, y, z) };
+            let (x, y, z) = if large {
+                (x.signum() * 21.5, y * 1.8, z * 2.4)
+            } else {
+                (x, y, z)
+            };
             let light = if std::env::var_os("HLFS_RT").is_some() {
-                let position = if x == 0.0 { [0.0, if large { 34.0 } else { 17.0 },
-                    if large { 78.0 } else { 34.0 }] }
-                    else { [x.signum() * if large { 29.0 } else { 16.0 },
-                        if large { 24.0 } else { 12.0 }, z] };
+                let position = if x == 0.0 {
+                    [
+                        0.0,
+                        if large { 34.0 } else { 17.0 },
+                        if large { 78.0 } else { 34.0 },
+                    ]
+                } else {
+                    [
+                        x.signum() * if large { 29.0 } else { 16.0 },
+                        if large { 24.0 } else { 12.0 },
+                        z,
+                    ]
+                };
                 point_light(position, [1.0; 3], 2500.0, 65.0)
             } else {
                 point_light([x, y, z], [r, g, b], 35.0, 10.0)
@@ -785,32 +921,64 @@ fn flicker_lights(
         light.set_ray_traced_shadows(ray_traced);
         light
     };
-    let chandelier_z = if large { LARGE_CHANDELIER_Z } else { CHANDELIER_Z };
+    let chandelier_z = if large {
+        LARGE_CHANDELIER_Z
+    } else {
+        CHANDELIER_Z
+    };
     let candle_positions = if large { LARGE_CANDLES } else { CANDLES };
     for (&id, &z) in chandeliers.iter().zip(chandelier_z) {
-        update_light(world, id, with_shadows(haze_light(point_light(
-            [0.0_f32, if large { 31.0 } else { 15.0 }, z], [1.0, 0.92, 0.78], 160.0 * flicker, 22.0))));
+        update_light(
+            world,
+            id,
+            with_shadows(haze_light(point_light(
+                [0.0_f32, if large { 31.0 } else { 15.0 }, z],
+                [1.0, 0.92, 0.78],
+                160.0 * flicker,
+                22.0,
+            ))),
+        );
     }
     for (&id, &(x, y, z)) in candles.iter().zip(candle_positions) {
-        update_light(world, id, with_shadows(haze_light(point_light(
-            [x, y, z], [1.0, 0.6, 0.15], 8.0 * cflicker, 4.0))));
+        update_light(
+            world,
+            id,
+            with_shadows(haze_light(point_light(
+                [x, y, z],
+                [1.0, 0.6, 0.15],
+                8.0 * cflicker,
+                4.0,
+            ))),
+        );
     }
 }
 
 /// Offscreen capture, optionally with the window's per-frame light flicker.
-fn capture(directory: &str, name: &str, large: bool,
-    populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>), camera: fn(f32, f32) -> Camera) {
+fn capture(
+    directory: &str,
+    name: &str,
+    large: bool,
+    populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>),
+    camera: fn(f32, f32) -> Camera,
+) {
     if std::env::var_os("HLFS_CAPTURE_FLICKER").is_none() {
         return hlfs_capture::run_scene(directory, name, populate, camera);
     }
     let ids = std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), Vec::new())));
     let stored = ids.clone();
     let ray_traced = std::env::var_os("HLFS_RT").is_some();
-    hlfs_capture::run_scene_animated(directory, name,
-        move |world| { let result = populate(world); *stored.borrow_mut() = result.clone(); result },
+    hlfs_capture::run_scene_animated(
+        directory,
+        name,
+        move |world| {
+            let result = populate(world);
+            *stored.borrow_mut() = result.clone();
+            result
+        },
         camera,
         move |world, time| {
             let ids = ids.borrow();
             flicker_lights(world, &ids.0, &ids.1, large, time, ray_traced);
-        });
+        },
+    );
 }

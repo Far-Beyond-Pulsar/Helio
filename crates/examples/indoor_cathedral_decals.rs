@@ -11,8 +11,8 @@ use helio::{
     Camera, HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
-use helio_pass_perf_overlay::PerfOverlayMode;
 use helio_pass_decal::{DecalBlendMode, DecalType, GpuDecal};
+use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
@@ -257,7 +257,13 @@ impl ApplicationHandler for App {
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_editor_mode(true)
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
 
         // Textured decals (grafiti sprite, alpha-masked ring) needed the removed
         // `Scene::insert_texture` bindless-table path -- no SceneDB component owns
@@ -266,13 +272,7 @@ impl ApplicationHandler for App {
 
         let mat = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.75, 0.72, 0.68, 1.0],
-                0.85,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ),
+            make_material([0.75, 0.72, 0.68, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
         spawn_indoor_cathedral_sky(&mut scene_db.world);
@@ -280,37 +280,35 @@ impl ApplicationHandler for App {
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
         let _floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 32.0));
-        let _wall_back = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [11.0, 10.5, 0.25],
-            ));
-        let _wall_front = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [11.0, 10.5, 0.25],
-            ));
-        let _aisle_ceil_l = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.5, 0.15, 28.0],
-            ));
-        let _nave_ceiling = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [6.0, 0.18, 28.0],
-            ));
-        let _aisle_ceil_r = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.5, 0.15, 28.0],
-            ));
-        let _wall_left_outer = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.25, 7.0, 28.0],
-            ));
-        let _wall_right_outer = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.25, 7.0, 28.0],
-            ));
-        let _ =
-            spawn_object(
-            &mut scene_db.world, _floor, mat, glam::Mat4::IDENTITY, 11.0);
+        let _wall_back = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]),
+        );
+        let _wall_front = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]),
+        );
+        let _aisle_ceil_l = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]),
+        );
+        let _nave_ceiling = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]),
+        );
+        let _aisle_ceil_r = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]),
+        );
+        let _wall_left_outer = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]),
+        );
+        let _wall_right_outer = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]),
+        );
+        let _ = spawn_object(&mut scene_db.world, _floor, mat, glam::Mat4::IDENTITY, 11.0);
         let _ = spawn_object(
             &mut scene_db.world,
             _nave_ceiling,
@@ -374,12 +372,12 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-                let id = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [0.25, 5.5, half_len.max(0.1)],
-                    ));
+                let id = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 5.5, mid_z)),
@@ -393,12 +391,12 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-                let id = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [0.25, 5.5, half_len.max(0.1)],
-                    ));
+                let id = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(5.5, 5.5, mid_z)),
@@ -412,23 +410,23 @@ impl ApplicationHandler for App {
         let _columns: Vec<Entity> = COLUMN_Z
             .iter()
             .flat_map(|&z| {
-                let l = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [0.65, 10.0, 0.65],
-                    ));
+                let l = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     l,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
                     10.0,
                 );
-                let r = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [0.65, 10.0, 0.65],
-                    ));
+                let r = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     r,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(5.5, 10.0, z)),
@@ -439,22 +437,22 @@ impl ApplicationHandler for App {
             .collect();
 
         // Altar: at far end (z = -26)
-        let _altar_step = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [5.5, 0.20, 3.0],
-            ));
-        let _altar_plinth = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [3.0, 0.45, 1.5],
-            ));
-        let _cross_vert = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.18, 2.2, 0.18],
-            ));
-        let _cross_horiz = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [1.0, 0.18, 0.18],
-            ));
+        let _altar_step = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [5.5, 0.20, 3.0]),
+        );
+        let _altar_plinth = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]),
+        );
+        let _cross_vert = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]),
+        );
+        let _cross_horiz = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             _altar_step,
@@ -488,12 +486,12 @@ impl ApplicationHandler for App {
         let _pews_left: Vec<Entity> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [1.5, 0.45, 0.5],
-                    ));
+                let id = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-3.2, 0.45, z)),
@@ -505,12 +503,12 @@ impl ApplicationHandler for App {
         let _pews_right: Vec<Entity> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [1.5, 0.45, 0.5],
-                    ));
+                let id = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(3.2, 0.45, z)),
@@ -523,23 +521,17 @@ impl ApplicationHandler for App {
         // Chandeliers: vertical chain + horizontal ring at each Z
         let chandelier_mat = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.3, 0.28, 0.25, 1.0],
-                0.5,
-                0.8,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ),
+            make_material([0.3, 0.28, 0.25, 1.0], 0.5, 0.8, [0.0, 0.0, 0.0], 0.0),
         );
         let _chandelier_chains: Vec<Entity> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [0.06, 2.0, 0.06],
-                    ));
+                let id = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     id,
                     chandelier_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(0.0, 17.5, z)),
@@ -551,12 +543,12 @@ impl ApplicationHandler for App {
         let _chandelier_rings: Vec<Entity> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = spawn_mesh(&mut scene_db.world, box_mesh(
-                        [0.0, 0.0, 0.0],
-                        [1.2, 0.12, 1.2],
-                    ));
+                let id = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]),
+                );
                 let _ = spawn_object(
-            &mut scene_db.world,
+                    &mut scene_db.world,
                     id,
                     chandelier_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(0.0, 15.2, z)),
@@ -578,7 +570,10 @@ impl ApplicationHandler for App {
         // `LightComponent` carries no per-light real-time/baked distinction, so
         // these are spawned as ordinary lights like every other one here.
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            spawn_light(&mut scene_db.world, point_light([x, y, z], [r, g, b], 1.8, 8.0));
+            spawn_light(
+                &mut scene_db.world,
+                point_light([x, y, z], [r, g, b], 1.8, 8.0),
+            );
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
@@ -600,66 +595,84 @@ impl ApplicationHandler for App {
 
         // Graffiti down the nave, tint-only (see the bindless-texture-table note above).
         for z in (-24..24).step_by(4) {
-            spawn_decal(&mut scene_db.world, make_decal(
-                [0.0, 0.0, z as f32],
-                [0.0, 1.0, 0.0],
-                [1.8, 1.2, 0.02],
-                [1.0, 1.0, 1.0, 0.9],
-                DecalBlendMode::AlphaBlend,
-                DecalType::AlbedoNormal,
-                false,
-            ));
+            spawn_decal(
+                &mut scene_db.world,
+                make_decal(
+                    [0.0, 0.0, z as f32],
+                    [0.0, 1.0, 0.0],
+                    [1.8, 1.2, 0.02],
+                    [1.0, 1.0, 1.0, 0.9],
+                    DecalBlendMode::AlphaBlend,
+                    DecalType::AlbedoNormal,
+                    false,
+                ),
+            );
         }
         // Normal-only decal: no albedo texture, so u32::MAX (tint only).
-        spawn_decal(&mut scene_db.world, make_decal(
-            [-3.0, 0.0, -6.0],
-            [0.0, 1.0, 0.0],
-            [0.8, 0.4, 0.02],
-            [1.0, 1.0, 0.0, 0.9],
-            DecalBlendMode::Translucent,
-            DecalType::NormalOnly,
-            false,
-        ));
-        spawn_decal(&mut scene_db.world, make_decal(
-            [3.0, 0.0, 22.0],
-            [0.0, 1.0, 0.0],
-            [1.5, 1.5, 0.02],
-            [1.0, 1.0, 1.0, 1.0],
-            DecalBlendMode::AlphaBlend,
-            DecalType::AlbedoNormal,
-            false,
-        ));
-        for i in 0..6 {
-            spawn_decal(&mut scene_db.world, make_decal(
-                [-3.0 + i as f32 * 1.2, 0.0, 18.0 - i as f32 * 2.0],
+        spawn_decal(
+            &mut scene_db.world,
+            make_decal(
+                [-3.0, 0.0, -6.0],
                 [0.0, 1.0, 0.0],
-                [0.3, 0.3, 0.02],
-                [1.0, 0.4, 1.0, 0.9],
+                [0.8, 0.4, 0.02],
+                [1.0, 1.0, 0.0, 0.9],
+                DecalBlendMode::Translucent,
+                DecalType::NormalOnly,
+                false,
+            ),
+        );
+        spawn_decal(
+            &mut scene_db.world,
+            make_decal(
+                [3.0, 0.0, 22.0],
+                [0.0, 1.0, 0.0],
+                [1.5, 1.5, 0.02],
+                [1.0, 1.0, 1.0, 1.0],
                 DecalBlendMode::AlphaBlend,
                 DecalType::AlbedoNormal,
                 false,
-            ));
+            ),
+        );
+        for i in 0..6 {
+            spawn_decal(
+                &mut scene_db.world,
+                make_decal(
+                    [-3.0 + i as f32 * 1.2, 0.0, 18.0 - i as f32 * 2.0],
+                    [0.0, 1.0, 0.0],
+                    [0.3, 0.3, 0.02],
+                    [1.0, 0.4, 1.0, 0.9],
+                    DecalBlendMode::AlphaBlend,
+                    DecalType::AlbedoNormal,
+                    false,
+                ),
+            );
         }
         for &z in CHANDELIER_Z {
-            spawn_decal(&mut scene_db.world, make_decal(
-                [5.0, 0.0, z],
-                [0.0, 1.0, 0.0],
-                [1.2, 1.2, 0.02],
-                [0.6, 0.8, 1.0, 0.7],
-                DecalBlendMode::Translucent,
-                DecalType::AlbedoNormal,
-                false,
-            ));
+            spawn_decal(
+                &mut scene_db.world,
+                make_decal(
+                    [5.0, 0.0, z],
+                    [0.0, 1.0, 0.0],
+                    [1.2, 1.2, 0.02],
+                    [0.6, 0.8, 1.0, 0.7],
+                    DecalBlendMode::Translucent,
+                    DecalType::AlbedoNormal,
+                    false,
+                ),
+            );
         }
-        spawn_decal(&mut scene_db.world, make_decal(
-            [0.0, 0.90, -25.5],
-            [0.0, 1.0, 0.0],
-            [0.6, 0.4, 0.02],
-            [1.0, 0.5, 0.0, 1.0],
-            DecalBlendMode::Additive,
-            DecalType::Emissive,
-            false,
-        ));
+        spawn_decal(
+            &mut scene_db.world,
+            make_decal(
+                [0.0, 0.90, -25.5],
+                [0.0, 1.0, 0.0],
+                [0.6, 0.4, 0.02],
+                [1.0, 0.5, 0.0, 1.0],
+                DecalBlendMode::Additive,
+                DecalType::Emissive,
+                false,
+            ),
+        );
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

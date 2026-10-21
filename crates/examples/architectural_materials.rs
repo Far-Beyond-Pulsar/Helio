@@ -89,33 +89,78 @@ pub fn load(
     }
 
     if !carved_stone.is_empty() {
-        let base = upload(device, queue, &mut store,
-            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_diff_2k.jpg"), true);
-        let normal = upload(device, queue, &mut store,
-            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_nor_gl_2k.jpg"), false);
-        let arm = upload(device, queue, &mut store,
-            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_arm_2k.jpg"), false);
+        let base = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_diff_2k.jpg"),
+            true,
+        );
+        let normal = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_nor_gl_2k.jpg"),
+            false,
+        );
+        let arm = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/plaster_stone_wall_01/plaster_stone_wall_01_arm_2k.jpg"),
+            false,
+        );
         apply_material(world, carved_stone, base, normal, arm, true, 1.0);
     }
 
     if !floor.is_empty() {
-        let base = upload(device, queue, &mut store,
-            include_bytes!("assets/marble_01/marble_01_diff_2k.jpg"), true);
-        let normal = upload(device, queue, &mut store,
-            include_bytes!("assets/marble_01/marble_01_nor_gl_2k.jpg"), false);
-        let arm = upload(device, queue, &mut store,
-            include_bytes!("assets/marble_01/marble_01_arm_2k.jpg"), false);
+        let base = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/marble_01/marble_01_diff_2k.jpg"),
+            true,
+        );
+        let normal = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/marble_01/marble_01_nor_gl_2k.jpg"),
+            false,
+        );
+        let arm = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/marble_01/marble_01_arm_2k.jpg"),
+            false,
+        );
         // The source's median roughness is about 0.5. Worn nave paving is
         // less reflective than a newly polished slab; retain map variation.
         apply_material(world, floor, base, normal, arm, true, 1.3);
     }
     if !wood.is_empty() {
-        let base = upload(device, queue, &mut store,
-            include_bytes!("assets/fine_grained_wood/fine_grained_wood_col_2k.jpg"), true);
-        let normal = upload(device, queue, &mut store,
-            include_bytes!("assets/fine_grained_wood/fine_grained_wood_nor_gl_2k.jpg"), false);
-        let arm = upload(device, queue, &mut store,
-            include_bytes!("assets/fine_grained_wood/fine_grained_wood_arm_2k.jpg"), false);
+        let base = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_col_2k.jpg"),
+            true,
+        );
+        let normal = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_nor_gl_2k.jpg"),
+            false,
+        );
+        let arm = upload(
+            device,
+            queue,
+            &mut store,
+            include_bytes!("assets/fine_grained_wood/fine_grained_wood_arm_2k.jpg"),
+            false,
+        );
         apply_material(world, wood, base, normal, arm, true, 1.0);
     }
     Some(Arc::new(RwLock::new(store)))
@@ -131,7 +176,9 @@ fn apply_material(
     roughness_scale: f32,
 ) {
     for entity in entities {
-        let mut material = world.get_mut::<MaterialComponent>(entity).expect("architectural material");
+        let mut material = world
+            .get_mut::<MaterialComponent>(entity)
+            .expect("architectural material");
         material.base_color = [1.0; 4];
         material.roughness_metallic[0] = roughness_scale;
         material.tex_base_color = base;

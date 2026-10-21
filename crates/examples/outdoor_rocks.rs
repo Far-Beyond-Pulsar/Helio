@@ -24,8 +24,8 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{
     load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
@@ -235,7 +235,13 @@ impl ApplicationHandler for App {
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]);
         renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
 
@@ -247,20 +253,26 @@ impl ApplicationHandler for App {
                 &mut scene_db.world,
                 directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
             );
-            spawn_light(&mut scene_db.world, point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0));
-            spawn_light(&mut scene_db.world, point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0));
+            spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0),
+            );
+            spawn_light(
+                &mut scene_db.world,
+                point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0),
+            );
             sun_entity
         };
 
         // ── Ground plane ──────────────────────────────────────────────────
-        let ground_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.28, 0.23, 0.18, 1.0],
-            0.92,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let ground_mesh = spawn_mesh(&mut scene_db.world, v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0));
+        let ground_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.28, 0.23, 0.18, 1.0], 0.92, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let ground_mesh = spawn_mesh(
+            &mut scene_db.world,
+            v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             ground_mesh,
@@ -280,45 +292,47 @@ impl ApplicationHandler for App {
         ];
 
         // Fallback cube material/mesh for any type that failed to load
-        let fallback_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.35, 0.30, 0.25, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let fallback_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.35, 0.30, 0.25, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
         let fallback_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
         // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
-        let rock_meshes: Vec<Option<Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)>>> = rock_paths
-            .iter()
-            .map(|path| {
-                let scene = match load_scene_file_with_config(path, LoadConfig::default()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::warn!("Could not load rock '{}': {e}", path.display());
-                        return None;
-                    }
-                };
-                let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
-                let entries: Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)> = scene
-                    .meshes
-                    .iter()
-                    .map(|mesh| {
-                        let vm_id = spawn_mesh(&mut scene_db.world, helio::MeshUpload {
-                            vertices: mesh.vertices.clone(), indices: mesh.indices.clone(),
-                        });
-                        let mat_id = mesh
-                            .material_index
-                            .and_then(|idx| mat_ids.get(idx))
-                            .or_else(|| mat_ids.first())
-                            .copied()
-                            .unwrap_or(fallback_mat);
-                        (vm_id, mat_id)
-                    })
-                    .collect();
-                Some(entries)
-            })
-            .collect();
+        let rock_meshes: Vec<Option<Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)>>> =
+            rock_paths
+                .iter()
+                .map(|path| {
+                    let scene = match load_scene_file_with_config(path, LoadConfig::default()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::warn!("Could not load rock '{}': {e}", path.display());
+                            return None;
+                        }
+                    };
+                    let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
+                    let entries: Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)> = scene
+                        .meshes
+                        .iter()
+                        .map(|mesh| {
+                            let vm_id = spawn_mesh(
+                                &mut scene_db.world,
+                                helio::MeshUpload {
+                                    vertices: mesh.vertices.clone(),
+                                    indices: mesh.indices.clone(),
+                                },
+                            );
+                            let mat_id = mesh
+                                .material_index
+                                .and_then(|idx| mat_ids.get(idx))
+                                .or_else(|| mat_ids.first())
+                                .copied()
+                                .unwrap_or(fallback_mat);
+                            (vm_id, mat_id)
+                        })
+                        .collect();
+                    Some(entries)
+                })
+                .collect();
 
         // ── Scatter rocks ─────────────────────────────────────────────────
         let mut seed: u64 = 0xDEAD_BEEF_CAFE_1234;
@@ -374,7 +388,13 @@ impl ApplicationHandler for App {
                     }
                     Some(entries) => {
                         for &(mesh_id, mat_id) in entries {
-                            let _ = spawn_object(&mut scene_db.world, mesh_id, mat_id, transform, bounds_radius);
+                            let _ = spawn_object(
+                                &mut scene_db.world,
+                                mesh_id,
+                                mat_id,
+                                transform,
+                                bounds_radius,
+                            );
                         }
                     }
                 }
@@ -384,11 +404,14 @@ impl ApplicationHandler for App {
         }
         for billboard in billboards {
             let entity = scene_db.world.spawn();
-            scene_db.world.insert(entity, helio_pass_billboard::BillboardComponent {
-                world_pos: billboard.world_pos,
-                scale_flags: billboard.scale_flags,
-                color: billboard.color,
-            });
+            scene_db.world.insert(
+                entity,
+                helio_pass_billboard::BillboardComponent {
+                    world_pos: billboard.world_pos,
+                    scale_flags: billboard.scale_flags,
+                    color: billboard.color,
+                },
+            );
         }
 
         // ── Ship (parked nearby) ───────────────────────────────────────────
@@ -404,52 +427,41 @@ impl ApplicationHandler for App {
                 // Upload meshes + materials in a single traversal.
                 {
                     let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
-                        let ship_transform =
-                            Mat4::from_rotation_translation(Quat::from_rotation_y(0.4), ship_pos);
-                        for mesh in &scene.meshes {
-                            let radius = mesh
-                                .vertices
-                                .iter()
-                                .map(|v| Vec3::from_array(v.position).length())
-                                .fold(0.5_f32, f32::max);
-                            let mesh_id = spawn_mesh(&mut scene_db.world, helio::MeshUpload {
-                                    vertices: mesh.vertices.clone(),
-                                    indices: mesh.indices.clone(),
-                                });
-                            let mat = mesh
-                                .material_index
-                                .and_then(|idx| mat_ids.get(idx))
-                                .or_else(|| mat_ids.first())
-                                .copied()
-                                .unwrap_or(fallback_mat);
-                            let _ = spawn_object(
-                                &mut scene_db.world,
-                                mesh_id,
-                                mat,
-                                ship_transform,
-                                radius,
-                            );
-                        }
+                    let ship_transform =
+                        Mat4::from_rotation_translation(Quat::from_rotation_y(0.4), ship_pos);
+                    for mesh in &scene.meshes {
+                        let radius = mesh
+                            .vertices
+                            .iter()
+                            .map(|v| Vec3::from_array(v.position).length())
+                            .fold(0.5_f32, f32::max);
+                        let mesh_id = spawn_mesh(
+                            &mut scene_db.world,
+                            helio::MeshUpload {
+                                vertices: mesh.vertices.clone(),
+                                indices: mesh.indices.clone(),
+                            },
+                        );
+                        let mat = mesh
+                            .material_index
+                            .and_then(|idx| mat_ids.get(idx))
+                            .or_else(|| mat_ids.first())
+                            .copied()
+                            .unwrap_or(fallback_mat);
+                        let _ =
+                            spawn_object(&mut scene_db.world, mesh_id, mat, ship_transform, radius);
+                    }
                 }
             }
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
                 let ship_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 1.5));
-                let ship_mat = spawn_material(&mut scene_db.world, make_material(
-                    [0.55, 0.70, 0.90, 1.0],
-                    0.25,
-                    0.75,
-                    [0.0, 0.0, 0.0],
-                    0.0,
-                ));
-                let transform = Mat4::from_translation(ship_pos);
-                let _ = spawn_object(
+                let ship_mat = spawn_material(
                     &mut scene_db.world,
-                    ship_mesh,
-                    ship_mat,
-                    transform,
-                    1.5,
+                    make_material([0.55, 0.70, 0.90, 1.0], 0.25, 0.75, [0.0, 0.0, 0.0], 0.0),
                 );
+                let transform = Mat4::from_translation(ship_pos);
+                let _ = spawn_object(&mut scene_db.world, ship_mesh, ship_mat, transform, 1.5);
             }
         }
 
@@ -623,8 +635,11 @@ impl ApplicationHandler for App {
                 )
                 .normalize();
                 {
-                    update_light(&mut state.scene_db.world, state.sun_entity,
-                        directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2));
+                    update_light(
+                        &mut state.scene_db.world,
+                        state.sun_entity,
+                        directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
+                    );
                 }
                 flush_scene_db(&state.scene_db, &state.queue);
 
