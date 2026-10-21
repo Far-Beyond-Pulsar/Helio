@@ -25,7 +25,7 @@
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
-//! `_LOOK=exposure,contrast,saturation`, `_DEBUG=<mode>` (the renderer's;
+//! `_LOOK=exposure,contrast,saturation` (default 2, 1.06, 1: voxel_craft's look), `_DEBUG=<mode>` (the renderer's;
 //! the voxel draw's 32 trace cost, 33 levels, 34 levels over the left half).
 //!
 //! Diagnostics of worlds the harness drives itself ([`harness_world`]):
@@ -202,15 +202,18 @@ impl Flight {
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], config.surface_format);
-        // HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation": the camera
-        // post-process of an outdoor look (AgX punchy tone map and a grade).
-        if let Ok(look) = std::env::var("HELIO_VOXEL_FLIGHT_LOOK") {
+        // The camera's look: voxel_craft's outdoor one (AgX punchy, exposure
+        // 2, a touch of contrast), so the stress test reads like the daily
+        // example; HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation"
+        // overrides it.
+        {
+            let look = std::env::var("HELIO_VOXEL_FLIGHT_LOOK").unwrap_or_default();
             let v: Vec<f32> = look.split(',').filter_map(|x| x.trim().parse().ok()).collect();
             let at = |i: usize, d: f32| v.get(i).copied().unwrap_or(d);
             let mut post = helio_pass_postprocess::PostProcessSettings::default();
             post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
-            post.tonemap_exposure = at(0, 1.0);
-            post.color_contrast = [at(1, 1.0); 3];
+            post.tonemap_exposure = at(0, 2.0);
+            post.color_contrast = [at(1, 1.06); 3];
             post.color_saturation = [at(2, 1.0); 3];
             // `HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE`: metered exposure (the
             // look's exposure its compensation).
