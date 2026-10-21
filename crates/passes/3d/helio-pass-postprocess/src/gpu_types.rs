@@ -17,7 +17,9 @@ pub enum TonemapOperator {
     Agx = 6,
     /// AgX with its punchy look (Blender's): contrast and saturation in its
     /// display encoding, before it leaves its working space; a deep sky and
-    /// rich foliage without AgX's base wash.
+    /// rich foliage without AgX's base wash. Colours darker than one EV under
+    /// middle grey keep the hue and saturation they have there (darker, not
+    /// purer), so shade does not clip to a pure primary.
     AgxPunchy = 7,
 }
 
