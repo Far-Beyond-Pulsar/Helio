@@ -70,6 +70,8 @@ const FOLIAGE_VISIBLE_LOCAL_MASK: u32 = 0xffffu;
 const FOLIAGE_L0_BOXES: u32 = 8u;
 const FOLIAGE_L1_BOXES: u32 = 5u;
 const FOLIAGE_L1_STEPS: u32 = 2u;
+/// How far blocky foliage sits off its cube lattice (the terrain's), in cubes.
+const FOLIAGE_LATTICE_OFFSET: f32 = 0.02;
 
 /// How far a blocky blade's shading normal leans from the ground's up towards its face's
 /// own: enough to tell the box's faces apart, little enough that a meadow lights like the
@@ -767,8 +769,12 @@ fn foliage_box_write(at: u32, it: Instance, bx: Box, total: f32, tip_from: f32, 
     if (ty.kind_and_flags & FOLIAGE_TYPE_FLAG_GROUND_COLOUR) != 0u {
         ground = it.record.packed_colour_seed & 0xffffu;
     }
+    // Off the cube lattice by a hair: a box's faces lie on its grid, which is the
+    // terrain's, and a face coplanar with the turf's (a blade leaning into a step, its top
+    // level with the step's) would win and lose the depth test as the TSR jitter moves.
+    let off = FOLIAGE_LATTICE_OFFSET * max(ty.width_min, 1.0e-3);
     boxes_out[at] = FoliageBox(
-        it.root + foliage_to_world(it.basis, vec3<f32>(bx.centre.x, 0.0, bx.centre.y)),
+        it.root + foliage_to_world(it.basis, vec3<f32>(bx.centre.x + off, off, bx.centre.y + off)),
         it.slot,
         bx.half,
         pack2x16float(vec2<f32>(bx.y0, bx.y1)),
