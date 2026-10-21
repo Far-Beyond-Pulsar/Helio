@@ -1297,7 +1297,12 @@ pub struct ChunkWorld {
     cull_bin: wgpu::ComputePipeline,
     cull_offsets: wgpu::ComputePipeline,
     cull_scatter: wgpu::ComputePipeline,
+    /// The trace of the camera's rays (from the eye), of orthographic
+    /// views' (`trace_ortho`: the sun's occlusion), and of the camera's
+    /// counting each ray's steps (`trace_heat`: debug mode 32).
     trace: wgpu::ComputePipeline,
+    trace_ortho: wgpu::ComputePipeline,
+    trace_heat: wgpu::ComputePipeline,
     shadow_sample_layout: wgpu::BindGroupLayout,
     shadow_sample: wgpu::ComputePipeline,
     /// `shadow_sample` and `sky_sample` for hits of exact levels.
@@ -1929,10 +1934,10 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
     // Primary rays count in the trace (`COUNT`), in their walks when
     // `counted` (`WCOUNT`; shadow walks do not).
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
-    // The primary steps' heat (debug mode 32)
-    // counts in every build.
+    // The primary steps' heat (debug mode 32) counts in every build, in the
+    // pipeline of that view (`STEP_HEAT`).
     let wcount = |n: u32| {
-        let heat = format!("if counted && debug_mode() == 32u {{ heat += u32({n} == 1); }}");
+        let heat = format!("if STEP_HEAT && counted {{ heat += u32({n} == 1); }}");
         if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}") } else { heat }
     };
     // The noise library (materials' patches), then the draw.
@@ -2186,14 +2191,19 @@ impl ChunkWorld {
         };
         let seed_outside = seed("seed_vertex", "seed_fragment");
         let seed_inside = seed("seed_vertex_inside", "seed_fragment_inside");
-        let trace = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("chunk trace"),
-            layout: Some(&layout(&trace_layout)),
-            module: &draw_module,
-            entry_point: Some("trace"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let trace_entry = |label: &str, entry: &str, heat: bool| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout(&trace_layout)),
+                module: &draw_module,
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions { constants: &[("STEP_HEAT", f64::from(u8::from(heat)))], ..Default::default() },
+                cache: None,
+            })
+        };
+        let trace = trace_entry("chunk trace", "trace", false);
+        let trace_ortho = trace_entry("chunk ortho trace", "trace_ortho", false);
+        let trace_heat = trace_entry("chunk heat trace", "trace", true);
         // Sun shadows: samples a 2x2 block, then every hit, and the meshes
         // in front of the hits (by the scene's depth).
         let hits = [
@@ -2505,6 +2515,8 @@ impl ChunkWorld {
             cull_offsets,
             cull_scatter,
             trace,
+            trace_ortho,
+            trace_heat,
             shadow_sample_layout,
             shadow_sample,
             shadow_sample_far,
@@ -4238,6 +4250,8 @@ impl ChunkWorld {
         });
         // Rounds of seed and trace: each resolves the rays that hit in
         // their box; the rest are seeded beyond it.
+        // An orthographic view's rays start on its near plane (`ortho_view`).
+        let ortho = params.ortho[..3].iter().any(|&v| v != 0.0);
         for round in 0..rounds {
             {
                 // 1. Seed: each pixel's nearest box (beyond its last exit).
@@ -4273,7 +4287,13 @@ impl ChunkWorld {
                 label: Some("chunk trace"),
                 timestamp_writes: timing.filter(|_| round + 1 == rounds).map(|(set, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 4) }),
             });
-            pass.set_pipeline(&self.trace);
+            pass.set_pipeline(if ortho {
+                &self.trace_ortho
+            } else if self.debug_mode == 32 {
+                &self.trace_heat
+            } else {
+                &self.trace
+            });
             pass.set_bind_group(0, &group, &[]);
             pass.set_bind_group(1, &trace_group, &[]);
             pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
