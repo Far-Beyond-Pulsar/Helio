@@ -11,10 +11,10 @@ use helio_pass_foliage_gbuffer::*;
 // ── Uniform layouts ───────────────────────────────────────────────────────────
 
 #[test]
-fn foliage_globals_is_sixty_four_bytes() {
-    // Mirrored by `struct FoliageGlobals` in foliage_gbuffer.wgsl. 64 is also a multiple
+fn foliage_globals_is_forty_eight_bytes() {
+    // Mirrored by `struct FoliageGlobals` in foliage_gbuffer.wgsl. 48 is also a multiple
     // of 16, which a uniform-address-space struct has to be.
-    assert_eq!(std::mem::size_of::<FoliageGlobals>(), 64);
+    assert_eq!(std::mem::size_of::<FoliageGlobals>(), 48);
     assert_eq!(std::mem::size_of::<FoliageGlobals>() % 16, 0);
 }
 
@@ -29,7 +29,6 @@ fn foliage_globals_field_offsets_match_the_wgsl_mirror() {
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_quality_scale), 32);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_fade_band), 36);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, interaction_strength), 40);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, fill), 48);
 }
 
 #[test]

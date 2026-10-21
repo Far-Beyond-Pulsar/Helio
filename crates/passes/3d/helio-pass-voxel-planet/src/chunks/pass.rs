@@ -395,11 +395,8 @@ impl ChunkPass {
             self.built_for = None;
             return Ok(());
         };
-        // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too), and
-        // its shade gets the terrain's fill light.
+        // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too).
         self.planet_ground.set_grid(*frame.planet.grid());
-        let shade = self.appearance.map_or_else(|| frame.planet.field().appearance().shade, |a| a.shade);
-        self.foliage_ground.set_fill([shade[0], shade[1], shade[2]]);
         let recipe = crate::record::recipe_fingerprint(frame.planet.recipe());
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe)

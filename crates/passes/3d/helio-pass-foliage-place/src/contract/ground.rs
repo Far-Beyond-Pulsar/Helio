@@ -265,8 +265,6 @@ struct LinkState {
     asked: Option<Question>,
     /// The latest batch the ground answered.
     answered: Option<u64>,
-    /// The ground's fill light ([`GroundLink::fill`]).
-    fill: [f32; 3],
 }
 
 impl GroundLink {
@@ -319,18 +317,6 @@ impl GroundLink {
     /// The latest batch answered.
     pub fn answered(&self) -> Option<u64> {
         self.state.lock().expect("ground link").answered
-    }
-
-    /// The ground's shade gets a fill light by its albedo (linear rgb): a stylised
-    /// world's stand-in for the sky's bounce. Foliage on it gets the same, so a meadow
-    /// in shade keeps the turf's colour.
-    pub fn set_fill(&self, fill: [f32; 3]) {
-        self.state.lock().expect("ground link").fill = fill.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
-    }
-
-    /// The fill light [`Self::set_fill`] last set (0: none).
-    pub fn fill(&self) -> [f32; 3] {
-        self.state.lock().expect("ground link").fill
     }
 }
 

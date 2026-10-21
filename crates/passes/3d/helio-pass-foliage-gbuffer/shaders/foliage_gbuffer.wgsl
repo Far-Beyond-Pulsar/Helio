@@ -92,7 +92,7 @@ const TAU: f32 = 6.283185307179586;
 // Uniforms and buffers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Mirror of `FoliageGlobals` in `src/lib.rs` (64 bytes).
+/// Mirror of `FoliageGlobals` in `src/lib.rs` (48 bytes).
 struct FoliageGlobals {
     /// Render target size in pixels; the velocity target is in pixels/frame.
     screen_size: vec2<f32>,
@@ -109,9 +109,6 @@ struct FoliageGlobals {
     /// Global multiplier on how far interactors press foliage over.
     interaction_strength: f32,
     _pad: f32,
-    /// rgb = the fill light by albedo the ground's shade gets (a stylised world's stand-in
-    /// for the sky's bounce), so blades in shade keep the turf's colour; w unused.
-    fill: vec4<f32>,
 }
 
 /// An interactor as `FoliagePlacePass` gathers them (`foliage_interactors.wgsl`):
@@ -910,8 +907,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     out.albedo = vec4<f32>(albedo, 1.0);
     out.normal = vec4<f32>(normal, f0.r);
     out.orm = vec4<f32>(ao, roughness, metallic, f0.g);
-    // The shade's fill light, as the ground's: deep in the sward less of it.
-    out.emissive = vec4<f32>(albedo * globals.fill.rgb * ao, f0.b);
+    out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0.b);
     out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position), 0.0, 0.0);
     out.lightmap_uv = vec2<f32>(-1.0, -1.5);
     return out;

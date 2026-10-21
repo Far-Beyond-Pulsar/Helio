@@ -1080,13 +1080,8 @@ fn build_default_graph_internal_with_lens_user(
     // Foliage grows on the voxel terrain when there is one: its pass answers the
     // placement's ground queries (`helio_pass_voxel_planet::chunks::ground`).
     let voxel_ground = graph.find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>().map(|p| p.foliage_ground());
-    if let Some(ground) = voxel_ground {
-        if let Some(draw) = graph.find_pass_mut::<FoliageGBufferPass>() {
-            draw.set_ground(ground.clone());
-        }
-        if let Some(place) = graph.find_pass_mut::<FoliagePlacePass>() {
-            place.set_ground(ground);
-        }
+    if let (Some(ground), Some(place)) = (voxel_ground, graph.find_pass_mut::<FoliagePlacePass>()) {
+        place.set_ground(ground);
     }
 
     // Decal pass — projects decals into the G-buffer after it's been written.

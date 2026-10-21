@@ -178,6 +178,7 @@ pub const GBUFFER_TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float, // 7 velocity (depth residual reserved)
 ];
 
+
 /// The two targets grass does not write, which therefore carry
 /// [`wgpu::ColorWrites::empty()`].
 ///
@@ -236,7 +237,7 @@ fn debug_lod_enabled() -> bool {
 }
 
 /// Per-frame foliage globals. Mirrors `FoliageGlobals` in `foliage_gbuffer.wgsl`
-/// (64 bytes).
+/// (48 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct FoliageGlobals {
@@ -261,14 +262,12 @@ pub struct FoliageGlobals {
     /// Global multiplier on how far interactors press foliage over.
     pub interaction_strength: f32,
     pub _pad: f32,
-    /// rgb = the fill light by albedo (the ground's), w unused.
-    pub fill: [f32; 4],
 }
 
 const _: () = {
     assert!(
-        std::mem::size_of::<FoliageGlobals>() == 64,
-        "FoliageGlobals must be 64 bytes and match `struct FoliageGlobals` in \
+        std::mem::size_of::<FoliageGlobals>() == 48,
+        "FoliageGlobals must be 48 bytes and match `struct FoliageGlobals` in \
          foliage_gbuffer.wgsl field for field; a mismatch here does not fail to compile, \
          it silently feeds the vertex shader the wrong numbers"
     );
@@ -453,9 +452,6 @@ pub struct FoliageGBufferPass {
     /// Global multiplier on how far interactors (`FoliageInteractorComponent` rows) press
     /// foliage over.
     pub interaction_strength: f32,
-    /// The ground the foliage grows on, for its fill light in shade
-    /// ([`helio_pass_foliage_place::GroundLink::fill`]); none, no fill.
-    ground: Option<Arc<helio_pass_foliage_place::GroundLink>>,
 }
 
 impl FoliageGBufferPass {
@@ -696,7 +692,6 @@ impl FoliageGBufferPass {
             type_liveness: helio_pass_foliage_place::foliage_type_liveness(),
             quality: FoliageQuality::default(),
             lod_fade_band: 4.0,
-            ground: None,
             interaction_strength: 1.0,
         }
     }
@@ -712,11 +707,6 @@ impl FoliageGBufferPass {
     #[inline]
     pub fn decision(&self) -> FoliageFrameDecision {
         self.decision
-    }
-
-    /// Draw foliage growing on `ground`: the blades in shade get its fill light.
-    pub fn set_ground(&mut self, ground: Arc<helio_pass_foliage_place::GroundLink>) {
-        self.ground = Some(ground);
     }
 
     /// The per-LOD constants, in the order they are written into `lod_buf`.
@@ -923,10 +913,6 @@ impl RenderPass for FoliageGBufferPass {
             },
             lod_fade_band: self.lod_fade_band.max(0.0),
             _pad: 0.0,
-            fill: {
-                let [r, g, b] = self.ground.as_ref().map_or([0.0; 3], |g| g.fill());
-                [r, g, b, 0.0]
-            },
             interaction_strength: self.interaction_strength.max(0.0),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
