@@ -285,10 +285,10 @@ pub enum FogMode {
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
 /// Default local exposure: bright regions keep most of their contrast, shade
-/// is lifted toward middle grey (a region 4 EV under it by 1.6 EV), and
+/// is lifted toward middle grey (a region 4 EV under it by 2 EV), and
 /// texture within a region keeps its contrast.
 pub const LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST: f32 = 0.85;
-pub const LOCAL_EXPOSURE_SHADOW_CONTRAST: f32 = 0.6;
+pub const LOCAL_EXPOSURE_SHADOW_CONTRAST: f32 = 0.5;
 pub const LOCAL_EXPOSURE_DETAIL_STRENGTH: f32 = 1.0;
 
 impl Default for GpuPostProcessUniforms {

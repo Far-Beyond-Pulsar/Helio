@@ -15,6 +15,7 @@
 //   cs_exposure/reduce       — compute: sampled log-luminance reduction
 //   cs_local_exposure_grid   — compute: bilateral grid of log luminance
 //   cs_local_exposure_blur   — compute: blur the grid in position and luminance
+//   cs_local_exposure_curve  — compute: a monotonic tone curve per grid cell
 //   cs_volume_blend          — compute: blend active post-process volumes → output
 //   cs_bloom_down_extract    — compute: extract brights from HDR → bloom mip 0
 //   cs_bloom_down            — compute: 2x downsample from bloom_src → bloom_dst
@@ -242,9 +243,11 @@ struct WorldOrigin { hi: vec4<f32>, lo: vec4<f32> }
 // fallback when no lens pass is in the graph.
 @group(0) @binding(17) var                     lens_input:   texture_2d<f32>;
 // Local exposure's bilateral grid: (sum of EV, weight) per screen cell and
-// luminance bin as gathered (cs_local_exposure_grid), and blurred
-// (cs_local_exposure_blur writes le_grid_out; fs_uber samples le_grid).
+// luminance bin as gathered (cs_local_exposure_grid) and blurred
+// (cs_local_exposure_blur), then each cell's tone curve as a gain in EV per
+// bin (cs_local_exposure_curve writes le_grid_out; fs_uber samples le_grid).
 @group(0) @binding(23) var<storage, read_write> le_grid_raw: array<vec2<f32>>;
+@group(0) @binding(26) var<storage, read_write> le_grid_blurred: array<vec2<f32>>;
 @group(0) @binding(24) var                     le_grid_out:  texture_storage_3d<rgba16float, write>;
 @group(0) @binding(25) var                     le_grid:      texture_3d<f32>;
 @group(0) @binding(18) var                     velocity_tex: texture_2d<f32>;
@@ -618,17 +621,24 @@ fn exposure_scale() -> f32 {
 // Processing with the Bilateral Grid", 2007) over screen position and log2
 // luminance. `cs_local_exposure_grid` gathers a 16x16 lattice of bilinear taps
 // per screen cell into the cell's luminance bins (each tap split between its
-// two nearest bins), `cs_local_exposure_blur` blurs the grid in position and
-// luminance, and fs_uber reads it back at the pixel's position and its own
-// luminance: the mean EV of the nearby pixels about as bright as it. Pixels
-// across a strong edge (a canopy against the sky) sit in other bins, so
-// neither side lifts or darkens the other: no halos.
+// two nearest bins), and `cs_local_exposure_blur` blurs the grid in position
+// and luminance: each bin holds the mean EV of the nearby pixels about as
+// bright as it. Pixels across a strong edge (a canopy against the sky) sit in
+// other bins, so neither side lifts or darkens the other: no halos.
 //
 // EVs are relative to the pivot, the scene luminance the frame's exposure
 // brings to middle grey at the tone curve's input (with auto exposure, the
-// adapted mean). A region's mean EV is scaled toward it by the shadow or
-// highlight contrast, and the pixel's difference from that mean by the detail
-// strength. Nothing is carried between frames: a still image stays still.
+// adapted mean). Each bin's mean is scaled toward it by the shadow or
+// highlight contrast, and the bin's difference from that mean by the detail
+// strength: a tone curve per cell (`cs_local_exposure_curve`). Taken pixel by
+// pixel, the mean jumps between regions across a penumbra (pixels a little
+// darker than sunlight average with the shade), so a brighter pixel could
+// come out darker: a dark rim along soft shadow edges. Each cell's curve is
+// therefore made non-decreasing (with a minimum slope) by weighted isotonic
+// regression: well-populated bins keep their values, the sparse bins between
+// regions are pooled. fs_uber reads the curve at the pixel's position and
+// luminance; interpolating non-decreasing curves keeps them non-decreasing.
+// Nothing is carried between frames: a still image stays still.
 
 const LE_BINS: u32 = 24u;
 const LE_EV_MIN: f32 = -13.0; // bin 0's centre
@@ -636,9 +646,12 @@ const LE_EV_MAX: f32 = 10.0;  // the last bin's centre
 const LE_EV_PER_BIN: f32 = 1.0;
 const LE_TAPS: u32 = 16u;     // per axis, per screen cell
 const LE_FIXED: f32 = 4096.0; // a tap's weight in the integer accumulators
-// Below this blurred weight a pixel has too few neighbours of its own
-// brightness to average, and its mean falls back toward its own EV.
+// Below this blurred weight a bin has too few pixels to average, and its
+// mean falls back toward its own EV.
 const LE_MIN_WEIGHT: f32 = 0.02;
+// The least slope of a cell's tone curve (output EV per input EV): penumbrae
+// keep some contrast where regions are pooled.
+const LE_MIN_SLOPE: f32 = 0.2;
 
 var<workgroup> le_weight: array<atomic<u32>, 24>;
 var<workgroup> le_sum: array<atomic<i32>, 24>;
@@ -727,20 +740,61 @@ fn cs_local_exposure_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
     // Over the full kernel's weight (16 x 16 x 4): cells off the screen add
-    // nothing, and the read divides the weight out.
-    textureStore(le_grid_out, at, vec4<f32>(sum / 1024.0, 0.0, 0.0));
+    // nothing, and the curve divides the weight out.
+    le_grid_blurred[(gid.y * dims.x + gid.x) * LE_BINS + gid.z] = sum / 1024.0;
 }
 
-// Local exposure's multiplier for the pre-exposure colour at `uv`.
+@compute @workgroup_size(8, 8, 1)
+fn cs_local_exposure_curve(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(le_grid_out);
+    if any(gid.xy >= dims.xy) || !local_exposure_active() { return; }
+    let first = (gid.y * dims.x + gid.x) * LE_BINS;
+    // Pool-adjacent-violators over (output - LE_MIN_SLOPE * input): blocks of
+    // bins, each at the weighted mean of its bins, merged while they descend.
+    var value: array<f32, 24>;
+    var weight: array<f32, 24>;
+    var count: array<u32, 24>;
+    var blocks = 0u;
+    for (var z = 0u; z < LE_BINS; z++) {
+        let ev = LE_EV_MIN + f32(z) * LE_EV_PER_BIN;
+        let bin = le_grid_blurred[first + z];
+        let mean = mix(ev, bin.x / max(bin.y, 1e-6), saturate(bin.y / LE_MIN_WEIGHT));
+        let contrast = select(postprocess.local_exposure_shadow_contrast,
+            postprocess.local_exposure_highlight_contrast, mean > 0.0);
+        let out = ev + mean * (contrast - 1.0) + (postprocess.local_exposure_detail_strength - 1.0) * (ev - mean);
+        value[blocks] = out - LE_MIN_SLOPE * ev;
+        weight[blocks] = bin.y + 1e-4;
+        count[blocks] = 1u;
+        blocks++;
+        while blocks > 1u && value[blocks - 2u] > value[blocks - 1u] {
+            let a = blocks - 2u;
+            let b = blocks - 1u;
+            let w = weight[a] + weight[b];
+            value[a] = (value[a] * weight[a] + value[b] * weight[b]) / w;
+            weight[a] = w;
+            count[a] += count[b];
+            blocks--;
+        }
+    }
+    var z = 0u;
+    for (var block = 0u; block < blocks; block++) {
+        for (var k = 0u; k < count[block]; k++) {
+            let ev = LE_EV_MIN + f32(z) * LE_EV_PER_BIN;
+            // The gain in EV: the curve's output less its input.
+            let gain = value[block] + (LE_MIN_SLOPE - 1.0) * ev;
+            textureStore(le_grid_out, vec3<u32>(gid.xy, z), vec4<f32>(gain, 0.0, 0.0, 0.0));
+            z++;
+        }
+    }
+}
+
+// Local exposure's multiplier for the pre-exposure colour at `uv`: its
+// cell's tone curve, interpolated in position and luminance.
 fn local_exposure_scale(color: vec3<f32>, uv: vec2<f32>) -> f32 {
     if !local_exposure_active() { return 1.0; }
     let ev = local_exposure_ev(color, local_exposure_pivot());
     let z = ((ev - LE_EV_MIN) / LE_EV_PER_BIN + 0.5) / f32(LE_BINS);
-    let grid = textureSampleLevel(le_grid, linear_samp, vec3<f32>(uv, z), 0.0).xy;
-    let mean = mix(ev, grid.x / max(grid.y, 1e-6), saturate(grid.y / LE_MIN_WEIGHT));
-    let contrast = select(postprocess.local_exposure_shadow_contrast,
-        postprocess.local_exposure_highlight_contrast, mean > 0.0);
-    return exp2(mean * (contrast - 1.0) + (postprocess.local_exposure_detail_strength - 1.0) * (ev - mean));
+    return exp2(textureSampleLevel(le_grid, linear_samp, vec3<f32>(uv, z), 0.0).x);
 }
 
 // ── cs_bloom_down_extract: extract brights from HDR → mip 0 ───────────────────

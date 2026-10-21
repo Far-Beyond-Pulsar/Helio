@@ -1,11 +1,14 @@
-//! Local exposure on a GPU: the production grid and blur kernels, and the
-//! multiplier fs_uber applies, read back per pixel (an adapter is required;
-//! the tests fail rather than skip).
+//! Local exposure on a GPU: the production grid, blur and curve kernels, and
+//! the multiplier fs_uber applies, read back per pixel (an adapter is
+//! required; the tests fail rather than skip).
 
 use super::*;
 use wgpu::util::DeviceExt;
 
-/// Evaluates fs_uber's local exposure multiplier at every pixel.
+/// Evaluates fs_uber's local exposure multiplier at every pixel, then (after
+/// the image's pixels) the output EV of a sweep of inputs, `SWEEP` steps of
+/// `SWEEP_STEP` EV from `SWEEP_FROM` (from the pivot), at each pixel of the
+/// middle row.
 const PROBE: &str = "
 @group(0) @binding(30) var<storage, read_write> probe_out: array<f32>;
 @compute @workgroup_size(8, 8)
@@ -16,14 +19,28 @@ fn probe_local_exposure(@builtin(global_invocation_id) id: vec3<u32>) {
     let color = textureLoad(hdr_input, vec2<i32>(id.xy), 0).rgb;
     probe_out[id.y * dims.x + id.x] = local_exposure_scale(color, uv);
 }
+@compute @workgroup_size(8, 8)
+fn probe_local_exposure_sweep(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(hdr_input);
+    if id.x >= dims.x || id.y >= 400u { return; }
+    let uv = vec2<f32>((f32(id.x) + 0.5) / f32(dims.x), 0.5);
+    let ev = -12.0 + f32(id.y) * 0.05;
+    let scale = local_exposure_scale(vec3<f32>(exp2(local_exposure_pivot() + ev)), uv);
+    probe_out[dims.x * dims.y + id.y * dims.x + id.x] = ev + log2(scale);
+}
 ";
+const SWEEP: u32 = 400;
+const SWEEP_STEP: f32 = 0.05;
+const SWEEP_FROM: f32 = -12.0;
 
 struct Probe {
     device: wgpu::Device,
     queue: wgpu::Queue,
     grid: wgpu::ComputePipeline,
     blur: wgpu::ComputePipeline,
+    curve: wgpu::ComputePipeline,
     probe: wgpu::ComputePipeline,
+    sweep: wgpu::ComputePipeline,
     build_layout: wgpu::BindGroupLayout,
     probe_layout: wgpu::BindGroupLayout,
 }
@@ -71,6 +88,7 @@ impl Probe {
         // groups (compute and render) too: one group may not hold both.
         let build_layout = layout(&[
             entry(23, storage),
+            entry(26, storage),
             entry(
                 24,
                 wgpu::BindingType::StorageTexture {
@@ -98,7 +116,9 @@ impl Probe {
         Self {
             grid: pipeline(&build_layout, "cs_local_exposure_grid"),
             blur: pipeline(&build_layout, "cs_local_exposure_blur"),
+            curve: pipeline(&build_layout, "cs_local_exposure_curve"),
             probe: pipeline(&probe_layout, "probe_local_exposure"),
+            sweep: pipeline(&probe_layout, "probe_local_exposure_sweep"),
             build_layout,
             probe_layout,
             device,
@@ -111,6 +131,31 @@ impl Probe {
     /// auto exposure adapted to `adapted_log2` (that luminance meets the
     /// curve as middle grey) and no tone curve.
     fn scales(
+        &self,
+        settings: &PostProcessSettings,
+        width: u32,
+        height: u32,
+        adapted_log2: f32,
+        luminance: impl Fn(u32, u32) -> f32,
+    ) -> Vec<f32> {
+        let mut out = self.probe(settings, width, height, adapted_log2, luminance);
+        out.truncate((width * height) as usize);
+        out
+    }
+
+    /// The output EV of inputs from `SWEEP_FROM` EV up, by `SWEEP_STEP`, at
+    /// each pixel of the image's middle row: `[step * width + x]`.
+    fn sweep(
+        &self,
+        settings: &PostProcessSettings,
+        width: u32,
+        height: u32,
+        luminance: impl Fn(u32, u32) -> f32,
+    ) -> Vec<f32> {
+        self.probe(settings, width, height, GREY.log2(), luminance).split_off((width * height) as usize)
+    }
+
+    fn probe(
         &self,
         settings: &PostProcessSettings,
         width: u32,
@@ -163,7 +208,7 @@ impl Probe {
             ..Default::default()
         });
         let grid = LocalExposureGrid::new(device, width, height);
-        let size = u64::from(width * height) * 4;
+        let size = u64::from(width * (height + SWEEP)) * 4;
         let output = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size,
@@ -190,6 +235,7 @@ impl Probe {
             &self.build_layout,
             &[
                 wgpu::BindGroupEntry { binding: 23, resource: grid.raw.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 26, resource: grid.blurred.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 24,
                     resource: wgpu::BindingResource::TextureView(&grid.storage_view),
@@ -210,16 +256,18 @@ impl Probe {
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &build, &[]);
-            for (pipeline, [x, y, z]) in [&self.grid, &self.blur].into_iter().zip(grid.workgroups()) {
+            for (pipeline, [x, y, z]) in [&self.grid, &self.blur, &self.curve].into_iter().zip(grid.workgroups()) {
                 pass.set_pipeline(pipeline);
                 pass.dispatch_workgroups(x, y, z);
             }
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&self.probe);
             pass.set_bind_group(0, &probe, &[]);
+            pass.set_pipeline(&self.probe);
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            pass.set_pipeline(&self.sweep);
+            pass.dispatch_workgroups(width.div_ceil(8), SWEEP.div_ceil(8), 1);
         }
         encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
         self.queue.submit([encoder.finish()]);
@@ -309,5 +357,35 @@ fn detail_inside_a_region_keeps_its_contrast() {
         let before = (checker(x, y) / checker(x + 2, y)).log2().abs();
         let after = (at(x, y) / at(x + 2, y)).log2().abs();
         assert!(after > 0.8 * before, "texture at ({x}, {y}): {before} EV -> {after} EV");
+    }
+}
+
+/// Soft shadow edges: shade, a penumbra ramping in EV, then sun. At every
+/// position along the edge, a brighter input never comes out darker: no
+/// dark rim along the sunlit side of a penumbra (gradient reversal), for
+/// shade 2 to 8 EV deep and penumbrae of 4 to 48 pixels.
+#[test]
+fn penumbrae_never_reverse_gradients() {
+    let probe = Probe::new();
+    let settings = PostProcessSettings::default();
+    let (width, height) = (256u32, 144u32);
+    for depth in [2.0f32, 4.0, 6.0, 8.0] {
+        for ramp in [4u32, 16, 48] {
+            let start = 100;
+            let ev_at = |x: u32| -depth * (1.0 - (x.saturating_sub(start) as f32 / ramp as f32).min(1.0));
+            let sweep = probe.sweep(&settings, width, height, |x, _| GREY * 2f32.powf(ev_at(x)));
+            for x in 0..width {
+                let mut worst = 0.0f32;
+                for step in 1..SWEEP {
+                    let (lower, upper) = (sweep[((step - 1) * width + x) as usize], sweep[(step * width + x) as usize]);
+                    worst = worst.min(upper - lower);
+                }
+                assert!(
+                    worst > -0.005,
+                    "{depth} EV shade, {ramp} px penumbra: at x {x} a brighter input ({SWEEP_STEP} EV) came out {} EV darker (sweep from {SWEEP_FROM} EV)",
+                    -worst
+                );
+            }
+        }
     }
 }
