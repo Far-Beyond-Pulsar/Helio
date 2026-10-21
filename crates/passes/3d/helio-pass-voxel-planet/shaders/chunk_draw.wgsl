@@ -179,8 +179,10 @@ fn chunk_frame(slot: u32) -> ChunkDraw {
         vec4<f32>(s.i0.xyz, o.x), vec4<f32>(s.i1.xyz, o.y), vec4<f32>(s.i2.xyz, o.z), s.box);
 }
 COUNTERS
-// Steps this invocation's primary walk took (counting builds; the step
-// heatmap, debug mode 2).
+// Steps this invocation's primary walk took (the step heatmap, debug mode
+// 32): counted only by the trace pipeline of that view (`STEP_HEAT`), as
+// the count costs every walk's loops registers.
+override STEP_HEAT: bool = false;
 var<private> heat: u32;
 
 const NONE: u32 = 0xffffffffu;
@@ -664,18 +666,19 @@ fn shell_roots(ray: ExactRay, level: i32, k: i32) -> vec2<f32> {
     return vec2<f32>(min(q, c / q), max(q, c / q));
 }
 
-// The ray's first stretch from `after` in cells [lo, hi) of `level` on
-// `face` (the face's indices).
-fn box_span(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, after: f32) -> Span {
+// The ray's first stretch from `after` in columns [lo, hi) of `level` on
+// `face` (the face's indices), at any height (`box_shells` bounds it in
+// layers): a chunk's occupied layers and its whole box share their sides.
+fn box_sides(ray: ExactRay, face: i32, level: i32, lo: vec2<i32>, hi: vec2<i32>, after: f32) -> Span {
     var s = Span(after, 3.0e38, 6u, 6u);
-    let n = vec3<f32>(FACE_N[face]);
+    let n = vec3<f32>(face_n(face));
     let np = dot(n, ray.p);
     let nd = dot(n, ray.d);
     // On the face's side of the centre (its cells' angles hold there).
     s = half_line(s, np, nd, 6u);
     let delta = cell_angle(level);
     for (var axis = 0; axis < 2; axis++) {
-        let a = vec3<f32>(select(FACE_B[face], FACE_A[face], axis == 0));
+        let a = vec3<f32>(select(face_b(face), face_a(face), axis == 0));
         let ap = dot(a, ray.p);
         let ad = dot(a, ray.d);
         let tl = tan(f32(lo[axis]) * delta - QUARTER_PI);
@@ -684,8 +687,15 @@ fn box_span(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, 
         s = half_line(s, ap - tl * np, ad - tl * nd, u32(2 * axis));
         s = half_line(s, th * np - ap, th * nd - ad, u32(2 * axis + 1));
     }
+    return s;
+}
+
+// The ray's first stretch in cells [lo, hi) of `level` on `face`: `sides`
+// (`box_sides` of their columns) between layers lo_z and hi_z.
+fn box_shells(sides: Span, ray: ExactRay, level: i32, lo_z: i32, hi_z: i32) -> Span {
+    var s = sides;
     // Under the high sphere.
-    let outer = shell_roots(ray, level, hi.z);
+    let outer = shell_roots(ray, level, hi_z);
     if outer.x > outer.y {
         s.t1 = s.t0 - 1.0;
         return s;
@@ -699,7 +709,7 @@ fn box_span(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, 
         s.leave = 5u;
     }
     // Over the low one: the first stretch out of it.
-    let inner = shell_roots(ray, level, lo.z);
+    let inner = shell_roots(ray, level, lo_z);
     if inner.x <= inner.y && inner.y > s.t0 && inner.x < s.t1 {
         if inner.x > s.t0 {
             s.t1 = inner.x;
@@ -713,19 +723,19 @@ fn box_span(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, 
 }
 
 // When and by which side a ray inside cells [lo, hi) of `level` on `face`
-// at time `t` leaves them (`box_span`'s t1 and leave): only the sides
+// at time `t` leaves them (`box_shells`' t1 and leave): only the sides
 // ahead of it. Along a ray a face's index moves one way (u = a.p / n.p has
 // a derivative of constant sign); its height falls until the ray's
 // closest approach, then rises.
 fn box_exit(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, t: f32) -> Span {
     var s = Span(t, 3.0e38, 6u, 6u);
-    let n = vec3<f32>(FACE_N[face]);
+    let n = vec3<f32>(face_n(face));
     let np = dot(n, ray.p);
     let nd = dot(n, ray.d);
     s = half_line(s, np, nd, 6u);
     let delta = cell_angle(level);
     for (var axis = 0; axis < 2; axis++) {
-        let a = vec3<f32>(select(FACE_B[face], FACE_A[face], axis == 0));
+        let a = vec3<f32>(select(face_b(face), face_a(face), axis == 0));
         let ap = dot(a, ray.p);
         let ad = dot(a, ray.d);
         if ad * np - ap * nd > 0.0 {
@@ -754,10 +764,10 @@ fn box_exit(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, 
 // The ray's cell coordinates of `level` on `face` (continuous) at time t.
 fn exact_cell(ray: ExactRay, face: i32, level: i32, t: f32) -> vec3<f32> {
     let q = ray.p + ray.d * t;
-    let n = dot(vec3<f32>(FACE_N[face]), q);
+    let n = dot(vec3<f32>(face_n(face)), q);
     let delta = cell_angle(level);
-    let i = (atan2(dot(vec3<f32>(FACE_A[face]), q), n) + QUARTER_PI) / delta;
-    let j = (atan2(dot(vec3<f32>(FACE_B[face]), q), n) + QUARTER_PI) / delta;
+    let i = (atan2(dot(vec3<f32>(face_a(face)), q), n) + QUARTER_PI) / delta;
+    let j = (atan2(dot(vec3<f32>(face_b(face)), q), n) + QUARTER_PI) / delta;
     // Height over the datum from |q|^2 - R^2 (precise near it).
     let e = ray.c + t * (2.0 * ray.b + t);
     let k = e / (length(q) + params.planet.x) / (params.planet.y * f32(1u << u32(level)));
@@ -836,9 +846,9 @@ fn cell_frame(slot: u32, cell: vec3<i32>) -> ChunkDraw {
     let delta = cell_angle(level);
     let u = tan(g.x * delta - QUARTER_PI);
     let v = tan(g.y * delta - QUARTER_PI);
-    let a = vec3<f32>(FACE_A[face]);
-    let b = vec3<f32>(FACE_B[face]);
-    let w = vec3<f32>(FACE_N[face]) + a * u + b * v;
+    let a = vec3<f32>(face_a(face));
+    let b = vec3<f32>(face_b(face));
+    let w = vec3<f32>(face_n(face)) + a * u + b * v;
     let len = length(w);
     let dir = w / len;
     let size = params.planet.y * f32(1u << u32(level));
@@ -937,19 +947,33 @@ const ROCK: i32 = 97;
 const KIND_MIXED: i32 = 0;
 const KIND_SOLID: i32 = 1;
 const KIND_BURIED: i32 = 2;
+// A bit of the kind word: a strict ancestor of the node is drawn
+// (`drawn::UNDER_DRAWN`).
+const UNDER_DRAWN: i32 = 16;
 
 fn entry_kind(v: vec4<i32>) -> i32 {
-    return v.z & 255;
+    return v.z & 15;
 }
 
 fn unpack_corner(p: i32) -> vec3<i32> {
     return vec3<i32>(p & 127, (p >> 7u) & 127, (p >> 14u) & 127);
 }
 
-// Cube faces' bases: normal, a, b (`grid::FACE_BASIS`).
-const FACE_N = array<vec3<i32>, 6>(vec3<i32>(1, 0, 0), vec3<i32>(-1, 0, 0), vec3<i32>(0, 1, 0), vec3<i32>(0, -1, 0), vec3<i32>(0, 0, 1), vec3<i32>(0, 0, -1));
-const FACE_A = array<vec3<i32>, 6>(vec3<i32>(0, 0, -1), vec3<i32>(0, 0, 1), vec3<i32>(1, 0, 0), vec3<i32>(1, 0, 0), vec3<i32>(1, 0, 0), vec3<i32>(-1, 0, 0));
-const FACE_B = array<vec3<i32>, 6>(vec3<i32>(0, 1, 0), vec3<i32>(0, 1, 0), vec3<i32>(0, 0, -1), vec3<i32>(0, 0, 1), vec3<i32>(0, 1, 0), vec3<i32>(0, 1, 0));
+// Cube faces' bases: normal, a, b (`grid::FACE_BASIS`). Computed, not
+// looked up: naga copies a constant array indexed by a variable into a
+// local one at every lookup (the trace's 576 bytes of local memory and a
+// tenth of its instructions).
+fn face_n(face: i32) -> vec3<i32> {
+    let s = 1 - 2 * (face & 1);
+    return vec3<i32>(select(0, s, face < 2), select(0, s, (face >> 1u) == 1), select(0, s, face >= 4));
+}
+fn face_a(face: i32) -> vec3<i32> {
+    return vec3<i32>(select(select(1, -1, face == 5), 0, face < 2), 0, select(0, 2 * face - 1, face < 2));
+}
+fn face_b(face: i32) -> vec3<i32> {
+    let side = (face >> 1u) == 1;
+    return vec3<i32>(0, select(1, 0, side), select(0, 2 * face - 5, side));
+}
 
 fn face_with_normal(n: vec3<i32>) -> i32 {
     if n.x != 0 { return select(1, 0, n.x > 0); }
@@ -979,12 +1003,12 @@ fn across_edge(face: i32, cell: vec3<i32>, frac: vec3<f32>, n: i32) -> Across {
     let y = select(cell.x, cell.y, out_a);
     let fy = select(frac.x, frac.y, out_a);
     let past = x >= n;
-    let normal = FACE_N[face];
-    let along = select(FACE_A[face], FACE_B[face], out_a);
-    let next = face_with_normal(select(select(FACE_B[face], FACE_A[face], out_a) * -1, select(FACE_B[face], FACE_A[face], out_a), past));
+    let normal = face_n(face);
+    let along = select(face_a(face), face_b(face), out_a);
+    let next = face_with_normal(select(select(face_b(face), face_a(face), out_a) * -1, select(face_b(face), face_a(face), out_a), past));
     var out = Across(next, vec3<i32>(0, 0, cell.z), vec3<f32>(0.0, 0.0, frac.z), true);
     for (var t = 0; t < 2; t++) {
-        let axis = select(FACE_B[next], FACE_A[next], t == 0);
+        let axis = select(face_b(next), face_a(next), t == 0);
         var c = 0;
         var f = 0.0;
         if all(axis == along) {
@@ -1023,7 +1047,8 @@ fn lost_at(site: u32) -> Place {
 // frame air in it is crossed in), else NONE.
 fn frame_near(k: vec4<i32>) -> u32 {
     for (var n = 0; n < 4; n++) {
-        let dz = array<i32, 4>(-1, 1, -2, 2)[n];
+        // -1, 1, -2, 2 (computed: see `face_n`).
+        let dz = select(1, -1, (n & 1) == 0) * (1 + (n >> 1u));
         let e = find_entry(vec4<i32>(k.xyz, k.w + dz));
         if e != NONE && chunk_table[e * 2u + 1u].x >= 0 { return bitcast<u32>(chunk_table[e * 2u + 1u].x); }
     }
@@ -1061,8 +1086,10 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     }
     var empty = e == NONE;
     // An ancestor found climbing: a coarser node fading in over it may show
-    // here (its finer side has no node over this point).
-    if !empty && params.cut.y > 0u && chunk_table[e * 2u + 1u].y == 0 {
+    // here (its finer side has no node over this point), when one over it
+    // is drawn (else the search would climb every ancestor to the top for
+    // nothing, whenever anything fades anywhere).
+    if !empty && params.cut.y > 0u && chunk_table[e * 2u + 1u].y == 0 && (chunk_table[e * 2u + 1u].z & UNDER_DRAWN) != 0 {
         var u = diff;
         for (var n = 0u; n < 32u && level + u < top; n++) {
             u += 1;
@@ -1223,7 +1250,9 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
         q0 = params.ceiling.x + org.y;
         b = dir.y;
     }
-    var frame = chunk_frame(start.slot);
+    // The frame's chunk, its frame read where it is used: kept through the
+    // loop, its 28 floats cost the walk registers (spilled).
+    var frame_slot = start.slot;
     var key = start.key;
     var cube_lo = start.lo;
     var cube_hi = start.hi;
@@ -1242,6 +1271,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     var exact = exact_level(key.x >> 8u);
     var place = exact;
     if exact && real {
+        let frame = chunk_frame(start.slot);
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
@@ -1276,12 +1306,16 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 let c = clamp(cell - cube_lo, vec3<i32>(0), vec3<i32>(63));
                 last = u32(c.x) | (u32(c.y) << 6u) | (u32(c.z) << 12u) | (2u << 18u) | (1u << 20u);
             } else {
+                // The box's exit, before the chunk's walk: only it is kept
+                // through the walk.
+                let sides = box_sides(ray, face, level, cube_lo.xy, hi.xy, t_prev);
+                let span = box_shells(sides, ray, level, cube_lo.z, hi.z);
                 if real {
                     // The walk over the chunk's occupied layers, entering
                     // by their side, else by the one it crossed into the
                     // chunk by.
                     let z = vec2<i32>(statics[slot].box.xy);
-                    let occupied = box_span(ray, face, level, vec3<i32>(cube_lo.xy, cube_lo.z + z.x), vec3<i32>(hi.xy, cube_lo.z + z.y), t_prev);
+                    let occupied = box_shells(sides, ray, level, cube_lo.z + z.x, cube_lo.z + z.y);
                     let t1 = min(occupied.t1, t_end);
                     if t1 > occupied.t0 {
                         let entered = occupied.enter < 6u;
@@ -1293,7 +1327,6 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                         }
                     }
                 }
-                let span = box_span(ray, face, level, cube_lo, hi, t_prev);
                 if span.leave >= 6u { break; }
                 let t_leave = max(span.t1, t_prev);
                 t_prev = t_leave;
@@ -1321,7 +1354,8 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 }
             }
         } else {
-            slot = bitcast<u32>(frame.box.z);
+            slot = frame_slot;
+            let frame = chunk_frame(frame_slot);
             TRACE_PIXEL(chunk, slot, cube_lo, real)
             // The ray in the frame chunk's cells.
             let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
@@ -1393,7 +1427,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 cube_lo = key.yzw * 64;
                 cube_hi = cube_lo + vec3<i32>(64);
             } else {
-                frame = chunk_frame(next.slot);
+                frame_slot = next.slot;
                 cube_lo = vec3<i32>(0);
                 cube_hi = vec3<i32>(64);
             }
@@ -1424,7 +1458,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 // Crossed in this frame or the finer one given.
                 exact = false;
                 if next.frame != NONE {
-                    frame = chunk_frame(next.frame);
+                    frame_slot = next.frame;
                     key = chunk_keys[next.frame];
                 }
                 cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
@@ -1437,8 +1471,21 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     return WalkEnd(false, t_prev, NONE, vec3<i32>(0), 0u, 0u, 0u);
 }
 
+// The camera's rays all start at the eye: their origin is a constant zero
+// the walk folds away (3% of its instructions, and registers);
+// orthographic views' (`ortho_view`) start on their near plane.
 @compute @workgroup_size(8, 8)
 fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
+    trace_pixel(id, false);
+}
+
+@compute @workgroup_size(8, 8)
+fn trace_ortho(@builtin(global_invocation_id) id: vec3<u32>) {
+    trace_pixel(id, true);
+}
+
+// Pixel `id.xy`'s round of the trace (`ortho`: an orthographic view).
+fn trace_pixel(id: vec3<u32>, ortho: bool) {
     let size = textureDimensions(seed);
     if id.x >= size.x || id.y >= size.y { return; }
     let p = vec2<i32>(id.xy);
@@ -1457,7 +1504,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     COUNT(0)
     let dir = pixel_ray(id.xy, size);
-    let org = pixel_origin(id.xy, size);
+    let org = select(vec3<f32>(0.0), pixel_origin(id.xy, size), ortho);
     var t_prev = max(exit, params.sun.w);
     // The chunk whose frame the ray is in (its last), and the box it is
     // crossing in that frame's cells: the chunk itself, or air.
@@ -1777,9 +1824,17 @@ fn voxel_face_uv(c: ChunkDraw, cell: vec3<i32>, axis: u32, position: vec3<f32>) 
 
 // A level's colour (`HELIO_VOXEL_CHUNKS_LEVELS`, environment-only diagnostic).
 fn level_colour(level: u32) -> vec3<f32> {
-    let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
-        vec3<f32>(0.1, 0.8, 0.8), vec3<f32>(0.2, 0.3, 0.9), vec3<f32>(0.6, 0.2, 0.9), vec3<f32>(0.9, 0.2, 0.7));
-    return colours[level & 7u];
+    // A switch, not an array lookup (see `face_n`).
+    switch level & 7u {
+        case 0u: { return vec3<f32>(0.9, 0.2, 0.2); }
+        case 1u: { return vec3<f32>(0.9, 0.6, 0.1); }
+        case 2u: { return vec3<f32>(0.8, 0.9, 0.1); }
+        case 3u: { return vec3<f32>(0.2, 0.8, 0.2); }
+        case 4u: { return vec3<f32>(0.1, 0.8, 0.8); }
+        case 5u: { return vec3<f32>(0.2, 0.3, 0.9); }
+        case 6u: { return vec3<f32>(0.6, 0.2, 0.9); }
+        default: { return vec3<f32>(0.9, 0.2, 0.7); }
+    }
 }
 
 // The hit `position`'s place in cell `cell` of chunk frame `c`, in the
