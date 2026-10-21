@@ -838,7 +838,17 @@ impl AtmosphereCompositePass {
                 },
                 sampled_texture(7, fragment, wgpu::TextureViewDimension::D2),
                 sampled_texture(8, fragment, wgpu::TextureViewDimension::D2),
-                sampled_texture(9, fragment, wgpu::TextureViewDimension::D2),
+                // The clouds' depths: Rg32Float, loaded.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: fragment,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

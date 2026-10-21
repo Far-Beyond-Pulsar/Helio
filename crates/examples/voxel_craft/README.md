@@ -48,7 +48,10 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
   (`shot_PP_FFF.png`), the camera still: flicker shows as frame-to-frame
   differences. `python tools/flicker.py <dir>` measures it per pose (mean
   luminance change a frame, pixels changing by more than 2%, and each
-  pixel's deviation over the burst, saved as `std_PP.npy`).
+  pixel's deviation over the burst, saved as `std_PP.npy`). It also lists
+  event frames, where over 5% of the image changed at once: on NVIDIA
+  Vulkan these are lost G-buffer writes (8x8 internal-pixel blocks showing
+  the background, driver bug 6939141), not flicker; retake that burst.
 * `VOXEL_CRAFT_TRUNK=1`: at frame 700, move the camera 4 m in front of the
   nearest tree log (within 15 m) and log that log and the voxels in
   front of it, so the next shot looks at a trunk (pair it with
