@@ -59,18 +59,38 @@ struct PassTimings {
     /// The voxel pass's stages over the window: frames, then draw (seed and
     /// trace), seed, sun shadows, denoiser, generation (ms summed).
     voxel: (u32, [f64; 12]),
+    /// Generation by kernel over the window (`FrameTimings::stages`,
+    /// `tile_stages`), summed ms.
+    generation: [f64; 7],
+    /// Tiles and chunks generated over the window.
+    generated: [usize; 2],
+    /// The voxel pass's residency over the window: chunks generated,
+    /// evicted, evicted never drawn, level switches; the last frame's.
+    residency: [usize; 4],
+    last_stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>,
 }
 
 impl PassTimings {
     /// Adds the renderer's latest completed GPU frame, and logs the means every
     /// `window` frames.
-    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, voxel: &[helio_pass_voxel_planet::chunks::FrameTimings], size: [u32; 2]) {
+    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, voxel: &[helio_pass_voxel_planet::chunks::FrameTimings], stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>, size: [u32; 2]) {
+        if let Some(s) = stats {
+            for (sum, n) in self.residency.iter_mut().zip([s.generated_chunks, s.evicted_chunks, s.evicted_unseen, s.switches]) {
+                *sum += n;
+            }
+            self.last_stats = Some(s);
+        }
         for t in voxel {
             self.voxel.0 += 1;
             let [a, b, c, d, e] = t.shadow_stages;
             for (sum, ms) in self.voxel.1.iter_mut().zip([t.draw, t.seed, t.shadow, t.denoise, t.generate, a, b, c, d, e, t.occlusion, t.fallbacks]) {
                 *sum += ms;
             }
+            for (sum, ms) in self.generation.iter_mut().zip(t.stages.iter().chain(&t.tile_stages)) {
+                *sum += ms;
+            }
+            self.generated[0] += t.tiles;
+            self.generated[1] += t.chunks;
         }
         let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else { return };
         self.last = frame;
@@ -91,6 +111,18 @@ impl PassTimings {
             let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion, fallbacks] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
             log::info!("[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3} (fallbacks {fallbacks:.3}), local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}, sun occlusion {occlusion:.3}", self.voxel.0);
         }
+        if self.voxel.0 > 0 {
+            let [tiles, columns, builds, nodes, tile_columns, halos, features] = self.generation.map(|ms| ms / f64::from(self.voxel.0));
+            let per = |n: usize| n as f64 / f64::from(self.voxel.0);
+            log::info!("[timings] generation: tiles {tiles:.3} (nodes {nodes:.3}, columns {tile_columns:.3}, halos {halos:.3}, features {features:.3}), chunk columns {columns:.3}, chunk builds {builds:.3}; a frame {:.1} tiles, {:.1} chunks", per(self.generated[0]), per(self.generated[1]));
+        }
+        self.generation = [0.0; 7];
+        self.generated = [0; 2];
+        if let Some(s) = self.last_stats {
+            let [generated, evicted, unseen, switches] = self.residency;
+            log::info!("[timings] residency over the window: generated {generated} chunks, evicted {evicted} ({unseen} never drawn), switches {switches}; now requests {}, resident {}, drawn {}, fading {}", s.requests, s.resident_chunks, s.drawn_chunks, s.fading_nodes);
+        }
+        self.residency = [0; 4];
         self.voxel = (0, [0.0; 12]);
         self.frames = 0;
         self.total = 0.0;
@@ -257,6 +289,10 @@ impl Gfx {
             total: 0.0,
             passes: Default::default(),
             voxel: (0, [0.0; 12]),
+            residency: [0; 4],
+            last_stats: None,
+            generation: [0.0; 7],
+            generated: [0; 2],
         });
         Self { window, surface, surface_format, device, queue, renderer, scene, avatar, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings }
     }
@@ -375,7 +411,8 @@ impl Gfx {
         }
         if let Some(timings) = &mut self.timings {
             let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
-            timings.add(self.renderer.timing_snapshot(), &voxel, self.size);
+            let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());
+            timings.add(self.renderer.timing_snapshot(), &voxel, stats, self.size);
         }
         if let Some(path) = view.screenshot {
             self.save_screenshot(&output.texture, path);
