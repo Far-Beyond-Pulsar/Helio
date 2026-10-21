@@ -274,6 +274,11 @@ fn light_through_a_canopy_lights_probes_under_it() {
     let clipmap = Clipmap::around(eye);
     let words = read(gpu, pass.buffers()[1]);
     let above = 77.0 / 255.0 * 128.0 / 255.0 * 2.0 / std::f32::consts::PI;
+    // The underside also passes on the light under it (the probes' own,
+    // their multi-bounce term), a gain of its transmission times albedo:
+    // up to the series' sum, as far as the probes have taken it in.
+    let gain = 77.0 / 255.0 * 128.0 / 255.0;
+    let most = above / (1.0 - gain);
     let mut under = 0;
     for index in 0..PROBES {
         let (_, state) = probe(&words, index, Vec3::Y);
@@ -284,10 +289,12 @@ fn light_through_a_canopy_lights_probes_under_it() {
         under += 1;
         let up = probe(&words, index, Vec3::Y).0;
         let down = probe(&words, index, Vec3::NEG_Y).0;
-        // Within a tenth: the light on the canopy's far side is the probes'
-        // there, and those just under it (a spacing away) leak a little of
-        // their own through the visibility test (DDGI's thin occluders).
-        assert!((up - Vec3::splat(above)).abs().max_element() < 0.1 * above, "probe {index} at {y}: up {up}, want {above}");
+        // The light through the canopy, and at most all of its bounce back
+        // (how much of it the probes have taken in after four frames depends
+        // on the order they updated in); a few percent either way for those
+        // just under it (a spacing away), which leak a little of their own
+        // through the visibility test (DDGI's thin occluders).
+        assert!(up.min_element() > 0.95 * above && up.max_element() < 1.05 * most, "probe {index} at {y}: up {up}, want {above} to {most}");
         assert!(down.max_element() < 0.06 * above, "probe {index} at {y}: down {down}");
     }
     assert!(under > 500, "{under} under the canopy");
