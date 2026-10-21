@@ -1,5 +1,11 @@
 //!use helio_prelude
-// Temporal Super-Resolution: one resolve draw and one sharpening draw.
+// Temporal Super-Resolution: one resolve dispatch and one sharpening draw.
+//
+// The resolve runs over 8x8 tiles of output pixels. A tile first converts
+// the input texels its pixels read (perceptual colour, log luminance, view
+// depth) once into workgroup memory, then runs the thin-feature test of
+// step 7 once per texel a kernel can centre on; each pixel then reads both
+// from there. The steps below are per pixel and unchanged by the tiling.
 //
 // Resolve, per output pixel:
 //   1. Reconstruct this frame's colour from the jittered input samples around
@@ -156,8 +162,9 @@ struct TsrUniform {
     previous_view: mat4x4<f32>,
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
-// View depths, 0 = sky: x dilated, y the pixel's own surface's.
-@group(0) @binding(7) var history_depth_tex: texture_2d<f32>;
+// xy: view depths, 0 = sky: x dilated, y the pixel's own surface's.
+// zw: the coarse detector's slow and fast mean log luminance.
+@group(0) @binding(7) var history_depth_coarse: texture_2d<f32>;
 @group(0) @binding(8) var transparency_reactivity: texture_2d<f32>;
 // x: accumulated weight, y: thin-feature lock lifetime (0..1), z: the fine
 // detector's fast mean residual, w: the deviation of its fast - slow.
@@ -167,11 +174,16 @@ struct TsrUniform {
 // w: the shading-change reference (log luminance). Deviations are stored,
 // not variances: half floats flush small variances to zero.
 @group(0) @binding(11) var history_noise: texture_2d<f32>;
-// The coarse detector's slow and fast mean log luminance.
-@group(0) @binding(12) var history_coarse: texture_2d<f32>;
 // Fraction of the pixel's shading sampled stochastically per frame (lib.rs
 // STOCHASTIC_MASK); zero when the graph does not provide it.
 @group(0) @binding(13) var stochastic_mask: texture_2d<f32>;
+
+// The resolve's outputs: next frame's history_frame, history_depth_coarse,
+// history_state and history_noise.
+@group(0) @binding(16) var out_color: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(17) var out_depth_coarse: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(18) var out_state: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(19) var out_noise: texture_storage_2d<rgba16float, write>;
 
 // Sharpening pass input: this frame's resolve.
 @group(0) @binding(10) var resolved: texture_2d<f32>;
@@ -320,12 +332,81 @@ fn gaussian4(first: f32, pos: f32, to_output: f32, sigma: f32) -> vec4<f32> {
     return exp(-0.5 * d * d / (sigma * sigma));
 }
 
+// ── Input tile ────────────────────────────────────────────────────────────────
+
+// Output pixels per tile (lib.rs RESOLVE_TILE).
+const TILE: vec2<u32> = vec2<u32>(8u, 8u);
+// Input texels a tile reads at most per axis: the 4x4 around each pixel,
+// whose origins lie at most one texel apart per pixel for input no larger
+// than the output (the renderer's render scale is at most 1), plus one for
+// rounding.
+const FOOTPRINT: vec2<i32> = vec2<i32>(12, 12);
+const FOOTPRINT_TEXELS: u32 = 144u;
+// Per texel of the tile, by the texel's own (unclamped) position, rows
+// FOOTPRINT.x apart: perceptual YCoCg and log luminance of the clamped
+// texel; its raw depth and the view depth that has at the unclamped texel's
+// centre.
+var<workgroup> tile_colour: array<vec4<f32>, FOOTPRINT_TEXELS>;
+var<workgroup> tile_depth: array<vec2<f32>, FOOTPRINT_TEXELS>;
+// Per texel a pixel's kernel centres on (the inner 2x2 of its 4x4): a thin
+// feature crossing it, as `Neighbourhood::ridge`.
+var<workgroup> tile_ridge: array<f32, FOOTPRINT_TEXELS>;
+
+fn pixel_uv(pixel: vec2<u32>) -> vec2<f32> {
+    return (vec2<f32>(pixel) + 0.5) / vec2<f32>(textureDimensions(history_frame));
+}
+
+// The scene point under this output pixel lies at this raster position.
+fn current_uv(pixel: vec2<u32>) -> vec2<f32> {
+    let in_dims = vec2<f32>(textureDimensions(current_frame));
+    return pixel_uv(pixel) + tsr.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
+}
+
+// The first texel of the 4x4 a pixel at `in_pos` reads.
+fn footprint_origin(in_pos: vec2<f32>) -> vec2<i32> {
+    return vec2<i32>(floor(in_pos - 0.5)) - 1;
+}
+
+// Converts the tile's input texels from `tile_origin` on, `span` per axis,
+// all threads of the workgroup sharing the work.
+fn load_tile(tile_origin: vec2<i32>, span: vec2<i32>, thread: u32) {
+    let dims = vec2<i32>(textureDimensions(current_frame));
+    let texel = 1.0 / vec2<f32>(dims);
+    for (var j = i32(thread); j < span.x * span.y; j += i32(TILE.x * TILE.y)) {
+        let local = vec2<i32>(j % span.x, j / span.x);
+        let i = local.y * FOOTPRINT.x + local.x;
+        let at = tile_origin + local;
+        let p = clamp(at, vec2<i32>(0), dims - 1);
+        let rgb = textureLoad(current_frame, p, 0).rgb;
+        let l = log(max(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 1.0e-4));
+        tile_colour[i] = vec4<f32>(perceptual(rgb), l);
+        let d = textureLoad(depth_tex, p, 0);
+        tile_depth[i] = vec2<f32>(d, view_depth((vec2<f32>(at) + 0.5) * texel, d));
+    }
+}
+
+// Tests the tile's texels from `first` on, `span` per axis, for thin
+// features, all threads of the workgroup sharing the work.
+fn find_ridges(first: vec2<i32>, span: vec2<i32>, thread: u32) {
+    let row = FOOTPRINT.x;
+    for (var i = i32(thread); i < span.x * span.y; i += i32(TILE.x * TILE.y)) {
+        let c = (first.y + i / span.x) * row + first.x + i % span.x;
+        let top = vec3<f32>(tile_colour[c - row - 1].x, tile_colour[c - row].x, tile_colour[c - row + 1].x);
+        let middle = vec3<f32>(tile_colour[c - 1].x, tile_colour[c].x, tile_colour[c + 1].x);
+        let bottom = vec3<f32>(tile_colour[c + row - 1].x, tile_colour[c + row].x, tile_colour[c + row + 1].x);
+        tile_ridge[c] = thin_ridge_polarity(top, middle, bottom) * middle.y;
+    }
+}
+
 // `in_pos` is the output pixel centre in input texels, jitter included. The
 // 4x4 texels around it hold every sample the kernel weighs, the 3x3 of each
 // of the 2x2 nearest, which the thin-feature test needs, and the coarse luma.
-fn gather(in_pos: vec2<f32>) -> Neighbourhood {
+// They are read from the tile loaded from `tile_origin`.
+fn gather(in_pos: vec2<f32>, tile_origin: vec2<i32>) -> Neighbourhood {
     let dims = vec2<i32>(textureDimensions(current_frame));
-    let origin = vec2<i32>(floor(in_pos - 0.5)) - 1;
+    let origin = footprint_origin(in_pos);
+    let local = clamp(origin - tile_origin, vec2<i32>(0), FOOTPRINT - 4);
+    let row = FOOTPRINT.x;
     let nearest = vec2<i32>(floor(in_pos)) - origin; // 1 or 2 per axis
     let to_output = vec2<f32>(textureDimensions(history_frame)) / vec2<f32>(dims);
     let kx = gaussian4(f32(origin.x), in_pos.x, to_output.x, KERNEL_SIGMA);
@@ -333,58 +414,49 @@ fn gather(in_pos: vec2<f32>) -> Neighbourhood {
     let lx = gaussian4(f32(origin.x), in_pos.x, to_output.x, LOW_PASS_SIGMA);
     let ly = gaussian4(f32(origin.y), in_pos.y, to_output.y, LOW_PASS_SIGMA);
     var n: Neighbourhood;
-    // Luma rows of the 4x4, kept in registers for the ridge test.
-    var rows = mat4x4<f32>();
+    // The 4x4: the kernel's samples and the coarse luma.
+    let first = local.y * row + local.x;
     var sum = vec3<f32>(0.0);
+    var log_sum = vec2<f32>(0.0);
+    for (var y = 0; y < 4; y++) {
+        for (var x = 0; x < 4; x++) {
+            let texel = tile_colour[first + y * row + x];
+            sum += kx[x] * ky[y] * texel.xyz;
+            log_sum += vec2<f32>(texel.w, texel.w * texel.w);
+        }
+    }
+    // The 3x3 around the nearest texel, in the same order.
+    let centre = first + nearest.y * row + nearest.x;
+    let lx3 = select(lx.xyz, lx.yzw, nearest.x == 2);
+    let ly3 = select(ly.xyz, ly.yzw, nearest.y == 2);
     var low = vec2<f32>(0.0);
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
     var depth = 0.0;
-    var log_sum = vec2<f32>(0.0);
-    var neighbours = vec4<f32>(0.0);
     n.lo = vec3<f32>(3.0e38);
     n.hi = vec3<f32>(-3.0e38);
-    for (var y = 0; y < 4; y++) {
-        var row = vec4<f32>(0.0);
-        for (var x = 0; x < 4; x++) {
-            let p = clamp(origin + vec2<i32>(x, y), vec2<i32>(0), dims - 1);
-            let rgb = textureLoad(current_frame, p, 0).rgb;
-            let q = perceptual(rgb);
-            sum += kx[x] * ky[y] * q;
-            row[x] = q.x;
-            let l = log(max(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 1.0e-4));
-            log_sum += vec2<f32>(l, l * l);
-            if all(abs(vec2<i32>(x, y) - nearest) <= vec2<i32>(1)) {
-                m1 += q;
-                m2 += q * q;
-                n.lo = min(n.lo, q);
-                n.hi = max(n.hi, q);
-                low += lx[x] * ly[y] * vec2<f32>(q.x, 1.0);
-                let d = textureLoad(depth_tex, p, 0);
-                depth = helio_depth_nearest(depth, d);
-                if all(vec2<i32>(x, y) == nearest) { n.centre_depth = d; }
-                let offset = vec2<i32>(x, y) - nearest;
-                if abs(offset.x) + abs(offset.y) == 1 {
-                    // 0: -x, 1: +x, 2: -y, 3: +y
-                    let side = select(select(2, 3, offset.y > 0), select(0, 1, offset.x > 0), offset.x != 0);
-                    neighbours[side] = d;
-                }
-            }
+    for (var y = 0; y < 3; y++) {
+        for (var x = 0; x < 3; x++) {
+            let i = centre + (y - 1) * row + x - 1;
+            let q = tile_colour[i].xyz;
+            m1 += q;
+            m2 += q * q;
+            n.lo = min(n.lo, q);
+            n.hi = max(n.hi, q);
+            low += lx3[x] * ly3[y] * vec2<f32>(q.x, 1.0);
+            depth = helio_depth_nearest(depth, tile_depth[i].x);
         }
-        rows[y] = row;
     }
+    n.centre_depth = tile_depth[centre].x;
+    let centre_view = tile_depth[centre].y;
+    // View depths of the centre's four neighbours: -x, +x, -y, +y.
+    let around = vec4<f32>(tile_depth[centre - 1].y, tile_depth[centre + 1].y,
+        tile_depth[centre - row].y, tile_depth[centre + row].y);
     n.weight = dot(kx, vec4<f32>(1.0)) * dot(ky, vec4<f32>(1.0));
     n.colour = sum / max(n.weight, 1.0e-6);
     n.mean = m1 / 9.0;
     n.deviation = sqrt(max(m2 / 9.0 - n.mean * n.mean, vec3<f32>(0.0)));
     n.nearest_depth = depth;
-    let texel = 1.0 / vec2<f32>(dims);
-    let centre_uv = (vec2<f32>(origin + nearest) + 0.5) * texel;
-    let centre_view = view_depth(centre_uv, n.centre_depth);
-    let around = vec4<f32>(view_depth(centre_uv - vec2<f32>(texel.x, 0.0), neighbours.x),
-        view_depth(centre_uv + vec2<f32>(texel.x, 0.0), neighbours.y),
-        view_depth(centre_uv - vec2<f32>(0.0, texel.y), neighbours.z),
-        view_depth(centre_uv + vec2<f32>(0.0, texel.y), neighbours.w));
     // Sky (view depth 0) next to the pixel is a silhouette, not slope.
     let steps = select(abs(around - centre_view), vec4<f32>(3.0e38), around == vec4<f32>(0.0));
     n.slope = max(min(steps.x, steps.y), min(steps.z, steps.w));
@@ -392,12 +464,9 @@ fn gather(in_pos: vec2<f32>) -> Neighbourhood {
     n.log_luma = log_sum.x / 16.0;
     n.log_variance = max(log_sum.y / 16.0 - n.log_luma * n.log_luma, 0.0);
     // The ridge nearest the pixel centre among the four texels it draws on.
-    let ridges = vec4<f32>(
-        thin_ridge_polarity(rows[0].xyz, rows[1].xyz, rows[2].xyz) * rows[1].y,
-        thin_ridge_polarity(rows[0].yzw, rows[1].yzw, rows[2].yzw) * rows[1].z,
-        thin_ridge_polarity(rows[1].xyz, rows[2].xyz, rows[3].xyz) * rows[2].y,
-        thin_ridge_polarity(rows[1].yzw, rows[2].yzw, rows[3].yzw) * rows[2].z,
-    );
+    let inner = first + row + 1;
+    let ridges = vec4<f32>(tile_ridge[inner], tile_ridge[inner + 1],
+        tile_ridge[inner + row], tile_ridge[inner + row + 1]);
     let weights = vec4<f32>(kx.yz * ky.y, kx.yz * ky.z);
     var best = 0.0;
     for (var i = 0; i < 4; i++) {
@@ -469,18 +538,39 @@ fn clip_toward_mean(h: vec3<f32>, mean: vec3<f32>, extent: vec3<f32>) -> vec4<f3
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
 struct TsrOutput {
-    @location(0) color: vec4<f32>,
-    @location(1) view_depth: vec2<f32>,
-    @location(2) state: vec4<f32>,
-    @location(3) noise: vec4<f32>,
-    @location(4) coarse: vec2<f32>,
+    color: vec4<f32>,
+    view_depth: vec2<f32>,
+    state: vec4<f32>,
+    noise: vec4<f32>,
+    coarse: vec2<f32>,
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> TsrOutput {
+@compute @workgroup_size(8, 8)
+fn cs_main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id) group: vec3<u32>,
+           @builtin(local_invocation_index) thread: u32) {
+    // The 4x4s of the tile's pixels, from its first pixel's to its last's.
     let in_dims = vec2<f32>(textureDimensions(current_frame));
-    // The scene point under this output pixel lies at this raster position.
-    let cur_uv = in.uv + tsr.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
+    let tile_origin = footprint_origin(current_uv(group.xy * TILE) * in_dims);
+    let last = min(group.xy * TILE + TILE - 1u, textureDimensions(history_frame) - 1u);
+    let last_origin = min(footprint_origin(current_uv(last) * in_dims) - tile_origin, FOOTPRINT - 4);
+    load_tile(tile_origin, last_origin + 4, thread);
+    workgroupBarrier();
+    // Their inner 2x2s.
+    find_ridges(vec2<i32>(1), last_origin + 2, thread);
+    workgroupBarrier();
+    if any(id.xy >= textureDimensions(history_frame)) {
+        return;
+    }
+    let out = resolve(id.xy, tile_origin);
+    textureStore(out_color, id.xy, out.color);
+    textureStore(out_depth_coarse, id.xy, vec4<f32>(out.view_depth, out.coarse));
+    textureStore(out_state, id.xy, out.state);
+    textureStore(out_noise, id.xy, out.noise);
+}
+
+fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
+    let in_dims = vec2<f32>(textureDimensions(current_frame));
+    let cur_uv = current_uv(pixel);
     let in_pos = cur_uv * in_dims;
     let use_coverage = (tsr.flags & 2u) != 0u;
     var coverage = 0.0;
@@ -490,7 +580,7 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     // History alpha holds coverage only in the opt-in transparency path.
     let output_alpha = select(1.0, coverage, use_coverage);
 
-    let n = gather(in_pos);
+    let n = gather(in_pos, tile_origin);
     let current_depth = vec2<f32>(view_depth(cur_uv, n.nearest_depth), view_depth(cur_uv, n.centre_depth));
     var fresh: TsrOutput;
     fresh.color = vec4<f32>(linear_rgb(n.colour), output_alpha);
@@ -519,18 +609,19 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     // Disocclusion (step 3).
     let out_dims = vec2<i32>(textureDimensions(history_frame));
     let depth_texel = clamp(vec2<i32>(history_uv * vec2<f32>(out_dims)), vec2<i32>(0), out_dims - 1);
+    // Any match decides, so the centre is tried first and the search stops
+    // there; sky only counts when nothing matched.
     var matched = false;
     var sky_stored = false;
-    for (var oy = -1; oy <= 1; oy++) {
-        for (var ox = -1; ox <= 1; ox++) {
-            let stored = textureLoad(history_depth_tex,
-                clamp(depth_texel + vec2<i32>(ox, oy), vec2<i32>(0), out_dims - 1), 0).xy;
-            matched = matched || history_depth_matches(history.w, stored.x, depth_tolerance)
-                || history_depth_matches(history.w, stored.y, depth_tolerance)
-                || history_depth_matches(expected_own, stored.x, depth_tolerance)
-                || history_depth_matches(expected_own, stored.y, depth_tolerance);
-            sky_stored = sky_stored || stored.x == 0.0;
-        }
+    for (var i = 0; i < 9 && !matched; i++) {
+        let offset = vec2<i32>((i + 1) % 3, (i / 3 + 1) % 3) - 1;
+        let stored = textureLoad(history_depth_coarse,
+            clamp(depth_texel + offset, vec2<i32>(0), out_dims - 1), 0).xy;
+        matched = history_depth_matches(history.w, stored.x, depth_tolerance)
+            || history_depth_matches(history.w, stored.y, depth_tolerance)
+            || history_depth_matches(expected_own, stored.x, depth_tolerance)
+            || history_depth_matches(expected_own, stored.y, depth_tolerance);
+        sky_stored = sky_stored || stored.x == 0.0;
     }
     let sky_continues = helio_is_sky(n.nearest_depth) && sky_stored;
     if !sky_continues && !matched {
@@ -547,7 +638,7 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
 
     let previous = textureSampleLevel(history_state, linear_sampler, history_uv, 0.0);
     let moments = textureSampleLevel(history_noise, linear_sampler, history_uv, 0.0);
-    let means = textureSampleLevel(history_coarse, linear_sampler, history_uv, 0.0).xy;
+    let means = textureSampleLevel(history_depth_coarse, linear_sampler, history_uv, 0.0).zw;
     var history_weight = previous.x * (1.0 - reactivity);
     var lock = previous.y * (1.0 - reactivity);
 
@@ -604,7 +695,7 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
 
     // Rectification (step 6).
     let history_colour = perceptual(sample_history(history_uv));
-    let velocity = length((history_uv - in.uv) * vec2<f32>(out_dims));
+    let velocity = length((history_uv - pixel_uv(pixel)) * vec2<f32>(out_dims));
     let still = 1.0 - saturate(velocity / PARALLAX_VELOCITY);
     // A shading change short of decisive weakens the widening, as it does
     // FSR 2's lock protection.
