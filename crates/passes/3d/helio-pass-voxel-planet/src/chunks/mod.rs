@@ -415,7 +415,6 @@ pub struct GiRays<'a> {
 struct ChunkMaterials {
     materials: [crate::engine::MaterialGpu; crate::engine::MATERIALS],
     detail: [f32; 4],
-    shade: [f32; 4],
 }
 
 /// A chunk's affine frame: world = origin + m * cell coordinates.
@@ -2378,8 +2377,8 @@ impl ChunkWorld {
         let pool_size = capacity.footprints.min((binding / (TILE_COLUMNS * 16)) as usize).min((binding / placement_stride.max(1)) as usize).max(2 * TILE_BATCH);
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
         let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
-        let (materials, detail, shade) = crate::engine::material_table(&planet.field().appearance());
-        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk materials"), contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail, shade }), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
+        let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
+        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk materials"), contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
         let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
             (
                 device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: QUERIES * TIMING_RING as u32 }),
@@ -4367,8 +4366,8 @@ impl ChunkWorld {
 
     /// Shade with `appearance` (the terrain's materials and detail).
     pub fn set_appearance(&mut self, appearance: &crate::engine::TerrainAppearance) {
-        let (materials, detail, shade) = crate::engine::material_table(appearance);
-        self.queue.write_buffer(&self.materials, 0, bytemuck::bytes_of(&ChunkMaterials { materials, detail, shade }));
+        let (materials, detail) = crate::engine::material_table(appearance);
+        self.queue.write_buffer(&self.materials, 0, bytemuck::bytes_of(&ChunkMaterials { materials, detail }));
     }
 
     /// The last draw's sun visibility (Helio's `directional_visibility`).

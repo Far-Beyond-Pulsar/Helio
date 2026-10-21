@@ -188,8 +188,10 @@ impl Block {
             colour: [r, g, b, self.roughness()],
             patches: patches.map(|p| p.map(unit)),
             lip: (self == Block::Grass).then_some(material::DIRT as u8),
-            // Leaves let a third of the light through (global illumination).
-            transmission: if leaves { 0.3 } else { 0.0 },
+            // A cell of leaves is a cluster with gaps: about two thirds of
+            // the light on it gets through (lit from behind; global
+            // illumination).
+            transmission: if leaves { 0.65 } else { 0.0 },
             // Glowing blocks light their surroundings.
             emission: self.emission().map_or(0.0, |(_, strength)| strength),
             ..MaterialAppearance::default()

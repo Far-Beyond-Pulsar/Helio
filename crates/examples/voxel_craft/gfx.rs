@@ -37,6 +37,43 @@ pub struct Gfx {
     /// The weather's clock at the last frame (game seconds): the renderer's
     /// frame clock (the clouds' wind) advances with it.
     clock: f64,
+    /// `VOXEL_CRAFT_TIMINGS=<frames>`: GPU milliseconds a pass, summed over
+    /// that many frames and logged as their mean.
+    timings: Option<PassTimings>,
+}
+
+/// Per-pass GPU time over a window of frames.
+struct PassTimings {
+    frames: u32,
+    window: u32,
+    last: u64,
+    total: f64,
+    passes: std::collections::BTreeMap<&'static str, f64>,
+}
+
+impl PassTimings {
+    /// Adds the renderer's latest completed GPU frame, and logs the means every
+    /// `window` frames.
+    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, size: [u32; 2]) {
+        let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else { return };
+        self.last = frame;
+        self.frames += 1;
+        self.total += f64::from(snapshot.total_gpu_ms.unwrap_or(0.0));
+        for pass in &snapshot.passes {
+            *self.passes.entry(pass.name).or_default() += f64::from(pass.gpu_ms.unwrap_or(0.0));
+        }
+        if self.frames < self.window {
+            return;
+        }
+        let n = f64::from(self.frames);
+        let mut passes: Vec<_> = self.passes.iter().map(|(name, ms)| (*name, ms / n)).collect();
+        passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let list: Vec<String> = passes.iter().take(14).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
+        log::info!("[timings] {}x{} over {} frames: gpu {:.3} ms; {}", size[0], size[1], self.frames, self.total / n, list.join(", "));
+        self.frames = 0;
+        self.total = 0.0;
+        self.passes.clear();
+    }
 }
 
 /// Residency settings for chunk trees at a window of height `h`.
@@ -183,7 +220,14 @@ impl Gfx {
         if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {
             renderer.set_debug_mode(mode);
         }
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size, clock: 0.0 }
+        let timings = std::env::var("VOXEL_CRAFT_TIMINGS").ok().and_then(|v| v.parse().ok()).map(|window: u32| PassTimings {
+            frames: 0,
+            window: window.max(1),
+            last: u64::MAX,
+            total: 0.0,
+            passes: Default::default(),
+        });
+        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, source, sun_light, origin: DVec3::ZERO, size, clock: 0.0, timings }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -279,6 +323,9 @@ impl Gfx {
         flush_scene_db(&self.scene, &self.queue);
         if let Err(error) = self.renderer.render(&camera, &target) {
             log::error!("render: {error:?}");
+        }
+        if let Some(timings) = &mut self.timings {
+            timings.add(self.renderer.timing_snapshot(), self.size);
         }
         if let Some(path) = view.screenshot {
             self.save_screenshot(&output.texture, path);

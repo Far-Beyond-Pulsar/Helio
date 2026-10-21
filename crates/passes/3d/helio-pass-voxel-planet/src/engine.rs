@@ -107,8 +107,8 @@ pub(crate) struct MaterialGpu {
 }
 
 /// The shading table of `appearance` (linear colours; sRGB is public, so
-/// convert once, not per pixel), its detail weights and its shade.
-pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; MATERIALS], [f32; 4], [f32; 4]) {
+/// convert once, not per pixel) and its detail weights.
+pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; MATERIALS], [f32; 4]) {
     let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
     let linear = |c: [f32; 4]| [clean(c[0]).powf(2.2), clean(c[1]).powf(2.2), clean(c[2]).powf(2.2), clean(c[3])];
     let materials = std::array::from_fn(|id| {
@@ -128,9 +128,7 @@ pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; M
             light: [clean(m.transmission), if m.emission.is_finite() { m.emission.clamp(0.0, 64.0) } else { 0.0 }, 0.0, 0.0],
         }
     });
-    let [r, g, b, floor] = appearance.shade;
-    let fill = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
-    (materials, appearance.detail.map(clean), [fill(r), fill(g), fill(b), clean(floor)])
+    (materials, appearance.detail.map(clean))
 }
 
 /// `World` of world.wgsl: the grid mapping.
