@@ -840,7 +840,7 @@ impl DebugDrawPass {
                 depth_write_enabled: Some(false),
                 depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
-                bias: helio_core::depth::bias_toward_camera(1, 1.0, 1.0),
+                bias: helio_core::depth::bias_toward_camera(1, 1.0, 0.0),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

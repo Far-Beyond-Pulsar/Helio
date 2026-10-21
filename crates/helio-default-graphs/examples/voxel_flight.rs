@@ -1629,6 +1629,9 @@ fn mountain(planet: &Planet, heading: f64) -> Vec<(&'static str, DVec3, Vec3)> {
 }
 
 fn main() {
+    // `RUST_LOG`: wgpu's own messages, the validation layer's among them
+    // (`WGPU_VALIDATION=1`, `WGPU_DEBUG=1` for labels); warnings by default.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args: Vec<String> = std::env::args().collect();
     let output = PathBuf::from(args.get(1).expect("OUTPUT directory"));
     std::fs::create_dir_all(&output).unwrap();

@@ -1624,6 +1624,7 @@ name = "helio-default-graphs"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "env_logger",
  "glam 0.33.5",
  "helio",
  "helio-core",

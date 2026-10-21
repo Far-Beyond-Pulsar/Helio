@@ -60,6 +60,7 @@ helio-pass-lens = { workspace = true }
 helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 
 [dev-dependencies]
+env_logger = { workspace = true }
 pollster = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 glam = { workspace = true }
