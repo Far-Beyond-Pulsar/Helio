@@ -163,25 +163,6 @@ fn a_tufts_blades_spread_around_it() {
 }
 
 #[test]
-fn a_blocky_blade_has_at_most_twice_its_sideways_steps_and_one_boxes() {
-    // The vertex shader drops a strip's tail by this bound before walking the blade.
-    let ty = block_type([0.0, 1.2], 0.6, 0.15, [0.05, 0.05]);
-    for tuft in tufts(&ty, 300) {
-        for (j, b) in tuft {
-            for steps in [STACK_STEPS, L1_STEPS] {
-                let [rise, side] = block_steps(&b, 0.05, 1.0, steps);
-                if rise == 0 {
-                    continue;
-                }
-                let side = if j > 0 { side.max(1) } else { side };
-                let boxes = block_boxes(&b, j, 0.05, 1.0, false, steps).len() as u32;
-                assert!(boxes <= 2 * side + 1, "blade {j}: {boxes} boxes for {side} steps");
-            }
-        }
-    }
-}
-
-#[test]
 fn boxes_by_levels_are_the_walks_boxes() {
     // The draw finds a blade's boxes from its sideways steps' levels; they must be the
     // cube-by-cube walk's, box for box.

@@ -1,12 +1,11 @@
-//! A tuft's blades, shared by placement and the draw (`tuft_blade`, `block_steps` and
-//! `foliage_box_bound` in foliage_common.wgsl; this is their CPU mirror).
+//! A tuft's blades (`tuft_blade` and `block_steps` in foliage_common.wgsl; this is their
+//! CPU mirror).
 //!
 //! A tuft's blades are a function of its seed, the blade's index and the type
 //! ([`tuft_blade`]): they fan out from a tight base, lean out more at the rim, bend more
-//! towards the tip, and some lie over. Placement stores each near blade's box bound
-//! ([`box_bound`]) so the draw drops its strip's unused vertices before any work.
+//! towards the tip, and some lie over.
 
-use crate::{foliage_hash, hash_to_unit, FoliageKind, GpuFoliageType, FOLIAGE_STACK_CUBES};
+use crate::{foliage_hash, hash_to_unit, GpuFoliageType, FOLIAGE_STACK_CUBES};
 
 /// Cubes a blocky blade steps sideways by at most (L0's strip; L1 takes fewer).
 pub const FOLIAGE_STACK_STEPS: u32 = 4;
@@ -54,21 +53,4 @@ pub fn block_steps(b: &Blade, cube: f32, scale: f32, steps: u32) -> [u32; 2] {
     }
     let side = ((rise as f32 * (b.lean + b.curve).max(0.0)).round() as u32).min(steps);
     [rise, side]
-}
-
-/// The most boxes blocky blade `j` of a tuft draws at any scale up to `scale_max` (its
-/// band's largest, [`crate::GpuFoliageBand::scale_max`]): a run up between sideways steps
-/// and a box a sideways step, `2 · side + 1`, at most 15; 0 for a blade that is not blocky
-/// (no bound: the draw walks it). `foliage_box_bound` in foliage_common.wgsl.
-pub fn box_bound(ty: &GpuFoliageType, seed: u32, turn: f32, height_lerp: f32, j: u32, n: u32, scale_max: f32) -> u8 {
-    if ty.kind() != Some(FoliageKind::Block) {
-        return 0;
-    }
-    let b = tuft_blade(ty, seed, turn, height_lerp, j, n);
-    let [rise, side] = block_steps(&b, ty.width_range[0].max(1.0e-3), scale_max, FOLIAGE_STACK_STEPS);
-    if rise == 0 {
-        return 1;
-    }
-    let side = if j > 0 { side.max(1) } else { side };
-    (2 * side + 1).min(15) as u8
 }

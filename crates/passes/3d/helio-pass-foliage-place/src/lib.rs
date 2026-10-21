@@ -138,13 +138,6 @@ pub const FOLIAGE_STACK_CUBES: u32 = 24;
 /// (`FoliagePlacePass::interactors`).
 pub const FOLIAGE_MAX_INTERACTORS: u32 = 16;
 
-/// Vertices a blocky blade draws at each LOD: per box its three faces turned to the eye
-/// (9) and two degenerate joins to the next (2), the last box without them. L0 draws a
-/// blade's every run of cubes (up to 8), L1 its staircase in cubes twice the size (up to 5), L2 a
-/// tuft's blades one box each, L3 a tuft as two crossed boxes. `cs_finalize` draws the larger of these and
-/// [`FOLIAGE_LOD_VERTEX_COUNTS`] at each LOD while any blocky type has a density; a
-/// shorter strip ends in a zero-area tail.
-pub const FOLIAGE_BLOCK_LOD_VERTEX_COUNTS: [u32; 4] = [11 * 8 - 2, 11 * 5 - 2, 11 * crate::FOLIAGE_MAX_TUFT_BLADES - 2, 11 * 2 - 2];
 
 /// Number of `u32` blade indices reserved for each LOD region of `visible_blades`.
 ///
@@ -301,12 +294,6 @@ mod tests {
         // out-of-bounds one is not.
         assert_eq!(lod_region_offset(4), lod_region_offset(3));
         assert_eq!(lod_region_offset(u32::MAX), lod_region_offset(3));
-    }
-
-    #[test]
-    fn block_vertex_counts_hold_their_boxes() {
-        // Duplicated in foliage_cull.wgsl (`cs_finalize`) and foliage_gbuffer.wgsl.
-        assert_eq!(FOLIAGE_BLOCK_LOD_VERTEX_COUNTS, [86, 53, 163, 20]);
     }
 
     #[test]

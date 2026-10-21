@@ -81,7 +81,7 @@ impl PassTimings {
         let n = f64::from(self.frames);
         let mut passes: Vec<_> = self.passes.iter().map(|(name, ms)| (*name, ms / n)).collect();
         passes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let list: Vec<String> = passes.iter().take(14).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
+        let list: Vec<String> = passes.iter().filter(|(_, ms)| *ms >= 0.02).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
         log::info!("[timings] {}x{} over {} frames: gpu {:.3} ms; {}", size[0], size[1], self.frames, self.total / n, list.join(", "));
         if self.voxel.0 > 0 {
             let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));

@@ -90,8 +90,7 @@ struct FoliageBand {
     probe_blocks:   u32,
     lod:            u32,
     grid_density:   f32,
-    /// The largest scale a tuft draws at in the band (`GpuFoliageBand::scale_max`).
-    scale_max:      f32,
+    _pad:           u32,
 }
 
 /// Mirrors `GpuFoliageBands` (Rust, 416 bytes).
@@ -283,25 +282,4 @@ fn block_steps(b: Blade, cube: f32, scale: f32, steps: u32) -> vec2<u32> {
     }
     let side = min(u32(round(f32(rise) * max(b.lean + b.curve, 0.0))), steps);
     return vec2<u32>(rise, side);
-}
-
-/// The most boxes blocky blade `j` of `n` of the tuft of `record` draws at any scale up to
-/// `scale_max`: a run up between sideways steps and a box a sideways step, `2 · side + 1`
-/// (at most 15); 0 for a blade that is not blocky (`blade::box_bound`).
-fn foliage_box_bound(ty: FoliageType, record: BladeInstance, j: u32, n: u32, scale_max: f32) -> u32 {
-    if (ty.kind_and_flags & 0xffu) != FOLIAGE_KIND_BLOCK {
-        return 0u;
-    }
-    let b = tuft_blade(ty, record, j, n);
-    let steps = block_steps(b, max(ty.width_min, 1.0e-3), scale_max, FOLIAGE_STACK_STEPS);
-    if steps.x == 0u {
-        return 1u;
-    }
-    let side = select(steps.y, max(steps.y, 1u), j > 0u);
-    return min(2u * side + 1u, 15u);
-}
-
-/// The record's box bound (`foliage_box_bound`; 0: unknown).
-fn foliage_blade_boxes(blade: BladeInstance) -> u32 {
-    return (blade.packed_scale_type >> 26u) & 15u;
 }

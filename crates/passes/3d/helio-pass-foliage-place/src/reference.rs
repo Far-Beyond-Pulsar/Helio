@@ -314,7 +314,6 @@ pub fn place_tile_reference(
             aux: ((seed >> 9) & 0xff) as u8,
             type_id: candidate.type_id,
             variant: ((seed >> 30) & 3) as u8,
-            boxes: 0,
             colour: (colour != 0).then(|| [0, 8, 16].map(|s| ((colour >> s) & 0xff) as f32 / 255.0)),
             seed: seed as u16,
         };
@@ -324,14 +323,7 @@ pub fn place_tile_reference(
                 placement.dropped += 1;
                 continue;
             }
-            // A near blade's box bound, for the draw to drop its strip's tail early.
-            let boxes = if band.lod == BAND_LOD_BLADES {
-                let ty = &types[usize::from(tuft.type_id)];
-                crate::blade::box_bound(ty, u32::from(tuft.seed), f32::from(tuft.aux) / 256.0, crate::unpack_unorm8(crate::pack_unorm8(tuft.height_scale)), u32::from(blade), u32::from(tuft.blades), band.scale_max)
-            } else {
-                0
-            };
-            placement.blades.push(pack_blade(BladeParams { blade, boxes, ..tuft }));
+            placement.blades.push(pack_blade(BladeParams { blade, ..tuft }));
         }
     }
     placement

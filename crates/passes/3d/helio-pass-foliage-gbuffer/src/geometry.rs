@@ -10,9 +10,9 @@
 //! their LOD's vertex count, smooth blades keep their length.
 //!
 //! A tuft's blades ([`tuft_blade`], [`block_steps`]) are shared with placement
-//! (`helio_pass_foliage_place::blade`), which bounds each near blade's boxes.
+//! (`helio_pass_foliage_place::blade`).
 
-pub use helio_pass_foliage_place::blade::{block_steps, box_bound, tuft_blade, Blade};
+pub use helio_pass_foliage_place::blade::{block_steps, tuft_blade, Blade};
 use helio_pass_foliage_place::FOLIAGE_LOD_VERTEX_COUNTS;
 
 /// Number of drawable foliage LOD levels.
@@ -22,7 +22,7 @@ pub const LOD_COUNT: usize = 4;
 pub const LOD_SEGMENTS: [u32; LOD_COUNT] = [5, 3, 1, 1];
 
 /// Vertices per instance at each LOD for smooth blades (the producer's
-/// [`FOLIAGE_LOD_VERTEX_COUNTS`]; blocky blades draw `FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`).
+/// [`FOLIAGE_LOD_VERTEX_COUNTS`]; blocky blades are drawn as boxes, nine corners each).
 pub const LOD_VERTEX_COUNTS: [u32; LOD_COUNT] = FOLIAGE_LOD_VERTEX_COUNTS;
 
 /// Cubes a blocky blade rises by at most (`FOLIAGE_STACK_CUBES`).
@@ -250,20 +250,6 @@ pub fn block_boxes(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bool, max_st
     out
 }
 
-/// Strip position `vertex_index` over boxes of 11 vertices (`strip_slot`): the box and its
-/// vertex, or `None` past the strip's end.
-pub fn strip_slot(vertex_index: u32, boxes: u32) -> Option<(u32, u32)> {
-    if boxes == 0 || vertex_index > 11 * (boxes - 1) + 9 {
-        return None;
-    }
-    let (b, k) = (vertex_index / 11, vertex_index % 11);
-    Some(match k {
-        9 => (b, 8),
-        10 => (b + 1, 0),
-        _ => (b, k),
-    })
-}
-
 /// A point of a smooth blade's spine at `s` in its own frame (+z its lean direction, +y
 /// up), and its unit tangent (`blade_spine`).
 pub fn blade_spine(b: &Blade, height: f32, s: f32) -> ([f32; 3], [f32; 3]) {
@@ -273,20 +259,4 @@ pub fn blade_spine(b: &Blade, height: f32, s: f32) -> ([f32; 3], [f32; 3]) {
     let rise = height * s / (1.0 + lean_here * lean_here).sqrt();
     let len = (1.0 + slope * slope).sqrt();
     ([0.0, rise, reach], [0.0, 1.0 / len, slope / len])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strips_fit_their_draws() {
-        assert_eq!(strip_slot(0, 1), Some((0, 0)));
-        assert_eq!(strip_slot(9, 1), Some((0, 8)));
-        assert_eq!(strip_slot(10, 1), None);
-        assert_eq!(strip_slot(10, 2), Some((1, 0)));
-        assert_eq!(strip_slot(11 * L0_BOXES - 3, L0_BOXES), Some((L0_BOXES - 1, 8)));
-        assert_eq!(11 * L0_BOXES - 2, helio_pass_foliage_place::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS[0]);
-        assert_eq!(11 * L1_BOXES - 2, helio_pass_foliage_place::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS[1]);
-    }
 }

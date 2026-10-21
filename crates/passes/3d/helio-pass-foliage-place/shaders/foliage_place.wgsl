@@ -199,7 +199,7 @@ fn pack_scale_type(height: f32, aux: u32, type_id: u32, variant: u32) -> u32 {
     return pack_unorm8_u(height)
         | ((aux & 0xffu) << 8u)
         | ((type_id & 0xffu) << 16u)
-        | ((variant & 3u) << 24u);
+        | ((variant & 0xffu) << 24u);
 }
 
 /// `crate::pack_rgb565` of an RGBA8 ground colour (0: none).
@@ -709,10 +709,6 @@ fn cs_place(
                 if local < band.slab && tile.blade_offset + local < arrayLength(&blades) {
                     var r = record;
                     r.packed_height_tuft = r.packed_height_tuft | (j << 16u);
-                    // A near blade's box bound: the draw drops its strip's tail early.
-                    if blade_records {
-                        r.packed_scale_type = r.packed_scale_type | (foliage_box_bound(types[(record.packed_scale_type >> 16u) & 0xffu], r, j, count, band.scale_max) << 26u);
-                    }
                     blades[tile.blade_offset + local] = r;
                 } else {
                     atomicAdd(&counters[COUNTER_PLACEMENT_OVERFLOW], 1u);

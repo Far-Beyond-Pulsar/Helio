@@ -112,11 +112,8 @@ pub struct BladeParams {
     pub aux: u8,
     /// Index into the foliage type descriptor array.
     pub type_id: u8,
-    /// Variant selector consumed by the material (2 bits).
+    /// Variant selector consumed by the material.
     pub variant: u8,
-    /// The most boxes a near blocky blade draws (`crate::blade::box_bound`, 4 bits; 0:
-    /// unknown): the draw drops its strip's vertices past them before any work.
-    pub boxes: u8,
     /// The ground's linear colour under the tuft (RGB565), or `None`.
     pub colour: Option<[f32; 3]>,
     /// Low 16 bits of [`crate::blade_seed`].
@@ -135,7 +132,6 @@ impl Default for BladeParams {
             aux: 0,
             type_id: 0,
             variant: 0,
-            boxes: 0,
             colour: None,
             seed: 0,
         }
@@ -177,26 +173,23 @@ pub fn unpack_blade_height_tuft(packed: u32) -> (f32, u8, u8, f32) {
     )
 }
 
-/// Pack the height scale, the aux byte, the type id and the last byte (the variant in
-/// bits 0..2, the box bound in bits 2..6), low byte first.
+/// Pack the height scale, the aux byte and the two 8-bit identifiers, low byte first.
 #[inline]
-pub fn pack_blade_scale_type(height_scale: f32, aux: u8, type_id: u8, variant: u8, boxes: u8) -> u32 {
+pub fn pack_blade_scale_type(height_scale: f32, aux: u8, type_id: u8, variant: u8) -> u32 {
     (pack_unorm8(height_scale) as u32)
         | ((aux as u32) << 8)
         | ((type_id as u32) << 16)
-        | (((variant & 3) as u32) << 24)
-        | (((boxes & 15) as u32) << 26)
+        | ((variant as u32) << 24)
 }
 
-/// Inverse of [`pack_blade_scale_type`]: `(height_scale, aux, type_id, variant, boxes)`.
+/// Inverse of [`pack_blade_scale_type`]: `(height_scale, aux, type_id, variant)`.
 #[inline]
-pub fn unpack_blade_scale_type(packed: u32) -> (f32, u8, u8, u8, u8) {
+pub fn unpack_blade_scale_type(packed: u32) -> (f32, u8, u8, u8) {
     (
         unpack_unorm8((packed & 0xff) as u8),
         ((packed >> 8) & 0xff) as u8,
         ((packed >> 16) & 0xff) as u8,
-        ((packed >> 24) & 3) as u8,
-        ((packed >> 26) & 15) as u8,
+        ((packed >> 24) & 0xff) as u8,
     )
 }
 
@@ -237,7 +230,7 @@ pub fn pack_blade(params: BladeParams) -> GpuBladeInstance {
     GpuBladeInstance {
         packed_pos: pack_blade_pos(params.tile_uv[0], params.tile_uv[1]),
         packed_height_tuft: pack_blade_height_tuft(params.height_offset, params.blade, params.blades, params.rank),
-        packed_scale_type: pack_blade_scale_type(params.height_scale, params.aux, params.type_id, params.variant, params.boxes),
+        packed_scale_type: pack_blade_scale_type(params.height_scale, params.aux, params.type_id, params.variant),
         packed_colour_seed: pack_blade_colour_seed(params.colour, params.seed),
     }
 }
@@ -250,9 +243,9 @@ pub fn pack_blade(params: BladeParams) -> GpuBladeInstance {
 pub fn unpack_blade(instance: &GpuBladeInstance) -> BladeParams {
     let tile_uv = unpack_blade_pos(instance.packed_pos);
     let (height_offset, blade, blades, rank) = unpack_blade_height_tuft(instance.packed_height_tuft);
-    let (height_scale, aux, type_id, variant, boxes) = unpack_blade_scale_type(instance.packed_scale_type);
+    let (height_scale, aux, type_id, variant) = unpack_blade_scale_type(instance.packed_scale_type);
     let (colour, seed) = unpack_blade_colour_seed(instance.packed_colour_seed);
-    BladeParams { tile_uv, height_offset, blade, blades, rank, height_scale, aux, type_id, variant, boxes, colour, seed }
+    BladeParams { tile_uv, height_offset, blade, blades, rank, height_scale, aux, type_id, variant, colour, seed }
 }
 
 impl GpuBladeInstance {
@@ -265,12 +258,7 @@ impl GpuBladeInstance {
     /// Material-defined variant selector.
     #[inline]
     pub fn variant(&self) -> u8 {
-        ((self.packed_scale_type >> 24) & 3) as u8
-    }
-
-    /// The most boxes the blade draws (0: unknown; see [`BladeParams::boxes`]).
-    pub fn boxes(&self) -> u8 {
-        ((self.packed_scale_type >> 26) & 15) as u8
+        ((self.packed_scale_type >> 24) & 0xff) as u8
     }
 
     /// Stable per-tuft hash seed. See [`GpuBladeInstance::packed_colour_seed`].
@@ -453,8 +441,8 @@ pub enum FoliageKind {
     /// height rounds to, at most [`crate::FOLIAGE_STACK_CUBES`]) upright on one grid,
     /// no yaw. Placement stands each on a cube's centre (no two share one) and shapes
     /// tufts: stacks lean out of their tuft in whole-cube steps, tallest at its centre.
-    /// Wind moves each cube whole. Drawn as procedural strips of the faces turned to
-    /// the eye ([`crate::FOLIAGE_BLOCK_LOD_VERTEX_COUNTS`]).
+    /// Wind moves each cube whole. Drawn as boxes, the faces turned to the eye
+    /// (`FoliageBoxesPass` expands them, the draw places nine corners a box).
     Block = 3,
 }
 
@@ -1126,11 +1114,10 @@ mod tests {
     fn blade_field_packers_do_not_bleed_into_each_other() {
         // Saturate one field at a time and assert the others stay clean. This is the
         // test that catches a shifted mask.
-        assert_eq!(pack_blade_scale_type(0.0, 0, 0xff, 0, 0), 0x00ff_0000);
-        assert_eq!(pack_blade_scale_type(0.0, 0, 0x00, 0xff, 0), 0x0300_0000);
-        assert_eq!(pack_blade_scale_type(0.0, 0, 0x00, 0, 0xff), 0x3c00_0000);
-        assert_eq!(pack_blade_scale_type(1.0, 0, 0x00, 0, 0), 0x0000_00ff);
-        assert_eq!(pack_blade_scale_type(0.0, 0xff, 0x00, 0, 0), 0x0000_ff00);
+        assert_eq!(pack_blade_scale_type(0.0, 0, 0xff, 0x00), 0x00ff_0000);
+        assert_eq!(pack_blade_scale_type(0.0, 0, 0x00, 0xff), 0xff00_0000);
+        assert_eq!(pack_blade_scale_type(1.0, 0, 0x00, 0x00), 0x0000_00ff);
+        assert_eq!(pack_blade_scale_type(0.0, 0xff, 0x00, 0x00), 0x0000_ff00);
         assert_eq!(pack_blade_height_tuft(0.0, 15, 0, 0.0), 0x000f_0000);
         assert_eq!(pack_blade_height_tuft(0.0, 0, 15, 0.0), 0x00f0_0000);
         assert_eq!(pack_blade_height_tuft(0.0, 0, 0, 1.0), 0xff00_0000);
@@ -1153,8 +1140,7 @@ mod tests {
                 height_scale: 1.0,
                 aux: 255,
                 type_id: 255,
-                variant: 3,
-                boxes: 15,
+                variant: 255,
                 colour: Some([1.0, 0.5, 0.0]),
                 seed: u16::MAX,
             },
@@ -1167,8 +1153,7 @@ mod tests {
                 height_scale: 0.5,
                 aux: 77,
                 type_id: 7,
-                variant: 2,
-                boxes: 5,
+                variant: 3,
                 colour: Some([0.2, 0.4, 0.1]),
                 seed: 0xbeef,
             },
@@ -1189,7 +1174,6 @@ mod tests {
             assert_eq!((decoded.blade, decoded.blades, decoded.aux), (original.blade, original.blades, original.aux));
             assert_eq!(decoded.type_id, original.type_id);
             assert_eq!(decoded.variant, original.variant);
-            assert_eq!(decoded.boxes, original.boxes);
             assert_eq!(decoded.seed, original.seed);
         }
     }
@@ -1208,8 +1192,7 @@ mod tests {
                 height_scale: t,
                 aux: (i * 3) as u8,
                 type_id: (i & 0xff) as u8,
-                variant: ((i >> 3) & 3) as u8,
-                boxes: ((i >> 5) & 15) as u8,
+                variant: ((i >> 3) & 0xff) as u8,
                 colour: (i % 3 != 0).then_some([t, 1.0 - t, t * 0.5]),
                 seed: (i * 7919) as u16,
             };
