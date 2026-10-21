@@ -69,14 +69,26 @@ spawn's squares by row then column).
 GPU (`chunk_generate.wgsl`):
 
 1. `tile_columns_main`: the terrain's columns.
-2. **`tile_features_main`** (a footprint a workgroup, spawn by spawn): the
-   near spawns' candidates over the footprint and the margin later spawns'
-   exclusion reads (`CompiledFeatures::layout`), with their level-0 ground
-   heights and materials, into the footprint's pool slot
-   (`tile_placements`, kept while the footprint is); its measured ranges
-   raised over the placements reaching its columns and its far forms'
-   canopies (classification and residency see trees as terrain).
-3. `chunk_columns_main`: after the terrain's mask and before the edits,
+2. **Candidate blocks** (`chunks::candidates`): a spawn's raw candidate on
+   a square is a function of the square alone, so candidates are evaluated
+   by blocks of 8x8 squares, each once while a pool keeps it (16384 blocks,
+   least recently used reused): the frame's footprints to compute reserve
+   the blocks their squares span, and those the pool lacks (64 a frame at
+   most) are evaluated in three wide dispatches:
+   `feature_block_quads_main` (a workgroup a block: the level-0 node quads
+   its anchors' and footprint corners' grounds read, listed once each),
+   `feature_block_nodes_main` (a lane a node) and
+   `feature_block_candidates_main` (a lane a square: heights, ground
+   material, relief).
+3. **`tile_features_main`** (a lane a square of each computed footprint):
+   the near spawns' raw candidates over the footprint and the margin later
+   spawns' exclusion reads (`CompiledFeatures::layout`) copied from the
+   blocks into the footprint's pool slot (`tile_placements`, kept while
+   the footprint is), excluded where they reach the footprint and an
+   earlier spawn's raw candidate meets them; its measured ranges raised
+   over the placements reaching its columns and its far forms' canopies
+   (classification and residency see trees as terrain).
+4. `chunk_columns_main`: after the terrain's mask and before the edits,
    `feature_column`: the far canopy, then each placement within reach in
    order, its shapes in order over the cells their boxes span; their
    materials into
@@ -87,14 +99,18 @@ CPU (`Planet`): `sample_kind` / `material` / walks evaluate the same
 placements and stamps over a cell (`FeatureEval`, each square's placement
 cached), then the far forms (`CompiledFeatures::far_cover`).
 
-Tests pin CPU and GPU: features render exactly against CPU ray casts at
-level 0, draw their stamps' materials, and every coarse hit (near stamps
-and far canopies) is solid on the CPU.
+Tests pin CPU and GPU: every footprint's placements are the CPU's square
+by square, features render exactly against CPU ray casts at level 0, draw
+their stamps' materials, and every coarse hit (near stamps and far
+canopies) is solid on the CPU.
 
 ## Costs
 
 A footprint keeps `CompiledFeatures::stride` squares (8 bytes each). A
 candidate costs one height evaluation, plus four with a relief rule, once
-per footprint while it stays in the pool; a chunk column scans the squares
-within its spawns' reach, and each placement's shapes over the cells their
-boxes span.
+while its block stays in the pool (512 bytes a block), however many
+footprints and levels keep its square (a level-0 footprint's tree squares
+reach some 150 columns past its 64 each way: each was evaluated by some 30
+footprints when footprints evaluated their own); a footprint copies its
+squares and checks exclusion. A chunk column scans the squares within its
+spawns' reach, and each placement's shapes over the cells their boxes span.

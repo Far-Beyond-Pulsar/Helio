@@ -36,7 +36,8 @@ views; from 45 m up looking down; behind; and from 400 m up looking out to
 the horizon), saves each as `<dir>/shot_NN.png` and quits after the last.
 A pose is shot once the planet pass reports the view settled and at least
 `VOXEL_CRAFT_WAIT` frames have passed (default 120, for the temporal
-anti-aliasing to converge), or after 900 frames regardless.
+anti-aliasing to converge), or after 900 frames regardless
+(`VOXEL_CRAFT_WAIT_MAX`).
 
 ```
 VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
@@ -44,6 +45,9 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
 
 * `VOXEL_CRAFT_POSES=<n>`: shoot only the first `n` poses.
 * `VOXEL_CRAFT_WAIT=<frames>`: the minimum frames before each shot.
+* `VOXEL_CRAFT_WAIT_MAX=<frames>`: the frames after which a pose is shot
+  settled or not (default 900; with `VOXEL_CRAFT_WAIT=1`, the shot's log
+  line gives the frames the view took to settle).
 * `VOXEL_CRAFT_BURST=<n>`: save `n` consecutive frames a pose
   (`shot_PP_FFF.png`), the camera still: flicker shows as frame-to-frame
   differences. `python tools/flicker.py <dir>` measures it per pose (mean

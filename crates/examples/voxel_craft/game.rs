@@ -289,8 +289,9 @@ impl Tour {
         self.waited += 1;
         // A pose is shot once the terrain has settled and the temporal
         // anti-aliasing has had frames to converge (or after a long wait).
-        let minimum: u32 = std::env::var("VOXEL_CRAFT_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
-        let ready = (settled && self.waited >= minimum) || self.waited >= minimum.max(900);
+        let frames = |name: &str, default: u32| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        let minimum = frames("VOXEL_CRAFT_WAIT", 120);
+        let ready = (settled && self.waited >= minimum) || self.waited >= minimum.max(frames("VOXEL_CRAFT_WAIT_MAX", 900));
         if !ready {
             return None;
         }
