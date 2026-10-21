@@ -101,12 +101,17 @@ pub struct GpuPostProcessUniforms {
     pub vignette_color: [f32; 3],
     pub vignette_enabled: u32,
 
-    // ── Reserved (16 bytes) ──
-    // Was post-process chromatic aberration. Lateral chromatic aberration is an
-    // optical effect and lives in the lens (`helio-pass-lens`). The bytes stay
-    // so every later offset, the SceneDB row split and the flare binding are
-    // unchanged.
-    pub reserved_ca: [f32; 4],
+    // ── Local exposure (16 bytes, offset 192) ──
+    // Edge-aware local tone mapping (`postprocess.wgsl`, `cs_local_exposure_*`):
+    // the mean EV of each pixel's neighbourhood of similar brightness, from a
+    // bilateral grid, is moved toward middle grey by these contrast scales.
+    // 1 leaves that side unchanged (all three at 1 turn the effect off).
+    // These bytes held the removed post-process chromatic aberration, so
+    // every later offset, the SceneDB row split and the flare binding stay.
+    pub local_exposure_highlight_contrast: f32, // 192 — regions above middle grey, 0..1
+    pub local_exposure_shadow_contrast: f32,    // 196 — regions below middle grey, 0..1
+    pub local_exposure_detail_strength: f32,    // 200 — contrast within a region, 1 = kept
+    pub pad_local_exposure: f32,                // 204
 
     // ── Film Grain (16 bytes) ──
     pub grain_intensity: f32,
@@ -279,6 +284,13 @@ pub enum FogMode {
 
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
+/// Default local exposure: bright regions keep most of their contrast, shade
+/// is lifted toward middle grey (a region 4 EV under it by 2 EV), and
+/// texture within a region keeps its contrast.
+pub const LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST: f32 = 0.85;
+pub const LOCAL_EXPOSURE_SHADOW_CONTRAST: f32 = 0.5;
+pub const LOCAL_EXPOSURE_DETAIL_STRENGTH: f32 = 1.0;
+
 impl Default for GpuPostProcessUniforms {
     fn default() -> Self {
         Self {
@@ -322,7 +334,10 @@ impl Default for GpuPostProcessUniforms {
             vignette_color: [0.0, 0.0, 0.0],
             vignette_enabled: 0,
 
-            reserved_ca: [0.0; 4],
+            local_exposure_highlight_contrast: LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST,
+            local_exposure_shadow_contrast: LOCAL_EXPOSURE_SHADOW_CONTRAST,
+            local_exposure_detail_strength: LOCAL_EXPOSURE_DETAIL_STRENGTH,
+            pad_local_exposure: 0.0,
 
             grain_intensity: 0.0,
             grain_response: 1.0,
@@ -451,6 +466,14 @@ pub struct PostProcessSettings {
     pub vignette_color: [f32; 3],
     pub vignette_enabled: bool,
 
+    // Local exposure: shade and bright regions moved toward middle grey,
+    // each by its own contrast scale (1 = unchanged, 0 = flattened to grey),
+    // with edges kept (no halos at silhouettes). Detail strength scales the
+    // contrast within a region (1 = kept, above 1 sharpened).
+    pub local_exposure_highlight_contrast: f32,
+    pub local_exposure_shadow_contrast: f32,
+    pub local_exposure_detail_strength: f32,
+
     // Film Grain
     pub grain_intensity: f32,
     pub grain_response: f32,
@@ -548,7 +571,10 @@ impl PostProcessSettings {
             vignette_color: self.vignette_color,
             vignette_enabled: self.vignette_enabled as u32,
 
-            reserved_ca: [0.0; 4],
+            local_exposure_highlight_contrast: self.local_exposure_highlight_contrast,
+            local_exposure_shadow_contrast: self.local_exposure_shadow_contrast,
+            local_exposure_detail_strength: self.local_exposure_detail_strength,
+            pad_local_exposure: 0.0,
 
             grain_intensity: self.grain_intensity,
             grain_response: self.grain_response,
@@ -666,6 +692,10 @@ impl Default for PostProcessSettings {
             vignette_roundness: 0.5,
             vignette_color: [0.0, 0.0, 0.0],
             vignette_enabled: false,
+
+            local_exposure_highlight_contrast: LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST,
+            local_exposure_shadow_contrast: LOCAL_EXPOSURE_SHADOW_CONTRAST,
+            local_exposure_detail_strength: LOCAL_EXPOSURE_DETAIL_STRENGTH,
 
             grain_intensity: 0.0,
             grain_response: 1.0,
@@ -871,8 +901,8 @@ impl GpuPostProcessUniforms {
 const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET == 272);
 const _: () = assert!(std::mem::offset_of!(GpuPostProcessUniforms, lens_enabled) == 432);
 
-/// Override bit indices, in non-padding, non-reserved GPU declaration order. Vector colors
-/// use one bit.
+/// Override bit indices, in non-padding, non-reserved GPU declaration order, with later
+/// additions appended (saved masks keep their meaning). Vector colors use one bit.
 /// ALL is the default for authored volumes; a zero mask overrides nothing.
 pub struct PostProcessProperty;
 #[allow(non_upper_case_globals)]
@@ -963,8 +993,11 @@ impl PostProcessProperty {
     pub const LENS_LIGHT_INTENSITY: usize = 81;
     pub const LENS_FIELD_MARGIN: usize = 82;
     pub const LENS_RESPONSE_TIME: usize = 83;
+    pub const LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST: usize = 84;
+    pub const LOCAL_EXPOSURE_SHADOW_CONTRAST: usize = 85;
+    pub const LOCAL_EXPOSURE_DETAIL_STRENGTH: usize = 86;
     /// One past the last property index.
-    pub const COUNT: usize = 84;
+    pub const COUNT: usize = 87;
     pub fn set(mask: &mut [u32; 4], property: usize, enabled: bool) {
         assert!(property < Self::COUNT);
         let bit = 1 << (property % 32);
@@ -1117,5 +1150,8 @@ fn blend_properties(mut a: GpuPostProcessUniforms, b: &GpuPostProcessUniforms, t
     if PostProcessProperty::contains(mask, 81) { a.lens_light_intensity += (b.lens_light_intensity - a.lens_light_intensity) * t; }
     if PostProcessProperty::contains(mask, 82) { a.lens_field_margin += (b.lens_field_margin - a.lens_field_margin) * t; }
     if PostProcessProperty::contains(mask, 83) { a.lens_response_time += (b.lens_response_time - a.lens_response_time) * t; }
+    if PostProcessProperty::contains(mask, 84) { a.local_exposure_highlight_contrast += (b.local_exposure_highlight_contrast - a.local_exposure_highlight_contrast) * t; }
+    if PostProcessProperty::contains(mask, 85) { a.local_exposure_shadow_contrast += (b.local_exposure_shadow_contrast - a.local_exposure_shadow_contrast) * t; }
+    if PostProcessProperty::contains(mask, 86) { a.local_exposure_detail_strength += (b.local_exposure_detail_strength - a.local_exposure_detail_strength) * t; }
     a
 }
