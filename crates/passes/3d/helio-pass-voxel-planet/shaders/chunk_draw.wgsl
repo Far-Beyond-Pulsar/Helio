@@ -1939,10 +1939,8 @@ fn store_walked(p: vec2<i32>, size: vec2<u32>, lit: f32, own: f32, terrain: f32)
 // The normal each hit is lit with (`Face::shading`) and its sky sample
 // (zero where a mesh is in front of the hit, or the sky).
 @group(1) @binding(13) var out_normal: texture_storage_2d<rgba16float, write>;
-// Samples: lit (bit 0), walked (it faced the sun, bit 1), a hit (bit 2),
-// walked through (its back to the sun, a material that lets light
-// through: bit 3); its distance's bits; its slope's normal (`pack_unit`,
-// 0: none); the sun's share through it (of 255: `back_sample`).
+// Samples: lit (bit 0), walked (it faced the sun, bit 1), a hit (bit 2);
+// its distance's bits; its slope's normal (`pack_unit`, 0: none).
 @group(1) @binding(9) var out_sun_samples: texture_storage_2d<rgba32uint, write>;
 @group(1) @binding(10) var sun_samples: texture_2d<u32>;
 // Hits no sample serves: their count and pixels (x | y << 16), and the
@@ -2338,22 +2336,6 @@ fn sample_pixel(b: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
     return min(b * 2u + vec2<u32>(turn & 1u, (turn >> 1u) ^ (turn & 1u)), size - 1u);
 }
 
-// A sample's hit facing away from the sun whose material lets light
-// through (bit 3): the sun's share through it and the cells past it (w, of
-// 255; `back_through`).
-fn back_sample(sample: vec4<u32>, q: vec2<u32>, size: vec2<u32>, v: vec2<u32>, t: f32, f: Face) -> vec4<u32> {
-    if dot(f.normal, params.sun.xyz) >= 0.0 || materials.m[min((v.y >> 21u) & 31u, 31u)].light.x <= 0.0 { return sample; }
-    let through = back_through(q, size, v.x, t, f, sun_ray(sun_point(q)));
-    return vec4<u32>(sample.x | 8u, sample.yz, u32(clamp(through, 0.0, 1.0) * 255.0 + 0.5));
-}
-
-// The sun's share along `dir` through the hit at pixel `q` (its back face
-// `f`, distance `t`, chunk `slot`): from off its face, into its own cell
-// first, then the cells past it (`light_through`).
-fn back_through(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face, dir: vec3<f32>) -> f32 {
-    return light_through(q, pixel_ray(q, size) * t + f.normal * (0.1 * f.cell), slot, dir);
-}
-
 // One thread a 2x2 block: dispatch over half the size.
 @compute @workgroup_size(8, 8)
 fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -2369,7 +2351,6 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
-        else { sample = back_sample(sample, q, size, v, t, f); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2389,7 +2370,6 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
-        else { sample = back_sample(sample, q, size, v, t, f); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2400,9 +2380,6 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // A listed pixel whose mesh walks, not its hit (`shadow_fallback`).
 const MESH_PIXEL: u32 = 0x8000u;
-// A hit facing away from the sun whose material lets light through: the
-// sun through it and the leaves past it (`light_through`).
-const BACK_PIXEL: u32 = 0x80000000u;
 
 // The mesh point at pixel `q` (eye-relative), w 1; w 0 where no mesh.
 fn mesh_point(q: vec2<u32>, size: vec2<u32>) -> vec4<f32> {
@@ -2546,27 +2523,13 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     var lit = 0.0;
     if dot(f.shading, sun) <= 0.0 {
         own = 1.0;
-        if dot(f.normal, sun) < 0.0 && materials.m[min((v.y >> 21u) & 31u, 31u)].light.x > 0.0 {
-            // Through it: its block's sample, or the nearer neighbours' (as
-            // the sun's walks above), else its own walk.
-            var found = false;
-            for (var b = 0u; b < 4u && !found; b++) {
-                let at = blocks[b];
-                if steady || any(at < vec2<i32>(0)) || any(at >= half) { continue; }
-                let s = textureLoad(sun_samples, at, 0);
-                if (s.x & 8u) == 0u || distance(pixel_ray(sample_pixel(vec2<u32>(at), size), size) * bitcast<f32>(s.y), at_hit) > reach { continue; }
-                lit = f32(s.w) / 255.0;
-                own = select(0.0, 1.0, all(sample_pixel(vec2<u32>(at), size) == id.xy));
-                found = true;
-            }
-            if found {
-                store_walked(p, size, lit, own, 1.0);
-                return;
-            }
-            let n = atomicAdd(&fallbacks.count, 1u);
-            fallbacks.pixels[n] = id.x | BACK_PIXEL | (id.y << 16u);
-            atomicMax(&fallback_groups[0], n / 64u + 1u);
-            return;
+        // A material that lets light through, its back to the sun: the
+        // light through it (its share) where the sun reaches its far side,
+        // by the sun's occlusion maps (as GI's hits: a texture read, steady
+        // from frame to frame).
+        let through = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x;
+        if dot(f.normal, sun) < 0.0 && through > 0.0 {
+            lit = clamp(through, 0.0, 1.0) * sun_occlusion(at_hit - f.normal * (1.5 * f.cell));
         }
     } else {
         let found = sampled != 0u;
@@ -2587,7 +2550,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
 fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= atomicLoad(&fallbacks.count) { return; }
     let packed = fallbacks.pixels[id.x];
-    let q = vec2<u32>(packed & 0x7fffu, (packed >> 16u) & 0x7fffu);
+    let q = vec2<u32>(packed & 0x7fffu, packed >> 16u);
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     if (packed & MESH_PIXEL) != 0u {
@@ -2596,17 +2559,6 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     let f = hit_face(v, vec3<f32>(0.0), q, size, t);
-    if (packed & BACK_PIXEL) != 0u {
-        var through = 0.0;
-        if steady_shadows() {
-            for (var i = 0u; i < SUN_DISK_RAYS; i++) { through += back_through(q, size, v.x, t, f, sun_ray(sun_disk_point(i))); }
-            through /= f32(SUN_DISK_RAYS);
-        } else {
-            through = back_through(q, size, v.x, t, f, sun_ray(sun_point(q)));
-        }
-        store_walked(vec2<i32>(q), size, through, 1.0, 1.0);
-        return;
-    }
     // Steady shadows: the disk's points averaged (the reference).
     var lit = 0.0;
     if steady_shadows() {
@@ -3791,31 +3743,6 @@ fn probe_start(c: vec4<i32>, org: vec3<f32>, r: i32) -> ProbeStart {
     out.walk = Walk(f, fk, to_frame(at.lo, diff, fk, true), clip_to_face(to_frame(at.hi, diff, fk, false), fk), false);
     out.ok = true;
     return out;
-}
-
-// The share of a distant light's (toward `dir`) reaching eye-relative point
-// `at` (beside a cell of chunk `slot`, pixel `q` for the dither): none past
-// an opaque cell; through cells that let light through, their transmission
-// each (crossed in a cell and three quarters, at most LIGHT_THROUGH of
-// them; under LIGHT_FLOOR of the light is none).
-const LIGHT_THROUGH: u32 = 4u;
-const LIGHT_FLOOR: f32 = 0.15;
-
-fn light_through(q: vec2<u32>, at: vec3<f32>, slot: u32, dir: vec3<f32>) -> f32 {
-    var origin = at;
-    var near = slot;
-    var light = 1.0;
-    for (var i = 0u; i <= LIGHT_THROUGH; i++) {
-        let end = point_walk(q, origin, vec2<u32>(near, 0u), dir, 1e30);
-        if !end.hit { return light; }
-        if end.slot == NONE || i == LIGHT_THROUGH { return 0.0; }
-        let m = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
-        light *= clamp(materials.m[min(m, 31u)].light.x, 0.0, 1.0);
-        if light < LIGHT_FLOOR { return 0.0; }
-        origin += dir * (end.t + 1.75 * length(cell_frame(end.slot, end.cell).m0.xyz));
-        near = end.slot;
-    }
-    return 0.0;
 }
 
 // A thread a ray: its hit (distance, the face's normal, the material's
