@@ -477,13 +477,7 @@ fn build_scene(
             let color = chart_colors[(row * 2 + col) % chart_colors.len()];
             let material = spawn_material(
                 &mut scene_db.world,
-                make_material(
-                    [color[0], color[1], color[2], 1.0],
-                    0.45,
-                    0.0,
-                    color,
-                    1.15,
-                ),
+                make_material([color[0], color[1], color[2], 1.0], 0.45, 0.0, color, 1.15),
             );
             let x = (col as f32 - 2.5) * 0.46;
             let y = 0.58 + row as f32 * 0.48;
@@ -1153,6 +1147,13 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
         if lens.element_count > 0 && slot.index() < lens.element_first + lens.element_count {
             scene_db.world.insert(slot, element);
         }
+    }
+    if name.starts_with("split-") {
+        // A longer, faster lens makes the two split-focus distances visible
+        // on this small showcase render while preserving the same scene.
+        lens.focal_length_mm = 85.0;
+        lens.f_number = 1.4;
+        lens.focus_distance_m = 8.0;
     }
     v3_demo_common::set_camera_lens(&mut scene_db.world, lens);
 }
