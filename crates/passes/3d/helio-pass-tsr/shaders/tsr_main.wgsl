@@ -221,6 +221,15 @@ fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
 
 fn max3(v: vec3<f32>) -> f32 { return max(v.r, max(v.g, v.b)); }
 
+// A colour with its non-finite channels (NaN, infinity: all exponent bits
+// set) as 0. A NaN that reached history would survive every blend after
+// it, and one frame's would stay for good; tested on the bits, which no
+// fast-math assumption folds away.
+fn finite_rgb(c: vec3<f32>) -> vec3<f32> {
+    let exponent = bitcast<vec3<u32>>(c) & vec3<u32>(0x7f800000u);
+    return select(c, vec3<f32>(0.0), exponent == vec3<u32>(0x7f800000u));
+}
+
 // Reversible max-channel Reinhard: [0, inf) -> [0, 1). Averaging here weights
 // each colour by 1 / (1 + max channel).
 fn tonemap(c: vec3<f32>) -> vec3<f32> { return c / (max3(c) + 1.0); }
@@ -260,7 +269,7 @@ fn sample_history(uv: vec2<f32>) -> vec3<f32> {
     for (var y = 0; y < 4; y++) {
         for (var x = 0; x < 4; x++) {
             let at = clamp(base + vec2<i32>(x - 1, y - 1), vec2<i32>(0), dims - 1);
-            let s = textureLoad(history_frame, at, 0).rgb;
+            let s = finite_rgb(textureLoad(history_frame, at, 0).rgb);
             sum += s * (w[x].x * w[y].y);
             if (x == 1 || x == 2) && (y == 1 || y == 2) {
                 lo = min(lo, s);
@@ -377,7 +386,7 @@ fn load_tile(tile_origin: vec2<i32>, span: vec2<i32>, thread: u32) {
         let i = local.y * FOOTPRINT.x + local.x;
         let at = tile_origin + local;
         let p = clamp(at, vec2<i32>(0), dims - 1);
-        let rgb = textureLoad(current_frame, p, 0).rgb;
+        let rgb = finite_rgb(textureLoad(current_frame, p, 0).rgb);
         let l = log(max(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 1.0e-4));
         tile_colour[i] = vec4<f32>(perceptual(rgb), l);
         let d = textureLoad(depth_tex, p, 0);
@@ -514,7 +523,7 @@ fn history_low_luma(in_pos: vec2<f32>, history_uv: vec2<f32>) -> f32 {
     for (var y = 0; y < 3; y++) {
         for (var x = 0; x < 3; x++) {
             let offset = first + vec2<f32>(f32(x), f32(y)) + 0.5 - in_pos;
-            let q = perceptual(textureSampleLevel(history_frame, linear_sampler, history_uv + offset / in_dims, 0.0).rgb);
+            let q = perceptual(finite_rgb(textureSampleLevel(history_frame, linear_sampler, history_uv + offset / in_dims, 0.0).rgb));
             sum += lx[x] * ly[y] * vec2<f32>(q.x, 1.0);
         }
     }

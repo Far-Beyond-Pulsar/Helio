@@ -775,3 +775,30 @@ fn moving_edges_leave_no_trails() {
         }
     }
 }
+
+/// A frame whose input holds NaN, then one holding infinities (a lighting
+/// bug upstream for a frame), must not stay in history: a NaN survives
+/// every blend after it. After clean frames the output is finite and
+/// matches a run that never saw them.
+#[test]
+fn a_non_finite_frame_does_not_stick() {
+    let Some(mut fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
+    let Some(mut clean) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
+    for _ in 0..16 {
+        fixture.frame(Content::DETAIL);
+        clean.frame(Content::DETAIL);
+    }
+    fixture.frame(Content { brightness: f32::NAN, ..Content::DETAIL });
+    clean.frame(Content::DETAIL);
+    fixture.frame(Content { brightness: f32::INFINITY, ..Content::DETAIL });
+    clean.frame(Content::DETAIL);
+    let (mut output, mut expected) = (Vec::new(), Vec::new());
+    for _ in 0..48 {
+        output = fixture.frame(Content::DETAIL);
+        expected = clean.frame(Content::DETAIL);
+    }
+    let non_finite = output.iter().filter(|v| !v.is_finite()).count();
+    assert_eq!(non_finite, 0, "{non_finite} pixels still non-finite");
+    let difference = mean_abs_difference(&output, &expected);
+    assert!(difference < 0.01, "mean difference from a clean run {difference}");
+}
