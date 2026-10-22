@@ -403,6 +403,7 @@ pub mod graph;
 mod frame_inputs;
 pub mod movability;
 pub mod profiling;
+pub mod radix_sort;
 pub mod registry;
 pub mod render_environment;
 pub mod resource_keys;
