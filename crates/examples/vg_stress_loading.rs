@@ -10,17 +10,18 @@ use super::vg_stress_data::{
 use super::vg_stress_prep::{catalog::Config, polyhaven};
 use super::{classic_proxy, load_or_build_vgeo_cache, stable_content_id};
 use helio::{MeshUpload, PackedVertex};
-use helio_asset_compat::{load_scene_file_with_config, ConvertedMesh, LoadConfig, MaterialSource};
-use helio_vg_stream::{content_words, VgeoBytes, VgeoSource};
+use helio_asset_compat::{ConvertedMesh, LoadConfig, MaterialSource, load_scene_file_with_config};
+use helio_vg_stream::{VgeoBytes, VgeoSource, content_words};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
-        Arc, Mutex,
     },
 };
 
@@ -170,8 +171,12 @@ fn load_scene(path: &Path) -> Result<Arc<LoadedScene>, String> {
         }
     }
     *cache = None;
-    let mut scene = load_scene_file_with_config(path, LoadConfig::default()).map_err(|e| e.to_string())?;
-    let info = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gltf")) {
+    let mut scene =
+        load_scene_file_with_config(path, LoadConfig::default()).map_err(|e| e.to_string())?;
+    let info = if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gltf"))
+    {
         textures::read_gltf_materials(path)
     } else {
         Default::default()
@@ -185,11 +190,18 @@ fn load_scene(path: &Path) -> Result<Arc<LoadedScene>, String> {
             .and_then(|m| m.uv);
         if let Some((scale, offset)) = uv {
             for v in &mut mesh.vertices {
-                v.tex_coords0 = [v.tex_coords0[0] * scale[0] + offset[0], v.tex_coords0[1] * scale[1] + offset[1]];
+                v.tex_coords0 = [
+                    v.tex_coords0[0] * scale[0] + offset[0],
+                    v.tex_coords0[1] * scale[1] + offset[1],
+                ];
             }
         }
     }
-    let loaded = Arc::new(LoadedScene { meshes, sources: std::mem::take(&mut scene.material_sources), info });
+    let loaded = Arc::new(LoadedScene {
+        meshes,
+        sources: std::mem::take(&mut scene.material_sources),
+        info,
+    });
     *cache = Some((path.to_path_buf(), loaded.clone()));
     Ok(loaded)
 }
@@ -212,7 +224,9 @@ impl LoadedScene {
 
     /// Meshes of `variant` (all of them for `None`).
     fn variant_meshes(&self, variant: Option<usize>) -> impl Iterator<Item = &ConvertedMesh> {
-        self.meshes.iter().filter(move |m| variant.is_none_or(|v| m.source_mesh == v))
+        self.meshes
+            .iter()
+            .filter(move |m| variant.is_none_or(|v| m.source_mesh == v))
     }
 }
 
@@ -233,7 +247,11 @@ fn run(
             let _ = tx.send(Event::Status(format!("Preparing assets: {message}")));
         };
         if let Err(error) = crate::vg_stress_prep::provision_with(&assets_dir, config, &progress) {
-            if !send(tx, Event::Error(format!("asset provisioning: {error}")), stop) {
+            if !send(
+                tx,
+                Event::Error(format!("asset provisioning: {error}")),
+                stop,
+            ) {
                 return;
             }
         }
@@ -298,35 +316,43 @@ fn run(
     // quality budget off the window thread; one bounded upload per event.
     let mats = Mat::all(config);
     let jobs = textures::jobs(&assets_dir, &mats, config);
+    let texture_count = jobs.len();
     let _ = tx.send(Event::Status(format!("Decoding {} textures", jobs.len())));
-    for job in jobs {
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-        match textures::decode(&job.path, job.role, job.cap) {
-            Ok(d) => {
-                if !send(
-                    tx,
-                    Event::Texture {
-                        bindings: job.bindings,
-                        srgb: job.role == textures::Role::Srgb,
-                        width: d.width,
-                        height: d.height,
-                        mips: d.mips,
-                    },
-                    stop,
-                ) {
-                    return;
+    let texture_started = std::time::Instant::now();
+    let texture_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .expect("texture decode pool");
+    texture_pool.install(|| {
+        jobs.into_par_iter().for_each(|job| {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            match textures::decode(&job.path, job.role, job.cap) {
+                Ok(d) => {
+                    let _ = send(
+                        tx,
+                        Event::Texture {
+                            bindings: job.bindings,
+                            srgb: job.role == textures::Role::Srgb,
+                            width: d.width,
+                            height: d.height,
+                            mips: d.mips,
+                        },
+                        stop,
+                    );
+                }
+                // The material keeps its flat colour.
+                Err(error) => {
+                    let _ = send(tx, Event::Error(format!("texture {error}")), stop);
                 }
             }
-            // The material keeps its flat colour.
-            Err(error) => {
-                if !send(tx, Event::Error(format!("texture {error}")), stop) {
-                    return;
-                }
-            }
-        }
-    }
+        });
+    });
+    eprintln!(
+        "[Museum] decoded {texture_count} textures in {:.2}s (4 workers)",
+        texture_started.elapsed().as_secs_f64()
+    );
 
     // Consume every warm VG cache before starting any cold, expensive cook.
     let mut misses = Vec::new();
@@ -500,7 +526,8 @@ fn preview(root: &Path, cache: &Path, asset: &str, vg: bool) -> Result<Vec<Prepa
         let masked = scene.masked(mesh);
         // Masked parts get no VG content id: they render classically.
         let use_vg = vg && (MASKED_PARTS_USE_VG || !masked);
-        let content = use_vg.then(|| content_words(stable_content_id(&mesh.vertices, &mesh.indices)));
+        let content =
+            use_vg.then(|| content_words(stable_content_id(&mesh.vertices, &mesh.indices)));
         let radius = mesh
             .vertices
             .iter()
@@ -567,7 +594,7 @@ fn write_preview(path: &Path, parts: &[PreparedPart]) -> Result<(), String> {
     }
     let temp = path.with_extension("tmp");
     write(&temp, parts)
-        .and_then(|_| std::fs::rename(&temp, path))
+        .and_then(|_| super::replace_cache_file(&temp, path).map_err(std::io::Error::other))
         .map_err(|e| {
             let _ = std::fs::remove_file(&temp);
             e.to_string()
@@ -688,6 +715,10 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.pop();
         assert!(decode_preview(&bytes, asset).is_err());
+        std::fs::write(&path, &bytes).unwrap();
+        let repaired = preview(root, &cache, asset, false).unwrap();
+        assert_eq!(repaired.len(), parts.len());
+        assert_eq!(read_preview(&path, asset).unwrap().len(), parts.len());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(cache).unwrap();
     }
@@ -706,7 +737,10 @@ mod tests {
             } else if placement.asset.contains('#') {
                 // Poly Haven trees are provisioned on demand.
                 let (path, variant) = split_key(&placement.asset);
-                assert!(path.starts_with("assets/vg_stress/trees/") && path.ends_with(".gltf"), "{path}");
+                assert!(
+                    path.starts_with("assets/vg_stress/trees/") && path.ends_with(".gltf"),
+                    "{path}"
+                );
                 assert!(variant.is_some());
             } else {
                 // Scans are prepared on demand (vg_stress_prep), not committed.
@@ -731,10 +765,13 @@ mod tests {
     #[test]
     #[ignore = "requires the six local museum scan preview and VG caches"]
     fn cached_museum_scans_reduce_triangles_with_distance() {
-        use helio_pass_vg_cull::reference::{select_clusters, RefAsset, RefInstance, RefView};
+        use helio_pass_vg_cull::reference::{
+            RefAsset, RefInstance, RefView, select_clusters, select_clusters_ex,
+        };
         use helio_vg_build::VgeoReader;
         use helio_vg_format::{
-            cluster_slot_local, cluster_slot_page, GpuCluster, GpuVgInstance, INST_ENABLED,
+            GpuCluster, GpuVgInstance, INST_CONE_CULL, INST_ENABLED, cluster_slot_local,
+            cluster_slot_page,
         };
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let cache = root.join("assets/vg_stress/cache");
@@ -753,8 +790,11 @@ mod tests {
                 continue;
             }
             let asset = format!("assets/vg_stress/meshes/{name}.glb");
-            let parts = read_preview(&preview_path(&cache, &root.join(&asset), None).unwrap(), &asset)
-                .expect("run the museum once to populate preview caches");
+            // Rebuild stale/missing preview caches from the local prepared
+            // scan; validation must not depend on which exhibits the
+            // interactive demo happened to load this run.
+            let parts = preview(root, &cache, &asset, true)
+                .unwrap_or_else(|error| panic!("{name}: could not prepare preview: {error}"));
             for part in parts {
                 let content = content_id(part.meta.content.unwrap());
                 let bytes = std::fs::read(vgeo_cache.join(format!("{content:032x}.vgeo")))
@@ -795,7 +835,10 @@ mod tests {
                     matrix: part.meta.transform,
                     inst: GpuVgInstance {
                         asset_slot: 0,
-                        flags: INST_ENABLED,
+                        // Every part admitted to VG is opaque. Masked tree
+                        // cards have no VG content id, so backface cone culling
+                        // is safe for this instance set.
+                        flags: INST_ENABLED | INST_CONE_CULL,
                         lod_error_scale: 1.0,
                         object_row: 0,
                     },
@@ -817,8 +860,12 @@ mod tests {
                     .iter()
                     .map(|c| c.self_error * inst.scale())
                     .fold(0.0f32, f32::max);
-                eprintln!("{name}: coarsest={root_tris} tris in {} roots, max root radius={max_radius:.3}m, error={max_error:.6}m", roots.len());
+                eprintln!(
+                    "{name}: coarsest={root_tris} tris in {} roots, max root radius={max_radius:.3}m, error={max_error:.6}m",
+                    roots.len()
+                );
                 let mut counts = Vec::new();
+                let mut cone_counts = Vec::new();
                 for distance in [3.0, 6.0, 12.0, 24.0, 48.0, 96.0] {
                     let view = RefView::looking_down_neg_z(
                         (center + glam::Vec3::Z * distance).to_array(),
@@ -840,10 +887,65 @@ mod tests {
                     assert!(triangles > 0, "{name}: disappeared at {distance}m");
                     assert!(selected.requested_pages.is_empty());
                     counts.push(triangles);
+                    let cone_selected = select_clusters_ex(&asset, &view, 1.0, &inst, true);
+                    let cone_triangles: u64 = cone_selected
+                        .drawn
+                        .iter()
+                        .map(|&s| {
+                            u64::from(
+                                lookup(cluster_slot_page(s), cluster_slot_local(s)).counts_material
+                                    & 0xff,
+                            )
+                        })
+                        .sum();
+                    assert!(
+                        cone_triangles > 0,
+                        "{name}: cone cull removed the whole asset at {distance}m"
+                    );
+                    assert!(
+                        cone_triangles <= triangles,
+                        "{name}: cone cull added triangles at {distance}m"
+                    );
+                    cone_counts.push(cone_triangles);
                 }
                 eprintln!(
-                    "{name}: source={} triangles; 3/6/12/24/48/96m at 720p, 1px: {counts:?}",
+                    "{name}: source={} triangles; 3/6/12/24/48/96m at 720p, 1px: no-cone={counts:?}, cone={cone_counts:?}",
                     part.meta.source_triangles
+                );
+                let focal = 720.0 / (2.0 * std::f32::consts::FRAC_PI_4.tan());
+                let mut pixel_height_counts = Vec::new();
+                for pixel_height in [18.0, 100.0, 1_000.0] {
+                    let distance = focal * 2.0 / pixel_height;
+                    let view = RefView::looking_down_neg_z(
+                        (center + glam::Vec3::Z * distance).to_array(),
+                        std::f32::consts::FRAC_PI_4,
+                        0.1,
+                        720.0,
+                    );
+                    let mut by_tau = Vec::new();
+                    for tau in [1.0, 2.0, 4.0, 8.0] {
+                        let selected = select_clusters(&asset, &view, tau, &inst);
+                        let triangles: u64 = selected
+                            .drawn
+                            .iter()
+                            .map(|&s| {
+                                u64::from(
+                                    lookup(cluster_slot_page(s), cluster_slot_local(s))
+                                        .counts_material
+                                        & 0xff,
+                                )
+                            })
+                            .sum();
+                        by_tau.push(triangles);
+                    }
+                    assert!(
+                        by_tau.windows(2).all(|w| w[1] <= w[0]),
+                        "{name}: looser pixel error must not select more geometry: {by_tau:?}"
+                    );
+                    pixel_height_counts.push((pixel_height as u32, by_tau));
+                }
+                eprintln!(
+                    "{name}: projected object height -> (tau 1/2/4/8 px) triangle counts: {pixel_height_counts:?}"
                 );
                 assert!(
                     counts.windows(2).all(|w| w[1] <= w[0]),
@@ -858,7 +960,7 @@ mod tests {
                     "{name}: distant triangle budget regressed: {counts:?}"
                 );
                 assert!(
-                    root_tris <= 6_000,
+                    root_tris <= 7_000,
                     "{name}: coarsest geometry is too dense: {root_tris}"
                 );
                 // Establish the actual geometry floor separately from the

@@ -16,8 +16,8 @@ mod vg_stress_data {
 }
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig,
+    Camera, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits,
 };
 use helio_core::{
     BufferHandle, BufferKey, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
@@ -25,9 +25,10 @@ use helio_core::{
 use helio_default_graphs::build_default_graph_external_with_context;
 use helio_vg_build::{BuildOptions, MeshInput};
 use helio_vg_format::{
-    GpuVgInstance, INST_ENABLED, INST_LOD_SUPPRESS, INST_SHADOW_CASTER, VG_ASSET_READY_FLAG_READY,
+    GpuVgInstance, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS, INST_SHADOW_CASTER,
+    VG_ASSET_READY_FLAG_READY,
 };
-use helio_vg_stream::{content_words, VgRuntime, VgeoBytes, VgeoSource};
+use helio_vg_stream::{VgRuntime, VgeoBytes, VgeoSource, content_words};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
@@ -57,7 +58,7 @@ const VG_INSTANCES: BufferKey = BufferKey::of("vg_instances");
 const VG_INSTANCE_COUNT: BufferKey = BufferKey::of("vg_instance_count");
 const VG_ASSET_READY: BufferKey = BufferKey::of("vg_asset_ready");
 const CLASSIC_SUPPRESSED: BufferKey = BufferKey::of("classic_suppressed");
-const VG_FLAGS: u32 = INST_ENABLED | INST_SHADOW_CASTER | INST_LOD_SUPPRESS;
+const VG_FLAGS: u32 = INST_ENABLED | INST_SHADOW_CASTER | INST_LOD_SUPPRESS | INST_CONE_CULL;
 /// The demo presents the scanned assets together on one metre-based stress
 /// grid. Normalize their imported height to this scene height while
 /// leaving the source mesh and its cached VG data unchanged.
@@ -87,7 +88,11 @@ fn stable_content_id(vertices: &[PackedVertex], indices: &[u32]) -> u128 {
 fn is_scan_asset(path: &std::path::Path) -> bool {
     path.file_stem()
         .and_then(|s| s.to_str())
-        .is_some_and(|stem| vg_stress_prep::scans::MODELS.iter().any(|m| m.name.eq_ignore_ascii_case(stem)))
+        .is_some_and(|stem| {
+            vg_stress_prep::scans::MODELS
+                .iter()
+                .any(|m| m.name.eq_ignore_ascii_case(stem))
+        })
 }
 
 fn load_or_build_vgeo_cache(
@@ -129,13 +134,79 @@ fn load_or_build_vgeo_cache(
     }
     let temporary = cache_path.with_extension("vgeo.tmp");
     std::fs::write(&temporary, &bytes).map_err(|error| error.to_string())?;
-    std::fs::rename(&temporary, &cache_path).map_err(|error| {
+    replace_cache_file(&temporary, &cache_path).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
-        error.to_string()
+        error
     })?;
     VgeoBytes::new(bytes)
         .map(|vgeo| (Arc::new(vgeo), false))
         .map_err(|error| error.to_string())
+}
+
+/// Replace a cooked cache on Windows too, where rename does not overwrite an
+/// existing destination. Keep a backup until the new file is in place so a
+/// failed install can restore the previous cache.
+fn replace_cache_file(
+    temporary: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<(), String> {
+    if !destination.exists() {
+        return std::fs::rename(temporary, destination).map_err(|error| error.to_string());
+    }
+    let mut backup_name = destination
+        .file_name()
+        .ok_or_else(|| "cache destination has no file name".to_string())?
+        .to_os_string();
+    backup_name.push(".bak");
+    let backup = destination.with_file_name(backup_name);
+    if backup.exists() {
+        std::fs::remove_file(&backup).map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(destination, &backup).map_err(|error| error.to_string())?;
+    match std::fs::rename(temporary, destination) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(backup);
+            Ok(())
+        }
+        Err(error) => {
+            let restore = std::fs::rename(&backup, destination);
+            match restore {
+                Ok(()) => Err(error.to_string()),
+                Err(restore_error) => Err(format!(
+                    "install failed ({error}); restoring previous cache also failed ({restore_error})"
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_file_tests {
+    use super::replace_cache_file;
+
+    #[test]
+    fn replacing_existing_cache_keeps_new_file_and_cleans_backup() {
+        let dir = std::env::temp_dir().join(format!(
+            "vg-cache-replace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("asset.vgeo");
+        let temporary = dir.join("asset.vgeo.tmp");
+        std::fs::write(&destination, b"old cook").unwrap();
+        std::fs::write(&temporary, b"new cook").unwrap();
+
+        replace_cache_file(&temporary, &destination).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"new cook");
+        assert!(!temporary.exists());
+        assert!(!dir.join("asset.vgeo.bak").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn pack_vgeo_attributes(vertices: &[PackedVertex]) -> Vec<u8> {
@@ -172,8 +243,7 @@ fn classic_proxy(vertices: &[PackedVertex], indices: &[u32], limit: usize) -> Me
     let triangle_count = indices.len() / 3;
     let target_triangles = (limit / 3).max(1);
     let stride = triangle_count.div_ceil(target_triangles).max(1);
-    let mut remap =
-        std::collections::HashMap::<u32, u32>::with_capacity(limit);
+    let mut remap = std::collections::HashMap::<u32, u32>::with_capacity(limit);
     let mut proxy_vertices = Vec::with_capacity(limit);
     let mut proxy_indices = Vec::with_capacity(target_triangles * 3);
 
@@ -397,7 +467,12 @@ fn print_scene_report(
         if config.trees.is_empty() {
             "none".to_string()
         } else {
-            config.trees.iter().map(|t| t.id).collect::<Vec<_>>().join(", ")
+            config
+                .trees
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
+                .join(", ")
         }
     );
     println!(
@@ -433,7 +508,12 @@ fn print_scene_report(
     let download: u64 = vg_stress_prep::catalog::MARBLES
         .iter()
         .map(|m| vg_stress_prep::polyhaven::pinned_bytes(m.id))
-        .chain(config.trees.iter().map(|t| vg_stress_prep::polyhaven::pinned_bytes(t.id)))
+        .chain(
+            config
+                .trees
+                .iter()
+                .map(|t| vg_stress_prep::polyhaven::pinned_bytes(t.id)),
+        )
         .sum();
     println!(
         "[Museum] textures: {} uploads, about {:.2} GiB of GPU memory at quality {:?} (VG_STRESS_TEXTURES=low|balanced|max); Poly Haven downloads about {:.2} GB",
@@ -575,7 +655,10 @@ impl ApplicationHandler for App {
         let runtime = VgRuntime::default();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let museum_config = vg_stress_prep::catalog::Config::from_env_and_args();
-        let layout = vg_stress_data::layout::museum_layout_with(&vg_stress_data::dims::Dims::load(), &museum_config);
+        let layout = vg_stress_data::layout::museum_layout_with(
+            &vg_stress_data::dims::Dims::load(),
+            &museum_config,
+        );
         print_scene_report(&layout, &museum_config, &root);
         let textures = Arc::new(RwLock::new(pulsar_scenedb::gpu::TextureStore::new(1024)));
         let mirror = scene_db_handle(&scene_db)
@@ -635,7 +718,9 @@ impl ApplicationHandler for App {
         }
         let vg_supported = helio_default_graphs::virtual_geometry_supported(&device);
         if !vg_supported {
-            log::warn!("This device does not support Helio's virtual-geometry passes; rendering scans through the classic mesh path.");
+            log::warn!(
+                "This device does not support Helio's virtual-geometry passes; rendering scans through the classic mesh path."
+            );
         }
         let mut config = RendererConfig::new(size.width, size.height, format);
         if vg_supported {
@@ -663,7 +748,9 @@ impl ApplicationHandler for App {
         });
         debug_views.sort_by_key(|v| v.debug_mode);
         debug_views.dedup_by_key(|v| v.debug_mode);
-        println!("[Museum controls] 0 normal, F3 VG triangles, F4 VG clusters, F5 LOD level, F6 triangle size, F7 raster tier, F8 page residency, F9 error vs tau, [ / ] every debug view (VG_DEBUG_VIEW=<id or key> picks one at startup), F1 list views");
+        println!(
+            "[Museum controls] 0 normal, F3 VG triangles, F4 VG clusters, F5 LOD level, F6 triangle size, F7 raster tier, F8 page residency, F9 error vs tau, [ / ] every debug view (VG_DEBUG_VIEW=<id or key> picks one at startup), F1 list views"
+        );
         for view in &debug_views {
             println!(
                 "  {}: {} – {}",
@@ -672,7 +759,8 @@ impl ApplicationHandler for App {
         }
 
         // No source parsing or cooking takes place on the window thread.
-        let loader = vg_stress_loading::start(root, &layout.placements, vg_supported, museum_config);
+        let loader =
+            vg_stress_loading::start(root, &layout.placements, vg_supported, museum_config);
         println!(
             "[Museum] {} placements, {} exhibits; loading in background",
             layout.placements.len(),
@@ -847,9 +935,18 @@ impl AppState {
         {
             return false;
         }
-        println!("[Museum smoke] {} frames, {} objects, {} VG assets, {} loading errors, {} render errors, loader active={}",
-            self.frames, self.loaded_objects, self.vg_ranges.keys().filter(|&&id| self.runtime.has_asset(id)).count(),
-            self.loading_errors, self.render_errors, self.loader.is_some());
+        println!(
+            "[Museum smoke] {} frames, {} objects, {} VG assets, {} loading errors, {} render errors, loader active={}",
+            self.frames,
+            self.loaded_objects,
+            self.vg_ranges
+                .keys()
+                .filter(|&&id| self.runtime.has_asset(id))
+                .count(),
+            self.loading_errors,
+            self.render_errors,
+            self.loader.is_some()
+        );
         assert!(
             self.frames > 1
                 && self.loaded_objects > 0
@@ -1072,9 +1169,8 @@ impl AppState {
                                     .scene_db
                                     .world
                                     .get_mut::<helio_pass_gbuffer::MaterialComponent>(
-                                        self.materials[&material],
-                                    )
-                                else {
+                                    self.materials[&material],
+                                ) else {
                                     continue;
                                 };
                                 match channel {

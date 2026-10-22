@@ -216,32 +216,75 @@ counters), read from the same asynchronous readback, so it adds no GPU stall.
 ## Validation
 
 ```powershell
+cargo test --release -p helio-vg-build --test build distant_sphere_has_bounded_density_and_sampled_surface_error -- --nocapture
 cargo test --release -p helio-pass-vg-cull -p helio-pass-vg-shade
 cargo test --release -p examples --features vg-stress --bin vg_stress
-# Requires six local scan preview/VG caches, populated by running the demo:
+# Rebuilds stale preview caches from local scans and checks the actual cached cuts:
 cargo test --release -p examples --features vg-stress --bin vg_stress cached_museum_scans_reduce_triangles_with_distance -- --ignored --nocapture
 ```
 
-GPU tests cover decreasing triangle counts, restoring near detail, instance
-scale equivalence, both temporal phases, counter accuracy, and off-screen
-rejection. A built-mesh test checks exact coverage of every leaf-to-root path.
-The local scan test uses the demo's corrected transforms, 45-degree field of
-view, 720p, and 1px error. It prints counts at 3/6/12/24/48/96 metres and checks
-that sufficiently distant views reach the actual root geometry. Passing these
-selection tests does not establish a frame-time or distant-triangle budget.
+The builder test samples actual simplified triangles against an analytic sphere
+from three camera axes and requires at most 1 pixel of projected surface error
+at 720p. It also checks monotonic triangle reductions and caps the 96m sphere at
+1,024 triangles. GPU tests cover decreasing counts, restoring near detail,
+instance-scale equivalence, both temporal phases, counter accuracy, and
+off-screen rejection. Built-mesh tests check one cluster per leaf-to-root path.
 
-### Current distance-detail limitation
+The museum cache test measures the actual six Stanford scans with the demo's
+corrected transforms, 45-degree field of view, 720p, and 1px error. It checks
+monotonic distance reduction, a 25,000-triangle per-scan ceiling at 96m, a
+7,000-triangle root ceiling, and eventual selection of the actual roots. It
+also compares each cut with cone culling enabled and disabled, requiring the
+cone-cull result to remain nonempty and never add triangles. These tests
+validate CPU selection and projected error; the live GPU counters are still
+needed to measure whole-scene frame time and total draw cost.
 
-Existing caches select much more than their coarsest geometry at ordinary
-distances. At 96 metres the Thai statue selects 166,876 triangles (862 at the
-coarsest level); Lucy selects 220,982 (10,534 coarsest). Maximum root errors
-after scene scaling are about 8.92m and 3.41m respectively.
+The same test also reports selected counts when the two-metre scan fills 18,
+100, and 1,000 vertical pixels, for 1/2/4/8px geometric-error tolerances. The
+current 1px results are still too dense for the requested pixel-area budget:
 
-The builder derives errors from weighted quadric costs and accumulates them
-up the hierarchy. This is a candidate cause of excessive conservatism; GPU
-selection agrees with the CPU reference. Correcting the build-time error
-metric and validating visual error remains outstanding. Caches must be
-regenerated when that metric changes.
+| Scan | 18px | 100px | 1,000px |
+|---|---:|---:|---:|
+| Dragon | 15,248 | 44,066 | 540,700 |
+| Happy Buddha | 9,274 | 39,354 | 308,778 |
+| Manuscript | 6,276 | 13,478 | 280,308 |
+| XYZRGB dragon | 20,217 | 108,743 | 3,403,411 |
+| Thai statue | 19,154 | 84,592 | 690,680 |
+| Lucy | 12,092 | 70,490 | 667,750 |
+
+Those counts confirm the distinction between error tolerance and a triangle
+budget: the selector only tests projected geometric deviation. `sw_edge_px`
+classifies a selected cluster for rasterization; it does not stop traversal or
+reduce the cut. The current cached scans also show cone culling removes only
+about 0–2% from these views, so backface culling does not explain or solve the
+main excess. The next VG selection change needs an explicit projected-density
+budget and tests for it; raising the global error tolerance would visibly
+loosen geometry and is not a substitute.
+
+The texture timing printed at runtime spans the whole bounded producer phase,
+including time the worker waits for the renderer to accept texture uploads; it
+is not decode-only CPU time. Cold tree VG cache misses are prepared after
+previews and texture events, so the scene is visible while this work continues,
+but the loader can remain active well after first frame.
+
+### Distance and backface fixes
+
+The old caches used weighted quadric costs accumulated up the hierarchy. The
+builder now simplifies with meshoptimizer while preserving material sections
+and group boundaries, measures deviation against the source surface, carries
+the maximum child error instead of summing it, and continues building while the
+triangle count falls even if the cluster count stays level. It multiplies the
+measured error by a safety margin. The cache cook revision invalidates output
+from the older builder; the loader now replaces stale files on Windows using a
+backup-and-restore sequence before activating the new cache.
+
+The demo now enables conservative normal-cone backface culling on its opaque VG
+instances. Alpha-blended tree cards remain classic meshes because VG does not
+yet preserve their alpha mode; their sampled classic proxies are a remaining
+source of distant geometry. Opaque tree trunks/branches and statue meshes use
+their real VG geometry once the current cache is ready. A fresh run rebuilds
+stale VG files automatically; the explicit scan cooker and distance test above
+can be used to refresh and inspect the six museum caches offline.
 
 For a hidden startup smoke run:
 
