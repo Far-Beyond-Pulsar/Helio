@@ -506,13 +506,24 @@ fn material_texture_data(material: GpuMaterial, id: u32) -> MaterialTextureData 
     if material_textures[0].params.w!=-1.0 && id<arrayLength(&material_textures) { return material_textures[id]; }
     return MaterialTextureData(material_slot(material.tex_base_color),material_slot(material.tex_normal),
         material_slot(material.tex_roughness),material_slot(material.tex_emissive),material_slot(material.tex_occlusion),
-        material_slot(NO_TEXTURE),material_slot(NO_TEXTURE),vec4<f32>(1.0,1.0,0.0,0.0));
+        material_slot(NO_TEXTURE),material_slot(NO_TEXTURE),vec4<f32>(1.0,1.0,select(0.0,0.5,(material.flags & 4u) != 0u),0.0));
 }
 
 @fragment
-fn fs_main(input: VertexOutput) -> GBufferOutput {
+fn fs_main(vertex: VertexOutput, @builtin(front_facing) front: bool) -> GBufferOutput {
+    var input = vertex;
     let material = materials[input.material_id];
     let material_tex = material_texture_data(material,input.material_id);
+    // Reject empty card pixels before normal/ORM/extension texture reads,
+    // including debug views. Graph materials retain their post-evaluation test.
+    if (material.flags & 4u) != 0u && (material.flags & 128u) == 0u && material.material_class == 0u {
+        let alpha = material.base_color.a * sample_texture(material_tex.base_color, input.tex_coords, vec4<f32>(1.0)).a;
+        if alpha < material_tex.params.z { discard; }
+    }
+    if !front && (material.flags & 1u) != 0u {
+        input.world_normal = -input.world_normal;
+        input.bitangent_sign = -input.bitangent_sign;
+    }
 
     // DEBUG MODE 1: Show the shared UV reference texture across UV0.
     if globals.debug_mode == 1u {

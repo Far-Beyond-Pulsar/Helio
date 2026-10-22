@@ -99,18 +99,25 @@ struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
 @group(0) @binding(5) var<storage, read> skin_vertices: array<SkinVertex>;
 @group(0) @binding(6) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
+struct ShadowVertex {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) material_id: u32,
+}
+
 // ── Vertex stage ──────────────────────────────────────────────────────────────
 
 @vertex
 fn vs_main(
     @location(0)             position: vec3<f32>,
+    @location(1)             uv: vec2<f32>,
     @builtin(vertex_index)    vertex_index: u32,
     // Per-instance vertex data, offset by the indirect draw's `first_instance`
     // on every backend (`helio_pass_gbuffer::draw_slots`).
     @location(15)            slot:     u32,
-) -> @builtin(position) vec4<f32> {
+) -> ShadowVertex {
     // `_pad0` is the dirty bit this layer is gated on (1 dynamic, 2 static); 0 draws unconditionally.
-    if face._pad0 != 0u && (face_dirty[face.value] & face._pad0) == 0u { return vec4f(2,2,2,1); }
+    if face._pad0 != 0u && (face_dirty[face.value] & face._pad0) == 0u { return ShadowVertex(vec4f(2,2,2,1), uv, 0u); }
     let inst  = instances[slot];
     var local_position = position;
     if inst.bone_palette_count > 0u {
@@ -133,10 +140,16 @@ fn vs_main(
         let center = (space * vec4f(inst.bounds.xyz, 1.0)).xyz;
         let radius = inst.bounds.w * max(length(space[0].xyz), max(length(space[1].xyz), length(space[2].xyz)));
         let touched = sphere_pages(shadow_matrices[face.value].mat, center, radius) & face_pages[face.value];
-        if touched.x == 0u && touched.y == 0u { return vec4f(2, 2, 2, 1); }
+        if touched.x == 0u && touched.y == 0u { return ShadowVertex(vec4f(2, 2, 2, 1), uv, inst.material_id); }
     }
     let world = space * (inst.transform * vec4<f32>(local_position, 1.0));
-    return shadow_matrices[face.value].mat * world;
+    return ShadowVertex(shadow_matrices[face.value].mat * world, uv, inst.material_id);
 }
 
-// No fragment stage: the GPU writes depth automatically for the depth-only pipeline.
+@fragment
+fn fs_main(input: ShadowVertex, @builtin(front_facing) front: bool) {
+    // Preserve the solid-mesh front-face policy, while both faces of a leaf
+    // card cast the same alpha-tested silhouette.
+    if front && (materials[input.material_id].flags & 1u) == 0u { discard; }
+    reject_cutout(input.material_id, input.uv);
+}

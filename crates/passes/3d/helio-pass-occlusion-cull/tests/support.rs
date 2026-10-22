@@ -20,6 +20,7 @@ pub struct TestSceneInput {
     pub frame_count: u64,
     camera_buf: wgpu::Buffer,
     camera_data: GpuCameraUniforms,
+    camera_generation: u64,
 }
 
 impl TestSceneInput {
@@ -43,12 +44,14 @@ impl TestSceneInput {
             frame_count: 0,
             camera_buf,
             camera_data,
+            camera_generation: 0,
         }
     }
 
     /// Writes `data` into `cameras[0]`'s slot and remembers it as this
     /// frame's CPU-side mirror.
     pub fn set_camera(&mut self, data: GpuCameraUniforms) {
+        self.camera_generation += 1;
         self.camera_data = data;
         self.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&data));
@@ -72,7 +75,7 @@ impl SceneInput for TestSceneInput {
         &self.camera_data
     }
     fn camera_generation(&self) -> u64 {
-        0
+        self.camera_generation
     }
     fn scene_buffers(&self) -> &helio_core::SceneBufferProjection {
         static EMPTY: std::sync::OnceLock<helio_core::SceneBufferProjection> =

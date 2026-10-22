@@ -27,7 +27,7 @@ pub const LICENCE_URL: &str = "https://polyhaven.com/license";
 
 /// Bump when the on-disk layout or the selection of files changes, so existing
 /// users re-provision (also recorded as `ph:<id>` entries in `prepared.json`).
-pub const PH_RECIPE_VERSION: u32 = 1;
+pub const PH_RECIPE_VERSION: u32 = 2;
 
 // ── API client ──────────────────────────────────────────────────────────────
 
@@ -153,6 +153,31 @@ pub fn plan_gltf_package(files: &Value, resolutions: &[&str]) -> Result<Plan, St
             for rel in keys {
                 let role = if rel.ends_with(".bin") { "bin" } else { "texture" };
                 out.push(PlannedFile { remote: remote(rel, &include[rel])?, role: role.into() });
+            }
+        }
+        // The JPEG glTF package omits the separate opacity maps shipped with
+        // the Blender package. JPEG cannot carry the leaf cutout alpha.
+        let mut opacity = std::collections::BTreeMap::new();
+        if let Some(include) = files["blend"][*res]["blend"]["include"].as_object() {
+            for (rel, node) in include {
+                if rel.contains("_alpha_") && rel.ends_with(".png") {
+                    opacity.insert(rel.clone(), node.clone());
+                }
+            }
+        }
+        if let Some(maps) = files.as_object() {
+            for (name, map) in maps {
+                if name == "alpha" || name.ends_with("_alpha") {
+                    if let Some(node) = map[*res].get("png") {
+                        let url = node["url"].as_str().ok_or("opacity map has no URL")?;
+                        opacity.insert(format!("textures/{}", file_name(url)), node.clone());
+                    }
+                }
+            }
+        }
+        for (rel, node) in opacity {
+            if !out.iter().any(|f| f.remote.rel == rel) {
+                out.push(PlannedFile { remote: remote(&rel, &node)?, role: "opacity".into() });
             }
         }
         return Ok(Plan { resolution: (*res).to_string(), files: out });
@@ -558,7 +583,7 @@ mod tests {
     fn gltf_package_keeps_the_directory_structure_and_roles() {
         let plan = plan_gltf_package(&fixture("files_island_tree_01.json"), &["2k", "1k"]).unwrap();
         assert_eq!(plan.resolution, "2k");
-        assert_eq!(plan.files.len(), 11);
+        assert_eq!(plan.files.len(), 12);
         assert_eq!(plan.files[0].remote.rel, "island_tree_01_2k.gltf");
         assert_eq!(plan.files[0].role, "gltf");
         assert!(plan.files.iter().any(|f| f.role == "bin" && f.remote.rel == "island_tree_01.bin" && f.remote.size == 60_709_812));
@@ -566,7 +591,9 @@ mod tests {
         assert_eq!(textures.len(), 9);
         assert!(textures.iter().all(|f| f.remote.rel.starts_with("textures/") && f.remote.rel.ends_with("_2k.jpg")));
         assert!(plan.files.iter().all(|f| f.remote.url.starts_with("https://dl.polyhaven.org/")));
-        assert_eq!(plan.total_bytes(), 79_783_969);
+        assert_eq!(plan.total_bytes(), 79_783_969 + 139_077);
+        assert!(plan.files.iter().any(|f| f.role == "opacity"
+            && f.remote.rel == "textures/island_tree_01_leaves_alpha_2k.png"));
         // Same capture the pins came from: nothing differs.
         assert!(pin_warnings("island_tree_01", &plan).is_empty());
     }
@@ -781,7 +808,7 @@ mod tests {
         let unit = island_unit();
         assert!(!unit_complete(&assets, &unit, false));
         let manifest = provision_unit(&api, &assets, &unit, false, Duration::from_millis(1), &|_, _| {}).unwrap();
-        assert_eq!(manifest.files.len(), 11);
+        assert_eq!(manifest.files.len(), 12);
         assert_eq!(manifest.resolution, "2k");
         assert_eq!(manifest.authors.len(), 2);
 
@@ -902,7 +929,7 @@ mod tests {
         assert!(missing_units(&assets, &config).is_empty());
         let prepared = read_prepared(&assets);
         assert_eq!(prepared["ph:marble_01"], Unit::from(&catalog::MARBLES[2]).recipe());
-        assert!(prepared["ph:island_tree_01"].starts_with("ph1:"));
+        assert!(prepared["ph:island_tree_01"].starts_with(&format!("ph{PH_RECIPE_VERSION}:")));
         let credits = std::fs::read_to_string(assets.join("CREDITS_POLYHAVEN.md")).unwrap();
         assert!(credits.contains("Island Tree 01") && credits.contains("Marble 01"), "{credits}");
         // A recipe bump makes everything stale again (existing users re-provision).

@@ -11,6 +11,7 @@
 use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
+    depth_materials: helio_pass_gbuffer::depth_material::DepthMaterialBindings,
     /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
     draw_slots: helio_pass_gbuffer::DrawSlots,
     pipeline: wgpu::RenderPipeline,
@@ -25,7 +26,11 @@ impl DepthPrepassPass {
     ///
     /// * `depth_format` – format of the depth attachment (e.g. `Depth32Float`)
     pub fn new(device: &wgpu::Device, depth_format: wgpu::TextureFormat) -> Self {
-        let shader = helio_core::shader::module(device, "DepthPrepass Shader", helio_core::include_wgsl!("../shaders/depth_prepass.wgsl"));
+        let depth_materials = helio_pass_gbuffer::depth_material::DepthMaterialBindings::new(device);
+        let source = depth_materials.shader_source(include_str!("../shaders/depth_prepass.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Cutout depth prepass"), source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DepthPrepass BGL"),
@@ -89,7 +94,7 @@ impl DepthPrepassPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DepthPrepass PL"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&bind_group_layout), Some(&depth_materials.layout)],
             immediate_size: 0,
         });
 
@@ -125,10 +130,12 @@ impl DepthPrepassPass {
                 }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             // Depth-only: no fragment stage, no color outputs.
-            fragment: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(), targets: &[],
+            }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -151,6 +158,7 @@ impl DepthPrepassPass {
         });
 
         Self {
+            depth_materials,
             draw_slots: Default::default(),
             pipeline,
             bind_group_layout,
@@ -167,6 +175,7 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        builder.read("material_textures");
         builder.read("object_batch");
         builder.read("culled_batch");
     }
@@ -202,6 +211,8 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        self.depth_materials.update(ctx);
+        if self.depth_materials.group.is_none() { return Ok(()); }
         let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
@@ -285,6 +296,7 @@ impl RenderPass for DepthPrepassPass {
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+        pass.set_bind_group(1, self.depth_materials.group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
         pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(

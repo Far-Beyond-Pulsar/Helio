@@ -742,3 +742,44 @@ fn instances_through_the_real_gcbvh_match_the_reference() {
     let far_emitted = out.items.iter().any(|i| !near(i.0));
     assert!(!far_emitted || s.instances.len() > 3, "far instances are culled by node bounds");
 }
+
+#[test]
+fn redistributed_frontier_matches_reference_without_lost_or_duplicate_clusters() {
+    use helio_pass_vg_bvh::{BvhMode, VgBvhPass};
+    let Some(g) = gpu() else { return; };
+    let mut s = scene(false);
+    let template = s.instances[0];
+    s.instances = (0..128).map(|i| {
+        let mut instance = template;
+        instance.matrix[12] = (i % 16) as f32 * 3.0 - 24.0;
+        instance.matrix[13] = (i / 16) as f32 * 3.0 - 12.0;
+        instance.inst.object_row = i;
+        instance
+    }).collect();
+    let mut r = upload(&g, &s);
+    let mut bvh = VgBvhPass::new(&g.device);
+    bvh.run_for_testing(&g.device, &g.queue, &r.instances, &r.objects, BvhMode::Rebuild);
+    r.bvh_nodes = bvh.nodes_buffer().clone();
+    r.bvh_header = bvh.header_buffer().clone();
+    r.bvh_items = bvh.items_buffer().clone();
+    let view = set_camera(&g, &r, [0.0, 0.0, 700.0]);
+    let (want, _) = expected(&s, &view, 0.01, VgMode::Auto);
+    assert!(want.len() > 4000);
+    for rounds in [2, 4, 8] {
+        for max_groups in [1, 256] {
+            let mut core = VgCullCore::new(&g.device, VgCullConfig {
+                rounds, max_groups, two_phase_occlusion: false, tau_px: 0.01,
+                initial_bin_capacity: 32768, initial_queue_capacity: 65536,
+                ..Default::default()
+            });
+            r.reset_feedback(&g);
+            begin(&g, &mut core, &r);
+            run_phase(&g, &mut core, &r, 0);
+            let (out, _) = collect(&g, &core, &r, 0);
+            assert_eq!(out.items, want, "rounds={rounds}, groups={max_groups}");
+            assert_eq!(out.state[(state::STATS + stats::JOB_OVERFLOW) as usize], 0);
+            assert_eq!(out.state[(state::STATS + stats::VISIBLE_OVERFLOW) as usize], 0);
+            assert!(out.state[(state::STATS + stats::SPILLED) as usize] > 0, "exercise actual redistribution");
+        }
+    }
+}

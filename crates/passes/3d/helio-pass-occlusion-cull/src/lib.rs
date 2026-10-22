@@ -336,6 +336,9 @@ pub struct OcclusionCullPass {
     /// `draw_count > 0`, guaranteeing real geometry lands in depth before
     /// Hi-Z testing ever reads from it.
     hiz_warmed_up: bool,
+    /// A single-phase temporal query is valid only against unchanged inputs.
+    /// Moving views need current-depth recovery before history may reject them.
+    history_inputs: Option<(u64, u64, u64, u32, u32)>,
     /// ([camera, instances, draw_calls, indirect, pvs_buf, cull_stats_buf,
     /// compacted_indices, compacted_indices_2, coordinate_spaces], hiz_view)
     bind_group_key: Option<([wgpu::Buffer; 9], wgpu::TextureView)>,
@@ -589,6 +592,7 @@ impl OcclusionCullPass {
             pvs_grid: None,
             bind_group: None,
             hiz_warmed_up: false,
+            history_inputs: None,
             bind_group_key: None,
             screen_width,
             screen_height,
@@ -936,7 +940,10 @@ impl RenderPass for OcclusionCullPass {
         // downstream draws always read `compacted_indices_2`, so pass the
         // frustum-culled list through unchanged instead of leaving it
         // stale/uninitialized.
-        if !self.hiz_warmed_up {
+        let inputs = (ctx.camera_generation, ctx.scene_buffers.content_signature(),
+            self.segments.generation, self.screen_width, self.screen_height);
+        let history_matches = self.history_inputs.replace(inputs) == Some(inputs);
+        if !self.hiz_warmed_up || !history_matches {
             // The live instance count is GPU-only: copy the whole list.
             let bytes = indirect_dispatch
                 .compacted_indices

@@ -245,12 +245,12 @@ current 1px results are still too dense for the requested pixel-area budget:
 
 | Scan | 18px | 100px | 1,000px |
 |---|---:|---:|---:|
-| Dragon | 15,248 | 44,066 | 540,700 |
-| Happy Buddha | 9,274 | 39,354 | 308,778 |
-| Manuscript | 6,276 | 13,478 | 280,308 |
-| XYZRGB dragon | 20,217 | 108,743 | 3,403,411 |
-| Thai statue | 19,154 | 84,592 | 690,680 |
-| Lucy | 12,092 | 70,490 | 667,750 |
+| Dragon | 9,322 | 23,744 | 233,340 |
+| Happy Buddha | 6,536 | 25,706 | 144,518 |
+| Manuscript | 6,276 | 6,276 | 79,268 |
+| XYZRGB dragon | 9,719 | 43,383 | 1,180,339 |
+| Thai statue | 6,432 | 37,796 | 313,766 |
+| Lucy | 1,184 | 31,732 | 235,776 |
 
 Those counts confirm the distinction between error tolerance and a triangle
 budget: the selector only tests projected geometric deviation. `sw_edge_px`
@@ -275,11 +275,10 @@ and group boundaries, measures deviation against the source surface, carries
 the maximum child error instead of summing it, and continues building while the
 triangle count falls even if the cluster count stays level. It multiplies the
 measured error by a safety margin. The cache cook revision invalidates output
-from the older builder; the loader now replaces stale files on Windows using a
-backup-and-restore sequence before activating the new cache.
+from the older builder; cache replacement uses `std::fs::rename`, which replaces an existing destination on Windows and Unix.
 
 The demo now enables conservative normal-cone backface culling on its opaque VG
-instances. Alpha-blended tree cards remain classic meshes because VG does not
+instances. Alpha-tested tree cards remain classic meshes because VG does not
 yet preserve their alpha mode; their sampled classic proxies are a remaining
 source of distant geometry. Opaque tree trunks/branches and statue meshes use
 their real VG geometry once the current cache is ready. A fresh run rebuilds
@@ -303,3 +302,35 @@ local API stand-in (directory structure, manifests, credits, hash mismatch,
 resolution fallback, recipe bump).
 Changing the scan preparation recipe or the Stanford URLs lives in
 `vg_stress_prep/scans.rs`; bump `RECIPE_VERSION` to regenerate GLBs.
+
+## Foliage correctness and profiling
+
+Leaf colour JPEGs require their separate linear PNG opacity maps. Provisioning
+recipe 2 downloads these maps; the loader combines them before resizing and
+preserves binary alpha coverage in the mip chain at the demo's 0.5 cutoff.
+Missing opacity is a load error. Leaves use double-sided cutout materials, with
+matching alpha tests in G-buffer, depth prepass, and cached shadow rendering.
+Texture publication invalidates cached shadow faces. Opaque and two-sided
+materials occupy separate GPU draw segments.
+
+The classic Hi-Z test now projects conservative sphere intervals and covers
+every queried mip texel. Camera, scene, draw-segment or resolution changes bypass
+stale history until a matching depth frame exists. This single-phase fallback
+can increase draws during motion; a current-depth second phase is still needed
+for efficient occlusion during motion.
+
+VG traversal redistributes its frontier after bounded local work, then drains
+the last round. Exact-set GPU tests check 128 instances over 2/4/8 rounds and
+1/256 workgroups, with no dropped or duplicate clusters. This changes work
+scheduling, not the geometric error tolerance or selected triangles.
+
+Set `HELIO_VG_PROFILE=1` to log interval frame percentiles, GPU pass timings and
+readback age. With `HELIO_VG_SMOKE_SECONDS`, profiling keeps a fixed debug view
+instead of cycling views. Run only one demo when comparing GPU times. The
+corrected pixel-height table above uses `tan(FOV/2)`; the previous report used
+`tan(FOV)` and mislabeled object sizes.
+
+Remaining work: constant sampled leaf proxies are not canopy LODs, VG scan
+density still exceeds the desired pixel budget, and texture cooking is not yet
+persistently cached. Passing these regressions does not establish full-scene
+visual stability or a production performance target.

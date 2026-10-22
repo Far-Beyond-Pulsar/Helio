@@ -741,7 +741,9 @@ fn cs_build_draw_calls(@builtin(global_invocation_id) gid: vec3<u32>) {
         row.vertex_offset,
         start,
     );
-    group_material_class[g] = row.material_class;
+    // Range/segment key: low 16 bits are the template class; upper bits
+    // carry raster state. Double-sided cards must not share an opaque PSO.
+    group_material_class[g] = row.material_class | ((materials_bdc[row.material_slot].flags & 5u) << 16u);
     group_graph_hash_lo[g] = row.graph_hash_lo;
     group_graph_hash_hi[g] = row.graph_hash_hi;
 

@@ -123,84 +123,54 @@ var<workgroup> wg_counter: atomic<u32>;
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Estimate screen-space radius (in pixels) of a sphere.
-/// proj[1][1] = cot(fovY/2) = 2n/h for a standard perspective matrix.
-fn screen_radius_px(world_radius: f32, clip_w: f32) -> f32 {
-    let half_h = f32(params.screen_height) * 0.5;
-    return abs(world_radius / clip_w * cameras[0].proj[1][1] * half_h);
+// Interval projection contains every point of the sphere, including near
+// and off-axis silhouettes. Dividing by center depth underestimates them.
+fn ratio_interval(lo: f32, hi: f32, wlo: f32, whi: f32) -> vec2<f32> {
+    return vec2<f32>(min(lo / wlo, lo / whi), max(hi / wlo, hi / whi));
 }
 
-/// Select HiZ mip level for a sphere footprint of `r_px` pixels.
-fn pick_mip(r_px: f32) -> u32 {
-    let diameter = max(r_px * 2.0, 1.0);
-    let mip = u32(ceil(log2(diameter)));
-    return clamp(mip, 0u, params.hiz_mip_count - 1u);
-}
-
-/// Conservative sphere near depth in NDC [0,1].
-/// Projects the point on the sphere nearest to the camera into NDC depth.
-fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
-    let cam_pos = cameras[0].position_near.xyz;
-    let to_center = center - cam_pos;
-    let dist_sq = dot(to_center, to_center);
-    if dist_sq <= radius * radius {
-        // Camera inside sphere — near depth is the near plane (reversed: 1)
-        return 1.0;
-    }
-    let dir = to_center * (1.0 / sqrt(dist_sq));
-    let near_ws = center - dir * radius;
-    let near_clip = cameras[0].view_proj * vec4<f32>(near_ws, 1.0);
-    // Protect against near_clip.w <= 0 (shouldn't happen since camera is outside)
-    if near_clip.w <= 0.0 {
-        return 1.0;
-    }
-    return clamp(near_clip.z / near_clip.w, 0.0, 1.0);
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Main kernel  (64 threads × 1 × 1 workgroup)
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Test a single instance against the Hi-Z pyramid. `center` is the bounds
-/// center already mapped through the instance's coordinate space (see caller).
 fn instance_hiz_occluded(inst: GpuInstanceData, center: vec3<f32>) -> bool {
     let radius = inst.bounds.w;
-    if radius <= 0.0 {
-        return false;
+    if !(radius > 0.0) { return false; }
+    let m = cameras[0].view_proj;
+    let c = m * vec4<f32>(center, 1.0);
+    let extent = radius * vec4<f32>(
+        length(vec3<f32>(m[0].x, m[1].x, m[2].x)),
+        length(vec3<f32>(m[0].y, m[1].y, m[2].y)),
+        length(vec3<f32>(m[0].z, m[1].z, m[2].z)),
+        length(vec3<f32>(m[0].w, m[1].w, m[2].w)));
+    let wlo = c.w - extent.w;
+    let whi = c.w + extent.w;
+    if !(wlo > 1e-5) { return false; }
+    let x = ratio_interval(c.x - extent.x, c.x + extent.x, wlo, whi);
+    let y = ratio_interval(c.y - extent.y, c.y + extent.y, wlo, whi);
+    let z = ratio_interval(c.z - extent.z, c.z + extent.z, wlo, whi);
+    if x.y < -1.0 || x.x > 1.0 || y.y < -1.0 || y.x > 1.0 { return false; }
+    // Reversed Z: maximum projected depth is the nearest surface point.
+    let near_z = clamp(z.y, 0.0, 1.0);
+    let size = vec2<f32>(textureDimensions(hiz_tex, 0));
+    // Cover subpixel jitter and rounding at rectangle boundaries.
+    let guard = vec2<f32>(2.0) / size;
+    let uv_lo = clamp(vec2<f32>(x.x * 0.5 + 0.5, 0.5 - y.y * 0.5) - guard, vec2<f32>(0.0), vec2<f32>(1.0));
+    let uv_hi = clamp(vec2<f32>(x.y * 0.5 + 0.5, 0.5 - y.x * 0.5) + guard, vec2<f32>(0.0), vec2<f32>(1.0));
+    let pixels = max((uv_hi - uv_lo) * size, vec2<f32>(1.0));
+    var mip = min(u32(ceil(log2(max(pixels.x, pixels.y)))), params.hiz_mip_count - 1u);
+    var lo = vec2<i32>(0);
+    var hi = vec2<i32>(0);
+    // NPOT mip dimensions need an explicit coverage check: the four taps
+    // must cover EVERY intersected texel, not just four chosen corners.
+    loop {
+        let dim = vec2<i32>(textureDimensions(hiz_tex, i32(mip)));
+        lo = clamp(vec2<i32>(floor(uv_lo * vec2<f32>(dim))), vec2<i32>(0), dim - vec2<i32>(1));
+        hi = clamp(vec2<i32>(floor(uv_hi * vec2<f32>(dim))), vec2<i32>(0), dim - vec2<i32>(1));
+        if all(hi - lo <= vec2<i32>(1)) || mip + 1u >= params.hiz_mip_count { break; }
+        mip += 1u;
     }
-
-    let clip = cameras[0].view_proj * vec4<f32>(center, 1.0);
-    if clip.w <= 0.0 {
-        return false;
-    }
-
-    let ndc_r = max(
-        abs(radius * cameras[0].proj[0][0] / clip.w),
-        abs(radius * cameras[0].proj[1][1] / clip.w),
-    );
-    let ndc = clip.xyz / clip.w;
-    let uv = helio_ndc_to_uv(ndc.xy);
-
-    if ndc.x + ndc_r < -1.0 || ndc.x - ndc_r > 1.0 ||
-       ndc.y + ndc_r < -1.0 || ndc.y - ndc_r > 1.0 {
-        return false;
-    }
-
-    let near_z = sphere_near_depth(center, radius);
-    let r_px = screen_radius_px(radius, clip.w);
-    let mip = pick_mip(r_px);
-
-    let uv_half = ndc_r * 0.5;
-    let uv_00 = clamp(uv - vec2<f32>(uv_half, uv_half), vec2<f32>(0.0), vec2<f32>(1.0));
-    let uv_11 = clamp(uv + vec2<f32>(uv_half, uv_half), vec2<f32>(0.0), vec2<f32>(1.0));
-
-    let hiz_00 = textureSampleLevel(hiz_tex, hiz_samp, uv_00, f32(mip)).r;
-    let hiz_01 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_11.x, uv_00.y), f32(mip)).r;
-    let hiz_10 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_00.x, uv_11.y), f32(mip)).r;
-    let hiz_11 = textureSampleLevel(hiz_tex, hiz_samp, uv_11, f32(mip)).r;
-    let hiz_depth = helio_depth_farthest(helio_depth_farthest(hiz_00, hiz_01), helio_depth_farthest(hiz_10, hiz_11));
-
-    return helio_hiz_occludes(hiz_depth, near_z);
+    let d00 = textureLoad(hiz_tex, lo, i32(mip)).r;
+    let d01 = textureLoad(hiz_tex, vec2<i32>(hi.x, lo.y), i32(mip)).r;
+    let d10 = textureLoad(hiz_tex, vec2<i32>(lo.x, hi.y), i32(mip)).r;
+    let d11 = textureLoad(hiz_tex, hi, i32(mip)).r;
+    return helio_hiz_occludes(min(min(d00, d01), min(d10, d11)), near_z);
 }
 
 /// Largest cell block an instance's bounds may cover before the PVS test is

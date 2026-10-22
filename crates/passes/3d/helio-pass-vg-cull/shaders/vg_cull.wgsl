@@ -85,6 +85,8 @@ struct VgObjectRow {
 @group(2) @binding(0) var<storage, read_write> dispatch_args: array<u32>;
 
 const WG: u32 = 64u;
+const SOURCE_CHUNK: u32 = 8u;
+const REDISTRIBUTE_WAVES: u32 = 8u;
 const STACK_CAP: u32 = 1024u;
 const INF_ERR: f32 = 1.0e30;
 const HUGE_PX: f32 = 3.0e38;
@@ -275,12 +277,7 @@ fn occlusion_policy(job: vec2<u32>, c: vec3<f32>, r: f32) -> u32 {
 
 // ── Queues ──────────────────────────────────────────────────────────────────
 
-fn push_job(job: vec2<u32>) {
-    let i = atomicAdd(&wg_sp, 1u);
-    if i < STACK_CAP {
-        wg_stack[i] = job;
-        return;
-    }
+fn spill_job(job: vec2<u32>) {
     let t = atomicAdd(&state[VGC_ST_Q_TAIL + rp.dst], 1u);
     // dst 3 is the sink of a phase's last round: nothing is stored, finalize
     // reports the count as overflow.
@@ -291,6 +288,15 @@ fn push_job(job: vec2<u32>) {
         atomicMax(&state[VGC_ST_STATS + VGC_STAT_PEAK_QUEUE], t + 1u);
     } else {
         stat_add(VGC_STAT_JOB_OVERFLOW);
+    }
+}
+
+fn push_job(job: vec2<u32>) {
+    let i = atomicAdd(&wg_sp, 1u);
+    if i < STACK_CAP {
+        wg_stack[i] = job;
+    } else {
+        spill_job(job);
     }
 }
 
@@ -549,7 +555,7 @@ fn cs_round_prepare() {
     atomicStore(&state[VGC_ST_Q_HEAD + rp.src], 0u);
     atomicStore(&state[VGC_ST_Q_TAIL + rp.dst], 0u);
     atomicStore(&state[VGC_ST_Q_HEAD + rp.dst], 0u);
-    dispatch_args[0] = min((n + WG - 1u) / WG, params.max_groups);
+    dispatch_args[0] = min((n + SOURCE_CHUNK - 1u) / SOURCE_CHUNK, params.max_groups);
     dispatch_args[1] = 1u;
     dispatch_args[2] = 1u;
 }
@@ -564,6 +570,7 @@ fn cs_traverse(@builtin(local_invocation_index) lid: u32) {
     let src = rp.src;
     let src_n = min(atomicLoad(&state[VGC_ST_Q_TAIL + src]), params.queue_capacity);
     workgroupBarrier();
+    var waves = 0u;
     loop {
         if lid == 0u {
             let sp = min(atomicLoad(&wg_sp), STACK_CAP);
@@ -574,14 +581,14 @@ fn cs_traverse(@builtin(local_invocation_index) lid: u32) {
                 wg_base = sp - take;
                 wg_mode = 1u;
             } else {
-                let base = atomicAdd(&state[VGC_ST_Q_HEAD + src], WG);
+                let base = atomicAdd(&state[VGC_ST_Q_HEAD + src], SOURCE_CHUNK);
                 if base >= src_n {
                     wg_mode = 0u;
                     wg_n = 0u;
                     wg_base = 0u;
                 } else {
                     wg_mode = 2u;
-                    wg_n = min(WG, src_n - base);
+                    wg_n = min(SOURCE_CHUNK, src_n - base);
                     wg_base = base;
                 }
             }
@@ -604,6 +611,21 @@ fn cs_traverse(@builtin(local_invocation_index) lid: u32) {
         workgroupBarrier();
         if have { process_job(job); }
         workgroupBarrier();
+        waves += 1u;
+        // The seed is one job: draining its entire subtree on one SM leaves
+        // the rest of the GPU idle. Share a bounded frontier with the next
+        // dispatch, whose workgroup count reflects that expanded frontier.
+        // The final round drains normally; yielding there would drop work.
+        if waves >= REDISTRIBUTE_WAVES && rp.dst != 3u {
+            if lid == 0u { wg_n = min(atomicLoad(&wg_sp), STACK_CAP); }
+            workgroupBarrier();
+            let pending = workgroupUniformLoad(&wg_n);
+            for (var i = lid; i < pending; i += WG) { spill_job(wg_stack[i]); }
+            workgroupBarrier();
+            if lid == 0u { atomicStore(&wg_sp, 0u); }
+            workgroupBarrier();
+            waves = 0u;
+        }
     }
 }
 

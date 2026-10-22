@@ -143,41 +143,14 @@ fn load_or_build_vgeo_cache(
         .map_err(|error| error.to_string())
 }
 
-/// Replace a cooked cache on Windows too, where rename does not overwrite an
-/// existing destination. Keep a backup until the new file is in place so a
-/// failed install can restore the previous cache.
+/// Install beside the destination with the platform's replacement rename.
+/// Rust uses replacement semantics on Windows as well as Unix; moving the old
+/// file aside first creates an unnecessary interval with no valid cache.
 fn replace_cache_file(
     temporary: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<(), String> {
-    if !destination.exists() {
-        return std::fs::rename(temporary, destination).map_err(|error| error.to_string());
-    }
-    let mut backup_name = destination
-        .file_name()
-        .ok_or_else(|| "cache destination has no file name".to_string())?
-        .to_os_string();
-    backup_name.push(".bak");
-    let backup = destination.with_file_name(backup_name);
-    if backup.exists() {
-        std::fs::remove_file(&backup).map_err(|error| error.to_string())?;
-    }
-    std::fs::rename(destination, &backup).map_err(|error| error.to_string())?;
-    match std::fs::rename(temporary, destination) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(backup);
-            Ok(())
-        }
-        Err(error) => {
-            let restore = std::fs::rename(&backup, destination);
-            match restore {
-                Ok(()) => Err(error.to_string()),
-                Err(restore_error) => Err(format!(
-                    "install failed ({error}); restoring previous cache also failed ({restore_error})"
-                )),
-            }
-        }
-    }
+    std::fs::rename(temporary, destination).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -564,6 +537,8 @@ struct AppState {
     frames: u64,
     render_errors: u64,
     smoke_seconds: Option<f32>,
+    profile: bool,
+    frame_samples: Vec<f32>,
     debug_views: Vec<helio_core::DebugViewDescriptor>,
     debug_index: usize,
     scene_triangles: u64,
@@ -669,15 +644,17 @@ impl ApplicationHandler for App {
         let mut materials = HashMap::new();
         for material in Mat::all(&museum_config) {
             let surface = material.surface();
+            let mut row = make_material(
+                surface.base_color, surface.roughness, surface.metallic,
+                surface.emissive_color, surface.emissive_intensity,
+            );
+            if material.tree_part().is_some_and(|(_, slot)| slot.masked) {
+                // The catalogue's leaf materials are cutouts, not blended glass.
+                row.flags |= helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_DOUBLE_SIDED;
+            }
             let entity = spawn_material(
                 &mut scene_db.world,
-                make_material(
-                    surface.base_color,
-                    surface.roughness,
-                    surface.metallic,
-                    surface.emissive_color,
-                    surface.emissive_intensity,
-                ),
+                row,
             );
             materials.insert(material, entity);
         }
@@ -795,6 +772,8 @@ impl ApplicationHandler for App {
             smoke_seconds: std::env::var("HELIO_VG_SMOKE_SECONDS")
                 .ok()
                 .and_then(|s| s.parse().ok()),
+            profile: std::env::var_os("HELIO_VG_PROFILE").is_some(),
+            frame_samples: Vec::with_capacity(1024),
             debug_index: helio_vg_format::debug_view::from_env()
                 .and_then(|view| debug_views.iter().position(|v| v.debug_mode == view.id()))
                 .unwrap_or(0),
@@ -913,7 +892,7 @@ impl ApplicationHandler for App {
                 let now = std::time::Instant::now();
                 let dt = (now - s.last_frame).as_secs_f32();
                 s.last_frame = now;
-                if s.frames > 0 && s.frames % 30 == 0 {
+                if !s.profile && s.frames > 0 && s.frames % 30 == 0 {
                     s.debug_key(KeyCode::BracketRight);
                 }
                 s.render(dt);
@@ -1014,6 +993,19 @@ impl AppState {
     }
 
     fn update_title(&mut self) {
+        if self.profile {
+            self.frame_samples.sort_by(f32::total_cmp);
+            let n = self.frame_samples.len();
+            let percentile = |p: usize| if n == 0 { 0.0 } else { self.frame_samples[((n - 1) * p) / 100] };
+            let timing = self.renderer.timing_snapshot();
+            let mut passes = timing.passes.clone();
+            passes.sort_by(|a, b| b.gpu_ms.unwrap_or(0.0).total_cmp(&a.gpu_ms.unwrap_or(0.0)));
+            let top: Vec<_> = passes.iter().take(6).map(|p| format!("{}={:.2}ms", p.name, p.gpu_ms.unwrap_or(0.0))).collect();
+            eprintln!("[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {}",
+                self.started.elapsed().as_secs_f32(), self.frames, self.loader.is_some(), percentile(50), percentile(99),
+                self.frame_samples.last().copied().unwrap_or(0.0), timing.total_gpu_ms, timing.gpu_lag_frames, top.join(" "));
+            self.frame_samples.clear();
+        }
         let vg_triangles = self
             .renderer
             .find_pass::<helio_pass_vg_cull::VgCullEarlyPass>()
@@ -1219,6 +1211,7 @@ impl AppState {
     }
 
     fn render(&mut self, dt: f32) {
+        if self.profile && self.frame_samples.len() < 1024 { self.frame_samples.push(dt * 1000.0); }
         self.poll_loader();
         let dt = dt.min(0.1);
         const SPEED: f32 = 6.0;

@@ -33,6 +33,7 @@ use wgpu::util::DeviceExt;
 pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
+pub mod depth_material;
 mod draw_segments;
 pub mod draw_slots;
 mod indirect_draw;
@@ -941,9 +942,9 @@ impl RenderPass for GBufferPass {
         } else {
             for (index, segment) in segments.in_bucket(crate::ShadingBucket::Opaque) {
                 let key = RadiantShaderKey {
-                    template_id: segment.material_class,
+                    template_id: segment.template_class(),
                     graph_hash: segment.graph_hash,
-                    feature_flags: 0,
+                    feature_flags: segment.raster_flags(),
                 };
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
@@ -1229,7 +1230,9 @@ impl GBufferPass {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: if wireframe { None } else { Some(wgpu::Face::Back) },
+                    cull_mode: if wireframe || key.feature_flags & helio_mats::FLAG_DOUBLE_SIDED != 0 {
+                        None
+                    } else { Some(wgpu::Face::Back) },
                     polygon_mode: if wireframe {
                         wgpu::PolygonMode::Line
                     } else {

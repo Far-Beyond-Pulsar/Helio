@@ -328,7 +328,7 @@ fn run(
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            match textures::decode(&job.path, job.role, job.cap) {
+            match textures::decode_with_opacity(&job.path, job.opacity.as_deref(), job.role, job.cap) {
                 Ok(d) => {
                     let _ = send(
                         tx,
@@ -912,7 +912,8 @@ mod tests {
                     "{name}: source={} triangles; 3/6/12/24/48/96m at 720p, 1px: no-cone={counts:?}, cone={cone_counts:?}",
                     part.meta.source_triangles
                 );
-                let focal = 720.0 / (2.0 * std::f32::consts::FRAC_PI_4.tan());
+                let fov_y = std::f32::consts::FRAC_PI_4;
+                let focal = 720.0 / (2.0 * (fov_y * 0.5).tan());
                 let mut pixel_height_counts = Vec::new();
                 for pixel_height in [18.0, 100.0, 1_000.0] {
                     let distance = focal * 2.0 / pixel_height;

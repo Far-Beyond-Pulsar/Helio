@@ -349,7 +349,7 @@ impl ForwardLitPass {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: if key.feature_flags & helio_mats::FLAG_DOUBLE_SIDED != 0 { None } else { Some(wgpu::Face::Back) },
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -670,7 +670,7 @@ impl RenderPass for ForwardLitPass {
             let key = RadiantShaderKey {
                 template_id: 0,
                 graph_hash: 0,
-                feature_flags: if self.render_all_opaque { 1 } else { 0 },
+                feature_flags: if self.render_all_opaque { 1 << 31 } else { 0 },
             };
             let pipeline =
                 self.get_or_create_pipeline(&ctx.device, key, "", self.render_all_opaque);
@@ -685,12 +685,12 @@ impl RenderPass for ForwardLitPass {
         } else {
             for (index, segment) in segments.in_bucket(bucket) {
                 let mut key = RadiantShaderKey {
-                    template_id: segment.material_class,
+                    template_id: segment.template_class(),
                     graph_hash: segment.graph_hash,
-                    feature_flags: 0,
+                    feature_flags: segment.raster_flags(),
                 };
                 if self.render_all_opaque {
-                    key.feature_flags |= 1;
+                    key.feature_flags |= 1 << 31;
                 }
                 let pipeline = self.get_or_create_pipeline(
                     &ctx.device,

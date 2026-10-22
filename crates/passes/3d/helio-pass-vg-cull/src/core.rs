@@ -28,7 +28,8 @@ pub struct VgCullConfig {
     /// Last-frame-visible-first occlusion with a Hi-Z hook between phases.
     pub two_phase_occlusion: bool,
     /// Traversal rounds per phase. Round `r+1` only runs work that round `r`
-    /// spilled from a full workgroup stack, so 3-4 is ample.
+    /// redistributed after bounded local traversal, or spilled from a full
+    /// workgroup stack. The final round drains its remaining work locally.
     pub rounds: u32,
     /// Cap on persistent workgroups per round.
     pub max_groups: u32,

@@ -34,6 +34,8 @@ pub enum Role {
 pub struct Job {
     pub key: String,
     pub path: PathBuf,
+    /// Separate linear opacity for Poly Haven's JPEG leaf colour maps.
+    pub opacity: Option<PathBuf>,
     pub role: Role,
     /// Longest side after loading; larger images are downscaled.
     pub cap: u32,
@@ -145,11 +147,11 @@ pub fn read_gltf_materials(path: &Path) -> HashMap<String, GltfMaterial> {
 pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
     let mut by_key: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<Job> = Vec::new();
-    let mut add = |path: PathBuf, role: Role, marble: bool, mat: Mat, channel: u8| {
+    let mut add = |path: PathBuf, opacity: Option<PathBuf>, role: Role, marble: bool, mat: Mat, channel: u8| {
         if !path.is_file() {
             return;
         }
-        let key = format!("{}|{:?}", path.display(), role);
+        let key = format!("{}|{:?}|{:?}", path.display(), role, opacity);
         match by_key.get(&key) {
             Some(&i) => out[i].bindings.push((mat, channel)),
             None => {
@@ -157,6 +159,7 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
                 out.push(Job {
                     key,
                     path,
+                    opacity,
                     role,
                     cap: cap(config.quality, marble, role),
                     bindings: vec![(mat, channel)],
@@ -173,7 +176,7 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
                 ("arm", Role::Linear, CH_ARM),
             ] {
                 if let Some(path) = polyhaven::marble_map(assets, id, role_name) {
-                    add(path, role, true, mat, channel);
+                    add(path, None, role, true, mat, channel);
                 }
             }
         } else if let Some((tree, slot)) = mat.tree_part() {
@@ -192,7 +195,10 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
                 (&m.arm, Role::Linear, CH_ARM),
             ] {
                 if let Some(file) = file {
-                    add(dir.join(file), role, false, mat, channel);
+                    let opacity = (m.masked && channel == CH_BASE
+                        && file.ends_with(".jpg") && file.contains("_diff_"))
+                        .then(|| dir.join(file.replace("_diff_", "_alpha_")).with_extension("png"));
+                    add(dir.join(file), opacity, role, false, mat, channel);
                 }
             }
         }
@@ -289,7 +295,43 @@ pub fn build_mips(level0: Vec<u8>, w: u32, h: u32, role: Role) -> Vec<Vec<u8>> {
     mips
 }
 
+fn alpha_coverage(pixels: &[u8]) -> f64 {
+    pixels.chunks_exact(4).filter(|p| p[3] >= 128).count() as f64 / (pixels.len() / 4) as f64
+}
+
+/// Match binary coverage at the 0.5 cutout threshold as closely as the mip's
+/// texels permit. Leave RGB and zero alpha untouched; never fill empty cards.
+fn preserve_coverage(pixels: &mut [u8], target: f64) {
+    let mut histogram = [0usize; 256];
+    for p in pixels.chunks_exact(4) { histogram[p[3] as usize] += 1; }
+    let total = (pixels.len() / 4) as f64;
+    let mut selected = 0usize;
+    let mut threshold = 256usize;
+    let mut best = target;
+    for t in (1..=255).rev() {
+        selected += histogram[t];
+        let error = (selected as f64 / total - target).abs();
+        if error < best || (error == best && t.abs_diff(128) < threshold.abs_diff(128)) {
+            best = error;
+            threshold = t;
+        }
+    }
+    let scale = 127.5 / (threshold as f64 - 0.5);
+    for p in pixels.chunks_exact_mut(4) { p[3] = (p[3] as f64 * scale).round().clamp(0.0, 255.0) as u8; }
+}
+
+fn cutout_mips(level0: Vec<u8>, w: u32, h: u32, coverage: f64) -> Vec<Vec<u8>> {
+    // Filter the unscaled alpha chain, so compensation does not accumulate.
+    let mut mips = build_mips(level0, w, h, Role::Srgb);
+    for mip in &mut mips { preserve_coverage(mip, coverage); }
+    mips
+}
+
 pub fn decode(path: &Path, role: Role, cap: u32) -> Result<Decoded, String> {
+    decode_with_opacity(path, None, role, cap)
+}
+
+pub fn decode_with_opacity(path: &Path, opacity: Option<&Path>, role: Role, cap: u32) -> Result<Decoded, String> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .with_guessed_format()
@@ -298,6 +340,18 @@ pub fn decode(path: &Path, role: Role, cap: u32) -> Result<Decoded, String> {
     let img = reader.decode().map_err(|e| format!("{}: {e}", path.display()))?;
     let (w, h) = (img.width(), img.height());
     let mut rgba = img.into_rgba8();
+    if let Some(path) = opacity {
+        // Apply before resizing; filtering a missing (opaque) alpha channel
+        // first cannot reconstruct the leaf silhouette later.
+        let mask = image::open(path).map_err(|e| format!("opacity {}: {e}", path.display()))?.into_luma8();
+        if mask.dimensions() != (w, h) {
+            return Err(format!("opacity {} dimensions {:?} do not match colour {w}x{h}", path.display(), mask.dimensions()));
+        }
+        for (colour, alpha) in rgba.pixels_mut().zip(mask.pixels()) {
+            colour[3] = ((u16::from(colour[3]) * u16::from(alpha[0]) + 127) / 255) as u8;
+        }
+    }
+    let coverage = opacity.map(|_| alpha_coverage(rgba.as_raw()));
     let (mut w, mut h) = (w, h);
     if w.max(h) > cap {
         let scale = f64::from(cap) / f64::from(w.max(h));
@@ -306,13 +360,45 @@ pub fn decode(path: &Path, role: Role, cap: u32) -> Result<Decoded, String> {
         w = nw;
         h = nh;
     }
-    let mips = build_mips(rgba.into_raw(), w, h, role);
+    let mips = if let Some(coverage) = coverage {
+        cutout_mips(rgba.into_raw(), w, h, coverage)
+    } else { build_mips(rgba.into_raw(), w, h, role) };
     Ok(Decoded { width: w, height: h, mips })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cutout_mips_preserve_coverage_without_filling_empty_texels() {
+        let base: Vec<u8> = (0..64*64).flat_map(|i| [80, 160, 40, if (i % 64) < 24 { 255 } else { 0 }]).collect();
+        let coverage = alpha_coverage(&base);
+        let mips = cutout_mips(base, 64, 64, coverage);
+        for mip in &mips[..5] {
+            assert!((alpha_coverage(mip) - coverage).abs() <= 0.125);
+            assert!(mip.chunks_exact(4).all(|p| p[..3] == [80, 160, 40]));
+        }
+        let mut empty = vec![0; 64];
+        preserve_coverage(&mut empty, 1.0);
+        assert!(empty.iter().all(|x| *x == 0));
+    }
+
+    #[test]
+    fn jpeg_leaf_colour_requires_its_separate_linear_opacity() {
+        let dir = std::env::temp_dir().join(format!("vg-opacity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let colour = dir.join("leaves.jpg");
+        let opacity = dir.join("alpha.png");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([30, 120, 40])).save(&colour).unwrap();
+        assert!(decode_with_opacity(&colour, Some(&dir.join("missing.png")), Role::Srgb, 8).is_err());
+        image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 {255} else {0}])).save(&opacity).unwrap();
+        let decoded = decode_with_opacity(&colour, Some(&opacity), Role::Srgb, 4).unwrap();
+        assert_eq!((decoded.width, decoded.height), (4, 4));
+        assert_eq!(alpha_coverage(&decoded.mips[0]), 0.5);
+        image::GrayImage::new(4, 4).save(&opacity).unwrap();
+        assert!(decode_with_opacity(&colour, Some(&opacity), Role::Srgb, 8).is_err());
+    }
 
     fn fixture(name: &str) -> serde_json::Value {
         let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("vg_stress_prep/fixtures").join(name);
