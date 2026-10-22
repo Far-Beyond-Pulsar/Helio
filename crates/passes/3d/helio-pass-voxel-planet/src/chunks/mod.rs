@@ -1069,12 +1069,17 @@ const QUERIES: u32 = 19;
 /// `Buried`'s size: a count and 4095 keys.
 const BURIED_BYTES: u64 = 16 * 4096;
 
-/// Pixels a side of the block one ray report samples (`feedback`), and
-/// the reports' buffer (a key a block, up to 4096x4096 pixels).
+/// Ray reports (`feedback`): a pixel of each 2x2 a frame, every pixel over
+/// `REPORT_SWEEP` frames; a workgroup's 32x32 pixels' distinct wanted
+/// nodes, up to one a block of 8x8 pixels in all. The reports' buffer: a
+/// count, then the keys (up to 4096x4096 pixels).
+const REPORT_SWEEP: u64 = 4;
 const FEEDBACK_BLOCK: u32 = 8;
-/// Frames the reports take to sample every pixel of their blocks.
-const FEEDBACK_FRAMES: u64 = (FEEDBACK_BLOCK * FEEDBACK_BLOCK) as u64;
-const FEEDBACK_BYTES: u64 = 16 * (4096 / FEEDBACK_BLOCK as u64) * (4096 / FEEDBACK_BLOCK as u64);
+const FEEDBACK_BYTES: u64 = 16 + 16 * (4096 / FEEDBACK_BLOCK as u64) * (4096 / FEEDBACK_BLOCK as u64);
+/// Frames of ray reports a plan must have seen since residency last
+/// changed (and fades ended) before it counts as settled: those in flight
+/// when it changed (a readback slot each), then a sweep of the new cut.
+const REPORT_FRAMES: u64 = TIMING_RING + REPORT_SWEEP;
 
 /// Picks a frame answers (more wait a frame).
 const MAX_PICKS: usize = 8;
@@ -1453,8 +1458,8 @@ pub struct ChunkWorld {
     /// Buried nodes rays met (`Buried`) and its readback slots.
     buried: wgpu::Buffer,
     buried_slots: Vec<ReachSlot>,
-    /// Ray reports (`feedback`): a node a block of pixels' sampled hit
-    /// wants, its readback slots, and the kernel.
+    /// Ray reports (`feedback`): the nodes sampled hits want, its readback
+    /// slots, and the kernel.
     feedback: wgpu::Buffer,
     feedback_slots: Vec<ReachSlot>,
     feedback_layout: wgpu::BindGroupLayout,
@@ -1478,8 +1483,8 @@ pub struct ChunkWorld {
     seen: Vec<NodeKey>,
     reached: Vec<NodeKey>,
     /// Frames of ray reports read and not yet sent to the planner, and the
-    /// planner's count of them when residency last changed: settled takes
-    /// a plan that saw a full cycle of them since (`FEEDBACK_FRAMES`).
+    /// planner's count of them when residency last changed or a fade last
+    /// ran: settled takes a plan that saw `REPORT_FRAMES` of them since.
     reports_unsent: u64,
     quiet_from: u64,
     evict_pipeline: wgpu::ComputePipeline,
@@ -2429,13 +2434,13 @@ impl ChunkWorld {
         let ground_probe = compute("chunk ground probes", &layout(&ground_layout), "ground_probe");
         let probe_frame = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk probe frame"), size: std::mem::size_of::<ground::ProbeFrame>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let probe_tiles = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk probe tiles"), size: (PROBE_TILES * std::mem::size_of::<ground::ProbeTile>()) as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        // Ray reports: the hits a block of pixels samples, as the nodes
-        // they want.
+        // Ray reports: the hits of a pixel of each 2x2, as the nodes they
+        // want.
         let feedback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk feedback"),
             entries: &[hits[0], hits[1], storage(24, false, wgpu::ShaderStages::COMPUTE)],
         });
-        let feedback_pipeline = compute("chunk feedback", &layout(&feedback_layout), "feedback");
+        let feedback_pipeline = tiled("chunk feedback", &layout(&feedback_layout), "feedback");
         let publish = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk gbuffer"),
             layout: Some(&layout(&resolve_layout)),
@@ -3826,7 +3831,9 @@ impl ChunkWorld {
         self.last_generated = (stats.generated_footprints, stats.generated_chunks);
         // Settled: a plan that saw every event wants nothing more.
         self.last_requests = self.plan.requests.iter().filter(|k| !self.nodes.contains_key(k)).count() + usize::from(unseen || self.events.iter().any(residency::Event::structural) || stats.generated_chunks > 0);
-        if self.last_requests > 0 {
+        // Rays must report the cut as it ends up: after the last change and
+        // the last fade (what a finer node uncovers shows once its fade ends).
+        if self.last_requests > 0 || stats.fading_nodes > 0 {
             self.quiet_from = self.worker.as_ref().map_or(0, residency::Worker::reports_sent);
         }
         stats.drawn_chunks = self.drawn_set.list.len();
@@ -3928,7 +3935,8 @@ impl ChunkWorld {
             *reports += 1;
             let words: &[[i32; 4]] = bytemuck::cast_slice(data);
             let mut unique: FxHashSet<[i32; 4]> = FxHashSet::default();
-            seen.extend(words.iter().filter(|k| k[0] >= 0 && unique.insert(**k)).map(|k| NodeKey::from_table_key(*k)));
+            let count = (words[0][0] as u32 as usize).min(words.len() - 1);
+            seen.extend(words[1..=count].iter().filter(|k| unique.insert(**k)).map(|k| NodeKey::from_table_key(*k)));
         });
         // Timestamps: map those just submitted, read those mapped.
         let period = f64::from(self.queue.get_timestamp_period()) / 1.0e6;
@@ -4005,10 +4013,10 @@ impl ChunkWorld {
     /// between levels is fading (fades move with drawn frames), and the
     /// rays have swept the view since residency last changed.
     pub fn settled(&self) -> bool {
-        // Rays sample a pixel of each block a frame: a plan that has not
-        // seen them all since residency last changed may still want more
-        // where rays meet what the eye's distance does not ask for.
-        let swept = self.targets.is_none() || self.planned_for.is_some_and(|p| p.reports_seen >= self.quiet_from + FEEDBACK_FRAMES);
+        // Every pixel reports within `REPORT_SWEEP` frames: a plan that has
+        // not seen a sweep of the cut as it is may still want more where
+        // rays meet what the eye's distance does not ask for.
+        let swept = self.targets.is_none() || self.planned_for.is_some_and(|p| p.reports_seen >= self.quiet_from + REPORT_FRAMES);
         // The plan shown was made for these edits: what they changed where
         // the cut draws air (no node to mark) is planned.
         let current = self.planned_for.is_some_and(|p| p.edits == self.edits.version);
@@ -4573,9 +4581,9 @@ impl ChunkWorld {
             self.denoise(encoder, &group, size, lights, timing);
         }
         // Ray reports, back without waiting (a frame's copy when a slot is
-        // free): the node each block of pixels' sampled hit wants, and the
-        // Buried nodes rays met.
-        let blocks = (u64::from(size[0].div_ceil(FEEDBACK_BLOCK)) * u64::from(size[1].div_ceil(FEEDBACK_BLOCK))).min(FEEDBACK_BYTES / 16);
+        // free): the nodes the sampled hits want, and the Buried nodes rays
+        // met.
+        let room = u64::from(size[0].div_ceil(FEEDBACK_BLOCK)) * u64::from(size[1].div_ceil(FEEDBACK_BLOCK));
         if let Some(slot) = self.feedback_slots.iter_mut().find(|s| matches!(s.state, ReachState::Free)) {
             let (distance, visibility) = (view(&targets.distance), view(&targets.visibility));
             let feedback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4583,14 +4591,15 @@ impl ChunkWorld {
                 layout: &self.feedback_layout,
                 entries: &[view_entry(4, &distance), view_entry(7, &visibility), entry(24, &self.feedback)],
             });
+            encoder.clear_buffer(&self.feedback, 0, Some(16));
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk feedback"), timestamp_writes: None });
                 pass.set_pipeline(&self.feedback_pipeline);
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &feedback_group, &[]);
-                pass.dispatch_workgroups(size[0].div_ceil(FEEDBACK_BLOCK).div_ceil(8), size[1].div_ceil(FEEDBACK_BLOCK).div_ceil(8), 1);
+                pass.dispatch_workgroups(size[0].div_ceil(32), size[1].div_ceil(32), 1);
             }
-            slot.bytes = blocks * 16;
+            slot.bytes = (16 + room * 16).min(FEEDBACK_BYTES);
             encoder.copy_buffer_to_buffer(&self.feedback, 0, &slot.buffer, 0, slot.bytes);
             slot.state = ReachState::Copied;
         }

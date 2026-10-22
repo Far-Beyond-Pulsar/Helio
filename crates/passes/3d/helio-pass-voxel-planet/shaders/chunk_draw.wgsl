@@ -3737,15 +3737,25 @@ fn local_filter(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // ---- 5. Ray reports ----
-// Where rays decide detail (`docs/chunk-octree.md`): each 8x8 block of
-// pixels samples one hit a frame (all 64 pixels over 64 frames) and
-// reports the node its level wants there: cells of a pixel, two levels of
-// margin (the prefetch eye, the coarsening hysteresis), the hit's own
-// node at least. The planner marks it and its ancestors seen. A
-// workgroup's 8x8 blocks report each node once.
+// Where rays decide detail goes (`docs/chunk-octree.md`): a pixel of each
+// 2x2 a frame (all four over `REPORT_SWEEP` frames, in `chunks/mod.rs`)
+// names the node its hit's level wants there: cells of a pixel, two levels
+// of margin for the prefetch eye and the coarsening hysteresis, the hit's
+// own node at least. A workgroup appends the distinct nodes of its 32x32
+// pixels to `reports`, up to a node per 8x8 pixels in all; the planner
+// marks them and their ancestors seen. A view's whole set is known a few
+// frames after it shows.
 
-@group(1) @binding(24) var<storage, read_write> reports: array<vec4<i32>>;
-var<workgroup> w_reports: array<vec4<i32>, 64>;
+struct Reports {
+    count: atomic<u32>,
+    keys: array<vec4<i32>>,
+}
+@group(1) @binding(24) var<storage, read_write> reports: Reports;
+var<workgroup> w_keys: array<vec4<i32>, 256>;
+// Distinct nodes so far, by hash: a lane's index + 1 (0: free).
+var<workgroup> w_table: array<atomic<u32>, 512>;
+var<workgroup> w_count: atomic<u32>;
+var<workgroup> w_base: u32;
 
 // The node a hit (`v`: slot and packed cell; distance `t`) at pixel `p`
 // wants.
@@ -3753,40 +3763,73 @@ fn wanted_node(v: vec2<u32>, t: f32, p: vec2<u32>, size: vec2<u32>) -> vec4<i32>
     let key = chunk_keys[v.x];
     let level = key.x >> 8u;
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
+    var size_m = length(statics[v.x].m0.xyz);
+    if exact_level(level) { size_m = length(cell_frame(v.x, cell).m0.xyz); }
+    let n = clamp(i32(ceil(log2(max(size_m / max(pixel_width(p, size, t), 1e-6), 1e-3)))) + 2, 0, level);
+    // Up to six levels finer, the node's 64 cells hold the hit's whole cell.
+    if n <= 6 {
+        return vec4<i32>((key.x & 7) | ((level - n) << 8u), (key.yzw * 64 + cell) >> vec3<u32>(u32(6 - n)));
+    }
     let c = cell_frame(v.x, cell);
     let position = pixel_ray(p, size) * t;
     let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
     let frac = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(0.999));
-    let px = length(c.m0.xyz) / max(pixel_width(p, size, t), 1e-6);
-    let n = clamp(i32(ceil(log2(max(px, 1e-3)))) + 2, 0, level);
     let fine = ((key.yzw * 64 + cell) << vec3<u32>(u32(n))) + vec3<i32>(floor(frac * f32(1 << u32(n))));
     return vec4<i32>((key.x & 7) | ((level - n) << 8u), fine >> vec3<u32>(6u));
 }
 
-@compute @workgroup_size(8, 8)
-fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+@compute @workgroup_size(16, 16)
+fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let size = textureDimensions(hit_distance);
-    let blocks = (size + 7u) / 8u;
-    var report = vec4<i32>(-1, 0, 0, 0);
-    if all(id.xy < blocks) {
-        // The block's pixel this frame: 37 is odd, so 64 frames visit all.
-        let n = (params.table.w * 37u + id.x * 7u + id.y * 13u) & 63u;
-        let p = id.xy * 8u + vec2<u32>(n & 7u, n >> 3u);
-        if all(p < size) {
-            let v = textureLoad(hit_visibility, vec2<i32>(p), 0).xy;
-            let t = textureLoad(hit_distance, vec2<i32>(p), 0).r;
-            if v.x != NONE && t > 0.0 { report = wanted_node(v, t, p, size); }
-        }
+    if li == 0u { atomicStore(&w_count, 0u); }
+    atomicStore(&w_table[li], 0u);
+    atomicStore(&w_table[li + 256u], 0u);
+    let phase = params.table.w & 3u;
+    let p = id.xy * 2u + vec2<u32>(phase & 1u, phase >> 1u);
+    var key = vec4<i32>(-1, 0, 0, 0);
+    if all(p < size) {
+        let v = textureLoad(hit_visibility, vec2<i32>(p), 0).xy;
+        let t = textureLoad(hit_distance, vec2<i32>(p), 0).r;
+        if v.x != NONE && t > 0.0 { key = wanted_node(v, t, p, size); }
     }
-    w_reports[li] = report;
+    w_keys[li] = key;
     workgroupBarrier();
-    for (var i = 0u; i < li; i++) {
-        if all(w_reports[i] == report) {
-            report.x = -1;
-            break;
+    // Each node once: the lane that claims its hash slot (open addressing;
+    // another node there sends it on). Lanes whose left or upper neighbour
+    // holds it too skip that (the first lane holding a node never does):
+    // most do.
+    var first = key.x >= 0;
+    if first && lid.x > 0u && all(w_keys[li - 1u] == key) { first = false; }
+    if first && lid.y > 0u && all(w_keys[li - 16u] == key) { first = false; }
+    var rank = 0u;
+    if first {
+        let h = vec4<u32>(key) * vec4<u32>(0x9e3779b1u, 0x85ebca77u, 0xc2b2ae3du, 0x27d4eb2fu);
+        var at = h.x ^ h.y ^ h.z ^ h.w;
+        at = (at ^ (at >> 15u)) & 511u;
+        first = false;
+        for (var probe = 0u; probe < 1024u; probe++) {
+            let r = atomicCompareExchangeWeak(&w_table[at], 0u, li + 1u);
+            if r.exchanged {
+                first = true;
+                rank = atomicAdd(&w_count, 1u);
+                break;
+            }
+            // A weak exchange may fail spuriously: the same slot again.
+            if r.old_value == 0u { continue; }
+            if all(w_keys[r.old_value - 1u] == key) { break; }
+            at = (at + 1u) & 511u;
         }
     }
-    if all(id.xy < blocks) { reports[id.y * blocks.x + id.x] = report; }
+    workgroupBarrier();
+    if li == 0u {
+        let n = atomicLoad(&w_count);
+        w_base = select(0u, atomicAdd(&reports.count, n), n > 0u);
+    }
+    workgroupBarrier();
+    // Up to a node per 8x8 pixels (the readback's size).
+    let room = ((size.x + 7u) / 8u) * ((size.y + 7u) / 8u);
+    let at = w_base + rank;
+    if first && at < room { reports.keys[at] = key; }
 }
 
 // ---- 6. GI probe rays ----
