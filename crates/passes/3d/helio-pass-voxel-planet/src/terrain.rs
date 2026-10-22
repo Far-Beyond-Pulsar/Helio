@@ -48,14 +48,18 @@
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
 //! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32
-//! fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 // optional
+//! fn cave_noise(q: vec3<i32>, level: u32, lattice: ptr<function, CaveLattice>) -> vec3<i32>
+//! fn cave_clearance(n: vec3<i32>, level: u32, step: f32) -> i32
 //! ```
 //!
-//! `terrain_clearance` is a conservative count of level cells along a lane,
-//! from the cell at volume point `q` (the point moving `step` units per
-//! cell), in which the volume cannot change a cell below the heightfield's
-//! lean band (caves cannot carve there); generation steps over them. Without
-//! it every cell of the extent is evaluated.
+//! `cave_clearance` is a conservative count of level cells along a lane,
+//! from a cell whose caves' noises are `n` (`cave_noise` at the cell centre
+//! `q`, the point moving `step` units per cell), in which the volume cannot
+//! change a cell below the heightfield's lean band (caves cannot carve
+//! there); generation steps over them. `cave_noise` keeps its lattice
+//! cells' corners in `lattice` (`cave_lattice()` at first), so a lane's
+//! cells hash each lattice cell once, and its noises are the ones the
+//! cell's density reads.
 //!
 //! and, to lean its surface (overhangs that are a continuous deformation of
 //! the heightfield: nothing floats),
