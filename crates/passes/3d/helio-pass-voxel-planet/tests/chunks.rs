@@ -1433,6 +1433,139 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
     assert!(mismatched * 100 <= before_hits + before_sky, "{mismatched} mismatched");
 }
 
+/// The publish shows a hit only where no mesh is in front of it, as the
+/// trace found against the meshes' depth: a mesh plane across a ground view
+/// (the scene's depth one view depth everywhere, the gbuffer a marker
+/// colour, as a mesh pass leaves them) keeps its colour and depth wherever
+/// the ground is past it and over the sky; nearer, the ground's colour and
+/// depth replace them. The publish does not test the depth itself: on
+/// NVIDIA's Vulkan driver its depth test once let every hit through, whole
+/// runs at a time (black grass).
+#[test]
+fn publish_shows_hits_only_in_front_of_meshes() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let view = ground_view(&planet, land(&planet, 4, 0.37, 0.61), [320, 180]);
+    let forward = view.forward.as_dvec3();
+    let plane_m = 6.0f32;
+    let plane_depth = view.near / plane_m;
+    let [w, h] = view.size;
+    let texture = |label: &str, format: wgpu::TextureFormat| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let depth = texture("mesh plane depth", wgpu::TextureFormat::Depth32Float);
+    let depth_view = depth.create_view(&Default::default());
+    let gbuffer: Vec<wgpu::Texture> = helio_pass_voxel_planet::engine::GBUFFER_FORMATS.iter().map(|&f| texture("gbuffer", f)).collect();
+    let gbuffer_views: Vec<wgpu::TextureView> = gbuffer.iter().map(|t| t.create_view(&Default::default())).collect();
+    let marker = wgpu::Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 };
+    // The mesh pass: its colour and depth everywhere.
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mesh plane"),
+        color_attachments: &gbuffer_views.iter().map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(marker), store: wgpu::StoreOp::Store } })).collect::<Vec<_>>(),
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &depth_view,
+            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(plane_depth), store: wgpu::StoreOp::Store }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    gpu.queue.submit([encoder.finish()]);
+    let mut world = World::new(gpu, &planet);
+    world.scene_depth = Some(depth.create_view(&Default::default()));
+    let hits = world.settle(gpu, &planet, &view);
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    let views: [&wgpu::TextureView; 8] = std::array::from_fn(|i| &gbuffer_views[i]);
+    world.chunks.publish_scene(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), views, &depth_view, None);
+    gpu.queue.submit([encoder.finish()]);
+    let albedo = read_rgba8(gpu, &gbuffer[0]);
+    let published_depth = read_depth(gpu, &depth);
+
+    let view_proj = view.view_proj(&planet);
+    let (mut shown, mut behind, mut wrong) = (0, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let at = (y * w + x) as usize;
+            let t = f64::from(plane_m) / view.pixel_dir(view_proj, x, y).dot(forward);
+            let hit = hits[at].map(|h| h.distance);
+            // Within a hundredth of the plane: either answer.
+            if hit.is_some_and(|d| (d - t).abs() < 0.01 * t) {
+                continue;
+            }
+            let marked = albedo[at] == [255, 0, 255, 255];
+            let bad = if hit.is_some_and(|d| d < t) {
+                shown += 1;
+                marked || published_depth[at] <= plane_depth
+            } else {
+                behind += 1;
+                !marked || published_depth[at] != plane_depth
+            };
+            if bad {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: hit {hit:?}, plane at {t:.3}, albedo {:?}, depth {}", albedo[at], published_depth[at]);
+                }
+            }
+        }
+    }
+    eprintln!("{shown} hits shown, {behind} behind the plane or sky");
+    assert!(shown > 2000 && behind > 2000, "{shown} shown, {behind} behind");
+    assert_eq!(wrong, 0);
+}
+
+/// An Rgba8Unorm target, row by row.
+fn read_rgba8(gpu: &Gpu, texture: &wgpu::Texture) -> Vec<[u8; 4]> {
+    let [w, h] = [texture.width(), texture.height()];
+    let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
+    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+        let at = (y * row + x * 4) as usize;
+        [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
+    }).collect()
+}
+
+/// A Depth32Float target, row by row.
+fn read_depth(gpu: &Gpu, texture: &wgpu::Texture) -> Vec<f32> {
+    let [w, h] = [texture.width(), texture.height()];
+    let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::DepthOnly },
+        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
+    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
+        let at = (y * row + x * 4) as usize;
+        f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }).collect()
+}
+
 /// An f16's value.
 fn f16_value(bits: u16) -> f32 {
     let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };

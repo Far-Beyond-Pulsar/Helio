@@ -407,6 +407,13 @@ while a cell spans several pixels, and the shading normal. A natural step
 softness) and its sun ray passes its own steps. Helio's deferred lighting,
 atmosphere and TSR do the rest.
 
+It writes only the hits no mesh covers, as the shading pass found them
+against the meshes' depth (a covered hit's normal is zero), and writes the
+depth without testing it. One decision, not two: on NVIDIA's Vulkan driver
+the publish's own depth test once read a depth surface that a copy read
+correctly the moment before, let every hit through and left the depth
+garbage for whole runs (black grass on Earth, 2026-10-22).
+
 With a host's scene materials (`scene.rs`, `shaders/scene_materials.wgsl`,
 devices with texture binding arrays), each voxel material's top, side and
 bottom faces use Helio material rows and textures instead of the flat
