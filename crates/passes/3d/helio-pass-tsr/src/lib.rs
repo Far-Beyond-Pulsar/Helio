@@ -22,19 +22,25 @@
 //! about their shading: `transparency_reactivity` (coverage that must not
 //! accumulate, [`TsrPass::with_transparency_reactivity`]) and
 //! [`STOCHASTIC_MASK`] (shading sampled stochastically per frame that relies
-//! on accumulation, [`TsrPass::with_stochastic_mask`]).
+//! on accumulation, [`TsrPass::with_stochastic_mask`]). [`MOTION_VECTORS`]
+//! give each texel's motion, so moving objects reproject with themselves
+//! ([`TsrPass::with_motion_vectors`]); without them the camera's motion is
+//! used for every texel.
 //!
 //! ## O(1) guarantee
 //!
 //! `execute()` records exactly:
-//! 1. One compute dispatch over 8x8 tiles of output pixels (TSR resolve)
+//! 1. With motion vectors, one buffer clear and one compute dispatch over
+//!    the input texels (TSR reconstruct: where moving objects were last
+//!    frame, for disocclusion).
+//! 2. One compute dispatch over 8x8 tiles of output pixels (TSR resolve)
 //!    into one of two ping-pong histories.
-//! 2. One fullscreen draw (RCAS sharpening of that resolve) into
+//! 3. One fullscreen draw (RCAS sharpening of that resolve) into
 //!    `output_texture`, published as `tsr_color`.
-//! 3. Optional fullscreen blit into `ctx.target`; intermediate mode leaves
+//! 4. Optional fullscreen blit into `ctx.target`; intermediate mode leaves
 //!    `tsr_color` to a following post-process pass.
 //!
-//! All three are constant-time GPU operations regardless of scene complexity.
+//! All are constant-time GPU operations regardless of scene complexity.
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
@@ -138,6 +144,23 @@ impl TsrQuality {
 /// still drops history.
 pub const STOCHASTIC_MASK: &str = "tsr_stochastic";
 
+/// Graph resource of per-texel motion vectors, which the geometry passes
+/// write with the G-buffer (`gbuffer_velocity`).
+///
+/// Contract: an `Rgba16Float` texture at the internal (pre-AA) resolution.
+/// `xy` is the texel's motion since last frame in pixels: its raster position
+/// this frame minus the same surface point's last frame, both with that
+/// frame's camera jitter (fragment position minus the point projected by the
+/// previous, jittered view-projection and its previous transform or
+/// animation). Bit 0 of `w` (as an integer) is set for geometry that moves
+/// by itself: a moving or skinned instance, animated foliage. Elsewhere
+/// (static geometry, passes that write none, the cleared target) the resolve
+/// derives the camera's motion from depth, which is exact where a writer's
+/// camera-relative matrices round (UE's velocity buffer holds only dynamic
+/// geometry the same way). The rest of `w` and `z` are the writers' own.
+/// Read only when [`TsrPass::with_motion_vectors`] is set.
+pub const MOTION_VECTORS: &str = "gbuffer_velocity";
+
 // ── GPU uniform ───────────────────────────────────────────────────────────────
 
 #[repr(C)]
@@ -145,10 +168,47 @@ pub const STOCHASTIC_MASK: &str = "tsr_stochastic";
 struct TsrUniform {
     jitter_offset: [f32; 2], // this frame's jitter in input pixels
     reactivity: f32,         // fraction of history confidence dropped per frame
-    flags: u32,              // bit 0: reset, bit 1: transparency coverage
+    flags: u32,              // bit 0: reset, bit 1: transparency coverage, bit 2: motion vectors
     previous_jitter_uv: [f32; 2],
     _pad: [f32; 2],
-    previous_view: [f32; 16],
+    reprojection: Reprojection,
+}
+
+/// How the resolve carries a point of this frame's clip space to last
+/// frame's (`TsrUniform` in tsr_main.wgsl): clip to previous clip, composed
+/// in f64 from this frame's view-projection, last frame's and last frame's
+/// view (UE's ClipToPrevClip). Through world space in f32 instead, a near
+/// point moves by rounding of the camera's position (hundreds of metres off
+/// the frame origin), frame to frame, and history accumulating over dozens
+/// of frames smears by it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+struct Reprojection {
+    clip_to_previous_clip: [f32; 16],
+    clip_to_world_w: [f32; 4],
+    eye_to_previous_clip: [f32; 4],
+    clip_to_previous_view_z: [f32; 4],
+}
+
+impl Reprojection {
+    /// From this frame's view-projection (`view_proj`) and eye, last frame's
+    /// view-projection and view, in this frame's coordinates (all
+    /// column-major).
+    fn new(view_proj: [f32; 16], eye: [f32; 3], previous_view_proj: [f32; 16], previous_view: [f32; 16]) -> Self {
+        let matrix = |m: [f32; 16]| glam::DMat4::from_cols_array(&m.map(f64::from));
+        let clip_to_world = matrix(view_proj).inverse();
+        let previous_view_proj = matrix(previous_view_proj);
+        let clip_to_previous_clip = previous_view_proj * clip_to_world;
+        let clip_to_previous_view = matrix(previous_view) * clip_to_world;
+        let eye = glam::DVec4::new(f64::from(eye[0]), f64::from(eye[1]), f64::from(eye[2]), 1.0);
+        let f32s = |v: glam::DVec4| v.to_array().map(|x| x as f32);
+        Self {
+            clip_to_previous_clip: clip_to_previous_clip.to_cols_array().map(|x| x as f32),
+            clip_to_world_w: f32s(clip_to_world.row(3)),
+            eye_to_previous_clip: f32s(previous_view_proj * eye),
+            clip_to_previous_view_z: f32s(clip_to_previous_view.row(2)),
+        }
+    }
 }
 
 // Express previous view-space depth in the current floating origin. Current
@@ -240,6 +300,20 @@ fn output_texture(
 
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
+/// What the resolve and reconstruction bind groups were made for: colour,
+/// depth, coverage, stochastic mask and motion vectors.
+type ResolveKey = (wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView);
+
+/// The reconstruction's buffer for `texels` input texels.
+fn nearest_buffer(device: &wgpu::Device, texels: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TSR Reconstructed Nearest Depth"),
+        size: texels.max(1) * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 /// Temporal Super-Resolution pass.
 ///
 /// Placed **in place of** `TaaPass` in the render graph when TSR is enabled.
@@ -255,13 +329,27 @@ pub struct TsrPass {
     bgl: wgpu::BindGroupLayout,
     /// Per write index: the resolve writing `histories[i]` reads the other.
     bind_groups: [Option<wgpu::BindGroup>; 2],
-    bind_group_key: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView)>,
+    bind_group_key: Option<ResolveKey>,
     _reactivity_fallback: wgpu::Texture,
     reactivity_fallback_view: wgpu::TextureView,
     transparency_reactivity: bool,
     /// Read [`STOCHASTIC_MASK`] (zero when off).
     stochastic_mask: bool,
+    /// Read [`MOTION_VECTORS`] (none when off: the camera's motion).
+    motion_vectors: bool,
+    /// The uniform's flags as `prepare` set them; `execute` adds bit 2 when
+    /// this frame's graph published motion vectors.
+    flags: u32,
+    _motion_fallback: wgpu::Texture,
+    motion_fallback_view: wgpu::TextureView,
     uniform_buf: wgpu::Buffer,
+
+    // ── Reconstruction (last frame's nearest depth per input texel) ──────────
+    reconstruct_pipeline: wgpu::ComputePipeline,
+    reconstruct_bgl: wgpu::BindGroupLayout,
+    reconstruct_bind_group: Option<wgpu::BindGroup>,
+    /// One word per input texel, at least; grown with the internal size.
+    nearest: wgpu::Buffer,
 
     // ── Sharpening (history → output_texture) ─────────────────────────────────
     sharpen_pipeline: wgpu::RenderPipeline,
@@ -375,6 +463,18 @@ impl TsrPass {
             view_formats:&[],
         });
         let reactivity_fallback_view = reactivity_fallback.create_view(&Default::default());
+        // Zero: no texel has a motion vector (w = 0), all move with the camera.
+        let motion_fallback = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TSR no motion vectors"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let motion_fallback_view = motion_fallback.create_view(&Default::default());
 
         // ── TSR BGL ───────────────────────────────────────────────────────────
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -391,10 +491,21 @@ impl TsrPass {
                 tex_entry(9, wgpu::TextureSampleType::Float { filterable: true }), // history_state
                 tex_entry(11, wgpu::TextureSampleType::Float { filterable: true }), // history_noise
                 tex_entry(13, wgpu::TextureSampleType::Float { filterable: true }), // stochastic_mask
+                tex_entry(14, wgpu::TextureSampleType::Float { filterable: true }), // motion_vectors
+                buffer_entry(15, true), // previous_nearest
                 storage_entry(16), // out_color
                 storage_entry(17), // out_depth_coarse
                 storage_entry(18), // out_state
                 storage_entry(19), // out_noise
+            ],
+        });
+        let reconstruct_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("TSR Reconstruct BGL"),
+            entries: &[
+                tex_entry(2, wgpu::TextureSampleType::Depth),                      // depth_tex
+                uniform_entry(6),                                                  // tsr
+                tex_entry(14, wgpu::TextureSampleType::Float { filterable: true }), // motion_vectors
+                buffer_entry(20, false), // reconstructed_nearest
             ],
         });
         let sharpen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -465,6 +576,18 @@ impl TsrPass {
             },
             cache: None,
         });
+        let reconstruct_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("TSR Reconstruct Pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("TSR Reconstruct Pipeline"),
+                bind_group_layouts: &[Some(&reconstruct_bgl)],
+                immediate_size: 0,
+            })),
+            module: &tsr_shader,
+            entry_point: Some("cs_reconstruct"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
         let sharpen_pipeline = fullscreen("TSR Sharpen Pipeline", &sharpen_bgl, &tsr_shader, "vs_main", "fs_sharpen",
             &[target(OUTPUT_FORMAT)]);
         let blit_pipeline = fullscreen("TSR Blit Pipeline", &blit_bgl, &blit_shader, "vs_blit", "fs_blit", &[target(format)]);
@@ -481,7 +604,15 @@ impl TsrPass {
             reactivity_fallback_view,
             transparency_reactivity: false,
             stochastic_mask: false,
+            motion_vectors: false,
+            flags: 0,
+            _motion_fallback: motion_fallback,
+            motion_fallback_view,
             uniform_buf,
+            reconstruct_pipeline,
+            reconstruct_bgl,
+            reconstruct_bind_group: None,
+            nearest: nearest_buffer(device, u64::from(output_width) * u64::from(output_height)),
             sharpen_pipeline,
             sharpen_bgl,
             sharpen_bind_groups,
@@ -547,6 +678,13 @@ impl TsrPass {
             self.stochastic_mask = enabled;
             self.bind_group_key = None;
         }
+    }
+
+    /// Read [`MOTION_VECTORS`], which a graph's geometry passes write. Off,
+    /// every texel moves with the camera.
+    pub fn with_motion_vectors(mut self) -> Self {
+        self.motion_vectors = true;
+        self
     }
 
     /// Enable coverage history for a graph providing `transparency_reactivity`.
@@ -635,6 +773,19 @@ fn camera_storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn buffer_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
 fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -692,6 +843,8 @@ fn make_resolve_bg(
     depth: &wgpu::TextureView,
     reactive: &wgpu::TextureView,
     stochastic: &wgpu::TextureView,
+    motion: &wgpu::TextureView,
+    nearest: &wgpu::Buffer,
     sampler: &wgpu::Sampler,
     camera: &wgpu::Buffer,
     uniform: &wgpu::Buffer,
@@ -712,6 +865,8 @@ fn make_resolve_bg(
             wgpu::BindGroupEntry { binding: 9, resource: view(&previous.state_view) },
             wgpu::BindGroupEntry { binding: 11, resource: view(&previous.noise_view) },
             wgpu::BindGroupEntry { binding: 13, resource: view(stochastic) },
+            wgpu::BindGroupEntry { binding: 14, resource: view(motion) },
+            wgpu::BindGroupEntry { binding: 15, resource: nearest.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 16, resource: view(&next.color_view) },
             wgpu::BindGroupEntry { binding: 17, resource: view(&next.depth_coarse_view) },
             wgpu::BindGroupEntry { binding: 18, resource: view(&next.state_view) },
@@ -719,6 +874,31 @@ fn make_resolve_bg(
         ],
     })
 }
+
+/// The reconstruction bind group, writing `nearest`.
+fn make_reconstruct_bg(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    depth: &wgpu::TextureView,
+    motion: &wgpu::TextureView,
+    nearest: &wgpu::Buffer,
+    uniform: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let view = wgpu::BindingResource::TextureView;
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("TSR Reconstruct BG"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 2, resource: view(depth) },
+            wgpu::BindGroupEntry { binding: 6, resource: uniform.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 14, resource: view(motion) },
+            wgpu::BindGroupEntry { binding: 20, resource: nearest.as_entire_binding() },
+        ],
+    })
+}
+
+/// Input texels per reconstruction workgroup (`cs_reconstruct`).
+const RECONSTRUCT_GROUP: [u32; 2] = [8, 8];
 
 /// Output pixels per resolve workgroup (`TILE` in tsr_main.wgsl).
 const RESOLVE_TILE: [u32; 2] = [8, 8];
@@ -808,6 +988,7 @@ impl RenderPass for TsrPass {
         if self.color_input == "fogged_hdr" { builder.read("pre_aa"); }
         if self.transparency_reactivity { builder.read("transparency_reactivity"); }
         if self.stochastic_mask { builder.read(STOCHASTIC_MASK); }
+        if self.motion_vectors { builder.read(MOTION_VECTORS); }
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -865,11 +1046,14 @@ impl RenderPass for TsrPass {
             flags: reset | (u32::from(self.transparency_reactivity) << 1),
             previous_jitter_uv: self.previous_jitter_uv,
             _pad: [0.0; 2],
-            previous_view,
+            reprojection: Reprojection::new(ctx.camera_data.view_proj,
+                [ctx.camera_data.position_near[0], ctx.camera_data.position_near[1], ctx.camera_data.position_near[2]],
+                ctx.camera_data.prev_view_proj, previous_view),
         };
 
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        self.flags = u.flags;
         self.previous_jitter_uv = [ndc[0] * 0.5, -ndc[1] * 0.5];
         // Retain the raw matrix and its origin, not this frame's rebased
         // history matrix, so successive shifts are never applied twice.
@@ -898,13 +1082,30 @@ impl RenderPass for TsrPass {
             ctx.registry.read_texture_view(helio_core::ResourceKey::new(STOCHASTIC_MASK), "TSR")
                 .unwrap_or(&self.reactivity_fallback_view)
         } else { &self.reactivity_fallback_view };
-        let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone(), stochastic_view.clone());
+        let motion = self.motion_vectors
+            .then(|| ctx.registry.read_texture_view(helio_core::ResourceKey::new(MOTION_VECTORS), "TSR"))
+            .flatten();
+        let motion_bound = motion.is_some();
+        let motion_view = motion.unwrap_or(&self.motion_fallback_view);
+        // Queue writes land before this frame's commands run.
+        ctx.queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(TsrUniform, flags) as u64,
+            bytemuck::bytes_of(&(self.flags | (u32::from(motion_bound) << 2))));
+        // The reconstruction holds a word per input texel.
+        let texels = u64::from(ctx.width) * u64::from(ctx.height);
+        if self.nearest.size() < texels * 4 {
+            self.nearest = nearest_buffer(ctx.device, texels);
+            self.bind_group_key = None;
+        }
+        let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone(), stochastic_view.clone(),
+            motion_view.clone());
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_groups = [1, 0].map(|read| {
                 Some(make_resolve_bg(ctx.device, &self.bgl, &self.histories[read], &self.histories[read ^ 1],
-                    pre_aa_view, ctx.depth, reactive_view, stochastic_view, &self.linear_sampler, ctx.camera,
-                    &self.uniform_buf))
+                    pre_aa_view, ctx.depth, reactive_view, stochastic_view, motion_view, &self.nearest,
+                    &self.linear_sampler, ctx.camera, &self.uniform_buf))
             });
+            self.reconstruct_bind_group = Some(make_reconstruct_bg(ctx.device, &self.reconstruct_bgl, ctx.depth,
+                motion_view, &self.nearest, &self.uniform_buf));
             self.bind_group_key = Some(key);
         }
         let write = self.write;
@@ -916,7 +1117,23 @@ impl RenderPass for TsrPass {
             cmds.write_timestamp(query, 0);
         }
 
-        // ── 2. Resolve → histories[write] ─────────────────────────────────────
+        // ── 2. Reconstruct where moving objects were ──────────────────────────
+        if motion_bound {
+            ctx.begin_gpu_scope(&mut cmds, "TSR: reconstruct");
+            cmds.clear_buffer(&self.nearest, 0, Some(texels * 4));
+            {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("TSR Reconstruct"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.reconstruct_pipeline);
+                pass.set_bind_group(0, self.reconstruct_bind_group.as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups(ctx.width.div_ceil(RECONSTRUCT_GROUP[0]), ctx.height.div_ceil(RECONSTRUCT_GROUP[1]), 1);
+            }
+            ctx.end_gpu_scope(&mut cmds, "TSR: reconstruct");
+        }
+
+        // ── 3. Resolve → histories[write] ─────────────────────────────────────
         ctx.begin_gpu_scope(&mut cmds, "TSR: resolve");
         dispatch_resolve(&mut cmds, &self.pipeline, self.bind_groups[write].as_ref().unwrap(),
             self.output_width, self.output_height);
@@ -925,7 +1142,7 @@ impl RenderPass for TsrPass {
             cmds.write_timestamp(query, 1);
         }
 
-        // ── 3. Sharpen → output_view (tsr_color) ──────────────────────────────
+        // ── 4. Sharpen → output_view (tsr_color) ──────────────────────────────
         ctx.begin_gpu_scope(&mut cmds, "TSR: sharpen");
         draw_fullscreen(&mut cmds, "TSR Sharpen", &[&self.output_view], &self.sharpen_pipeline,
             &self.sharpen_bind_groups[write]);
@@ -934,7 +1151,7 @@ impl RenderPass for TsrPass {
             cmds.write_timestamp(query, 2);
         }
 
-        // ── 4. Blit output_view → ctx.target ──────────────────────────────────
+        // ── 5. Blit output_view → ctx.target ──────────────────────────────────
         if !self.intermediate_output {
             ctx.begin_gpu_scope(&mut cmds, "TSR: blit");
             draw_fullscreen(&mut cmds, "TSR Blit", &[ctx.target], &self.blit_pipeline, &self.blit_bind_group);

@@ -1159,7 +1159,9 @@ fn build_default_graph_internal_with_lens_user(
     // cells are a pixel or two wide, TSR integrates them (`tsr_stochastic`).
     let aa = match config.tsr_quality {
         Some(quality) => {
-            let tsr = TsrPass::new(device, iw, ih, config.width, config.height, config.surface_format, quality);
+            // The G-buffer passes write motion vectors: moving objects reproject with themselves.
+            let tsr = TsrPass::new(device, iw, ih, config.width, config.height, config.surface_format, quality)
+                .with_motion_vectors();
             SceneAa::Tsr(if gi { tsr.with_stochastic_mask() } else { tsr })
         }
         None => SceneAa::Fxaa,
@@ -1391,7 +1393,7 @@ fn build_fxaa_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )),
+        ).with_motion_vectors()),
         None => SceneAa::None,
     };
     let resolved = add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, None, aa, iw, ih, None);
@@ -1524,7 +1526,7 @@ fn build_hlfs_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        ).with_transparency_reactivity()),
+        ).with_transparency_reactivity().with_motion_vectors()),
         None => SceneAa::None,
     };
     let resolved =

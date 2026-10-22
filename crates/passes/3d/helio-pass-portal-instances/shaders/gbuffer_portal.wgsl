@@ -586,6 +586,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.sss = vec4<f32>(surface.subsurface_color, surface.subsurface_radius);
     out.extra = vec4<f32>(surface.roughness_aniso_x, surface.roughness_aniso_y,
                           surface.aniso_rotation, f32(surface.flags));
-    out.velocity = vec4<f32>(compute_velocity(input),0.0,0.0);
+    // w: treated as moving by itself (helio-pass-tsr MOTION_VECTORS).
+    out.velocity = vec4<f32>(compute_velocity(input),0.0,1.0);
     return out;
 }

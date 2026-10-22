@@ -9,8 +9,8 @@ license = "MIT OR Apache-2.0"
 helio-core = { workspace = true }
 wgpu       = { workspace = true }
 bytemuck   = { workspace = true, features = ["derive"] }
+glam       = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
-glam     = { workspace = true }
 half     = { version = "2", features = ["bytemuck"] }

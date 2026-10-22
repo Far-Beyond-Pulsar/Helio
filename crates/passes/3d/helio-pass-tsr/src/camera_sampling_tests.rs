@@ -28,10 +28,10 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
         label: Some("read actual TSR uniform upload"),
         source: wgpu::ShaderSource::Wgsl(
             r#"
-@group(0) @binding(0) var<uniform> input_data: array<vec4<u32>, 6>;
-@group(0) @binding(1) var<storage, read_write> output_data: array<vec4<u32>, 6>;
+@group(0) @binding(0) var<uniform> input_data: array<vec4<u32>, 9>;
+@group(0) @binding(1) var<storage, read_write> output_data: array<vec4<u32>, 9>;
 @compute @workgroup_size(1) fn read_uniform() {
-    for(var i=0u;i<6u;i++) { output_data[i] = input_data[i]; }
+    for(var i=0u;i<9u;i++) { output_data[i] = input_data[i]; }
 }
 "#
             .into(),
@@ -47,13 +47,13 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
     });
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 96,
+        size: 144,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 96,
+        size: 144,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -73,6 +73,7 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
     });
     let mut previous_uv = [0.0f32; 2];
     let mut previous_view = [0.0f32; 16];
+    let mut previous_view_proj = [0.0f32; 16];
     for (index, (size, expected, time, frame)) in [
         ([32, 16], [0.0_f32, 0.0_f32], 1.0_f32 / 60.0, 17),
         ([32, 16], [0.375, -0.25], 1.0 / 30.0, 991),
@@ -86,6 +87,8 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
             camera.view[i] = 1.0;
         }
         camera.view[14] = -(index as f32) * 2.0;
+        camera.view_proj = camera.view;
+        camera.prev_view_proj = previous_view_proj;
         camera.jitter_frame = [
             expected[0] * 2.0 / size[0] as f32,
             expected[1] * 2.0 / size[1] as f32,
@@ -119,7 +122,7 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
             compute.set_bind_group(0, &group, &[]);
             compute.dispatch_workgroups(1, 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, 96);
+        encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, 144);
         queue.submit([encoder.finish()]);
         let (send, receive) = std::sync::mpsc::channel();
         staging
@@ -137,10 +140,12 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
         assert_eq!(words[4], previous_uv[0].to_bits());
         assert_eq!(words[5], previous_uv[1].to_bits());
         // Reset uses the current view; subsequent unchanged-origin frames
-        // upload the preceding raw view exactly.
+        // reproject with the preceding raw view exactly.
         let expected_view = if index == 0 { camera.view } else { previous_view };
-        assert_eq!(&words[8..24], &expected_view.map(f32::to_bits));
+        let expected = Reprojection::new(camera.view_proj, [0.0; 3], camera.prev_view_proj, expected_view);
+        assert_eq!(&words[8..36], bytemuck::cast_slice::<Reprojection, u32>(&[expected]));
         previous_view = camera.view;
+        previous_view_proj = camera.view_proj;
         previous_uv = [camera.jitter_frame[0] * 0.5, -camera.jitter_frame[1] * 0.5];
         drop(data);
         staging.unmap();
@@ -251,8 +256,12 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
                     usage: wgpu::BufferUsages::STORAGE,
                 });
                 let mut uniform = TsrUniform::zeroed();
-                uniform.previous_view = identity;
-                uniform.previous_view[14] = -2.0;
+                let mut previous_view = identity;
+                previous_view[14] = -2.0;
+                let mut view_proj = identity;
+                view_proj[12] = current[0];
+                view_proj[13] = current[1];
+                uniform.reprojection = Reprojection::new(view_proj, [0.0; 3], camera.prev_view_proj, previous_view);
                 uniform.previous_jitter_uv = [previous[0] * 0.5, -previous[1] * 0.5];
                 let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,

@@ -9,7 +9,8 @@ fn shadow_receiver(position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>) -> 
     // Corrected G-buffer receivers no longer carry depth-buffer quantization
     // error. Bound the FP16 residual's relative rounding plus transform error;
     // legacy producers retain the depth-ULP bound instead of assuming precision.
-    let corrected=globals.has_velocity!=0u && velocity.w==2.0;
+    // w: 2 marks a valid residual (1 a moving instance, helio-pass-gbuffer).
+    let corrected=globals.has_velocity!=0u && (u32(velocity.w)&2u)!=0u;
     var error=abs(velocity.z)*0.001;
     if !corrected {
         let depth=textureLoad(gbuf_depth,vec2<i32>(pixel),0);
