@@ -218,10 +218,6 @@ pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
         s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
-    if !program.wgsl.contains("fn terrain_clearance") {
-        // No bound: every cell of the volume's extent is evaluated.
-        s.push_str("fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 { return 0; }\n");
-    }
     if !program.wgsl.contains("fn terrain_lean") {
         // No lean (`TerrainField::lean`).
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");

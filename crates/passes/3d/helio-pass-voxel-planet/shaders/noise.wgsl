@@ -66,6 +66,40 @@ fn noise(p: vec3<i32>, shift: u32, seed: u32) -> i32 {
     return clamp(lerp_q16(y0, y1, w.z), -NOISE_ONE, NOISE_ONE);
 }
 
+// The gradient codes (`grad`'s four hash bits) of the eight corners of
+// lattice cell `c`, corner x + 2 y + 4 z at bit 4 (x + 2 y + 4 z): `noise_at`
+// evaluates any point of the cell from them, so points sharing a cell hash
+// its corners once.
+fn noise_codes(c: vec3<i32>, seed: u32) -> u32 {
+    var codes = 0u;
+    for (var n = 0u; n < 8u; n++) {
+        codes |= (hash3(c.x + i32(n & 1u), c.y + i32((n >> 1u) & 1u), c.z + i32(n >> 2u), seed) & 15u) << (4u * n);
+    }
+    return codes;
+}
+
+// `noise` at `p` from its lattice cell's `noise_codes` (the same bits).
+fn noise_at(p: vec3<i32>, shift: u32, codes: u32) -> i32 {
+    let mask = (1 << shift) - 1;
+    let f = vec3<i32>(to_q12(p.x & mask, shift), to_q12(p.y & mask, shift), to_q12(p.z & mask, shift));
+    let w = vec3<i32>(fade(f.x), fade(f.y), fade(f.z));
+    let g000 = grad(codes, f.x, f.y, f.z);
+    let g100 = grad(codes >> 4u, f.x - NOISE_ONE, f.y, f.z);
+    let g010 = grad(codes >> 8u, f.x, f.y - NOISE_ONE, f.z);
+    let g110 = grad(codes >> 12u, f.x - NOISE_ONE, f.y - NOISE_ONE, f.z);
+    let g001 = grad(codes >> 16u, f.x, f.y, f.z - NOISE_ONE);
+    let g101 = grad(codes >> 20u, f.x - NOISE_ONE, f.y, f.z - NOISE_ONE);
+    let g011 = grad(codes >> 24u, f.x, f.y - NOISE_ONE, f.z - NOISE_ONE);
+    let g111 = grad(codes >> 28u, f.x - NOISE_ONE, f.y - NOISE_ONE, f.z - NOISE_ONE);
+    let x00 = lerp_q16(g000, g100, w.x);
+    let x10 = lerp_q16(g010, g110, w.x);
+    let x01 = lerp_q16(g001, g101, w.x);
+    let x11 = lerp_q16(g011, g111, w.x);
+    let y0 = lerp_q16(x00, x10, w.y);
+    let y1 = lerp_q16(x01, x11, w.y);
+    return clamp(lerp_q16(y0, y1, w.z), -NOISE_ONE, NOISE_ONE);
+}
+
 fn scale_q16(n: i32, amplitude: i32) -> i32 {
     return n * (amplitude >> 16u) + ((n * ((amplitude & 0xffff) >> 4u)) >> 12u);
 }

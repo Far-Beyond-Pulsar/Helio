@@ -156,8 +156,55 @@ fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
     return vec2<i32>(below, above);
 }
 
-// Level cells along a column's lane, from a cell at volume point `q`, in
-// which no cave can carve (`terrain_density`'s tunnels and caverns): a
+// The lattice cells a column's scan last evaluated the caves' noises in and
+// their corners' gradient codes (`noise_codes`): the tunnels' (both noises
+// share their lattice) and the cavern's. Cells along a lane mostly share
+// them, so their corners are hashed once a lattice cell, not once a cell.
+struct CaveLattice {
+    tunnel: vec3<i32>,
+    tunnel_a: u32,
+    tunnel_b: u32,
+    cavern: vec3<i32>,
+    cavern_codes: u32,
+}
+
+// None evaluated yet (no lattice cell is this far out).
+fn cave_lattice() -> CaveLattice {
+    return CaveLattice(vec3<i32>(0x7fffffff), 0u, 0u, vec3<i32>(0x7fffffff), 0u);
+}
+
+// The caves' noises at a cell's volume point `q`, as `terrain_density` and
+// `cave_clearance` read them: the tunnels' two (absolute) and the cavern's
+// (0 for a kind not resolved at `level`).
+fn cave_noise(q: vec3<i32>, level: u32, lattice: ptr<function, CaveLattice>) -> vec3<i32> {
+    let v = terrain.volume;
+    let caves = landform_caves_at(level);
+    var n = vec3<i32>(0);
+    if caves.x {
+        let shift = u32(v[1].x);
+        let c = q >> vec3<u32>(shift);
+        if any(c != (*lattice).tunnel) {
+            (*lattice).tunnel = c;
+            (*lattice).tunnel_a = noise_codes(c, landform_seed() ^ SEED_TUNNEL_A);
+            (*lattice).tunnel_b = noise_codes(c, landform_seed() ^ SEED_TUNNEL_B);
+        }
+        n.x = abs(noise_at(q, shift, (*lattice).tunnel_a));
+        n.y = abs(noise_at(q, shift, (*lattice).tunnel_b));
+    }
+    if caves.y {
+        let shift = u32(v[1].z);
+        let c = q >> vec3<u32>(shift);
+        if any(c != (*lattice).cavern) {
+            (*lattice).cavern = c;
+            (*lattice).cavern_codes = noise_codes(c, landform_seed() ^ SEED_CAVERN);
+        }
+        n.z = noise_at(q, shift, (*lattice).cavern_codes);
+    }
+    return n;
+}
+
+// Level cells along a column's lane, from a cell whose `cave_noise` is `n`,
+// in which no cave can carve (`terrain_density`'s tunnels and caverns): a
 // tunnel needs both of its noises within the tunnel width, a cavern its
 // noise over the cavern threshold (at their widest and lowest, whatever
 // the depth's ramps), and no noise moves faster than NOISE_SLOPE per
@@ -165,21 +212,18 @@ fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
 // along the lane. 0: a cave may carve near this cell. Generation steps over
 // solid rock by it instead of evaluating every cell down to the cave depth
 // (a mountain's columns cost 100 heightfield columns each).
-fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 {
+fn cave_clearance(n: vec3<i32>, level: u32, step: f32) -> i32 {
     let v = terrain.volume;
     let caves = landform_caves_at(level);
     var clear = 1.0e9;
     if caves.x {
         let shift = u32(v[1].x);
-        let na = abs(noise(q, shift, landform_seed() ^ SEED_TUNNEL_A));
-        let nb = abs(noise(q, shift, landform_seed() ^ SEED_TUNNEL_B));
-        let excess = max(na, nb) - (v[1].y + 16) - NOISE_ROUNDING;
+        let excess = max(n.x, n.y) - (v[1].y + 16) - NOISE_ROUNDING;
         clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
     }
     if caves.y {
         let shift = u32(v[1].z);
-        let n = noise(q, shift, landform_seed() ^ SEED_CAVERN);
-        let excess = (v[1].w - 2) - n - NOISE_ROUNDING;
+        let excess = (v[1].w - 2) - n.z - NOISE_ROUNDING;
         clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
     }
     return i32(clamp(floor(clear), 0.0, 1.0e9));
@@ -231,12 +275,13 @@ fn cave_window(c: ColumnVolume, height: i32, level: u32) -> vec2<i32> {
 // height (mm), the surface the volume folds, and `lean_height` the height
 // under the cell's lean offset (`terrain::lean_height`).
 fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
-    return terrain_density_with(column_volume(p, level), q, level, top, height, lean_height, k);
+    var lattice = cave_lattice();
+    return terrain_density_with(column_volume(p, level), cave_noise(q, level, &lattice), level, top, height, lean_height, k);
 }
 
 // `terrain_density` with its column's `column_volume` given (a column's
-// cells evaluate it once).
-fn terrain_density_with(column: ColumnVolume, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
+// cells evaluate it once) and the cell's `cave_noise`.
+fn terrain_density_with(column: ColumnVolume, noises: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
     let v = terrain.volume;
     let a = column.overhang;
     let caves = landform_caves_at(level);
@@ -266,8 +311,8 @@ fn terrain_density_with(column: ColumnVolume, q: vec3<i32>, level: u32, top: i32
             let taper = v[4].z;
             let open = min(min(max(landform_ramp(depth - cover, taper), entrance), region), landform_ramp(v[0].w - depth, taper));
             let w = scale_q16(open, v[1].y);
-            let na = abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_A));
-            let nb = abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_B));
+            let na = noises.x;
+            let nb = noises.y;
             walls = min(walls, landform_noise_mm(max(na, nb) - w, v[1].x));
             carved = carved || (na < w && nb < w);
         }
@@ -276,7 +321,7 @@ fn terrain_density_with(column: ColumnVolume, q: vec3<i32>, level: u32, top: i32
             let open = min(min(region, landform_ramp(depth - cover, taper)), landform_ramp(v[0].w - depth, taper));
             // The threshold rises to the noise's top as the cavern closes.
             let threshold = v[1].w + scale_q16(NOISE_ONE - open, NOISE_ONE - v[1].w);
-            let n = noise(q, u32(v[1].z), landform_seed() ^ SEED_CAVERN);
+            let n = noises.z;
             walls = min(walls, landform_noise_mm(threshold - n, v[1].z));
             carved = carved || n > threshold;
         }
@@ -1166,12 +1211,34 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
 
 // Material of a solid ground cell by material style (`ground_material`).
 fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+    return column_ground_material(ground_rules(surface, top_height, slope), p, surface, top_height, depth, slope, layer);
+}
+
+// What `ground_material` reads of a column alone (its surface word, top
+// height and slope), for its cells to share: the rules style's rules whose
+// height, slope and erosion tests pass (bit by rule; 0 in other styles).
+fn ground_rules(surface: u32, top_height: i32, slope: i32) -> u32 {
+    if terrain.style.x != 3 { return 0u; }
+    let erosion = i32(surface << 24u) >> 24u;
+    let count = min(u32(max(terrain.materials.x, 0)), 16u);
+    var rules = 0u;
+    for (var index = 0u; index < count; index++) {
+        let height_slope = terrain.rules[index].height_slope;
+        let bands = terrain.rules[index].surface_bands.xy;
+        if top_height < height_slope.x || top_height > height_slope.y || slope < height_slope.z || slope > height_slope.w || erosion < bands.x || erosion > bands.y { continue; }
+        rules |= 1u << index;
+    }
+    return rules;
+}
+
+// `ground_material` of a cell of a column whose `ground_rules` are `rules`.
+fn column_ground_material(rules: u32, p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     material_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
     material_fleck_base = M_AIR;
     material_coverage = -1.0;
     material_coverage_ids = vec2<u32>(M_DARK_STONE, M_STONE);
     if terrain.style.x == 1 { return lunar_material(p, surface, depth, slope, layer); }
-    if terrain.style.x == 3 { return rules_material(p, surface, top_height, depth, slope, layer); }
+    if terrain.style.x == 3 { return rules_material(rules, p, depth, layer); }
     if terrain.style.x == 2 {
         if depth == 0 { return u32(terrain.style.y); }
         if depth <= terrain.header.z { return u32(terrain.style.z); }
@@ -1180,19 +1247,20 @@ fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slop
     return earthlike_material(p, surface, top_height, depth, slope, layer);
 }
 
-// The first rule whose conditions hold, else the fallback (`rules_material`).
-fn rules_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
-    let erosion = i32(surface << 24u) >> 24u;
+// The first rule whose conditions hold, else the fallback (`rules_material`):
+// of the column's `rules` (`ground_rules`: its height, slope and erosion
+// tests passed), those whose cell tests pass.
+fn rules_material(rules: u32, p: vec3<i32>, depth: i32, layer: i32) -> u32 {
     let altitude = layer * terrain.header.y;
     let seed = bitcast<u32>(terrain.header.w);
-    let count = min(u32(max(terrain.materials.x, 0)), 16u);
-    // The moisture noise once a rule reaches it (most fail on height,
-    // slope or depth first); each rule's words as its tests read them.
+    // The moisture noise once a rule reaches it (most fail on depth
+    // first); each rule's words as its tests read them.
     var wet = 0;
     var wet_known = false;
-    for (var index = 0u; index < count; index++) {
-        let height_slope = terrain.rules[index].height_slope;
-        if top_height < height_slope.x || top_height > height_slope.y || slope < height_slope.z || slope > height_slope.w { continue; }
+    var left = rules;
+    while left != 0u {
+        let index = firstTrailingBit(left);
+        left &= left - 1u;
         let depth_moisture = terrain.rules[index].depth_moisture;
         if depth < depth_moisture.x || depth > depth_moisture.y { continue; }
         if !wet_known {
@@ -1201,7 +1269,6 @@ fn rules_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope
         }
         if wet < depth_moisture.z || wet > depth_moisture.w { continue; }
         let bands = terrain.rules[index].surface_bands;
-        if erosion < bands.x || erosion > bands.y { continue; }
         let salt = index * 0x9E3779B9u;
         if bands.z > 0 && (div_floor(landform_strata(p, altitude), bands.z) & 1) != bands.w { continue; }
         let head = terrain.rules[index].head;
