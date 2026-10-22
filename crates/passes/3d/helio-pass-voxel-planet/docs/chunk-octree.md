@@ -143,8 +143,10 @@ without waiting: its drawn set and requests as differences from the last.
   `IDLE_FRAMES`: it may still be fading out). Bookkeeping of nodes not
   generated is dropped after `keep_frames`.
 - **Settled.** A plan counts only for the eye and view it was made for, and
-  only once a full cycle of ray reports (64 frames: every pixel sampled)
-  came since residency last changed. Hosts render until then.
+  only once it saw a sweep of ray reports of the cut as it ended up: after
+  residency last changed and the last fade ended (what a finer node
+  uncovers shows once its fade ends), past the reports in flight then
+  (`REPORT_FRAMES`, 8). Hosts render until then.
 
 ## Generation
 
@@ -389,11 +391,23 @@ silhouettes and ridges, where rays skim pixel-sized cells.
 
 ### Ray reports
 
-Each 8x8 block of pixels samples one hit a frame (all 64 pixels over 64
-frames) and reports the node its level wants there: cells of a pixel, two
-levels of margin, the hit's own node at least. Rays that met Buried nodes
-report them too. Reports come back without waiting; the planner marks the
-nodes and their ancestors seen and generates the Buried ones.
+A pixel of each 2x2 a frame (all four over `REPORT_SWEEP`, 4 frames)
+names the node its hit's level wants there: cells of a pixel, two levels
+of margin, the hit's own node at least. A workgroup appends the distinct
+nodes of its 32x32 pixels to one list, up to a node per 8x8 pixels in all
+(the old readback's size). Rays that met Buried nodes report them too.
+Reports come back without waiting; the planner marks the nodes and their
+ancestors seen and generates the Buried ones.
+
+A view's whole set is thus known a few frames after it shows. One pixel
+of each 8x8 block a frame (a 64-frame sweep, before 2026-10-22) left bands
+that a turn or a finer node's fade uncovered unmet for up to 64 frames, a
+round each, and settling waited a whole sweep after the last change:
+voxel_craft's second pose asked for chunks 30 to 100 frames after the
+turn. The reports cost 0.03 ms at 1080p (every pixel each frame cost
+0.17 ms: two bounds-checked texture loads and the node's arithmetic a
+pixel). A fixed number of nodes per tile dropped the same ones every frame
+where tiles held more (toward the horizon): the list has no per-tile cap.
 
 ### Publish
 
