@@ -5,8 +5,9 @@
 //! cargo run -p helio-default-graphs --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
-//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel|face_edge|cave|eye`
-//!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`)
+//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye`
+//!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`;
+//!   `feature` the nearest feature, `HELIO_VOXEL_FLIGHT_FEATURE=<material>`'s)
 //!   and holds it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS`: drawn by
 //!   `ChunkWorld` alone (`CHUNKHOLD`: its GPU stages), or with
 //!   `HELIO_VOXEL_CHUNKS_ENGINE=1` by the renderer's chunk pass
@@ -21,11 +22,12 @@
 //!   samples saved with settled references to compare.
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
-//! (earth|moon|desert) or `_LAYERS=<json>` (a layer stack), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
+//! (earth|moon|desert, [`worlds`]: the planet, its features, look, sky and
+//! ground cover) or `_LAYERS=<json>` (a layer stack), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
-//! `_LOOK=exposure,contrast,saturation` (default 2, 1.06, 1: voxel_craft's look), `_DEBUG=<mode>` (the renderer's;
+//! `_LOOK=exposure,contrast,saturation` (default the preset's exposure, 2 under air, 1.06, 1: voxel_craft's look), `_DEBUG=<mode>` (the renderer's;
 //! the voxel draw's 32 trace cost, 33 levels, 34 levels over the left half).
 //!
 //! Diagnostics of worlds the harness drives itself ([`harness_world`]):
@@ -35,6 +37,8 @@
 //! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead
 //! of the GPU): waiting for every frame lets the driver lower its clocks,
 //! which inflates every GPU timing.
+
+mod worlds;
 
 use glam::{DVec3, Vec3};
 use helio::{
@@ -105,7 +109,7 @@ impl Flight {
         (level * e.cos() + up * e.sin()).normalize()
     }
 
-    fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality, planet: Planet) -> Self {
+    fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality, planet: Planet, preset: worlds::Preset) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU required");
         eprintln!("VOXEL_FLIGHT_ADAPTER {:?}", adapter.get_info());
@@ -142,6 +146,7 @@ impl Flight {
             .unwrap_or(Vec3::new(0.35, 0.75, 0.45))
             .normalize();
         let light = scene.world.spawn();
+        let sky = preset.sky(planet.grid().radius());
         scene.world.insert(
             light,
             helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
@@ -151,29 +156,33 @@ impl Flight {
                 color_intensity: [1.0, 1.0, 1.0, 3.0],
                 shadow_index: u32::MAX,
                 light_type: helio::LightType::Directional as u32,
+                // Where there is air, it lights the haze too, shadowed by
+                // everything (shafts), as voxel_craft's sun.
+                god_rays_enabled: u32::from(sky.is_some()),
+                god_rays_density: 1.0,
+                god_rays_weight: 1.0,
+                god_rays_exposure: 1.0,
+                god_rays_decay: 1.0,
                 ..Default::default()
             }),
         );
-        // Earth's air around the planet, centred on the world origin, with
-        // fair-weather cumulus (`HELIO_VOXEL_FLIGHT_NO_CLOUDS`: a clear
-        // sky) and a ground haze thinning with altitude over the planet
+        // The preset's air around the planet, centred on the world origin
+        // (none on the Moon), with its clouds (`HELIO_VOXEL_FLIGHT_NO_CLOUDS`:
+        // a clear sky) and a haze thinning with altitude over the planet
         // (`HELIO_VOXEL_FLIGHT_NO_HAZE`): the planet's own scale stresses
         // both.
-        let air = scene.world.spawn();
-        let sky = helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius());
-        let sky = if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLOUDS").is_some() { sky } else { sky.with_clouds(helio_pass_sky::CloudLayer::cumulus()) };
-        scene.world.insert(air, sky);
-        if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HAZE").is_none() {
-            let haze = scene.world.spawn();
-            scene.world.insert(
-                haze,
-                helio_pass_volumetric_fog::GlobalFogComponent { mode: 1, extinction: 0.0006, height_falloff: 0.004, anisotropy: 0.6, ..Default::default() }
-                    .around_planet([0.0; 3], planet.grid().radius()),
-            );
+        if let Some(sky) = sky {
+            let air = scene.world.spawn();
+            scene.world.insert(air, sky);
         }
-        // The engine's voxel meadow on the grass (`HELIO_VOXEL_FLIGHT_NO_FOLIAGE`:
-        // bare ground, A/B for its cost).
-        let meadow = (std::env::var_os("HELIO_VOXEL_FLIGHT_NO_FOLIAGE").is_none()).then(helio_pass_voxel_planet::meadow::meadow);
+        if let Some(haze) = preset.haze(planet.grid().radius()) {
+            let entity = scene.world.spawn();
+            scene.world.insert(entity, haze);
+        }
+        // The preset's ground cover: the engine's voxel meadow on Earth's
+        // grass (`HELIO_VOXEL_FLIGHT_NO_FOLIAGE`: bare ground, A/B for its
+        // cost).
+        let meadow = preset.meadow();
         if let Some(meadow) = &meadow {
             for row in &meadow.types {
                 let entity = scene.world.spawn();
@@ -190,7 +199,13 @@ impl Flight {
         let mut config = chunk_config(size[1], 256);
         config.generate_ms = config.generate_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().generate_ms);
         config.frame_ms = config.frame_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().frame_ms);
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::with_config(pass_source.clone(), config)));
+        // The generator's look with the materials the preset's features add.
+        let appearance = preset.appearance(planet.field().appearance());
+        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
+            let mut pass = ChunkPass::with_config(pass_source.clone(), config);
+            pass.set_appearance(Some(appearance));
+            Box::new(pass)
+        });
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = meadow.is_some();
         if let Some(meadow) = &meadow {
@@ -202,6 +217,8 @@ impl Flight {
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], config.surface_format);
+        let (ambient, intensity) = preset.ambient();
+        renderer.set_ambient(ambient, intensity);
         // The camera's look: voxel_craft's outdoor one (AgX punchy, exposure
         // 2, a touch of contrast), so the stress test reads like the daily
         // example; HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation"
@@ -212,7 +229,7 @@ impl Flight {
             let at = |i: usize, d: f32| v.get(i).copied().unwrap_or(d);
             let mut post = helio_pass_postprocess::PostProcessSettings::default();
             post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
-            post.tonemap_exposure = at(0, 2.0);
+            post.tonemap_exposure = at(0, preset.exposure());
             post.color_contrast = [at(1, 1.06); 3];
             post.color_saturation = [at(2, 1.0); 3];
             // `HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE`: metered exposure (the
@@ -326,15 +343,21 @@ fn percentile(values: &[f64], p: f64) -> f64 {
     v[((v.len() as f64 - 1.0) * p).round() as usize]
 }
 
-fn land_near(planet: &Planet, face: u8, fi: f64, fj: f64, min_height_m: f64) -> DVec3 {
+/// Land over `min_height_m` near face coordinates (fi, fj), and with
+/// `level_m` level within that many metres 30 m around (a plain, not a
+/// crater's wall).
+fn land_near(planet: &Planet, face: u8, fi: f64, fj: f64, min_height_m: f64, level_m: Option<f64>) -> DVec3 {
     let grid = planet.grid();
     let n = f64::from(grid.cells());
     let min_top = (min_height_m / grid.voxel_size()) as i32;
+    let around = (30.0 / grid.voxel_size()) as i32;
     for step in 0..4000 {
         let a = fi + 0.002 * f64::from(step % 60);
         let b = fj + 0.002 * f64::from(step / 60);
         let (i, j) = ((a * n) as i32, (b * n) as i32);
-        if planet.column_top(face, i, j, 0) > min_top {
+        let top = planet.column_top(face, i, j, 0);
+        let level = level_m.is_none_or(|m| [(around, 0), (-around, 0), (0, around), (0, -around)].iter().all(|(di, dj)| f64::from((planet.column_top(face, i + di, j + dj, 0) - top).abs()) * grid.voxel_size() <= m));
+        if top > min_top && level {
             return grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
         }
     }
@@ -1043,6 +1066,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut worst_wanted = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
+    // The renderer's CPU and GPU by pass over the flight (summed ms, frames).
+    let mut pass_cpu_sums: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
+    let mut pass_gpu_sums: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
+    let mut gpu_seen = 0;
     let started = Instant::now();
     let mut last = started;
     let mut captured = false;
@@ -1052,7 +1079,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut next_dig = 1.0;
     let mut generated_chunks = 0usize;
     let (mut computed_footprints, mut cached_footprints) = (0usize, 0usize);
-    let (mut shown_chunks, mut unseen_evicted) = (0usize, 0usize);
+    let (mut shown_chunks, mut unseen_evicted, mut emptied_chunks) = (0usize, 0usize, 0usize);
     // GPU generation by kernel: evictions and tile columns, chunk columns,
     // chunk builds.
     let mut stage_ms = [0.0f64; 3];
@@ -1130,6 +1157,22 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             passes.truncate(4);
             eprintln!("CHUNKSTRESS {mode}: recording {record_ms:.1} ms at t {t:.2} s: graph cpu {:?} ms, passes {passes:?}", snapshot.total_cpu_ms);
         }
+        let snapshot = flight.renderer.timing_snapshot();
+        for p in &snapshot.passes {
+            if let Some(ms) = p.cpu_ms {
+                let entry = pass_cpu_sums.entry(p.name).or_default();
+                entry.0 += f64::from(ms);
+                entry.1 += 1;
+            }
+        }
+        if snapshot.generation != gpu_seen {
+            gpu_seen = snapshot.generation;
+            for (name, ms) in snapshot.passes.iter().filter_map(|p| Some((p.name, p.gpu_ms?))).chain(snapshot.total_gpu_ms.map(|ms| ("total", ms))) {
+                let entry = pass_gpu_sums.entry(name).or_default();
+                entry.0 += f64::from(ms);
+                entry.1 += 1;
+            }
+        }
         let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
         let s = *pass.stats();
         let pass_cpu = pass.cpu_ms();
@@ -1144,6 +1187,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         computed_footprints += s.generated_footprints;
         cached_footprints += s.cached_footprints;
         shown_chunks += s.shown_chunks;
+        emptied_chunks += s.emptied_chunks;
         unseen_evicted += s.evicted_unseen;
         csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
 ", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
@@ -1257,7 +1301,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();
     let per_chunk = |ms: f64| ms * 1e3 / generated_chunks.max(1) as f64;
-    eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
+    eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {emptied_chunks} held nothing, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
     eprintln!(
         "CHUNKSTRESS {mode}: worst over its motion allowance p50 {:.2} p95 {:.2} max {:.2}",
         percentile(&worst_wanted, 0.5),
@@ -1271,6 +1315,11 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         per_chunk(stage_ms[1]),
         per_chunk(stage_ms[2])
     );
+    for (what, sums) in [("cpu", &pass_cpu_sums), ("gpu", &pass_gpu_sums)] {
+        let mut by_pass: Vec<(&str, f64)> = sums.iter().map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1)))).collect();
+        by_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!("CHUNKSTRESS {mode}: renderer {what} mean by pass: {}", by_pass.iter().filter(|p| p.1 >= 0.05).map(|(n, ms)| format!("{n} {ms:.2}")).collect::<Vec<_>>().join(", "));
+    }
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
     }
@@ -1619,6 +1668,41 @@ fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)
     tunnel.into_iter().chain(overhang).collect()
 }
 
+/// The feature nearest `ground` (a cell of `material` within a few layers
+/// over the ground, any feature's solid or air without one: a tree, a rock,
+/// a crater), seen from `distance` m back towards `ground` at eye height:
+/// (eye, forward).
+fn feature_view(planet: &Planet, ground: DVec3, material: Option<u32>, distance: f64) -> (DVec3, Vec3) {
+    use helio_pass_voxel_planet::Cell;
+    let grid = *planet.grid();
+    let (base, _) = grid.locate(ground);
+    // Columns 2 m apart in square rings out to 600 m.
+    let step = (2.0 / grid.voxel_size()).round().max(1.0) as i32;
+    let found = (0..300).find_map(|ring: i32| {
+        (-ring..=ring).flat_map(|a| (-ring..=ring).map(move |b| (a, b))).filter(|(a, b)| a.abs().max(b.abs()) == ring).find_map(|(a, b)| {
+            let (i, j) = (base.i + a * step, base.j + b * step);
+            let top = planet.column_top(base.face, i, j, 0);
+            [1, 3, 6, 0].into_iter().find_map(|dk| {
+                let at = planet.features_at(0, base.face, i, j, top + dk)?;
+                let hit = match (material, at) {
+                    (Some(m), Some(found)) => found == m,
+                    (Some(_), None) => false,
+                    (None, Some(_)) => dk > 0,
+                    (None, None) => dk == 0,
+                };
+                hit.then(|| grid.cell_center(Cell::new(base.face, i, j, top + 1)))
+            })
+        })
+    });
+    let target = found.expect("a feature within 600 m of the spawn");
+    let up = target.normalize();
+    let back = ground - target;
+    let back = (back - up * back.dot(up)).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+    let eye = planet.surface_point(target + back * distance, 1.7);
+    eprintln!("VOXEL_FLIGHT feature at {:.0} m from the spawn", (target - ground).length());
+    (eye, (target + up * 1.0 - eye).normalize().as_vec3())
+}
+
 /// The highest summit near the spawn and two views of it: 300 m above the
 /// ground 12 km away, and on its slope 1.5 km below the summit.
 fn mountain(planet: &Planet, heading: f64) -> Vec<(&'static str, DVec3, Vec3)> {
@@ -1659,13 +1743,9 @@ fn main() {
     // overhangs (A/B for volumetric columns).
     // HELIO_VOXEL_FLIGHT_SEED=<n>: the Earth stack with another seed (7).
     let seed = std::env::var("HELIO_VOXEL_FLIGHT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
-    // HELIO_VOXEL_FLIGHT_PRESET=earth|moon|desert: the layer stack (Earth).
-    let stack = match std::env::var("HELIO_VOXEL_FLIGHT_PRESET").as_deref() {
-        Ok("moon") => helio_pass_voxel_planet::layers::TerrainLayers::moon(),
-        Ok("desert") => helio_pass_voxel_planet::layers::TerrainLayers::desert(),
-        Ok("earth") | Err(_) => helio_pass_voxel_planet::layers::TerrainLayers::earth(),
-        Ok(other) => panic!("unknown preset {other}"),
-    };
+    // HELIO_VOXEL_FLIGHT_PRESET=earth|moon|desert: the world (Earth).
+    let preset = worlds::Preset::from_env();
+    let stack = preset.stack();
     // HELIO_VOXEL_FLIGHT_LAYERS=<json>: a layer stack of its own (a Pulsar
     // level's `VoxelTerrainLayersComponent` data), for its views.
     let stack = match std::env::var("HELIO_VOXEL_FLIGHT_LAYERS") {
@@ -1688,11 +1768,13 @@ fn main() {
     } else {
         stack.source(seed)
     };
-    let planet = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain, ..Default::default() }).unwrap();
-    let mut flight = Flight::new(&output, size, quality, planet);
+    // HELIO_VOXEL_FLIGHT_NO_FEATURES: bare terrain (A/B for their cost).
+    let features = if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_FEATURES").is_some() { Default::default() } else { preset.features(voxel, seed) };
+    let planet = Planet::new(PlanetRecipe { radius_m: preset.radius_m(), voxel_size_m: voxel, terrain, features, ..Default::default() }).unwrap();
+    let mut flight = Flight::new(&output, size, quality, planet, preset);
 
     // Ground spawn on the +Y face.
-    let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
+    let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0, preset.level_spawn_m());
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
     if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
@@ -1715,8 +1797,8 @@ fn main() {
     if let Ok(view) = std::env::var("HELIO_VOXEL_FLIGHT_HOLD") {
         let (e, f) = match view.as_str() {
             "tunnel" => carve_tunnel(&mut flight, ground, heading),
-            "mountain_slope" => {
-                let (_, e, f) = mountain(&flight.planet, heading)[1];
+            "mountain_slope" | "mountain_air" => {
+                let (_, e, f) = mountain(&flight.planet, heading)[usize::from(view == "mountain_slope")];
                 (e, f)
             }
             // Inside the natural cave nearest the spawn (searched 3 km
@@ -1731,6 +1813,12 @@ fn main() {
                     .find_map(|near| volume_views(&flight.planet, near).into_iter().find(|v| v.0 == "cave_tunnel"))
                     .expect("a cave within 9 km of the spawn");
                 (e, f)
+            }
+            // The nearest feature, 8 m away (`HELIO_VOXEL_FLIGHT_FEATURE`:
+            // of that material, by name or id: `Wood` stands in a wood).
+            "feature" => {
+                let material = std::env::var("HELIO_VOXEL_FLIGHT_FEATURE").ok().map(|m| m.parse().ok().or_else(|| helio_pass_voxel_planet::terrain::material::from_name(&m)).expect("a material name or id"));
+                feature_view(&flight.planet, ground, material, 8.0)
             }
             // `HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz`: any eye (planet-centred)
             // and view direction.

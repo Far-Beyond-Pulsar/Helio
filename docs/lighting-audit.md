@@ -59,7 +59,7 @@ aerial RGB transmittance, LUT caching, multi-body atmospheres, night sky) is P2 
 - Sun: Pulsar's directional `intensity` is passed through as lux whatever the unit selector says
   (`crates/helio-component/src/components/light_component/mapping.rs:81-95`). The shipped level uses
   **3.0** (`Pulsar:assets/examples/voxel_planet.level`, `voxel_sun.intensity = 3.0`, unit label
-  "Lumens"); `voxel_flight` also uses 3.0 (`crates/helio-default-graphs/examples/voxel_flight.rs:146`).
+  "Lumens"); `voxel_flight` also uses 3.0 (`crates/helio-default-graphs/examples/voxel_flight/worlds.rs`).
   The atmosphere treats it as top-of-atmosphere illuminance (`atmosphere_luts.wgsl:58-70`), and sky
   radiance, aerial in-scatter and the SH ambient all scale with it, so sun and sky are mutually
   consistent.

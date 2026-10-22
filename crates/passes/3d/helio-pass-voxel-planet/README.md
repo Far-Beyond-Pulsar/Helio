@@ -65,7 +65,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `shaders/chunk_table.wgsl` | Scatters a frame's chunk-table changes. |
 | `tests/chunks.rs` | GPU correctness against the CPU planet (see [Tests](#tests)). |
 | `tests/wide_products.rs`, `tests/bake_cost.rs` | Hardware and limb wide products agree; what baking a brush costs as the history grows (a report). |
-| `../../../helio-default-graphs/examples/voxel_flight.rs` | The flight harness: held views, flights, digs, picks, captures. |
+| `../../../helio-default-graphs/examples/voxel_flight/` | The flight harness: held views, flights, digs, picks, captures. |
 
 ## Data model
 
