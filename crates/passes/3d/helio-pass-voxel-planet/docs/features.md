@@ -12,7 +12,9 @@ footprints, and a forest shows to the horizon at the terrain's cost.
 A planet's recipe holds a **feature set** (`FeatureSet`), part of the world's
 definition (its fingerprint; saves keep the recipe):
 
-- **Stamps**: voxel models built from shapes (`stamp::Stamp`): boxes and
+- **Stamps**: voxel models built from shapes (`stamp::Stamp`; `flora`
+  grows natural ones in metres for any voxel size and materials: trees of
+  six species, bushes, dry-land shrubs, cacti, boulders, impact craters): boxes and
   tapered capsules (a ball is a capsule of no length) of material ids 1 to
   127 or of air, around an anchor, the later over the earlier. A shape may
   be sparse (a share of its cells left out by hash: foliage) and rough (its

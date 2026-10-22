@@ -72,8 +72,7 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
 | `blocks.rs` | the blocks: voxel material ids, colours and patches, light through and given off |
 | `palette.rs` | the planet's appearance from the blocks, and the block-in-hand materials |
 | `terrain/` | the planet recipe (layer stack and material rules), biomes, hash noise |
-| `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` is the decoration: tree, cactus and structure stamps and the spawns that place them |
-| `trees/` | growth of shapes in metres: oak, dark oak, birch, spruce, pine, jungle giant, bushes, boulders, cacti |
+| `world/` | the edit worker thread, snapshots, block queries; `decorate.rs` is the decoration: tree, cactus and structure stamps (trees, bushes, boulders and cacti grown in this world's blocks by the engine's `helio_pass_voxel_planet::flora`) and the spawns that place them |
 | `structures/` | blueprints (stamps of this game's blocks, a block a metre): cottage, tower, ruins, well, pyramid |
 | `player/` | movement and collision on a sphere (stepping up ledges), digging and building, the character |
 | `input.rs` | keyboard and mouse state |

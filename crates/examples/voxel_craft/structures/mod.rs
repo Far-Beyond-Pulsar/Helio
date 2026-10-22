@@ -7,7 +7,7 @@ pub mod blueprint;
 pub use blueprint::Blueprint;
 
 use crate::blocks::Block;
-use crate::trees::Rng;
+use helio_pass_voxel_planet::flora::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {

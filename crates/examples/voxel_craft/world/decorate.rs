@@ -1,5 +1,6 @@
 //! Decorating the terrain: trees, cacti and structures, as the voxel planet's
-//! features (`helio_pass_voxel_planet::features`): a library of stamps grown
+//! features (`helio_pass_voxel_planet::features`; natural ones grown by the
+//! engine's `flora` in this world's blocks): a library of stamps grown
 //! once from the world seed (tree variants of each species, structures with
 //! their foundations, cacti) and spawns saying where each grows (biome by
 //! the ground's surface, height, flatness, forest fields). The planet
@@ -11,8 +12,8 @@
 use crate::blocks::Block;
 use crate::config::{VOXEL_M, WORLD_SEED};
 use crate::structures::{blueprint, Kind};
-use crate::trees::{self, Rng, Species};
 use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
+use helio_pass_voxel_planet::flora::{self, Rng, Species};
 use helio_pass_voxel_planet::stamp::Stamp;
 use helio_pass_voxel_planet::terrain::material;
 
@@ -52,9 +53,9 @@ pub fn features() -> FeatureSet {
     let broadleaf = add(&mut set, grow(&[Species::Oak, Species::Oak, Species::DarkOak]));
     let birch = add(&mut set, grow(&[Species::Birch]));
     let conifer = add(&mut set, grow(&[Species::Spruce, Species::Pine]));
-    let boulders = add(&mut set, (0..VARIANTS).map(|v| trees::boulder(if v % 3 == 0 { Block::Andesite } else { Block::Stone }, WORLD_SEED ^ (v << 8))).collect());
-    let cacti = add(&mut set, (0..VARIANTS).map(|v| trees::cactus(WORLD_SEED ^ (v << 16))).collect());
-    let bushes = add(&mut set, (0..VARIANTS).map(|v| trees::bush(if v % 2 == 0 { Block::OakLeaves } else { Block::BirchLeaves }, WORLD_SEED ^ (v << 24))).collect());
+    let boulders = add(&mut set, (0..VARIANTS).map(|v| flora::boulder(if v % 3 == 0 { Block::Andesite } else { Block::Stone }.material(), WORLD_SEED ^ (v << 8), VOXEL_M)).collect());
+    let cacti = add(&mut set, (0..VARIANTS).map(|v| flora::cactus(Block::Cactus.material(), WORLD_SEED ^ (v << 16), VOXEL_M)).collect());
+    let bushes = add(&mut set, (0..VARIANTS).map(|v| flora::bush(if v % 2 == 0 { Block::OakLeaves } else { Block::BirchLeaves }.material(), WORLD_SEED ^ (v << 24), VOXEL_M)).collect());
     let lowland = [-1e9, TREE_LINE_M];
     let structure = |name: &str, stamps: Vec<u32>, surfaces: &[u32], density: f32| Spawn {
         name: name.into(),
@@ -95,7 +96,24 @@ pub fn features() -> FeatureSet {
 
 /// `VARIANTS` trees of each of `species`.
 fn grow(species: &[Species]) -> Vec<Stamp> {
-    species.iter().enumerate().flat_map(|(n, &s)| (0..VARIANTS).map(move |v| trees::tree(s, WORLD_SEED ^ ((n as u64) << 32) ^ (v * 0x9e37_79b9) ^ s as u64))).collect()
+    species
+        .iter()
+        .enumerate()
+        .flat_map(|(n, &s)| {
+            let (wood, leaves) = blocks(s);
+            (0..VARIANTS).map(move |v| flora::tree(s, wood.material(), leaves.material(), WORLD_SEED ^ ((n as u64) << 32) ^ (v * 0x9e37_79b9) ^ s as u64, VOXEL_M))
+        })
+        .collect()
+}
+
+/// A species' wood and leaves.
+fn blocks(species: Species) -> (Block, Block) {
+    match species {
+        Species::Oak | Species::DarkOak => (Block::OakLog, Block::OakLeaves),
+        Species::Birch => (Block::BirchLog, Block::BirchLeaves),
+        Species::Spruce | Species::Pine => (Block::SpruceLog, Block::SpruceLeaves),
+        Species::Jungle => (Block::JungleLog, Block::JungleLeaves),
+    }
 }
 
 /// A structure on its site: the room it needs cleared (its footprint and a

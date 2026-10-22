@@ -1,18 +1,22 @@
-//! Procedural trees, bushes, cacti and boulders of small voxels, as the
-//! voxel planet's stamps of shapes: trunks and branches are tapered
-//! capsules, crowns sparse leaf balls with broken edges (light and sky
-//! show through), conifers stacked cones. Sizes are in metres; a stamp's
-//! offsets are cells (`VOXEL_M`), its anchor the first layer over the
-//! ground with the trunk on the anchor column's centre.
+//! Natural features grown as stamps of shapes (`crate::stamp`): trees of
+//! several species, bushes, desert shrubs, cacti, boulders and impact
+//! craters, for a world's feature set (`crate::features`). Trunks and
+//! branches are tapered capsules, crowns sparse leaf balls with broken edges
+//! (light and sky show through), conifers stacked cones, craters an air bowl
+//! inside a lumpy rim.
+//!
+//! Sizes are in metres and every generator takes the world's voxel size: a
+//! stamp's offsets are cells, its anchor the first layer over the ground
+//! with the trunk on the anchor column's centre. Materials are the
+//! caller's (built-in ids or a world's own); a stamp is a pure function of
+//! its seed, on any platform.
 
 mod rng;
 
 pub use rng::Rng;
 
-use crate::blocks::Block;
-use crate::config::VOXEL_M;
+use crate::stamp::{Part, Shape, Stamp};
 use glam::DVec3;
-use helio_pass_voxel_planet::stamp::{Part, Shape, Stamp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Species {
@@ -24,60 +28,53 @@ pub enum Species {
     Jungle,
 }
 
-impl Species {
-    fn blocks(self) -> (Block, Block) {
-        match self {
-            Species::Oak | Species::DarkOak => (Block::OakLog, Block::OakLeaves),
-            Species::Birch => (Block::BirchLog, Block::BirchLeaves),
-            Species::Spruce | Species::Pine => (Block::SpruceLog, Block::SpruceLeaves),
-            Species::Jungle => (Block::JungleLog, Block::JungleLeaves),
-        }
-    }
-}
-
 /// Shapes in metres from the anchor column's centre at ground level, into
-/// a stamp in cells.
+/// a stamp in cells of `voxel` metres.
 struct Builder {
     stamp: Stamp,
+    voxel: f64,
 }
 
 impl Builder {
-    fn new() -> Self {
-        Self { stamp: Stamp::new() }
+    fn new(voxel: f64) -> Self {
+        Self { stamp: Stamp::new(), voxel }
     }
 
     /// A point (m) as the stamp's cells: the anchor column's centre is
     /// `(0.5, 0, 0.5)` cells, the ground's top at `y = 0`.
-    fn at(p: DVec3) -> [f32; 3] {
-        [(p.x / VOXEL_M + 0.5) as f32, (p.y / VOXEL_M) as f32, (p.z / VOXEL_M + 0.5) as f32]
+    fn at(&self, p: DVec3) -> [f32; 3] {
+        [(p.x / self.voxel + 0.5) as f32, (p.y / self.voxel) as f32, (p.z / self.voxel + 0.5) as f32]
     }
 
-    fn cells(m: f64) -> f32 {
-        (m / VOXEL_M) as f32
+    fn cells(&self, m: f64) -> f32 {
+        (m / self.voxel) as f32
     }
 
     /// A limb from `a` to `b` (m), its radius tapering from `ra` to `rb`.
-    fn limb(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, block: Block) {
-        self.stamp.capsule(Self::at(a), Self::at(b), [Self::cells(ra), Self::cells(rb)], block.material());
+    fn limb(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, material: u32) {
+        let (a, b, r) = (self.at(a), self.at(b), [self.cells(ra), self.cells(rb)]);
+        self.stamp.capsule(a, b, r, material);
     }
 
     /// Foliage: a cone or ball (a limb of leaves) a share of whose cells
     /// is left out, its edge broken by `rough` metres and its outline into
     /// lumps up to `lump` metres deep, 40 cm across.
-    fn foliage(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, block: Block, sparse: f32, rough: f64, lump: f64) {
-        let shape = Shape::Capsule { a: Self::at(a), b: Self::at(b), radius: [Self::cells(ra), Self::cells(rb)] };
-        self.stamp.add(Part { sparse, rough: Self::cells(rough), lump: Self::cells(lump), lump_size: Self::cells(0.4).round().max(1.0) as u32, ..Part::solid(shape, block.material()) });
+    fn foliage(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, material: u32, sparse: f32, rough: f64, lump: f64) {
+        let shape = Shape::Capsule { a: self.at(a), b: self.at(b), radius: [self.cells(ra), self.cells(rb)] };
+        let part = Part { sparse, rough: self.cells(rough), lump: self.cells(lump), lump_size: self.cells(0.4).round().max(1.0) as u32, ..Part::solid(shape, material) };
+        self.stamp.add(part);
     }
 
     /// A flat-ended cone of foliage: a conifer's tier.
-    fn tier(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, block: Block, sparse: f32, rough: f64) {
-        let shape = Shape::Cone { a: Self::at(a), b: Self::at(b), radius: [Self::cells(ra), Self::cells(rb)] };
-        self.stamp.add(Part { sparse, rough: Self::cells(rough), ..Part::solid(shape, block.material()) });
+    fn tier(&mut self, a: DVec3, b: DVec3, ra: f64, rb: f64, material: u32, sparse: f32, rough: f64) {
+        let shape = Shape::Cone { a: self.at(a), b: self.at(b), radius: [self.cells(ra), self.cells(rb)] };
+        let part = Part { sparse, rough: self.cells(rough), ..Part::solid(shape, material) };
+        self.stamp.add(part);
     }
 
     /// A leaf mass: a lumpy ball of leaves.
-    fn crown(&mut self, c: DVec3, r: f64, block: Block, sparse: f32) {
-        self.foliage(c, c, r, r, block, sparse, r * 0.2, r * 0.4);
+    fn crown(&mut self, c: DVec3, r: f64, material: u32, sparse: f32) {
+        self.foliage(c, c, r, r, material, sparse, r * 0.2, r * 0.4);
     }
 }
 
@@ -89,7 +86,7 @@ fn direction(azimuth: f64, elevation: f64) -> DVec3 {
 
 /// A trunk `height` metres to its fork, of `radius` at the ground, gently
 /// curved, with roots flaring into the ground: the fork's point.
-fn trunk(b: &mut Builder, rng: &mut Rng, height: f64, radius: f64, wood: Block) -> DVec3 {
+fn trunk(b: &mut Builder, rng: &mut Rng, height: f64, radius: f64, wood: u32) -> DVec3 {
     let lean = direction(rng.uniform(0.0, std::f64::consts::TAU), 0.0);
     let mid = DVec3::Y * height * 0.5 + lean * rng.uniform(0.0, 0.25);
     let fork = DVec3::Y * height + lean * rng.uniform(0.1, 0.5);
@@ -106,8 +103,8 @@ fn trunk(b: &mut Builder, rng: &mut Rng, height: f64, radius: f64, wood: Block) 
 /// left out and radius range (m), how far a child limb turns from its
 /// parent (radians) and how much it is drawn upward.
 struct Limbs {
-    wood: Block,
-    leaves: Block,
+    wood: u32,
+    leaves: u32,
     sparse: f32,
     cluster: [f64; 2],
     spread: f64,
@@ -148,12 +145,12 @@ impl Limbs {
     }
 }
 
-/// The tree of `species` grown from `seed`, as a stamp.
-pub fn tree(species: Species, seed: u64) -> Stamp {
+/// The tree of `species` grown from `seed`, of `wood` and `leaves`, in
+/// cells of `voxel` metres.
+pub fn tree(species: Species, wood: u32, leaves: u32, seed: u64, voxel: f64) -> Stamp {
     // Seeds of nearby variants differ in a few bits: spread them.
     let mut rng = Rng::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(23) ^ 0x5851_f42d_4c95_7f2d);
-    let (wood, leaves) = species.blocks();
-    let mut b = Builder::new();
+    let mut b = Builder::new(voxel);
     match species {
         Species::Oak | Species::DarkOak => {
             let dark = species == Species::DarkOak;
@@ -242,26 +239,26 @@ pub fn tree(species: Species, seed: u64) -> Stamp {
     b.stamp
 }
 
-/// A cactus grown from `seed`: a column and up to two arms.
-pub fn cactus(seed: u64) -> Stamp {
+/// A cactus of `material` grown from `seed`: a column and up to two arms.
+pub fn cactus(material: u32, seed: u64, voxel: f64) -> Stamp {
     let mut rng = Rng::new(seed);
-    let mut b = Builder::new();
+    let mut b = Builder::new(voxel);
     let height = rng.uniform(1.4, 3.2);
-    b.limb(DVec3::Y * -0.3, DVec3::Y * height, 0.2, 0.17, Block::Cactus);
+    b.limb(DVec3::Y * -0.3, DVec3::Y * height, 0.2, 0.17, material);
     for n in 0..rng.int(0, 2) {
         let out = direction(f64::from(n) * std::f64::consts::PI + rng.uniform(-0.4, 0.4), 0.0);
         let from = DVec3::Y * height * rng.uniform(0.4, 0.7);
         let elbow = from + out * rng.uniform(0.4, 0.6);
-        b.limb(from, elbow, 0.13, 0.13, Block::Cactus);
-        b.limb(elbow, elbow + DVec3::Y * rng.uniform(0.5, 1.0), 0.13, 0.11, Block::Cactus);
+        b.limb(from, elbow, 0.13, 0.13, material);
+        b.limb(elbow, elbow + DVec3::Y * rng.uniform(0.5, 1.0), 0.13, 0.11, material);
     }
     b.stamp
 }
 
 /// A bush of `leaves` grown from `seed`: a few low clusters.
-pub fn bush(leaves: Block, seed: u64) -> Stamp {
+pub fn bush(leaves: u32, seed: u64, voxel: f64) -> Stamp {
     let mut rng = Rng::new(seed);
-    let mut b = Builder::new();
+    let mut b = Builder::new(voxel);
     for _ in 0..rng.int(2, 4) {
         let c = DVec3::new(rng.uniform(-0.5, 0.5), rng.uniform(0.2, 0.5), rng.uniform(-0.5, 0.5));
         b.crown(c, rng.uniform(0.45, 0.8), leaves, 0.3);
@@ -269,15 +266,86 @@ pub fn bush(leaves: Block, seed: u64) -> Stamp {
     b.stamp
 }
 
-/// A boulder of `block` grown from `seed`: rough lumps half sunk.
-pub fn boulder(block: Block, seed: u64) -> Stamp {
+/// A dry-land shrub of `wood` and `leaves` grown from `seed`: thin stems
+/// fanning low out of one root, wider than tall, airy flat tufts of leaves
+/// along them down to the ground (sagebrush, saltbush), knee to waist high.
+pub fn shrub(wood: u32, leaves: u32, seed: u64, voxel: f64) -> Stamp {
+    let mut rng = Rng::new(seed ^ 0x5bd1_e995);
+    let mut b = Builder::new(voxel);
+    let height = rng.uniform(0.4, 1.0);
+    let width = height * rng.uniform(1.4, 2.2);
+    let turn = rng.uniform(0.0, std::f64::consts::TAU);
+    let stems = rng.int(6, 9);
+    for n in 0..stems {
+        let azimuth = turn + f64::from(n) * std::f64::consts::TAU / f64::from(stems) + rng.uniform(-0.3, 0.3);
+        let out = direction(azimuth, 0.0);
+        let tip = out * width * rng.uniform(0.3, 0.5) + DVec3::Y * height * rng.uniform(0.55, 0.9);
+        b.limb(DVec3::Y * -0.1, tip, 0.03, 0.012, wood);
+        let r = width * rng.uniform(0.14, 0.2);
+        b.foliage(tip, tip * 0.55, r, r * 0.8, leaves, 0.55, r * 0.25, r * 0.3);
+    }
+    b.stamp
+}
+
+/// A boulder of `material` grown from `seed`: rough lumps half sunk, 0.5
+/// to 1.3 m.
+pub fn boulder(material: u32, seed: u64, voxel: f64) -> Stamp {
+    boulder_sized(material, seed, voxel, [0.5, 1.3])
+}
+
+/// A boulder of `material` grown from `seed`, `size` metres (a range): one
+/// to three rough lumps, half sunk.
+pub fn boulder_sized(material: u32, seed: u64, voxel: f64, size: [f64; 2]) -> Stamp {
     let mut rng = Rng::new(seed);
-    let mut b = Builder::new();
-    let size = rng.uniform(0.5, 1.3);
+    let mut b = Builder::new(voxel);
+    let size = rng.uniform(size[0], size[1]);
     for _ in 0..rng.int(1, 3) {
         let c = DVec3::new(rng.uniform(-0.4, 0.4), rng.uniform(-0.3, 0.1) * size, rng.uniform(-0.4, 0.4)) * size;
         let r = size * rng.uniform(0.6, 1.0);
-        b.foliage(c, c, r, r, block, 0.0, r * 0.1, r * 0.3);
+        b.foliage(c, c, r, r, material, 0.0, r * 0.1, r * 0.3);
+    }
+    b.stamp
+}
+
+/// A simple impact crater `diameter` metres across (a range) grown from
+/// `seed`: a bowl about a fifth as deep as it is wide, cut into the ground
+/// inside a raised, lumpy rim of `rim` (the ground's own material, or fresh
+/// ejecta), `blocks` lumps of `rocks` thrown out over it.
+pub fn crater(rim: u32, rocks: u32, blocks: u32, seed: u64, voxel: f64, diameter: [f64; 2]) -> Stamp {
+    let mut rng = Rng::new(seed ^ 0x2f69_3a1d);
+    let mut b = Builder::new(voxel);
+    let radius = rng.uniform(diameter[0], diameter[1]) * 0.5;
+    let depth = radius * rng.uniform(0.34, 0.44);
+    // The rim: a ring of lumpy balls round the bowl's edge, its crest a
+    // tenth of the radius over the ground, sloping out over half the radius.
+    let crest = radius * rng.uniform(0.08, 0.12);
+    let ring = (radius * 0.5).max(voxel * 2.0);
+    let segments = 16;
+    let turn = rng.uniform(0.0, std::f64::consts::TAU);
+    for n in 0..segments {
+        let a = turn + f64::from(n) * std::f64::consts::TAU / f64::from(segments);
+        let c = direction(a, 0.0) * radius * rng.uniform(1.0, 1.08) + DVec3::Y * (crest - ring);
+        b.foliage(c, c, ring, ring, rim, 0.0, ring * 0.08, ring * 0.25);
+    }
+    // The bowl: air in the sphere through the ground's line at `radius` and
+    // `depth` under the ground, up to just over the crest, as tiers (a
+    // whole sphere would reach far over the ground: the stamp's box is
+    // what classification bounds it by).
+    let sphere = (radius * radius + depth * depth) / (2.0 * depth);
+    let profile = |y: f64| (sphere * sphere - (y - (sphere - depth)).powi(2)).max(0.0).sqrt();
+    let heights = [-depth, -0.8 * depth, -0.55 * depth, -0.3 * depth, 0.0, crest + voxel];
+    for pair in heights.windows(2) {
+        let (y0, y1) = (pair[0], pair[1]);
+        let shape = Shape::Cone { a: b.at(DVec3::Y * y0), b: b.at(DVec3::Y * y1), radius: [b.cells(profile(y0)), b.cells(profile(y1))] };
+        b.stamp.add(Part { rough: b.cells(radius * 0.02), ..Part::air(shape) });
+    }
+    // Blocks thrown out over the rim.
+    for _ in 0..blocks {
+        let a = rng.uniform(0.0, std::f64::consts::TAU);
+        let r = radius * rng.uniform(0.9, 1.5);
+        let s = radius * rng.uniform(0.03, 0.07);
+        let c = direction(a, 0.0) * r + DVec3::Y * (crest * (1.5 - r / radius).max(0.0) - s * 0.3);
+        b.foliage(c, c, s, s, rocks, 0.0, s * 0.1, s * 0.3);
     }
     b.stamp
 }
@@ -285,13 +353,16 @@ pub fn boulder(block: Block, seed: u64) -> Stamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::material;
+
+    const VOXEL: f64 = 0.1;
 
     /// Solid cells' box of a stamp: lowest and highest offsets, in metres.
     fn extent(s: &Stamp) -> (DVec3, DVec3) {
         let cells: Vec<[i32; 3]> = s.cells().into_iter().filter(|(_, m)| m.is_some()).map(|(p, _)| p).collect();
         let lo = cells.iter().fold([i32::MAX; 3], |a, p| [a[0].min(p[0]), a[1].min(p[1]), a[2].min(p[2])]);
         let hi = cells.iter().fold([i32::MIN; 3], |a, p| [a[0].max(p[0]), a[1].max(p[1]), a[2].max(p[2])]);
-        let m = |c: [i32; 3]| DVec3::new(f64::from(c[0]), f64::from(c[1]), f64::from(c[2])) * VOXEL_M;
+        let m = |c: [i32; 3]| DVec3::new(f64::from(c[0]), f64::from(c[1]), f64::from(c[2])) * VOXEL;
         (m(lo), m(hi))
     }
 
@@ -299,27 +370,53 @@ mod tests {
     /// anchor column, within a stamp's reach; a seed grows the same tree.
     #[test]
     fn every_species_grows_a_plausible_tree() {
+        let (wood, leaves) = (material::WOOD, material::LEAVES);
         for (species, height) in [(Species::Oak, 7.0..13.0), (Species::DarkOak, 6.0..12.0), (Species::Birch, 8.0..16.0), (Species::Spruce, 9.0..18.0), (Species::Pine, 12.0..21.0), (Species::Jungle, 15.0..25.0)] {
             for seed in 0..3 {
-                let s = tree(species, seed);
+                let s = tree(species, wood, leaves, seed, VOXEL);
                 let (lo, hi) = extent(&s);
                 assert!(height.contains(&hi.y), "{species:?} {seed}: {}", hi.y);
                 assert!(hi.x - lo.x > 1.0 && hi.x - lo.x < 24.0, "{species:?} {seed}: width {}", hi.x - lo.x);
-                let (wood, _) = species.blocks();
-                assert_eq!(s.get([0, 1, 0]), Some(Some(wood.material())), "{species:?} {seed}: trunk");
+                assert_eq!(s.get([0, 1, 0]), Some(Some(wood)), "{species:?} {seed}: trunk");
                 s.compile().expect("within a stamp's reach");
-                assert_eq!(s, tree(species, seed));
+                assert_eq!(s, tree(species, wood, leaves, seed, VOXEL));
             }
-            assert_ne!(tree(species, 1), tree(species, 2));
+            assert_ne!(tree(species, wood, leaves, 1, VOXEL), tree(species, wood, leaves, 2, VOXEL));
         }
     }
 
     #[test]
     fn small_growth_stands_on_its_anchor() {
         for seed in 0..4 {
-            assert_eq!(cactus(seed).get([0, 2, 0]), Some(Some(Block::Cactus.material())));
-            assert!(!bush(Block::OakLeaves, seed).cells().is_empty());
-            assert!(boulder(Block::Stone, seed).get([0, -1, 0]).is_some());
+            assert_eq!(cactus(material::LEAVES, seed, VOXEL).get([0, 2, 0]), Some(Some(material::LEAVES)));
+            assert!(!bush(material::LEAVES, seed, VOXEL).cells().is_empty());
+            assert!(boulder(material::STONE, seed, VOXEL).get([0, -1, 0]).is_some());
+            let s = shrub(material::WOOD, material::LEAVES, seed, VOXEL);
+            let (lo, hi) = extent(&s);
+            assert!((0.3..1.4).contains(&hi.y), "shrub {seed}: {}", hi.y);
+            assert!(hi.x - lo.x > hi.y, "shrub {seed}: wider than tall");
+        }
+    }
+
+    /// A crater is a bowl of air under the ground inside a rim over it,
+    /// within a stamp's reach at its largest.
+    #[test]
+    fn craters_are_bowls_inside_rims() {
+        for seed in 0..4 {
+            let s = crater(material::REGOLITH, material::BOULDER, 8, seed, VOXEL, [36.0, 36.0]);
+            s.compile().expect("within a stamp's reach");
+            // Air at the bowl's middle, well under the ground.
+            assert_eq!(s.get([0, -40, 0]), Some(None), "{seed}: bowl");
+            assert_eq!(s.get([0, 10, 0]), Some(None), "{seed}: open over the bowl");
+            // Rim over the ground somewhere on the circle of the radius.
+            let rim = (0..64).any(|n| {
+                let a = f64::from(n) / 64.0 * std::f64::consts::TAU;
+                (180..240).step_by(4).any(|r| (1..15).any(|y| s.get([(a.cos() * f64::from(r)) as i32, y, (a.sin() * f64::from(r)) as i32]) == Some(Some(material::REGOLITH))))
+            });
+            assert!(rim, "{seed}: rim");
+            let (lo, hi) = s.bounds().unwrap();
+            // Its box ends a little over the rim (no air sphere over it).
+            assert!(hi[1] < 30 && lo[1] > -180, "{seed}: box {lo:?} {hi:?}");
         }
     }
 }

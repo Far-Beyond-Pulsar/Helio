@@ -7,7 +7,8 @@
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * [`features`] — procedural content (trees, rocks, buildings) generated
-//!   like the terrain (docs/features.md), from [`stamp`] models.
+//!   like the terrain (docs/features.md), from [`stamp`] models; [`flora`]
+//!   grows natural ones (trees, shrubs, boulders, craters).
 //! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
 //!   residency, drawing and lighting, and the Helio pass.
 //! * `engine` — what hosts share with the pass (frames, picks) and the
@@ -15,6 +16,7 @@
 pub mod edit_store;
 pub mod edits;
 pub mod features;
+pub mod flora;
 pub mod snapshot;
 pub mod stamp;
 pub mod grid;

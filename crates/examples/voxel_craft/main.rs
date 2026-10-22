@@ -23,7 +23,8 @@
 //! (see the README).
 //!
 //! Layout: `terrain/` the planet's recipe and biomes, `world/` edits, the
-//! worker thread and decoration, `trees/` and `structures/` the generators,
+//! worker thread and decoration (trees and rocks grown by the engine's
+//! `flora`), `structures/` the buildings,
 //! `palette.rs` the blocks' look, `player/` movement, interaction and the
 //! character, `gfx.rs` the renderer, `game.rs` one frame.
 
@@ -41,7 +42,6 @@ mod palette;
 mod player;
 mod structures;
 mod terrain;
-mod trees;
 mod world;
 
 fn main() {

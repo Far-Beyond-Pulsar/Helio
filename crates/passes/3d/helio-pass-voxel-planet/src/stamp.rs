@@ -285,10 +285,27 @@ impl CompiledPart {
                 let flat = matches!(part.shape, Shape::Cone { .. });
                 let (a, b) = (a.map(units), b.map(units));
                 let radius = [units(radius[0].max(0.0)), units(radius[1].max(0.0))];
+                // Each end's reach along each axis: the larger radius (a
+                // capsule's balls), or for flat ends the end's disk square
+                // to the segment, `r sqrt(1 - u_k^2)` along axis k for the
+                // segment's direction u, plus what `holds` rounds (its
+                // closest point is found to 1/256 of the segment), never
+                // past the radius: a vertical tier's box ends at its
+                // planes.
                 let r = radius[0].max(radius[1]);
+                let d = sub3(b, a);
+                let length = (dot3(d, d) as f64).sqrt();
+                let reach = |end: i32, k: usize| {
+                    if flat && length > 0.0 {
+                        let disk = f64::from(end) * (1.0 - (f64::from(d[k]) / length).powi(2)).max(0.0).sqrt();
+                        r.min((disk + length / 256.0).ceil() as i32 + 2)
+                    } else {
+                        r
+                    }
+                };
                 // Cells whose centre may lie within the radius.
-                let lo = [0, 1, 2].map(|k| (a[k].min(b[k]) - r - UNIT / 2).div_euclid(UNIT));
-                let hi = [0, 1, 2].map(|k| (a[k].max(b[k]) + r - UNIT / 2).div_euclid(UNIT) + 1);
+                let lo = [0, 1, 2].map(|k| ((a[k] - reach(radius[0], k)).min(b[k] - reach(radius[1], k)) - UNIT / 2).div_euclid(UNIT));
+                let hi = [0, 1, 2].map(|k| ((a[k] + reach(radius[0], k)).max(b[k] + reach(radius[1], k)) - UNIT / 2).div_euclid(UNIT) + 1);
                 Self { capsule: true, flat, material, lo, hi, a, b, radius, rough, keep, seed, lump, lump_shift }
             }
         };
@@ -464,6 +481,40 @@ fn dot3(a: [i32; 3], b: [i32; 3]) -> i32 {
 mod tests {
     use super::*;
     use crate::{Planet, PlanetRecipe};
+
+    /// A part's box holds every cell it holds: flat-ended cones of any
+    /// tilt, taper and length, rough and lumpy, whose boxes end near their
+    /// disks, against every cell within their radius of the segment.
+    #[test]
+    fn a_cone_box_holds_its_cells() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for n in 0..300 {
+            let a = [next() * 40.0 - 20.0, next() * 40.0 - 20.0, next() * 40.0 - 20.0];
+            let tilt = if n % 3 == 0 { [0.0, 1.0, 0.0] } else { [next() - 0.5, next() - 0.5, next() - 0.5] };
+            let length = next() * 30.0;
+            let b = [a[0] + tilt[0] * length, a[1] + tilt[1] * length, a[2] + tilt[2] * length];
+            let radius = [next() * 12.0, next() * 12.0];
+            let part = Part { rough: next() * 2.0, lump: next() * 2.0, lump_size: 2, ..Part::solid(Shape::Cone { a, b, radius }, 5) };
+            let compiled = CompiledPart::new(&part, n).unwrap();
+            let r = radius[0].max(radius[1]).ceil() as i32 + 1;
+            for x in (a[0].min(b[0]) as i32 - r)..=(a[0].max(b[0]) as i32 + r) {
+                for y in (a[1].min(b[1]) as i32 - r)..=(a[1].max(b[1]) as i32 + r) {
+                    for z in (a[2].min(b[2]) as i32 - r)..=(a[2].max(b[2]) as i32 + r) {
+                        if cell_of(&[compiled], [x, y, z]).is_some() {
+                            let inside = (0..3).all(|k| compiled.lo[k] <= [x, y, z][k] && [x, y, z][k] <= compiled.hi[k]);
+                            assert!(inside, "cone {n} {a:?} {b:?} {radius:?}: {:?} outside {:?} {:?}", [x, y, z], compiled.lo, compiled.hi);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// A placed stamp reads back cell for cell: its materials where it set
     /// them, air where it cleared, in a handful of run brushes.
