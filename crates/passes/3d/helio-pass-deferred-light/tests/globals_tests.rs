@@ -158,25 +158,6 @@ fn csm_cascade_count_is_4() {
     assert_eq!(splits.len(), 4);
 }
 
-// ── World bounds sanity ───────────────────────────────────────────────────────
-
-#[test]
-fn rc_world_min_components_accessible() {
-    let world_min: [f32; 4] = [-100.0, 0.0, -100.0, 0.0];
-    assert_eq!(world_min[0], -100.0);
-    assert_eq!(world_min[1], 0.0);
-    assert_eq!(world_min[2], -100.0);
-}
-
-#[test]
-fn rc_world_max_x_greater_than_min_x() {
-    let world_min: [f32; 4] = [-100.0, 0.0, -100.0, 0.0];
-    let world_max: [f32; 4] = [100.0, 50.0, 100.0, 0.0];
-    assert!(world_max[0] > world_min[0]);
-    assert!(world_max[1] > world_min[1]);
-    assert!(world_max[2] > world_min[2]);
-}
-
 // ── Padding completeness ──────────────────────────────────────────────────────
 
 #[test]
@@ -187,11 +168,11 @@ fn last_row_three_pad_u32s_fill_16_bytes_with_debug_mode() {
 }
 
 #[test]
-fn globals_96_bytes_leaves_no_trailing_gap_in_16_byte_rows() {
+fn globals_80_bytes_leaves_no_trailing_gap_in_16_byte_rows() {
     assert_eq!(
-        96 % 16,
+        80 % 16,
         0,
-        "96 bytes must pack cleanly into 16-byte WGSL rows"
+        "80 bytes must pack cleanly into 16-byte WGSL rows"
     );
 }
 

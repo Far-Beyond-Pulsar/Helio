@@ -15,7 +15,7 @@ pub use builder::{
 };
 pub use config::{
     ray_queries_usable, recommended_instance_flags, required_experimental_features,
-    required_wgpu_features, required_wgpu_limits, usable_adapter_features, GiConfig,
+    required_wgpu_features, required_wgpu_limits, usable_adapter_features,
     PerfOverlayMode, RenderMode, RendererConfig,
 };
 pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};

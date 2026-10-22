@@ -1063,10 +1063,6 @@ fn build_default_graph_internal_with_lens_user(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
-    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
-    // output, and it only cost a probe-atlas trace every frame.
-
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
     // World-space GI (helio-pass-gi): its probes' rays are traced by the
@@ -1331,10 +1327,6 @@ fn build_fxaa_graph_internal(
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
-
-    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
-    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
-    // output, and it only cost a probe-atlas trace every frame.
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
@@ -2004,10 +1996,6 @@ fn build_forward_graph_internal(
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
-
-    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
-    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
-    // output, and it only cost a probe-atlas trace every frame.
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
     add_forward_geometry_passes(&mut graph, device, camera_buf, &lighting_config, &perf, true);

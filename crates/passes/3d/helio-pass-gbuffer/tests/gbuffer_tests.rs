@@ -94,32 +94,6 @@ fn csm_last_split_largest() {
     assert_eq!(max, 150.0);
 }
 
-// ── World-space bounds ────────────────────────────────────────────────────────
-
-#[test]
-fn rc_world_bounds_x_min_lte_max() {
-    let mut g: GBufferGlobals = bytemuck::Zeroable::zeroed();
-    g.rc_world_min = [-50.0, 0.0, -50.0, 0.0];
-    g.rc_world_max = [50.0, 20.0, 50.0, 0.0];
-    assert!(g.rc_world_min[0] <= g.rc_world_max[0]);
-}
-
-#[test]
-fn rc_world_bounds_y_min_lte_max() {
-    let mut g: GBufferGlobals = bytemuck::Zeroable::zeroed();
-    g.rc_world_min = [-50.0, -10.0, -50.0, 0.0];
-    g.rc_world_max = [50.0, 20.0, 50.0, 0.0];
-    assert!(g.rc_world_min[1] <= g.rc_world_max[1]);
-}
-
-#[test]
-fn rc_world_bounds_z_min_lte_max() {
-    let mut g: GBufferGlobals = bytemuck::Zeroable::zeroed();
-    g.rc_world_min = [-50.0, 0.0, -50.0, 0.0];
-    g.rc_world_max = [50.0, 20.0, 50.0, 0.0];
-    assert!(g.rc_world_min[2] <= g.rc_world_max[2]);
-}
-
 // ── Frame and time ────────────────────────────────────────────────────────────
 
 #[test]

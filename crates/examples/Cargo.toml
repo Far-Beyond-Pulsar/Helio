@@ -136,10 +136,6 @@ name = "light_benchmark"
 path = "light_benchmark.rs"
 
 [[bin]]
-name = "rc_benchmark"
-path = "rc_benchmark.rs"
-
-[[bin]]
 name = "load_fbx"
 path = "load_fbx.rs"
 

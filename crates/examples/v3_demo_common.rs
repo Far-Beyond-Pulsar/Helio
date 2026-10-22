@@ -558,7 +558,7 @@ pub fn spawn_reflection_capture_box(
 }
 
 /// Spawn the atmosphere shared by the indoor-cathedral demo family: a dim,
-/// blue-tinted air for the radiance-cascades GI bounce to pick up. (Its
+/// blue-tinted air. (Its
 /// cloud layer went with the procedural sky pass; clouds will return as
 /// part of the atmosphere.)
 pub fn spawn_indoor_cathedral_sky(world: &mut World) -> Entity {

@@ -10,7 +10,6 @@ pulsar_reflection = { workspace = true }
 helio-core  = { workspace = true }
 helio-mats  = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
-helio-pass-radiance-cascades = { workspace = true }
 helio-pass-sky = { workspace = true }
 helio-pass-gi = { workspace = true }
 wgpu      = { workspace = true }

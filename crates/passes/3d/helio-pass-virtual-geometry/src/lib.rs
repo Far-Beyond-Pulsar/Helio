@@ -277,8 +277,6 @@ pub(crate) struct VgGlobals {
     pub light_count: u32,
     pub ambient_intensity: f32,
     pub ambient_color: [f32; 4],
-    pub rc_world_min: [f32; 4],
-    pub rc_world_max: [f32; 4],
     pub csm_splits: [f32; 4],
     pub debug_mode: u32,
     _pad0: u32,

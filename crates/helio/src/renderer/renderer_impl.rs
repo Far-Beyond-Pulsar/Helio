@@ -31,7 +31,6 @@ pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send +
 use crate::camera::Camera;
 use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 
-use super::config::GiConfig;
 use super::debug::DebugDrawState;
 
 /// Backend-only fallback bindings for the material sampling contract.
@@ -214,7 +213,7 @@ pub struct Renderer {
     #[cfg(not(target_arch = "wasm32"))]
     /// Application-provided camera template for XR frames: supplies
     /// `view_id`, near/far and the representative position used
-    /// for RC bounds and the debug state. The per-eye view/proj are overridden
+    /// for the debug state. The per-eye view/proj are overridden
     /// by the headset each frame.
     pub(crate) xr_camera: Option<Camera>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -333,20 +332,6 @@ impl Renderer {
         // new view, and make the next mono frame compare afresh.
         self.camera_identity = None;
         self.camera_generation = self.camera_generation.wrapping_add(1);
-    }
-
-    pub fn set_gi_config(&mut self, gi_config: GiConfig) {
-        self.graph_config.gi_config = gi_config;
-        if let Some(pass) = self
-            .graph
-            .find_pass_mut::<helio_pass_radiance_cascades::RadianceCascadesPass>()
-        {
-            pass.set_gi_config(gi_config);
-        }
-    }
-
-    pub fn gi_config(&self) -> GiConfig {
-        self.graph_config.gi_config
     }
 
     /// Change the shadow quality. The passes that use it are configured at
@@ -707,11 +692,6 @@ impl Renderer {
     /// passes that only learn it through `set_debug_mode`).
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
         graph.set_debug_mode(self.debug_mode);
-        if let Some(pass) = graph
-            .find_pass_mut::<helio_pass_radiance_cascades::RadianceCascadesPass>()
-        {
-            pass.set_gi_config(self.graph_config.gi_config);
-        }
         #[cfg(feature = "bake")]
         let baked = self.installed_baked_data();
         self.graph = graph;
@@ -785,7 +765,7 @@ impl Renderer {
     }
 
     /// Set the camera template used for XR frames (postprocess settings,
-    /// near/far planes, RC bounds position). The per-eye view/projection
+    /// near/far planes, position). The per-eye view/projection
     /// matrices are overridden by the headset pose each frame; only the
     /// post-processing settings and clip distances are read back.
     #[cfg(not(target_arch = "wasm32"))]

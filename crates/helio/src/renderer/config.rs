@@ -1,6 +1,5 @@
 use crate::material::MAX_TEXTURES;
 use helio_mats::BINDLESS_MATERIAL_FEATURES;
-pub use helio_pass_radiance_cascades::GiConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -83,7 +82,7 @@ pub fn recommended_instance_flags() -> wgpu::InstanceFlags {
 ///
 /// Software Vulkan (lavapipe / llvmpipe, and CPU adapters in general)
 /// reports `EXPERIMENTAL_RAY_QUERY`, but its shader compiler crashes building
-/// the radiance-cascades ray-query pipeline and the device is lost
+/// ray-query pipelines and the device is lost
 /// (Pulsar-Native#840). Without the feature the default graph uses its
 /// non-ray-traced fallbacks.
 pub fn usable_adapter_features(adapter: &wgpu::Adapter) -> wgpu::Features {
@@ -255,7 +254,6 @@ pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
-    pub gi_config: GiConfig,
     pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
@@ -366,7 +364,6 @@ impl RendererConfig {
             width: width.max(1),
             height: height.max(1),
             surface_format,
-            gi_config: GiConfig::default(),
             shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
@@ -405,11 +402,6 @@ impl RendererConfig {
     /// Enable/disable the planar reflection pass.
     pub fn with_planar_reflections(mut self, enabled: bool) -> Self {
         self.enable_planar_reflections = enabled;
-        self
-    }
-
-    pub fn with_gi_config(mut self, gi_config: GiConfig) -> Self {
-        self.gi_config = gi_config;
         self
     }
 

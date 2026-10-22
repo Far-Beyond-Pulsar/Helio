@@ -246,11 +246,6 @@ impl Renderer {
     /// What `install_replacement_graph` and `replace_graph` apply to a freshly
     /// built graph, for a graph whose passes are about to be moved instead.
     fn apply_post_build_settings(&self, graph: &mut RenderGraph) {
-        if let Some(pass) =
-            graph.find_pass_mut::<helio_pass_radiance_cascades::RadianceCascadesPass>()
-        {
-            pass.set_gi_config(self.graph_config.gi_config);
-        }
         if let Some(hook) = &self.graph_rebuild_hook {
             hook(graph, &self.device);
         }

@@ -958,9 +958,6 @@ impl RenderPass for VirtualGeometryPass {
             return Ok(());
         };
         let environment: Option<helio_core::RenderEnvironment<'_>> = ctx.registry.get(helio_core::resource_keys::render_environment());
-        let rc_volume = ctx
-            .registry
-            .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
         let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
@@ -1002,18 +999,6 @@ impl RenderPass for VirtualGeometryPass {
                 environment.map(|value| value.ambient_color[0]).unwrap_or(0.1),
                 environment.map(|value| value.ambient_color[1]).unwrap_or(0.1),
                 environment.map(|value| value.ambient_color[2]).unwrap_or(0.15),
-                0.0,
-            ],
-            rc_world_min: [
-                rc_volume.map(|v| v.world_min[0]).unwrap_or(-100.0),
-                rc_volume.map(|v| v.world_min[1]).unwrap_or(-100.0),
-                rc_volume.map(|v| v.world_min[2]).unwrap_or(-100.0),
-                0.0,
-            ],
-            rc_world_max: [
-                rc_volume.map(|v| v.world_max[0]).unwrap_or(100.0),
-                rc_volume.map(|v| v.world_max[1]).unwrap_or(100.0),
-                rc_volume.map(|v| v.world_max[2]).unwrap_or(100.0),
                 0.0,
             ],
             csm_splits: [5.0, 20.0, 60.0, 200.0],

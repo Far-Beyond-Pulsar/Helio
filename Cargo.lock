@@ -1505,7 +1505,6 @@ dependencies = [
  "helio-pass-portal-cull",
  "helio-pass-portal-instances",
  "helio-pass-postprocess",
- "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-tsr",
@@ -1773,7 +1772,6 @@ dependencies = [
  "helio-core",
  "helio-mats",
  "helio-pass-gi",
- "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "pulsar_reflection",
@@ -1869,7 +1867,6 @@ dependencies = [
  "glam 0.33.5",
  "helio-core",
  "helio-mats",
- "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "image",
  "log",
@@ -2049,17 +2046,6 @@ dependencies = [
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-radiance-cascades"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "naga",
- "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -2271,7 +2257,6 @@ dependencies = [
  "helio-mats",
  "helio-pass-gbuffer",
  "helio-pass-object-batch",
- "helio-pass-radiance-cascades",
  "log",
  "naga",
  "pulsar_scenedb",

@@ -12,8 +12,8 @@ called out in their sections (§3, §14, §15 and §19).
 export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
 cargo build --release -p examples --bin resolution_bench
 
-# --no-ray-query: lavapipe's compiler crashes on the radiance-cascades
-# ray-query pipeline. Add --pulsar-columns for the editor's SceneDB setup.
+# --no-ray-query: lavapipe's compiler crashes on ray-query
+# pipelines. Add --pulsar-columns for the editor's SceneDB setup.
 target/release/resolution_bench --no-ray-query --frames 7 --warmup 10 \
     --out bench --tag after [--pulsar-columns] [--billboards]
 
@@ -114,9 +114,7 @@ covered" mask and early-Z rejects covered pixels.
 
 SSR and planar reflections sample `pre_aa` between the G-buffer and lighting,
 and XR uses a multiview depth target, so those configurations keep the
-original order. The radiance-cascades fallback also reads `pre_aa` early, but
-nothing in the default graph consumes its output: no pass publishes
-`rc_view`, so `has_rc_gi` is always 0.
+original order.
 
 Frame diff: bit-identical in all 9 runs. The open-sky scene saves less
 because most of its pixels are sky.

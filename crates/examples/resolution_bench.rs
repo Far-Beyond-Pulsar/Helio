@@ -57,8 +57,8 @@
 //! `--scale` is the renderer's internal render scale (the editor uses the
 //! `RendererConfig` default, 0.75). `--editor` renders in editor mode (light
 //! billboards, grid). `--tsr` switches FXAA for TSR. `--no-capture` skips PNGs.
-//! `--no-ray-query` drops ray queries; lavapipe, whose compiler crashes on the
-//! radiance-cascades ray-query pipeline, never gets them
+//! `--no-ray-query` drops ray queries; lavapipe, whose compiler crashes on
+//! ray-query pipelines, never gets them
 //! (`helio::usable_adapter_features`).
 //!
 //! No window or surface is created. On a machine without a GPU, Mesa's

@@ -15,7 +15,6 @@ enable wgpu_ray_query;
 @group(1) @binding(6) var ssr_output:           texture_storage_2d<rgba16float, write>;
 
 @group(2) @binding(0) var acc_struct:           acceleration_structure;
-@group(2) @binding(1) var rc_cascades:          texture_2d<f32>;
 
 const MAX_ITER:      u32 = 64u;
 const START_LEVEL:   i32 = 2;
@@ -88,32 +87,6 @@ fn projected_hit_color(hit: vec4<f32>, direction: vec3<f32>) -> vec4<f32> {
     let normal=helio_gbuffer_normal(textureLoad(gbuf_normal,px,0).xyz);
     if dot(normal,-direction)<=0.0 { return vec4<f32>(0.0); }
     return vec4<f32>(textureLoad(scene_color,px,0).rgb,1.0);
-}
-
-fn sample_rc_reflection(world_pos: vec3<f32>, R: vec3<f32>, roughness: f32) -> vec3<f32> {
-    if roughness < 0.6 { return vec3<f32>(0.0); }
-    let rc_dims = textureDimensions(rc_cascades);
-    if rc_dims.x < 2u || rc_dims.y < 2u { return vec3<f32>(0.0); }
-
-    let f = R / (abs(R.x) + abs(R.y) + abs(R.z));
-    let oct_uv = select(
-        vec2<f32>(f.z, f.x) * 0.5 + 0.5,
-        vec2<f32>(1.0 - abs(f.z), 1.0 - abs(f.x)) * 0.5,
-        f.y >= 0.0,
-    );
-    let sx = f32(rc_dims.x);
-    let sy = f32(rc_dims.y);
-    let px = clamp(i32(oct_uv.x * sx), 0, i32(rc_dims.x) - 3);
-    let py = clamp(i32(oct_uv.y * sy), 0, i32(rc_dims.y) - 3);
-
-    var irradiance = vec3<f32>(0.0);
-    for (var dy = 0u; dy < 2u; dy++) {
-        for (var dx = 0u; dx < 2u; dx++) {
-            let s = textureLoad(rc_cascades, vec2<i32>(px + i32(dx), py + i32(dy)), 0);
-            irradiance += s.rgb;
-        }
-    }
-    return irradiance * 0.25;
 }
 
 @compute @workgroup_size(8, 8)
@@ -214,9 +187,6 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
             // endpoint. Offscreen hit shading remains a separate missing path.
             final_color=vec3<f32>(0.0);
             final_confidence=0.0;
-        } else if final_confidence==0.0 && roughness>0.6 {
-            final_color=sample_rc_reflection(world_pos,R2,roughness);
-            final_confidence=roughness_fade*0.2;
         }
     }
     textureStore(ssr_output,px,vec4<f32>(final_color,final_confidence));

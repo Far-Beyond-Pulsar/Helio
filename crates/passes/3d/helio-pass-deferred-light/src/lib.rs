@@ -22,10 +22,10 @@ pub use gpu_types::*;
 /// (their pipeline layouts; a test counts them).
 ///
 /// Base lighting uses ten G-buffer inputs (voxel sun visibility included) and
-/// six scene textures. Reflection composition uses six G-buffer inputs, four
+/// five scene textures. Reflection composition uses six G-buffer inputs, three
 /// reflection textures and the water caustics.
-pub const BASE_SAMPLED_TEXTURE_COUNT: u32 = 16;
-pub const REFLECTION_SAMPLED_TEXTURE_COUNT: u32 = 11;
+pub const BASE_SAMPLED_TEXTURE_COUNT: u32 = 15;
+pub const REFLECTION_SAMPLED_TEXTURE_COUNT: u32 = 10;
 const _: () = assert!(BASE_SAMPLED_TEXTURE_COUNT <= 16);
 const _: () = assert!(REFLECTION_SAMPLED_TEXTURE_COUNT <= 16);
 
@@ -37,16 +37,8 @@ struct DeferredGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
     debug_mode: u32,
-    /// 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
-    /// 0 if it fell back to the dummy placeholder (e.g. FXAA/simple/default
-    /// pipelines, which never run the HLFS inject/propagate passes). Lets the
-    /// shader skip `sample_rc_irradiance()` entirely instead of paying for its
-    /// ~128 texture loads per pixel against data that was never written.
-    has_rc_gi: u32,
     /// Number of tiles in the X dimension for tiled light culling.
     num_tiles_x: u32,
     /// Number of reflection captures in the capture storage buffer. Zero means
@@ -56,7 +48,7 @@ struct DeferredGlobals {
     /// 0 on targets where `helio_core::REFLECTIONS_SUPPORTED` is false. Makes
     /// the shader skip the reflection-capture cube array along with the SSR and
     /// planar composites, so no reflection path contributes to indirect
-    /// specular. Direct light, ambient and RC GI are unaffected.
+    /// specular. Direct light and ambient are unaffected.
     enable_reflections: u32,
     /// 0 disables the environment-cubemap indirect specular term specifically.
     ///
@@ -65,7 +57,7 @@ struct DeferredGlobals {
     /// reflections from the image. This is the switch that does.
     enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
-    _pad: [u32; 2],
+    _pad: [u32; 3],
 }
 
 pub struct DeferredLightPass {
@@ -100,14 +92,14 @@ pub struct DeferredLightPass {
     bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     bind_group_2_key: Option<(
         usize,
-        [wgpu::TextureView; 6],
+        [wgpu::TextureView; 5],
         [wgpu::Sampler; 4],
         wgpu::Buffer,
     )>,
     bind_group_3_key: Option<[wgpu::Buffer; 4]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     reflection_bind_group_2_key: Option<(
-        [wgpu::TextureView; 5],
+        [wgpu::TextureView; 4],
         [wgpu::Sampler; 2],
         [wgpu::Buffer; 2],
     )>,
@@ -126,7 +118,6 @@ pub struct DeferredLightPass {
     shadow_depth_sampler: wgpu::Sampler,
     fallback_env_view: wgpu::TextureView,
     fallback_env_sampler: wgpu::Sampler,
-    fallback_rc_view: wgpu::TextureView,
     fallback_caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
     fallback_water_volumes: wgpu::Buffer,
@@ -547,9 +538,6 @@ impl DeferredLightPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let (_fallback_rc_texture, fallback_rc_view) =
-            black_2d_texture(device, queue, "Deferred Fallback RC");
-
         // Fallback caustics texture (black 1x1 RGBA16Float)
         let (_fallback_caustics_texture, fallback_caustics_view) =
             black_2d_texture(device, queue, "Deferred Fallback Caustics");
@@ -815,7 +803,6 @@ impl DeferredLightPass {
             shadow_depth_sampler,
             fallback_env_view,
             fallback_env_sampler,
-            fallback_rc_view,
             fallback_caustics_view,
             caustics_sampler,
             fallback_water_volumes,
@@ -886,7 +873,6 @@ impl RenderPass for DeferredLightPass {
             "render_environment",
             "water_caustics",
             "pre_aa",
-            "rc_view",
             "baked_lightmap",
             "baked_lightmap_sampler",
             "ssr_trace",
@@ -913,24 +899,6 @@ impl RenderPass for DeferredLightPass {
         } else {
             ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
         };
-        // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
-        let (rc_min, rc_max) = if let Some(volume) = ctx
-            .registry
-            .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME)
-        {
-            (volume.world_min, volume.world_max)
-        } else {
-            ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
-        };
-        // The volume's presence only says a radiance-cascades pass is in the
-        // graph (it publishes it from its GiConfig before any pass prepares),
-        // not that this pipeline runs HLFS. Only the presence of a real
-        // rc_view texture tells us whether there's anything to sample.
-        let has_rc_gi = ctx
-            .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("rc_view"))
-            .is_some();
-
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
@@ -942,14 +910,11 @@ impl RenderPass for DeferredLightPass {
                 .map_or(0, |lights| lights.row_capacity()),
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
-            rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
-            rc_world_max: [rc_max[0], rc_max[1], rc_max[2], 0.0],
             // Must match CSM_SPLITS constant in shadow_matrices.wgsl ([16,80,300,1400]).
             // The shadow matrices are computed for these distances, so cascade selection
             // must use the same values or shadow maps will be sampled outside their valid range.
             csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
             debug_mode: self.debug_mode,
-            has_rc_gi: has_rc_gi as u32,
             num_tiles_x: ctx.width.div_ceil(16),
             // SceneDB is the only reflection-capture source: fixed capacity,
             // not a live count -- see `MAX_REFLECTION_CAPTURES`'s doc.
@@ -963,7 +928,7 @@ impl RenderPass for DeferredLightPass {
             },
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
-            _pad: [0; 2],
+            _pad: [0; 3],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1139,10 +1104,6 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get(helio_core::ResourceKey::new("shadow_sampler"))
             .unwrap_or(&self.fallback_shadow_sampler);
-        let rc_view = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("rc_view"))
-            .unwrap_or(&self.fallback_rc_view);
         // Baked reflection cube array from the probe bake. Falls back to a 1×1
         // black cube array when nothing has been baked, which reads as "no
         // environment" rather than failing to bind.
@@ -1217,7 +1178,6 @@ impl RenderPass for DeferredLightPass {
             lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize),
             [
                 shadow_view.clone(),
-                rc_view.clone(),
                 static_shadow_view.clone(),
                 lightmap_view.clone(),
                 ies_view.clone(),
@@ -1252,7 +1212,6 @@ impl RenderPass for DeferredLightPass {
                         binding: 4,
                         resource: shadow_matrices_buf.as_entire_binding(),
                     },
-                    texture_view_entry(5, rc_view),
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
@@ -1289,7 +1248,6 @@ impl RenderPass for DeferredLightPass {
         let reflection_scene_key = (
             [
                 env_view.clone(),
-                rc_view.clone(),
                 ssr_view.clone(),
                 planar_view.clone(),
                 caustics_view.clone(),
@@ -1304,7 +1262,6 @@ impl RenderPass for DeferredLightPass {
                     layout: &self.reflection_bgl_2,
                     entries: &[
                         texture_view_entry(3, env_view),
-                        texture_view_entry(5, rc_view),
                         wgpu::BindGroupEntry {
                             binding: 6,
                             resource: wgpu::BindingResource::Sampler(env_sampler),
@@ -1555,7 +1512,7 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "Indirect Lighting",
                 debug_mode: 23,
-                description: "Diffuse indirect light: the sky ambient or GI probes, radiance cascades, or the baked lightmap",
+                description: "Diffuse indirect light: the sky ambient or GI probes, or the baked lightmap",
             },
             DebugViewDescriptor {
                 name: "Lighting Only",
@@ -1576,7 +1533,7 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "GI Blend",
                 debug_mode: 27,
-                description: "Red=GI probe weight, green=runtime radiance-cascade weight, blue=baked lightmap weight",
+                description: "Red=GI probe weight, blue=baked lightmap weight",
             },
             DebugViewDescriptor {
                 name: "GI Irradiance",
@@ -1634,7 +1591,7 @@ fn base_group_1_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     ]
 }
 
-/// Base lighting, group 2: lights, shadows, radiance cascades, lightmaps, IES profiles.
+/// Base lighting, group 2: lights, shadows, lightmaps, IES profiles.
 fn base_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     vec![
         storage_entry(0),
@@ -1655,7 +1612,6 @@ fn base_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
             count: None,
         },
         storage_entry(4),
-        texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
         wgpu::BindGroupLayoutEntry {
             binding: 7,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1760,7 +1716,6 @@ fn reflection_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
             },
             count: None,
         },
-        texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }),
         wgpu::BindGroupLayoutEntry {
             binding: 6,
             visibility: wgpu::ShaderStages::FRAGMENT,

@@ -234,7 +234,7 @@ impl Renderer {
     /// off the cull-stats readback. Shared by the mono and XR render paths.
     ///
     /// `camera` supplies the post-process settings and the camera position used
-    /// for the RC volume bounds and debug-state tracking. It must have been
+    /// for debug-state tracking. It must have been
     /// written to the scene already (`update_camera` / `update_stereo_cameras`)
     /// and `scene.flush()` called before this runs.
     ///

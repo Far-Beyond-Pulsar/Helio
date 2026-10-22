@@ -54,8 +54,8 @@ fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
         return;
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        // The radiance-cascades ray-query pipeline is not needed here, and
-        // some software drivers cannot compile it.
+        // Ray queries are not needed here, and some software drivers cannot
+        // compile ray-query pipelines.
         required_features: helio::required_wgpu_features(
             adapter.features() - wgpu::Features::EXPERIMENTAL_RAY_QUERY,
         ),

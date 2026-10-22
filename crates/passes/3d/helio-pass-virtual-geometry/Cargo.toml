@@ -12,7 +12,6 @@ helio-core = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-object-batch = { workspace = true }
-helio-pass-radiance-cascades = { workspace = true }
 log = { workspace = true }
 pulsar_scenedb = { workspace = true }
 wgpu = { workspace = true }

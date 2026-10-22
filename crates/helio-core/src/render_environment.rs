@@ -5,8 +5,8 @@
 //! frame in general (clear color, ambient fallback, an optional hardware
 //! ray-tracing acceleration structure) — nothing here names a specific pass
 //! or scene-object type. A technique-specific environment parameter (for
-//! example a radiance-cascades GI volume extent) is published as its own
-//! resource by the pass crate that owns that technique, not folded in here.
+//! example the GI probes' clipmap) is published as its own resource by the
+//! pass crate that owns that technique, not folded in here.
 
 /// Backend material-texture bindings used by passes that sample material rows.
 ///

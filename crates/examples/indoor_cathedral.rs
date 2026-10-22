@@ -8,9 +8,7 @@
 //!
 //! No sky atmosphere — the scene relies entirely on the interplay of the
 //! chandelier warm-white lights, the cool-coloured stained-glass fills, and
-//! a very dim stone-cold ambient to create a moody sacred atmosphere. The
-//! radiance cascades GI system bounces chandelier light deep into the side
-//! aisles and onto the vaulted ceiling.
+//! a very dim stone-cold ambient to create a moody sacred atmosphere.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right

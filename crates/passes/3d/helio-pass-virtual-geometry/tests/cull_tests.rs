@@ -34,8 +34,6 @@ struct VgGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
     debug_mode: u32,
     _pad0: u32,
@@ -63,8 +61,9 @@ fn cull_shader_parses_and_validates() {
 
 #[test]
 fn gbuffer_shader_parses_and_validates() {
-    let source = include_str!("../shaders/vg_gbuffer.wgsl");
-    let module = naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
+    // Resolved as the pass resolves it (`rendering.rs`).
+    let source = helio_core::shader::resolve_with(include_str!("../shaders/vg_gbuffer.wgsl"), &[helio_mats::SPECULAR_AA_SNIPPET]);
+    let module = naga::front::wgsl::parse_str(&source).expect("VG draw shader must parse");
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -91,7 +90,7 @@ fn browser_shader_variants_parse_and_validate() {
     const MAX_TEXTURES: usize = 16;
 
     let fix_material_shader = |source: &str| {
-        let source = source
+        let source = helio_core::shader::resolve_with(source, &[helio_mats::PBR_EVAL_SNIPPET, helio_mats::SPECULAR_AA_SNIPPET])
             .replace(
                 "binding_array<texture_2d<f32>, 256>",
                 &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
@@ -148,8 +147,8 @@ fn cull_uniforms_size_divisible_by_16() {
 // ── VgGlobals layout tests ────────────────────────────────────────────────────
 
 #[test]
-fn vg_globals_size_is_96() {
-    assert_eq!(mem::size_of::<VgGlobals>(), 96);
+fn vg_globals_size_is_64() {
+    assert_eq!(mem::size_of::<VgGlobals>(), 64);
 }
 
 // ── Initial buffer capacity tests ────────────────────────────────────────────

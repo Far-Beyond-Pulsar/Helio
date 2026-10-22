@@ -1,7 +1,7 @@
 //! Light Benchmark — helio v3
 //!
 //! 150 simultaneous point lights (10×15 grid) over a warehouse floor.
-//! Tests v3 deferred + radiance-cascade GI with high light count.
+//! Tests v3 deferred lighting with a high light count.
 //!
 //! Controls:
 //!   WASD / Space / Shift — fly

@@ -128,7 +128,6 @@ helio-pass-light-cull = { path = "crates/passes/3d/helio-pass-light-cull" }
 helio-pass-virtual-geometry = { path = "crates/passes/3d/helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "crates/passes/3d/helio-pass-water-sim" }
 helio-pass-transparent = { path = "crates/passes/3d/helio-pass-transparent" }
-helio-pass-radiance-cascades = { path = "crates/passes/3d/helio-pass-radiance-cascades" }
 helio-pass-hiz = { path = "crates/passes/3d/helio-pass-hiz" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"

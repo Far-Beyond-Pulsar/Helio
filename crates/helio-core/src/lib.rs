@@ -380,7 +380,7 @@
 /// compiled out there: `SsrPass` and `PlanarReflectionPass` are left out of the
 /// graph, and `DeferredLightPass` tells its shader to skip both composites and
 /// the reflection-capture cube array. Everything else in deferred lighting —
-/// direct light, ambient, RC GI — is untouched.
+/// direct light, ambient, GI — is untouched.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const REFLECTIONS_SUPPORTED: bool = false;
 /// See the macOS/iOS variant above.

@@ -12,8 +12,6 @@ struct Globals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: vec4<f32>,
-    rc_world_min: vec4<f32>,
-    rc_world_max: vec4<f32>,
     csm_splits: vec4<f32>,
 }
 
