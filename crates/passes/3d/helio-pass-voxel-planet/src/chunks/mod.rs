@@ -2441,7 +2441,8 @@ impl ChunkWorld {
             layout: Some(&layout(&resolve_layout)),
             vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
             primitive: Default::default(),
-            depth_stencil: depth(helio_core::depth::NEARER),
+            // `shadow` decided which hits show against the meshes' depth.
+            depth_stencil: depth(wgpu::CompareFunction::Always),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &draw_module,
@@ -2470,7 +2471,7 @@ impl ChunkWorld {
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState { module: &module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
                 primitive: Default::default(),
-                depth_stencil: depth(helio_core::depth::NEARER),
+                depth_stencil: depth(wgpu::CompareFunction::Always),
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,

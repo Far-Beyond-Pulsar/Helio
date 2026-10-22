@@ -1897,11 +1897,22 @@ struct GOut {
     @builtin(frag_depth) depth: f32,
 }
 
+// The hits the frame shows, over the meshes' gbuffer. Which those are was
+// decided once, by `shadow` against the meshes' depth (`mesh_point`): a hit
+// with a mesh in front of it, or none, has a zero normal. The pipeline
+// writes the depth without testing it (`Always`): a second decision by the
+// depth test could disagree with the first, and on NVIDIA's Vulkan driver
+// (616.64, RTX 3060) it did, whole runs at a time: this pass's depth test
+// read a depth surface that a copy of it read correctly the moment before,
+// let the hits through over every mesh in front (the meadow became the turf
+// behind it with `shadow`'s zero normal: black grass) and left the depth
+// garbage (runs of eight equal texels, the sky's too).
 @fragment
 fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let p = vec2<i32>(pixel.xy);
     let v = textureLoad(hit_visibility, p, 0).xy;
-    if v.x == NONE { discard; }
+    let shading = textureLoad(hit_normal, p, 0);
+    if v.x == NONE || dot(shading.xyz, shading.xyz) == 0.0 { discard; }
     let t = textureLoad(hit_distance, p, 0).r;
     let size = textureDimensions(hit_distance);
     let position = pixel_ray(vec2<u32>(pixel.xy), size) * t;
@@ -1910,7 +1921,6 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
     let material = (v.y >> 21u) & 31u;
-    let shading = textureLoad(hit_normal, p, 0);
     var normal = shading.xyz;
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
