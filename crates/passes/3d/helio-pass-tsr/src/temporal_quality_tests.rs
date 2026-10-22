@@ -257,7 +257,34 @@ impl helio_core::SceneInput for Input {
     fn scene_buffers(&self) -> &helio_core::SceneBufferProjection { &self.projection }
 }
 
+/// Fixtures create their own devices; several waiting on the GPU at once
+/// deadlock now and then on NVIDIA Vulkan (4 of the quality tests hung in 2 of
+/// 6 parallel runs), so tests run one at a time, as helio-pass-flare's do. A
+/// test may hold several fixtures: the first takes the lock for its thread.
+static GPU_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    static SERIAL_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct Serial(Option<std::sync::MutexGuard<'static, ()>>);
+
+impl Serial {
+    fn take() -> Self {
+        let held = SERIAL_HELD.with(|n| n.replace(n.get() + 1));
+        Self((held == 0).then(|| GPU_SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())))
+    }
+}
+
+impl Drop for Serial {
+    fn drop(&mut self) {
+        SERIAL_HELD.with(|n| n.set(n.get() - 1));
+    }
+}
+
 struct Fixture {
+    /// Held for the fixture's life (`GPU_SERIAL`).
+    _serial: Serial,
     input: Input,
     graph: helio_core::RenderGraph,
     internal: [u32; 2],
@@ -300,6 +327,7 @@ fn luma(rgba: &[f32; 4]) -> f32 {
 
 impl Fixture {
     fn new(quality: TsrQuality, output: [u32; 2]) -> Option<Self> {
+        let serial = Serial::take();
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
@@ -408,6 +436,7 @@ impl Fixture {
         graph.lock(internal[0], internal[1]);
         graph.set_delta_time(1.0 / 60.0);
         Some(Self {
+            _serial: serial,
             input: Input {
                 device: device.clone(),
                 queue: queue.clone(),
