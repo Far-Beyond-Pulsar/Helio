@@ -15,7 +15,7 @@ fn texture_consumers_validate_with_scene_owned_slot_defaults() {
             include_str!("../../helio-pass-virtual-geometry/shaders/vg_gbuffer.wgsl"),
         ),
     ] {
-        let resolved = helio_core::shader::resolve_with(source, &[helio_mats::PBR_EVAL_SNIPPET]);
+        let resolved = helio_core::shader::resolve_with(source, &[helio_mats::PBR_EVAL_SNIPPET, helio_mats::SPECULAR_AA_SNIPPET]);
         let module = naga::front::wgsl::parse_str(&resolved)
             .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(&resolved)));
         naga::valid::Validator::new(
