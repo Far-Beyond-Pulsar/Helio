@@ -15,7 +15,9 @@
 // 2. `chunk_columns`: each column's 64 cells in a chunk as a 64-bit mask
 //    (bit z: layer `64 cz + z`), with volume terms, features and brushes,
 //    and the material of its highest solid cell.
-// 3. `chunk_build`: the chunk's 64-tree from its column masks, its leaves
+// 3. `chunk_cells` (chunks with per-voxel materials): each column's exposed
+//    cells' materials, where their leaves' pairs would draw them wrong;
+//    `chunk_build`: the chunk's 64-tree from its column masks, its leaves
 //    in pages of 64 (`LEAF_PAGES` a chunk at most) taken off the free
 //    pages' stack.
 // 4. `evict`: evicted chunks' pages (and their detail pages) back on their
@@ -115,13 +117,15 @@ const LEAF_PAGES: u32 = 64u;
 // materials"). A chunk job under edits writes each solid cell's edited
 // material (0: none set) into its slot of `cell_materials`: CELL_WORDS a
 // column, cell z in byte z & 3 of word z >> 2, then the column's natural
-// top. `chunk_build_main` gives each exposed cell without one its natural
-// material (`Planet::material`), clears the cells their leaf's pair draws
-// as they are, and gives every leaf page holding a leaf with cells left a
-// detail page (`detail_pages`, by leaf page; NONE: none) of `DETAIL_WORDS`
-// words: 16 a leaf, by the leaf's place in its page, word x + 4 y its
-// column's four cells (byte z). Other leaves read zero there. Pages come off the stack `detail_free` (`detail_alloc`: the
-// free count, the overflow flag) and go back when the chunk is evicted.
+// top, then its leaves with cells left (bit lz). `chunk_cells_main` gives
+// each exposed cell without one its natural material (`Planet::material`)
+// and clears the cells their leaf's pair draws as they are;
+// `chunk_build_main` gives every leaf page holding a leaf with cells left
+// a detail page (`detail_pages`, by leaf page; NONE: none) of
+// `DETAIL_WORDS` words: 16 a leaf, by the leaf's place in its page, word
+// x + 4 y its column's four cells (byte z). Other leaves read zero there.
+// Pages come off the stack `detail_free` (`detail_alloc`: the free count,
+// the overflow flag) and go back when the chunk is evicted.
 @group(0) @binding(28) var<storage, read_write> cell_materials: array<u32>;
 @group(0) @binding(29) var<storage, read_write> detail_pages: array<u32>;
 @group(0) @binding(30) var<storage, read_write> detail_cells: array<u32>;
@@ -148,7 +152,7 @@ fn slope_origin(job: TileJob) -> vec2<i32> {
     return vec2<i32>((4 * job.cx) << job.level, (4 * job.cy) << job.level) - 1;
 }
 const DETAIL_WORDS: u32 = 1024u;
-const CELL_WORDS: u32 = 17u;
+const CELL_WORDS: u32 = 18u;
 
 // A detail page off the free stack (NONE: none free; the overflow flag is
 // set).
@@ -619,7 +623,11 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let lean = terrain_lean(level);
     let leaning = column.x != OUTSIDE && lean.x != 0 && column.w > 0;
     let node = vec2<i32>(div_floor((i >> 3u) * 8 - lean.x, max(lean.y, 1)), div_floor((j >> 3u) * 8 - lean.x, max(lean.y, 1)));
-    if li == 0u { atomicStore(&w_leaning, 0u); }
+    if li == 0u {
+        atomicStore(&w_leaning, 0u);
+        atomicStore(&w_feature_bits[0], 0u);
+        atomicStore(&w_feature_bits[1], 0u);
+    }
     workgroupBarrier();
     if leaning { atomicStore(&w_leaning, 1u); }
     workgroupBarrier();
@@ -637,6 +645,18 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         }
     }
     workgroupBarrier();
+    let height = column.x;
+    let top = div_floor(height, world.grid.y) >> level;
+    let k0 = job.cz * 64;
+    let p = domain_point(face, i, j, level);
+    // Features over the terrain, under the edits (`Planet::sample_kind`):
+    // the far forms' canopies, the near stamps over them. Every lane takes
+    // part (the workgroup culls the placements together).
+    var fc: FeatureColumn;
+    if features[0] > 0u {
+        let brick = vec2<i32>(tile.cx * 64 + i32((wg.x & 7u) * 8u), tile.cy * 64 + i32((wg.x >> 3u) * 8u));
+        fc = feature_column(tile, brick, li, column.x != OUTSIDE, i, j, k0, p, top, height, u32(column.y) & 0xffu);
+    }
     if column.x == OUTSIDE {
         column_masks[at] = vec2<u32>(0u);
         column_materials[at] = M_AIR;
@@ -645,11 +665,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         }
         return;
     }
-    let height = column.x;
-    let top = div_floor(height, world.grid.y) >> level;
-    let k0 = job.cz * 64;
     var mask = set_bits(vec2<u32>(0u), 0, top - k0, true);
-    let p = domain_point(face, i, j, level);
     // Under edits, the natural top when the volume puts solid cells over
     // the chunk (`terrain::generated_top`: the first air over the highest).
     var above_top = OUTSIDE;
@@ -708,11 +724,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // cells, the recent brushes.
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     let natural = mask;
-    // Features over the terrain, under the edits (`Planet::sample_kind`):
-    // the far forms' canopies, the near stamps over them.
-    var fc: FeatureColumn;
     if features[0] > 0u {
-        fc = feature_column(tile, i, j, k0, p, top, height, u32(column.y) & 0xffu);
         mask = (mask & ~fc.air) | fc.solid;
         if (fc.solid.x | fc.solid.y | fc.air.x | fc.air.y) != 0u {
             let c = y * 64u + x;
@@ -782,7 +794,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // heightfield's.
     if job.detail != NONE {
         let cells = (job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS;
-        // A natural column's cells set none (`leaf_column_cells` starts its
+        // A natural column's cells set none (`column_cells` starts its
         // words from zero); a feature's take its stamp's material.
         let featured_column = (featured.x | featured.y) != 0u;
         for (var w = 0u; w < 16u && (job.brush_count > 0u || job.baked != NONE || featured_column); w++) {
@@ -845,17 +857,30 @@ fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -
     return select(sub, top & 0x7fu, has_top != 0u) | (sub << 8u);
 }
 
-// The leaves of leaf column (lx, ly) of chunk job `n` (`job`, footprint
-// `tile`) in `occupied` (bit lz), their material pairs `leaf_pairs`: each exposed
-// solid cell's material (its edit's, else `Planet::material`'s natural
-// one), cleared where its leaf's pair draws it (the surface's under air,
-// the subsurface's under ground; both at the chunk's top layer; never in a
-// leaf that would be implicit, bit lz of `implicit`, drawn with its mid's
-// material), written back to the job's `cell_materials`. The leaves with
-// any cell left (bit lz). Each column is read once for all its leaves. A
-// natural chunk's words are written only where cells are left, and marked
-// in `written` (bit 16 lz + c, column c of the leaf column): the rest are
-// zero without being stored.
+// One column's top material voting for the surface of the leaf its top
+// cell is in (`chunk_build_main`): the leaf's top material and votes after
+// it (a majority vote of all but single-voxel specks, which a leaf of 4x4
+// columns would spread).
+fn vote_top(top: u32, votes: u32, column_material: u32) -> vec2<u32> {
+    if (column_material & 0x80u) != 0u {
+        // A speck: the surface only while nothing else votes.
+        return vec2<u32>(select(top, column_material, votes == 0u), votes);
+    }
+    if votes == 0u { return vec2<u32>(column_material, 1u); }
+    if (top & 0x7fu) == (column_material & 0x7fu) { return vec2<u32>(top, votes + 1u); }
+    return vec2<u32>(top, votes - 1u);
+}
+
+// Column (cx, cy) of chunk job `n` (`job`, footprint `tile`), its leaf
+// column's leaves in `occupied` (bit lz), their material pairs at
+// `w_cells_pairs[pairs + lz]`: each exposed solid cell's material (its
+// edit's, else `Planet::material`'s natural one), cleared where its leaf's
+// pair draws it (the surface's under air, the subsurface's under ground;
+// both at the chunk's top layer; never in a leaf that would be implicit,
+// bit lz of `implicit`, drawn with its mid's material), written back to
+// the job's `cell_materials`. The leaves with any of its cells left (bit
+// lz). A natural column's words are written only where cells are left: the
+// rest are zero without being stored.
 //
 // In a chunk no edits are over, a heightfield column (no volume terms and
 // no features) is solid up to its top, so its cells on the chunk's faces are exposed only
@@ -863,92 +888,153 @@ fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -
 // footprint's sides, a column like it); other columns and edited chunks
 // count the chunk's faces as air. A natural top takes the material
 // `chunk_columns_main` gave its column's top: the same evaluation.
-fn leaf_column_cells(job: ChunkJob, n: u32, tile: TileJob, lx: u32, ly: u32, leaf_pairs: array<u32, 16>, occupied: u32, implicit: u32, written: ptr<function, array<u32, 8>>) -> u32 {
-    // Indexed by a variable: a local copy (a value argument cannot be).
-    var pairs = leaf_pairs;
+fn column_cells(job: ChunkJob, n: u32, tile: TileJob, cx: u32, cy: u32, pairs: u32, occupied: u32, implicit: u32) -> u32 {
     let natural_job = job.brush_count == 0u && job.baked == NONE;
+    // A column features changed stores its cells as an edited one.
+    let natural = natural_job && !column_featured(n, cx, cy);
+    let m = column_masks[n * TILE_COLUMNS + cy * 64u + cx];
+    let cells = (job.detail * TILE_COLUMNS + cy * 64u + cx) * CELL_WORDS;
+    if m.x == 0u && m.y == 0u {
+        return 0u;
+    }
+    let natural_top = bitcast<i32>(cell_materials[cells + 16u]);
+    let high = select(firstLeadingBit(m.x), 32u + firstLeadingBit(m.y), m.y != 0u);
+    let top_material = column_materials[n * TILE_COLUMNS + cy * 64u + cx] & 0x7fu;
+    let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
+    let exact = natural && column.z == 0 && column.w == 0;
+    // The columns beside it (past the chunk's sides: air, or for an
+    // exact column one like it).
+    let outside = select(vec2<u32>(0u), m, exact);
+    var west = outside;
+    var east = outside;
+    var south = outside;
+    var north = outside;
+    if cx > 0u { west = column_masks[n * TILE_COLUMNS + cy * 64u + cx - 1u]; }
+    if cx < 63u { east = column_masks[n * TILE_COLUMNS + cy * 64u + cx + 1u]; }
+    if cy > 0u { south = column_masks[n * TILE_COLUMNS + (cy - 1u) * 64u + cx]; }
+    if cy < 63u { north = column_masks[n * TILE_COLUMNS + (cy + 1u) * 64u + cx]; }
+    // Its exposed cells: air over, under or beside them (the chunk's
+    // top and bottom faces as above).
+    let top_open = !exact || job.cz * 64 + 63 == natural_top - 1;
+    let above = vec2<u32>((m.x >> 1u) | (m.y << 31u), (m.y >> 1u) | select(0x80000000u, 0u, top_open));
+    let below = vec2<u32>((m.x << 1u) | select(0u, 1u, exact), (m.y << 1u) | (m.x >> 31u));
+    let exposed = m & (~above | ~below | ~west | ~east | ~south | ~north);
+    // The column's domain point and material slope, once it has a cell
+    // to evaluate.
+    var p = vec3<i32>(0);
+    var slope = 0;
+    var located = false;
     var left = 0u;
-    for (var c = 0u; c < 16u; c++) {
-        let cx = lx * 4u + (c & 3u);
-        let cy = ly * 4u + (c >> 2u);
-        // A column features changed stores its cells as an edited one.
-        let natural = natural_job && !column_featured(n, cx, cy);
-        let m = column_masks[n * TILE_COLUMNS + cy * 64u + cx];
-        let cells = (job.detail * TILE_COLUMNS + cy * 64u + cx) * CELL_WORDS;
-        if m.x == 0u && m.y == 0u {
+    for (var lz = 0u; lz < 16u; lz++) {
+        if ((occupied >> lz) & 1u) == 0u {
             continue;
         }
-        let natural_top = bitcast<i32>(cell_materials[cells + 16u]);
-        let high = select(firstLeadingBit(m.x), 32u + firstLeadingBit(m.y), m.y != 0u);
-        let top_material = column_materials[n * TILE_COLUMNS + cy * 64u + cx] & 0x7fu;
-        let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
-        let exact = natural && column.z == 0 && column.w == 0;
-        // The columns beside it (past the chunk's sides: air, or for an
-        // exact column one like it).
-        let outside = select(vec2<u32>(0u), m, exact);
-        var west = outside;
-        var east = outside;
-        var south = outside;
-        var north = outside;
-        if cx > 0u { west = column_masks[n * TILE_COLUMNS + cy * 64u + cx - 1u]; }
-        if cx < 63u { east = column_masks[n * TILE_COLUMNS + cy * 64u + cx + 1u]; }
-        if cy > 0u { south = column_masks[n * TILE_COLUMNS + (cy - 1u) * 64u + cx]; }
-        if cy < 63u { north = column_masks[n * TILE_COLUMNS + (cy + 1u) * 64u + cx]; }
-        // Its exposed cells: air over, under or beside them (the chunk's
-        // top and bottom faces as above).
-        let top_open = !exact || job.cz * 64 + 63 == natural_top - 1;
-        let above = vec2<u32>((m.x >> 1u) | (m.y << 31u), (m.y >> 1u) | select(0x80000000u, 0u, top_open));
-        let below = vec2<u32>((m.x << 1u) | select(0u, 1u, exact), (m.y << 1u) | (m.x >> 31u));
-        let exposed = m & (~above | ~below | ~west | ~east | ~south | ~north);
-        for (var lz = 0u; lz < 16u; lz++) {
-            if ((occupied >> lz) & 1u) == 0u {
-                continue;
-            }
-            // A natural leaf's cells are none but its exposed ones.
-            let cells_in = select(m, exposed, natural);
-            if ((select(cells_in.x, cells_in.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
-                continue;
-            }
-            let surface = pairs[lz] & 0xffu;
-            let sub = (pairs[lz] >> 8u) & 0xffu;
-            let full = ((implicit >> lz) & 1u) != 0u;
-            // Edits' materials as the columns wrote them (none: a natural
-            // chunk's columns write only their natural tops).
-            var word = 0u;
-            if !natural { word = cell_materials[cells + lz]; }
-            for (var b = 0u; b < 4u; b++) {
-                let z = lz * 4u + b;
-                var own = (word >> (b * 8u)) & 0xffu;
-                if !bit_at(m, z) {
-                    continue;
-                }
-                let under_air = z < 63u && !bit_at(m, z + 1u);
-                let k = job.cz * 64 + i32(z);
-                let open = bit_at(exposed, z);
-                if own == 0u && open && natural && z == high && k == natural_top - 1 {
-                    own = top_material;
-                } else if own == 0u && open {
-                    let level = tile.level;
-                    let i = tile.cx * 64 + i32(cx);
-                    let j = tile.cy * 64 + i32(cy);
-                    let depth = max(natural_top - 1 - k, 0) << level;
-                    let q = volume_point_half(domain_point(tile.face, i, j, level), (k << (level + 1u)) + (1 << level));
-                    own = ground_material(q, u32(column.y) & 0xffu, column.x, depth, column_slope(tile, cx, cy), k << level) & M_ID;
-                }
-                let drawn = !full && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
-                if own == 0u || drawn {
-                    own = 0u;
-                }
-                word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
-            }
-            if !natural || word != 0u { cell_materials[cells + lz] = word; }
-            if word != 0u {
-                left |= 1u << lz;
-                (*written)[lz >> 1u] |= 1u << ((lz & 1u) * 16u + c);
-            }
+        // A natural leaf's cells are none but its exposed ones.
+        let cells_in = select(m, exposed, natural);
+        if ((select(cells_in.x, cells_in.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
+            continue;
         }
+        let pair = w_cells_pairs[pairs + lz];
+        let surface = pair & 0xffu;
+        let sub = (pair >> 8u) & 0xffu;
+        let full = ((implicit >> lz) & 1u) != 0u;
+        // Edits' materials as the columns wrote them (none: a natural
+        // chunk's columns write only their natural tops).
+        var word = 0u;
+        if !natural { word = cell_materials[cells + lz]; }
+        for (var b = 0u; b < 4u; b++) {
+            let z = lz * 4u + b;
+            var own = (word >> (b * 8u)) & 0xffu;
+            if !bit_at(m, z) {
+                continue;
+            }
+            let under_air = z < 63u && !bit_at(m, z + 1u);
+            let k = job.cz * 64 + i32(z);
+            let open = bit_at(exposed, z);
+            if own == 0u && open && natural && z == high && k == natural_top - 1 {
+                own = top_material;
+            } else if own == 0u && open {
+                let level = tile.level;
+                if !located {
+                    p = domain_point(tile.face, tile.cx * 64 + i32(cx), tile.cy * 64 + i32(cy), level);
+                    slope = column_slope(tile, cx, cy);
+                    located = true;
+                }
+                let depth = max(natural_top - 1 - k, 0) << level;
+                let q = volume_point_half(p, (k << (level + 1u)) + (1 << level));
+                own = ground_material(q, u32(column.y) & 0xffu, column.x, depth, slope, k << level) & M_ID;
+            }
+            let drawn = !full && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
+            if own == 0u || drawn {
+                own = 0u;
+            }
+            word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
+        }
+        if !natural || word != 0u { cell_materials[cells + lz] = word; }
+        if word != 0u { left |= 1u << lz; }
     }
     return left;
+}
+
+// The brick column's columns (masks, materials) and its four leaf
+// columns' (2x2 of 4x4 columns) leaf pairs (16 a leaf column) and leaves
+// (occupied in bits 0..16, implicit in bits 16..32).
+var<workgroup> w_cells_mask: array<vec2<u32>, 64>;
+var<workgroup> w_cells_material: array<u32, 64>;
+var<workgroup> w_cells_pairs: array<u32, 64>;
+var<workgroup> w_cells_leaves: array<atomic<u32>, 4>;
+
+// Each detail job's exposed cells' materials (`column_cells`), a lane a
+// column, a workgroup a brick column (as `chunk_columns_main`): dispatch
+// (64, chunks), before `chunk_build_main`, which reads each column's leaves
+// with cells left (word 17 of its `cell_materials`). A lane a leaf of the
+// brick column's leaf columns first finds the leaves' pairs, occupancy and
+// implicit leaves as `chunk_build_main` does.
+@compute @workgroup_size(64)
+fn chunk_cells_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = chunk_jobs[wg.y];
+    if job.detail == NONE { return; }
+    let tile = tile_jobs[job.tile];
+    let x = (wg.x & 7u) * 8u + (li & 7u);
+    let y = (wg.x >> 3u) * 8u + (li >> 3u);
+    let m = column_masks[wg.y * TILE_COLUMNS + y * 64u + x];
+    w_cells_mask[li] = m;
+    w_cells_material[li] = column_materials[wg.y * TILE_COLUMNS + y * 64u + x];
+    if li < 4u { atomicStore(&w_cells_leaves[li], 0u); }
+    workgroupBarrier();
+    // Leaf lz of leaf column lc: its columns in `chunk_build_main`'s order.
+    let lc = li >> 4u;
+    let lz = li & 15u;
+    var first = 0u;
+    var top = 0u;
+    var votes = 0u;
+    var topped = false;
+    var occupied = false;
+    var full = true;
+    for (var c = 0u; c < 16u; c++) {
+        let b = ((lc >> 1u) * 4u + (c >> 2u)) * 8u + (lc & 1u) * 4u + (c & 3u);
+        let cm = w_cells_mask[b];
+        let nib = (select(cm.x, cm.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
+        full = full && nib == 15u;
+        if cm.x == 0u && cm.y == 0u { continue; }
+        let material = w_cells_material[b];
+        let high = select(firstLeadingBit(cm.x), 32u + firstLeadingBit(cm.y), cm.y != 0u);
+        if (high >> 2u) == lz {
+            topped = true;
+            let v = vote_top(top, votes, material);
+            top = v.x;
+            votes = v.y;
+        }
+        if nib != 0u && first == 0u { first = material; }
+        occupied = occupied || nib != 0u;
+    }
+    w_cells_pairs[li] = select(0u, leaf_materials_of(first, top, u32(topped), lz, tile.level), occupied);
+    atomicOr(&w_cells_leaves[lc], (u32(occupied) << lz) | (u32(full && !topped) << (lz + 16u)));
+    workgroupBarrier();
+    let own = ((y & 7u) >> 2u) * 2u + ((x & 7u) >> 2u);
+    let leaves = atomicLoad(&w_cells_leaves[own]);
+    let left = column_cells(job, wg.y, tile, x, y, own * 16u, leaves & 0xffffu, leaves >> 16u);
+    cell_materials[(job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS + 17u] = left;
 }
 
 var<workgroup> w_occ: array<atomic<u32>, 128>;
@@ -1005,9 +1091,8 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     // 16 leaves along z, built from this leaf column's 4x4 cell columns.
     var leaf: array<vec2<u32>, 16>;
     // Each leaf's materials: its first column with cells in it's, and for
-    // its surface the most common top material of the columns whose top
-    // cell is in it (a majority vote of all but single-voxel specks, which
-    // a leaf of 4x4 columns would spread; `topped` where there are any).
+    // its surface the top material of the columns whose top cell is in it
+    // (`vote_top`; `topped` where there are any).
     var leaf_material: array<u32, 16>;
     var leaf_top: array<u32, 16>;
     var votes: array<u32, 16>;
@@ -1041,17 +1126,9 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         fit[8] += y * z;
         let top_leaf = u32(high) >> 2u;
         topped |= 1u << top_leaf;
-        if (column_material & 0x80u) != 0u {
-            // A speck: the surface only while nothing else votes.
-            if votes[top_leaf] == 0u { leaf_top[top_leaf] = column_material; }
-        } else if votes[top_leaf] == 0u {
-            leaf_top[top_leaf] = column_material;
-            votes[top_leaf] = 1u;
-        } else if (leaf_top[top_leaf] & 0x7fu) == (column_material & 0x7fu) {
-            votes[top_leaf] += 1u;
-        } else {
-            votes[top_leaf] -= 1u;
-        }
+        let vote = vote_top(leaf_top[top_leaf], votes[top_leaf], column_material);
+        leaf_top[top_leaf] = vote.x;
+        votes[top_leaf] = vote.y;
         for (var lz = 0u; lz < 16u; lz++) {
             let nib = (select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
             if nib != 0u && leaf_material[lz] == 0u { leaf_material[lz] = column_material; }
@@ -1098,7 +1175,6 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             ground = encode_slope(g.x) | (encode_slope(g.y) << 8u);
         }
     }
-    var pairs: array<u32, 16>;
     var occupied = 0u;
     var full = 0u;
     for (var lz = 0u; lz < 16u; lz++) {
@@ -1106,7 +1182,6 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
         if leaf[lz].x != 0u || leaf[lz].y != 0u {
             let pair = leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile.level);
-            pairs[lz] = pair;
             occupied |= 1u << lz;
             atomicOr(&w_occ[m * 2u + (l >> 5u)], 1u << (l & 31u));
             atomicMax(&w_mid_material[m], pair);
@@ -1114,11 +1189,12 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u { full |= 1u << lz; }
     }
     // Leaves (bit lz) holding cells their pair would draw wrong
-    // (`leaf_column_cells`, at `DETAIL_LEVELS`).
+    // (`chunk_cells_main`, at `DETAIL_LEVELS`).
     var edited = 0u;
-    var written: array<u32, 8>;
-    if job.detail != NONE && occupied != 0u {
-        edited = leaf_column_cells(job, wg.x, tile, lx, ly, pairs, occupied, full, &written);
+    if job.detail != NONE {
+        for (var c = 0u; c < 16u; c++) {
+            edited |= cell_materials[(job.detail * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)) * CELL_WORDS + 17u];
+        }
     }
     // A full leaf is implicit (its mid's material) unless a column tops in
     // it (then it is the surface and keeps its own materials: not in
@@ -1280,14 +1356,12 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             // Its cells' edited materials, column by column.
             let detail = w_detail[order >> 6u];
             if ((edited >> lz) & 1u) != 0u && detail != NONE {
-                // A natural chunk stored only its cells' nonzero words.
-                let natural = job.brush_count == 0u && job.baked == NONE;
+                // A column's word is nonzero where it has cells left (a
+                // natural column stored only those).
                 for (var c = 0u; c < 16u; c++) {
-                    let column = (lx * 4u + (c & 3u)) + (ly * 4u + (c >> 2u)) * 64u;
+                    let at = (job.detail * TILE_COLUMNS + (lx * 4u + (c & 3u)) + (ly * 4u + (c >> 2u)) * 64u) * CELL_WORDS;
                     var cells = 0u;
-                    if !natural || ((written[lz >> 1u] >> ((lz & 1u) * 16u + c)) & 1u) != 0u {
-                        cells = cell_materials[(job.detail * TILE_COLUMNS + column) * CELL_WORDS + lz];
-                    }
+                    if ((cell_materials[at + 17u] >> lz) & 1u) != 0u { cells = cell_materials[at + lz]; }
                     detail_cells[detail * DETAIL_WORDS + (order & 63u) * 16u + c] = cells;
                 }
             }
@@ -1783,55 +1857,143 @@ fn feature_set(c: ptr<function, FeatureColumn>, z: i32, v: u32) {
     (*c).materials[w] = ((*c).materials[w] & ~(0xffu << shift)) | (m << shift);
 }
 
+// Part `q` of placement `pl` over a column (its box `clo`, `chi` in the
+// stamp's frame) set in its cells from layer `k0`.
+fn feature_part(c: ptr<function, FeatureColumn>, q: Part, pl: Placed, clo: vec3<i32>, chi: vec3<i32>, k0: i32, level: u32) {
+    if q.lo.x > chi.x || q.hi.x < clo.x || q.lo.z > chi.z || q.hi.z < clo.z { return; }
+    let code = part_code(q);
+    let span = 1 << level;
+    let first = max((pl.anchor.y + q.lo.y) >> level, k0);
+    let last = min(((pl.anchor.y + q.hi.y) >> level) + 1, k0 + 64);
+    for (var k = first; k < last; k++) {
+        let y = (k << level) - pl.anchor.y;
+        var held: bool;
+        if level == 0u {
+            let cell = vec3<i32>(clo.x, y, clo.z);
+            held = part_holds(q, cell * 16 + 8, true, cell);
+        } else {
+            held = part_holds(q, vec3<i32>(clo.x + chi.x + 1, 2 * y + span, clo.z + chi.z + 1) * 8, false, vec3<i32>(0));
+        }
+        if held { feature_set(c, k - k0, code); }
+    }
+}
+
+// The near placements over a brick column (`chunk_columns_main`'s
+// workgroup) and their parts, culled by the workgroup together: a round
+// tests 64 squares (or parts), a lane each, and its lanes' bits come back
+// as a mask every lane reads alike (`feature_round`); a round's squares'
+// placements wait in `w_feature_*` while their parts are culled.
+var<workgroup> w_feature_bits: array<atomic<u32>, 2>;
+var<workgroup> w_feature_mask: vec2<u32>;
+var<workgroup> w_feature_anchor: array<vec4<i32>, 64>;
+var<workgroup> w_feature_square: array<vec4<i32>, 64>;
+var<workgroup> w_feature_stamp: array<u32, 64>;
+
+// The round's lanes whose `bit` is set (bit `li`), as a uniform mask.
+fn feature_round(li: u32, bit: bool) -> vec2<u32> {
+    if bit { atomicOr(&w_feature_bits[li >> 5u], 1u << (li & 31u)); }
+    workgroupBarrier();
+    if li == 0u {
+        w_feature_mask = vec2<u32>(atomicLoad(&w_feature_bits[0]), atomicLoad(&w_feature_bits[1]));
+        atomicStore(&w_feature_bits[0], 0u);
+        atomicStore(&w_feature_bits[1], 0u);
+    }
+    return workgroupUniformLoad(&w_feature_mask);
+}
+
+// The lowest bit of a nonzero 64-bit mask.
+fn lowest_bit(m: vec2<u32>) -> u32 {
+    return select(32u + firstTrailingBit(m.y), firstTrailingBit(m.x), m.x != 0u);
+}
+
 // Level column `(i, j)` of footprint `tile` from layer `k0` (its domain
 // point `p`, top `top`, height and surface word as `chunk_columns_main`
 // has them): the far forms' canopies, the near spawns' stamps over them (a
 // base cell the last placement holding it; a coarse cell their sums).
-fn feature_column(tile: TileJob, i: i32, j: i32, k0: i32, p: vec3<i32>, top: i32, height: i32, surface: u32) -> FeatureColumn {
+// Every lane of the workgroup calls it (lane `li`, brick column `brick`'s
+// first column); a lane not `inside` the face evaluates nothing.
+fn feature_column(tile: TileJob, brick: vec2<i32>, li: u32, inside: bool, i: i32, j: i32, k0: i32, p: vec3<i32>, top: i32, height: i32, surface: u32) -> FeatureColumn {
     var c: FeatureColumn;
     let level = tile.level;
-    let cover = far_cover(tile, i, j, p, top, height, surface);
-    c.far = u32(cover.x);
-    if cover.x != 0 {
-        for (var k = max(cover.y >> level, k0); k < min(((cover.z - 1) >> level) + 1, k0 + 64); k++) {
-            if far_cell(level, k, cover) { feature_set(&c, k - k0, 2u + u32(cover.x)); }
+    if inside {
+        let cover = far_cover(tile, i, j, p, top, height, surface);
+        c.far = u32(cover.x);
+        if cover.x != 0 {
+            for (var k = max(cover.y >> level, k0); k < min(((cover.z - 1) >> level) + 1, k0 + 64); k++) {
+                if far_cell(level, k, cover) { feature_set(&c, k - k0, 2u + u32(cover.x)); }
+            }
         }
     }
     let lo = vec2<i32>(i, j) << vec2<u32>(level);
     let hi = lo + (1 << level) - 1;
+    let brick_lo = brick << vec2<u32>(level);
+    let brick_hi = brick_lo + (8 << level) - 1;
     // Each placement over the column in order, its parts in order, each
     // over the cells before: a base cell takes the last holding its centre,
     // a coarse cell the last holding its box's centre (`stamp::cell_of`,
-    // `coarse_of`). A part reads the cells its box spans.
-    let span = 1 << level;
+    // `coarse_of`). A part reads the cells its box spans. The workgroup
+    // lists the placements meeting the brick column and their parts
+    // meeting its box and the chunk's layers, in the same order: those a
+    // column meets are among them.
     for (var s = 0u; s < feature_near(level); s++) {
         if !feature_drawn(level, s) { continue; }
-        let g = reaching_squares(s, lo, hi);
-        for (var gy = g.y; gy <= g.w; gy++) {
-            for (var gx = g.x; gx <= g.z; gx++) {
-                let pl = tile_placement(tile, s, vec2<i32>(gx, gy));
-                if !placed_meets(pl, lo, hi) { continue; }
-                // The column's box in the stamp's frame (x, z).
+        let own = reaching_squares(s, lo, hi);
+        let g = reaching_squares(s, brick_lo, brick_hi);
+        let side = g.z - g.x + 1;
+        let squares = side * (g.w - g.y + 1);
+        for (var first_square = 0; first_square < squares; first_square += 64) {
+            let n = first_square + i32(li);
+            var meets = false;
+            if n < squares {
+                let square = g.xy + vec2<i32>(n % side, n / side);
+                let pl = tile_placement(tile, s, square);
+                meets = placed_meets(pl, brick_lo, brick_hi);
+                w_feature_anchor[li] = vec4<i32>(pl.anchor, pl.reach);
+                w_feature_square[li] = vec4<i32>(square, i32(pl.turn), i32(pl.mirror));
+                w_feature_stamp[li] = pl.stamp;
+            }
+            var placed = feature_round(li, meets);
+            while (placed.x | placed.y) != 0u {
+                let b = lowest_bit(placed);
+                placed = placed & ~select(vec2<u32>(0u, 1u << (b & 31u)), vec2<u32>(1u << b, 0u), b < 32u);
+                let stamp = workgroupUniformLoad(&w_feature_stamp[b]);
+                let anchor = w_feature_anchor[b];
+                let square = w_feature_square[b];
+                let pl = Placed(true, false, stamp, anchor.xyz, u32(square.z), square.w != 0, anchor.w);
+                let mine = inside && all(square.xy >= own.xy) && all(square.xy <= own.zw) && placed_meets(pl, lo, hi);
+                // The column's and the brick column's boxes in the stamp's
+                // frame (x, z).
                 let ca = placed_local(pl, vec3<i32>(lo.x, 0, lo.y) - pl.anchor);
                 let cb = placed_local(pl, vec3<i32>(hi.x, 0, hi.y) - pl.anchor);
                 let clo = min(ca, cb);
                 let chi = max(ca, cb);
-                for (var n = 0u; n < stamp_word(pl.stamp, 7u); n++) {
-                    let q = stamp_part(pl.stamp, n);
-                    if q.lo.x > chi.x || q.hi.x < clo.x || q.lo.z > chi.z || q.hi.z < clo.z { continue; }
-                    let code = part_code(q);
-                    let first = max((pl.anchor.y + q.lo.y) >> level, k0);
-                    let last = min(((pl.anchor.y + q.hi.y) >> level) + 1, k0 + 64);
-                    for (var k = first; k < last; k++) {
-                        let y = (k << level) - pl.anchor.y;
-                        var held: bool;
-                        if level == 0u {
-                            let cell = vec3<i32>(clo.x, y, clo.z);
-                            held = part_holds(q, cell * 16 + 8, true, cell);
-                        } else {
-                            held = part_holds(q, vec3<i32>(clo.x + chi.x + 1, 2 * y + span, clo.z + chi.z + 1) * 8, false, vec3<i32>(0));
+                let ba = placed_local(pl, vec3<i32>(brick_lo.x, 0, brick_lo.y) - pl.anchor);
+                let bb = placed_local(pl, vec3<i32>(brick_hi.x, 0, brick_hi.y) - pl.anchor);
+                let blo = min(ba, bb);
+                let bhi = max(ba, bb);
+                let parts = stamp_word(stamp, 7u);
+                let parts_at = stamp_word(stamp, 8u);
+                for (var first_part = 0u; first_part < parts; first_part += 64u) {
+                    let n = first_part + li;
+                    var near = false;
+                    if n < parts {
+                        // The part's cell bounds (`stamp_part`'s lo, hi).
+                        let at = parts_at + 20u * n;
+                        let plo = vec3<i32>(bitcast<i32>(features[at + 1u]), bitcast<i32>(features[at + 2u]), bitcast<i32>(features[at + 3u]));
+                        let phi = vec3<i32>(bitcast<i32>(features[at + 4u]), bitcast<i32>(features[at + 5u]), bitcast<i32>(features[at + 6u]));
+                        let first = max((pl.anchor.y + plo.y) >> level, k0);
+                        let last = min(((pl.anchor.y + phi.y) >> level) + 1, k0 + 64);
+                        near = first < last && !(plo.x > bhi.x || phi.x < blo.x || plo.z > bhi.z || phi.z < blo.z);
+                    }
+                    var held_parts = feature_round(li, near);
+                    while (held_parts.x | held_parts.y) != 0u {
+                        let h = lowest_bit(held_parts);
+                        held_parts = held_parts & ~select(vec2<u32>(0u, 1u << (h & 31u)), vec2<u32>(1u << h, 0u), h < 32u);
+                        // (No `continue` here: the rounds' barriers need
+                        // the loop uniform.)
+                        if mine {
+                            feature_part(&c, stamp_part(stamp, first_part + h), pl, clo, chi, k0, level);
                         }
-                        if held { feature_set(&c, k - k0, code); }
                     }
                 }
             }
