@@ -1162,6 +1162,9 @@ pub struct UpdateStats {
     /// the first time (diagnostics: what generation was for).
     pub evicted_unseen: usize,
     pub shown_chunks: usize,
+    /// Generated chunks that held nothing to draw (what classification
+    /// could not rule out).
+    pub emptied_chunks: usize,
     /// Edited chunks the plan evicted left resident past the frame's packs
     /// (evicted, kept, by a later plan).
     pub evictions_deferred: usize,
@@ -3332,6 +3335,7 @@ impl ChunkWorld {
                         }
                         evictions.push(old.slot);
                         self.events.push(residency::Event::Emptied(key));
+                        stats.emptied_chunks += 1;
                     } else {
                         // Out of detail pages: its leaves' pairs show until
                         // the pool grows and it is built again.

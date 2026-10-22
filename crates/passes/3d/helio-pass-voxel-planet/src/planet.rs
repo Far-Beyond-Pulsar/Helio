@@ -299,6 +299,10 @@ pub struct RayHit {
 
 pub struct Planet {
     recipe: PlanetRecipe,
+    /// `record::recipe_fingerprint` of the recipe, once: a recipe with
+    /// features serializes to hundreds of kilobytes (renderers compare it
+    /// every frame).
+    fingerprint: u64,
     grid: Grid,
     field: Arc<dyn TerrainField>,
     edits: Edits,
@@ -316,6 +320,7 @@ impl Clone for Planet {
     fn clone(&self) -> Self {
         Self {
             recipe: self.recipe.clone(),
+            fingerprint: self.fingerprint,
             grid: self.grid,
             field: Arc::clone(&self.field),
             edits: self.edits.clone(),
@@ -346,6 +351,7 @@ impl Planet {
         let field = terrain::build(&recipe.terrain, &grid)?;
         let features = Arc::new(CompiledFeatures::new(&recipe.features, &grid, recipe.terrain.seed)?);
         Ok(Self {
+            fingerprint: crate::record::recipe_fingerprint(&recipe),
             recipe,
             grid,
             field,
@@ -360,6 +366,10 @@ impl Planet {
     }
     pub fn recipe(&self) -> &PlanetRecipe {
         &self.recipe
+    }
+    /// The recipe's fingerprint (`record::recipe_fingerprint`).
+    pub fn recipe_fingerprint(&self) -> u64 {
+        self.fingerprint
     }
     /// The world's features compiled (`crate::features`).
     pub fn features(&self) -> &CompiledFeatures {

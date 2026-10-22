@@ -402,7 +402,7 @@ impl ChunkPass {
         };
         // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too).
         self.planet_ground.set_grid(*frame.planet.grid());
-        let recipe = crate::record::recipe_fingerprint(frame.planet.recipe());
+        let recipe = frame.planet.recipe_fingerprint();
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe)
             || self
