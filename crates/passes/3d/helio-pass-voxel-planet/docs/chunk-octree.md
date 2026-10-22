@@ -256,10 +256,17 @@ without one its natural material and clears the cells the leaf's pair
 draws as they are, a lane a column (a lane a leaf column, as the build
 has them, left most of its 256 lanes waiting on a few steep ones);
 `chunk_build_main` gives every leaf page holding a leaf with cells left a
-**detail page** (4 KiB: a byte a cell; 16384 pages by default,
-`HELIO_VOXEL_DETAIL_PAGES`). Drawing reads the cell's byte first
-(0: the pair); `slot_details` skips the lookup in chunks without detail
-pages. Out of pages, a chunk keeps its pairs (`UpdateStats::out_of_details`).
+**detail page** (4 KiB: a byte a cell), off the stack of pages given
+back, else past those ever taken up to the pool's capacity. Drawing reads
+the cell's byte first (0: the pair); `slot_details` skips the lookup in
+chunks without detail pages. Out of pages, a chunk keeps its pairs
+(`UpdateStats::out_of_details`) and the world doubles the pool (8192 pages
+at first, `Capacity::detail_pages` at most: 262144, 1 GiB, by default),
+copying its pages and stack, then builds the starved chunks again. What a
+view needs grows with the level 0-1 surface it shows: at 1600x900 a
+meadow takes ~1.3k pages, the Moon's speckled regolith ~18k, inside an
+Earth wood ~29k, an Earth mountain's snow and rock ~81k (its pages ~80%
+full of leaves that need them).
 Coarser chunks keep their pairs (an edit's top materials vote in them).
 
 ## The drawn cut

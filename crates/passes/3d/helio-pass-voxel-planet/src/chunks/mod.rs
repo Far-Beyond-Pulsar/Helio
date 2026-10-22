@@ -72,10 +72,17 @@ const FEATURE_JOB_WORDS: u64 = 128;
 /// chunk_generate.wgsl): 16 of cell bytes, the column's natural top, its
 /// leaves with cells left.
 const CELL_WORDS: u64 = 18;
-/// Detail pages by default (`Capacity::detail_pages`): 4 KiB each, one
-/// for each leaf page (of `DETAIL_LEVELS`) holding a leaf whose cells its
-/// pair would draw wrong.
-pub const DEFAULT_DETAIL_PAGES: usize = 16384;
+/// Most detail pages by default (`Capacity::detail_pages`): 4 KiB each,
+/// one for each leaf page (of `DETAIL_LEVELS`) holding a leaf whose cells
+/// its pair would draw wrong. The pool starts at `DETAIL_PAGES_START` and
+/// doubles when a build finds it full: what a view needs scales with the
+/// level 0-1 surface it shows (at 1600x900: a voxel_craft-like meadow
+/// ~1.3k, the Moon's speckled regolith ~18k, inside an Earth wood ~29k, an
+/// Earth mountain's snow and rock ~81k, its pages ~80% full of leaves that
+/// need them).
+pub const DEFAULT_DETAIL_PAGES: usize = 262_144;
+/// Detail pages a world starts with (fewer if its capacity is less).
+const DETAIL_PAGES_START: u64 = 8192;
 /// Words a detail page (`DETAIL_WORDS` of chunk_generate.wgsl).
 const DETAIL_WORDS: u64 = 1024;
 
@@ -128,7 +135,7 @@ const SLOPE_LATTICE: u64 = 1444;
 /// cached baked bricks (1 KiB each, before the least recently used are
 /// reused) and edited chunks kept on the CPU (bytes, least recently used
 /// dropped). The default is a game's: 131072 chunks, a world and its device
-/// about 2.9 GB of device memory. `counters` builds the draw with trace
+/// about 3 GB of device memory. `counters` builds the draw with trace
 /// counters (`take_counts`, `pixel_trace`, `lost_where`: diagnostics, and
 /// a fragment shader with side effects, slower).
 #[derive(Clone, Copy, Debug)]
@@ -1525,9 +1532,9 @@ pub struct ChunkWorld {
     max_chunks: usize,
     leaf_capacity: u64,
     /// Per-voxel materials (`chunk_generate.wgsl`): a batch's edited cell
-    /// materials, each leaf page's detail page, the pages, their free
-    /// stack and its count; pages this world holds and those free when last
-    /// read back.
+    /// materials, each leaf page's detail page, the pages, the stack of
+    /// those given back, and the allocator (the stack's count, the
+    /// overflow flag, pages ever taken, the capacity).
     cell_materials: wgpu::Buffer,
     detail_pages: wgpu::Buffer,
     detail_cells: wgpu::Buffer,
@@ -1535,8 +1542,16 @@ pub struct ChunkWorld {
     detail_free: wgpu::Buffer,
     /// Per slot: whether any of its leaf pages has a detail page.
     slot_details: wgpu::Buffer,
+    /// Detail pages the pool holds now, and at most (`Capacity`).
     detail_capacity: u64,
-    detail_free_seen: u64,
+    detail_max: u64,
+    /// Pages in use when last read back, and whether a build found the
+    /// pool (of that capacity) full since.
+    detail_used_seen: u64,
+    detail_overflow_seen: Option<u64>,
+    /// Chunks built without some detail pages (their leaves draw their
+    /// pairs): generated again once the pool grows.
+    detail_starved: FxHashSet<NodeKey>,
     grid: Grid,
     /// Height over the datum above which nothing is solid (terrain,
     /// overhangs, edits), with a margin: rays rising past it end.
@@ -2490,7 +2505,8 @@ impl ChunkWorld {
         let binding = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
         let max_chunks = capacity.chunks.min((binding / 1024) as usize).min((binding / (LEAVES_PER_SLOT * 8)) as usize).max(1024);
         let leaf_capacity = max_chunks as u64 * LEAVES_PER_SLOT;
-        let detail_capacity = capacity.detail_pages.min((binding / (DETAIL_WORDS * 4)) as usize).max(64) as u64;
+        let detail_max = capacity.detail_pages.min((binding / (DETAIL_WORDS * 4)) as usize).max(64) as u64;
+        let detail_capacity = detail_max.min(DETAIL_PAGES_START);
         let table_slots = (max_chunks * TABLE_PER_SLOT).next_power_of_two().min((binding / 32).next_power_of_two() as usize / 2);
         let features = planet.features();
         let placement_stride = features.stride as u64 * 8;
@@ -2703,20 +2719,19 @@ impl ChunkWorld {
                 contents: bytemuck::cast_slice(&vec![u32::MAX; (leaf_capacity / LEAF_PAGE) as usize]),
                 usage: wgpu::BufferUsages::STORAGE,
             }),
-            detail_cells: buffer("chunk detail cells", detail_capacity * DETAIL_WORDS * 4, wgpu::BufferUsages::STORAGE),
+            detail_cells: buffer("chunk detail cells", detail_capacity * DETAIL_WORDS * 4, s | wgpu::BufferUsages::COPY_SRC),
             detail_alloc: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk detail allocator"),
-                contents: bytemuck::cast_slice(&[detail_capacity as i32, 0]),
+                contents: bytemuck::cast_slice(&[0, 0, 0, detail_capacity as i32]),
                 usage: s | wgpu::BufferUsages::COPY_SRC,
             }),
-            detail_free: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk detail free pages"),
-                contents: bytemuck::cast_slice(&(0..detail_capacity as u32).collect::<Vec<u32>>()),
-                usage: wgpu::BufferUsages::STORAGE,
-            }),
+            detail_free: buffer("chunk detail free pages", detail_capacity * 4, s | wgpu::BufferUsages::COPY_SRC),
             slot_details: buffer("chunk slot details", max_chunks as u64 * 4, wgpu::BufferUsages::STORAGE),
             detail_capacity,
-            detail_free_seen: detail_capacity,
+            detail_max,
+            detail_used_seen: 0,
+            detail_overflow_seen: None,
+            detail_starved: FxHashSet::default(),
             free_pages_seen: leaf_capacity / LEAF_PAGE,
             urgent: FxHashSet::default(),
             hidden: FxHashSet::default(),
@@ -2767,6 +2782,25 @@ impl ChunkWorld {
         self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let out = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
         out
+    }
+
+    /// The detail pool doubled (up to its most): its pages and the stack
+    /// of those given back copied into buffers twice the size, the
+    /// capacity raised and the overflow flag cleared before the frame's
+    /// builds (`take_detail` in chunk_generate.wgsl).
+    fn grow_details(&mut self, encoder: &mut helio_core::CommandRecorder<'_>) {
+        let capacity = (self.detail_capacity * 2).min(self.detail_max);
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let buffer = |label: &str, size: u64| self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
+        let cells = buffer("chunk detail cells", capacity * DETAIL_WORDS * 4);
+        let free = buffer("chunk detail free pages", capacity * 4);
+        encoder.copy_buffer_to_buffer(&self.detail_cells, 0, &cells, 0, self.detail_capacity * DETAIL_WORDS * 4);
+        encoder.copy_buffer_to_buffer(&self.detail_free, 0, &free, 0, self.detail_capacity * 4);
+        self.queue.write_buffer(&self.detail_alloc, 4, bytemuck::bytes_of(&0i32));
+        self.queue.write_buffer(&self.detail_alloc, 12, bytemuck::bytes_of(&(capacity as i32)));
+        self.detail_cells = cells;
+        self.detail_free = free;
+        self.detail_capacity = capacity;
     }
 
     fn gen_group(&self, brush_refs: &wgpu::Buffer, evictions: &wgpu::Buffer, baked_refs: &wgpu::Buffer, baked_cells: &wgpu::Buffer) -> wgpu::BindGroup {
@@ -3299,8 +3333,12 @@ impl ChunkWorld {
                         evictions.push(old.slot);
                         self.events.push(residency::Event::Emptied(key));
                     } else {
-                        // Out of detail pages: its leaves' pairs show.
-                        stats.out_of_details |= w[3] & 16 != 0;
+                        // Out of detail pages: its leaves' pairs show until
+                        // the pool grows and it is built again.
+                        if w[3] & 16 != 0 {
+                            stats.out_of_details = true;
+                            self.detail_starved.insert(key);
+                        }
                         let c = self.nodes.get_mut(&key).unwrap();
                         c.z = Some((w[1], w[2]));
                         c.flags = w[3];
@@ -3316,8 +3354,11 @@ impl ChunkWorld {
                 if let Some(&free) = words.get(at) {
                     self.free_pages_seen = free.max(0) as u64;
                 }
-                if let Some(&free) = words.get(at + 2) {
-                    self.detail_free_seen = free.max(0) as u64;
+                if let [given, overflow, taken, capacity] = words.get(at + 2..at + 6).unwrap_or_default() {
+                    self.detail_used_seen = (*taken - *given).max(0) as u64;
+                    if *overflow != 0 {
+                        self.detail_overflow_seen = Some(*capacity as u64);
+                    }
                 }
             }
             r.buffer.unmap();
@@ -3434,6 +3475,22 @@ impl ChunkWorld {
         stats.worst_wanted = plan.worst_wanted;
         stats.worst = plan.worst;
         lap(&mut stats, 2);
+
+        // A build found the detail pool full: at its present size it
+        // doubles (up to its most); once it has grown since, the chunks
+        // built short of pages are built again; full at its most, they
+        // keep their leaves' pairs.
+        if let Some(full_at) = self.detail_overflow_seen.take() {
+            if full_at == self.detail_capacity && self.detail_capacity < self.detail_max {
+                self.grow_details(encoder);
+            }
+            if full_at < self.detail_capacity {
+                let starved: Vec<NodeKey> = self.detail_starved.drain().filter(|k| self.nodes.contains_key(k) && !self.urgent.contains(k)).collect();
+                self.stale.extend(starved);
+            } else {
+                self.detail_starved.clear();
+            }
+        }
 
         // 3. Generate: nodes edits changed (those brushes changed, all now;
         // baked edits, within the budget), then the most wanted.
@@ -3687,7 +3744,7 @@ impl ChunkWorld {
         if !tile_jobs.is_empty() || !restores.jobs.is_empty() {
             let tiles = (computed_count * 16) as u64;
             let chunks = ((chunk_jobs.len() + restores.jobs.len()) * 16) as u64;
-            readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: tiles + chunks + 16, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: tiles + chunks + 24, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             if tiles > 0 {
                 encoder.copy_buffer_to_buffer(&self.tile_ranges, 0, &readback.buffer, 0, tiles);
             }
@@ -3695,7 +3752,7 @@ impl ChunkWorld {
                 encoder.copy_buffer_to_buffer(&self.job_results, 0, &readback.buffer, tiles, chunks);
             }
             encoder.copy_buffer_to_buffer(&self.leaf_alloc, 0, &readback.buffer, tiles + chunks, 8);
-            encoder.copy_buffer_to_buffer(&self.detail_alloc, 0, &readback.buffer, tiles + chunks + 8, 8);
+            encoder.copy_buffer_to_buffer(&self.detail_alloc, 0, &readback.buffer, tiles + chunks + 8, 16);
             self.pending = Some(readback);
         }
         // Slots evicted now are reused from the next frame.
@@ -3768,7 +3825,7 @@ impl ChunkWorld {
             self.quiet_from = self.worker.as_ref().map_or(0, residency::Worker::reports_sent);
         }
         stats.drawn_chunks = self.drawn_set.list.len();
-        stats.detail_pages = (self.detail_capacity - self.detail_free_seen.min(self.detail_capacity), self.detail_capacity);
+        stats.detail_pages = (self.detail_used_seen, self.detail_capacity);
         stats.resident_chunks = self.nodes.len();
         stats
     }

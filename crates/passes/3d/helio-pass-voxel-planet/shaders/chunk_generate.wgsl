@@ -124,8 +124,11 @@ const LEAF_PAGES: u32 = 64u;
 // a detail page (`detail_pages`, by leaf page; NONE: none) of
 // `DETAIL_WORDS` words: 16 a leaf, by the leaf's place in its page, word
 // x + 4 y its column's four cells (byte z). Other leaves read zero there.
-// Pages come off the stack `detail_free` (`detail_alloc`: the free count,
-// the overflow flag) and go back when the chunk is evicted.
+// Pages come off the stack `detail_free` of pages given back, else past
+// the pages ever taken, up to the capacity (`detail_alloc`: the stack's
+// count, the overflow flag, the pages ever taken, the capacity), and go
+// back on the stack when the chunk is evicted. The world grows the pool
+// (and raises the capacity) when it overflows.
 @group(0) @binding(28) var<storage, read_write> cell_materials: array<u32>;
 @group(0) @binding(29) var<storage, read_write> detail_pages: array<u32>;
 @group(0) @binding(30) var<storage, read_write> detail_cells: array<u32>;
@@ -154,8 +157,8 @@ fn slope_origin(job: TileJob) -> vec2<i32> {
 const DETAIL_WORDS: u32 = 1024u;
 const CELL_WORDS: u32 = 18u;
 
-// A detail page off the free stack (NONE: none free; the overflow flag is
-// set).
+// A detail page off the free stack, else a page never taken below the
+// capacity (NONE: none free; the overflow flag is set).
 fn take_detail() -> u32 {
     var free = atomicLoad(&detail_alloc[0]);
     for (var tries = 0u; tries < 4096u; tries++) {
@@ -163,6 +166,14 @@ fn take_detail() -> u32 {
         let r = atomicCompareExchangeWeak(&detail_alloc[0], free, free - 1);
         if r.exchanged { return detail_free[u32(free - 1)]; }
         free = r.old_value;
+    }
+    let capacity = atomicLoad(&detail_alloc[3]);
+    var fresh = atomicLoad(&detail_alloc[2]);
+    for (var tries = 0u; tries < 4096u; tries++) {
+        if fresh >= capacity { break; }
+        let r = atomicCompareExchangeWeak(&detail_alloc[2], fresh, fresh + 1);
+        if r.exchanged { return u32(fresh); }
+        fresh = r.old_value;
     }
     atomicStore(&detail_alloc[1], 1);
     return NONE;
