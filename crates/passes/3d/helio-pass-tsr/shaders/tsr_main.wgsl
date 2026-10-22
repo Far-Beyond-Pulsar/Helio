@@ -1,5 +1,13 @@
 //!use helio_prelude
-// Temporal Super-Resolution: one resolve dispatch and one sharpening draw.
+// Temporal Super-Resolution: a reconstruction dispatch, one resolve dispatch
+// and one sharpening draw.
+//
+// Reconstruct, per input texel that moves by itself (its motion vector):
+// where it was last frame, its depth over the 2x2 texels there, the nearest
+// kept (FSR 2 reconstructs and dilates depth the same way, for all texels;
+// the camera's own parallax is step 3's). Where that is nearer than a
+// pixel's own (dilated) depth, a moving object was in front of the pixel
+// last frame and has left: history there shows it, at any depth.
 //
 // The resolve runs over 8x8 tiles of output pixels. A tile first converts
 // the input texels its pixels read (perceptual colour, log luminance, view
@@ -12,7 +20,9 @@
 //      it with a Gaussian of the output pixel, and keep the summed kernel
 //      weight: how much this frame actually says about the pixel.
 //   2. Dilate depth (nearest of the 3x3) and reproject with it, so an edge
-//      moves with its foreground surface.
+//      moves with its foreground surface: by that texel's motion vector
+//      where it moves by itself (moving objects, animated geometry), else
+//      by the camera's motion, derived from depth.
 //   3. Reject history on disocclusion: no stored depth in the 3x3 around the
 //      reprojected pixel near the dilated depth or the pixel's own surface
 //      (history stores both). The dilated depth keeps a still silhouette
@@ -20,6 +30,11 @@
 //      keeps ground at a grazing angle matching while the jitter moves the
 //      3x3 between rows. The tolerance follows the surface's slope measured
 //      on the input's depth texels, one-sided so a silhouette is not slope.
+//      An object that moves by itself leaves its history where the pixel
+//      behind it reprojects to, often matched (in foliage the slope is
+//      metres): the reconstruction above finds those from the object's
+//      motion vectors. History there keeps no more than a rejection does
+//      (step 6) and no thin-feature lock (step 7).
 //   4. Sample history with Catmull-Rom, de-ringed to its own 2x2.
 //   5. Detect changes the per-pixel box cannot tell from noise, two ways,
 //      each a fast running mean against a slow one (a bias-free test: a
@@ -36,7 +51,7 @@
 //   6. Rectify: clip history toward the neighbourhood mean (YCoCg,
 //      tonemapped), against a box that is the larger of:
 //      - mean +/- one standard deviation of the 3x3 (Salvi's variance clip);
-//      - twice the pixel's own measured temporal deviation, while still: the
+//      - twice the pixel's own measured temporal deviation: the
 //        input's spread about history, learnt as a running variance. Jitter
 //        aliasing on texel-sized detail and stochastic per-frame lighting
 //        (rotating shadow and sky samples) make single frames disagree with
@@ -52,6 +67,14 @@
 //      pixel for a short lifetime, during which the clip yields to history,
 //      so a sub-pixel wire the jitter missed this frame is not clipped away.
 //      A detected change releases it.
+//   The two widenings of step 6 and the locks are what a still view needs
+//   (the jitter's misses, stochastic samples); they fade out over the first
+//   pixel a frame of motion, as the history cap does (step 8): moving,
+//   history holds a few frames anyway and the pixel's learnt variation says
+//   nothing about the surface reprojected onto it. Flying past glowstone,
+//   locks and widened boxes (up to 20 px a frame before) kept its light and
+//   trunks in streaks behind them, on foliage whose depth step 3's slope
+//   allowance matched.
 //   8. Accumulate as a weighted running mean: history weight vs this frame's
 //      kernel weight, capped at MAX_HISTORY_WEIGHT while still and toward
 //      MOVING_HISTORY_WEIGHT at a pixel per frame of motion, so repeated
@@ -99,16 +122,16 @@ const REJECTED_HISTORY_WEIGHT: f32 = 2.0;
 const VARIANCE_CLIP_GAMMA: f32 = 1.0;
 // ...and in the pixel's own temporal deviations.
 const TEMPORAL_GAMMA: f32 = 2.0;
-// Motion (output pixels per frame) at which the temporal widening and the
-// stochastic mask stop applying: FSR 2 scales its box down by velocity / 20,
-// UE5 TSR has a maximum parallax velocity for flicker detection.
-const PARALLAX_VELOCITY: f32 = 20.0;
 // Box floor in tonemapped YCoCg: below half-float noise of the input.
 const MIN_BOX_EXTENT: f32 = 1.0 / 1024.0;
 // Disocclusion: the stored depth may differ by this many texels of the
 // surface's slope (the jitter moves the sample by up to one, the dilation by
 // up to one more).
 const DEPTH_SLOPE_TEXELS: f32 = 2.0;
+// Disocclusion by reconstruction: last frame's nearest depth at the pixel was
+// nearer than its own by this fraction. Dilation already covers the texels
+// next to it, which the 2x2 scatter reaches.
+const OCCLUDER_RELATIVE: f32 = 0.02;
 // Low-pass sigma (output pixels) of the fine detector: wide enough to
 // average the jitter, narrow enough for the 3x3 the clip box reads anyway.
 const LOW_PASS_SIGMA: f32 = 1.0;
@@ -156,10 +179,19 @@ const RCAS_LIMIT: f32 = 0.1875;
 struct TsrUniform {
     jitter_offset:  vec2<f32>, // this frame's jitter in input pixels
     reactivity:     f32,       // fraction of history confidence dropped per frame
-    flags:          u32,       // bit 0: reset, bit 1: transparency coverage
+    flags:          u32,       // bit 0: reset, bit 1: transparency coverage, bit 2: motion vectors
     previous_jitter_uv: vec2<f32>,
     _pad: vec2<f32>,
-    previous_view: mat4x4<f32>,
+    // Reprojection (lib.rs `Reprojection`), applied to this frame's clip
+    // position c = (ndc, raw depth, 1): last frame's clip position of the
+    // homogeneous world point is clip_to_previous_clip * c, the point's w
+    // is dot(clip_to_world_w, c), last frame's eye's clip position
+    // eye_to_previous_clip, and last frame's view z times w is
+    // dot(clip_to_previous_view_z, c). Composed on the CPU in f64.
+    clip_to_previous_clip: mat4x4<f32>,
+    clip_to_world_w: vec4<f32>,
+    eye_to_previous_clip: vec4<f32>,
+    clip_to_previous_view_z: vec4<f32>,
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
 // xy: view depths, 0 = sky: x dilated, y the pixel's own surface's.
@@ -177,6 +209,16 @@ struct TsrUniform {
 // Fraction of the pixel's shading sampled stochastically per frame (lib.rs
 // STOCHASTIC_MASK); zero when the graph does not provide it.
 @group(0) @binding(13) var stochastic_mask: texture_2d<f32>;
+// Motion vectors (lib.rs MOTION_VECTORS): xy each texel's motion since last
+// frame in input pixels, from last frame's raster position to this one's
+// (both jittered), for geometry that moves by itself (bit 0 of w); other
+// texels move with the camera. Read when tsr.flags bit 2 is set.
+@group(0) @binding(14) var motion_vectors: texture_2d<f32>;
+// Last frame's nearest depth per input texel, reconstructed this frame
+// (raw depth bits, 0 for none): read by the resolve, written by the
+// reconstruction.
+@group(0) @binding(15) var<storage, read> previous_nearest: array<u32>;
+@group(0) @binding(20) var<storage, read_write> reconstructed_nearest: array<atomic<u32>>;
 
 // The resolve's outputs: next frame's history_frame, history_depth_coarse,
 // history_state and history_noise.
@@ -228,6 +270,15 @@ fn max3(v: vec3<f32>) -> f32 { return max(v.r, max(v.g, v.b)); }
 fn finite_rgb(c: vec3<f32>) -> vec3<f32> {
     let exponent = bitcast<vec3<u32>>(c) & vec3<u32>(0x7f800000u);
     return select(c, vec3<f32>(0.0), exponent == vec3<u32>(0x7f800000u));
+}
+
+// The same for the history's state taps (weights, detectors' means and
+// learnt deviations, which can overflow half floats): a NaN there spread
+// through the bilinear taps frame by frame, resetting what it reached, and
+// a non-finite motion vector put one in every channel.
+fn finite4(v: vec4<f32>) -> vec4<f32> {
+    let exponent = bitcast<vec4<u32>>(v) & vec4<u32>(0x7f800000u);
+    return select(v, vec4<f32>(0.0), exponent == vec4<u32>(0x7f800000u));
 }
 
 // Reversible max-channel Reinhard: [0, inf) -> [0, 1). Averaging here weights
@@ -284,31 +335,43 @@ fn sample_history(uv: vec2<f32>) -> vec3<f32> {
 
 // Color and depth refer to the same jittered raster position. History is
 // resolved into an unjittered display grid, so remove the prior projection's
-// jitter after reprojection. Keep clip W for behind-camera rejection.
+// jitter after reprojection. z: positive where the point was in front of
+// last frame's camera; w: its view depth then (0 for sky).
 fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec4<f32> {
-    let ndc = raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0);
-    let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc,depth,1.0);
-    // Sky texels reproject as directions: the homogeneous point minus the
-    // eye, exact for any w including the w = 0 of depth 0 (infinity).
+    let c = vec4<f32>(raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0), depth, 1.0);
+    let w = dot(tsr.clip_to_world_w, c);
+    // Sky texels reproject as directions: the homogeneous point minus w times
+    // the eye, exact for any w including the w = 0 of depth 0 (infinity).
     // Sky has no history depth.
     let sky = helio_is_sky(depth);
-    let point = select(vec4<f32>(world_h.xyz/world_h.w,1.0),
-        vec4<f32>(world_h.xyz - world_h.w*cameras[0].position_near.xyz,0.0), sky);
-    let prev_clip = cameras[0].prev_view_proj * point;
+    let prev_clip = tsr.clip_to_previous_clip * c - select(0.0, w, sky) * tsr.eye_to_previous_clip;
     let uv = prev_clip.xy/prev_clip.w * vec2<f32>(0.5,-0.5)+0.5;
-    let previous_position = tsr.previous_view * point;
-    return vec4<f32>(uv-tsr.previous_jitter_uv,prev_clip.w,select(-previous_position.z,0.0,sky));
+    // A point's clip w is the homogeneous one over w (same sign as times w).
+    let front = select(prev_clip.w * w, prev_clip.w, sky);
+    return vec4<f32>(uv-tsr.previous_jitter_uv, front, select(-dot(tsr.clip_to_previous_view_z, c) / w, 0.0, sky));
+}
+
+// The motion of input texel `texel` (xy) if it moves by itself (z 1), else
+// zero (it moves with the camera).
+fn motion_vector(texel: vec2<i32>) -> vec3<f32> {
+    if (tsr.flags & 4u) == 0u {
+        return vec3<f32>(0.0);
+    }
+    let m = textureLoad(motion_vectors, texel, 0);
+    // A non-finite vector (a writer's division by a zero w) is none.
+    let finite = all((bitcast<vec2<u32>>(m.xy) & vec2<u32>(0x7f800000u)) != vec2<u32>(0x7f800000u));
+    return select(vec3<f32>(0.0), vec3<f32>(m.xy, 1.0), (u32(m.w) & 1u) != 0u && finite);
 }
 
 fn history_depth_matches(expected: f32, stored: f32, tolerance: f32) -> bool {
     return expected > 0.0 && stored > 0.0 && abs(expected-stored) <= tolerance;
 }
 
-// Positive view depth of a raw depth sample, 0 for sky (matching history).
-fn view_depth(raster_uv: vec2<f32>, depth: f32) -> f32 {
-    let world_h = cameras[0].view_proj_inv * vec4<f32>(helio_uv_to_ndc(raster_uv), depth, 1.0);
-    let view_position = cameras[0].view * vec4<f32>(world_h.xyz / world_h.w, 1.0);
-    return select(max(-view_position.z, 0.0), 0.0, helio_is_sky(depth));
+// Positive view depth of a raw depth sample, 0 for sky (matching history):
+// from the projection's z and w rows alone, the same at every raster
+// position.
+fn view_depth(depth: f32) -> f32 {
+    return select(max(helio_view_depth(cameras[0].proj, depth), 0.0), 0.0, helio_is_sky(depth));
 }
 
 // ── Input neighbourhood ───────────────────────────────────────────────────────
@@ -321,6 +384,7 @@ struct Neighbourhood {
     lo: vec3<f32>,
     hi: vec3<f32>,
     nearest_depth: f32,     // dilated: the nearest raw depth of that 3x3
+    nearest_texel: vec2<i32>, // ...and the input texel holding it
     centre_depth: f32,      // raw depth of the texel under the pixel
     // View depth change across one input texel of the centre's own surface:
     // per axis the smaller of the two one-sided differences, so a silhouette
@@ -353,8 +417,7 @@ const FOOTPRINT: vec2<i32> = vec2<i32>(12, 12);
 const FOOTPRINT_TEXELS: u32 = 144u;
 // Per texel of the tile, by the texel's own (unclamped) position, rows
 // FOOTPRINT.x apart: perceptual YCoCg and log luminance of the clamped
-// texel; its raw depth and the view depth that has at the unclamped texel's
-// centre.
+// texel; its raw depth and view depth.
 var<workgroup> tile_colour: array<vec4<f32>, FOOTPRINT_TEXELS>;
 var<workgroup> tile_depth: array<vec2<f32>, FOOTPRINT_TEXELS>;
 // Per texel a pixel's kernel centres on (the inner 2x2 of its 4x4): a thin
@@ -380,7 +443,6 @@ fn footprint_origin(in_pos: vec2<f32>) -> vec2<i32> {
 // all threads of the workgroup sharing the work.
 fn load_tile(tile_origin: vec2<i32>, span: vec2<i32>, thread: u32) {
     let dims = vec2<i32>(textureDimensions(current_frame));
-    let texel = 1.0 / vec2<f32>(dims);
     for (var j = i32(thread); j < span.x * span.y; j += i32(TILE.x * TILE.y)) {
         let local = vec2<i32>(j % span.x, j / span.x);
         let i = local.y * FOOTPRINT.x + local.x;
@@ -390,7 +452,7 @@ fn load_tile(tile_origin: vec2<i32>, span: vec2<i32>, thread: u32) {
         let l = log(max(dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722)), 1.0e-4));
         tile_colour[i] = vec4<f32>(perceptual(rgb), l);
         let d = textureLoad(depth_tex, p, 0);
-        tile_depth[i] = vec2<f32>(d, view_depth((vec2<f32>(at) + 0.5) * texel, d));
+        tile_depth[i] = vec2<f32>(d, view_depth(d));
     }
 }
 
@@ -442,6 +504,7 @@ fn gather(in_pos: vec2<f32>, tile_origin: vec2<i32>) -> Neighbourhood {
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
     var depth = 0.0;
+    var nearest_offset = vec2<i32>(0);
     n.lo = vec3<f32>(3.0e38);
     n.hi = vec3<f32>(-3.0e38);
     for (var y = 0; y < 3; y++) {
@@ -453,7 +516,11 @@ fn gather(in_pos: vec2<f32>, tile_origin: vec2<i32>) -> Neighbourhood {
             n.lo = min(n.lo, q);
             n.hi = max(n.hi, q);
             low += lx3[x] * ly3[y] * vec2<f32>(q.x, 1.0);
-            depth = helio_depth_nearest(depth, tile_depth[i].x);
+            let nearer = helio_depth_nearest(depth, tile_depth[i].x);
+            if nearer != depth {
+                nearest_offset = vec2<i32>(x - 1, y - 1);
+            }
+            depth = nearer;
         }
     }
     n.centre_depth = tile_depth[centre].x;
@@ -466,6 +533,7 @@ fn gather(in_pos: vec2<f32>, tile_origin: vec2<i32>) -> Neighbourhood {
     n.mean = m1 / 9.0;
     n.deviation = sqrt(max(m2 / 9.0 - n.mean * n.mean, vec3<f32>(0.0)));
     n.nearest_depth = depth;
+    n.nearest_texel = clamp(vec2<i32>(floor(in_pos)) + nearest_offset, vec2<i32>(0), dims - 1);
     // Sky (view depth 0) next to the pixel is a silhouette, not slope.
     let steps = select(abs(around - centre_view), vec4<f32>(3.0e38), around == vec4<f32>(0.0));
     n.slope = max(min(steps.x, steps.y), min(steps.z, steps.w));
@@ -544,6 +612,48 @@ fn clip_toward_mean(h: vec3<f32>, mean: vec3<f32>, extent: vec3<f32>) -> vec4<f3
     return vec4<f32>(select(h, mean + d / outside, outside > 1.0), outside);
 }
 
+// ── Reconstruction ────────────────────────────────────────────────────────────
+
+// Per input texel that moves by itself: its depth, at the 2x2 texels
+// around where it was last frame. Raw depth is positive and nearer is
+// larger (reversed Z), so the largest bits are the nearest depth. The buffer
+// holds a word per input texel.
+@compute @workgroup_size(8, 8)
+fn cs_reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(depth_tex);
+    if any(id.xy >= dims) {
+        return;
+    }
+    let texel = vec2<i32>(id.xy);
+    let motion = motion_vector(texel);
+    if motion.z == 0.0 {
+        return;
+    }
+    let depth = textureLoad(depth_tex, texel, 0);
+    let base = vec2<i32>(floor(vec2<f32>(id.xy) - motion.xy));
+    for (var i = 0; i < 4; i++) {
+        let at = base + vec2<i32>(i & 1, i >> 1);
+        if all(at >= vec2<i32>(0)) && all(at < vec2<i32>(dims)) {
+            atomicMax(&reconstructed_nearest[u32(at.y) * dims.x + u32(at.x)], bitcast<u32>(depth));
+        }
+    }
+}
+
+// Whether something nearer than view depth `own` was at last frame's raster
+// position `previous` (input pixels), by the reconstruction.
+fn occluded_before(previous: vec2<f32>, own: f32) -> bool {
+    let dims = vec2<i32>(textureDimensions(current_frame));
+    let at = vec2<i32>(floor(previous));
+    if any(at < vec2<i32>(0)) || any(at >= dims) {
+        return false;
+    }
+    let nearest = previous_nearest[u32(at.y * dims.x + at.x)];
+    if nearest == 0u {
+        return false;
+    }
+    return view_depth(bitcast<f32>(nearest)) < own * (1.0 - OCCLUDER_RELATIVE);
+}
+
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
 struct TsrOutput {
@@ -590,7 +700,7 @@ fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
     let output_alpha = select(1.0, coverage, use_coverage);
 
     let n = gather(in_pos, tile_origin);
-    let current_depth = vec2<f32>(view_depth(cur_uv, n.nearest_depth), view_depth(cur_uv, n.centre_depth));
+    let current_depth = vec2<f32>(view_depth(n.nearest_depth), view_depth(n.centre_depth));
     var fresh: TsrOutput;
     fresh.color = vec4<f32>(linear_rgb(n.colour), output_alpha);
     fresh.view_depth = current_depth;
@@ -602,7 +712,11 @@ fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
         n.log_luma);
     fresh.coarse = vec2<f32>(n.log_luma);
 
-    let history = reproject_history(cur_uv, n.nearest_depth);
+    var history = reproject_history(cur_uv, n.nearest_depth);
+    let motion = motion_vector(n.nearest_texel);
+    if motion.z != 0.0 {
+        history = vec4<f32>(cur_uv - (motion.xy / in_dims + tsr.previous_jitter_uv), 1.0, history.w);
+    }
     let history_uv = history.xy;
     let expected_own = reproject_history(cur_uv, n.centre_depth).w;
     let depth_tolerance = max(0.002, abs(expected_own) * 0.004) + DEPTH_SLOPE_TEXELS * n.slope;
@@ -645,11 +759,19 @@ fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
         return fresh;
     }
 
-    let previous = textureSampleLevel(history_state, linear_sampler, history_uv, 0.0);
-    let moments = textureSampleLevel(history_noise, linear_sampler, history_uv, 0.0);
-    let means = textureSampleLevel(history_depth_coarse, linear_sampler, history_uv, 0.0).zw;
+    let previous = finite4(textureSampleLevel(history_state, linear_sampler, history_uv, 0.0));
+    let moments = finite4(textureSampleLevel(history_noise, linear_sampler, history_uv, 0.0));
+    let means = finite4(textureSampleLevel(history_depth_coarse, linear_sampler, history_uv, 0.0)).zw;
     var history_weight = previous.x * (1.0 - reactivity);
     var lock = previous.y * (1.0 - reactivity);
+    // Uncovered by a moving object (the reconstruction; only with motion
+    // vectors): history shows the object. What the box keeps of it (step 6)
+    // is what a rejection keeps, and no lock spares it (step 7).
+    let uncovered = (tsr.flags & 4u) != 0u && !helio_is_sky(n.nearest_depth)
+        && occluded_before((history_uv + tsr.previous_jitter_uv) * in_dims, current_depth.x);
+    if uncovered {
+        history_weight = min(history_weight, REJECTED_HISTORY_WEIGHT);
+    }
 
     // Fine change detector (step 5): the residual's fast mean against its
     // slow one.
@@ -697,15 +819,19 @@ fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
     let new_reference = select(mix(reference, coarse, REFERENCE_RATE), coarse, restart >= 1.0);
     let variance = moments.x * moments.x * unchanged;
 
-    // Thin-feature locks (step 7), released by a detected change. Full
-    // protection for most of the lifetime, fading over its last frames.
-    lock = select(max(lock - 1.0 / LOCK_FRAMES, 0.0), 1.0, n.ridge != 0.0) * unchanged;
-    let protection = saturate(lock * 4.0);
+    // What a still view's allowances keep: all at rest, none from a pixel a
+    // frame of motion on.
+    let velocity = length((history_uv - pixel_uv(pixel)) * vec2<f32>(out_dims));
+    let still = 1.0 - saturate(velocity);
+
+    // Thin-feature locks (step 7), released by a detected change or an
+    // object uncovering the pixel. Full protection for most of the
+    // lifetime, fading over its last frames.
+    lock = select(max(lock - 1.0 / LOCK_FRAMES, 0.0), 1.0, n.ridge != 0.0) * unchanged * f32(!uncovered);
+    let protection = saturate(lock * 4.0) * still;
 
     // Rectification (step 6).
     let history_colour = perceptual(sample_history(history_uv));
-    let velocity = length((history_uv - pixel_uv(pixel)) * vec2<f32>(out_dims));
-    let still = 1.0 - saturate(velocity / PARALLAX_VELOCITY);
     // A shading change short of decisive weakens the widening, as it does
     // FSR 2's lock protection.
     let relit = select(1.0 - change, 0.0, change > SHADING_CHANGE);
@@ -735,7 +861,9 @@ fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
     out.color = vec4<f32>(linear_rgb(blended), output_alpha);
     out.view_depth = current_depth;
     out.state = vec4<f32>(min(total, MAX_HISTORY_WEIGHT), lock, new_residual_fast, learnt_deviation);
-    out.noise = vec4<f32>(sqrt((1.0 - alpha) * (variance + alpha * dot(spread, spread))), learnt_coarse_deviation,
+    // Learnt at rest only: moving, the spread is the reprojection's.
+    let learn = alpha * still;
+    out.noise = vec4<f32>(sqrt((1.0 - learn) * (variance + learn * dot(spread, spread))), learnt_coarse_deviation,
         new_residual_slow, new_reference);
     out.coarse = vec2<f32>(new_slow, new_fast);
     return out;

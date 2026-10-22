@@ -60,6 +60,19 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
   nearest tree log (within 15 m) and log that log and the voxels in
   front of it, so the next shot looks at a trunk (pair it with
   `VOXEL_CRAFT_POSES=1 VOXEL_CRAFT_WAIT=800`).
+* `VOXEL_CRAFT_FLIGHT=<frames>`: instead of the poses, a flight for
+  ghosting. Glowstone goes up ahead of the spawn (two columns on the
+  ground, one block in the air in front of distant terrain); the camera
+  settles 1 m up, then moves sideways at the fly speed
+  (`VOXEL_CRAFT_FLIGHT_SPEED`, m/s, default 14) in steps of a 60 Hz frame,
+  saving every frame (`flight_NNN.png`). Then it returns to every eighth of
+  those places and saves each once still and converged
+  (`still_NNN.png`, after `VOXEL_CRAFT_STILL_WAIT` frames, default 90).
+  `python tools/ghosting.py <dir>` compares the pairs: light or dark left
+  behind what moved (`trail`, `dark`: pixels off by over 0.1), and writes
+  `ghost_NNN.png` (brighter than the still in red, darker in blue).
+* `VOXEL_CRAFT_QUALITY=fxaa`: no TSR (FXAA at native resolution), to tell
+  what is temporal.
 
 ## Layout
 

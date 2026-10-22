@@ -536,6 +536,9 @@ struct VertexOutput {
     @location(1) height_frac: f32,
     @location(2) prev_clip_position: vec4<f32>,
     @location(3) tint: vec2<f32>,
+    /// How far the vertex moved by itself since last frame (m): in the wind,
+    /// pushed aside. 0: still, it moves with the camera.
+    @location(4) moved: f32,
     /// LOD this instance was drawn at, for the `FOLIAGE_FLAG_DEBUG_LOD` view.
     @location(6) @interpolate(flat) lod: u32,
     /// The type's colour word (RGBA8; 0: procedural) and roughness/metallic word.
@@ -710,6 +713,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     var out: VertexOutput;
     out.clip_position = cameras[0].view_proj * vec4<f32>(world_base + foliage_to_world(basis, sway_now) + bend, 1.0);
     out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(world_base + foliage_to_world(basis, sway_prev) + bend_prev, 1.0);
+    out.moved = length(foliage_to_world(basis, sway_now - sway_prev) + bend - bend_prev);
     out.world_normal = foliage_to_world(basis, normal);
     out.face_normal = out.world_normal;
     out.blocky = 0u;
@@ -893,6 +897,7 @@ fn vs_box(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) ins
     var out: VertexOutput;
     out.clip_position = cameras[0].view_proj * vec4<f32>(world + bx.now, 1.0);
     out.prev_clip_position = cameras[0].prev_view_proj * vec4<f32>(world + bx.prev, 1.0);
+    out.moved = length(bx.now - bx.prev);
     // A blocky shape lights as the ground it grows on, its faces telling apart.
     out.world_normal = basis.up;
     out.face_normal = foliage_to_world(basis, corner.normal);
@@ -1000,7 +1005,10 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
     out.normal = vec4<f32>(normal, f0.r);
     out.orm = vec4<f32>(ao, roughness, metallic, f0.g);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0.b);
-    out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position), 0.0, 0.0);
+    // w: 1 where the blade moved by itself, in the wind or pushed aside
+    // (helio-pass-tsr MOTION_VECTORS); still, it moves with the camera.
+    out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position), 0.0,
+        select(0.0, 1.0, input.moved > 0.0));
     out.lightmap_uv = vec2<f32>(-1.0, -1.5);
     return out;
 }

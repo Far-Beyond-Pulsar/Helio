@@ -105,10 +105,16 @@ fn run_depth_history_fixture(translated_origin: bool) {
             identity[i] = 1.0;
         }
         camera.view = identity;
+        camera.view_proj = identity;
+        camera.view_proj[14] = 10.5;
         camera.inv_view_proj = identity;
         camera.inv_view_proj[14] = -10.5;
         camera.prev_view_proj = identity;
         camera.prev_view_proj[14] = 10.5;
+        // The projection's z and w rows give view depth: 10.5 - raw depth,
+        // as the inverse above and the identity view do.
+        camera.proj = identity;
+        camera.proj[14] = 10.5;
         let cameras = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&[camera, camera]),
@@ -118,7 +124,8 @@ fn run_depth_history_fixture(translated_origin: bool) {
         // histories[0] and reads histories[1].
         let create_bind = |pass: &TsrPass| {
             make_resolve_bg(&device, &pass.bgl, &pass.histories[1], &pass.histories[0], &current_view, &depth_view,
-                &coverage_view, &pass.reactivity_fallback_view, &pass.linear_sampler, &cameras, &pass.uniform_buf)
+                &coverage_view, &pass.reactivity_fallback_view, &pass.motion_fallback_view, &pass.nearest,
+                &pass.linear_sampler, &cameras, &pass.uniform_buf)
         };
         let mut bind = create_bind(&pass);
         let probe = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -256,7 +263,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 flags,
                 previous_jitter_uv: [0.0; 2],
                 _pad: [0.0; 2],
-                previous_view: identity,
+                reprojection: Reprojection::new(camera.view_proj, [0.0; 3], camera.prev_view_proj, identity),
             };
             queue.write_buffer(&pass.uniform_buf, 0, bytemuck::bytes_of(&uniform));
             let mut raster_depth = 0.5;

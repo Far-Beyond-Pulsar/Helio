@@ -155,12 +155,15 @@ fn sun_light(direction: [f32; 3], color: [f32; 3]) -> helio::GpuLight {
     light
 }
 
-fn tsr_quality() -> helio_pass_tsr::TsrQuality {
+/// TSR's quality (`fxaa`: no TSR, FXAA at native resolution, for A/B
+/// measurements of what is temporal).
+fn tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
     match std::env::var("VOXEL_CRAFT_QUALITY").as_deref() {
-        Ok("performance") => helio_pass_tsr::TsrQuality::Performance,
-        Ok("quality") => helio_pass_tsr::TsrQuality::Quality,
-        Ok("native") => helio_pass_tsr::TsrQuality::Native,
-        _ => helio_pass_tsr::TsrQuality::Balanced,
+        Ok("performance") => Some(helio_pass_tsr::TsrQuality::Performance),
+        Ok("quality") => Some(helio_pass_tsr::TsrQuality::Quality),
+        Ok("native") => Some(helio_pass_tsr::TsrQuality::Native),
+        Ok("fxaa") => None,
+        _ => Some(helio_pass_tsr::TsrQuality::Balanced),
     }
 }
 
@@ -265,7 +268,11 @@ impl Gfx {
             pass.set_appearance(Some(appearance));
             Box::new(pass)
         });
-        let mut renderer_config = RendererConfig::new(size[0], size[1], surface_format).with_tsr_quality(tsr_quality());
+        let renderer_config = RendererConfig::new(size[0], size[1], surface_format);
+        let mut renderer_config = match tsr_quality() {
+            Some(quality) => renderer_config.with_tsr_quality(quality),
+            None => renderer_config.without_tsr(),
+        };
         // The meadow, grown on the terrain the planet pass draws
         // (`VOXEL_CRAFT_NO_FOLIAGE`: bare turf, for A/B measurements).
         renderer_config.enable_foliage = std::env::var_os("VOXEL_CRAFT_NO_FOLIAGE").is_none();

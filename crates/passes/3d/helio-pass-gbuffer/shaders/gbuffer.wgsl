@@ -8,7 +8,8 @@ enable wgpu_binding_array;
 //!   target 1 – normal    (Rgba16Float)
 //!   target 2 – orm       (Rgba8Unorm)
 //!   target 3 – emissive  (Rgba16Float)
-//!   target 7 – velocity  (Rg16Float)  — screen-space motion in pixels/frame
+//!   target 7 – velocity  (Rgba16Float) — screen-space motion in pixels/frame
+//!                                          (helio-pass-tsr MOTION_VECTORS)
 //!
 //! Resolved F0 is packed into unused alpha channels:
 //!   normal.a   = F0.r
@@ -169,6 +170,9 @@ struct VertexOutput {
     @location(5) @interpolate(flat) material_id:    u32,
     @location(6) lightmap_uv:        vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
     @location(7) prev_clip_position: vec4<f32>,  // Previous frame clip-space position (velocity)
+    // 1 when the instance moves by itself (its transform, skin or coordinate
+    // space changed since last frame), else 0.
+    @location(8) @interpolate(flat) moving: u32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -269,6 +273,11 @@ fn vs_main(v: Vertex, @location(15) slot: u32, @builtin(vertex_index) vertex_ind
     out.tex_coords         = v.tex_coords;
     out.material_id        = inst.material_id;
     out.prev_clip_position = prev_clip;
+    let moved = any(inst.prev_model[0] != inst.transform[0]) || any(inst.prev_model[1] != inst.transform[1])
+        || any(inst.prev_model[2] != inst.transform[2]) || any(inst.prev_model[3] != inst.transform[3])
+        || any(space_prev[0] != space[0]) || any(space_prev[1] != space[1])
+        || any(space_prev[2] != space[2]) || any(space_prev[3] != space[3]);
+    out.moving = select(0u, 1u, moved || inst.bone_palette_count > 0u);
     
     // Compute lightmap UV from atlas region.
     //
@@ -319,7 +328,7 @@ struct GBufferOutput {
     @location(4) lightmap_uv: vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
-    @location(7) velocity:    vec4<f32>,  // motion.xy, view-depth residual.z, validity.w
+    @location(7) velocity:    vec4<f32>,  // motion.xy, view-depth residual.z, flags.w (compute_velocity)
 }
 
 // ── Surface data passed to GBuffer packing ──────────────────────────────────
@@ -499,7 +508,10 @@ fn compute_velocity(input: VertexOutput) -> vec4<f32> {
     }
     // Store only the small reconstruction error in FP16, not the large view
     // depth itself. This preserves contact-scale precision at long distances.
-    return vec4<f32>(input.clip_position.xy-prev_pixel,residual,valid);
+    // w: 2 when the residual is valid, plus 1 when the instance moves by
+    // itself (helio-pass-tsr MOTION_VECTORS: static geometry leaves its
+    // camera motion to TSR, which derives it from depth at full precision).
+    return vec4<f32>(input.clip_position.xy-prev_pixel,residual,valid+f32(input.moving));
 }
 
 // Basic SceneDB materials carry texture-store indices directly. An explicit

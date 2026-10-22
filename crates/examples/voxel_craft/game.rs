@@ -7,6 +7,7 @@ use crate::input::Input;
 use crate::player::interaction::Interaction;
 use crate::player::Player;
 use crate::terrain::{self, Biome};
+use crate::world::edits::Edit;
 use crate::world::World;
 use glam::DVec3;
 use helio_pass_voxel_planet::{Cell, Planet};
@@ -184,7 +185,7 @@ impl Game {
                 }
             }
         }
-        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, self.gfx.settled(), &mut self.quit));
+        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, self.gfx.settled(), &mut self.quit));
         let (eye, look) = self.player.camera(&self.world);
         let outline = self.interaction.outline(&self.world);
         let view = View {
@@ -254,7 +255,32 @@ struct Tour {
     /// saved of this one: still frames, to measure flicker.
     burst: u32,
     shots: u32,
+    /// A flight instead of the poses (`VOXEL_CRAFT_FLIGHT`).
+    flight: Option<Flight>,
 }
+
+/// `VOXEL_CRAFT_FLIGHT=<frames>` with `VOXEL_CRAFT_SHOTS`: a sideways flight
+/// past glowstone, for ghosting (history that trails behind what moves on
+/// screen). Glowstone goes up ahead of the spawn: a column on the ground,
+/// and a block in the air in front of distant terrain. The camera settles at
+/// the start, then moves `VOXEL_CRAFT_FLIGHT_SPEED` m/s (the fly speed) to
+/// its right in steps of a 60 Hz frame, saving every frame as
+/// `flight_NNN.png`; then it goes back to every eighth of those places and,
+/// once still and converged there, saves `still_NNN.png`: what the frame
+/// should look like. `tools/ghosting.py` compares them.
+struct Flight {
+    frames: u32,
+    /// Metres a frame, and along which direction from where.
+    step: f64,
+    start: DVec3,
+    along: DVec3,
+    /// Frames flown so far; then the stills shot so far.
+    flown: u32,
+    stills: u32,
+}
+
+/// Flight frames between still references.
+const FLIGHT_STILL_EVERY: u32 = 8;
 
 /// (turn about up in degrees, pitch, third person, metres above the start).
 const POSES: &[(f64, f64, bool, f64)] = &[
@@ -274,14 +300,86 @@ impl Tour {
     fn new(dir: String) -> Self {
         let _ = std::fs::create_dir_all(&dir);
         let burst = std::env::var("VOXEL_CRAFT_BURST").ok().and_then(|v| v.parse().ok()).unwrap_or(1u32).max(1);
-        Self { dir, pose: 0, waited: u32::MAX, trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some(), burst, shots: 0 }
+        let flight = std::env::var("VOXEL_CRAFT_FLIGHT").ok().and_then(|v| v.parse().ok()).map(|frames: u32| Flight {
+            frames: frames.max(1),
+            step: std::env::var("VOXEL_CRAFT_FLIGHT_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(FLY_SPEED) / 60.0,
+            start: DVec3::ZERO,
+            along: DVec3::ZERO,
+            flown: 0,
+            stills: 0,
+        });
+        Self { dir, pose: 0, waited: u32::MAX, trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some(), burst, shots: 0, flight }
+    }
+
+    /// The flight's frame: places the glowstone and the camera first, then
+    /// flies, then shoots the stills; the path to save this frame to.
+    fn fly(&mut self, player: &mut Player, world: &mut World, settled: bool, quit: &mut bool) -> Option<String> {
+        let frames = |name: &str, default: u32| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        let flight = self.flight.as_mut()?;
+        if self.waited == u32::MAX {
+            let frame = player.frame();
+            let (f, r, u) = (frame.forward, frame.right, frame.up);
+            flight.start = player.position + u * 1.0;
+            flight.along = r;
+            // The ground under a point, and blocks stacked on it.
+            let mut edits = Vec::new();
+            for (ahead, side, height) in [(7.0, -1.0, 3), (7.0, 5.0, 2), (12.0, 9.0, 1)] {
+                let above = flight.start + f * ahead + r * side + u * 6.0;
+                if let Some(hit) = world.raycast(above, -u, 30.0) {
+                    let base = world.cell_centre(hit.previous);
+                    for k in 0..height {
+                        edits.push(Edit::Build(world.cell_at(base + u * (BLOCK_M * f64::from(k))), Block::Glowstone));
+                    }
+                }
+            }
+            edits.push(Edit::Build(world.cell_at(flight.start + f * 9.0 + r * 3.0 + u * 1.5), Block::Glowstone));
+            world.edit(&edits);
+            player.flying = true;
+            player.third_person = false;
+            player.pitch = -0.1;
+            player.position = flight.start;
+            player.velocity = DVec3::ZERO;
+            self.waited = 0;
+        }
+        self.waited += 1;
+        let at = |n: u32| flight.start + flight.along * (flight.step * f64::from(n));
+        if flight.flown < flight.frames {
+            let minimum = frames("VOXEL_CRAFT_WAIT", 120);
+            if !((settled && self.waited >= minimum) || self.waited >= minimum.max(frames("VOXEL_CRAFT_WAIT_MAX", 900))) {
+                return None;
+            }
+            player.position = at(flight.flown);
+            flight.flown += 1;
+            return Some(format!("{}/flight_{:03}.png", self.dir, flight.flown - 1));
+        }
+        // The stills: each a fresh pose that converges.
+        let n = flight.stills * FLIGHT_STILL_EVERY;
+        if n >= flight.frames {
+            *quit = true;
+            self.flight = None;
+            self.pose = usize::MAX / 2;
+            return None;
+        }
+        if player.position != at(n) {
+            player.position = at(n);
+            self.waited = 0;
+            return None;
+        }
+        if self.waited < frames("VOXEL_CRAFT_STILL_WAIT", 90) {
+            return None;
+        }
+        flight.stills += 1;
+        Some(format!("{}/still_{:03}.png", self.dir, n))
     }
 
     /// Advances the tour by a frame; the path to save this frame to, if it
     /// should be.
-    fn step(&mut self, player: &mut Player, settled: bool, quit: &mut bool) -> Option<String> {
+    fn step(&mut self, player: &mut Player, world: &mut World, settled: bool, quit: &mut bool) -> Option<String> {
         if self.pose >= usize::MAX / 2 {
             return None;
+        }
+        if self.flight.is_some() {
+            return self.fly(player, world, settled, quit);
         }
         if self.waited == u32::MAX {
             self.set_pose(player);

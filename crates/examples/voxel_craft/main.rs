@@ -17,7 +17,8 @@
 //! mouse wheel or 1-9 pick from the hotbar, V third-person camera, T speed
 //! up time, R respawn, Esc release the mouse.
 //!
-//! Environment: `VOXEL_CRAFT_QUALITY` (performance|balanced|quality|native),
+//! Environment: `VOXEL_CRAFT_QUALITY` (performance|balanced|quality|native,
+//! or fxaa: no TSR),
 //! `VOXEL_CRAFT_LOD` (cells per pixel, 0.6), `VOXEL_CRAFT_DISTANCE` (view
 //! distance in metres); `VOXEL_CRAFT_SHOTS=<dir>` runs the screenshot tour
 //! (see the README).

@@ -1958,6 +1958,10 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let through = materials.m[min(material, 31u)].light.x;
     out.sss = vec4<f32>(select(vec3<f32>(0.0), albedo, through > 0.0), 0.0);
     out.extra = vec4<f32>(0.0, 0.0, 0.0, select(0.0, f32(SURFACE_FLAG_TWO_SIDED), through > 0.0));
+    // The terrain is static: w 0 (helio-pass-tsr MOTION_VECTORS) leaves its
+    // motion, the camera's, to TSR, which derives it from depth at full
+    // precision. These eye-relative matrices are f32 products that cancel
+    // the camera's position: near points move by up to 0.05 px of rounding.
     let previous = params.prev_view_proj * vec4<f32>(position, 1.0);
     var velocity = vec2<f32>(0.0);
     if previous.w > 0.0 {

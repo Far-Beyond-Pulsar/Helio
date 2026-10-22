@@ -3,8 +3,9 @@
 //! of foliage (texel-sized high-contrast texture, depth edges, ground at a
 //! grazing angle, lit by stochastic per-frame samples as the voxel terrain's
 //! sun and sky are); response to a light switching without anything moving;
-//! and trails behind moving edges (object motion without motion vectors, and
-//! camera motion).
+//! trails behind moving edges (object motion without motion vectors, and
+//! camera motion); and behind an emissive object over foliage, moving by
+//! itself or by parallax, with and without motion vectors.
 //!
 //! The input is a procedural scene point-sampled at each frame's jittered
 //! raster positions, exactly as a rasterizer would, so every number here is
@@ -23,6 +24,9 @@ struct Scene {
     frame_size: vec4<f32>,
     // frame index, background depth (near edge), foreground depth, background depth (far edge)
     extra: vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+    // the bar's world x shift since last frame; 1 to write its motion vectors
+    motion: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> s: Scene;
 
@@ -78,10 +82,19 @@ fn sky(p: vec2<f32>) -> f32 {
     return 0.7 + 0.3 * sin(p.x * 9.0 + 1.3) * cos(p.y * 7.0);
 }
 
+// The bar: `frame_size.w` output pixels wide from world x `params.y` on
+// (none if 0). Over the foliage it is an emissive block 1 m in front of the
+// leaf blocks, many times as bright as their sunlit texels.
+const EMISSIVE_BAR: f32 = 30.0;
+fn on_bar(p: vec2<f32>) -> bool {
+    return s.frame_size.w > 0.0 && p.x >= s.params.y && p.x < s.params.y + s.frame_size.w * s.frame_size.z;
+}
+
 fn scene(p: vec2<f32>) -> vec3<f32> {
     let px = s.frame_size.z;
     var c = vec3<f32>(0.05);
     if s.params.z > 1.5 {
+        if on_bar(p) { return vec3<f32>(EMISSIVE_BAR); }
         return albedo(p) * (4.0 * sun(p) + 0.6 * sky(p)) * s.params.x;
     }
     if s.params.z < 0.5 {
@@ -108,7 +121,7 @@ fn scene(p: vec2<f32>) -> vec3<f32> {
                 if wire(p, vec2<f32>(0.0, 0.2 + f32(i) * 0.25), 1.5, (0.3 + f32(i) * 0.25) * px) { c = vec3<f32>(1.0); }
             }
         }
-    } else if p.x >= s.params.y && p.x < s.params.y + s.frame_size.w * px {
+    } else if on_bar(p) {
         c = vec3<f32>(1.0);
     }
     return c * s.params.x;
@@ -137,6 +150,8 @@ fn stochastic_foliage(frag: vec2<f32>) -> vec3<f32> {
 
 struct Out {
     @location(0) colour: vec4<f32>,
+    // helio-pass-tsr MOTION_VECTORS: the bar's, when it writes them.
+    @location(1) motion: vec4<f32>,
     @builtin(frag_depth) depth: f32,
 }
 
@@ -148,9 +163,25 @@ struct Out {
     // steeply, as ground seen at a grazing angle does.
     let ground = select(s.extra.y, mix(s.extra.w, s.extra.y, frag.y / s.frame_size.y), s.params.z > 1.5);
     out.depth = select(ground, s.extra.z, s.params.z > 1.5 && foreground(centre));
+    out.motion = vec4<f32>(0.0);
+    if s.params.z > 1.5 && on_bar(centre) {
+        // Depth is linear in view z (orthographic): the plane 3 m away is at
+        // extra.y, the leaf blocks 2 m away at extra.z, the bar 1 m away.
+        out.depth = 2.0 * s.extra.z - s.extra.y;
+        if s.motion.y > 0.0 {
+            // Where this point of the bar was last frame, in last frame's
+            // (jittered) raster.
+            let previous = s.prev_view_proj * vec4<f32>(centre.x - s.motion.x, centre.y, 0.0, 1.0);
+            let ndc = previous.xy / previous.w;
+            let raster = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * s.frame_size.xy;
+            out.motion = vec4<f32>(frag.xy - raster, 0.0, 1.0);
+        }
+    }
     if n <= 1 {
         // One sample at the jittered pixel centre, as rasterization takes it.
-        if s.params.z > 1.5 {
+        if s.params.z > 1.5 && on_bar(centre) {
+            out.colour = vec4<f32>(vec3<f32>(EMISSIVE_BAR), 1.0);
+        } else if s.params.z > 1.5 {
             out.colour = vec4<f32>(stochastic_foliage(frag.xy), 1.0);
         } else {
             out.colour = vec4<f32>(scene(centre), 1.0);
@@ -177,6 +208,8 @@ struct SceneUniform {
     params: [f32; 4],
     frame_size: [f32; 4],
     extra: [f32; 4],
+    prev_view_proj: [f32; 16],
+    motion: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -189,14 +222,18 @@ struct Content {
     /// Camera position along world x.
     pan: f32,
     /// The foliage scene instead: high-contrast texel-sized texture, leaf
-    /// blocks in front of it, and stochastic per-frame-sampled lighting.
+    /// blocks in front of it, and stochastic per-frame-sampled lighting
+    /// (with a bar: an emissive block in front of the leaf blocks).
     foliage: bool,
     /// Mark the foliage's stochastic lighting in the pass's stochastic mask.
     masked: bool,
+    /// The bar writes motion vectors (`MOTION_VECTORS`) for its own motion.
+    motion_vectors: bool,
 }
 
 impl Content {
-    const DETAIL: Self = Self { brightness: 1.0, bar: None, bar_width: 0.0, pan: 0.0, foliage: false, masked: false };
+    const DETAIL: Self =
+        Self { brightness: 1.0, bar: None, bar_width: 0.0, pan: 0.0, foliage: false, masked: false, motion_vectors: false };
     const FOLIAGE: Self = Self { foliage: true, ..Self::DETAIL };
     const FOLIAGE_MASKED: Self = Self { masked: true, ..Self::FOLIAGE };
 }
@@ -229,6 +266,10 @@ struct Fixture {
     color_view: wgpu::TextureView,
     /// The stochastic mask the fixture publishes (`STOCHASTIC_MASK`).
     mask_view: wgpu::TextureView,
+    /// The motion vectors it publishes (`MOTION_VECTORS`), and the reference
+    /// draw's (unused).
+    motion_view: wgpu::TextureView,
+    reference_motion_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
     target_view: wgpu::TextureView,
     reference: wgpu::Texture,
@@ -241,6 +282,11 @@ struct Fixture {
     scene_uniform: wgpu::Buffer,
     scene_bind: wgpu::BindGroup,
     previous_view_proj: Option<Mat4>,
+    /// The bar's world x last frame.
+    previous_bar: Option<f32>,
+    /// The bar's shift since last frame as its motion vectors say, for the
+    /// next frame only (a writer's bad vectors).
+    bar_shift_override: Option<f32>,
 }
 
 /// One output pixel in world units: the camera spans world [-1, 1].
@@ -283,6 +329,8 @@ impl Fixture {
             | wgpu::TextureUsages::COPY_SRC;
         let color = texture(internal, wgpu::TextureFormat::Rgba16Float, color_usage);
         let mask = texture(internal, wgpu::TextureFormat::R8Unorm, color_usage);
+        let motion = texture(internal, wgpu::TextureFormat::Rgba16Float, color_usage);
+        let reference_motion = texture(output, wgpu::TextureFormat::Rgba16Float, color_usage);
         let reference = texture(output, wgpu::TextureFormat::Rgba16Float, color_usage);
         let target = texture(output, wgpu::TextureFormat::Rgba16Float, color_usage);
         let depth = texture(
@@ -317,7 +365,7 @@ impl Fixture {
                 module: &module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into()), Some(wgpu::TextureFormat::Rgba16Float.into())],
             }),
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -354,7 +402,8 @@ impl Fixture {
             TsrPass::new(&device, internal[0], internal[1], output[0], output[1],
                 wgpu::TextureFormat::Rgba16Float, quality)
             .with_intermediate_output()
-            .with_stochastic_mask(),
+            .with_stochastic_mask()
+            .with_motion_vectors(),
         ));
         graph.lock(internal[0], internal[1]);
         graph.set_delta_time(1.0 / 60.0);
@@ -372,6 +421,8 @@ impl Fixture {
             output,
             color_view: color.create_view(&Default::default()),
             mask_view: mask.create_view(&Default::default()),
+            motion_view: motion.create_view(&Default::default()),
+            reference_motion_view: reference_motion.create_view(&Default::default()),
             color,
             depth_view,
             target_view: target.create_view(&Default::default()),
@@ -383,6 +434,8 @@ impl Fixture {
             scene_uniform,
             scene_bind,
             previous_view_proj: None,
+            previous_bar: None,
+            bar_shift_override: None,
         })
     }
 
@@ -393,26 +446,31 @@ impl Fixture {
         glam::camera::rh::view::look_at_mat4(Vec3::new(pan, 0.0, 3.0), Vec3::new(pan, 0.0, 0.0), Vec3::Y)
     }
 
-    fn draw_scene(&self, view: &wgpu::TextureView, depth: &wgpu::TextureView, inv_view_proj: Mat4, content: Content,
-        size: [u32; 2], samples: f32) {
+    /// Draws `content` into `view`, `depth` and `motion` (the bar's motion
+    /// vectors, `bar_shift` world units since `prev_view_proj`'s frame).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_scene(&self, view: &wgpu::TextureView, depth: &wgpu::TextureView, motion: &wgpu::TextureView,
+        inv_view_proj: Mat4, prev_view_proj: Mat4, bar_shift: f32, content: Content, size: [u32; 2], samples: f32) {
         let scene = if content.foliage { 2.0 } else if content.bar.is_some() { 1.0 } else { 0.0 };
         let uniform = SceneUniform {
             inv_view_proj: inv_view_proj.to_cols_array(),
             params: [content.brightness, content.bar.unwrap_or(0.0), scene, samples],
             frame_size: [size[0] as f32, size[1] as f32, world_per_pixel(self.output), content.bar_width],
             extra: [self.input.frame as f32, self.plane_depths[0], self.plane_depths[1], self.plane_depths[2]],
+            prev_view_proj: prev_view_proj.to_cols_array(),
+            motion: [bar_shift, if content.motion_vectors { 1.0 } else { 0.0 }, 0.0, 0.0],
         };
         self.queue().write_buffer(&self.scene_uniform, 0, bytemuck::bytes_of(&uniform));
         let mut encoder = self.device().create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TSR fixture scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                color_attachments: &[view, motion].map(|view| Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })),
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
@@ -445,7 +503,11 @@ impl Fixture {
         );
         self.queue().write_buffer(&self.input.camera, 0, bytemuck::cast_slice(&[camera, camera]));
         self.input.camera_data = camera;
-        self.draw_scene(&self.color_view, &self.depth_view, view_proj.inverse(), content, self.internal, 1.0);
+        let bar = content.bar.unwrap_or(0.0);
+        let bar_shift = self.bar_shift_override.take().unwrap_or(bar - self.previous_bar.unwrap_or(bar));
+        self.previous_bar = Some(bar);
+        self.draw_scene(&self.color_view, &self.depth_view, &self.motion_view, view_proj.inverse(), previous, bar_shift,
+            content, self.internal, 1.0);
 
         let mut registry = helio_core::ResourceRegistry::empty();
         // The whole of the foliage's lighting is sampled stochastically.
@@ -467,6 +529,7 @@ impl Fixture {
         self.queue().submit([encoder.finish()]);
         registry.write(helio_core::ResourceKey::new("pre_aa"), &self.color_view, "Fixture");
         registry.write(helio_core::ResourceKey::new(STOCHASTIC_MASK), &self.mask_view, "Fixture");
+        registry.write(helio_core::ResourceKey::new(MOTION_VECTORS), &self.motion_view, "Fixture");
         self.graph
             .execute_with_registry(&self.input, &self.target_view, &self.depth_view, &mut registry)
             .unwrap();
@@ -478,8 +541,9 @@ impl Fixture {
     /// Box-filtered ground truth of `content` at output resolution.
     fn reference(&self, content: Content) -> Vec<f32> {
         let proj = helio_core::depth::orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 10.0);
-        self.draw_scene(&self.reference_view, &self.reference_depth_view, (proj * Self::view(content.pan)).inverse(), content,
-            self.output, 8.0);
+        let view_proj = proj * Self::view(content.pan);
+        self.draw_scene(&self.reference_view, &self.reference_depth_view, &self.reference_motion_view, view_proj.inverse(),
+            view_proj, 0.0, content, self.output, 8.0);
         self.read(&self.reference).iter().map(luma).collect()
     }
 
@@ -653,9 +717,9 @@ fn trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_motion: bool
         // The bar starts near the left edge; camera motion moves the camera
         // left so the world-fixed bar travels right on screen.
         let content = if camera_motion {
-            Content { brightness: 1.0, bar: Some(-0.8), bar_width: width, pan: -travelled, foliage: false, masked: false }
+            Content { bar: Some(-0.8), bar_width: width, pan: -travelled, ..Content::DETAIL }
         } else {
-            Content { brightness: 1.0, bar: Some(-0.8 + travelled), bar_width: width, pan: 0.0, foliage: false, masked: false }
+            Content { bar: Some(-0.8 + travelled), bar_width: width, ..Content::DETAIL }
         };
         let output = fixture.frame(content);
         if frame < FRAMES - MEASURED {
@@ -676,6 +740,58 @@ fn trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_motion: bool
         error += mean_abs_difference(&output, &reference) / MEASURED as f32;
     }
     Some((trails, error))
+}
+
+/// The fixture shader's `EMISSIVE_BAR`.
+const EMISSIVE_BAR: f32 = 30.0;
+
+/// An emissive bar `width` output pixels wide 1 m in front of the foliage,
+/// moving right on screen at `speed` output pixels per frame, either by
+/// itself with the camera still, or by parallax: the camera pans at half
+/// that speed and the bar, nearer than anything, moves twice as fast as the
+/// foliage (the orthographic fixture has no parallax of its own, so the bar
+/// moves in the world by the pan; without motion vectors reprojection, which
+/// follows the camera, then misses it as it missed glowstone flown past).
+/// With `motion_vectors` the bar writes them. The foliage's thin features
+/// lock pixels (step 7), and a lock must not keep the bar's light once the
+/// foliage shows there again. Returns the mean count, per frame, of pixels
+/// more than 1.5 px from the bar brighter by over a tenth of the bar than the
+/// same pass shown the foliage alone, in lockstep (same camera, input and
+/// jitter but for the bar). Under that, a fresh pixel's stochastic lighting
+/// differs from the converged one's by up to about 2.
+fn emissive_trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_motion: bool, motion_vectors: bool)
+    -> Option<f32> {
+    let mut fixture = Fixture::new(quality, [128, 128])?;
+    let mut plain = Fixture::new(quality, [128, 128])?;
+    let px = world_per_pixel(fixture.output);
+    let mut trails = 0.0;
+    const FRAMES: usize = 48;
+    const MEASURED: usize = 16;
+    for frame in 0..FRAMES {
+        let (bar, pan) = if camera_motion {
+            let pan = frame as f32 * speed * 0.5 * px;
+            (-0.8 + pan, -pan)
+        } else {
+            (-0.8 + frame as f32 * speed * px, 0.0)
+        };
+        let foliage = Content { pan, ..Content::FOLIAGE };
+        let output = fixture.frame(Content { bar: Some(bar), bar_width: width, motion_vectors, ..foliage });
+        let without = plain.frame(foliage);
+        if frame < FRAMES - MEASURED {
+            continue;
+        }
+        // Screen-space left edge of the bar, in output pixels.
+        let left = (bar - pan + 1.0) / px;
+        let right = left + width;
+        let count = output.iter().zip(&without).enumerate()
+            .filter(|(i, (o, w))| {
+                let x = (i % 128) as f32 + 0.5;
+                (x < left - 1.5 || x > right + 1.5) && *o - *w > 0.1 * EMISSIVE_BAR
+            })
+            .count();
+        trails += count as f32 / MEASURED as f32;
+    }
+    Some(trails)
 }
 
 // Thresholds, from the metrics on an RTX 3060 (Vulkan). The still-pixel
@@ -774,6 +890,54 @@ fn moving_edges_leave_no_trails() {
             assert!(error < 0.01, "{quality:?}: {width} px bar under {motion} motion: error {error:.5} vs truth");
         }
     }
+}
+
+/// The ghosting seen flying past glowstone in voxel_craft: locks on the
+/// foliage's thin features skipped the clip for history that had passed the
+/// disocclusion test only by its depth slope allowance, and kept the
+/// emissive block's light in streaks behind it. With motion vectors, history
+/// the bar uncovered is found by the reconstruction; without, under camera
+/// motion, locks yield to motion. (Object motion without motion vectors, a
+/// still camera, is the one case left to the box and the change detectors.)
+#[test]
+fn emissive_object_over_foliage_leaves_no_trail() {
+    for quality in [TsrQuality::Native, TsrQuality::Balanced] {
+        for (speed, camera_motion, motion_vectors) in
+            [(1.0, false, true), (2.0, false, true), (2.0, true, true), (4.0, true, true), (2.0, true, false)] {
+            let Some(trails) = emissive_trail_pixels(quality, 6.0, speed, camera_motion, motion_vectors) else { return };
+            let motion = if camera_motion { "parallax" } else { "object" };
+            let vectors = if motion_vectors { "with" } else { "without" };
+            eprintln!("TSR {quality:?}: emissive bar over foliage, {motion} motion at {speed} px/frame {vectors} motion \
+                vectors, trails {trails:.1} px/frame");
+            assert!(trails <= 4.0, "{quality:?}: emissive bar, {motion} motion at {speed} px/frame {vectors} motion \
+                vectors, trails {trails:.1} px per frame");
+        }
+    }
+}
+
+/// A frame whose motion vectors are NaN (a writer dividing by a zero w)
+/// reads as a frame without them: through the history position they would
+/// reach the accumulated state, and a NaN there kept a pixel's output NaN,
+/// black, for good. The run must match one whose bar wrote no vectors that
+/// frame, and stay finite.
+#[test]
+fn non_finite_motion_vectors_read_as_none() {
+    let Some(mut fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
+    let Some(mut reference) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
+    let px = world_per_pixel(fixture.output);
+    let content = |frame: usize| Content { bar: Some(-0.8 + frame as f32 * px), bar_width: 6.0, motion_vectors: true, ..Content::FOLIAGE };
+    let (mut output, mut expected) = (Vec::new(), Vec::new());
+    for frame in 0..32 {
+        if frame == 16 {
+            fixture.bar_shift_override = Some(f32::NAN);
+        }
+        output = fixture.frame(content(frame));
+        expected = reference.frame(Content { motion_vectors: frame != 16, ..content(frame) });
+    }
+    let non_finite = output.iter().filter(|v| !v.is_finite()).count();
+    assert_eq!(non_finite, 0, "{non_finite} pixels non-finite");
+    let difference = mean_abs_difference(&output, &expected);
+    assert!(difference < 1.0e-4, "mean difference from a run without the frame's vectors {difference}");
 }
 
 /// A frame whose input holds NaN, then one holding infinities (a lighting

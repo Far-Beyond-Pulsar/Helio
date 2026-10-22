@@ -7,15 +7,27 @@
 //! Registers bound occupancy, and occupancy bounds how much memory latency a
 //! traversal loop hides; no profiler reports this for Vulkan compute on this
 //! machine. Sources are the Earth program's (`engine::validation_sources`),
-//! compiled with naga as wgpu does (index accesses restricted, buffer
-//! accesses left to the driver's robustness).
+//! or the WGSL files in `SHADER_STATS_FILES` (comma-separated, Helio's
+//! `//!use` prelude resolved: any pass's compute shader, or variants of one
+//! to compare; binary size / 16 is about the instruction count), compiled
+//! with naga as wgpu does (index accesses restricted, buffer accesses left
+//! to the driver's robustness).
 
 use ash::vk;
 use std::ffi::CStr;
 
 fn main() {
     let filter = std::env::args().nth(1);
-    let sources = helio_pass_voxel_planet::engine::validation_sources();
+    let sources: Vec<(String, String)> = match std::env::var("SHADER_STATS_FILES") {
+        Ok(files) => files
+            .split(',')
+            .map(|f| {
+                let name = std::path::Path::new(f).file_name().map_or(f.to_string(), |n| n.to_string_lossy().into_owned());
+                (name, helio_core::shader::resolve(&std::fs::read_to_string(f).expect("a WGSL file")).into_owned())
+            })
+            .collect(),
+        Err(_) => helio_pass_voxel_planet::engine::validation_sources(),
+    };
     unsafe {
         let entry = ash::Entry::load().expect("Vulkan loader");
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
