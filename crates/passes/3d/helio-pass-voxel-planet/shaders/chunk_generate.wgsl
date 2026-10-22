@@ -1607,6 +1607,18 @@ fn spawn_word(s: u32, w: u32) -> u32 {
     return features[features[1] + 24u * s + w];
 }
 
+// Whether ground at layer `ground` of base column `(i, j)` of `face` lies
+// within spawn `s`'s heights as they wander there
+// (`CompiledSpawn::grows_at`).
+fn spawn_grows_at(s: u32, face: u32, i: i32, j: i32, ground: i32) -> bool {
+    var g = ground;
+    let shift = spawn_word(s, 20u);
+    if shift > 0u {
+        g += scale_q16(noise(domain_point(face, i, j, 0u), shift, spawn_word(s, 5u) ^ 0x7a3de1f1u), bitcast<i32>(spawn_word(s, 19u)));
+    }
+    return g >= bitcast<i32>(spawn_word(s, 8u)) && g <= bitcast<i32>(spawn_word(s, 9u));
+}
+
 fn stamp_word(t: u32, w: u32) -> u32 {
     return features[features[2] + 16u * t + w];
 }
@@ -1815,7 +1827,8 @@ fn far_cover(tile: TileJob, i: i32, j: i32, p: vec3<i32>, top: i32, height: i32,
     var material = NONE;
     for (var s = 0u; s < features[0]; s++) {
         let far = spawn_word(s, 14u);
-        if feature_drawn(level, s) || far == 0u || ground < bitcast<i32>(spawn_word(s, 8u)) || ground > bitcast<i32>(spawn_word(s, 9u)) { continue; }
+        let mid = 1 << (level - 1u);
+        if feature_drawn(level, s) || far == 0u || !spawn_grows_at(s, tile.face, (i << level) + mid, (j << level) + mid, ground) { continue; }
         // The column holds canopy with the spawn's coverage for odds.
         if (hash3(i, j, i32((level << 3u) | tile.face), spawn_word(s, 5u) ^ 0xfa7f0e55u) >> 16u) >= spawn_word(s, 18u) { continue; }
         if (spawn_word(s, 6u) | spawn_word(s, 7u)) != 0u {
@@ -1830,7 +1843,6 @@ fn far_cover(tile: TileJob, i: i32, j: i32, p: vec3<i32>, top: i32, height: i32,
             let threshold = bitcast<i32>(spawn_word(s, 4u));
             var grows = threshold < 0;
             if level < spawn_word(s, 16u) {
-                let mid = 1 << (level - 1u);
                 grows = noise(domain_point(tile.face, (i << level) + mid, (j << level) + mid, 0u), shift, spawn_word(s, 5u) ^ 0x632be5abu) > threshold;
             }
             if !grows { continue; }
@@ -2097,7 +2109,7 @@ fn feature_candidate(job: u32, reads: u32, face: u32, s: u32, g: vec2<i32>) -> v
     let j = anchor.y;
     let column = feature_ground(job, reads, face, i, j);
     let ground = div_floor(column.x, world.grid.y);
-    if ground < bitcast<i32>(spawn_word(s, 8u)) || ground > bitcast<i32>(spawn_word(s, 9u)) { return none; }
+    if !spawn_grows_at(s, face, i, j, ground) { return none; }
     if (spawn_word(s, 6u) | spawn_word(s, 7u)) != 0u {
         // The terrain's rules at its top cell on level ground.
         let q = volume_point_half(domain_point(face, i, j, 0u), ((ground - 1) << 1u) + 1);

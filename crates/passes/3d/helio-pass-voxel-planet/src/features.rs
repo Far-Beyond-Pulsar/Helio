@@ -51,7 +51,7 @@
 //! ([`CompiledFeatures::far_cover`]).
 
 use crate::grid::Grid;
-use crate::noise::{hash3, noise, ONE};
+use crate::noise::{hash3, noise, scale, ONE};
 use crate::stamp::{coarse_of, cell_of, CompiledPart, Stamp, MAX_STAMP_REACH, UNIT};
 use crate::terrain::{top_cells, Column, TerrainField};
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,10 @@ pub struct Spawn {
     pub surfaces: Vec<u32>,
     /// Ground heights over the datum it grows between (m).
     pub heights_m: [f64; 2],
+    /// How far its heights wander (m) and over what distance (m; 0: they
+    /// do not): a tree line follows noise as the terrain's snowline does,
+    /// not a contour.
+    pub height_wander_m: [f64; 2],
     /// Most layers between the grounds at its anchor and its footprint's
     /// corners (its stamp's reach each way, at least a column).
     pub max_relief: u32,
@@ -118,7 +122,7 @@ impl FeatureSet {
 
 impl Default for Spawn {
     fn default() -> Self {
-        Self { name: String::new(), stamps: Vec::new(), spacing: 8, density: 0.5, field_scale_m: 0.0, field_threshold: -1.0, surfaces: Vec::new(), heights_m: [-1e9, 1e9], max_relief: u32::MAX, sink: 0, far_material: 0, far_height: 0 }
+        Self { name: String::new(), stamps: Vec::new(), spacing: 8, density: 0.5, field_scale_m: 0.0, field_threshold: -1.0, surfaces: Vec::new(), heights_m: [-1e9, 1e9], height_wander_m: [0.0, 0.0], max_relief: u32::MAX, sink: 0, far_material: 0, far_height: 0 }
     }
 }
 
@@ -201,8 +205,11 @@ pub struct CompiledSpawn {
     pub seed: u32,
     /// Surface materials as a bit mask (0: any).
     pub surfaces: u64,
-    /// Ground top layers it grows between.
+    /// Ground top layers it grows between, and how many layers they wander
+    /// by noise of what shift (0: none; `CompiledSpawn::wander`).
     pub tops: [i32; 2],
+    pub wander: i32,
+    pub wander_shift: u32,
     pub max_relief: i32,
     pub sink: i32,
     /// Its far form: material (0: none) and canopy height (layers), and the
@@ -214,6 +221,17 @@ pub struct CompiledSpawn {
     /// The share of ground its stamps cover (Q16): the odds of a far
     /// column holding its canopy.
     pub cover: u32,
+}
+
+impl CompiledSpawn {
+    /// Whether ground at layer `ground` of base column `(i, j)` of `face`
+    /// lies within its heights, as they wander there (`spawn_grows_at` in
+    /// chunk_generate.wgsl).
+    pub fn grows_at(&self, grid: &Grid, face: u8, i: i32, j: i32, ground: i32) -> bool {
+        let wander = if self.wander_shift > 0 { scale(noise(grid.domain_point(face, i, j, 0), self.wander_shift, self.seed ^ 0x7a3d_e1f1), self.wander) } else { 0 };
+        let ground = ground.saturating_add(wander);
+        ground >= self.tops[0] && ground <= self.tops[1]
+    }
 }
 
 /// A world's features compiled for evaluation (CPU and GPU).
@@ -343,6 +361,7 @@ impl CompiledFeatures {
             // The field's scale as the layer stack's noise takes it.
             let field_shift = if s.field_scale_m > 0.0 { (s.field_scale_m / crate::grid::DOMAIN_UNIT).log2().round().clamp(1.0, 30.0) as u32 } else { 0 };
             let layer = |m: f64| (m / voxel).floor().clamp(-2.0e9, 2.0e9) as i32;
+            let wander_shift = if s.height_wander_m[0] > 0.0 && s.height_wander_m[1] > 0.0 { (s.height_wander_m[1] / crate::grid::DOMAIN_UNIT).log2().round().clamp(1.0, 30.0) as u32 } else { 0 };
             spawns.push(CompiledSpawn {
                 stamps: s.stamps.clone(),
                 spacing: s.spacing as i32,
@@ -354,6 +373,8 @@ impl CompiledFeatures {
                 seed: (hash3(n as i32, (seed >> 32) as i32, seed as i32, 0x5eed_f00d)) | 1,
                 surfaces,
                 tops: [layer(s.heights_m[0]) + 1, layer(s.heights_m[1]) + 1],
+                wander: if wander_shift > 0 { layer(s.height_wander_m[0]).min(1 << 26) } else { 0 },
+                wander_shift,
                 max_relief: s.max_relief.min(i32::MAX as u32) as i32,
                 sink: s.sink,
                 far_material: s.far_material,
@@ -403,7 +424,8 @@ impl CompiledFeatures {
             return None;
         }
         for (s, sp) in self.spawns.iter().enumerate() {
-            if self.drawn(s, level) || sp.far_material == 0 || ground < sp.tops[0] || ground > sp.tops[1] {
+            let mid = 1 << (level - 1);
+            if self.drawn(s, level) || sp.far_material == 0 || !sp.grows_at(grid, face, (i << level) + mid, (j << level) + mid, ground) {
                 continue;
             }
             // The column holds canopy with the spawn's coverage for odds.
@@ -417,7 +439,6 @@ impl CompiledFeatures {
                 let pass = if level >= sp.field_level {
                     sp.field_threshold < 0
                 } else {
-                    let mid = 1 << (level - 1);
                     noise(grid.domain_point(face, (i << level) + mid, (j << level) + mid, 0), sp.field_shift, sp.seed ^ 0x632b_e5ab) > sp.field_threshold
                 };
                 if !pass {
@@ -516,8 +537,8 @@ impl CompiledFeatures {
                 sp.field_level,
                 sp.inset as u32,
                 sp.cover,
-                0,
-                0,
+                sp.wander as u32,
+                sp.wander_shift,
                 0,
                 0,
                 0,
@@ -565,7 +586,7 @@ impl CompiledFeatures {
             return None;
         }
         let (ground, surface) = top(face, i, j);
-        if ground < sp.tops[0] || ground > sp.tops[1] {
+        if !sp.grows_at(grid, face, i, j, ground) {
             return None;
         }
         if sp.surfaces != 0 && (surface >= 64 || sp.surfaces & (1 << surface) == 0) {
@@ -724,6 +745,35 @@ mod tests {
     use crate::edits::{Brush, BrushOp, BrushShape};
     use crate::grid::Cell;
     use crate::{Planet, PlanetRecipe};
+
+    /// Heights that wander let ground past their limit grow in places and
+    /// keep ground short of it bare in others, by no more than the wander,
+    /// smoothly over its distance; without wander the limit is a contour.
+    #[test]
+    fn wandering_heights_break_the_contour() {
+        let grid = Grid::new(crate::planet::EARTH_RADIUS, 0.1).unwrap();
+        let spawn = |wander: [f64; 2]| Spawn { stamps: vec![0], heights_m: [-1e9, 100.0], height_wander_m: wander, ..Spawn::default() };
+        let set = FeatureSet { stamps: stamps(), spawns: vec![spawn([20.0, 400.0]), spawn([0.0, 0.0])] };
+        let compiled = CompiledFeatures::new(&set, &grid, 7).unwrap();
+        let (wandering, fixed) = (&compiled.spawns[0], &compiled.spawns[1]);
+        let n = grid.cells() / 2;
+        let (mut above, mut below) = (0, 0);
+        for step in 0..2000 {
+            let (i, j) = (n + step * 37, n - step * 23);
+            for (ground_m, past) in [(110.0, true), (90.0, false)] {
+                let ground = (ground_m / 0.1) as i32;
+                assert_eq!(fixed.grows_at(&grid, 2, i, j, ground), !past);
+                match (wandering.grows_at(&grid, 2, i, j, ground), past) {
+                    (true, true) => above += 1,
+                    (false, false) => below += 1,
+                    _ => {}
+                }
+            }
+            // Never past the wander.
+            assert!(wandering.grows_at(&grid, 2, i, j, (79.0 / 0.1) as i32) && !wandering.grows_at(&grid, 2, i, j, (121.0 / 0.1) as i32));
+        }
+        assert!(above > 100 && below > 100, "{above} grow past the limit, {below} bare short of it");
+    }
 
     /// A tree (trunk and crown) and a hut (walls, its inside and a door
     /// cleared).

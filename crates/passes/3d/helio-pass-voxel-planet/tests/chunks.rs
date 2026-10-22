@@ -1756,7 +1756,7 @@ fn picks_report_the_drawn_hit() {
 
 /// Huts, trees and boulders (`features`): spawns widest first, each spacing
 /// at least its stamps' footprint.
-fn forest() -> FeatureSet {
+fn forest(ground_m: f64) -> FeatureSet {
     let mut hut = Stamp::new();
     hut.fill([-4, -1, -4], [4, 6, 4], material::PLANKS);
     hut.hollow([-3, 0, -3], [3, 5, 3]);
@@ -1785,16 +1785,21 @@ fn forest() -> FeatureSet {
         stamps: vec![hut, tree, boulder, round],
         spawns: vec![
             Spawn { name: "huts".into(), stamps: vec![0], spacing: 48, density: 0.5, max_relief: 4, sink: 1, ..Spawn::default() },
-            Spawn { name: "trees".into(), stamps: vec![1, 3], spacing: 16, density: 0.8, field_scale_m: 30.0, field_threshold: -0.4, max_relief: 3, far_material: material::LEAVES, ..Spawn::default() },
-            Spawn { name: "boulders".into(), stamps: vec![2], spacing: 8, density: 0.15, sink: 1, ..Spawn::default() },
+            // Trees up to a line wandering 20 to 100 m over the ground at
+            // the forest's land (far canopies stop at it), boulders up to
+            // one wandering through it (both sides in view).
+            Spawn { name: "trees".into(), stamps: vec![1, 3], spacing: 16, density: 0.8, field_scale_m: 30.0, field_threshold: -0.4, heights_m: [-1e9, ground_m + 60.0], height_wander_m: [40.0, 300.0], max_relief: 3, far_material: material::LEAVES, ..Spawn::default() },
+            Spawn { name: "boulders".into(), stamps: vec![2], spacing: 8, density: 0.15, heights_m: [-1e9, ground_m + 2.0], height_wander_m: [6.0, 40.0], sink: 1, ..Spawn::default() },
         ],
     }
 }
 
 /// A forest's planet and a land direction on it.
 fn forest_planet() -> (Planet, DVec3) {
-    let planet = Planet::new(PlanetRecipe { features: forest(), ..PlanetRecipe::default() }).unwrap();
-    let dir = land(&planet, 2, 0.31, 0.62);
+    let bare = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&bare, 2, 0.31, 0.62);
+    let ground_m = bare.surface_point(dir, 0.0).length() - bare.grid().radius();
+    let planet = Planet::new(PlanetRecipe { features: forest(ground_m), ..PlanetRecipe::default() }).unwrap();
     (planet, dir)
 }
 

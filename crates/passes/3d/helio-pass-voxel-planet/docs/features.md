@@ -29,9 +29,10 @@ definition (its fingerprint; saves keep the recipe):
     apart);
   - a density (a share of candidates by hash) and a noise field of the
     world (`field_scale_m`, `field_threshold`);
-  - ground rules: the materials it grows on, the heights, the most relief
-    between its anchor's ground and its footprint's corners, how deep it
-    sinks;
+  - ground rules: the materials it grows on, the heights (which may
+    wander by noise of the world, `height_wander_m`: a tree line ragged
+    like the terrain's snowline, not a contour), the most relief between
+    its anchor's ground and its footprint's corners, how deep it sinks;
   - its stamps (variants chosen by hash), turned and mirrored by hash;
   - its **far form** (below): material and canopy height.
 
@@ -62,7 +63,7 @@ spawn's squares by row then column).
   ground its rules accept (its field at the column's middle, or past the
   field's scale the field's majority; heights; ground material) holds the
   canopy's layers from its ground up, a cell solid where they fill half of
-  it. Cells taller than twice the canopy keep its colour: a covered
+  it. Wandering heights are read at the column's middle base column. Cells taller than twice the canopy keep its colour: a covered
   column's natural top is drawn in the far material, so a forest shows to
   the horizon. Near stamps stand over far forms where both apply.
 
