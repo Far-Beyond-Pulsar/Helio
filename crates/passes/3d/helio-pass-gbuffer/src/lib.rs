@@ -509,11 +509,17 @@ impl RenderPass for GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        // `gbuffer_sss`, `gbuffer_extra` and `gbuffer_velocity` are also written
+        // by storage texture when virtual geometry shades its pixels
+        // (`helio-pass-vg-shade`). Not `gbuffer_lightmap_uv`: Rg16Float is not a
+        // storage format (the VG depth pass writes it as an attachment).
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_extra",
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_velocity",
             // XY remain pixel motion. Z is the FP16 view-depth residual and W=2
@@ -521,6 +527,7 @@ impl RenderPass for GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}

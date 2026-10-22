@@ -1247,9 +1247,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Mode 4 (G-buffer readback test) shows albedo read from G-buffer without lighting
     // Mode 5 (World normals) remaps N from [-1,1] → [0,1] as RGB (R=+X, G=+Y, B=+Z)
     // Mode 20 (VG triangle debug): per-face colour written into albedo by vg_gbuffer.wgsl
-    // Mode 21 (VG LOD heatmap): LOD-level colour written into albedo by vg_gbuffer.wgsl
+    // Mode 21 (VG cluster colours) and modes 100..127 (virtual-geometry debug views):
+    // colours written into albedo by helio-pass-vg-shade's debug resolve
     if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u
-    || globals.debug_mode == 20u || globals.debug_mode == 21u {
+    || globals.debug_mode == 20u || globals.debug_mode == 21u
+    || (globals.debug_mode >= 100u && globals.debug_mode < 128u) {
         return vec4<f32>(albedo, alpha);
     }
     if globals.debug_mode == 5u {
@@ -1649,6 +1651,7 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 22u || globals.debug_mode == 23u
         || globals.debug_mode == 24u || globals.debug_mode == 25u
         || globals.debug_mode == 26u || globals.debug_mode == 27u
+        || (globals.debug_mode >= 100u && globals.debug_mode < 128u)
         || globals.debug_mode == 20u || globals.debug_mode == 21u
         || globals.debug_mode == 28u || globals.debug_mode == 29u
         || globals.debug_mode == 32u || globals.debug_mode == 33u

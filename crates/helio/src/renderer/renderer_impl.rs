@@ -432,6 +432,12 @@ impl Renderer {
         self.graph.collect_debug_view_legends()
     }
 
+    /// Menu categories (`(debug_mode, category)`) of the debug views whose
+    /// pass names one.
+    pub fn available_debug_view_categories(&self) -> Vec<(u32, &'static str)> {
+        self.graph.collect_debug_view_categories()
+    }
+
     pub fn set_editor_mode(&mut self, enabled: bool) {
         self.editor_mode = enabled;
         if let Ok(mut s) = self.debug_state.lock() {

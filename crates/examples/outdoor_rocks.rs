@@ -13,7 +13,7 @@
 //!   Q/E         — rotate sun (time of day)
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
-//!   F3          — toggle virtual geometry triangle debug view
+//!   F3          — toggle triangle debug view
 
 mod v3_demo_common;
 
@@ -281,9 +281,9 @@ impl ApplicationHandler for App {
             250.0,
         );
 
-        // ── Load rock FBX files as virtual geometry (meshlets) ────────────
-        // Each rock type is meshletised once at upload time; the GPU cull
-        // compute then handles per-meshlet frustum + backface culling O(1) CPU.
+        // ── Load rock FBX files as classic meshes ────────────
+        // Each rock type is uploaded once and instanced; the GPU cull
+        // compute handles per-instance culling with O(1) CPU.
         let asset_dir = base_dir().join("3d");
         let rock_paths = [
             asset_dir.join("Chiseled_Rock_rafue_Raw.fbx"),
@@ -550,7 +550,7 @@ impl ApplicationHandler for App {
                     .renderer
                     .set_debug_mode(if state.vg_debug { 20 } else { 0 });
                 state.window.set_title(if state.vg_debug {
-                    "Helio — Outdoor Rocks  [VG TRIANGLE DEBUG — F3 to exit]"
+                    "Helio — Outdoor Rocks  [TRIANGLE DEBUG — F3 to exit]"
                 } else {
                     "Helio — Outdoor Rocks"
                 });

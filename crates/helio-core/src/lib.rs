@@ -398,16 +398,16 @@ pub mod depth;
 pub mod entity;
 pub mod error;
 pub mod frame_demands;
+mod frame_inputs;
 pub mod frame_storage;
 pub mod graph;
-mod frame_inputs;
 pub mod movability;
 pub mod profiling;
 pub mod registry;
 pub mod render_environment;
 pub mod resource_keys;
-pub mod scene_input;
 pub mod scene_derivation;
+pub mod scene_input;
 pub mod scene_liveness;
 pub mod shader;
 pub mod temporal;
@@ -469,28 +469,29 @@ pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};
+pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
+pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};
 pub use frame_storage::RenderFrameStorage;
 pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData,
-    GraphTimelineData, GraphTimelinePass, PipelineFormatCache, PipelineFormatKey,
-    PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
-    PassIdentity, RecordingCacheStats, SwapPlan, SwapPolicy, UnitCacheStats,
+    GraphTimelineData, GraphTimelinePass, PassIdentity, PipelineFormatCache, PipelineFormatKey,
+    PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
+    RecordingCacheStats, RenderGraph, SwapPlan, SwapPolicy, UnitCacheStats,
 };
 pub use profiling::{
     FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,
     RenderPassTiming, RenderTimingSnapshot,
 };
-pub use scene_input::{
-    BufferHandle, BufferKey, FlushedRows, SceneBufferProjection, SceneInput, ENTITY_GENERATIONS_KEY,
-};
 pub use scene_derivation::{
     run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
 };
+pub use scene_input::{
+    BufferHandle, BufferKey, FlushedRows, SceneBufferProjection, SceneInput, CAMERA_BUFFER_KEY,
+    ENTITY_GENERATIONS_KEY,
+};
 pub use scene_liveness::SceneBufferLiveness;
-pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use shader::{populate_bind_group_entries, CachedBindGroup, ReflectedShader};
 pub use traits::{
     AsAny, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, MaybeSend, MaybeSync,
     RenderPass,
 };
-pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};

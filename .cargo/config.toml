@@ -1,2 +1,6 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
+[alias]
+# Run the VG museum; the first run downloads and prepares the Stanford scans.
+vg-stress = "run -p examples --features vg-stress --bin vg_stress --release"

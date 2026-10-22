@@ -1,6 +1,6 @@
 //! Foliage quality presets.
 //!
-//! Mirrors the shape of `helio_pass_virtual_geometry::LodQuality`: a four-variant enum
+//! Mirrors the shape of the removed virtual-geometry pass's `LodQuality`: a four-variant enum
 //! whose variants are the only platform difference in the whole foliage stack. Nothing
 //! in the plan's platform matrix is `#[cfg]`-ed out — every pass compiles and runs
 //! everywhere, and a mobile tier is a `FoliageQuality::Low` rather than a second code

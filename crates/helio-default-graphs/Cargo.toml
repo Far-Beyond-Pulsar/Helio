@@ -53,12 +53,19 @@ helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-pass-tsr = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
-helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-lens = { workspace = true }
+helio-vg-format = { path = "../helio-vg-format" }
+helio-vg-stream = { path = "../helio-vg-stream" }
+helio-pass-vg-bvh = { path = "../passes/3d/helio-pass-vg-bvh" }
+helio-pass-vg-cull = { path = "../passes/3d/helio-pass-vg-cull" }
+helio-pass-vg-raster = { path = "../passes/3d/helio-pass-vg-raster" }
+helio-pass-vg-dense = { path = "../passes/3d/helio-pass-vg-dense" }
+helio-pass-vg-shade = { path = "../passes/3d/helio-pass-vg-shade" }
 
 [dev-dependencies]
 pollster = { workspace = true }
+helio-vg-stream = { path = "../helio-vg-stream" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 glam = { workspace = true }
 serde_json = { workspace = true }

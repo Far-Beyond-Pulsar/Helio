@@ -241,7 +241,7 @@ fn cs_join_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
             skin.offset - vertices.offset,
             palette.offset,
             palette.count / 2u,
-            0u,
+            s,
         );
     }
 }

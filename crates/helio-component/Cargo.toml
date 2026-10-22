@@ -65,6 +65,12 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
+# `SceneDerivation`/`BufferKey` for the virtual-geometry instance derivation
+# (src/virtual_geometry_instances.rs); `helio-vg-format` is the frozen GPU ABI.
+helio-core.workspace = true
+helio-vg-format = { path = "../helio-vg-format" }
+helio-vg-stream = { path = "../helio-vg-stream" }
+helio-vg-build = { path = "../helio-vg-build" }
 helio-mats.workspace = true
 # Shader-graph material slots compile at upload time (static_mesh_draw).
 psgc.workspace = true
@@ -104,6 +110,7 @@ twox-hash = { workspace = true }
 
 [dev-dependencies]
 pollster = "=0.4.0"
+naga = { version = "30.0.0", features = ["wgsl-in"] }
 tempfile = { workspace = true }
 
 [[test]]

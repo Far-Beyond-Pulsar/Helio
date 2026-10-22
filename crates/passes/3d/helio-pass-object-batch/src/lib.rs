@@ -35,6 +35,10 @@ const STRUCTURE_KEY: &str = "scene_objects_structure";
 /// The scene join's list of the object slots a frame that only moved objects
 /// rewrote (`helio_default_graphs::scene_join::OBJECTS_MOVED_KEY`).
 const MOVED_KEY: &str = "scene_objects_moved";
+/// Scene buffer of per-`static_objects`-row flags: a non-zero row is drawn by
+/// another renderer (virtual geometry), so the main view's frustum cull skips
+/// it. Shadows still see the row: the classic geometry is the shadow proxy.
+const CLASSIC_SUPPRESSED_KEY: &str = "classic_suppressed";
 const SORT_BITS: usize = 32;
 /// Byte offset of the one-workgroup-per-group dispatch size in
 /// `dispatch_args_groups` (see `cs_prepare_groups`).
@@ -471,7 +475,7 @@ pub struct ObjectBatchPass {
     /// (epoch, content generation) plus row and scratch capacity. The
     /// pipeline is a pure function of these and its own persistent
     /// buffers, so an unchanged key reproduces the previous outputs.
-    last_inputs: Option<[u64; 6]>,
+    last_inputs: Option<[u64; 8]>,
     /// True once a run has seen `last_inputs` twice in a row: the first
     /// repeat rolls every row's previous-frame transform forward to the
     /// current one, after which outputs stop changing and runs are skipped.
@@ -504,6 +508,12 @@ pub struct ObjectBatchPass {
     /// -- `capacity`/dispatch counts are all 0 whenever this is bound, so it
     /// is never actually dereferenced).
     fallback_buf: wgpu::Buffer,
+
+    /// SceneDB buffer `classic_suppressed` (one `u32` per `static_objects` row)
+    /// when published, else a fallback. A non-zero row gets
+    /// `INSTANCE_FLAG_CLASSIC_SUPPRESSED`, so the main view skips it.
+    suppress_buf: wgpu::Buffer,
+    suppress_key: Option<wgpu::Buffer>,
 
     /// GPU copy of every draw count consumers pass to
     /// `multi_draw_indexed_indirect_count` (Helio#306); `None` when the
@@ -573,6 +583,7 @@ impl ObjectBatchPass {
                     bgl_entry_storage(4, cs, false),
                     bgl_entry_storage(5, cs, false),
                     bgl_entry_storage(6, cs, false),
+                    bgl_entry_storage(7, cs, true),
                 ],
             }),
             moved: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -887,6 +898,8 @@ impl ObjectBatchPass {
             moved_list: None,
             moved_bgs: Vec::new(),
             readback_pending: false,
+            suppress_buf: fallback_buf.clone(),
+            suppress_key: None,
             fallback_buf,
             draw_counts: Some(create_draw_counts_buffer(
                 device,
@@ -1023,6 +1036,7 @@ impl ObjectBatchPass {
                 bg_entry(4, &s.aabbs_out),
                 bg_entry(5, &s.prev_rows),
                 bg_entry(6, &s.sorted_position),
+                bg_entry(7, &self.suppress_buf),
             ],
         }));
 
@@ -1712,12 +1726,22 @@ impl RenderPass for ObjectBatchPass {
             .as_ref()
             .map(|h| &h.buffer)
             .unwrap_or(&static_objects_buf);
+        let suppress_handle = ctx.scene_buffers.get(BufferKey::of(CLASSIC_SUPPRESSED_KEY));
+        let suppress_buf: wgpu::Buffer = suppress_handle
+            .as_ref()
+            .map(|h| h.buffer.clone())
+            .unwrap_or_else(|| self.fallback_buf.clone());
+        let suppress_changed = self.suppress_key.as_ref() != Some(&suppress_buf);
+        if suppress_changed {
+            self.suppress_buf = suppress_buf.clone();
+            self.suppress_key = Some(suppress_buf);
+        }
         let key = (
             self.scratch_capacity,
             static_objects_epoch,
             materials_buf.clone(),
         );
-        if grew || self.bind_group_key.as_ref() != Some(&key) {
+        if grew || suppress_changed || self.bind_group_key.as_ref() != Some(&key) {
             self.rebuild_bind_groups(ctx.device, &static_objects_buf, materials_buf);
             self.bind_group_key = Some(key);
         }
@@ -1727,6 +1751,7 @@ impl RenderPass for ObjectBatchPass {
         };
         let (objects_epoch, objects_content) = generation(static_objects_handle);
         let (materials_epoch, materials_content) = generation(materials_handle);
+        let (suppress_epoch, suppress_content) = generation(suppress_handle);
         let inputs = [
             objects_epoch,
             objects_content,
@@ -1734,6 +1759,8 @@ impl RenderPass for ObjectBatchPass {
             materials_content,
             capacity as u64,
             self.scratch_capacity as u64,
+            suppress_epoch,
+            suppress_content,
         ];
         // The scene join's structure marker, when a join feeds this pass:
         // without one every change is treated as structural.

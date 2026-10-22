@@ -79,6 +79,7 @@ serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
+helio-vg-format = { path = "crates/helio-vg-format" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8b5b1144c4ef80411592985fcd9767134ee03941", features = ["gpu"] }
@@ -124,7 +125,6 @@ helio-pass-object-batch = { path = "crates/passes/3d/helio-pass-object-batch" }
 helio-pass-occlusion-cull = { path = "crates/passes/3d/helio-pass-occlusion-cull" }
 helio-pass-indirect-dispatch = { path = "crates/passes/3d/helio-pass-indirect-dispatch" }
 helio-pass-light-cull = { path = "crates/passes/3d/helio-pass-light-cull" }
-helio-pass-virtual-geometry = { path = "crates/passes/3d/helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "crates/passes/3d/helio-pass-water-sim" }
 helio-pass-transparent = { path = "crates/passes/3d/helio-pass-transparent" }
 helio-pass-radiance-cascades = { path = "crates/passes/3d/helio-pass-radiance-cascades" }
@@ -151,3 +151,8 @@ wgpu-core-deps-windows-linux-android = { git = "https://github.com/Far-Beyond-Pu
 wgpu-hal = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
 wgpu-naga-bridge = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
 wgpu-types = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+
+# The vg_stress build script decompresses and converts ~570 MB of scans; build
+# scripts default to opt-level 0 even in release, which would be glacial.
+[profile.release.build-override]
+opt-level = 3

@@ -409,6 +409,10 @@ struct GpuInstanceAabbOut {
 @group(0) @binding(5) var<storage, read_write> prev_rows_fg: array<PrevRow>;
 
 @group(0) @binding(6) var<storage, read_write> sorted_position_fg: array<u32>;
+// Per `static_objects` row: non-zero = another renderer (virtual geometry) draws
+// it in the main view. The row stays in the batch (shadows keep drawing it).
+@group(0) @binding(7) var<storage, read> classic_suppressed_fg: array<u32>;
+const INSTANCE_FLAG_CLASSIC_SUPPRESSED: u32 = 1u << 4u; // mirrors helio_pass_object_batch
 
 fn gather_one(i: u32, src: u32) {
     let row = static_objects_fg[src];
@@ -418,6 +422,10 @@ fn gather_one(i: u32, src: u32) {
     // permutation, so each row is read and written by one invocation.
     let identity = vec4<u32>(row.mesh_slot, row.mesh_generation, row.material_slot, row.material_generation);
     let last = prev_rows_fg[src];
+    var row_flags = row.flags;
+    if src < arrayLength(&classic_suppressed_fg) && classic_suppressed_fg[src] != 0u {
+        row_flags = row_flags | INSTANCE_FLAG_CLASSIC_SUPPRESSED;
+    }
     var prev_transform = row.transform;
     if all(last.identity == identity) {
         prev_transform = last.transform;
@@ -430,7 +438,7 @@ fn gather_one(i: u32, src: u32) {
         prev_transform,
         row.mesh_slot,
         row.material_slot,
-        row.flags,
+        row_flags,
         0xFFFFFFFFu,
         row.skin_vertex_offset,
         row.bone_palette_offset,
