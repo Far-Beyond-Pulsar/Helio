@@ -181,9 +181,13 @@ Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):
 6. `chunk_columns_main`: each column's 64 cells in a chunk as a 64-bit mask
    (bit z: layer `64 cz + z`): the heightfield, volume terms and lean,
    features, then the edits in order (large brushes, baked cells, recent
-   brushes), and the materials of its cells.
-7. `chunk_build_main`: the chunk's 64-tree, leaf pairs and slopes, detail
-   pages, top plane and frame height, into leaf pages off the free stack.
+   brushes), and the materials of its cells. A workgroup (8x8 columns)
+   culls the feature placements over it and their parts together, a lane
+   a square or part, so each column tests only those that can meet it.
+7. `chunk_cells_main` (chunks with per-voxel materials, below): a lane a
+   column, its exposed cells' materials; `chunk_build_main`: the chunk's
+   64-tree, leaf pairs and slopes, detail pages, top plane and frame
+   height, into leaf pages off the free stack.
 8. `restore_main`: kept chunks copied back in.
 
 Results come back a frame later without waiting (a readback ring):
@@ -247,11 +251,13 @@ same inputs:
 Leaves draw their pair. Chunks of `DETAIL_LEVELS` (levels 0 and 1) take a
 `cell_materials` slot (`DETAIL_JOBS` a batch; a job past them waits for the
 next batch): `chunk_columns_main` writes each solid cell's edited material
-and the column's natural top; `chunk_build_main` (`leaf_column_cells`)
-gives each exposed cell without one its natural material, clears the cells
-the leaf's pair draws as they are, and gives every leaf page holding a leaf
-with cells left a **detail page** (4 KiB: a byte a cell; 16384 pages by
-default, `HELIO_VOXEL_DETAIL_PAGES`). Drawing reads the cell's byte first
+and the column's natural top; `chunk_cells_main` gives each exposed cell
+without one its natural material and clears the cells the leaf's pair
+draws as they are, a lane a column (a lane a leaf column, as the build
+has them, left most of its 256 lanes waiting on a few steep ones);
+`chunk_build_main` gives every leaf page holding a leaf with cells left a
+**detail page** (4 KiB: a byte a cell; 16384 pages by default,
+`HELIO_VOXEL_DETAIL_PAGES`). Drawing reads the cell's byte first
 (0: the pair); `slot_details` skips the lookup in chunks without detail
 pages. Out of pages, a chunk keeps its pairs (`UpdateStats::out_of_details`).
 Coarser chunks keep their pairs (an edit's top materials vote in them).

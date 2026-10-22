@@ -1182,26 +1182,35 @@ fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slop
 
 // The first rule whose conditions hold, else the fallback (`rules_material`).
 fn rules_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
-    let wet = landform_moisture(p) >> 8u;
     let erosion = i32(surface << 24u) >> 24u;
     let altitude = layer * terrain.header.y;
     let seed = bitcast<u32>(terrain.header.w);
     let count = min(u32(max(terrain.materials.x, 0)), 16u);
+    // The moisture noise once a rule reaches it (most fail on height,
+    // slope or depth first); each rule's words as its tests read them.
+    var wet = 0;
+    var wet_known = false;
     for (var index = 0u; index < count; index++) {
-        let r = terrain.rules[index];
-        if top_height < r.height_slope.x || top_height > r.height_slope.y
-            || slope < r.height_slope.z || slope > r.height_slope.w
-            || depth < r.depth_moisture.x || depth > r.depth_moisture.y
-            || wet < r.depth_moisture.z || wet > r.depth_moisture.w
-            || erosion < r.surface_bands.x || erosion > r.surface_bands.y { continue; }
-        let salt = index * 0x9E3779B9u;
-        if r.surface_bands.z > 0 && (div_floor(landform_strata(p, altitude), r.surface_bands.z) & 1) != r.surface_bands.w { continue; }
-        if r.head.z > 0 && noise(p, u32(r.head.z), seed ^ 0x68E31DA4u ^ salt) <= r.head.w { continue; }
-        if r.head.y > 0 {
-            if i32(hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x5f356495u ^ salt) & 255u) >= r.head.y { continue; }
-            return u32(r.head.x) | select(0u, M_SPECK, depth == 0);
+        let height_slope = terrain.rules[index].height_slope;
+        if top_height < height_slope.x || top_height > height_slope.y || slope < height_slope.z || slope > height_slope.w { continue; }
+        let depth_moisture = terrain.rules[index].depth_moisture;
+        if depth < depth_moisture.x || depth > depth_moisture.y { continue; }
+        if !wet_known {
+            wet = landform_moisture(p) >> 8u;
+            wet_known = true;
         }
-        return u32(r.head.x);
+        if wet < depth_moisture.z || wet > depth_moisture.w { continue; }
+        let bands = terrain.rules[index].surface_bands;
+        if erosion < bands.x || erosion > bands.y { continue; }
+        let salt = index * 0x9E3779B9u;
+        if bands.z > 0 && (div_floor(landform_strata(p, altitude), bands.z) & 1) != bands.w { continue; }
+        let head = terrain.rules[index].head;
+        if head.z > 0 && noise(p, u32(head.z), seed ^ 0x68E31DA4u ^ salt) <= head.w { continue; }
+        if head.y > 0 {
+            if i32(hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x5f356495u ^ salt) & 255u) >= head.y { continue; }
+            return u32(head.x) | select(0u, M_SPECK, depth == 0);
+        }
+        return u32(head.x);
     }
     return u32(terrain.materials.y);
 }

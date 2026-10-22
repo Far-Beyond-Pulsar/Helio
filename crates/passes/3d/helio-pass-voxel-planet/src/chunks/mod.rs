@@ -43,7 +43,7 @@ const CHUNK_BATCH: usize = 2048;
 /// bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
 /// Chunk jobs of `DETAIL_LEVELS` a batch (`cell_materials` slots:
-/// `CELL_WORDS` words a column, 272 KiB each).
+/// `CELL_WORDS` words a column, 288 KiB each).
 const DETAIL_JOBS: usize = 128;
 /// Levels whose chunks get per-voxel materials, natural and edited: cells
 /// of 0.1-0.2 m at 0.1 m voxels, near the eye. Coarser chunks' leaves keep
@@ -69,8 +69,9 @@ const UNIFORM_BRICK: u32 = 0x4000_0000;
 /// chunk_generate.wgsl).
 const FEATURE_JOB_WORDS: u64 = 128;
 /// Words a column of a `cell_materials` slot (`CELL_WORDS` of
-/// chunk_generate.wgsl): 16 of cell bytes, the column's natural top.
-const CELL_WORDS: u64 = 17;
+/// chunk_generate.wgsl): 16 of cell bytes, the column's natural top, its
+/// leaves with cells left.
+const CELL_WORDS: u64 = 18;
 /// Detail pages by default (`Capacity::detail_pages`): 4 KiB each, one
 /// for each leaf page (of `DETAIL_LEVELS`) holding a leaf whose cells its
 /// pair would draw wrong.
@@ -1282,6 +1283,7 @@ pub struct ChunkWorld {
     feature_block_candidates: wgpu::ComputePipeline,
     tile_features: wgpu::ComputePipeline,
     chunk_columns: wgpu::ComputePipeline,
+    chunk_cells: wgpu::ComputePipeline,
     chunk_build: wgpu::ComputePipeline,
     draw_layout: wgpu::BindGroupLayout,
     trace_layout: wgpu::BindGroupLayout,
@@ -2074,6 +2076,7 @@ impl ChunkWorld {
         let feature_block_candidates = compute("feature_block_candidates_main");
         let tile_features = compute("tile_features_main");
         let chunk_columns = compute("chunk_columns_main");
+        let chunk_cells = compute("chunk_cells_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
         let keep_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2523,6 +2526,7 @@ impl ChunkWorld {
             feature_block_candidates,
             tile_features,
             chunk_columns,
+            chunk_cells,
             chunk_build,
             draw_layout,
             trace_layout,
@@ -3655,6 +3659,11 @@ impl ChunkWorld {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk build"), timestamp_writes: stamp(None, 6) });
             pass.set_bind_group(0, &group, &[]);
+            // Detail jobs' leaf cells first (`chunk_cells_main`).
+            if chunk_jobs.iter().any(|j| j.detail != u32::MAX) {
+                pass.set_pipeline(&self.chunk_cells);
+                pass.dispatch_workgroups(64, chunk_jobs.len() as u32, 1);
+            }
             if !chunk_jobs.is_empty() {
                 pass.set_pipeline(&self.chunk_build);
                 pass.dispatch_workgroups(chunk_jobs.len() as u32, 1, 1);
