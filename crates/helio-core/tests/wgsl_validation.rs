@@ -93,6 +93,30 @@ fn is_composed(path: &Path) -> bool {
         // templates); validated when the pass builds its pipelines.
         "helio-pass-voxel-planet/shaders/chunk_generate.wgsl",
         "helio-pass-voxel-planet/shaders/chunk_draw.wgsl",
+        // The virtual geometry's kernels, assembled by their crates from
+        // shared declaration pieces (`include_str!` constants joined in
+        // Rust); validated when their passes build their pipelines (the
+        // crates' GPU tests).
+        "helio-component/src/virtual_geometry_instances.wgsl",
+        "helio-pass-vg-bvh/shaders/vg_bvh_build.wgsl",
+        "helio-pass-vg-cull/shaders/vg_cull.wgsl",
+        "helio-pass-vg-dense/shaders/args.wgsl",
+        "helio-pass-vg-dense/shaders/bin.wgsl",
+        "helio-pass-vg-dense/shaders/collect.wgsl",
+        "helio-pass-vg-dense/shaders/footprint.wgsl",
+        "helio-pass-vg-dense/shaders/peel.wgsl",
+        "helio-pass-vg-dense/shaders/rt.wgsl",
+        "helio-pass-vg-dense/shaders/tiles.wgsl",
+        "helio-pass-vg-raster/shaders/vg_dense_count.wgsl",
+        "helio-pass-vg-raster/shaders/vg_hw_raster.wgsl",
+        "helio-pass-vg-raster/shaders/vg_hw_raster_masked.wgsl",
+        "helio-pass-vg-raster/shaders/vg_sw_bin.wgsl",
+        "helio-pass-vg-raster/shaders/vg_sw_raster.wgsl",
+        "helio-pass-vg-raster/shaders/vg_sw_raster_masked.wgsl",
+        "helio-pass-vg-raster/shaders/vg_tile_raster.wgsl",
+        "helio-pass-vg-shade/shaders/vg_debug.wgsl",
+        "helio-pass-vg-shade/shaders/vg_resolve.wgsl",
+        "helio-pass-vg-shade/shaders/vg_shade.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
@@ -114,6 +138,18 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
         let common = root.join("crates/helio-default-graphs/shaders/scene_join_common.wgsl");
         let common = std::fs::read_to_string(common).expect("scene_join_common.wgsl");
         return format!("{common}\n{source}");
+    }
+    // The depth passes prefix the alpha-tested depth material's declarations
+    // (`helio_pass_gbuffer::depth_material::DepthMaterialBindings::shader_source`).
+    const DEPTH_MATERIAL: &[&str] = &[
+        "helio-pass-depth-prepass/shaders/depth_prepass.wgsl",
+        "helio-pass-shadow/shaders/shadow.wgsl",
+    ];
+    if DEPTH_MATERIAL.iter().any(|suffix| normalized.ends_with(suffix)) {
+        let material = root.join("crates/passes/3d/helio-pass-gbuffer/shaders/depth_material.wgsl");
+        let material = std::fs::read_to_string(material).expect("depth_material.wgsl");
+        return format!("{material}
+{source}");
     }
     // `helio_pass_volumetric_fog::shader_source` sizes the post-process row's
     // words around its fog block from its Rust ABI; any lengths validate the
@@ -206,10 +242,12 @@ fn every_wgsl_shader_parses_and_validates() {
 
     // Guard the skip heuristic: fragments are deliberate source modules and
     // composed shaders. If this trips, the source-module set has grown enough
-    // to require an explicit audit. Last audited at 41: Radiant templates,
-    // shared prelude/common pieces, and the voxel planet's 11 source pieces.
+    // to require an explicit audit. Last audited at 54 (2026-10-23): Radiant
+    // templates, shared prelude/common pieces, the voxel planet's source
+    // pieces, and the virtual geometry's declaration pieces (vg-format,
+    // vg-stream, vg-bvh, vg-dense, vg-raster, vg-shade, helio-mats' vg_alpha).
     assert!(
-        skipped.len() <= 48,
+        skipped.len() <= 54,
         "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")

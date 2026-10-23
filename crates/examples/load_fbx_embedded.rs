@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use glam::Vec3;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{
     load_scene_bytes_with_config, upload_scene_materials, AssetError, ConvertedScene, LoadConfig,
@@ -368,7 +368,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_clear_color([0.01, 0.01, 0.02, 1.0]);
 
         let (scene, bounds) = match load_embedded_scene() {
@@ -381,7 +387,10 @@ impl ApplicationHandler for App {
                     center: Vec3::new(0.0, 0.75, 0.0),
                     radius: 3.0,
                 };
-                let mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.75, 0.0], [0.75, 0.75, 0.75]));
+                let mesh = spawn_mesh(
+                    &mut scene_db.world,
+                    box_mesh([0.0, 0.75, 0.0], [0.75, 0.75, 0.75]),
+                );
                 let material = spawn_material(
                     &mut scene_db.world,
                     make_material([0.65, 0.72, 0.9, 1.0], 0.35, 0.1, [0.0, 0.0, 0.0], 0.0),

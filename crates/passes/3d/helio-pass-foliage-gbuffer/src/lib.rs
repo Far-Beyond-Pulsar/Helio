@@ -583,7 +583,7 @@ impl FoliageGBufferPass {
             immediate_size: 0,
         });
         let targets = color_target_states();
-        let raster = |label: &str, entry: &str| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let raster = |label: &str, entry: &str| helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some(label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -1099,7 +1099,7 @@ impl FoliageBoxesPass {
             immediate_size: 0,
         });
         let pipeline = |label: &str, entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
                 module: &shader,

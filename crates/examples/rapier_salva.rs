@@ -23,13 +23,13 @@ mod v3_demo_common;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, despawn_object, make_material, new_scene_db_with_gpu_mirror, point_light,
-    scene_db_handle, sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
-    spawn_object_with_movability, update_object_transform,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+    spawn_object_with_movability, sphere_mesh, update_object_transform,
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use salva3d::{
@@ -476,34 +476,22 @@ impl ApplicationHandler for App {
             point_light([-15.0, 20.0, -10.0], [0.7, 0.8, 1.0], 15.0, 70.0),
         );
 
-        let floor_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.3, 0.3, 0.35, 1.0],
-            0.8,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let wall_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.35, 0.3, 0.28, 1.0],
-            0.7,
-            0.02,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let water_material = spawn_material(&mut scene_db.world, make_material(
-            [0.15, 0.4, 0.75, 0.85],
-            0.1,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let faucet_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.6, 0.6, 0.65, 1.0],
-            0.3,
-            0.6,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.3, 0.3, 0.35, 1.0], 0.8, 0.05, [0.0, 0.0, 0.0], 0.0),
+        );
+        let wall_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.35, 0.3, 0.28, 1.0], 0.7, 0.02, [0.0, 0.0, 0.0], 0.0),
+        );
+        let water_material = spawn_material(
+            &mut scene_db.world,
+            make_material([0.15, 0.4, 0.75, 0.85], 0.1, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let faucet_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.6, 0.6, 0.65, 1.0], 0.3, 0.6, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let sphere_mesh = spawn_mesh(&mut scene_db.world, sphere_mesh([0.0, 0.0, 0.0], 1.0));
 
@@ -529,7 +517,10 @@ impl ApplicationHandler for App {
         let wall_thickness = 0.5;
 
         // Render container floor
-        let floor_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [20.0, 0.5, 20.0]));
+        let floor_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [20.0, 0.5, 20.0]),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             floor_mesh,
@@ -544,7 +535,10 @@ impl ApplicationHandler for App {
         // Right wall
         let wall_mesh = spawn_mesh(
             &mut scene_db.world,
-            box_mesh([0.0, 0.0, 0.0], [wall_thickness * 0.5, wall_height * 0.5, container_size]),
+            box_mesh(
+                [0.0, 0.0, 0.0],
+                [wall_thickness * 0.5, wall_height * 0.5, container_size],
+            ),
         );
         let _ = spawn_object(
             &mut scene_db.world,
@@ -561,7 +555,10 @@ impl ApplicationHandler for App {
         // Left wall
         let wall_mesh = spawn_mesh(
             &mut scene_db.world,
-            box_mesh([0.0, 0.0, 0.0], [wall_thickness * 0.5, wall_height * 0.5, container_size]),
+            box_mesh(
+                [0.0, 0.0, 0.0],
+                [wall_thickness * 0.5, wall_height * 0.5, container_size],
+            ),
         );
         let _ = spawn_object(
             &mut scene_db.world,
@@ -578,7 +575,10 @@ impl ApplicationHandler for App {
         // Back wall
         let wall_mesh = spawn_mesh(
             &mut scene_db.world,
-            box_mesh([0.0, 0.0, 0.0], [container_size, wall_height * 0.5, wall_thickness * 0.5]),
+            box_mesh(
+                [0.0, 0.0, 0.0],
+                [container_size, wall_height * 0.5, wall_thickness * 0.5],
+            ),
         );
         let _ = spawn_object(
             &mut scene_db.world,
@@ -595,7 +595,10 @@ impl ApplicationHandler for App {
         // Front wall
         let wall_mesh = spawn_mesh(
             &mut scene_db.world,
-            box_mesh([0.0, 0.0, 0.0], [container_size, wall_height * 0.5, wall_thickness * 0.5]),
+            box_mesh(
+                [0.0, 0.0, 0.0],
+                [container_size, wall_height * 0.5, wall_thickness * 0.5],
+            ),
         );
         let _ = spawn_object(
             &mut scene_db.world,
@@ -610,7 +613,10 @@ impl ApplicationHandler for App {
         );
 
         // Render simple faucet indicator
-        let faucet_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.5, 0.5, 0.5]));
+        let faucet_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.5, 0.5, 0.5]),
+        );
         let _ = spawn_object(
             &mut scene_db.world,
             faucet_mesh,

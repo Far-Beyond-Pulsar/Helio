@@ -202,7 +202,7 @@ impl PostProcessVolumeBlendPass {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PostProcess Resolver PL"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("PostProcess Resolver"), layout: Some(&layout), module: &shader,
             entry_point: Some("cs_volume_blend"), compilation_options: Default::default(), cache: None,
         });

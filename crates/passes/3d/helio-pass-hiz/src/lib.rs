@@ -210,7 +210,7 @@ impl HiZBuildPass {
             immediate_size: 0,
         });
 
-        let mip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let mip_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("HiZ Mip Pipeline"),
             layout: Some(&mip_pl),
             module: &mip_shader,
@@ -220,7 +220,7 @@ impl HiZBuildPass {
         });
 
         // Same module and layout as the farthest chain — only the reduction differs.
-        let nearest_mip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let nearest_mip_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("HiZ Nearest Mip Pipeline"),
             layout: Some(&mip_pl),
             module: &mip_shader,
@@ -269,7 +269,7 @@ impl HiZBuildPass {
             bind_group_layouts: &[Some(&fallback_bgl)],
             immediate_size: 0,
         });
-        let fallback_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let fallback_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("HiZ Far Depth Fallback Pipeline"),
             layout: Some(&fallback_layout),
             module: &fallback_shader,

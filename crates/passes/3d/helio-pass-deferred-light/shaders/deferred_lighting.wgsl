@@ -44,9 +44,9 @@ struct Globals {
     // over it. Scalars, not vec3<u32>: a vec3 would align the tail to 16 and
     // desync the struct from its Rust mirror.
     enable_env_reflections: u32,
+    measured_lighting_ms: f32,
+    pixel_count: u32,
     _pad_0: u32,
-    _pad_1: u32,
-    _pad_2: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -161,6 +161,64 @@ fn portal_chain_of(lightmap_uv: vec2<f32>) -> i32 {
         return min(i32(round(-3.0 - lightmap_uv.y)), 255);
     }
     return -1;
+}
+
+fn complexity_color(value: f32) -> vec3<f32> {
+    let t = clamp(value, 0.0, 1.0);
+    if t < 0.25 { return mix(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 1.0), t * 4.0); }
+    if t < 0.5 { return mix(vec3<f32>(0.0, 1.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), (t - 0.25) * 4.0); }
+    if t < 0.75 { return mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), (t - 0.5) * 4.0); }
+    return mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), (t - 0.75) * 4.0);
+}
+
+// Fixed absolute scale in microseconds per pixel. Unlike a normalized
+// complexity view, one color always represents the same measured duration.
+fn time_cost_color(us_per_pixel: f32) -> vec3<f32> {
+    let t = max(us_per_pixel, 0.0);
+    if t < 0.01 { return mix(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 1.0), t / 0.01); }
+    if t < 0.03 { return mix(vec3<f32>(0.0, 1.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), (t - 0.01) / 0.02); }
+    if t < 0.1 { return mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), (t - 0.03) / 0.07); }
+    if t < 0.5 { return mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), (t - 0.1) / 0.4); }
+    return vec3<f32>(1.0, 0.0, 0.0);
+}
+
+// The sky's irradiance / pi at a surface `from_camera` (km, relative to the
+// camera) with normal `n`: its own sky, by its altitude and sun angle, not
+// the eye's (`sky_table_kernel`). Above the atmosphere the planet's glow
+// falls with its solid angle.
+fn atmosphere_local_irradiance(from_camera: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    if atmosphere.planet.w < 0.5 { return vec3<f32>(0.0); }
+    let bottom = atmosphere.params.bottom_radius;
+    let top = atmosphere.params.top_radius;
+    let pos = from_camera - atmosphere.planet.xyz;
+    let r = max(length(pos), bottom);
+    let up = normalize(pos);
+    let sun = atmosphere.sun.xyz;
+    let mu_s = dot(up, sun);
+    var x = sun - up * mu_s;
+    if dot(x, x) < 1e-8 { x = cross(up, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(up.x) > 0.9)); }
+    x = normalize(x);
+    let z = cross(x, up);
+    let l = vec3<f32>(dot(n, x), dot(n, up), dot(n, z));
+    let height = clamp((r - bottom) / (top - bottom), 0.0, 1.0);
+    let fr = sqrt(height) * f32(SKY_TABLE_R - 1u);
+    let fm = clamp((mu_s - SKY_TABLE_MU_LO) / (1.0 - SKY_TABLE_MU_LO), 0.0, 1.0) * f32(SKY_TABLE_MU - 1u);
+    let r0 = min(u32(fr), SKY_TABLE_R - 2u);
+    let m0 = min(u32(fm), SKY_TABLE_MU - 2u);
+    let w = vec2<f32>(fr - f32(r0), fm - f32(m0));
+    let basis = array<f32, 6>(0.282095, 0.488603 * l.y, 0.488603 * l.x, 1.092548 * l.x * l.y, 0.315392 * (3.0 * l.z * l.z - 1.0), 0.546274 * (l.x * l.x - l.y * l.y));
+    var e = vec3<f32>(0.0);
+    for (var k = 0u; k < SKY_TABLE_COEFFS; k++) {
+        let a = (r0 * SKY_TABLE_MU + m0) * SKY_TABLE_COEFFS + k;
+        let b = a + SKY_TABLE_COEFFS;
+        let c = a + SKY_TABLE_MU * SKY_TABLE_COEFFS;
+        let d = c + SKY_TABLE_COEFFS;
+        let v = mix(mix(atmosphere_sky_table[a].rgb, atmosphere_sky_table[b].rgb, w.y), mix(atmosphere_sky_table[c].rgb, atmosphere_sky_table[d].rgb, w.y), w.x);
+        e += v * basis[k];
+    }
+    let above = length(pos) / top;
+    let falloff = select(1.0, 1.0 / (above * above), above > 1.0);
+    return max(e, vec3<f32>(0.0)) * atmosphere.sun_illuminance.rgb * falloff;
 }
 
 // min(dynamic, static) shadow comparison, skipping an atlas with no casters.
@@ -1064,9 +1122,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Mode 4 (G-buffer readback test) shows albedo read from G-buffer without lighting
     // Mode 5 (World normals) remaps N from [-1,1] → [0,1] as RGB (R=+X, G=+Y, B=+Z)
     // Mode 20 (VG triangle debug): per-face colour written into albedo by vg_gbuffer.wgsl
-    // Mode 21 (VG LOD heatmap): LOD-level colour written into albedo by vg_gbuffer.wgsl
+    // Mode 21 (VG cluster colours) and modes 100..127 (virtual-geometry debug views):
+    // colours written into albedo by helio-pass-vg-shade's debug resolve
     if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u
-    || globals.debug_mode == 20u || globals.debug_mode == 21u {
+    || globals.debug_mode == 20u || globals.debug_mode == 21u
+    || (globals.debug_mode >= 100u && globals.debug_mode < 128u) {
         return vec4<f32>(albedo, alpha);
     }
     if globals.debug_mode == 5u {
@@ -1178,6 +1238,61 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let radius = max(sss_r.a, 0.0);
         let readable_radius = radius / (1.0 + radius);
         return vec4<f32>(vec3<f32>(readable_radius), 1.0);
+    }
+
+    // Per-surface work is displayed as a scalar heat map. Do not shade this
+    // diagnostic with light intensity, N·L, or material response: those create
+    // shape contrast that obscures the work being measured.
+    if globals.debug_mode == 40u || globals.debug_mode == 41u || globals.debug_mode == 42u {
+        let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
+        let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
+        let tile_idx = tile_y * globals.num_tiles_x + tile_x;
+        var light_pass_count = tile_light_counts[tile_idx];
+        if in_portal { light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS); }
+
+        var affecting_lights = 0.0;
+        var shadow_work = 0.0;
+        for (var i = 0u; i < light_pass_count; i++) {
+            var light_idx = i;
+            if !in_portal { light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]; }
+            let light = lights[light_idx];
+            if light.light_type != 0u {
+                let to_light = light.position_range.xyz - world_pos;
+                let dist = length(to_light);
+                let range = max(light.position_range.w, 1e-4);
+                if dist >= range { continue; }
+            }
+            // Count light shader work, not its brightness. Point and spot
+            // influence is bounded by the authored range; directional lights
+            // affect every surface. Spot-cone attenuation still costs work and
+            // therefore does not darken pixels outside the cone.
+            affecting_lights += 1.0;
+            if light.shadow_index != 0xffffffffu && !is_vg && !in_portal { shadow_work += 1.0; }
+        }
+
+        if globals.debug_mode == 40u {
+            return vec4<f32>(complexity_color(affecting_lights / 8.0), 1.0);
+        }
+
+        let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
+        let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
+        // Count shader features, not their authored values (roughness,
+        // metallic, and lighting response do not change the execution path).
+        var material_work = 1.0;
+        material_work += select(0.0, 1.8, is_anisotropic) + select(0.0, 1.2, has_subsurface);
+        material_work += select(0.0, 0.4, has_lightmap) + select(0.0, 0.6, is_vg);
+        let surface_work = 2.0 + material_work * 2.0 + affecting_lights * 1.6 + shadow_work * 1.1;
+        if globals.debug_mode == 42u {
+            // Show an absolute estimated time contribution per output pixel.
+            // The pass timestamp is real GPU timing; surface_work distributes
+            // that measured duration according to this pixel's known shader
+            // work. Values are encoded against fixed microseconds-per-pixel
+            // thresholds, never frame-relative percentiles or scene exposure.
+            let estimated_us_per_pixel = globals.measured_lighting_ms * 1000.0
+                * surface_work / f32(max(globals.pixel_count, 1u));
+            return vec4<f32>(time_cost_color(estimated_us_per_pixel), 1.0);
+        }
+        return vec4<f32>(complexity_color(surface_work / 32.0), 1.0);
     }
 
     // Anisotropic GGX parameters
@@ -1443,8 +1558,11 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 28u || globals.debug_mode == 29u
         || globals.debug_mode == 34u || globals.debug_mode == 35u
         || globals.debug_mode == 36u
+        || (globals.debug_mode >= 100u && globals.debug_mode < 128u)
         || globals.debug_mode == 20u || globals.debug_mode == 21u
-        || globals.debug_mode == 32u || globals.debug_mode == 33u {
+        || globals.debug_mode == 32u || globals.debug_mode == 33u
+        || globals.debug_mode == 40u || globals.debug_mode == 41u
+        || globals.debug_mode == 42u {
         return vec4<f32>(0.0);
     }
 

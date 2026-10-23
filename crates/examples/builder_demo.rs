@@ -20,8 +20,7 @@ use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
     scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,
-    sphere_mesh,
-    update_object_transform, update_point_light,
+    sphere_mesh, update_object_transform, update_point_light,
 };
 
 use winit::{
@@ -156,34 +155,22 @@ impl ApplicationHandler for App {
             .build(device.clone(), queue.clone(), w, h, surface_format);
 
         // ── Materials ───────────────────────────────────────────────────────
-        let gold = spawn_material(&mut scene_db.world, make_material(
-            [0.95, 0.75, 0.25, 1.0],
-            0.25,
-            0.85,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let marble = spawn_material(&mut scene_db.world, make_material(
-            [0.85, 0.83, 0.80, 1.0],
-            0.55,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let crystal = spawn_material(&mut scene_db.world, make_material(
-            [0.3, 0.6, 1.0, 1.0],
-            0.05,
-            0.1,
-            [0.2, 0.4, 1.0],
-            2.0,
-        ));
-        let floor = spawn_material(&mut scene_db.world, make_material(
-            [0.22, 0.22, 0.25, 1.0],
-            0.7,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let gold = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.75, 0.25, 1.0], 0.25, 0.85, [0.0, 0.0, 0.0], 0.0),
+        );
+        let marble = spawn_material(
+            &mut scene_db.world,
+            make_material([0.85, 0.83, 0.80, 1.0], 0.55, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let crystal = spawn_material(
+            &mut scene_db.world,
+            make_material([0.3, 0.6, 1.0, 1.0], 0.05, 0.1, [0.2, 0.4, 1.0], 2.0),
+        );
+        let floor = spawn_material(
+            &mut scene_db.world,
+            make_material([0.22, 0.22, 0.25, 1.0], 0.7, 0.05, [0.0, 0.0, 0.0], 0.0),
+        );
 
         // ── Sky ─────────────────────────────────────────────────────────────
         v3_demo_common::spawn_sky(&mut scene_db.world, [0.15, 0.25, 0.45]);

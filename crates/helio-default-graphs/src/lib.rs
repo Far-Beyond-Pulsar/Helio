@@ -6,6 +6,8 @@ pub mod portal_projection;
 pub mod hierarchy_resolve;
 pub mod ray_tracing;
 pub mod scene_join;
+pub mod virtual_geometry;
+pub use virtual_geometry::{virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass};
 
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
@@ -52,7 +54,6 @@ use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_sprite_batch::SpriteBatchPass;
 use helio_pass_sprite_cull::SpriteCullPass;
-use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_water_sim::WaterSimPass;
 
@@ -129,16 +130,14 @@ fn new_graph(
 /// `RenderGraph::declare_external_input` and `docs/helio_3_0_spec.md`
 /// §6. `"material_textures"` and `"render_environment"` are read by the
 /// geometry/lighting passes that need those backend values;
-/// `"vg"` is read only by `VirtualGeometryPass` (`add_geometry_passes`/
-/// `add_forward_geometry_passes`); `"billboards"`/`"corona_emitters"` are
+/// `"billboards"`/`"corona_emitters"` are
 /// read only by `BillboardPass`/`CoronaPass` (`add_late_passes`). Every
-/// graph builder in this file that calls one of those three helpers needs
-/// all four names; `build_simple_graph` uses none of this and is the one
+/// graph builder in this file that calls one of those helpers needs
+/// all of these names; `build_simple_graph` uses none of this and is the one
 /// entry point that legitimately calls none of these.
 fn declare_common_external_inputs(graph: &mut RenderGraph) {
     graph.declare_external_input("material_textures");
     graph.declare_external_input("render_environment");
-    graph.declare_external_input("vg");
     graph.declare_external_input("billboards");
     graph.declare_external_input("corona_emitters");
 }
@@ -192,7 +191,6 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<PlanarReflectionPass>()
         .independent::<DeferredLightPass>()
         .independent::<HlfsPass>()
-        .independent::<VirtualGeometryPass>()
         .independent::<PortalMaskPass>()
         .independent::<PortalEditorOverlayPass>()
         .independent::<BillboardPass>()
@@ -349,7 +347,10 @@ fn add_common_early_passes(
 
     // The black background the sky (the atmosphere composite) and every
     // lighting pass draw over.
-    graph.add_pass(Box::new(BackgroundPass::new(config.surface_format)));
+    graph.add_pass(Box::new(BackgroundPass::new(
+        config.surface_format,
+        config.background_color,
+    )));
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(
         device,
@@ -421,7 +422,7 @@ fn add_cloud_trace(graph: &mut RenderGraph, device: &Arc<wgpu::Device>) {
 fn add_geometry_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
-    camera_buf: &wgpu::Buffer,
+    _camera_buf: &wgpu::Buffer,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
     _scene_db: helio::SceneDbHandle,
@@ -500,18 +501,19 @@ fn add_geometry_passes(
     }
 
     // Foliage rasterisation goes immediately after GBufferPass/PortalInstance and
-    // before VirtualGeometry. After those two because it composites into the same
+    // before the virtual-geometry shade passes. After those two because it composites into the same
     // eight targets with LoadOp::Load (chain fusion is transitive across a linear
-    // run of exact-attachment-match passes); before VirtualGeometry because VG
-    // binds only seven attachments — it omits gbuffer_velocity — so anything
-    // downstream of VG can never fuse with the G-buffer.
+    // run of exact-attachment-match passes); VG shading writes the G-buffer through
+    // storage textures, so nothing about it participates in render-pass fusion and
+    // foliage keeps its slot directly after the classic passes.
     if let Some(draw) = foliage_buffers {
         graph.add_pass(Box::new(draw));
     }
 
-    let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
-    vg_pass.debug_mode = config.debug_mode;
-    graph.add_pass(Box::new(vg_pass));
+    // Virtual geometry draws its clusters after everything classic, so its
+    // resolve depth-tests against the combined classic depth (portals and
+    // foliage included). Absent unless asked for and supported.
+    virtual_geometry::add_virtual_geometry_passes(graph, device, config);
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 }
 
@@ -526,10 +528,6 @@ fn add_forward_geometry_passes(
     let mut fl_pass = ForwardLitPass::new(device, config.surface_format);
     fl_pass.render_all_opaque = render_all_opaque;
     graph.add_pass(Box::new(fl_pass));
-
-    let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
-    vg_pass.debug_mode = config.debug_mode;
-    graph.add_pass(Box::new(vg_pass));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 }
 

@@ -275,14 +275,17 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
         // Three draw-call groups, one instance each, all dead-center on
         // screen: `front` (closer than the wall), `behind` (farther than
         // the wall), `always_visible` (farther too, but flag-exempt).
+        let mut off_axis = make_instance(-5.21, 0);
+        off_axis.bounds = [3.9, 0.0, -5.21, 0.25];
         let instances = [
             make_instance(-FRONT_DIST, 0),
             make_instance(-BEHIND_DIST, 0),
             make_instance(-BEHIND_DIST, INSTANCE_FLAG_ALWAYS_VISIBLE),
+            off_axis,
         ];
-        let draw_calls = [draw_call(0), draw_call(1), draw_call(2)];
-        let indirect = [indirect_args(0), indirect_args(1), indirect_args(2)];
-        let compacted_indices: [u32; 3] = [0, 1, 2];
+        let draw_calls = [draw_call(0), draw_call(1), draw_call(2), draw_call(3)];
+        let indirect = [indirect_args(0), indirect_args(1), indirect_args(2), indirect_args(3)];
+        let compacted_indices: [u32; 4] = [0, 1, 2, 3];
         let identity = Mat4::IDENTITY.to_cols_array();
 
         let instances_buf = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -298,7 +301,7 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
         let indirect_buf = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Test Indirect"),
             contents: bytemuck::cast_slice(&indirect),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         }));
         let compacted_indices_buf =
             Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -365,11 +368,11 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
             depth_texture,
             group_dispatch: Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Test Group Dispatch"),
-                contents: bytemuck::cast_slice(&[3u32, 1, 1]),
+                contents: bytemuck::cast_slice(&[4u32, 1, 1]),
                 usage: wgpu::BufferUsages::INDIRECT,
             })),
-            draw_count: 3,
-            instance_count: 3,
+            draw_count: 4,
+            instance_count: 4,
         };
 
         let hiz_pass = HiZBuildPass::new(&device, &queue, WIDTH, HEIGHT);
@@ -408,10 +411,25 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
 
         assert_eq!(instance_count(0), 1, "front object (in front of the wall) must stay visible");
         assert_eq!(instance_count(1), 0, "behind object (behind the wall) must be culled");
+        assert_eq!(instance_count(3), 1, "off-axis sphere intersects the front of the wall: camera-ray near point must not falsely cull it");
         assert_eq!(
             instance_count(2),
             1,
             "ALWAYS_VISIBLE object behind the wall must stay visible (flag override)"
         );
+        // A camera-generation change invalidates old depth. Reset the input
+        // survivors just as the real frustum pass does each frame.
+        scene_input.set_camera(camera);
+        queue.write_buffer(&indirect_buf, 0, bytemuck::cast_slice(&indirect));
+        graph.execute(&scene_input, &target, &depth).unwrap();
+        let words = read_buffer_u32(&device, &queue, &indirect_buf);
+        assert_eq!(words[6], 1, "changed camera must not reject against stale history");
+        for _ in 0..8 {
+            queue.write_buffer(&indirect_buf, 0, bytemuck::cast_slice(&indirect));
+            graph.execute(&scene_input, &target, &depth).unwrap();
+            let words = read_buffer_u32(&device, &queue, &indirect_buf);
+            assert_eq!(words[6], 0, "stable camera resumes occlusion");
+            assert_eq!(words[16], 1, "off-axis visible sphere must not alternate visibility");
+        }
     });
 }

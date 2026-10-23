@@ -12,12 +12,11 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RenderMode, Renderer, RendererConfig,
 };
-use v3_demo_common::{
-    build_default_renderer, cube_mesh, make_material, new_scene_db_with_gpu_mirror,
-    plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky,
-    update_light,
-};
 use pulsar_scenedb::{Entity, SceneDb};
+use v3_demo_common::{
+    build_default_renderer, cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
+    point_light, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky, update_light,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -155,13 +154,10 @@ impl ApplicationHandler for App {
         let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
         renderer.set_editor_mode(true);
 
-        let mat = spawn_material(&mut scene_db.world, make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
         let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.4));
@@ -189,8 +185,7 @@ impl ApplicationHandler for App {
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
             0.3,
         );
-        let _ =
-            spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 5.0);
+        let _ = spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
@@ -199,8 +194,14 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0),
         );
-        spawn_light(&mut scene_db.world, point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
-        spawn_light(&mut scene_db.world, point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
+        spawn_light(
+            &mut scene_db.world,
+            point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0),
+        );
+        spawn_light(
+            &mut scene_db.world,
+            point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0),
+        );
         self.state = Some(AppState {
             window,
             surface,

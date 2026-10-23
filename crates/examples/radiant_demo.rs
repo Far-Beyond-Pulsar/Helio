@@ -14,16 +14,16 @@ use helio::{
     GpuMaterial, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
-use helio_pass_gbuffer::MaterialComponent;
 use helio_mats::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE,
 };
+use helio_pass_gbuffer::MaterialComponent;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, sphere_mesh, spawn_light, spawn_material, spawn_mesh, spawn_object,
-    spawn_sky, update_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky, sphere_mesh,
+    update_light,
 };
 use winit::{
     application::ApplicationHandler,
@@ -135,7 +135,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         // ── Register iridescent template (Tier 3) ───────────────────────────
 

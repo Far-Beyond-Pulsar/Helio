@@ -30,17 +30,17 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererConfig,
 };
 use helio_pass_postprocess::FogMode;
-use v3_demo_common::{
-    build_default_renderer, box_mesh, directional_light, make_material,
-    new_scene_db_with_gpu_mirror, plane_mesh, set_volumetric_quality,
-    spawn_light, spawn_local_fog, spawn_material, spawn_mesh, spawn_object, update_light,
-    volumetric_light, GlobalFogComponent, SHADOW_BASES,
-};
 use pulsar_scenedb::SceneDb;
+use v3_demo_common::{
+    box_mesh, build_default_renderer, directional_light, make_material,
+    new_scene_db_with_gpu_mirror, plane_mesh, set_volumetric_quality, spawn_light, spawn_local_fog,
+    spawn_material, spawn_mesh, spawn_object, update_light, volumetric_light, GlobalFogComponent,
+    SHADOW_BASES,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -192,7 +192,8 @@ impl ApplicationHandler for App {
         // be honest.
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let (scene_db, renderer, sun_light_id, haze) = build_scene(device.clone(), queue.clone(), config);
+        let (scene_db, renderer, sun_light_id, haze) =
+            build_scene(device.clone(), queue.clone(), config);
 
         print_help();
 
@@ -455,16 +456,19 @@ impl AppState {
         );
 
         // The hall haze. Height mode sits at floor level and thins upward.
-        self.scene_db.world.insert(self.haze, hall_haze(GlobalFogComponent {
-            enabled: self.fog_enabled as u32,
-            mode: self.fog_mode as u32,
-            extinction: self.fog_density,
-            albedo: [0.62, 0.70, 0.85],
-            anisotropy: self.fog_anisotropy,
-            height: 0.0,
-            height_falloff: 0.25,
-            ..Default::default()
-        }));
+        self.scene_db.world.insert(
+            self.haze,
+            hall_haze(GlobalFogComponent {
+                enabled: self.fog_enabled as u32,
+                mode: self.fog_mode as u32,
+                extinction: self.fog_density,
+                albedo: [0.62, 0.70, 0.85],
+                anisotropy: self.fog_anisotropy,
+                height: 0.0,
+                height_falloff: 0.25,
+                ..Default::default()
+            }),
+        );
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -500,28 +504,36 @@ fn build_scene(
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     config: RendererConfig,
-) -> (SceneDb, Renderer, pulsar_scenedb::Entity, pulsar_scenedb::Entity) {
+) -> (
+    SceneDb,
+    Renderer,
+    pulsar_scenedb::Entity,
+    pulsar_scenedb::Entity,
+) {
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
 
-    let stone = spawn_material(&mut scene_db.world, make_material(
-        [0.62, 0.60, 0.58, 1.0],
-        0.85,
-        0.0,
-        [0.0, 0.0, 0.0],
-        0.0,
-    ));
+    let stone = spawn_material(
+        &mut scene_db.world,
+        make_material([0.62, 0.60, 0.58, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
+    );
 
     // Floor
     let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
-    let _ = spawn_object(&mut scene_db.world, floor, stone, glam::Mat4::IDENTITY, 40.0);
+    let _ = spawn_object(
+        &mut scene_db.world,
+        floor,
+        stone,
+        glam::Mat4::IDENTITY,
+        40.0,
+    );
 
     // Roof — without it the sun lights everything and there is nothing to
     // slice the light into shafts.
-    let roof = spawn_mesh(&mut scene_db.world, box_mesh(
-        [0.0, 0.0, 0.0],
-        [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z],
-    ));
+    let roof = spawn_mesh(
+        &mut scene_db.world,
+        box_mesh([0.0, 0.0, 0.0], [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z]),
+    );
     let _ = spawn_object(
         &mut scene_db.world,
         roof,
@@ -531,10 +543,13 @@ fn build_scene(
     );
 
     // Two rows of pillars. The gaps between them are what the sun cuts through.
-    let pillar = spawn_mesh(&mut scene_db.world, box_mesh(
-        [0.0, 0.0, 0.0],
-        [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
-    ));
+    let pillar = spawn_mesh(
+        &mut scene_db.world,
+        box_mesh(
+            [0.0, 0.0, 0.0],
+            [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
+        ),
+    );
 
     let count = (HALL_HALF_Z * 2.0 / PILLAR_SPACING) as i32;
     for i in 0..=count {
@@ -544,11 +559,7 @@ fn build_scene(
                 &mut scene_db.world,
                 pillar,
                 stone,
-                glam::Mat4::from_translation(glam::Vec3::new(
-                    side * HALL_HALF_X,
-                    ROOF_Y * 0.5,
-                    z,
-                )),
+                glam::Mat4::from_translation(glam::Vec3::new(side * HALL_HALF_X, ROOF_Y * 0.5, z)),
                 ROOF_Y * 0.5,
             );
         }
@@ -569,7 +580,9 @@ fn build_scene(
     // roof carve it into shafts. (A global uniform medium would also attenuate
     // the sunlight along its whole path: 120 m at 0.08/m leaves e^-9.6.)
     let haze = scene_db.world.spawn();
-    scene_db.world.insert(haze, hall_haze(GlobalFogComponent::default()));
+    scene_db
+        .world
+        .insert(haze, hall_haze(GlobalFogComponent::default()));
 
     // A denser pocket mid-hall. It is a local medium, so it is visible
     // from anywhere, not only while the camera is inside it, and overlaps
@@ -589,12 +602,24 @@ fn build_scene(
     // High-quality tier, integrating just past the far end of the hall.
     let fog_settings = set_volumetric_quality(&mut scene_db.world, 1, 120.0);
     // Probe-only overrides for measuring reconstruction loss.
-    if let Some(blend) = std::env::var("PROBE_FOG_BLEND").ok().and_then(|v| v.parse().ok()) {
-        let quality = std::env::var("PROBE_FOG_QUALITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-        scene_db.world.insert(fog_settings, v3_demo_common::VolumetricFogSettingsComponent {
-            quality, max_distance: 120.0, light_max_distance: 120.0, temporal_blend: blend,
-            ..Default::default()
-        });
+    if let Some(blend) = std::env::var("PROBE_FOG_BLEND")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        let quality = std::env::var("PROBE_FOG_QUALITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        scene_db.world.insert(
+            fog_settings,
+            v3_demo_common::VolumetricFogSettingsComponent {
+                quality,
+                max_distance: 120.0,
+                light_max_distance: 120.0,
+                temporal_blend: blend,
+                ..Default::default()
+            },
+        );
     }
     (scene_db, renderer, sun_light_id, haze)
 }
@@ -604,46 +629,105 @@ fn build_scene(
 fn probe() {
     let (device, queue) = v3_demo_common::headless_gpu();
     let (width, height) = (1280, 720);
-    let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8UnormSrgb).with_render_scale(1.0);
-    if let Some(mode) = std::env::var("PROBE_DEBUG_MODE").ok().and_then(|v| v.parse().ok()) { config.debug_mode = mode; }
-    let (mut scene_db, mut renderer, sun_light_id, haze) = build_scene(device.clone(), queue.clone(), config);
-    let sun_intensity = std::env::var("PROBE_SUN").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0);
-    let sun = volumetric_light(directional_light(sun_light_dir(0.35), [1.0, 0.9, 0.75], sun_intensity), SHADOW_BASES[0]);
+    let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8UnormSrgb)
+        .with_render_scale(1.0);
+    if let Some(mode) = std::env::var("PROBE_DEBUG_MODE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        config.debug_mode = mode;
+    }
+    let (mut scene_db, mut renderer, sun_light_id, haze) =
+        build_scene(device.clone(), queue.clone(), config);
+    let sun_intensity = std::env::var("PROBE_SUN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4.0);
+    let sun = volumetric_light(
+        directional_light(sun_light_dir(0.35), [1.0, 0.9, 0.75], sun_intensity),
+        SHADOW_BASES[0],
+    );
     let mut sun = sun;
-    if std::env::var_os("PROBE_NOSHADOW").is_some() { sun.shadow_index = u32::MAX; }
+    if std::env::var_os("PROBE_NOSHADOW").is_some() {
+        sun.shadow_index = u32::MAX;
+    }
     update_light(&mut scene_db.world, sun_light_id, sun);
-    scene_db.world.insert(haze, hall_haze(GlobalFogComponent {
-        extinction: std::env::var("PROBE_EXT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.04),
-        emission: if std::env::var_os("PROBE_DENSE").is_some() { [0.3, 0.1, 0.1] } else { [0.0; 3] },
-        albedo: [0.62, 0.70, 0.85], anisotropy: 0.35, height_falloff: 0.25, ..Default::default()
-    }));
+    scene_db.world.insert(
+        haze,
+        hall_haze(GlobalFogComponent {
+            extinction: std::env::var("PROBE_EXT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.04),
+            emission: if std::env::var_os("PROBE_DENSE").is_some() {
+                [0.3, 0.1, 0.1]
+            } else {
+                [0.0; 3]
+            },
+            albedo: [0.62, 0.70, 0.85],
+            anisotropy: 0.35,
+            height_falloff: 0.25,
+            ..Default::default()
+        }),
+    );
     // `PROBE_TOWARD_SUN`: look across the hall into the sun through the pillar
     // gaps, where forward scattering makes shafts brightest.
     let (eye, look) = if std::env::var_os("PROBE_TOWARD_SUN").is_some() {
-        (glam::Vec3::new(-4.0, 2.0, 4.0), glam::Vec3::new(1.0, 0.25, -0.35))
+        (
+            glam::Vec3::new(-4.0, 2.0, 4.0),
+            glam::Vec3::new(1.0, 0.25, -0.35),
+        )
     } else {
-        (glam::Vec3::new(0.0, 2.0, 16.0), glam::Vec3::new(0.0, -0.05, -1.0))
+        (
+            glam::Vec3::new(0.0, 2.0, 16.0),
+            glam::Vec3::new(0.0, -0.05, -1.0),
+        )
     };
-    let camera = Camera::perspective_look_at(eye, eye + look, glam::Vec3::Y,
-        std::f32::consts::FRAC_PI_4, width as f32 / height as f32, 0.1, 500.0);
-    let mean = v3_demo_common::capture_png(&scene_db, &mut renderer, &device, &queue, &camera,
-        (width, height), 30, "volumetric_fog_probe.png");
+    let camera = Camera::perspective_look_at(
+        eye,
+        eye + look,
+        glam::Vec3::Y,
+        std::f32::consts::FRAC_PI_4,
+        width as f32 / height as f32,
+        0.1,
+        500.0,
+    );
+    let mean = v3_demo_common::capture_png(
+        &scene_db,
+        &mut renderer,
+        &device,
+        &queue,
+        &camera,
+        (width, height),
+        30,
+        "volumetric_fog_probe.png",
+    );
     println!("[probe] mean {mean:.2}/255 -> volumetric_fog_probe.png");
     if std::env::var_os("PROBE_SHADOW_DEBUG").is_some() {
         if let Some(batch) = renderer.find_pass::<helio_pass_object_batch::ObjectBatchPass>() {
-            println!("[probe] batch counts (draws, shadow static, shadow movable) = {:?}", batch.counts());
+            println!(
+                "[probe] batch counts (draws, shadow static, shadow movable) = {:?}",
+                batch.counts()
+            );
         }
-        if let Some(matrix_pass) = renderer.find_pass::<helio_pass_shadow_matrix::ShadowMatrixPass>() {
+        if let Some(matrix_pass) =
+            renderer.find_pass::<helio_pass_shadow_matrix::ShadowMatrixPass>()
+        {
             let src = matrix_pass.matrices();
             let dump = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: src.size(), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+                label: None,
+                size: src.size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
             });
             let mut e = device.create_command_encoder(&Default::default());
             e.copy_buffer_to_buffer(src, 0, &dump, 0, src.size());
             queue.submit([e.finish()]);
-            dump.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            dump.slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let m: Vec<f32> = bytemuck::cast_slice(&dump.slice(..).get_mapped_range().unwrap()).to_vec();
+            let m: Vec<f32> =
+                bytemuck::cast_slice(&dump.slice(..).get_mapped_range().unwrap()).to_vec();
             println!("[probe] matrix 0 = {:?}", &m[..16]);
         }
     }

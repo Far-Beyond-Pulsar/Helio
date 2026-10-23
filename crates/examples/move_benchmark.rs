@@ -73,8 +73,11 @@ use v3_demo_common::{
 // `cathedral_large` reads these from its parent module.
 const LARGE_CHANDELIER_Z: &[f32] = &[-54.0, -36.0, -18.0, 0.0, 18.0, 36.0, 54.0];
 const LARGE_CANDLES: &[(f32, f32, f32)] = &[
-    (-4.0, 1.6, -64.0), (-2.0, 1.6, -63.5), (0.0, 1.6, -64.0),
-    (2.0, 1.6, -63.5), (4.0, 1.6, -64.0),
+    (-4.0, 1.6, -64.0),
+    (-2.0, 1.6, -63.5),
+    (0.0, 1.6, -64.0),
+    (2.0, 1.6, -63.5),
+    (4.0, 1.6, -64.0),
 ];
 
 const WIDTH: u32 = 320;
@@ -314,7 +317,13 @@ fn bench_camera(target: Vec3, eye: Vec3) -> Camera {
 
 /// `n` objects on a square grid over a floor, sharing `unique` meshes and 8
 /// materials, lit by `lights` point lights spread over the grid.
-fn populate_grid(world: &mut World, n: usize, unique: usize, segments: u32, lights: usize) -> BenchScene {
+fn populate_grid(
+    world: &mut World,
+    n: usize,
+    unique: usize,
+    segments: u32,
+    lights: usize,
+) -> BenchScene {
     let unique = unique.clamp(1, n.max(1));
     let materials: Vec<Entity> = (0..8)
         .map(|i| {
@@ -344,11 +353,23 @@ fn populate_grid(world: &mut World, n: usize, unique: usize, segments: u32, ligh
     let spacing = 1.5;
     let half = side as f32 * spacing * 0.5;
 
-    let floor_material = spawn_material(world, make_material([0.5, 0.5, 0.48, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
-    let floor_mesh = spawn_mesh(world, v3_demo_common::box_mesh([0.0; 3], [half + 2.0, 0.1, half + 2.0]));
+    let floor_material = spawn_material(
+        world,
+        make_material([0.5, 0.5, 0.48, 1.0], 0.8, 0.0, [0.0; 3], 0.0),
+    );
+    let floor_mesh = spawn_mesh(
+        world,
+        v3_demo_common::box_mesh([0.0; 3], [half + 2.0, 0.1, half + 2.0]),
+    );
     triangles += 12;
-    let floor = spawn_object(world, floor_mesh, floor_material, Mat4::from_translation(Vec3::new(0.0, -0.6, 0.0)), half * 1.5)
-        .expect("floor");
+    let floor = spawn_object(
+        world,
+        floor_mesh,
+        floor_material,
+        Mat4::from_translation(Vec3::new(0.0, -0.6, 0.0)),
+        half * 1.5,
+    )
+    .expect("floor");
 
     let mut objects = vec![floor];
     for i in 0..n {
@@ -361,16 +382,31 @@ fn populate_grid(world: &mut World, n: usize, unique: usize, segments: u32, ligh
             Quat::from_rotation_y(i as f32 * 0.37),
             position,
         );
-        objects.push(spawn_object(world, mesh, materials[i % materials.len()], transform, 0.6).expect("grid object"));
+        objects.push(
+            spawn_object(world, mesh, materials[i % materials.len()], transform, 0.6)
+                .expect("grid object"),
+        );
     }
 
     let light_side = (lights as f32).sqrt().ceil().max(1.0) as usize;
     for i in 0..lights {
         let (x, z) = (i % light_side, i / light_side);
         let step = 2.0 * half / light_side as f32;
-        let position = [x as f32 * step - half + step * 0.5, 3.0, z as f32 * step - half + step * 0.5];
+        let position = [
+            x as f32 * step - half + step * 0.5,
+            3.0,
+            z as f32 * step - half + step * 0.5,
+        ];
         let hue = i as f32 / lights.max(1) as f32;
-        spawn_light(world, point_light(position, [1.0, 0.7 + 0.3 * hue, 0.5 + 0.5 * hue], 40.0, step * 1.5 + 4.0));
+        spawn_light(
+            world,
+            point_light(
+                position,
+                [1.0, 0.7 + 0.3 * hue, 0.5 + 0.5 * hue],
+                40.0,
+                step * 1.5 + 4.0,
+            ),
+        );
     }
 
     // Move an object near the camera so the move is actually visible.
@@ -379,8 +415,17 @@ fn populate_grid(world: &mut World, n: usize, unique: usize, segments: u32, ligh
         .get::<StaticObjectComponent>(mover)
         .map(|o| o.transform().w_axis.truncate())
         .unwrap_or(Vec3::ZERO);
-    let camera = bench_camera(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, half.max(6.0) * 0.8, half.max(6.0) * 1.2));
-    BenchScene { objects, mover, mover_origin, camera, triangles }
+    let camera = bench_camera(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, half.max(6.0) * 0.8, half.max(6.0) * 1.2),
+    );
+    BenchScene {
+        objects,
+        mover,
+        mover_origin,
+        camera,
+        triangles,
+    }
 }
 
 /// The HLFS large cathedral with its interior lights plus one small movable prop.
@@ -388,15 +433,28 @@ fn populate_cathedral_large(world: &mut World) -> BenchScene {
     v3_demo_common::spawn_indoor_cathedral_sky(world);
     cathedral_large::populate(world);
     for &z in LARGE_CHANDELIER_Z {
-        spawn_light(world, point_light([0.0, 31.0, z], [1.0, 0.92, 0.78], 160.0, 22.0));
+        spawn_light(
+            world,
+            point_light([0.0, 31.0, z], [1.0, 0.92, 0.78], 160.0, 22.0),
+        );
     }
     for &(x, y, z) in LARGE_CANDLES {
         spawn_light(world, point_light([x, y, z], [1.0, 0.6, 0.15], 8.0, 4.0));
     }
-    let material = spawn_material(world, make_material([0.8, 0.2, 0.2, 1.0], 0.4, 0.0, [0.0; 3], 0.0));
+    let material = spawn_material(
+        world,
+        make_material([0.8, 0.2, 0.2, 1.0], 0.4, 0.0, [0.0; 3], 0.0),
+    );
     let mesh = spawn_mesh(world, uv_sphere(0.6, 16, 1.0));
     let mover_origin = Vec3::new(0.0, 1.0, 50.0);
-    let mover = spawn_object(world, mesh, material, Mat4::from_translation(mover_origin), 0.6).expect("mover");
+    let mover = spawn_object(
+        world,
+        mesh,
+        material,
+        Mat4::from_translation(mover_origin),
+        0.6,
+    )
+    .expect("mover");
     let objects: Vec<Entity> = world
         .query::<(&StaticObjectComponent,)>()
         .map(|(entity, _)| entity)
@@ -407,7 +465,13 @@ fn populate_cathedral_large(world: &mut World) -> BenchScene {
         .map(|o| o.index_count as usize / 3)
         .sum();
     let camera = bench_camera(Vec3::new(0.0, 8.0, -40.0), Vec3::new(0.0, 2.3, 60.0));
-    BenchScene { objects, mover, mover_origin, camera, triangles }
+    BenchScene {
+        objects,
+        mover,
+        mover_origin,
+        camera,
+        triangles,
+    }
 }
 
 /// Every opaque object casts ray-traced shadows and every light traces them.
@@ -417,19 +481,26 @@ fn enable_ray_shadows(world: &mut World, objects: &[Entity]) {
         .map(|(id, _)| id)
         .collect();
     for id in lights {
-        let mut component = world.get_mut::<helio_pass_forward_lit::LightComponent>(id).unwrap();
+        let mut component = world
+            .get_mut::<helio_pass_forward_lit::LightComponent>(id)
+            .unwrap();
         let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
         light.set_ray_traced_shadows(true);
         *component = light.into();
     }
     for &id in objects {
-        let material_slot = world.get::<StaticObjectComponent>(id).unwrap().material_slot;
+        let material_slot = world
+            .get::<StaticObjectComponent>(id)
+            .unwrap()
+            .material_slot;
         let blended = world
             .query::<(&helio_pass_gbuffer::MaterialComponent,)>()
             .find(|(entity, _)| entity.index() == material_slot)
             .is_some_and(|(entity, (m,))| {
                 m.flags & helio_mats::FLAG_ALPHA_BLEND != 0
-                    && world.get::<helio_default_graphs::ray_tracing::RayTransmission>(entity).is_none()
+                    && world
+                        .get::<helio_default_graphs::ray_tracing::RayTransmission>(entity)
+                        .is_none()
             });
         if !blended {
             world.get_mut::<StaticObjectComponent>(id).unwrap().flags |=
@@ -447,8 +518,15 @@ fn mover_transform(origin: Vec3, frame: usize) -> Mat4 {
 
 fn move_one(world: &mut World, scene: &BenchScene, frame: usize) {
     let transform = mover_transform(scene.mover_origin, frame);
-    let mut object = world.get_mut::<StaticObjectComponent>(scene.mover).expect("mover row");
-    let bounds = [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, object.bounds[3]];
+    let mut object = world
+        .get_mut::<StaticObjectComponent>(scene.mover)
+        .expect("mover row");
+    let bounds = [
+        transform.w_axis.x,
+        transform.w_axis.y,
+        transform.w_axis.z,
+        object.bounds[3],
+    ];
     *object = object.with_transform(transform, bounds);
 }
 
@@ -471,9 +549,20 @@ fn move_lights(world: &mut World, lights: &[(Entity, [f32; 3])], frame: usize) {
 fn editor_resync(world: &mut World, scene: &BenchScene, frame: usize) {
     let mover_transform = mover_transform(scene.mover_origin, frame);
     for &entity in &scene.objects {
-        let row = *world.get::<StaticObjectComponent>(entity).expect("object row");
-        let transform = if entity == scene.mover { mover_transform } else { row.transform() };
-        let bounds = [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, row.bounds[3]];
+        let row = *world
+            .get::<StaticObjectComponent>(entity)
+            .expect("object row");
+        let transform = if entity == scene.mover {
+            mover_transform
+        } else {
+            row.transform()
+        };
+        let bounds = [
+            transform.w_axis.x,
+            transform.w_axis.y,
+            transform.w_axis.z,
+            row.bounds[3],
+        ];
         world.insert(
             entity,
             StaticObjectComponent::new(
@@ -549,19 +638,25 @@ impl Bench {
 
         if let Some(acceleration) = self.acceleration.as_mut() {
             let t = Instant::now();
-            acceleration.prepare(&self.scene_db.world).expect("RT preparation");
+            acceleration
+                .prepare(&self.scene_db.world)
+                .expect("RT preparation");
             timing.rt = ms(t);
             // Wait for the acceleration-structure build so its device time is
             // not attributed to the next submission in `render`.
             let t = Instant::now();
-            self.device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll");
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll");
             timing.rt_gpu = ms(t);
             self.renderer
                 .set_ray_tracing_frame(acceleration.frame());
         }
 
         let t = Instant::now();
-        self.renderer.render(&self.scene.camera, &self.view).expect("render");
+        self.renderer
+            .render(&self.scene.camera, &self.view)
+            .expect("render");
         timing.render = ms(t);
         timing.finish = self
             .renderer
@@ -581,9 +676,14 @@ impl Bench {
     /// Writes the last rendered frame's pixels to `path`, tightly packed rows
     /// of the target's format, for comparing two runs byte for byte.
     fn dump_frame(&self, path: &str) {
-        let bytes_per_pixel = self.target.format().block_copy_size(None).expect("plain color format");
+        let bytes_per_pixel = self
+            .target
+            .format()
+            .block_copy_size(None)
+            .expect("plain color format");
         let row = WIDTH * bytes_per_pixel;
-        let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded =
+            row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("move_benchmark frame dump"),
             size: u64::from(padded * HEIGHT),
@@ -604,9 +704,16 @@ impl Bench {
             self.target.size(),
         );
         self.queue.submit([encoder.finish()]);
-        staging.slice(..).map_async(wgpu::MapMode::Read, |result| result.expect("map frame dump"));
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll");
-        let mapped = staging.slice(..).get_mapped_range().expect("mapped frame dump");
+        staging.slice(..).map_async(wgpu::MapMode::Read, |result| {
+            result.expect("map frame dump")
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        let mapped = staging
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped frame dump");
         let pixels: Vec<u8> = mapped
             .chunks(padded as usize)
             .flat_map(|line| &line[..row as usize])
@@ -620,10 +727,16 @@ impl Bench {
     fn recording_cache_summary(&self) -> Option<String> {
         let stats = self.renderer.recording_cache_stats();
         if !stats.active {
-            return stats.inactive_reason.map(|reason| format!("recording cache inactive: {reason}"));
+            return stats
+                .inactive_reason
+                .map(|reason| format!("recording cache inactive: {reason}"));
         }
         let hits: u64 = stats.units.iter().map(|u| u.hits).sum();
-        let total: u64 = stats.units.iter().map(|u| u.hits + u.misses + u.bypassed).sum();
+        let total: u64 = stats
+            .units
+            .iter()
+            .map(|u| u.hits + u.misses + u.bypassed)
+            .sum();
         let mut missing: Vec<_> = stats
             .units
             .iter()
@@ -682,7 +795,8 @@ struct Row {
 }
 
 async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgpu::AdapterInfo) {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -709,7 +823,9 @@ async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgp
         .await
         .expect("device");
     device.on_uncaptured_error(Arc::new(|error| panic!("wgpu error: {error}")));
-    device.set_device_lost_callback(|reason, message| eprintln!("device lost: {reason:?}: {message}"));
+    device.set_device_lost_callback(|reason, message| {
+        eprintln!("device lost: {reason:?}: {message}")
+    });
     (Arc::new(device), Arc::new(queue), info)
 }
 
@@ -722,7 +838,13 @@ fn build_bench(
 ) -> Bench {
     let mut scene_db = new_scene_db_with_gpu_mirror(device, queue);
     let scene = match args.scene.as_str() {
-        "grid" => populate_grid(&mut scene_db.world, size, args.unique_meshes, args.sphere_segments, args.lights),
+        "grid" => populate_grid(
+            &mut scene_db.world,
+            size,
+            args.unique_meshes,
+            args.sphere_segments,
+            args.lights,
+        ),
         "cathedral_large" => populate_cathedral_large(&mut scene_db.world),
         other => panic!("unknown scene {other}; use grid or cathedral_large"),
     };
@@ -787,7 +909,11 @@ fn build_bench(
     });
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("move_benchmark target"),
-        size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -801,10 +927,27 @@ fn build_bench(
         .query::<(&helio_pass_forward_lit::LightComponent,)>()
         .map(|(entity, (light,))| {
             let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
-            (entity, [gpu.position_range[0], gpu.position_range[1], gpu.position_range[2]])
+            (
+                entity,
+                [
+                    gpu.position_range[0],
+                    gpu.position_range[1],
+                    gpu.position_range[2],
+                ],
+            )
         })
         .collect();
-    Bench { device: device.clone(), queue: queue.clone(), scene_db, renderer, acceleration, target: texture, view, scene, lights }
+    Bench {
+        device: device.clone(),
+        queue: queue.clone(),
+        scene_db,
+        renderer,
+        acceleration,
+        target: texture,
+        view,
+        scene,
+        lights,
+    }
 }
 
 fn main() {
@@ -814,10 +957,19 @@ fn main() {
         std::env::set_var("HELIO_FINISH_BREAKDOWN", "1");
     }
     let (device, queue, info) = pollster::block_on(device(args.no_ray_query));
-    eprintln!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
-    let rt_supported = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    eprintln!(
+        "adapter: {} ({:?}, {:?})",
+        info.name, info.device_type, info.backend
+    );
+    let rt_supported = device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
 
-    let sizes = if args.scene == "grid" { args.sizes.clone() } else { vec![0] };
+    let sizes = if args.scene == "grid" {
+        args.sizes.clone()
+    } else {
+        vec![0]
+    };
     let mut rows = Vec::new();
     for &size in &sizes {
         for &mode in &args.modes {
@@ -850,7 +1002,8 @@ fn main() {
                         // Per-pass CPU/GPU times the graph profiler resolved
                         // for the most recent completed frame.
                         for pass in &bench.renderer.timing_snapshot().passes {
-                            let slot = match passes.iter().position(|(name, ..)| *name == pass.name) {
+                            let slot = match passes.iter().position(|(name, ..)| *name == pass.name)
+                            {
                                 Some(i) => i,
                                 None => {
                                     passes.push((pass.name, Vec::new(), Vec::new()));
@@ -869,7 +1022,11 @@ fn main() {
                     .collect();
                 if let Some(dir) = &args.dump_frame {
                     std::fs::create_dir_all(dir).expect("create --dump-frame directory");
-                    bench.dump_frame(&format!("{dir}/{}_{size}_{}.rgba", args.scene, workload.label()));
+                    bench.dump_frame(&format!(
+                        "{dir}/{}_{size}_{}.rgba",
+                        args.scene,
+                        workload.label()
+                    ));
                 }
                 if let Some(summary) = bench.recording_cache_summary() {
                     eprintln!("{} {} {}: {summary}", args.scene, size, workload.label());
@@ -966,7 +1123,8 @@ fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
         args.out,
         args.scene,
         args.graph,
-        args.mesh_movability.map_or("unset".to_string(), |m| format!("{m:?}").to_lowercase())
+        args.mesh_movability
+            .map_or("unset".to_string(), |m| format!("{m:?}").to_lowercase())
     );
     std::fs::write(format!("{stem}_summary.md"), &table).expect("write summary");
     std::fs::write(format!("{stem}_frames.csv"), csv).expect("write csv");

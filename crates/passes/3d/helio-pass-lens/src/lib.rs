@@ -439,7 +439,7 @@ impl LensPass {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 module: &shader,

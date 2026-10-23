@@ -10,8 +10,8 @@
 
 mod v3_demo_common;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb, World};
@@ -138,7 +138,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         renderer.set_ambient([0.08, 0.10, 0.18], 0.035);
 
@@ -404,11 +410,13 @@ impl AppState {
         // Red warning beacon (1 Hz strobe)
         let beacon = (0.5 + 0.5 * (time * TAU).sin()).max(0.0_f32);
 
-        let _ = update_light(&mut self.scene_db.world,
+        let _ = update_light(
+            &mut self.scene_db.world,
             self.hub_light_ids[0],
             point_light([0.0, 14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0),
         );
-        let _ = update_light(&mut self.scene_db.world,
+        let _ = update_light(
+            &mut self.scene_db.world,
             self.hub_light_ids[1],
             point_light([0.0, -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0),
         );
@@ -420,7 +428,8 @@ impl AppState {
             [0.0, 6.0, -35.0],
         ];
         for (i, &id) in self.hab_ring_light_ids.iter().enumerate() {
-            let _ = update_light(&mut self.scene_db.world,
+            let _ = update_light(
+                &mut self.scene_db.world,
                 id,
                 point_light(hab_pos[i], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
             );
@@ -433,23 +442,27 @@ impl AppState {
             [-5.0, -5.0, 58.0],
         ];
         for (i, &id) in self.engine_light_ids.iter().enumerate() {
-            let _ = update_light(&mut self.scene_db.world,
+            let _ = update_light(
+                &mut self.scene_db.world,
                 id,
                 point_light(eng_pos[i], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
             );
         }
 
-        let _ = update_light(&mut self.scene_db.world,
+        let _ = update_light(
+            &mut self.scene_db.world,
             self.beacon_light_ids[0],
             point_light([0.0, 6.0, 65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
         );
-        let _ = update_light(&mut self.scene_db.world,
+        let _ = update_light(
+            &mut self.scene_db.world,
             self.beacon_light_ids[1],
             point_light([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
         );
 
         // docking light steady
-        let _ = update_light(&mut self.scene_db.world,
+        let _ = update_light(
+            &mut self.scene_db.world,
             self.docking_light_id,
             point_light([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0),
         );

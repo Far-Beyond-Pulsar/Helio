@@ -102,6 +102,10 @@ pub fn ray_queries_usable(info: &wgpu::AdapterInfo) -> bool {
     !(info.device_type == wgpu::DeviceType::Cpu || software(&info.name) || software(&info.driver))
 }
 
+/// 64-bit integers and 64-bit atomic min/max, for the virtual-geometry software raster.
+pub const VIRTUAL_GEOMETRY_INT64_FEATURES: wgpu::Features =
+    wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
+
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
@@ -112,6 +116,11 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         wgpu::Features::PIPELINE_CACHE | // persistent driver-validated pipeline cache
         wgpu::Features::SHADER_INT64 | // hardware wide multiplies (voxel planet fixed-point math)
         wgpu::Features::POLYGON_MODE_LINE; // wireframe debug view
+    // Virtual geometry's software raster uses a 64-bit atomicMax; both features
+    // are needed together, and without them it falls back to a tiled kernel.
+    if adapter_features.contains(VIRTUAL_GEOMETRY_INT64_FEATURES) {
+        optional |= VIRTUAL_GEOMETRY_INT64_FEATURES;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
         optional |= BINDLESS_MATERIAL_FEATURES;
@@ -254,6 +263,12 @@ pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
+    /// Colour the default graphs' `Background` pass writes into `pre_aa` before any geometry.
+    ///
+    /// Defaults to opaque black, matching the retired hard-coded clear. Alpha is preserved by the
+    /// FXAA, fog-composite and post-process passes, so `[0.0; 4]` leaves the scene background
+    /// transparent for a compositor (GPUI's `paint_surface` blends the dma-buf with alpha).
+    pub background_color: [f32; 4],
     pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
@@ -362,6 +377,12 @@ pub struct RendererConfig {
     /// voxel terrain and 0.5 m in mesh scenes, whose rooms, pillars and
     /// furniture are a few metres apart.
     pub gi_probe_spacing: Option<f32>,
+    /// Opaque id of the virtual-geometry runtime (`helio_vg_stream::VgRuntime::handle_id`)
+    /// the default deferred graph builds its virtual-geometry passes for, or
+    /// `None` (the default) for classic rendering only. The passes are added
+    /// only when the device supports them (`helio_default_graphs::virtual_geometry_supported`);
+    /// otherwise the graph is exactly the classic one.
+    pub virtual_geometry: Option<u64>,
 }
 
 impl RendererConfig {
@@ -370,6 +391,7 @@ impl RendererConfig {
             width: width.max(1),
             height: height.max(1),
             surface_format,
+            background_color: [0.0, 0.0, 0.0, 1.0],
             shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
@@ -391,7 +413,28 @@ impl RendererConfig {
             enable_xr: false,
             enable_portals: true,
             gi_probe_spacing: None,
+            virtual_geometry: None,
         }
+    }
+
+    /// Build the default deferred graph's virtual-geometry passes for `runtime`
+    /// (when the device supports them).
+    pub fn with_virtual_geometry(mut self, runtime: &helio_vg_stream::VgRuntime) -> Self {
+        self.virtual_geometry = Some(runtime.handle_id());
+        // `VG_DEBUG_VIEW` selects a virtual-geometry debug view at creation (tests,
+        // headless captures); an explicit `debug_mode` is left alone.
+        if self.debug_mode == 0 {
+            if let Some(view) = helio_vg_format::debug_view::from_env() {
+                self.debug_mode = view.id();
+            }
+        }
+        self
+    }
+
+    /// Set the default graphs' scene clear colour. Use alpha 0 for a transparent background.
+    pub fn with_background_color(mut self, color: [f32; 4]) -> Self {
+        self.background_color = color;
+        self
     }
 
     /// Enable/disable environment-cubemap indirect specular.

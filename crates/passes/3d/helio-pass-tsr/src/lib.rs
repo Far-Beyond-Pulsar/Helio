@@ -533,7 +533,7 @@ impl TsrPass {
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
@@ -559,7 +559,7 @@ impl TsrPass {
             })
         };
         let target = |format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("TSR Resolve Pipeline"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("TSR Resolve Pipeline"),
@@ -576,7 +576,7 @@ impl TsrPass {
             },
             cache: None,
         });
-        let reconstruct_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let reconstruct_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("TSR Reconstruct Pipeline"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("TSR Reconstruct Pipeline"),

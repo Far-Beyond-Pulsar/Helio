@@ -19,6 +19,7 @@ pub use helio_pass_portal_cull::{
     PortalPose, PortalProjectionBridge, PortalProjectionConfig, PortalProjectionFrame,
     PortalProjectionKey, ProjectionError, RuntimePortalKey, MAX_PORTAL_CHAINS,
 };
+pub use helio_pass_portal_instances::PortalDebugText;
 pub use helio_pass_tsr::TsrQuality;
 pub use helio_mats::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
@@ -43,6 +44,8 @@ pub use helio_bake::{
     AoConfig, BakeConfig, BakeMesh, BakeRequest, BakedData, LightSource, LightSourceKind,
     LightmapConfig, ProbeConfig, ProbeSpec, SceneGeometry,
 };
+/// Ids, names and keys of the virtual-geometry debug views.
+pub use helio_vg_format::debug_view as vg_debug_view;
 pub use helio_core::{
     Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
     GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,

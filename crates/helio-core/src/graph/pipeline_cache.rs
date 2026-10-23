@@ -20,7 +20,81 @@
 //! lock. Phase 10 prewarming keeps the normal frame path on the hit branch.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+
+struct DriverCacheRecord {
+    cache: Weak<wgpu::PipelineCache>,
+    path: Option<std::path::PathBuf>,
+    persist_lock: Arc<Mutex<()>>,
+}
+
+static DRIVER_CACHES: OnceLock<Mutex<HashMap<usize, DriverCacheRecord>>> = OnceLock::new();
+
+fn shared_driver_cache(
+    device: &wgpu::Device,
+    requested_path: Option<std::path::PathBuf>,
+) -> (
+    Option<Arc<wgpu::PipelineCache>>,
+    Option<std::path::PathBuf>,
+    Option<Arc<Mutex<()>>>,
+) {
+    if !device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+        return (None, requested_path, None);
+    }
+
+    // All graphs and pass constructors using one Device share this cache.
+    // Keep a weak registry entry so closing a renderer releases its Device.
+    let device_key = device as *const wgpu::Device as usize;
+    let caches = DRIVER_CACHES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut caches = caches
+        .lock()
+        .expect("driver pipeline cache registry poisoned");
+
+    if let Some(record) = caches.get(&device_key) {
+        if let Some(cache) = record.cache.upgrade() {
+            // A graph opts into persistence before adding passes. If an
+            // in-memory graph cache exists, replace it with the loaded cache.
+            let upgrade_to_persistent = record.path.is_none() && requested_path.is_some();
+            if !upgrade_to_persistent {
+                return (
+                    Some(cache),
+                    record.path.clone().or(requested_path),
+                    Some(Arc::clone(&record.persist_lock)),
+                );
+            }
+        }
+    }
+
+    let path = requested_path
+        .or_else(|| std::env::var_os("PULSAR_PIPELINE_CACHE").map(std::path::PathBuf::from));
+    let data = path.as_ref().and_then(|path| std::fs::read(path).ok());
+    let cache = Arc::new(unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("Helio Pipeline Cache"),
+            data: data.as_deref(),
+            fallback: true,
+        })
+    });
+    let persist_lock = caches
+        .get(&device_key)
+        .map(|record| Arc::clone(&record.persist_lock))
+        .unwrap_or_else(|| Arc::new(Mutex::new(())));
+    caches.insert(
+        device_key,
+        DriverCacheRecord {
+            cache: Arc::downgrade(&cache),
+            path: path.clone(),
+            persist_lock: Arc::clone(&persist_lock),
+        },
+    );
+    (Some(cache), path, Some(persist_lock))
+}
+
+/// The wgpu cache shared by all pipeline construction for this device.
+pub(crate) fn driver_cache_for_device(device: &wgpu::Device) -> Option<Arc<wgpu::PipelineCache>> {
+    let path = std::env::var_os("PULSAR_PIPELINE_CACHE").map(std::path::PathBuf::from);
+    shared_driver_cache(device, path).0
+}
 
 /// Pass-local opaque identifier for an executor-owned pipeline recipe.
 ///
@@ -301,6 +375,7 @@ pub struct PipelineFormatCache {
     workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     driver_cache: Option<Arc<wgpu::PipelineCache>>,
     persistent_path: Option<std::path::PathBuf>,
+    persist_lock: Option<Arc<Mutex<()>>>,
 }
 
 fn pass_epoch(epochs: &Mutex<HashMap<&'static str, u64>>, pass: &'static str) -> u64 {
@@ -327,18 +402,8 @@ impl PipelineFormatCache {
         path: impl Into<std::path::PathBuf>,
     ) -> Self {
         let path = path.into();
-        let data = std::fs::read(&path).ok();
-        let driver_cache = if device.features().contains(wgpu::Features::PIPELINE_CACHE) {
-            Some(Arc::new(unsafe {
-                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-                    label: Some("Helio Pipeline Cache"),
-                    data: data.as_deref(),
-                    fallback: true,
-                })
-            }))
-        } else {
-            None
-        };
+        let (driver_cache, persistent_path, persist_lock) =
+            shared_driver_cache(device, Some(path));
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             build_lock: Arc::new(Mutex::new(())),
@@ -346,22 +411,19 @@ impl PipelineFormatCache {
             pass_epochs: Arc::new(Mutex::new(HashMap::new())),
             workers: Mutex::new(Vec::new()),
             driver_cache,
-            persistent_path: Some(path),
+            persistent_path,
+            persist_lock,
         }
     }
 
     /// Creates a driver-backed in-memory cache without persistence.
     pub fn with_device(device: &wgpu::Device) -> Self {
+        let path = std::env::var_os("PULSAR_PIPELINE_CACHE").map(std::path::PathBuf::from);
+        let (driver_cache, persistent_path, persist_lock) = shared_driver_cache(device, path);
         let mut cache = Self::default();
-        if device.features().contains(wgpu::Features::PIPELINE_CACHE) {
-            cache.driver_cache = Some(Arc::new(unsafe {
-                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-                    label: Some("Helio Pipeline Cache"),
-                    data: None,
-                    fallback: true,
-                })
-            }));
-        }
+        cache.driver_cache = driver_cache;
+        cache.persistent_path = persistent_path;
+        cache.persist_lock = persist_lock;
         cache
     }
 
@@ -600,6 +662,10 @@ impl PipelineFormatCache {
         let Some(path) = &self.persistent_path else {
             return Ok(());
         };
+        let _persist_guard = self
+            .persist_lock
+            .as_ref()
+            .map(|lock| lock.lock().expect("driver pipeline cache persist lock poisoned"));
         let Some(data) = self
             .driver_cache
             .as_ref()

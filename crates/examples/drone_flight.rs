@@ -18,9 +18,9 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
-mod hlfs_capture;
 mod architectural_mesh;
 mod cathedral_detail;
+mod hlfs_capture;
 mod v3_demo_common;
 
 use helio::{
@@ -31,9 +31,8 @@ use helio_default_graphs::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
-    new_scene_db_with_gpu_mirror, point_light,
-    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light,
-    update_light,
+    new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_indoor_cathedral_sky,
+    spawn_light, update_light,
 };
 
 use std::io::{self, BufRead};
@@ -61,12 +60,12 @@ const GLASS_LIGHTS: &[(f32, f32, f32, f32, f32, f32)] = &[
     // Left wall (x ≈ -10.5), windows between columns
     (-10.3, 9.0, -22.0, 0.8, 0.2, 1.0), // violet
     (-10.3, 9.0, -6.0, 0.2, 0.7, 1.0),  // sky blue
-    (-10.3, 9.0, 10.0, 0.2, 1.0, 0.4),   // emerald
+    (-10.3, 9.0, 10.0, 0.2, 1.0, 0.4),  // emerald
     (-10.3, 9.0, 18.0, 1.0, 0.7, 0.1),  // gold
     // Right wall (x ≈ +10.5)
     (10.3, 9.0, -22.0, 1.0, 0.2, 0.3), // ruby
     (10.3, 9.0, -6.0, 1.0, 0.5, 0.1),  // amber
-    (10.3, 9.0, 10.0, 0.1, 0.8, 0.9),   // teal
+    (10.3, 9.0, 10.0, 0.1, 0.8, 0.9),  // teal
     (10.3, 9.0, 18.0, 0.9, 0.1, 0.7),  // magenta
     // Rose window above entrance (back wall, z ≈ +28)
     (0.0, 13.0, 27.0, 1.0, 0.75, 0.3), // warm gold
@@ -213,25 +212,46 @@ impl ApplicationHandler for App {
         let (chandelier_light_ids, candle_light_ids) = populate_cathedral(&mut scene_db.world);
 
         let mut scene_handle = scene_db_handle(&scene_db);
-        let stone_store = hlfs_capture::architectural_materials::load(&device, &queue, &mut scene_db.world);
+        let stone_store =
+            hlfs_capture::architectural_materials::load(&device, &queue, &mut scene_db.world);
         let has_stone = stone_store.is_some();
-        if let Some(store) = stone_store { scene_handle = scene_handle.with_texture_store(store).unwrap(); }
+        if let Some(store) = stone_store {
+            scene_handle = scene_handle.with_texture_store(store).unwrap();
+        }
         let mut renderer = RendererBuilder::new(config, scene_handle)
             .with_editor_mode(true)
             .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
-        if has_stone { hlfs_capture::architectural_materials::configure_sampler(&mut renderer); }
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
+        if has_stone {
+            hlfs_capture::architectural_materials::configure_sampler(&mut renderer);
+        }
         let acceleration = if std::env::var_os("HLFS_RT").is_some() {
             hlfs_capture::enable_ray_shadows(&mut scene_db.world);
             let config = if std::env::var_os("HLFS_PRESAMPLED").is_some() {
                 helio_pass_hlfs::HlfsConfig::ray_traced_presampled()
             } else {
-                helio_pass_hlfs::HlfsConfig { mode: helio_pass_hlfs::HlfsMode::RayTraced, ..Default::default() }
+                helio_pass_hlfs::HlfsConfig {
+                    mode: helio_pass_hlfs::HlfsMode::RayTraced,
+                    ..Default::default()
+                }
             };
-            renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().expect("HLFS pass")
+            renderer
+                .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
+                .expect("HLFS pass")
                 .set_config(&device, config);
-            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
-        } else { None };
+            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(
+                device.clone(),
+                queue.clone(),
+            ))
+        } else {
+            None
+        };
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
@@ -502,8 +522,8 @@ impl AppState {
             // inverse of that convention so the drone looks along its route
             // instead of back out through the entrance toward the sky.
             self.cam_yaw = (target.x - position.x).atan2(-(target.z - position.z));
-            self.cam_pitch = (target.y - position.y)
-                .atan2((target.x - position.x).hypot(target.z - position.z));
+            self.cam_pitch =
+                (target.y - position.y).atan2((target.x - position.x).hypot(target.z - position.z));
             camera_up = glam::Vec3::new(bank.sin(), bank.cos(), 0.0);
         }
 
@@ -546,7 +566,12 @@ impl AppState {
             update_light(
                 &mut self.scene_db.world,
                 id,
-                with_shadows(point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 160.0 * flicker, 22.0)),
+                with_shadows(point_light(
+                    [0.0_f32, 15.0, z],
+                    [1.0, 0.92, 0.78],
+                    160.0 * flicker,
+                    22.0,
+                )),
             );
         }
         // Update flickering candle intensities
@@ -555,7 +580,12 @@ impl AppState {
             update_light(
                 &mut self.scene_db.world,
                 id,
-                with_shadows(point_light([x, y, z], [1.0, 0.6, 0.15], 8.0 * cflicker, 4.0)),
+                with_shadows(point_light(
+                    [x, y, z],
+                    [1.0, 0.6, 0.15],
+                    8.0 * cflicker,
+                    4.0,
+                )),
             );
         }
 
@@ -644,15 +674,20 @@ fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
     if std::env::var_os("HLFS_RT").is_some()
         && std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_none()
     {
-        spawn_light(world, v3_demo_common::directional_light(
-            [0.80, -0.48, -0.30], [1.0, 0.94, 0.84], 4.0,
-        ));
+        spawn_light(
+            world,
+            v3_demo_common::directional_light([0.80, -0.48, -0.30], [1.0, 0.94, 0.84], 4.0),
+        );
     } else {
         // Stained glass shafts — static, no need to store ids
         // RT uses white exterior sources: pane materials supply the transmitted tint.
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
             let light = if std::env::var_os("HLFS_RT").is_some() {
-                let position = if x == 0.0 { [0.0, 17.0, 34.0] } else { [x.signum() * 16.0, 12.0, z] };
+                let position = if x == 0.0 {
+                    [0.0, 17.0, 34.0]
+                } else {
+                    [x.signum() * 16.0, 12.0, z]
+                };
                 point_light(position, [1.0; 3], 2500.0, 65.0)
             } else {
                 point_light([x, y, z], [r, g, b], 35.0, 10.0)

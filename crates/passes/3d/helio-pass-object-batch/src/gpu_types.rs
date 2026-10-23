@@ -55,6 +55,13 @@ pub const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 1 << 2;
 /// split, computed from a CPU-side `Movability` enum per object.
 pub const INSTANCE_FLAG_MOVABLE: u32 = 1 << 3;
 
+/// Another renderer (virtual geometry) draws this instance in the main view:
+/// the main-view frustum cull (`indirect_dispatch.wgsl`) skips it. The row
+/// stays in the batch, so shadow passes still draw its classic geometry as the
+/// shadow proxy. Set by the object batch from the scene buffer
+/// `classic_suppressed` (one `u32` per `static_objects` row).
+pub const INSTANCE_FLAG_CLASSIC_SUPPRESSED: u32 = 1 << 4;
+
 /// Bit offset of the coordinate-space id within [`GpuInstanceData::flags`].
 ///
 /// # Coordinate spaces

@@ -604,7 +604,7 @@ impl PostProcessPass {
         });
 
         let mk_compute = |label: &str, entry: &str, layout: &wgpu::PipelineLayout| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 module: &shader,
@@ -618,7 +618,7 @@ impl PostProcessPass {
         let exposure_reduce_pipeline = mk_compute("PostProcess Exposure Reduce", "cs_exposure_reduce", &exposure_pl);
         let exposure_adapt_pipeline = mk_compute("PostProcess Exposure Adapt", "cs_exposure_adapt", &exposure_pl);
         // Zeroes its own bins: naga's zeroing would do it from one invocation.
-        let local_exposure_grid_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let local_exposure_grid_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("PostProcess Local Exposure Grid"),
             layout: Some(&exposure_pl),
             module: &shader,
@@ -642,7 +642,7 @@ impl PostProcessPass {
         let bloom_upsample_pipeline =
             mk_compute("PostProcess Bloom Upsample", "cs_bloom_upsample", &bloom_upsample_pl);
 
-        let uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let uber_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber Pipeline"),
             layout: Some(&render_pl),
             vertex: wgpu::VertexState {
@@ -968,7 +968,7 @@ impl PostProcessPass {
             return; // identical — skip rebuild
         }
         let shader_mod = helio_core::shader::module(device, "PostProcess Shader", &source);
-        self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        self.uber_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber"),
             layout: Some(&self.uber_pl),
             vertex: wgpu::VertexState {

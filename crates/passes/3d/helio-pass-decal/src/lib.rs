@@ -125,7 +125,7 @@ impl DecalPass {
             bind_group_layouts: &[Some(&bgl_collect), Some(&bgl_textures)],
             immediate_size: 0,
         });
-        let collect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let collect_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Decal Collect"),
             layout: Some(&collect_pl),
             module: &collect_mod,
@@ -172,7 +172,7 @@ impl DecalPass {
             bind_group_layouts: &[Some(&bgl_apply)],
             immediate_size: 0,
         });
-        let apply_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let apply_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Decal Apply"),
             layout: Some(&apply_pl),
             module: &apply_mod,

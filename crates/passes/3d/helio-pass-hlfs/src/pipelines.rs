@@ -171,7 +171,7 @@ fn compute(
     entry: &str,
     layout: &wgpu::PipelineLayout,
 ) -> wgpu::ComputePipeline {
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
         module: shader,
@@ -641,7 +641,7 @@ fn composite_pipeline(
         bind_group_layouts: &layouts,
         immediate_size: 0,
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
         label: Some("HLFS denoise and composite"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {

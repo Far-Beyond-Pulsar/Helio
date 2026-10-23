@@ -17,8 +17,8 @@ use v3_demo_common::{
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb, World};
@@ -157,7 +157,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
         renderer.set_ambient([0.6, 0.72, 1.0], 0.06);
 
@@ -208,12 +214,66 @@ impl ApplicationHandler for App {
         };
 
         // Room shell: 24 m × 4 m × 12 m
-        add(&mut scene_db.world, 0.0, -0.05, 0.0, 12.0, 0.05, 6.0, mat_floor);
-        add(&mut scene_db.world, 0.0, 4.05, 0.0, 12.0, 0.05, 6.0, mat_ceiling);
-        add(&mut scene_db.world, 0.0, 2.0, -6.0, 12.0, 2.0, 0.05, mat_wall);
-        add(&mut scene_db.world, 0.0, 2.0, 6.0, 12.0, 2.0, 0.05, mat_wall);
-        add(&mut scene_db.world, 12.0, 2.0, 0.0, 0.05, 2.0, 6.0, mat_wall);
-        add(&mut scene_db.world, -12.0, 2.0, 0.0, 0.05, 2.0, 6.0, mat_wall);
+        add(
+            &mut scene_db.world,
+            0.0,
+            -0.05,
+            0.0,
+            12.0,
+            0.05,
+            6.0,
+            mat_floor,
+        );
+        add(
+            &mut scene_db.world,
+            0.0,
+            4.05,
+            0.0,
+            12.0,
+            0.05,
+            6.0,
+            mat_ceiling,
+        );
+        add(
+            &mut scene_db.world,
+            0.0,
+            2.0,
+            -6.0,
+            12.0,
+            2.0,
+            0.05,
+            mat_wall,
+        );
+        add(
+            &mut scene_db.world,
+            0.0,
+            2.0,
+            6.0,
+            12.0,
+            2.0,
+            0.05,
+            mat_wall,
+        );
+        add(
+            &mut scene_db.world,
+            12.0,
+            2.0,
+            0.0,
+            0.05,
+            2.0,
+            6.0,
+            mat_wall,
+        );
+        add(
+            &mut scene_db.world,
+            -12.0,
+            2.0,
+            0.0,
+            0.05,
+            2.0,
+            6.0,
+            mat_wall,
+        );
 
         // Raised floor tiles (5x3 grid)
         for xi in -2_i32..=2 {
@@ -239,12 +299,30 @@ impl ApplicationHandler for App {
         }
 
         // Hot-aisle containment walls
-        add(&mut scene_db.world, -5.0, 1.5, 0.0, 0.05, 1.5, 5.0, mat_wall);
+        add(
+            &mut scene_db.world,
+            -5.0,
+            1.5,
+            0.0,
+            0.05,
+            1.5,
+            5.0,
+            mat_wall,
+        );
         add(&mut scene_db.world, 5.0, 1.5, 0.0, 0.05, 1.5, 5.0, mat_wall);
 
         // Cable trays overhead
         for &(rx, _) in RACK_ROWS {
-            add(&mut scene_db.world, rx, 3.55, 0.0, 0.25, 0.08, 5.5, mat_tray);
+            add(
+                &mut scene_db.world,
+                rx,
+                3.55,
+                0.0,
+                0.25,
+                0.08,
+                5.5,
+                mat_tray,
+            );
         }
 
         // Ceiling fluorescent panel bodies
@@ -254,12 +332,39 @@ impl ApplicationHandler for App {
 
         // Rear cooling units
         for &cx in &[-9.0_f32, -3.0, 3.0, 9.0] {
-            add(&mut scene_db.world, cx, 1.5, -5.75, 1.1, 1.5, 0.25, mat_cooling);
+            add(
+                &mut scene_db.world,
+                cx,
+                1.5,
+                -5.75,
+                1.1,
+                1.5,
+                0.25,
+                mat_cooling,
+            );
         }
 
         // Entry door
-        add(&mut scene_db.world, 0.0, 1.2, 5.90, 0.70, 1.2, 0.08, mat_door);
-        add(&mut scene_db.world, 0.0, 1.0, 5.95, 0.55, 1.0, 0.04, mat_door);
+        add(
+            &mut scene_db.world,
+            0.0,
+            1.2,
+            5.90,
+            0.70,
+            1.2,
+            0.08,
+            mat_door,
+        );
+        add(
+            &mut scene_db.world,
+            0.0,
+            1.0,
+            5.95,
+            0.55,
+            1.0,
+            0.04,
+            mat_door,
+        );
 
         // ── Lights ───────────────────────────────────────────────────────────────
         let mut light_ids: Vec<Entity> = Vec::new();

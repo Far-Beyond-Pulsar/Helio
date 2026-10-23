@@ -223,7 +223,7 @@ impl PortalCullPass {
             immediate_size: 0,
         });
 
-        let select_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let select_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("PortalCull Select Pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
@@ -231,7 +231,7 @@ impl PortalCullPass {
             compilation_options: Default::default(),
             cache: None,
         });
-        let finalize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let finalize_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("PortalCull Finalize Pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,

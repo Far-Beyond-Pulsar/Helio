@@ -126,7 +126,7 @@ impl Transmittance {
             bind_group_layouts: &[Some(bgl_0), Some(&bgl_1)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Shadow/Transmittance Pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -192,7 +192,7 @@ impl Transmittance {
             bind_group_layouts: &[Some(bgl_0)],
             immediate_size: 0,
         });
-        let clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let clear_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Clear transmission tile"),
             layout: Some(&clear_layout),
             vertex: wgpu::VertexState {

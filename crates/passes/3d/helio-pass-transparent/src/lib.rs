@@ -622,9 +622,9 @@ impl RenderPass for TransparentPass {
         // One draw per transparent material segment (see `DrawSegments`).
         for (index, segment) in segments.in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent) {
             let key = RadiantShaderKey {
-                template_id: segment.material_class,
+                template_id: segment.template_class(),
                 graph_hash: segment.graph_hash,
-                feature_flags: 0,
+                feature_flags: segment.raster_flags(),
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
@@ -691,7 +691,7 @@ impl TransparentPass {
                     write_mask: if supports_reactivity {wgpu::ColorWrites::RED} else {wgpu::ColorWrites::empty()},
                 }));
             }
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("Transparent Pipeline"),
                 layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {

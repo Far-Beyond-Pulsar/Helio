@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use helio_component::components::{
-    MESH_ASSET_KIND, ObjectMovability, StaticMeshComponent, mesh_source_for_file,
+    mesh_asset_residency, mesh_source_for_file, prefetch_mesh_asset, ObjectMovability,
+    StaticMeshComponent, MESH_ASSET_KIND,
 };
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use pulsar_scenedb::{AssetState, World};
@@ -108,6 +109,25 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
         "distinct fixtures"
     );
     assert_ne!(cube.bounds_local, [0.0, 0.0, 0.0, 0.5]);
+
+    // LOD demand and ordinary strong AssetId references share SceneDB's
+    // byte-budgeted residency cache instead of parsing duplicate CPU meshes.
+    let cube_residency = mesh_asset_residency(cube.mesh).expect("declared mesh residency");
+    let cube_payload = cube_residency.get().expect("resident cube mesh");
+    assert_eq!(
+        cube_payload.upload.geometry.vertices.len(),
+        cube.vertices.len()
+    );
+    assert!(Arc::ptr_eq(
+        &cube_payload,
+        &cube_residency.get().expect("cached cube mesh")
+    ));
+    let sphere_prefetch = prefetch_mesh_asset(sphere.mesh).expect("sphere prefetch");
+    let sphere_payload = sphere_prefetch.wait().expect("prefetched sphere mesh");
+    assert_eq!(
+        sphere_payload.upload.geometry.vertices.len(),
+        sphere.vertices.len()
+    );
 
     // ── Missing and corrupt assets: an empty, invisible mesh, no panic ────
     for path in ["meshes/missing.fbx", "meshes/corrupt.fbx"] {

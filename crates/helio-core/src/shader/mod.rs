@@ -56,6 +56,35 @@
 
 use std::borrow::Cow;
 
+/// Create a render pipeline with the device's shared driver cache when one is
+/// configured. wgpu persists backend compiled pipeline data, including shader
+/// compilation results; WGSL module parsing still uses the normal source path.
+pub fn create_render_pipeline(
+    device: &wgpu::Device,
+    descriptor: wgpu::RenderPipelineDescriptor<'_>,
+) -> wgpu::RenderPipeline {
+    let cache = crate::graph::driver_cache_for_device(device);
+    let descriptor = wgpu::RenderPipelineDescriptor {
+        cache: descriptor.cache.or(cache.as_deref()),
+        ..descriptor
+    };
+    device.create_render_pipeline(&descriptor)
+}
+
+/// Create a compute pipeline with the device's shared driver cache when one is
+/// configured.
+pub fn create_compute_pipeline(
+    device: &wgpu::Device,
+    descriptor: wgpu::ComputePipelineDescriptor<'_>,
+) -> wgpu::ComputePipeline {
+    let cache = crate::graph::driver_cache_for_device(device);
+    let descriptor = wgpu::ComputePipelineDescriptor {
+        cache: descriptor.cache.or(cache.as_deref()),
+        ..descriptor
+    };
+    device.create_compute_pipeline(&descriptor)
+}
+
 pub mod directives;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub mod hot;

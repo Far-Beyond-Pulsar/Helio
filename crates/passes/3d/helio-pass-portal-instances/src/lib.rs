@@ -38,7 +38,7 @@ mod mask;
 pub use mask::PortalMaskPass;
 
 mod editor_overlay;
-pub use editor_overlay::PortalEditorOverlayPass;
+pub use editor_overlay::{PortalDebugText, PortalEditorOverlayPass};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -175,7 +175,7 @@ impl PortalInstancePass {
 
 impl PortalInstancePass {
     fn create_pipeline(device: &wgpu::Device, pipeline_layout: &wgpu::PipelineLayout, shader: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("PortalInstance Pipeline"),
             layout: Some(pipeline_layout),
             vertex: wgpu::VertexState {

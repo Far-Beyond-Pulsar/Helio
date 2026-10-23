@@ -11,3 +11,7 @@ helio-core = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+image = { workspace = true, features = ["png"] }

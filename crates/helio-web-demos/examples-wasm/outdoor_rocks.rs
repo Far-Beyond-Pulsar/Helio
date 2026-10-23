@@ -1,7 +1,7 @@
 //! WASM twin of `outdoor_rocks` — procedural rock clusters with embedded ship.
 //!
 //! The native version loads three rock FBX meshes from `3d/` and scatters them
-//! via virtual geometry. On WASM, file I/O is unavailable, so rocks are
+//! as classic instanced meshes. On WASM, file I/O is unavailable, so rocks are
 //! replaced with randomised stretched cubes and the ship is loaded from
 //! `include_bytes!("../../../test.fbx")`.
 //!

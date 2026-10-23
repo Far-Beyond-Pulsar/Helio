@@ -254,7 +254,7 @@ impl LensFlarePass {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(entry), bind_group_layouts: layouts, immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry), layout: Some(&layout), module: &shader,
                 entry_point: Some(entry), compilation_options: Default::default(), cache: None,
             })

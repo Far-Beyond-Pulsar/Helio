@@ -1,7 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{
-    DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+    DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
+    RenderPass, Result as HelioResult,
 };
 use helio_pass_sky::atmosphere::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
@@ -57,7 +58,9 @@ struct DeferredGlobals {
     /// reflections from the image. This is the switch that does.
     enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
-    _pad: [u32; 3],
+    measured_lighting_ms: f32,
+    pixel_count: u32,
+    _pad: u32,
 }
 
 pub struct DeferredLightPass {
@@ -141,6 +144,8 @@ pub struct DeferredLightPass {
     fallback_ies_view: wgpu::TextureView,
     ies_sampler: wgpu::Sampler,
     pub debug_mode: u32,
+    /// Most recently completed GPU duration for this pass.
+    measured_lighting_ms: f32,
     /// Whether the environment cubemap contributes indirect specular.
     pub enable_env_reflections: bool,
 }
@@ -396,7 +401,7 @@ impl DeferredLightPass {
             bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2), Some(&bgl_3)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("DeferredLight Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -434,7 +439,7 @@ impl DeferredLightPass {
                 ],
                 immediate_size: 0,
             });
-        let reflection_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let reflection_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("DeferredReflection Additive Pipeline"),
             layout: Some(&reflection_pipeline_layout),
             vertex: wgpu::VertexState {
@@ -474,7 +479,7 @@ impl DeferredLightPass {
             cache: None,
         });
         let reflection_debug_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("DeferredReflection Debug Pipeline"),
                 layout: Some(&reflection_pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -817,6 +822,7 @@ impl DeferredLightPass {
             fallback_ies_view,
             ies_sampler,
             debug_mode: 0,
+            measured_lighting_ms: 0.0,
             enable_env_reflections: false,
         }
     }
@@ -833,6 +839,15 @@ impl DeferredLightPass {
 
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
+    }
+
+    pub fn set_measured_lighting_ms(&mut self, milliseconds: f32) -> bool {
+        let milliseconds = milliseconds.max(0.0);
+        if (self.measured_lighting_ms - milliseconds).abs() < 0.001 {
+            return false;
+        }
+        self.measured_lighting_ms = milliseconds;
+        true
     }
 
     /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
@@ -928,7 +943,9 @@ impl RenderPass for DeferredLightPass {
             },
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
-            _pad: [0; 3],
+            measured_lighting_ms: self.measured_lighting_ms,
+            pixel_count: ctx.width.saturating_mul(ctx.height).max(1),
+            _pad: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1350,7 +1367,10 @@ impl RenderPass for DeferredLightPass {
         let portal_unmap = ctx
             .scene_buffers
             .get(BufferKey::of("portal_chain_unmap"))
-            .map_or_else(|| self.fallback_portal_unmap.clone(), |handle| handle.buffer.clone());
+            .map_or_else(
+                || self.fallback_portal_unmap.clone(),
+                |handle| handle.buffer.clone(),
+            );
         let key_0 = [
             ctx.camera.clone(),
             caster_counts.clone(),
@@ -1546,12 +1566,58 @@ impl RenderPass for DeferredLightPass {
                 description: "What GI changes against the sky's ambient: green brighter, red darker (full at 3 stops), blue where no probe holds the point",
             },
             DebugViewDescriptor {
+                name: "Light Complexity",
+                debug_mode: 40,
+                description: "Scalar heat map of directional lights and local lights within their attenuation radii",
+            },
+            DebugViewDescriptor {
+                name: "Shader Complexity",
+                debug_mode: 41,
+                description: "Scalar heat map of per-surface light and material shader work, without lighting contrast",
+            },
+            DebugViewDescriptor {
+                name: "GPU-Time-Weighted Shader Cost",
+                debug_mode: 42,
+                description: "Estimated absolute shader time contribution per pixel in microseconds, weighted by the last measured DeferredLight GPU duration",
+            },
+            DebugViewDescriptor {
                 name: "Ray Trace vs Raster",
                 debug_mode: 33,
                 description: "Cyan=voxel ray-traced surfaces, orange=rasterized geometry",
             },
         ];
         VIEWS
+    }
+
+    fn debug_view_legend(&self, debug_mode: u32) -> Option<DebugViewLegend> {
+        static COLORS: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "0 µs/px", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "0.01 µs/px", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "0.03 µs/px", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "0.1 µs/px", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "0.5+ µs/px", color: [255, 0, 0] },
+        ];
+        static LIGHTS: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "2", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "4", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "6", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "8+", color: [255, 0, 0] },
+        ];
+        static WORK: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
+            DebugViewLegendStop { label: "8", color: [0, 255, 255] },
+            DebugViewLegendStop { label: "16", color: [0, 255, 0] },
+            DebugViewLegendStop { label: "24", color: [255, 255, 0] },
+            DebugViewLegendStop { label: "32+", color: [255, 0, 0] },
+        ];
+
+        match debug_mode {
+            28 => Some(DebugViewLegend { title: "Light complexity", unit: "lights", stops: LIGHTS }),
+            29 => Some(DebugViewLegend { title: "Shader complexity", unit: "work units", stops: WORK }),
+            34 => Some(DebugViewLegend { title: "Estimated GPU time per pixel", unit: "µs / pixel", stops: COLORS }),
+            _ => None,
+        }
     }
 }
 

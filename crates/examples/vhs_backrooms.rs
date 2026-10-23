@@ -37,8 +37,7 @@ use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
-    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_post_process_volume,
-    update_light,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_post_process_volume, update_light,
 };
 
 // User shader snippet injected into the post-process pipeline.
@@ -1011,7 +1010,8 @@ impl App {
                     // so height transitions between neighbouring rooms show
                     // up as an open ceiling ledge rather than a mismatched
                     // wall (there's no wall between two walkable cells).
-                    let w = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [0.1, h / 2.0, CELL / 2.0]));
+                    let w =
+                        spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [0.1, h / 2.0, CELL / 2.0]));
                     let t =
                         glam::Mat4::from_translation(glam::Vec3::new(wx + ox, h / 2.0, wz + oz))
                             * glam::Mat4::from_rotation_y(rot_y);
@@ -1019,10 +1019,7 @@ impl App {
                     walls.push((w, w_obj));
 
                     // Baseboard trim
-                    let t2 = spawn_mesh(
-                        world,
-                        box_mesh([0.0, 0.0, 0.0], [0.12, 0.05, CELL / 2.0]),
-                    );
+                    let t2 = spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [0.12, 0.05, CELL / 2.0]));
                     let tt = glam::Mat4::from_translation(glam::Vec3::new(wx + ox, 0.05, wz + oz))
                         * glam::Mat4::from_rotation_y(rot_y);
                     let t2_obj = Self::place(world, t2, trim_mat, tt, H_CELL);

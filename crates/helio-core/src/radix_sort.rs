@@ -66,7 +66,7 @@ impl RadixSort {
         });
         let module = crate::shader::module(device, "radix sort", crate::include_wgsl!("../shaders/radix_sort.wgsl"));
         let pipeline = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            crate::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
                 module: &module,

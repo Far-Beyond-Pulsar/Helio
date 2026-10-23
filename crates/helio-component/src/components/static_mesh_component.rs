@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use crate::asset_component::AssetComponentRegistration;
 use crate::mesh_cache::{MeshAssetUpload, MeshMaterialSlot, MeshSection};
 use crate::subsystems::{load_mesh_asset_upload, resolve_asset_path};
-use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
+use pulsar_scenedb::{AssetId, AssetPayload, AssetView, Prefetch, Residency};
+use pulsar_scenedb::gpu::{BufferKey, GpuMirrorHandle, InternedGpuLease};
+use pulsar_scenedb::handle_ledger::HandleId;
+use std::sync::{Mutex, OnceLock};
 
 pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
@@ -151,6 +154,56 @@ pub struct LoadedMesh {
     pub content_id: u128,
 }
 
+/// A view's lease on a streamed mesh's geometry in SceneDB's shared GPU
+/// pools. It shares ranges with ordinary StaticMeshComponents and releases
+/// them when this view stops selecting the asset.
+pub struct LoadedMeshGpuLease {
+    pub vertices: InternedGpuLease<PackedVertex>,
+    pub indices: InternedGpuLease<u32>,
+}
+
+impl LoadedMeshGpuLease {
+    pub fn vertex_range(&self) -> pulsar_scenedb::gpu::VarLenHandle {
+        self.vertices.range()
+    }
+
+    pub fn index_range(&self) -> pulsar_scenedb::gpu::VarLenHandle {
+        self.indices.range()
+    }
+}
+
+impl LoadedMesh {
+    fn resident_size_bytes(&self) -> usize {
+        let geometry = self
+            .upload
+            .geometry
+            .vertices
+            .len()
+            .saturating_mul(std::mem::size_of::<PackedVertex>())
+            .saturating_add(
+                self.upload
+                    .geometry
+                    .indices
+                    .len()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            );
+        let sections = self
+            .upload
+            .sections
+            .len()
+            .saturating_mul(std::mem::size_of::<MeshSection>());
+        let material_metadata = self
+            .upload
+            .material_slots
+            .iter()
+            .map(|slot| slot.name.len())
+            .sum::<usize>();
+        geometry
+            .saturating_add(sections)
+            .saturating_add(material_metadata)
+    }
+}
+
 /// Registers the mesh asset kind with SceneDB: its loader, and how a
 /// [`StaticMeshComponent`] takes in a loaded mesh. Idempotent; done on the
 /// first [`mesh_asset_id`].
@@ -158,8 +211,99 @@ pub fn register_mesh_assets() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     REGISTER.call_once(|| {
         pulsar_scenedb::register_loader(MESH_ASSET_KIND, load_mesh_asset);
+        pulsar_scenedb::register_payload_size(MESH_ASSET_KIND, |payload| {
+            payload
+                .downcast_ref::<LoadedMesh>()
+                .map_or(0, LoadedMesh::resident_size_bytes)
+        });
         pulsar_scenedb::register_binding::<StaticMeshComponent>(MESH_ASSET_KIND, bind_mesh_asset);
     });
+}
+
+/// The shared SceneDB residency entry for a declared mesh asset.
+///
+/// LOD render views request the selected asset through this cache and retain
+/// the returned `Arc` only while that level is active. Adjacent levels can
+/// use [`prefetch_mesh_asset`] without becoming strong references in the
+/// authored component's asset ledger.
+pub fn mesh_asset_residency(asset: AssetId) -> Option<Residency<LoadedMesh>> {
+    if asset.is_zero() {
+        return None;
+    }
+    let (kind, source) = asset.source()?;
+    if kind != MESH_ASSET_KIND {
+        return None;
+    }
+
+    static CACHE: OnceLock<Mutex<HashMap<(AssetId, u128), Residency<LoadedMesh>>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+    // AssetId names a source path and stays stable across reimports. Include
+    // the source content id in the residency key so file reloads rebuild the
+    // cooked mesh while unchanged content still shares one resident value.
+    let content_id =
+        crate::mesh_cache::content_id_for_path(std::path::Path::new(source.as_ref())).unwrap_or(0);
+    Some(
+        cache
+            .entry((asset, content_id))
+            .or_insert_with(|| {
+                let source = source.to_string();
+                Residency::lazy(LoadedMesh::resident_size_bytes, move || {
+                    load_mesh_asset_data(&source)
+                })
+            })
+            .clone(),
+    )
+}
+
+/// Current source content identity used to invalidate a selected GPU lease
+/// after the asset is reimported or edited in place.
+pub fn mesh_asset_content_version(asset: AssetId) -> Option<u128> {
+    let (kind, source) = asset.source()?;
+    (kind == MESH_ASSET_KIND).then(|| {
+        crate::mesh_cache::content_id_for_path(std::path::Path::new(source.as_ref())).unwrap_or(0)
+    })
+}
+
+/// Start loading a declared LOD mesh on SceneDB's asset loader workers.
+/// The caller keeps the returned prefetch while the view may soon need it.
+pub fn prefetch_mesh_asset(asset: AssetId) -> Option<Prefetch<LoadedMesh>> {
+    Some(mesh_asset_residency(asset)?.prefetch())
+}
+
+/// Make a selected LOD's cooked geometry resident in the same content-addressed
+/// GPU pools ordinary mesh components use. The returned lease is view-owned;
+/// dropping it returns its references to SceneDB's shared pool allocator.
+pub fn acquire_mesh_asset_gpu_lease(
+    mirror: &GpuMirrorHandle,
+    asset: AssetId,
+    mesh: &LoadedMesh,
+) -> Result<LoadedMeshGpuLease, String> {
+    let identity = HandleId(if mesh.content_id != 0 {
+        mesh.content_id
+    } else {
+        asset.0
+    });
+    if identity.is_zero() {
+        return Err("mesh geometry has no stable content identity".into());
+    }
+    let store = mirror.store();
+    let vertex_pool = store
+        .interned_var_len_pool::<PackedVertex>(BufferKey::of("builtin_mesh_vertex"))
+        .ok_or_else(|| "SceneDB mesh vertex pool is not registered".to_owned())?;
+    let vertices = vertex_pool
+        .acquire_shared(mirror.queue(), identity, &mesh.upload.geometry.vertices)
+        .map_err(|error| format!("could not allocate LOD vertices: {error}"))?;
+    store.sync_var_len_pool(BufferKey::of("builtin_mesh_vertex"), vertex_pool.underlying());
+    let index_pool = store
+        .interned_var_len_pool::<u32>(BufferKey::of("builtin_mesh_index"))
+        .ok_or_else(|| "SceneDB mesh index pool is not registered".to_owned())?;
+    let indices = index_pool
+        .acquire_shared(mirror.queue(), identity, &mesh.upload.geometry.indices)
+        .map_err(|error| format!("could not allocate LOD indices: {error}"))?;
+    store.sync_var_len_pool(BufferKey::of("builtin_mesh_index"), index_pool.underlying());
+    Ok(LoadedMeshGpuLease { vertices, indices })
 }
 
 /// The asset id of the mesh `mesh_asset` names, declared so the world can
@@ -197,6 +341,14 @@ pub fn mesh_source_for_file(abs: &std::path::Path) -> String {
 
 /// The mesh kind's loader: runs on a SceneDB worker thread.
 fn load_mesh_asset(source: &str) -> Result<AssetPayload, String> {
+    let asset = AssetId::of(MESH_ASSET_KIND, source);
+    let residency = mesh_asset_residency(asset)
+        .ok_or_else(|| format!("mesh asset source is not declared: '{source}'"))?;
+    let loaded = residency.get()?;
+    Ok(loaded)
+}
+
+fn load_mesh_asset_data(source: &str) -> Result<LoadedMesh, String> {
     let path = std::path::Path::new(source);
     let upload =
         load_mesh_asset_upload(path).ok_or_else(|| format!("could not load mesh '{source}'"))?;
@@ -207,11 +359,11 @@ fn load_mesh_asset(source: &str) -> Result<AssetPayload, String> {
         upload.geometry.indices.len(),
         upload.sections.len()
     );
-    Ok(std::sync::Arc::new(LoadedMesh {
+    Ok(LoadedMesh {
         bounds_local: local_bounding_sphere(&upload.geometry.vertices),
         content_id: crate::mesh_cache::content_id_for_path(path).unwrap_or(0),
         upload,
-    }))
+    })
 }
 
 /// How a [`StaticMeshComponent`] takes in its loaded (or failed) mesh.
@@ -518,7 +670,7 @@ impl gpui::Render for MeshAssetEditor {
     ) -> impl gpui::IntoElement {
         use gpui::prelude::*;
         use ui::button::{Button, ButtonVariants as _};
-        use ui::{ActiveTheme, Sizable, h_flex, popover::Popover};
+        use ui::{h_flex, popover::Popover, ActiveTheme, Sizable};
 
         let display = if self.path.is_empty() {
             "No mesh selected".to_string()
@@ -834,7 +986,7 @@ impl gpui::Render for StaticMeshMaterialSlotsEditor {
     ) -> impl gpui::IntoElement {
         use gpui::prelude::*;
         use ui::button::{Button, ButtonVariants as _};
-        use ui::{ActiveTheme, Sizable, h_flex, popover::Popover, v_flex};
+        use ui::{h_flex, popover::Popover, v_flex, ActiveTheme, Sizable};
 
         let mut rows = v_flex().w_full().gap_1().child(
             gpui::div()

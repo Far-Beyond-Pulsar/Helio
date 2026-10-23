@@ -26,8 +26,8 @@ use std::{
 };
 use v3_demo_common::{
     build_default_renderer, cube_mesh, directional_light, flush_scene_db, make_material,
-    new_scene_db_with_gpu_mirror, spawn_light, spawn_material, spawn_mesh,
-    spawn_object_with_movability, set_object_movability,
+    new_scene_db_with_gpu_mirror, set_object_movability, spawn_light, spawn_material, spawn_mesh,
+    spawn_object_with_movability,
 };
 use winit::{
     application::ApplicationHandler,
@@ -53,10 +53,12 @@ fn options() -> Options {
     Options {
         initial_frames: value("HELIO_INITIAL_FRAMES")
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300).max(1),
+            .unwrap_or(300)
+            .max(1),
         step: value("HELIO_DYNAMIC_STEP")
             .and_then(|v| v.parse().ok())
-            .unwrap_or(100_000).clamp(1, OBJECTS),
+            .unwrap_or(100_000)
+            .clamp(1, OBJECTS),
         stabilize: Duration::from_secs(
             value("HELIO_STABILIZE_SECONDS")
                 .and_then(|v| v.parse().ok())
@@ -64,7 +66,8 @@ fn options() -> Options {
         ),
         sample_frames: value("HELIO_SAMPLE_FRAMES")
             .and_then(|v| v.parse().ok())
-            .unwrap_or(120).max(1),
+            .unwrap_or(120)
+            .max(1),
         out: Box::leak(
             value("HELIO_PERF_DB")
                 .unwrap_or_else(|| "two_million_dynamic.sqlite".into())
@@ -186,12 +189,13 @@ impl Db {
         .unwrap();
         let profiler_frame_id = self.conn.last_insert_rowid();
         for pass in &snapshot.passes {
-            self.conn.execute(
-                "INSERT INTO pass_timings (profiler_frame_id, pass_name, cpu_ms, gpu_ms)
+            self.conn
+                .execute(
+                    "INSERT INTO pass_timings (profiler_frame_id, pass_name, cpu_ms, gpu_ms)
                  VALUES (?, ?, ?, ?)",
-                params![profiler_frame_id, pass.name, pass.cpu_ms, pass.gpu_ms],
-            )
-            .unwrap();
+                    params![profiler_frame_id, pass.name, pass.cpu_ms, pass.gpu_ms],
+                )
+                .unwrap();
         }
     }
     fn stage(&self, frame_id: i64, name: &str, duration_ms: f64) {
@@ -222,7 +226,9 @@ impl Db {
         self.conn
             .execute("UPDATE runs SET completed = 1 WHERE id = ?", [self.run])
             .unwrap();
-        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
     }
 }
 
@@ -315,7 +321,7 @@ impl ApplicationHandler for App {
                 format,
                 width: size.width,
                 height: size.height,
-                    present_mode,
+                present_mode,
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
@@ -507,9 +513,7 @@ impl App {
         let now = Instant::now();
         s.frame += 1;
         let initial_transition = s.dynamic == 0 && s.frame > self.opts.initial_frames;
-        if s.dynamic < OBJECTS
-            && (initial_transition || (s.transition_ready && !s.sampling))
-        {
+        if s.dynamic < OBJECTS && (initial_transition || (s.transition_ready && !s.sampling)) {
             let add = self.opts.step.min(OBJECTS - s.dynamic);
             for &e in &s.objects[s.dynamic..s.dynamic + add] {
                 set_object_movability(&mut s.scene.world, e, Movability::Dynamic).unwrap();
@@ -544,7 +548,10 @@ impl App {
         {
             s.sampling = true;
             s.sample_left = self.opts.sample_frames;
-            println!("checkpoint {}: stabilization complete; sampling {} frames", s.seq, s.sample_left);
+            println!(
+                "checkpoint {}: stabilization complete; sampling {} frames",
+                s.seq, s.sample_left
+            );
         }
         let record_frame = if s.dynamic == 0 && s.frame <= self.opts.initial_frames {
             true
@@ -586,7 +593,9 @@ impl App {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let render_start = Instant::now();
-        s.renderer.render(&s.camera, &view).expect("benchmark render failed");
+        s.renderer
+            .render(&s.camera, &view)
+            .expect("benchmark render failed");
         let render_ms = render_start.elapsed().as_secs_f64() * 1000.0;
         let present_start = Instant::now();
         s.renderer.queue().present(out);
@@ -600,14 +609,30 @@ impl App {
             s.db.conn.execute_batch("BEGIN;").unwrap();
             let frame_id = s.db.frame(s.checkpoint, s.frame, frame_ms, s.dynamic);
             let snapshot = s.renderer.timing_snapshot().clone();
-            if s.previous_cpu_frame.is_some_and(|previous| snapshot.cpu_frame_index <= previous) {
+            if s.previous_cpu_frame
+                .is_some_and(|previous| snapshot.cpu_frame_index <= previous)
+            {
                 s.profiler_epoch += 1;
             }
             s.previous_cpu_frame = Some(snapshot.cpu_frame_index);
-            s.db.conn.execute("INSERT INTO frame_context VALUES (?, ?, ?, ?, ?)",
-                params![frame_id, record_frame, s.profiler_epoch as i64, size.width, size.height]).unwrap();
+            s.db.conn
+                .execute(
+                    "INSERT INTO frame_context VALUES (?, ?, ?, ?, ?)",
+                    params![
+                        frame_id,
+                        record_frame,
+                        s.profiler_epoch as i64,
+                        size.width,
+                        size.height
+                    ],
+                )
+                .unwrap();
             s.db.profiler_frame(frame_id, &snapshot);
-            s.db.stage(frame_id, "cpu_tick", present_end.duration_since(frame_start).as_secs_f64() * 1000.0);
+            s.db.stage(
+                frame_id,
+                "cpu_tick",
+                present_end.duration_since(frame_start).as_secs_f64() * 1000.0,
+            );
             s.db.stage(frame_id, "scene_flush", flush_ms);
             if let Some(stats) = upload_stats {
                 s.db.scene_upload(frame_id, stats.ranges as u64, stats.bytes);

@@ -16,8 +16,8 @@ use v3_demo_common::{
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use rapier3d::prelude::*;
@@ -157,20 +157,14 @@ impl ApplicationHandler for App {
             .build(device.clone(), queue.clone(), size.width, size.height, fmt);
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let floor_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.25, 0.25, 0.3, 1.0],
-            0.85,
-            0.03,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let sphere_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.2, 0.5, 0.8, 1.0],
-            0.45,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.25, 0.25, 0.3, 1.0], 0.85, 0.03, [0.0, 0.0, 0.0], 0.0),
+        );
+        let sphere_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.2, 0.5, 0.8, 1.0], 0.45, 0.05, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let floor_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 50.0));
         let _ = spawn_object(
@@ -415,7 +409,10 @@ impl AppState {
             // Start horizontal at height 18.0 and extend along +X, so gravity will swing the chain.
             let x = (i as f32 + 1.0) * seg_length;
             let y = 18.0;
-            let sphere_mesh_id = spawn_mesh(&mut self.scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.4, 0.4, 0.4]));
+            let sphere_mesh_id = spawn_mesh(
+                &mut self.scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [0.4, 0.4, 0.4]),
+            );
             let obj = spawn_object_with_movability(
                 &mut self.scene_db.world,
                 sphere_mesh_id,

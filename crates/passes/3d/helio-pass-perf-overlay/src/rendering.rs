@@ -125,7 +125,7 @@ impl PerfOverlayShared {
             });
 
         let color_compare_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some("PerfOverlay Color Compare Pipeline"),
                 layout: Some(&color_compare_pipeline_layout),
                 module: &color_compare_shader,
@@ -175,7 +175,7 @@ impl PerfOverlayShared {
             immediate_size: 0,
         });
 
-        let blit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let blit_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("PerfOverlay Blit Pipeline"),
             layout: Some(&blit_pipeline_layout),
             module: &blit_shader,
@@ -274,7 +274,7 @@ impl PerfOverlayShared {
             });
 
         let cost_compute_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some("PerfOverlay Cost Compute Pipeline"),
                 layout: Some(&cost_compute_pipeline_layout),
                 module: &cost_compute_shader,
@@ -453,7 +453,7 @@ impl PerfOverlayPass {
                 immediate_size: 0,
             });
 
-        let aggregate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let aggregate_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("PerfOverlay Aggregate Pipeline"),
             layout: Some(&aggregate_pipeline_layout),
             module: &aggregate_shader,
@@ -541,7 +541,7 @@ impl PerfOverlayPass {
                 immediate_size: 0,
             });
 
-        let visualize_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let visualize_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("PerfOverlay Visualize Pipeline"),
             layout: Some(&visualize_pipeline_layout),
             vertex: wgpu::VertexState {
@@ -902,7 +902,7 @@ impl MaterialProfiler {
                 immediate_size: 0,
             });
 
-        let profile_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let profile_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Material Profile Pipeline"),
             layout: Some(&profile_pipeline_layout),
             vertex: wgpu::VertexState {

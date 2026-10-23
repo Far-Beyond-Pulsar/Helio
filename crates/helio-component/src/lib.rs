@@ -18,6 +18,8 @@ pub mod texture_assets;
 pub mod texture_detail;
 pub use static_move_watch::StaticMoveWatch;
 pub mod subsystems;
+pub mod virtual_geometry_host;
+pub mod virtual_geometry_instances;
 
 pub use asset_component::*;
 pub use components::*;

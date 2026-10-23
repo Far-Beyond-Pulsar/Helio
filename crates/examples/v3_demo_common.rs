@@ -1,5 +1,8 @@
 use glam::{Mat4, Vec3};
-use helio::{GpuLight, LightType, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
+use helio::{
+    GpuLight, LightType, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig,
+    SceneDbHandle,
+};
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
@@ -43,8 +46,16 @@ pub fn new_scene_db_with_gpu_mirror_and(
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
     helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
     helio_pass_gbuffer::SubLevelActorComponent::register_gpu_columns_growable(
         &mut gpu_store,
         1024,
@@ -75,12 +86,32 @@ pub fn new_scene_db_with_gpu_mirror_and(
         helio_pass_forward_lit::MAX_LIGHTS,
         device,
     );
-    helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
     helio_pass_lens::LensComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_lens::LensElementComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_volumetric_fog::LocalFogVolumeComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_volumetric_fog::VolumetricFogSettingsComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_lens::LensElementComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
+    helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
+    helio_pass_volumetric_fog::LocalFogVolumeComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
+    helio_pass_volumetric_fog::VolumetricFogSettingsComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4096,
+        device,
+    );
     register_extra(&mut gpu_store);
     let gpu_store = Arc::new(gpu_store);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
@@ -481,7 +512,12 @@ impl Default for WaterVolumeDescriptor {
 impl WaterVolumeDescriptor {
     pub fn to_component(&self) -> helio_pass_water_sim::WaterVolumeComponent {
         helio_pass_water_sim::WaterVolumeComponent {
-            bounds_min: [self.bounds_min[0], self.bounds_min[1], self.bounds_min[2], 0.0],
+            bounds_min: [
+                self.bounds_min[0],
+                self.bounds_min[1],
+                self.bounds_min[2],
+                0.0,
+            ],
             bounds_max: [
                 self.bounds_max[0],
                 self.bounds_max[1],
@@ -589,7 +625,8 @@ pub fn spawn_water_hitbox(world: &mut World, descriptor: WaterHitboxDescriptor) 
 /// Replace a previously spawned water hitbox's bounds (e.g. each frame, as
 /// the object displacing the water moves).
 pub fn update_water_hitbox(world: &mut World, entity: Entity, descriptor: WaterHitboxDescriptor) {
-    if let Some(mut existing) = world.get_mut::<helio_pass_water_sim::WaterHitboxComponent>(entity) {
+    if let Some(mut existing) = world.get_mut::<helio_pass_water_sim::WaterHitboxComponent>(entity)
+    {
         *existing = descriptor.to_component();
     }
 }
@@ -683,7 +720,10 @@ pub fn spawn_object(
     transform: Mat4,
     radius: f32,
 ) -> SceneResult<Entity> {
-    let mirror = world.gpu_mirror().cloned().ok_or("scene has no GPU mirror")?;
+    let mirror = world
+        .gpu_mirror()
+        .cloned()
+        .ok_or("scene has no GPU mirror")?;
     let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
         .filter(|handle| handle.count != 0)
         .ok_or("mesh has no GPU vertex range")?;
@@ -693,7 +733,12 @@ pub fn spawn_object(
     let material_component = world
         .get::<helio_pass_gbuffer::MaterialComponent>(material)
         .ok_or("material entity has no MaterialComponent")?;
-    let bounds = [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius];
+    let bounds = [
+        transform.w_axis.x,
+        transform.w_axis.y,
+        transform.w_axis.z,
+        radius,
+    ];
     // `+ 1`, not the raw SceneDB entity generation: `Entity::generation()`
     // legitimately starts at 0 for any slot's first use (see
     // `World::spawn_inner`) and only increments on despawn-then-reuse, but
@@ -998,9 +1043,14 @@ pub fn update_point_light(
 
 /// Author one persistent camera-settings row per view. Interactive examples call
 /// this after editing their controls, before flushing the world's GPU mirror.
-pub fn set_camera_postprocess(world: &mut World, view_id: u32, settings: &helio_pass_postprocess::PostProcessSettings) {
+pub fn set_camera_postprocess(
+    world: &mut World,
+    view_id: u32,
+    settings: &helio_pass_postprocess::PostProcessSettings,
+) {
     use helio_pass_postprocess::CameraPostProcessComponent;
-    let existing = world.query::<&CameraPostProcessComponent>()
+    let existing = world
+        .query::<&CameraPostProcessComponent>()
         .find(|(_, row)| row.view_id == view_id)
         .map(|(entity, _)| entity);
     let entity = existing.unwrap_or_else(|| world.spawn());
@@ -1010,7 +1060,8 @@ pub fn set_camera_postprocess(world: &mut World, view_id: u32, settings: &helio_
 /// Author one persistent lens row per view (the camera's optics and focus).
 pub fn set_camera_lens(world: &mut World, lens: helio_pass_lens::LensComponent) {
     use helio_pass_lens::LensComponent;
-    let existing = world.query::<&LensComponent>()
+    let existing = world
+        .query::<&LensComponent>()
         .find(|(_, row)| row.view_id == lens.view_id)
         .map(|(entity, _)| entity);
     let entity = existing.unwrap_or_else(|| world.spawn());
@@ -1038,7 +1089,10 @@ pub const SHADOW_BASES: [u32; 5] = [0, 6, 12, 18, 24];
 /// Opt a light into the medium with a real shadow map, so it forms shafts
 /// wherever geometry blocks it. Scattering gain 1, full volumetric shadow.
 pub fn volumetric_light(mut light: GpuLight, shadow_base: u32) -> GpuLight {
-    debug_assert!(shadow_base % 6 == 0, "shadow bases are caster slots of 6 layers");
+    debug_assert!(
+        shadow_base % 6 == 0,
+        "shadow bases are caster slots of 6 layers"
+    );
     light.shadow_index = shadow_base;
     light.god_rays_enabled = 1;
     light.god_rays_density = 1.0;
@@ -1075,12 +1129,15 @@ pub fn spawn_local_fog(
 /// and the integration range in metres (keep it tight around the media).
 pub fn set_volumetric_quality(world: &mut World, quality: u32, max_distance: f32) -> Entity {
     let entity = world.spawn();
-    world.insert(entity, VolumetricFogSettingsComponent {
-        quality,
-        max_distance,
-        light_max_distance: max_distance,
-        ..Default::default()
-    });
+    world.insert(
+        entity,
+        VolumetricFogSettingsComponent {
+            quality,
+            max_distance,
+            light_max_distance: max_distance,
+            ..Default::default()
+        },
+    );
     entity
 }
 
@@ -1088,7 +1145,8 @@ pub fn set_volumetric_quality(world: &mut World, quality: u32, max_distance: f32
 
 /// A GPU device with the renderer's required features and no window.
 pub fn headless_gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
@@ -1102,7 +1160,9 @@ pub fn headless_gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
         ..Default::default()
     }))
     .expect("GPU device");
-    device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU UNCAPTURED ERROR] {e:?}")));
+    device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
+        panic!("[GPU UNCAPTURED ERROR] {e:?}")
+    }));
     (Arc::new(device), Arc::new(queue))
 }
 
@@ -1121,7 +1181,11 @@ pub fn capture_png(
     let (width, height) = size;
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Probe target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1147,15 +1211,28 @@ pub fn capture_png(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(height),
+            },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([encoder.finish()]);
-    readback.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let pixels = readback.slice(..).get_mapped_range().unwrap().to_vec();
     image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
-    pixels.chunks_exact(4).map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0).sum::<f64>()
+    pixels
+        .chunks_exact(4)
+        .map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0)
+        .sum::<f64>()
         / (width * height) as f64
 }

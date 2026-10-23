@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use glam::Vec3;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
 use helio_default_graphs::build_default_graph_external_with_context;
@@ -159,7 +159,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
         renderer.set_ambient([0.06, 0.06, 0.09], 1.0);
 

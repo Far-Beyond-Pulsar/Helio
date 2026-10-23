@@ -153,69 +153,93 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
         renderer.set_editor_mode(true);
 
-        let white = spawn_material(&mut scene_db.world, make_material(
-            [0.9, 0.9, 0.92, 1.0],
-            0.6,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let emissive_red = spawn_material(&mut scene_db.world, make_material(
-            [1.0, 0.1, 0.1, 1.0],
-            0.3,
-            0.0,
-            [10.0, 0.5, 0.5],
-            10.0,
-        ));
-        let emissive_green = spawn_material(&mut scene_db.world, make_material(
-            [0.1, 1.0, 0.1, 1.0],
-            0.3,
-            0.0,
-            [0.5, 10.0, 0.5],
-            10.0,
-        ));
-        let emissive_blue = spawn_material(&mut scene_db.world, make_material(
-            [0.1, 0.1, 1.0, 1.0],
-            0.3,
-            0.0,
-            [0.5, 0.5, 10.0],
-            10.0,
-        ));
-        let emissive_sun = spawn_material(&mut scene_db.world, make_material(
-            [1.0, 0.9, 0.7, 1.0],
-            0.2,
-            0.0,
-            [50.0, 45.0, 35.0],
-            50.0,
-        ));
-        let metal = spawn_material(&mut scene_db.world, make_material(
-            [0.95, 0.93, 0.88, 1.0],
-            0.1,
-            1.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let white = spawn_material(
+            &mut scene_db.world,
+            make_material([0.9, 0.9, 0.92, 1.0], 0.6, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let emissive_red = spawn_material(
+            &mut scene_db.world,
+            make_material([1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0),
+        );
+        let emissive_green = spawn_material(
+            &mut scene_db.world,
+            make_material([0.1, 1.0, 0.1, 1.0], 0.3, 0.0, [0.5, 10.0, 0.5], 10.0),
+        );
+        let emissive_blue = spawn_material(
+            &mut scene_db.world,
+            make_material([0.1, 0.1, 1.0, 1.0], 0.3, 0.0, [0.5, 0.5, 10.0], 10.0),
+        );
+        let emissive_sun = spawn_material(
+            &mut scene_db.world,
+            make_material([1.0, 0.9, 0.7, 1.0], 0.2, 0.0, [50.0, 45.0, 35.0], 50.0),
+        );
+        let metal = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.93, 0.88, 1.0], 0.1, 1.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 8.0));
-        let _ = spawn_object(&mut scene_db.world, ground, white, glam::Mat4::IDENTITY, 8.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            ground,
+            white,
+            glam::Mat4::IDENTITY,
+            8.0,
+        );
 
         let red_cube = spawn_mesh(&mut scene_db.world, cube_mesh([-1.5, 0.5, -1.0], 0.5));
-        let _ = spawn_object(&mut scene_db.world, red_cube, emissive_red, glam::Mat4::IDENTITY, 0.5);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            red_cube,
+            emissive_red,
+            glam::Mat4::IDENTITY,
+            0.5,
+        );
 
         let green_cube = spawn_mesh(&mut scene_db.world, cube_mesh([1.5, 0.5, -1.0], 0.5));
-        let _ = spawn_object(&mut scene_db.world, green_cube, emissive_green, glam::Mat4::IDENTITY, 0.5);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            green_cube,
+            emissive_green,
+            glam::Mat4::IDENTITY,
+            0.5,
+        );
 
         let blue_cube = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.5, 1.5], 0.5));
-        let _ = spawn_object(&mut scene_db.world, blue_cube, emissive_blue, glam::Mat4::IDENTITY, 0.5);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            blue_cube,
+            emissive_blue,
+            glam::Mat4::IDENTITY,
+            0.5,
+        );
 
         let metal_cube = spawn_mesh(&mut scene_db.world, cube_mesh([-1.5, 0.5, 2.5], 0.5));
-        let _ = spawn_object(&mut scene_db.world, metal_cube, metal, glam::Mat4::IDENTITY, 0.5);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            metal_cube,
+            metal,
+            glam::Mat4::IDENTITY,
+            0.5,
+        );
 
         let sun_sphere = spawn_mesh(&mut scene_db.world, cube_mesh([3.0, 4.0, -3.0], 0.4));
-        let _ = spawn_object(&mut scene_db.world, sun_sphere, emissive_sun, glam::Mat4::IDENTITY, 0.4);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            sun_sphere,
+            emissive_sun,
+            glam::Mat4::IDENTITY,
+            0.4,
+        );
 
         spawn_light(
             &mut scene_db.world,
@@ -419,7 +443,11 @@ impl ApplicationHandler for App {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
-                v3_demo_common::set_camera_postprocess(&mut state.scene_db.world, camera.view_id, &settings);
+                v3_demo_common::set_camera_postprocess(
+                    &mut state.scene_db.world,
+                    camera.view_id,
+                    &settings,
+                );
                 v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render error: {:?}", e);

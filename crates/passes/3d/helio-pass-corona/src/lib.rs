@@ -367,7 +367,7 @@ impl CoronaPass {
         // ── Compute pipelines ────────────────────────────────────────────────
 
         let mk_compute = |entry: &str| -> wgpu::ComputePipeline {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(&format!("Corona {entry}")),
                 layout: Some(&compute_pl),
                 module: &compute_shader,
@@ -390,7 +390,7 @@ impl CoronaPass {
 
         // ── Render pipeline ──────────────────────────────────────────────────
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let render_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Corona Render"),
             layout: Some(&render_pl),
             vertex: wgpu::VertexState {
