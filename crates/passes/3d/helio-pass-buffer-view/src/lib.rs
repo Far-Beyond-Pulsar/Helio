@@ -82,7 +82,7 @@ impl BufferViewPass {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Buffer View Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {

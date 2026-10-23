@@ -26,7 +26,11 @@ pub fn populate(world: &mut World) {
     meshes[0].block([0., -0.13, 0.], [11., 0.1, 28.]);
     for x in -9_i32..9 {
         for z in -23_i32..23 {
-            let mat = if x.abs() <= 1 && z.rem_euclid(7) == 0 { 2 } else { 3 };
+            let mat = if x.abs() <= 1 && z.rem_euclid(7) == 0 {
+                2
+            } else {
+                3
+            };
             meshes[mat].block(
                 [x as f32 * 1.2 + 0.6, -0.015, z as f32 * 1.2 + 0.6],
                 [0.592, 0.015, 0.592],
@@ -324,22 +328,33 @@ pub fn populate(world: &mut World) {
         .chain(&panes)
         .map(|m| m.indices.len() / 3)
         .sum();
-    for (index, (mut mesh, (colour, rough, metal, emission, strength))) in meshes.into_iter().zip(properties).enumerate() {
+    for (index, (mut mesh, (colour, rough, metal, emission, strength))) in
+        meshes.into_iter().zip(properties).enumerate()
+    {
         let material = spawn_material(
             world,
             make_material(colour, rough, metal, emission, strength),
         );
         match index {
             0 => {
-                world.insert(material, crate::hlfs_capture::architectural_materials::StoneMaterial);
+                world.insert(
+                    material,
+                    crate::hlfs_capture::architectural_materials::StoneMaterial,
+                );
                 mesh.world_space_uv(2.0);
             }
             3 => {
-                world.insert(material, crate::hlfs_capture::architectural_materials::FloorMaterial);
+                world.insert(
+                    material,
+                    crate::hlfs_capture::architectural_materials::FloorMaterial,
+                );
                 mesh.world_space_uv(2.0);
             }
             4 => {
-                world.insert(material, crate::hlfs_capture::architectural_materials::WoodMaterial);
+                world.insert(
+                    material,
+                    crate::hlfs_capture::architectural_materials::WoodMaterial,
+                );
                 mesh.world_space_uv(0.8);
             }
             _ => {}

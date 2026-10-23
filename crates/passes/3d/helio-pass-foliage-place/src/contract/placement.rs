@@ -16,7 +16,7 @@
 //! garbage across the whole frame for several frames. The guard is what turns "one
 //! instance had a bad transform" into a single missing blade instead of a corrupted
 //! image, and it is the same reason `select_object_lod` in
-//! `helio-pass-virtual-geometry` opens with a five-way `is_finite` check.
+//! the removed virtual-geometry pass opens with a five-way `is_finite` check.
 
 /// Number of drawable foliage LOD levels: L0 through L3.
 pub const FOLIAGE_LOD_COUNT: u32 = 4;

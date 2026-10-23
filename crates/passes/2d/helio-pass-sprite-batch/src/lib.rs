@@ -407,7 +407,7 @@ impl SpriteBatchPass {
             ],
         };
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Sprite Batch Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -570,7 +570,7 @@ impl SpriteBatchPass {
             bind_group_layouts: &[Some(&pass.bgl), Some(&textures_bgl)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Sprite Scene Pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {

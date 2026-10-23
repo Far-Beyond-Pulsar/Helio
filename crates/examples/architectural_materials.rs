@@ -132,7 +132,9 @@ fn apply_material(
     roughness_scale: f32,
 ) {
     for entity in entities {
-        let mut material = world.get_mut::<MaterialComponent>(entity).expect("architectural material");
+        let mut material = world
+            .get_mut::<MaterialComponent>(entity)
+            .expect("architectural material");
         material.base_color = [1.0; 4];
         material.roughness_metallic[0] = roughness_scale;
         material.tex_base_color = base;

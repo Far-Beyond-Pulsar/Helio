@@ -28,8 +28,8 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_portal_cull::{
-    components::PortalComponent, PortalProjectionBridge, PortalProjectionConfig,
-    SubLevelContents, SubLevelResolver, MAX_PORTAL_CHAINS,
+    components::PortalComponent, PortalProjectionBridge, PortalProjectionConfig, SubLevelContents,
+    SubLevelResolver, MAX_PORTAL_CHAINS,
 };
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
@@ -269,9 +269,8 @@ impl ApplicationHandler for App {
         // second copy of the same surface. This is the same topology that
         // arbitrary portal scenes use, and lets the resolver produce normal
         // recursive chains without demo-specific anchor records.
-        let authored_portal_entities: Vec<Entity> = (0..faces.len())
-            .map(|_| scene_db.world.spawn())
-            .collect();
+        let authored_portal_entities: Vec<Entity> =
+            (0..faces.len()).map(|_| scene_db.world.spawn()).collect();
         let opposite_face = [1usize, 0, 3, 2, 5, 4];
         let mut authored_portals = Vec::with_capacity(faces.len());
         for (i, &(normal, up_hint)) in faces.iter().enumerate() {
@@ -342,12 +341,8 @@ impl ApplicationHandler for App {
             -0.488
         };
         let initial_aspect = size.width as f32 / size.height.max(1) as f32;
-        let (_, initial_camera) = cube_camera(
-            initial_position,
-            initial_yaw,
-            initial_pitch,
-            initial_aspect,
-        );
+        let (_, initial_camera) =
+            cube_camera(initial_position, initial_yaw, initial_pitch, initial_aspect);
         let projection_frame = projection_bridge
             .build_visible_from_camera(
                 &resolver,
@@ -569,12 +564,7 @@ impl AppState {
         self.cam_pitch = (self.cam_pitch - self.mouse_delta.1 * SENS).clamp(-1.4, 1.4);
         self.mouse_delta = (0.0, 0.0);
 
-        let (forward, _) = cube_camera(
-            self.cam_pos,
-            self.cam_yaw,
-            self.cam_pitch,
-            1.0,
-        );
+        let (forward, _) = cube_camera(self.cam_pos, self.cam_yaw, self.cam_pitch, 1.0);
         let (sy, cy) = self.cam_yaw.sin_cos();
         let right = Vec3::new(cy, 0.0, sy);
 
@@ -602,13 +592,11 @@ impl AppState {
 
         let (_, camera) = cube_camera(self.cam_pos, self.cam_yaw, self.cam_pitch, aspect);
 
-        let projection_result = self
-            .portal_projection_bridge
-            .build_visible_from_camera(
-                &self.portal_resolver,
-                camera.proj * camera.view,
-                self.cam_pos,
-            );
+        let projection_result = self.portal_projection_bridge.build_visible_from_camera(
+            &self.portal_resolver,
+            camera.proj * camera.view,
+            self.cam_pos,
+        );
         match projection_result {
             Ok(projection_frame) => {
                 let view_count = projection_frame.portal_views.len();

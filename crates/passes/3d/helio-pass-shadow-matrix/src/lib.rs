@@ -151,7 +151,7 @@ fn pipeline(
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
         label: Some(entry),
         layout: Some(&pl),
         module: shader,

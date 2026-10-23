@@ -862,7 +862,7 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
             label: None,
             source: wgpu::ShaderSource::Wgsl(COMPUTE.into()),
         });
-        let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let compute = crate::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: None,
             layout: None,
             module: &module,
@@ -880,7 +880,7 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
             source: wgpu::ShaderSource::Wgsl(RENDER.into()),
         });
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let render = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let render = crate::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: None,
             layout: None,
             vertex: wgpu::VertexState {

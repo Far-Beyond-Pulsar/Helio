@@ -85,10 +85,6 @@ mod tests {
                 include_str!("../../helio-pass-shadow/shaders/shadow_transmittance.wgsl"),
             ),
             (
-                "virtual geometry",
-                include_str!("../../helio-pass-virtual-geometry/shaders/vg_gbuffer.wgsl"),
-            ),
-            (
                 "portal instances",
                 include_str!("../../helio-pass-portal-instances/shaders/gbuffer_portal.wgsl"),
             ),

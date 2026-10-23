@@ -502,7 +502,7 @@ impl AtmospherePass {
                 bind_group_layouts: &groups,
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
                 module: &module,
@@ -862,7 +862,7 @@ impl AtmosphereCompositePass {
             dst_factor: wgpu::BlendFactor::SrcAlpha,
             operation: wgpu::BlendOperation::Add,
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Atmosphere composite"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {

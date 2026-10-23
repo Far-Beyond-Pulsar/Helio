@@ -125,7 +125,7 @@ impl SmaaPass {
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pl),
                 vertex: wgpu::VertexState {

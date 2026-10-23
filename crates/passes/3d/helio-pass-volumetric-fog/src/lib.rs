@@ -467,7 +467,7 @@ impl VolumetricFogPass {
             bind_group_layouts: &[Some(&resolve_bgl)],
             immediate_size: 0,
         });
-        let resolve_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let resolve_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Fog SceneDB Resolve"),
             layout: Some(&resolve_pl),
             module: &shader,
@@ -475,7 +475,7 @@ impl VolumetricFogPass {
             compilation_options: Default::default(),
             cache: None,
         });
-        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let cull_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Fog Cluster Lights"),
             layout: Some(&inject_pl),
             module: &shader,
@@ -483,7 +483,7 @@ impl VolumetricFogPass {
             compilation_options: Default::default(),
             cache: None,
         });
-        let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let classify_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Volumetric Fog Classify"),
             layout: Some(&classify_pl),
             module: &shader,
@@ -491,7 +491,7 @@ impl VolumetricFogPass {
             compilation_options: Default::default(),
             cache: None,
         });
-        let inject_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let inject_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Volumetric Fog Inject"),
             layout: Some(&inject_pl),
             module: &shader,
@@ -499,7 +499,7 @@ impl VolumetricFogPass {
             compilation_options: Default::default(),
             cache: None,
         });
-        let integrate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let integrate_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Volumetric Fog Integrate"),
             layout: Some(&integrate_pl),
             module: &shader,

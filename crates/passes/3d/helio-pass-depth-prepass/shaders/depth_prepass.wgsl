@@ -40,15 +40,21 @@ struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
 @group(0) @binding(3) var<storage, read> skin_vertices: array<SkinVertex>;
 @group(0) @binding(4) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
+struct DepthVertex {
+    @invariant @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) @interpolate(flat) material_id: u32,
+}
+
 @vertex
 fn vs_main(
     @location(0)             position:    vec3<f32>,
-    @location(2)             _tex_coords: vec2<f32>,  // kept for vertex layout compatibility
+    @location(2)             tex_coords: vec2<f32>,
     // Per-instance vertex data, offset by the indirect draw's `first_instance`
     // on every backend (`helio_pass_gbuffer::draw_slots`).
     @location(15)            slot:        u32,
     @builtin(vertex_index) vertex_index: u32,
-) -> @invariant @builtin(position) vec4<f32> {
+) -> DepthVertex {
     let inst      = instance_data[compacted_indices[slot]];
     var local_position = position;
     if inst.bone_palette_count > 0u {
@@ -69,5 +75,11 @@ fn vs_main(
     }
     let world_pos = inst.transform * vec4<f32>(local_position, 1.0);
     // Match G-buffer projection order exactly, including rounding.
-    return cameras[0].proj * (cameras[0].view * world_pos);
+    return DepthVertex(cameras[0].proj * (cameras[0].view * world_pos), tex_coords, inst.material_id);
+}
+
+@fragment
+fn fs_main(input: DepthVertex, @builtin(front_facing) front: bool) {
+    if !front && (materials[input.material_id].flags & 1u) == 0u { discard; }
+    reject_cutout(input.material_id, input.uv);
 }

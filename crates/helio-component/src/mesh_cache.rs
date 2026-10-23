@@ -13,6 +13,9 @@
 //! The v3 format also stores mesh sections and imported scalar PBR material
 //! values. Source texture payloads are still not copied into native assets.
 //!
+//! v4 adds an optional length-delimited VG chunk after the metadata. It does
+//! not change the source-geometry content id or discard the classic mesh.
+//!
 //! # v2: content-id provenance (Pulsar-Native#632/#658)
 //!
 //! v2 appends a 16-byte `content_id: u128` to the header — the xxh3-128
@@ -49,6 +52,10 @@ const VERSION: u32 = 2;
 /// vertex/index bytes so identical geometry can still share GPU allocations
 /// even when its material assignment differs.
 const VERSION_WITH_SECTIONS: u32 = 3;
+/// Version 4 adds an optional, length-delimited baked virtual-geometry image
+/// after the original geometry and metadata. Geometry identity remains based
+/// only on the classic vertex/index bytes, so adding VG is non-destructive.
+const VERSION_WITH_VGEO: u32 = 4;
 const HEADER: usize = 4 + 4 + 8 + 8; // magic + version + vertex_count + index_count
 /// v2 only: `HEADER` bytes plus a trailing 16-byte `content_id: u128`,
 /// BEFORE the vertex/index payload (so a v1 reader that somehow ignored the
@@ -56,6 +63,7 @@ const HEADER: usize = 4 + 4 + 8 + 8; // magic + version + vertex_count + index_c
 /// content-id bytes as geometry).
 const HEADER_V2: usize = HEADER + 16;
 const HEADER_V3: usize = HEADER_V2 + 8; // metadata byte length
+const HEADER_V4: usize = HEADER_V3 + 8; // embedded vgeo byte length
 
 /// One imported material slot on a static mesh asset. `source_material` is
 /// the material index assigned by the source format (for example FBX); the
@@ -409,7 +417,7 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
         if let Ok(bytes) = std::fs::read(abs_path) {
             if bytes.len() >= HEADER_V2 && &bytes[0..4] == MAGIC {
                 if let Ok(version) = bytes[4..8].try_into().map(u32::from_le_bytes) {
-                    if version == VERSION || version == VERSION_WITH_SECTIONS {
+                    if version == VERSION || version == VERSION_WITH_SECTIONS || version == VERSION_WITH_VGEO {
                         if let Ok(id_bytes) = bytes[HEADER..HEADER_V2].try_into() {
                             return Some(u128::from_le_bytes(id_bytes));
                         }
@@ -541,6 +549,78 @@ pub fn encode_asset(asset: &MeshAssetUpload, content_id: u128) -> Vec<u8> {
     out
 }
 
+/// Serialize a mesh with an optional baked virtual-geometry payload. The
+/// classic geometry, sections and material metadata remain byte-for-byte
+/// equivalent to a normal v3 mesh; the VG payload is a separate trailing
+/// chunk and can be discarded/rebuilt without reimporting the source model.
+pub fn encode_asset_with_vgeo(
+    asset: &MeshAssetUpload,
+    content_id: u128,
+    vgeo: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut out = encode_asset(asset, content_id);
+    let vgeo = vgeo.unwrap_or_default();
+    out[4..8].copy_from_slice(&VERSION_WITH_VGEO.to_le_bytes());
+    out.splice(HEADER_V3..HEADER_V3, (vgeo.len() as u64).to_le_bytes());
+    out.extend_from_slice(vgeo);
+    out
+}
+
+/// Borrow the embedded VG chunk from a v4 `.mesh`, if present and the
+/// enclosing asset has a valid structure. Legacy mesh formats have no chunk.
+pub fn embedded_vgeo(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < HEADER_V4 || &bytes[0..4] != MAGIC {
+        return None;
+    }
+    let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    if version != VERSION_WITH_VGEO {
+        return None;
+    }
+    let vcount = usize::try_from(u64::from_le_bytes(bytes[8..16].try_into().ok()?)).ok()?;
+    let icount = usize::try_from(u64::from_le_bytes(bytes[16..24].try_into().ok()?)).ok()?;
+    let metadata_len = usize::try_from(u64::from_le_bytes(
+        bytes[HEADER_V2..HEADER_V3].try_into().ok()?,
+    ))
+    .ok()?;
+    let vgeo_len = usize::try_from(u64::from_le_bytes(
+        bytes[HEADER_V3..HEADER_V4].try_into().ok()?,
+    ))
+    .ok()?;
+    let geometry_end = HEADER_V4
+        .checked_add(vcount.checked_mul(std::mem::size_of::<PackedVertex>())?)?
+        .checked_add(icount.checked_mul(4)?)?;
+    let metadata_end = geometry_end.checked_add(metadata_len)?;
+    let end = metadata_end.checked_add(vgeo_len)?;
+    if end != bytes.len() {
+        return None;
+    }
+    Some(&bytes[metadata_end..end])
+}
+
+/// Atomically attach a baked VG payload to an existing native mesh while
+/// preserving its decoded classic geometry and authored material metadata.
+/// The mesh content id remains the identity of the original vertex/index data.
+pub fn write_embedded_vgeo(path: &Path, content_id: u128, vgeo: &[u8]) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let (asset, stored_id) = decode_asset(&bytes)
+        .ok_or_else(|| format!("{} is not a valid native mesh", path.display()))?;
+    if stored_id != content_id {
+        return Err(format!(
+            "{} changed while its VG data was being built",
+            path.display()
+        ));
+    }
+    let updated = encode_asset_with_vgeo(&asset, stored_id, Some(vgeo));
+    let tmp = path.with_extension("mesh.vgeo.tmp");
+    std::fs::write(&tmp, updated).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("replace {}: {e}", path.display())
+    })?;
+    prime_content_id_cache(path, stored_id);
+    Ok(())
+}
+
 /// Parse a [`MeshUpload`] plus its content id from native `.mesh` bytes, or
 /// `None` if invalid / an unsupported version / a size mismatch (callers
 /// may fall back to converting a source). v1 files (no stored id) get one
@@ -552,15 +632,19 @@ pub fn decode(bytes: &[u8]) -> Option<(MeshUpload, u128)> {
     Some((asset.geometry, id))
 }
 
-/// Decode both legacy geometry-only assets (v1/v2) and sectioned v3 assets.
-/// Legacy assets become a single section and one unnamed material slot so
-/// downstream code has one uniform representation.
+/// Decode legacy geometry-only assets (v1/v2), sectioned v3 assets and v4
+/// assets with an optional trailing VG chunk. Legacy assets become a single
+/// section and one unnamed material slot so downstream has one representation.
 pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
     if bytes.len() < HEADER || &bytes[0..4] != MAGIC {
         return None;
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    if version != 1 && version != VERSION && version != VERSION_WITH_SECTIONS {
+    if version != 1
+        && version != VERSION
+        && version != VERSION_WITH_SECTIONS
+        && version != VERSION_WITH_VGEO
+    {
         return None;
     }
     let vcount = u64::from_le_bytes(bytes[8..16].try_into().ok()?) as usize;
@@ -591,11 +675,34 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
                 .ok()?,
             )
         }
+        VERSION_WITH_VGEO => {
+            if bytes.len() < HEADER_V4 {
+                return None;
+            }
+            (
+                HEADER_V4,
+                Some(u128::from_le_bytes(bytes[HEADER..HEADER_V2].try_into().ok()?)),
+                usize::try_from(u64::from_le_bytes(
+                    bytes[HEADER_V2..HEADER_V3].try_into().ok()?,
+                ))
+                .ok()?,
+            )
+        }
         _ => return None,
     };
     let istart = vstart.checked_add(vbytes)?;
     let geometry_end = istart.checked_add(ibytes)?;
     let end = geometry_end.checked_add(metadata_len)?;
+    let end = if version == VERSION_WITH_VGEO {
+        end.checked_add(
+            usize::try_from(u64::from_le_bytes(
+                bytes[HEADER_V3..HEADER_V4].try_into().ok()?,
+            ))
+            .ok()?,
+        )?
+    } else {
+        end
+    };
     if bytes.len() != end {
         return None;
     }
@@ -612,8 +719,9 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
         Some(id) => id,
         None => content_id_for_bytes(&geometry),
     };
-    let (sections, material_slots) = if version == VERSION_WITH_SECTIONS {
-        serde_json::from_slice(&bytes[geometry_end..end]).ok()?
+    let metadata_end = geometry_end.checked_add(metadata_len)?;
+    let (sections, material_slots) = if version == VERSION_WITH_SECTIONS || version == VERSION_WITH_VGEO {
+        serde_json::from_slice(&bytes[geometry_end..metadata_end]).ok()?
     } else if geometry.indices.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -820,7 +928,11 @@ pub fn set_default_materials(path: &Path, materials: &[String]) -> Result<(), St
         slot.material_asset = material.trim().to_owned();
     }
     let tmp = path.with_extension("mesh.tmp");
-    std::fs::write(&tmp, encode_asset(&asset, id))
+    let encoded = embedded_vgeo(&bytes)
+        .filter(|vgeo| !vgeo.is_empty())
+        .map(|vgeo| encode_asset_with_vgeo(&asset, id, Some(vgeo)))
+        .unwrap_or_else(|| encode_asset(&asset, id));
+    std::fs::write(&tmp, encoded)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     prime_content_id_cache(path, id);

@@ -101,7 +101,7 @@ impl FogCompositePass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Fog Composite"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {

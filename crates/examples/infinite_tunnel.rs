@@ -35,9 +35,14 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_pass_portal_cull::{components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver};
+use helio_pass_portal_cull::{
+    components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver,
+};
 use pulsar_scenedb::{Entity, SceneDb};
-use v3_demo_common::{box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object};
+use v3_demo_common::{
+    box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -199,46 +204,57 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
-            .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .with_pass_build_context(Box::new(
+                helio_default_graphs::build_default_graph_external_with_context,
+            ))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         // ── Shared geometry & materials for every segment ─────────────────────
-        let wall_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.72, 0.72, 0.75, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let strip_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.95, 0.85, 0.55, 1.0],
-            0.6,
-            0.0,
-            [1.0, 0.7, 0.3],
-            2.5,
-        ));
-        let post_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.35, 0.8, 1.0, 1.0],
-            0.5,
-            0.0,
-            [0.2, 0.7, 1.0],
-            1.5,
-        ));
-        let frame_mat = spawn_material(&mut scene_db.world, make_material(
-            [0.25, 0.95, 1.0, 1.0],
-            0.4,
-            0.0,
-            [0.2, 0.9, 1.0],
-            3.0,
-        ));
+        let wall_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.72, 0.72, 0.75, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let strip_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.85, 0.55, 1.0], 0.6, 0.0, [1.0, 0.7, 0.3], 2.5),
+        );
+        let post_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.35, 0.8, 1.0, 1.0], 0.5, 0.0, [0.2, 0.7, 1.0], 1.5),
+        );
+        let frame_mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.25, 0.95, 1.0, 1.0], 0.4, 0.0, [0.2, 0.9, 1.0], 3.0),
+        );
 
         // Meshes are inserted once and shared by every copy's instances (the
         // copies batch into the same draw calls by mesh+material).
-        let slab_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]));
-        let side_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]));
-        let strip_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.06, 0.02, HALF_LENGTH]));
-        let post_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.08, 0.8, 0.08]));
-        let frame_box_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.12, 0.12, 0.12]));
+        let slab_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [HALF_WIDTH, 0.02, HALF_LENGTH]),
+        );
+        let side_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.02, HALF_HEIGHT, HALF_LENGTH]),
+        );
+        let strip_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.06, 0.02, HALF_LENGTH]),
+        );
+        let post_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.08, 0.8, 0.08]),
+        );
+        let frame_box_mesh = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.12, 0.12, 0.12]),
+        );
 
         // Central corridor segment (world space, no sublevel).
         insert_segment(
@@ -296,7 +312,13 @@ impl ApplicationHandler for App {
         let mut insert_frame = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32| {
             let transform = glam::Mat4::from_scale(glam::Vec3::new(hx, hy, hz))
                 * glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz));
-            let _ = spawn_object(&mut scene_db.world, frame_box_mesh, frame_mat, transform, (hx * hx + hy * hy + hz * hz).sqrt());
+            let _ = spawn_object(
+                &mut scene_db.world,
+                frame_box_mesh,
+                frame_mat,
+                transform,
+                (hx * hx + hy * hy + hz * hz).sqrt(),
+            );
         };
         for &z in &[PORTAL_Z, -PORTAL_Z] {
             // Top / bottom rails (full opening width), left / right posts.
@@ -338,7 +360,10 @@ impl ApplicationHandler for App {
         // fall off into ambient, which sells the "endless" distance. ─────────
         let mut light_ids = Vec::new();
         for &z in &[0.0f32, -16.0, 16.0, -32.0, 32.0, -48.0, 48.0] {
-            light_ids.push(spawn_light(&mut scene_db.world, point_light([0.0, 2.2, z], [0.9, 0.95, 1.0], 3.0, 12.0)));
+            light_ids.push(spawn_light(
+                &mut scene_db.world,
+                point_light([0.0, 2.2, z], [0.9, 0.95, 1.0], 3.0, 12.0),
+            ));
         }
 
         // ── Portals: each pairs its real surface (a, on the corridor end)
@@ -393,17 +418,58 @@ impl ApplicationHandler for App {
         let far_entity = scene_db.world.spawn();
         scene_db.world.insert(
             near_entity,
-            PortalComponent::new(Some(far_entity), pose_near.transform, [HALF_WIDTH, HALF_HEIGHT]),
+            PortalComponent::new(
+                Some(far_entity),
+                pose_near.transform,
+                [HALF_WIDTH, HALF_HEIGHT],
+            ),
         );
         scene_db.world.insert(
             far_entity,
-            PortalComponent::new(Some(near_entity), pose_far.transform, [HALF_WIDTH, HALF_HEIGHT]),
+            PortalComponent::new(
+                Some(near_entity),
+                pose_far.transform,
+                [HALF_WIDTH, HALF_HEIGHT],
+            ),
         );
         let mut resolver = SubLevelResolver::new();
-        resolver.insert_sublevel(0, SubLevelContents::new([], [(near_entity, PortalComponent::new(Some(far_entity), pose_near.transform, [HALF_WIDTH, HALF_HEIGHT])), (far_entity, PortalComponent::new(Some(near_entity), pose_far.transform, [HALF_WIDTH, HALF_HEIGHT]))]));
-        let projection = PortalProjectionBridge::new(1).expect("portal projection depth").build(&resolver).expect("portal projection");
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new(
+                [],
+                [
+                    (
+                        near_entity,
+                        PortalComponent::new(
+                            Some(far_entity),
+                            pose_near.transform,
+                            [HALF_WIDTH, HALF_HEIGHT],
+                        ),
+                    ),
+                    (
+                        far_entity,
+                        PortalComponent::new(
+                            Some(near_entity),
+                            pose_far.transform,
+                            [HALF_WIDTH, HALF_HEIGHT],
+                        ),
+                    ),
+                ],
+            ),
+        );
+        let projection = PortalProjectionBridge::new(1)
+            .expect("portal projection depth")
+            .build(&resolver)
+            .expect("portal projection");
         let projection_entities = [near_entity, far_entity];
-        projection.publish_to_world(&mut scene_db.world, &projection_entities, &projection_entities, near_entity).expect("portal projection rows");
+        projection
+            .publish_to_world(
+                &mut scene_db.world,
+                &projection_entities,
+                &projection_entities,
+                near_entity,
+            )
+            .expect("portal projection rows");
         renderer.set_portal_projection_frame(&projection);
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);

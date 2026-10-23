@@ -221,7 +221,7 @@ impl ShadowCullPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("ShadowCull Pipeline"),
             layout: Some(&pl),
             module: &shader,

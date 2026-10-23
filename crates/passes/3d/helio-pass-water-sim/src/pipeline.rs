@@ -177,7 +177,7 @@ impl WaterSimPass {
 
         let make_sim_pipeline =
             |label, layout: &wgpu::PipelineLayout, frag: &wgpu::ShaderModule| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(layout),
                     vertex: wgpu::VertexState {
@@ -559,7 +559,7 @@ impl WaterSimPass {
             bind_group_layouts: &[Some(&blit_bgl)],
             immediate_size: 0,
         });
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let blit_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Water Blit Pipeline"),
             layout: Some(&blit_pl_layout),
             vertex: wgpu::VertexState {
@@ -706,7 +706,7 @@ impl WaterSimPass {
             immediate_size: 0,
         });
         let underwater_tint_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("Water Underwater Tint Pipeline"),
                 layout: Some(&underwater_tint_pl),
                 vertex: wgpu::VertexState {
@@ -764,7 +764,7 @@ impl WaterSimPass {
 
         let vbl = vec4_vbl();
 
-        let caustics_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let caustics_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Water Caustics Pipeline"),
             layout: Some(&caustics_pl_layout),
             vertex: wgpu::VertexState {
@@ -801,7 +801,7 @@ impl WaterSimPass {
             cache: None,
         });
 
-        let surface_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let surface_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Water Surface Pipeline"),
             layout: Some(&render_pl_layout),
             vertex: wgpu::VertexState {

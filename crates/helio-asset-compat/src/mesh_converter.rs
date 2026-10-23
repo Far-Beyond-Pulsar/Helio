@@ -7,6 +7,11 @@ use crate::Result;
 use helio::PackedVertex;
 use solid_rs::geometry::{Topology, Vertex};
 use solid_rs::scene::Mesh;
+use std::sync::Once;
+
+static WARNED_MISSING_NORMAL: Once = Once::new();
+static WARNED_EXTRA_UVS: Once = Once::new();
+static WARNED_VERTEX_COLORS: Once = Once::new();
 
 /// Convert a SolidRS vertex to Helio's PackedVertex format
 pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
@@ -17,7 +22,7 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
     let normal = if let Some(n) = v.normal {
         [n.x, n.y, n.z]
     } else {
-        log::warn!("Vertex missing normal, using +Y");
+        WARNED_MISSING_NORMAL.call_once(|| log::warn!("Vertex missing normal, using +Y"));
         [0.0, 1.0, 0.0]
     };
 
@@ -57,10 +62,12 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
     };
 
     if v.uvs.iter().skip(2).any(|uv| uv.is_some()) {
-        log::warn!("Mesh has more than two UV channels - only UV0/UV1 are supported, higher channels will be discarded");
+        WARNED_EXTRA_UVS.call_once(|| log::warn!("Vertex has more than two UV channels - only UV0/UV1 are supported, higher channels will be discarded"));
     }
     if v.colors.iter().any(|c| c.is_some()) {
-        log::warn!("Mesh has vertex colors - not yet supported, will be discarded");
+        WARNED_VERTEX_COLORS.call_once(|| {
+            log::warn!("Mesh has vertex colors - not yet supported, will be discarded")
+        });
     }
 
     let mut packed =

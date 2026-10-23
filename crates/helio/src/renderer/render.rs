@@ -896,8 +896,9 @@ impl Renderer {
         if self.xr_mirror_pipeline.is_none() {
             let module =
                 helio_core::shader::module(&self.device, "XR Mirror Shader", XR_MIRROR_WGSL);
-            self.xr_mirror_pipeline = Some(self.device.create_render_pipeline(
-                &wgpu::RenderPipelineDescriptor {
+            self.xr_mirror_pipeline = Some(helio_core::shader::create_render_pipeline(
+                &self.device,
+                wgpu::RenderPipelineDescriptor {
                     label: Some("XR Mirror Pipeline"),
                     layout: Some(&self.device.create_pipeline_layout(
                         &wgpu::PipelineLayoutDescriptor {

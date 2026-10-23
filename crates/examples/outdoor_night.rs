@@ -9,8 +9,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::Entity;
@@ -146,60 +146,58 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
 
         let mat = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.7, 0.7, 0.72, 1.0],
-                0.8,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ),
+            make_material([0.7, 0.7, 0.72, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
         let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 20.0));
-        let bld_a = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.5, 7.0, 2.5],
-            ));
-        let bld_b = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [3.0, 4.5, 2.0],
-            ));
-        let bld_c = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.0, 3.0, 3.0],
-            ));
-        let bld_d = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [3.5, 1.5, 2.5],
-            ));
-        let bld_e = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [4.0, 9.5, 3.0],
-            ));
-        let lamp_pole_a = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.08, 2.5, 0.08],
-            ));
-        let lamp_pole_b = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.08, 2.5, 0.08],
-            ));
-        let lamp_pole_c = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.08, 2.5, 0.08],
-            ));
-        let lamp_pole_d = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.08, 2.5, 0.08],
-            ));
+        let bld_a = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.5, 7.0, 2.5]),
+        );
+        let bld_b = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [3.0, 4.5, 2.0]),
+        );
+        let bld_c = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.0, 3.0, 3.0]),
+        );
+        let bld_d = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [3.5, 1.5, 2.5]),
+        );
+        let bld_e = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [4.0, 9.5, 3.0]),
+        );
+        let lamp_pole_a = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]),
+        );
+        let lamp_pole_b = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]),
+        );
+        let lamp_pole_c = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]),
+        );
+        let lamp_pole_d = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]),
+        );
 
-        let _ =
-            spawn_object(
-            &mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 20.0);
+        let _ = spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 20.0);
         let _ = spawn_object(
             &mut scene_db.world,
             bld_a,

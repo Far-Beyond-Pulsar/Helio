@@ -15,11 +15,11 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererConfig,
 };
-use v3_demo_common::{build_default_renderer, new_scene_db_with_gpu_mirror};
 use pulsar_scenedb::SceneDb;
+use v3_demo_common::{build_default_renderer, new_scene_db_with_gpu_mirror};
 
 use winit::{
     application::ApplicationHandler,
@@ -297,8 +297,8 @@ impl AppState {
 
         // Sphere
         let sphere_center = glam::Vec3::new((t * 0.6).cos() * 3.0, 1.0, (t * 0.6).sin() * 3.0);
-            self.renderer
-                .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
+        self.renderer
+            .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
 
         // A small depth-occlusion gallery: the grid must disappear behind
         // these props while remaining visible through the spaces between them.

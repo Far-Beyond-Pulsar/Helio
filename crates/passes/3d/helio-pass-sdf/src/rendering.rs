@@ -221,7 +221,7 @@ impl SdfPass {
         };
 
         let scroll_shader = helio_core::shader::module(device, "SDF Scroll", helio_core::include_wgsl!("../shaders/sdf_scroll.wgsl"));
-        let scroll_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let scroll_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("SDF Scroll Pipeline"),
             layout: None,
             module: &scroll_shader,
@@ -231,7 +231,7 @@ impl SdfPass {
         });
 
         let classify_shader = helio_core::shader::module(device, "SDF Classify", helio_core::include_wgsl!("../shaders/sdf_classify.wgsl"));
-        let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let classify_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("SDF Classify Pipeline"),
             layout: None,
             module: &classify_shader,
@@ -241,7 +241,7 @@ impl SdfPass {
         });
 
         let eval_shader = helio_core::shader::module(device, "SDF Evaluate", helio_core::include_wgsl!("../shaders/sdf_evaluate.wgsl"));
-        let eval_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let eval_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("SDF Evaluate Pipeline"),
             layout: None,
             module: &eval_shader,
@@ -286,7 +286,7 @@ impl SdfPass {
                 bind_group_layouts: &[Some(&march_bgl)],
                 immediate_size: 0,
             });
-        let march_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let march_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("SDF Ray March Pipeline"),
             layout: Some(&march_pipeline_layout),
             vertex: wgpu::VertexState {

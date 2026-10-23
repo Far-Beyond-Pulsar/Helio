@@ -153,7 +153,14 @@ pub fn load_scene_file_with_config<P: AsRef<Path>>(
     registry.register_loader(solid_unreal::UnrealLoader); // supports uasset/umap
 
     // Load the scene
-    let solid_scene = registry.load_file(path).map_err(|e| AssetError::Solid(e))?;
+    // A glTF names its `.bin` and textures relative to the file. `load_file`
+    // passes no base directory, so they would resolve against the process's
+    // working directory and fail for any glTF with external buffers.
+    let mut options = solid_rs::traits::LoadOptions::default();
+    options.base_dir = path.parent().map(Path::to_path_buf);
+    let solid_scene = registry
+        .load_file_with_options(path, &options)
+        .map_err(|e| AssetError::Solid(e))?;
 
     log::info!(
         "Loaded SolidRS scene '{}' - {} meshes, {} materials, {} lights",

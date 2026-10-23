@@ -33,6 +33,7 @@ pub enum ShadingBucket {
 /// One material key's fixed region of [`DrawSegments::indirect`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DrawSegment {
+    /// Packed template class (low 16 bits) and raster flags (upper 16).
     pub material_class: u32,
     pub graph_hash: u64,
     pub bucket: ShadingBucket,
@@ -40,6 +41,11 @@ pub struct DrawSegment {
     pub first: u32,
     /// Records in the region; also the most a draw of it reads.
     pub capacity: u32,
+}
+
+impl DrawSegment {
+    pub fn template_class(&self) -> u32 { self.material_class & 0xffff }
+    pub fn raster_flags(&self) -> u32 { self.material_class >> 16 }
 }
 
 /// This frame's per-material draw segments.

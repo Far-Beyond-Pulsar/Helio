@@ -1,4 +1,4 @@
-//! The scene's background: `pre_aa` cleared to black before anything draws
+//! The scene's background: `pre_aa` cleared to the configured colour before anything draws
 //! into it.
 //!
 //! The sky is the atmosphere (`helio_pass_sky::AtmosphereCompositePass`),
@@ -12,14 +12,23 @@
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
 
-/// Clears `pre_aa` to black; records no draws.
+/// Clears `pre_aa` to the caller's colour; records no draws.
 pub(crate) struct BackgroundPass {
     format: wgpu::TextureFormat,
+    color: wgpu::Color,
 }
 
 impl BackgroundPass {
-    pub(crate) fn new(format: wgpu::TextureFormat) -> Self {
-        Self { format }
+    pub(crate) fn new(format: wgpu::TextureFormat, color: [f32; 4]) -> Self {
+        Self {
+            format,
+            color: wgpu::Color {
+                r: f64::from(color[0]),
+                g: f64::from(color[1]),
+                b: f64::from(color[2]),
+                a: f64::from(color[3]),
+            },
+        }
     }
 }
 
@@ -50,7 +59,7 @@ impl RenderPass for BackgroundPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(self.color),
                     store: wgpu::StoreOp::Store,
                 },
             })]));

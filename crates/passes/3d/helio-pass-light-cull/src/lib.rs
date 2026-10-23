@@ -183,7 +183,7 @@ impl LightCullPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("LightCull Pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
@@ -194,7 +194,7 @@ impl LightCullPass {
 
         // Separate layout: the compaction output is writable here and read-only
         // in the tile kernel. Never bind the same buffer with conflicting usage.
-        let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let compact_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("LightCull Compact Pipeline"),
             layout: None,
             module: &shader,

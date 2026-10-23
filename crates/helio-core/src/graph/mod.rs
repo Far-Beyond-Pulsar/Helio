@@ -22,6 +22,7 @@ pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
     PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
 };
+pub(crate) use pipeline_cache::driver_cache_for_device;
 pub use swap::{
     align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity,
     SwapPlan, SwapPolicy,

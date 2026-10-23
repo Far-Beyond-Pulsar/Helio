@@ -1043,15 +1043,12 @@ impl App {
         eprintln!("[CE] scene renderer configured");
         let cube_material = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.74, 0.80, 0.92, 1.0],
-                0.58,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ),
+            make_material([0.74, 0.80, 0.92, 1.0], 0.58, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
-        let cube_mesh = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], CUBE_HALF_EXTENT));
+        let cube_mesh = spawn_mesh(
+            &mut scene_db.world,
+            cube_mesh([0.0, 0.0, 0.0], CUBE_HALF_EXTENT),
+        );
         let grid_half = (CUBE_GRID_SIZE - 1) as f32 * CUBE_SPACING * 0.5;
         for x in 0..CUBE_GRID_SIZE {
             for z in 0..CUBE_GRID_SIZE {

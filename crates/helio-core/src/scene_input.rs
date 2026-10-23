@@ -1,8 +1,8 @@
 //! Generic scene input boundary used by graph execution.
 
 use crate::GpuCameraUniforms;
-pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey, FlushedRows};
 use pulsar_scenedb::gpu::SceneGpuStore;
+pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey, FlushedRows};
 use std::sync::Arc;
 
 /// The frontend's entity-generation buffer: one `u32` per entity index, the
@@ -10,6 +10,10 @@ use std::sync::Arc;
 /// renderer publishes it under this key; consumers joining a row that
 /// records another entity's `(index, generation)` check it here.
 pub const ENTITY_GENERATIONS_KEY: BufferKey = BufferKey::of("world_entity_generations");
+
+/// The current render view's camera uniform buffer, also exposed to scene
+/// derivations that make per-view decisions (for example authored mesh LOD).
+pub const CAMERA_BUFFER_KEY: BufferKey = BufferKey::of("scene_camera");
 
 /// Type-agnostic, read-only GPU buffers supplied by the frontend SceneDB.
 /// Buffer contents are interpreted by the pass that declared the key; core
@@ -25,7 +29,10 @@ impl SceneBufferProjection {
     /// Construct a projection from frontend-owned GPU handles, including focused
     /// test fixtures. Handles are owned snapshots and survive buffer replacement.
     pub fn from_handles(entries: impl IntoIterator<Item = (BufferKey, BufferHandle)>) -> Self {
-        Self { entries: entries.into_iter().collect(), flushed: Vec::new() }
+        Self {
+            entries: entries.into_iter().collect(),
+            flushed: Vec::new(),
+        }
     }
 
     pub fn empty() -> Self {
@@ -49,7 +56,10 @@ impl SceneBufferProjection {
     /// kept them (dirty-tracked columns). A consumer that processed the
     /// previous `sequence` can visit only these rows instead of all of them.
     pub fn flushed_rows(&self, key: BufferKey) -> Option<&FlushedRows> {
-        self.flushed.iter().find(|(candidate, _)| *candidate == key).map(|(_, rows)| rows)
+        self.flushed
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, rows)| rows)
     }
 
     /// Snapshot every currently registered SceneDB buffer. Keys remain the
@@ -78,7 +88,11 @@ impl SceneBufferProjection {
     /// for it (a derivation that rewrites a column, e.g. composing parented
     /// transforms, moves rows the flush never named).
     pub fn insert(&mut self, key: BufferKey, handle: BufferHandle) {
-        match self.entries.iter_mut().find(|(candidate, _)| *candidate == key) {
+        match self
+            .entries
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == key)
+        {
             Some((_, existing)) => {
                 *existing = handle;
                 self.flushed.retain(|(candidate, _)| *candidate != key);

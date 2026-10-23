@@ -27,7 +27,9 @@ fn read(device: &wgpu::Device, queue: &wgpu::Queue, source: &wgpu::Buffer) -> Ve
     let mut encoder = device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(source, 0, &staging, 0, source.size());
     queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |result| result.unwrap());
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |result| result.unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let words = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
     staging.unmap();
@@ -48,7 +50,8 @@ fn culled_rows(device: &wgpu::Device, queue: &wgpu::Queue, pass: &LightCullPass)
 
 #[test]
 fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;
@@ -73,8 +76,15 @@ fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
     spawn_object(world, mesh, material, Mat4::IDENTITY, 17.0).unwrap();
     let lights: Vec<_> = (0..LIGHTS)
         .map(|i| {
-            let position = [(i % 10) as f32 * 2.2 - 10.0, 0.6, (i / 10) as f32 * 2.2 - 10.0];
-            (spawn_light(world, point_light(position, [1.0; 3], 5.0, 1.5)), position)
+            let position = [
+                (i % 10) as f32 * 2.2 - 10.0,
+                0.6,
+                (i / 10) as f32 * 2.2 - 10.0,
+            ];
+            (
+                spawn_light(world, point_light(position, [1.0; 3], 5.0, 1.5)),
+                position,
+            )
         })
         .collect();
 
@@ -84,11 +94,17 @@ fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
         scene_db_handle(&scene_db),
     )
     .with_external_device()
-    .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
+    .with_pass_build_context(Box::new(
+        helio_default_graphs::build_default_graph_external_with_context,
+    ))
     .build(device.clone(), queue.clone(), WIDTH, HEIGHT, format);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -116,10 +132,20 @@ fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
 
     render(&scene_db, &mut renderer);
     let light_rows: BTreeSet<u32> = lights.iter().map(|(entity, _)| entity.index()).collect();
-    let culled = culled_rows(&device, &queue, renderer.find_pass::<LightCullPass>().unwrap());
-    assert!(culled.is_subset(&light_rows), "culled rows that hold no light: {culled:?}");
+    let culled = culled_rows(
+        &device,
+        &queue,
+        renderer.find_pass::<LightCullPass>().unwrap(),
+    );
+    assert!(
+        culled.is_subset(&light_rows),
+        "culled rows that hold no light: {culled:?}"
+    );
     let beyond_initial_capacity = light_rows.iter().filter(|&&row| row >= 64).count();
-    assert!(beyond_initial_capacity > 0, "test must place lights past row 64");
+    assert!(
+        beyond_initial_capacity > 0,
+        "test must place lights past row 64"
+    );
     assert_eq!(
         culled.iter().filter(|&&row| row >= 64).count(),
         beyond_initial_capacity,
@@ -135,6 +161,13 @@ fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
         );
     }
     render(&scene_db, &mut renderer);
-    let culled = culled_rows(&device, &queue, renderer.find_pass::<LightCullPass>().unwrap());
-    assert!(culled.is_empty(), "moved lights kept stale tile assignments: {culled:?}");
+    let culled = culled_rows(
+        &device,
+        &queue,
+        renderer.find_pass::<LightCullPass>().unwrap(),
+    );
+    assert!(
+        culled.is_empty(),
+        "moved lights kept stale tile assignments: {culled:?}"
+    );
 }

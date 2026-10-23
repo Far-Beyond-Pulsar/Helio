@@ -176,7 +176,8 @@ fn cpu_reference(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
         let key = (row.mesh_slot, row.material_slot);
         *groups.entry(key).or_insert(0) += 1;
         let hash = ((row.graph_hash_hi as u64) << 32) | row.graph_hash_lo as u64;
-        class_hash_of_group.insert(key, (row.material_class, hash));
+        let raster_flags = materials[row.material_slot as usize].flags & 5;
+        class_hash_of_group.insert(key, (row.material_class | (raster_flags << 16), hash));
 
         let mat_flags = materials[row.material_slot as usize].flags;
         let shading = if (mat_flags & FLAG_FORWARD_SHADING) != 0 {
@@ -477,6 +478,9 @@ fn gpu_object_batch_matches_cpu_reference() {
         .map(|i| {
             let bucket = i as u64;
             let mut flags = 0u32;
+            // Same shader class/hash, different raster PSO: leaves must not
+            // be merged back into the single-sided opaque segment.
+            if bucket % 3 == 0 { flags |= 5; }
             if bucket % 5 == 0 {
                 flags |= FLAG_TRANSPARENT_ONLY;
             }

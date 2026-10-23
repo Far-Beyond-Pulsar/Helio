@@ -33,6 +33,7 @@ use wgpu::util::DeviceExt;
 pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
+pub mod depth_material;
 mod draw_segments;
 pub mod draw_slots;
 mod indirect_draw;
@@ -507,11 +508,17 @@ impl RenderPass for GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        // `gbuffer_sss`, `gbuffer_extra` and `gbuffer_velocity` are also written
+        // by storage texture when virtual geometry shades its pixels
+        // (`helio-pass-vg-shade`). Not `gbuffer_lightmap_uv`: Rg16Float is not a
+        // storage format (the VG depth pass writes it as an attachment).
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_extra",
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_velocity",
             // XY remain pixel motion. Z is the FP16 view-depth residual and W=2
@@ -519,6 +526,7 @@ impl RenderPass for GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
@@ -915,9 +923,9 @@ impl RenderPass for GBufferPass {
         } else {
             for (index, segment) in segments.in_bucket(crate::ShadingBucket::Opaque) {
                 let key = RadiantShaderKey {
-                    template_id: segment.material_class,
+                    template_id: segment.template_class(),
                     graph_hash: segment.graph_hash,
-                    feature_flags: 0,
+                    feature_flags: segment.raster_flags(),
                 };
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
@@ -1103,7 +1111,7 @@ impl GBufferPass {
                 self.material_binding,
                 "GBuffer Shader",
             );
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("GBuffer Pipeline"),
                 layout: Some(&self.pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -1203,7 +1211,9 @@ impl GBufferPass {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: if wireframe { None } else { Some(wgpu::Face::Back) },
+                    cull_mode: if wireframe || key.feature_flags & helio_mats::FLAG_DOUBLE_SIDED != 0 {
+                        None
+                    } else { Some(wgpu::Face::Back) },
                     polygon_mode: if wireframe {
                         wgpu::PolygonMode::Line
                     } else {

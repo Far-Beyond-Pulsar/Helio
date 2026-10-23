@@ -62,7 +62,11 @@ impl Harness {
         renderer.set_ambient([0.0; 3], 0.0);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -87,7 +91,18 @@ impl Harness {
             0.1,
             100.0,
         );
-        Some((Self { device, queue, renderer, target, view, staging, camera }, scene_db))
+        Some((
+            Self {
+                device,
+                queue,
+                renderer,
+                target,
+                view,
+                staging,
+                camera,
+            },
+            scene_db,
+        ))
     }
 
     /// Renders `frames` frames and returns the centre pixel's RGB.
@@ -95,7 +110,9 @@ impl Harness {
         for _ in 0..frames {
             flush_scene_db(scene_db, &self.queue);
             self.renderer.render(&self.camera, &self.view).unwrap();
-            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            self.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
@@ -111,8 +128,12 @@ impl Harness {
             self.target.size(),
         );
         self.queue.submit([encoder.finish()]);
-        self.staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let pixels = self.staging.slice(..).get_mapped_range().unwrap().to_vec();
         self.staging.unmap();
         let i = (((SIZE / 2) * SIZE + SIZE / 2) * 4) as usize;
@@ -126,12 +147,20 @@ fn spawn_emissive_box(
     half_extents: [f32; 3],
     translation: Vec3,
 ) -> pulsar_scenedb::Entity {
-    let material =
-        spawn_material(&mut scene_db.world, make_material([1.0; 4], 1.0, 0.0, color, 20.0));
+    let material = spawn_material(
+        &mut scene_db.world,
+        make_material([1.0; 4], 1.0, 0.0, color, 20.0),
+    );
     let mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0; 3], half_extents));
     let radius = Vec3::from_array(half_extents).length();
-    spawn_object(&mut scene_db.world, mesh, material, Mat4::from_translation(translation), radius)
-        .unwrap()
+    spawn_object(
+        &mut scene_db.world,
+        mesh,
+        material,
+        Mat4::from_translation(translation),
+        radius,
+    )
+    .unwrap()
 }
 
 /// Objects present before the first frame, camera never moves: the object
@@ -147,10 +176,16 @@ fn objects_present_before_the_first_frame_are_drawn_under_a_static_camera() {
     };
 
     let [r, g, b] = h.render(&scene_db, 12);
-    assert!(r > 100 && g > 100 && b > 100, "object not drawn after 12 frames: {r} {g} {b}");
+    assert!(
+        r > 100 && g > 100 && b > 100,
+        "object not drawn after 12 frames: {r} {g} {b}"
+    );
     // Long after the pyramid settled into reuse.
     let [r, g, b] = h.render(&scene_db, 48);
-    assert!(r > 100 && g > 100 && b > 100, "object vanished under a reused pyramid: {r} {g} {b}");
+    assert!(
+        r > 100 && g > 100 && b > 100,
+        "object vanished under a reused pyramid: {r} {g} {b}"
+    );
 }
 
 /// A wall in front of an object, both present before the first frame, camera
@@ -176,11 +211,20 @@ fn removing_an_occluder_under_a_static_camera_reveals_what_it_hid() {
     // The wall is drawn, and the object behind it is (correctly) hidden
     // long enough for the pyramid to settle into reuse.
     let [r, g, _] = h.render(&scene_db, 24);
-    assert!(r > 100 && g < 30, "wall not drawn in front of the object: r {r} g {g}");
+    assert!(
+        r > 100 && g < 30,
+        "wall not drawn in front of the object: r {r} g {g}"
+    );
 
     despawn_object(&mut scene_db.world, &mut h.renderer, wall.unwrap()).unwrap();
     let [r, g, _] = h.render(&scene_db, 12);
-    assert!(g > 100 && r < 30, "object behind the removed wall never appeared: r {r} g {g}");
+    assert!(
+        g > 100 && r < 30,
+        "object behind the removed wall never appeared: r {r} g {g}"
+    );
     let [r, g, _] = h.render(&scene_db, 24);
-    assert!(g > 100 && r < 30, "revealed object vanished under a reused pyramid: r {r} g {g}");
+    assert!(
+        g > 100 && r < 30,
+        "revealed object vanished under a reused pyramid: r {r} g {g}"
+    );
 }

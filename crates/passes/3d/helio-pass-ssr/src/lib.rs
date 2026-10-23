@@ -138,7 +138,7 @@ impl SsrPass {
             immediate_size: 0,
         });
 
-        let default_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let default_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("SSR Trace Pipeline"),
             layout: Some(&default_pl),
             module: &shader,
@@ -163,7 +163,7 @@ impl SsrPass {
                 bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(bgl_2.as_ref().unwrap())],
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some("SSR Hybrid Trace Pipeline"),
                 layout: Some(&rt_pl),
                 module: &rt_shader,

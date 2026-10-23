@@ -65,6 +65,7 @@ fn face_count_offset(region: usize, face: usize) -> u64 {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct ShadowPass {
+    depth_materials: helio_pass_gbuffer::depth_material::DepthMaterialBindings,
     /// Shadow geometry pipeline (depth-only, front-face culled, depth-bias = 2.0).
     pipeline: wgpu::RenderPipeline,
     face_static_gen: Vec<u64>,
@@ -178,7 +179,11 @@ impl ShadowPass {
     ) -> Self {
         let atlas_layers = 1;
         // ── Shader ────────────────────────────────────────────────────────────
-        let shader = helio_core::shader::module(device, "Shadow", helio_core::include_wgsl!("../shaders/shadow.wgsl"));
+        let depth_materials = helio_pass_gbuffer::depth_material::DepthMaterialBindings::new(device);
+        let source = depth_materials.shader_source(include_str!("../shaders/shadow.wgsl"));
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shadow cutout"), source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
 
         let clear_shader = helio_core::shader::module(device, "Shadow/DepthClear", helio_core::include_wgsl!("../shaders/depth_clear.wgsl"));
 
@@ -267,11 +272,11 @@ impl ShadowPass {
         // ── Pipeline ──────────────────────────────────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow PL"),
-            bind_group_layouts: &[Some(&bgl_0)],
+            bind_group_layouts: &[Some(&bgl_0), Some(&depth_materials.layout)],
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Shadow Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -287,18 +292,20 @@ impl ShadowPass {
                         format: wgpu::VertexFormat::Float32x3,
                         offset: 0,
                         shader_location: 0,
-                    }],
+                    }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 1 }],
                 }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             // Depth-only: no colour outputs, no fragment shader.
             // The GPU writes depth from the vertex clip position automatically.
-            fragment: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(), targets: &[],
+            }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 // Front-face culling: light "looks into" the scene; culling the faces
                 // visible to the light prevents writing depth for lit-surface geometry
                 // directly, eliminating shadow acne.  Identical convention to UE4/Unity.
-                cull_mode: Some(wgpu::Face::Front),
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -335,7 +342,7 @@ impl ShadowPass {
                 immediate_size: 0,
             });
 
-        let depth_clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let depth_clear_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Shadow/DepthClear Pipeline"),
             layout: Some(&depth_clear_pipeline_layout),
             vertex: wgpu::VertexState {
@@ -426,6 +433,7 @@ impl ShadowPass {
         let face_views = Self::create_face_views(&dynamic_atlas, "Dynamic tiles", 1);
         let static_face_views = Self::create_face_views(&static_atlas, "Static tiles", 1);
         Self {
+            depth_materials,
             last_work: (0, 0),
             last_visits: (0, 0),
             dynamic_array_view: array_view(&dynamic_atlas),
@@ -497,6 +505,7 @@ impl RenderPass for ShadowPass {
         builder.read("object_batch");
         builder.read("shadow_matrices");
         builder.read("shadow_dirty");
+        builder.read("material_textures");
         // Pass-owned (it caches with the static atlas): declared for ordering,
         // routed in `publish`.
         builder.write_buffer(TRANSMITTANCE_KEY);
@@ -534,6 +543,11 @@ impl RenderPass for ShadowPass {
         helio_core::cpu_scope!("Shadow: execute");
         self.last_work = (0, 0);
         self.last_visits = (0, 0);
+        if self.depth_materials.update(ctx) {
+            self.face_static_gen.fill(u64::MAX);
+            self.face_light_gen.fill(u64::MAX);
+        }
+        if self.depth_materials.group.is_none() { return Ok(()); }
         let Some(batch) = ctx
             .registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
@@ -779,6 +793,7 @@ impl RenderPass for ShadowPass {
                         continue;
                     }
                     pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(1, self.depth_materials.group.as_ref().unwrap(), &[]);
                     pass.set_bind_group(0, bg, &[dynamic_offset]);
                     // With GPU counts, every list is bounded by its capacity
                     // and drawn to this frame's live count, so a caster

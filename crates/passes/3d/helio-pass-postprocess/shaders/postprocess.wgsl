@@ -1206,7 +1206,8 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // FogCompositePass applied transmittance and in-scattering at each
     // surface's depth before transparency and AA, so metering, bloom and lens
     // extraction below all see scattered light.
-    var color = textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb;
+    let source = textureSampleLevel(hdr_input, linear_samp, uv, 0.0);
+    var color = source.rgb;
 
     //%P0
 
@@ -1294,5 +1295,5 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     }
     // LDR (mode 0) and Passthrough (mode 3): pass through as-is
 
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(color, source.a);
 }

@@ -17,11 +17,11 @@ use helio::{
     HdrOutputMode, Renderer, RendererConfig, TonemapOperator,
 };
 use helio_pass_postprocess::LutBuilder;
+use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     build_default_renderer, cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
     point_light, spawn_light, spawn_material, spawn_mesh, spawn_object,
 };
-use pulsar_scenedb::SceneDb;
 
 use winit::{
     application::ApplicationHandler,
@@ -178,44 +178,35 @@ impl ApplicationHandler for App {
         let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
         renderer.set_editor_mode(true);
 
-        let white = spawn_material(&mut scene_db.world, make_material(
-            [0.9, 0.9, 0.92, 1.0],
-            0.6,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let emissive_red = spawn_material(&mut scene_db.world, make_material(
-            [1.0, 0.1, 0.1, 1.0],
-            0.3,
-            0.0,
-            [10.0, 0.5, 0.5],
-            10.0,
-        ));
-        let emissive_green = spawn_material(&mut scene_db.world, make_material(
-            [0.1, 1.0, 0.1, 1.0],
-            0.3,
-            0.0,
-            [0.5, 10.0, 0.5],
-            10.0,
-        ));
-        let emissive_blue = spawn_material(&mut scene_db.world, make_material(
-            [0.1, 0.1, 1.0, 1.0],
-            0.3,
-            0.0,
-            [0.5, 0.5, 10.0],
-            10.0,
-        ));
-        let metal = spawn_material(&mut scene_db.world, make_material(
-            [0.95, 0.93, 0.88, 1.0],
-            0.1,
-            1.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let white = spawn_material(
+            &mut scene_db.world,
+            make_material([0.9, 0.9, 0.92, 1.0], 0.6, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
+        let emissive_red = spawn_material(
+            &mut scene_db.world,
+            make_material([1.0, 0.1, 0.1, 1.0], 0.3, 0.0, [10.0, 0.5, 0.5], 10.0),
+        );
+        let emissive_green = spawn_material(
+            &mut scene_db.world,
+            make_material([0.1, 1.0, 0.1, 1.0], 0.3, 0.0, [0.5, 10.0, 0.5], 10.0),
+        );
+        let emissive_blue = spawn_material(
+            &mut scene_db.world,
+            make_material([0.1, 0.1, 1.0, 1.0], 0.3, 0.0, [0.5, 0.5, 10.0], 10.0),
+        );
+        let metal = spawn_material(
+            &mut scene_db.world,
+            make_material([0.95, 0.93, 0.88, 1.0], 0.1, 1.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 8.0));
-        let _ = spawn_object(&mut scene_db.world, ground, white, glam::Mat4::IDENTITY, 8.0);
+        let _ = spawn_object(
+            &mut scene_db.world,
+            ground,
+            white,
+            glam::Mat4::IDENTITY,
+            8.0,
+        );
 
         let red_cube = spawn_mesh(&mut scene_db.world, cube_mesh([-1.5, 0.5, -1.0], 0.5));
         let _ = spawn_object(
@@ -253,12 +244,10 @@ impl ApplicationHandler for App {
             0.5,
         );
 
-        spawn_light(&mut scene_db.world, point_light(
-                [3.0, 4.0, -3.0],
-                [1.0, 0.9, 0.7],
-                20.0,
-                15.0,
-            ));
+        spawn_light(
+            &mut scene_db.world,
+            point_light([3.0, 4.0, -3.0], [1.0, 0.9, 0.7], 20.0, 15.0),
+        );
 
         // Create LUT builder
         let lut_builder = LutBuilder::new(&device, 16);
@@ -461,7 +450,7 @@ impl ApplicationHandler for App {
                     / state.window.inner_size().height.max(1) as f32;
 
                 let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-        let camera = Camera::perspective_look_at(
+                let camera = Camera::perspective_look_at(
                     state.cam_pos,
                     state.cam_pos + forward,
                     glam::Vec3::Y,
@@ -497,8 +486,12 @@ impl ApplicationHandler for App {
                 }
 
                 // Clone the pass-owned buffer handle before borrowing the renderer again.
-                let resolved = state.renderer.find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
-                    .expect("postprocess blend pass").resolved_uniforms().clone();
+                let resolved = state
+                    .renderer
+                    .find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+                    .expect("postprocess blend pass")
+                    .resolved_uniforms()
+                    .clone();
                 // Build LUT if needed
                 if let Some(ref mut builder) = state.lut_builder {
                     let rebuilt = builder.build_if_needed(
@@ -523,9 +516,13 @@ impl ApplicationHandler for App {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
-                v3_demo_common::set_camera_postprocess(&mut state.scene_db.world, camera.view_id, &settings);
-        v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
-        if let Err(e) = state.renderer.render(&camera, &view) {
+                v3_demo_common::set_camera_postprocess(
+                    &mut state.scene_db.world,
+                    camera.view_id,
+                    &settings,
+                );
+                v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
+                if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render error: {:?}", e);
                 }
                 state.queue.present(output);
