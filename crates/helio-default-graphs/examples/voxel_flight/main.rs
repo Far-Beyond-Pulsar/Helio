@@ -206,7 +206,7 @@ impl Flight {
             pass.set_appearance(Some(appearance));
             Box::new(pass)
         });
-        let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
+        let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8UnormSrgb).with_tsr_quality(quality);
         config.enable_foliage = meadow.is_some();
         if let Some(meadow) = &meadow {
             config.foliage_tufts_per_m2 = Some(meadow.tufts_per_m2);
@@ -252,7 +252,7 @@ impl Flight {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });

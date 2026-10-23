@@ -262,6 +262,10 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
 pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
+    /// The output's format. The graph writes display-linear colour: for SDR
+    /// output give an `*Srgb` format (it encodes on write, and so does every
+    /// pass drawn after post-processing); a plain UNORM target stores the
+    /// linear values, two stops dark in the mid-tones when shown as sRGB.
     pub surface_format: wgpu::TextureFormat,
     /// Colour the default graphs' `Background` pass writes into `pre_aa` before any geometry.
     ///
