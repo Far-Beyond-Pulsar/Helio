@@ -492,7 +492,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         "terrain verification",
         &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64), false) + kernel),
     );
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
         label: Some("terrain verification"),
         layout: None,
         module: &module,

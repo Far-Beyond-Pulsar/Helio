@@ -2310,9 +2310,11 @@ fn skip_along(f: Face, dir: vec3<f32>) -> f32 {
 // WALK {
 // Whether the hit at pixel `q` (distance `t`, face `f`) sees along `dir` to
 // distance `range` (the sun: as far as the world goes; a light: to it).
-fn hit_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face, dir: vec3<f32>, range: f32) -> f32 {
-    let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let end = walk(Walk(slot, chunk_keys[slot], vec3<i32>(0), vec3<i32>(64), true), org, dir, skip_along(f, dir), range, fade_dither(q), 96u, false, q);
+// `through`: from the far side of the hit's cell (a light behind a material
+// that lets light through reaches its face through the cell).
+fn hit_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face, dir: vec3<f32>, range: f32, through: bool) -> f32 {
+    let org = pixel_ray(q, size) * t + f.normal * (f.cell * select(0.01, -1.01, through));
+    let end = walk(Walk(slot, chunk_keys[slot], vec3<i32>(0), vec3<i32>(64), true), org, dir, select(skip_along(f, dir), 0.0, through), range, fade_dither(q), 96u, false, q);
     return select(1.0, 0.0, end.hit);
 }
 
@@ -2437,7 +2439,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 && !sub_pixel(f, q, size, t) { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 && !sub_pixel(f, q, size, t) { sample.x |= 2u | u32(hit_walk_fine(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30, false)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2456,7 +2458,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
-        if dot(f.shading, params.sun.xyz) > 0.0 && !sub_pixel(f, q, size, t) { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30)); }
+        if dot(f.shading, params.sun.xyz) > 0.0 && !sub_pixel(f, q, size, t) { sample.x |= 2u | u32(hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30, false)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -2679,11 +2681,11 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     var lit = 0.0;
     if steady_shadows() {
         for (var i = 0u; i < SUN_DISK_RAYS; i++) {
-            lit += hit_walk(q, size, v.x, t, f, sun_ray(sun_disk_point(i)), 1e30);
+            lit += hit_walk(q, size, v.x, t, f, sun_ray(sun_disk_point(i)), 1e30, false);
         }
         lit /= f32(SUN_DISK_RAYS);
     } else {
-        lit = hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30);
+        lit = hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30, false);
     }
     store_walked(vec2<i32>(q), size, lit, 1.0, 1.0);
 }
@@ -2727,15 +2729,17 @@ const LOCAL_LIGHTS: u32 = 32u;
 
 // Whether light `light` (in a tile's list) wants the terrain's shadow at
 // eye-relative point `at`: a shadowed point or spot light that reaches it,
-// toward which the surface (normal `n`, none: any) faces. Its direction and
-// distance from the point.
+// toward which the surface (normal `n`, none: any) faces, or that is behind a
+// surface that lets light through (`transmits`: two-sided foliage, lit from
+// behind through its cell: `back`). Its direction and distance from the point.
 struct LightReach {
     walk: bool,
     dir: vec3<f32>,
     range: f32,
+    back: bool,
 }
 
-fn light_reach(light: SceneLight, at: vec3<f32>, n: vec3<f32>) -> LightReach {
+fn light_reach(light: SceneLight, at: vec3<f32>, n: vec3<f32>, transmits: bool) -> LightReach {
     var none: LightReach;
     // Shadows as the deferred lighting requests them (`shadow_factor`).
     let requested = select(light.shadow_index != 0xffffffffu, (light.flags & 4u) != 0u, (light.flags & 8u) != 0u);
@@ -2744,9 +2748,10 @@ fn light_reach(light: SceneLight, at: vec3<f32>, n: vec3<f32>) -> LightReach {
     let range = length(to);
     if range > light.position_range.w || range < 1e-4 { return none; }
     let dir = to / range;
-    if dot(n, n) > 0.0 && dot(n, dir) <= 0.0 { return none; }
+    let back = dot(n, n) > 0.0 && dot(n, dir) <= 0.0;
+    if back && !transmits { return none; }
     if light.light_type == 2u && dot(-dir, normalize(light.direction_outer.xyz)) < light.direction_outer.w { return none; }
-    return LightReach(true, dir, range);
+    return LightReach(true, dir, range, back);
 }
 
 // The tile list of pixel `p` (its first entry, its count up to 32).
@@ -2762,18 +2767,20 @@ fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
     let list = light_tile(q, size);
     let at = pixel_ray(q, size) * t;
     let n = textureLoad(hit_normals, vec2<i32>(q), 0).xyz;
+    let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    let transmits = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x > 0.0;
     var seen = 0xffffffffu;
     var face: Face;
     var faced = false;
     for (var i = 0u; i < list.y; i++) {
-        let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], at, n);
+        let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], at, n, transmits);
         if !reach.walk { continue; }
         if !faced {
-            face = hit_face(textureLoad(hit_visibility, vec2<i32>(q), 0).xy, vec3<f32>(0.0), q, size, t);
+            face = hit_face(v, vec3<f32>(0.0), q, size, t);
             faced = true;
         }
         // Short of the light: the cell a lamp stands in does not shade it.
-        if hit_walk(q, size, slot, t, face, reach.dir, reach.range - face.cell) < 0.5 { seen &= ~(1u << i); }
+        if hit_walk(q, size, slot, t, face, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
     }
     return seen;
 }
@@ -2884,7 +2891,7 @@ fn local_shadow_far(@builtin(global_invocation_id) id: vec3<u32>) {
         if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < t) {
             let list = light_tile(id.xy, size);
             for (var i = 0u; i < list.y; i++) {
-                let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], mesh.xyz, vec3<f32>(0.0));
+                let reach = light_reach(scene_lights[tile_light_lists[list.x + i]], mesh.xyz, vec3<f32>(0.0), false);
                 if reach.walk && mesh_walk(id.xy, mesh.xyz, v, reach.dir, reach.range) < 0.5 { seen.x &= ~(1u << i); }
             }
         } else if v.x != NONE {
@@ -3619,11 +3626,14 @@ fn local_temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgro
     if s.depth > 0.0 && !steady_shadows() && params.light_eye.w > 0.0 {
         // The shadowed lights reaching the hit, those of least index first.
         let list = light_tile(id.xy, size);
+        // Lights behind foliage reach it through its cells (`light_reach`).
+        let hit = textureLoad(hit_visibility, vec2<i32>(id.xy), 0).xy;
+        let transmits = hit.x != NONE && materials.m[min((hit.y >> 21u) & 31u, 31u)].light.x > 0.0;
         var lights = array<u32, 4>(NONE, NONE, NONE, NONE);
         var slots = array<u32, 4>(0u, 0u, 0u, 0u);
         for (var i = 0u; i < list.y; i++) {
             var light = tile_light_lists[list.x + i];
-            if light > LOCAL_IDS || !light_reach(scene_lights[light], s.at, s.normal).walk { continue; }
+            if light > LOCAL_IDS || !light_reach(scene_lights[light], s.at, s.normal, transmits).walk { continue; }
             var slot = i;
             for (var k = 0u; k < LOCAL_TRACKED; k++) {
                 if light < lights[k] {

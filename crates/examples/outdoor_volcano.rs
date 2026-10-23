@@ -17,8 +17,8 @@
 
 mod v3_demo_common;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -201,27 +201,21 @@ impl ApplicationHandler for App {
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                format,
+            );
 
         let rock_mat = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.25, 0.2, 0.18, 1.0],
-                0.9,
-                0.0,
-                [0.0, 0.0, 0.0],
-                0.0,
-            ),
+            make_material([0.25, 0.2, 0.18, 1.0], 0.9, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
         let lava_mat = spawn_material(
             &mut scene_db.world,
-            make_material(
-                [0.3, 0.08, 0.02, 1.0],
-                0.9,
-                0.0,
-                [1.0, 0.35, 0.05],
-                3.0,
-            ),
+            make_material([0.3, 0.08, 0.02, 1.0], 0.9, 0.0, [1.0, 0.35, 0.05], 3.0),
         );
 
         let _island_ground = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 55.0));
@@ -233,34 +227,34 @@ impl ApplicationHandler for App {
             55.0,
         );
 
-        let _cone_l1 = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [22.0, 5.0, 20.0],
-            ));
-        let _cone_l2 = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [15.5, 6.5, 14.0],
-            ));
-        let _cone_l3 = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [10.0, 6.5, 9.5],
-            ));
-        let _cone_l4 = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [5.5, 6.0, 5.5],
-            ));
-        let _cone_l5 = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.8, 4.5, 2.8],
-            ));
-        let _crater_rim = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [3.2, 0.4, 3.2],
-            ));
-        let _lava_lake = spawn_mesh(&mut scene_db.world, box_mesh(
-                [0.0, 0.0, 0.0],
-                [2.2, 0.05, 2.2],
-            ));
+        let _cone_l1 = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [22.0, 5.0, 20.0]),
+        );
+        let _cone_l2 = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [15.5, 6.5, 14.0]),
+        );
+        let _cone_l3 = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [10.0, 6.5, 9.5]),
+        );
+        let _cone_l4 = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [5.5, 6.0, 5.5]),
+        );
+        let _cone_l5 = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.8, 4.5, 2.8]),
+        );
+        let _crater_rim = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [3.2, 0.4, 3.2]),
+        );
+        let _lava_lake = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.2, 0.05, 2.2]),
+        );
         for (&m, t) in [
             _cone_l1,
             _cone_l2,
@@ -281,8 +275,7 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = spawn_object(
-            &mut scene_db.world, m, rock_mat, *t, 22.0);
+            let _ = spawn_object(&mut scene_db.world, m, rock_mat, *t, 22.0);
         }
         let _ = spawn_object(
             &mut scene_db.world,
@@ -293,40 +286,40 @@ impl ApplicationHandler for App {
         );
 
         let _flow_left: Vec<Entity> = vec![
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.0, 0.12, 2.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.2, 0.12, 3.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.4, 0.12, 5.0],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.5, 0.1, 6.0],
-                )),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 5.0]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 6.0]),
+            ),
         ];
         let _flow_right: Vec<Entity> = vec![
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.0, 0.12, 2.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.2, 0.12, 3.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.4, 0.12, 4.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [1.5, 0.1, 5.5],
-                )),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 4.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 5.5]),
+            ),
         ];
         for (&m, t) in _flow_left.iter().chain(_flow_right.iter()).zip(
             [
@@ -341,23 +334,22 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = spawn_object(
-            &mut scene_db.world, m, lava_mat, *t, 6.0);
+            let _ = spawn_object(&mut scene_db.world, m, lava_mat, *t, 6.0);
         }
 
         let _lava_pools: Vec<Entity> = vec![
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [4.0, 0.06, 3.0],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [3.5, 0.06, 2.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [2.5, 0.06, 2.0],
-                )),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [4.0, 0.06, 3.0]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [3.5, 0.06, 2.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [2.5, 0.06, 2.0]),
+            ),
         ];
         for (&m, t) in _lava_pools.iter().zip(
             [
@@ -367,8 +359,7 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = spawn_object(
-            &mut scene_db.world, m, lava_mat, *t, 4.0);
+            let _ = spawn_object(&mut scene_db.world, m, lava_mat, *t, 4.0);
         }
 
         let _boulders: Vec<Entity> = BOULDERS
@@ -379,7 +370,7 @@ impl ApplicationHandler for App {
             .collect();
         for (&m, &(x, yh, z, _)) in _boulders.iter().zip(BOULDERS.iter()) {
             let _ = spawn_object(
-            &mut scene_db.world,
+                &mut scene_db.world,
                 m,
                 rock_mat,
                 glam::Mat4::from_translation(glam::Vec3::new(x, yh, z)),
@@ -388,26 +379,26 @@ impl ApplicationHandler for App {
         }
 
         let _scorch_patches: Vec<Entity> = vec![
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [4.5, 0.02, 3.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [3.5, 0.02, 3.0],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [3.0, 0.02, 4.0],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [3.0, 0.02, 2.5],
-                )),
-            spawn_mesh(&mut scene_db.world, box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [3.5, 0.02, 2.5],
-                )),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [4.5, 0.02, 3.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 3.0]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 4.0]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 2.5]),
+            ),
+            spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 2.5]),
+            ),
         ];
         for (&m, t) in _scorch_patches.iter().zip(
             [
@@ -419,14 +410,17 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ = spawn_object(
-            &mut scene_db.world, m, rock_mat, *t, 4.0);
+            let _ = spawn_object(&mut scene_db.world, m, rock_mat, *t, 4.0);
         }
 
         let ocean_dir = glam::Vec3::new(-0.3, -0.6, 0.2).normalize();
         let _ocean_light_id = spawn_light(
             &mut scene_db.world,
-            directional_light([ocean_dir.x, ocean_dir.y, ocean_dir.z], [0.3, 0.5, 1.0], 0.04),
+            directional_light(
+                [ocean_dir.x, ocean_dir.y, ocean_dir.z],
+                [0.3, 0.5, 1.0],
+                0.04,
+            ),
         );
         let mut lava_light_ids = Vec::new();
         for &(x, y, z, r, g, b, intensity, range) in LAVA_LIGHTS {

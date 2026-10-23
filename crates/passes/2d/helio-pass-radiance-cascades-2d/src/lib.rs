@@ -347,7 +347,7 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&scene_bgl)],
             immediate_size: 0,
         });
-        let scene_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let scene_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("RC Scene Pipeline"),
             layout: Some(&scene_pl),
             module: &scene_shader,
@@ -415,7 +415,7 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&seed_bgl)],
             immediate_size: 0,
         });
-        let seed_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let seed_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("RC JFA Seed Pipeline"),
             layout: Some(&seed_pl),
             module: &jfa_shader,
@@ -457,7 +457,7 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&step_bgl)],
             immediate_size: 0,
         });
-        let step_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let step_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("RC JFA Step Pipeline"),
             layout: Some(&step_pl),
             module: &jfa_shader,
@@ -538,7 +538,7 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&dist_bgl)],
             immediate_size: 0,
         });
-        let dist_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let dist_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("RC Distance Pipeline"),
             layout: Some(&dist_pl),
             module: &dist_shader,
@@ -583,7 +583,7 @@ impl RadianceCascades2DPass {
             bind_group_layouts: &[Some(&cascade_bgl)],
             immediate_size: 0,
         });
-        let cascade_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let cascade_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("RC Cascade Pipeline"),
             layout: Some(&cascade_pl),
             module: &cascade_shader,
@@ -894,7 +894,7 @@ impl RadianceCascadesCompositePass {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("RC Composite Pipeline"),
             layout: Some(&pl),
             vertex: wgpu::VertexState {

@@ -92,7 +92,7 @@ impl DebugPass {
             mapped_at_creation: false,
         });
 
-        let pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_depth = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Debug Draw Pipeline Depth"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -142,7 +142,7 @@ impl DebugPass {
             cache: None,
         });
 
-        let pipeline_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_no_depth = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Debug Draw Pipeline NoDepth"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -215,7 +215,7 @@ impl DebugPass {
             ..Default::default()
         };
 
-        let pipeline_tri_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_tri_depth = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Debug Tri Pipeline Depth"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -244,7 +244,7 @@ impl DebugPass {
         });
 
         let pipeline_tri_no_depth =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("Debug Tri Pipeline NoDepth"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {

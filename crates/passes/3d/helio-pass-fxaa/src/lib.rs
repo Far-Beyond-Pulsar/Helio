@@ -72,7 +72,7 @@ impl FxaaPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("FXAA Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {

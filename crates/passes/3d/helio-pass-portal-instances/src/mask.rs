@@ -67,7 +67,7 @@ impl PortalMaskPass {
             bind_group_layouts: &[Some(&stamp_bgl)],
             immediate_size: 0,
         });
-        let stamp_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let stamp_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("PortalMask Stamp Pipeline"),
             layout: Some(&stamp_pl),
             vertex: wgpu::VertexState {
@@ -156,7 +156,7 @@ impl PortalMaskPass {
             bind_group_layouts: &[Some(&reset_bgl)],
             immediate_size: 0,
         });
-        let reset_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let reset_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("PortalMask Reset Pipeline"),
             layout: Some(&reset_pl),
             vertex: wgpu::VertexState {

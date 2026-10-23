@@ -181,13 +181,10 @@ impl ApplicationHandler for App {
                 surface_format,
             );
 
-        let mat = spawn_material(&mut scene_db.world, make_material(
-            [0.7, 0.7, 0.72, 1.0],
-            0.7,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let mat = spawn_material(
+            &mut scene_db.world,
+            make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
+        );
 
         let cube1 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.5));
         let cube2 = spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.4));
@@ -215,13 +212,7 @@ impl ApplicationHandler for App {
             glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
             0.3,
         );
-        let _ = spawn_object(
-            &mut scene_db.world,
-            ground,
-            mat,
-            glam::Mat4::IDENTITY,
-            5.0,
-        );
+        let _ = spawn_object(&mut scene_db.world, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         // p0 bobs up/down (animated), p1 and p2 are static
         let p0_init = [0.0f32, 2.2, 0.0];

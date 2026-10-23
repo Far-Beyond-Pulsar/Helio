@@ -717,6 +717,12 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         None
     }
 
+    /// Menu category of one of this pass's [`debug_views`](Self::debug_views)
+    /// (for example "Virtual Geometry"); empty for the uncategorised group.
+    fn debug_view_category(&self, _debug_mode: u32) -> &'static str {
+        ""
+    }
+
     /// Declares the inter-pass resources this pass reads and writes.
     ///
     /// The graph uses these declarations to:

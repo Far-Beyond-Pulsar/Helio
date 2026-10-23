@@ -3,7 +3,7 @@
 //! The corridor runs down −Z from the stage origin, divided into bays. Each bay
 //! demonstrates one thing the renderer does — so walking its length is a tour
 //! of the engine: PBR materials, spot lights, lens flare + volumetric fog,
-//! water simulation, GPU particles, virtual geometry, emissive/HDR colour,
+//! water simulation, GPU particles, emissive/HDR colour,
 //! and post-process colour grading.
 //!
 //! # Why it is built the way it is
@@ -486,8 +486,8 @@ fn bay_instancing(world: &mut World, z: f32, mats: &Mats) {
 }
 
 /// Load the shipping-container FBX (the same asset `editor_demo` uses) as a
-/// *classic* mesh so it renders through the forward-opaque graph — the meshlet
-/// path VirtualGeometry uses is deferred-only and would not draw here.
+/// *classic* mesh so it renders through the forward-opaque graph — virtual geometry
+/// is deferred-only and would not draw here.
 ///
 /// Returns `(mesh, material, local_centre, local_size)` so the caller can place
 /// the container on the floor regardless of the FBX's origin. `None` if the

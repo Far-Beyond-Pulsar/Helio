@@ -38,6 +38,15 @@ impl<'a> SceneInputAdapter<'a> {
             frame_count,
             buffers: {
                 let mut buffers = SceneBufferProjection::from_store_all(mirror.store());
+                buffers.insert(
+                    helio_core::CAMERA_BUFFER_KEY,
+                    helio_core::BufferHandle {
+                        buffer: camera_buffer.clone(),
+                        epoch: camera_generation,
+                        row_bytes: std::mem::size_of::<GpuCameraUniforms>() as u64,
+                        content_generation: camera_generation,
+                    },
+                );
                 // The entity-generation mirror lives on the handle, not in the
                 // store's registry; consumers joining rows across entities
                 // check recorded generations against it.
@@ -64,7 +73,10 @@ impl<'a> SceneInputAdapter<'a> {
 
     /// Run the renderer's scene derivations, publishing their outputs into
     /// this frame's scene buffers, and submit their work ahead of the graph.
-    pub(crate) fn run_derivations(&mut self, derivations: &mut [Box<dyn helio_core::SceneDerivation>]) {
+    pub(crate) fn run_derivations(
+        &mut self,
+        derivations: &mut [Box<dyn helio_core::SceneDerivation>],
+    ) {
         if let Some(commands) = helio_core::run_scene_derivations(
             derivations,
             &self.device,
@@ -73,6 +85,9 @@ impl<'a> SceneInputAdapter<'a> {
             self.world_origin,
         ) {
             self.queue.submit(std::iter::once(commands));
+            for derivation in derivations {
+                derivation.after_submit();
+            }
         }
     }
 }

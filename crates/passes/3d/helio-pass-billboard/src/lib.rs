@@ -269,7 +269,7 @@ impl BillboardPass {
         });
 
         // ── Render pipeline ───────────────────────────────────────────────────
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("Billboard Pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {

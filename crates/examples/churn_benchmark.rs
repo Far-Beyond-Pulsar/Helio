@@ -16,8 +16,8 @@ use v3_demo_common::{
 };
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -197,7 +197,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_ambient([0.04, 0.04, 0.05], 1.0);
 
         let mat_floor = spawn_material(
@@ -231,7 +237,10 @@ impl ApplicationHandler for App {
         );
 
         let mut mesh_list = Vec::new();
-        mesh_list.push(spawn_mesh(&mut scene_db.world, cube_mesh([0.0, 0.0, 0.0], 0.35)));
+        mesh_list.push(spawn_mesh(
+            &mut scene_db.world,
+            cube_mesh([0.0, 0.0, 0.0], 0.35),
+        ));
         mesh_list.push(spawn_mesh(
             &mut scene_db.world,
             box_mesh([0.0, 0.0, 0.0], [0.15, 0.65, 0.15]),
@@ -384,8 +393,9 @@ impl ApplicationHandler for App {
                     &state.device,
                     &wgpu::SurfaceConfiguration {
                         // COPY_SRC so the debug frame-dump (see dump_frame_png) can
-                // read the actual presented swapchain texture back.
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                        // read the actual presented swapchain texture back.
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
                         format: state.surface_format,
                         width: s.width,
                         height: s.height,
@@ -883,7 +893,12 @@ fn dump_frame_png(
 /// white) -- answers "is anything being rasterized in front of the camera
 /// at all" independent of shading/lighting/post-process, which the final
 /// composited frame alone can't distinguish.
-fn dump_depth_png(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, path: &std::path::Path) {
+fn dump_depth_png(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    path: &std::path::Path,
+) {
     let width = texture.width();
     let height = texture.height();
     let unpadded_bytes_per_row = width * 4; // Depth32Float = 4 bytes/texel

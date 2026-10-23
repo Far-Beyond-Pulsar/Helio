@@ -280,13 +280,7 @@ impl ApplicationHandler for App {
         );
         let floor_mat = v3_demo_common::spawn_material(
             &mut scene_db.world,
-            v3_demo_common::make_material(
-            [0.06, 0.06, 0.08, 1.0],
-            0.8,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-            ),
+            v3_demo_common::make_material([0.06, 0.06, 0.08, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
         let _floor_entity = v3_demo_common::spawn_object(
             &mut scene_db.world,

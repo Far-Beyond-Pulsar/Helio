@@ -365,7 +365,7 @@ impl MovedJoin {
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
                 module: &module,
@@ -483,7 +483,7 @@ impl SceneJoin {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(join_source(source).into()),
             });
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: None,
                 module: &module,

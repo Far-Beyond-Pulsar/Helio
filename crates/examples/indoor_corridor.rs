@@ -13,8 +13,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -143,7 +143,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         let mat = spawn_material(
             &mut scene_db.world,
@@ -151,12 +157,30 @@ impl ApplicationHandler for App {
         );
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)
-        let floor = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [2.0, 0.02, 18.0]));
-        let ceiling = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [2.0, 0.02, 18.0]));
-        let wall_l = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.02, 1.5, 18.0]));
-        let wall_r = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.02, 1.5, 18.0]));
-        let wall_far = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.02]));
-        let wall_near = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.02]));
+        let floor = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.0, 0.02, 18.0]),
+        );
+        let ceiling = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.0, 0.02, 18.0]),
+        );
+        let wall_l = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.02, 1.5, 18.0]),
+        );
+        let wall_r = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [0.02, 1.5, 18.0]),
+        );
+        let wall_far = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.02]),
+        );
+        let wall_near = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.02]),
+        );
         let sconce_l = spawn_mesh(
             &mut scene_db.world,
             box_mesh([0.0, 0.0, 0.0], [0.12, 0.08, 0.25]),

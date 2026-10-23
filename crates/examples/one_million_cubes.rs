@@ -14,16 +14,15 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
-};
-use v3_demo_common::{
-    cube_mesh, directional_light, make_material, scene_db_handle,
-    new_scene_db_with_gpu_mirror, point_light, spawn_light, spawn_material,
-    spawn_mesh, spawn_object_with_movability,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_mats::texture_mips::{mip_chain, TexelKind};
 use pulsar_scenedb::SceneDb;
+use v3_demo_common::{
+    cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, point_light,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,
+};
 
 use winit::{
     application::ApplicationHandler,
@@ -308,7 +307,8 @@ impl ApplicationHandler for App {
             .map(|&color| {
                 // Soft tint multiplied over the brick albedo.
                 let tint = color.map(|c| 0.6 + 0.4 * c);
-                let mut material = make_material([tint[0], tint[1], tint[2], 1.0], 0.8, 0.0, [0.0; 3], 0.0);
+                let mut material =
+                    make_material([tint[0], tint[1], tint[2], 1.0], 0.8, 0.0, [0.0; 3], 0.0);
                 material.tex_base_color = brick_base;
                 material.tex_normal = brick_nrm;
                 material.flags |= helio_mats::FLAG_HAS_NORMAL_MAP;
@@ -358,25 +358,20 @@ impl ApplicationHandler for App {
             elapsed.as_secs_f32()
         );
 
-        spawn_light(&mut scene_db.world, directional_light(
-                [0.5, -0.8, 0.3],
-                [1.0, 0.95, 0.85],
-                8.0,
-            ));
+        spawn_light(
+            &mut scene_db.world,
+            directional_light([0.5, -0.8, 0.3], [1.0, 0.95, 0.85], 8.0),
+        );
 
-        spawn_light(&mut scene_db.world, point_light(
-                [-60.0, 40.0, -60.0],
-                [0.3, 0.6, 1.0],
-                4.0,
-                120.0,
-            ));
+        spawn_light(
+            &mut scene_db.world,
+            point_light([-60.0, 40.0, -60.0], [0.3, 0.6, 1.0], 4.0, 120.0),
+        );
 
-        spawn_light(&mut scene_db.world, point_light(
-                [60.0, 40.0, 60.0],
-                [1.0, 0.6, 0.3],
-                4.0,
-                120.0,
-            ));
+        spawn_light(
+            &mut scene_db.world,
+            point_light([60.0, 40.0, 60.0], [1.0, 0.6, 0.3], 4.0, 120.0),
+        );
 
         self.state = Some(AppState {
             window,

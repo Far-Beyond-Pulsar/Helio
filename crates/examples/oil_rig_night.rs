@@ -13,8 +13,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use helio_pass_water_sim::WaterSimPass;
@@ -151,7 +151,13 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, config.surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
 
         spawn_sky(&mut scene_db.world, [0.02, 0.03, 0.08]);
 
@@ -239,7 +245,10 @@ impl ApplicationHandler for App {
             (12.0, 4.0, 16.0),
         ];
         for (x, y, z) in leg_positions {
-            let leg_mesh = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 0.0, 0.0], [0.9, 4.2, 0.9]));
+            let leg_mesh = spawn_mesh(
+                &mut scene_db.world,
+                box_mesh([0.0, 0.0, 0.0], [0.9, 4.2, 0.9]),
+            );
             let _ = spawn_object(
                 &mut scene_db.world,
                 leg_mesh,

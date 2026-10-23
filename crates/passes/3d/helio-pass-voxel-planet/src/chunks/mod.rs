@@ -2110,7 +2110,7 @@ impl ChunkWorld {
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
         let compute = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&gen_pipeline_layout),
                 module: &gen_module,
@@ -2139,12 +2139,12 @@ impl ChunkWorld {
         });
         let keep_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk keep"), bind_group_layouts: &[Some(&gen_layout), Some(&keep_layout)], immediate_size: 0 });
         let keep = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { label: Some(entry), layout: Some(&keep_pipeline_layout), module: &gen_module, entry_point: Some(entry), compilation_options: Default::default(), cache: None })
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor { label: Some(entry), layout: Some(&keep_pipeline_layout), module: &gen_module, entry_point: Some(entry), compilation_options: Default::default(), cache: None })
         };
         let (pack_pipeline, restore_pipeline) = (keep("pack_main"), keep("restore_main"));
         let table_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk table"), source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_table.wgsl").into()) });
         let table_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("chunk table"), entries: &[storage(0, true, c), storage(1, false, c)] });
-        let table_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let table_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("chunk table"),
             layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&table_layout)], immediate_size: 0 })),
             module: &table_module,
@@ -2213,7 +2213,7 @@ impl ChunkWorld {
         ];
         let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk cull"), bind_group_layouts: &[Some(&cull_layout[0]), Some(&cull_layout[1])], immediate_size: 0 });
         let cull = |entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&cull_pipeline_layout),
                 module: &draw_module,
@@ -2252,7 +2252,7 @@ impl ChunkWorld {
             Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: Some(true), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() })
         };
         let seed = |vertex: &str, fragment: &str| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some(fragment),
                 layout: Some(&seed_layout),
                 vertex: wgpu::VertexState { module: &draw_module, entry_point: Some(vertex), compilation_options: Default::default(), buffers: &[] },
@@ -2268,7 +2268,7 @@ impl ChunkWorld {
         let seed_outside = seed("seed_vertex", "seed_fragment");
         let seed_inside = seed("seed_vertex_inside", "seed_fragment_inside");
         let trace_entry = |label: &str, entry: &str, heat: bool| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout(&trace_layout)),
                 module: &draw_module,
@@ -2318,7 +2318,7 @@ impl ChunkWorld {
             entries: &[hits[0], hits[1], storage(41, false, wgpu::ShaderStages::COMPUTE), storage(11, false, wgpu::ShaderStages::COMPUTE), scene_depth],
         });
         let compute = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 module: &draw_module,
@@ -2331,7 +2331,7 @@ impl ChunkWorld {
         // zeroing first (naga zeroes workgroup memory from one invocation
         // while the others wait, longer than the kernels' own work).
         let tiled = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 module: &draw_module,
@@ -2409,6 +2409,7 @@ impl ChunkWorld {
                 label: Some("chunk local light history"),
                 entries: &[
                     hits[0],
+                    hits[1],
                     float(29),
                     read(40),
                     read(43),
@@ -2472,7 +2473,7 @@ impl ChunkWorld {
             entries: &[hits[0], hits[1], storage(24, false, wgpu::ShaderStages::COMPUTE)],
         });
         let feedback_pipeline = tiled("chunk feedback", &layout(&feedback_layout), "feedback");
-        let publish = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let publish = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
             label: Some("chunk gbuffer"),
             layout: Some(&layout(&resolve_layout)),
             vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
@@ -2502,7 +2503,7 @@ impl ChunkWorld {
                 bind_group_layouts: &[Some(&draw_layout), Some(&resolve_layout), Some(&layout_2)],
                 immediate_size: 0,
             });
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
                 label: Some("chunk gbuffer (scene materials)"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState { module: &module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
@@ -4913,6 +4914,7 @@ impl ChunkWorld {
                 layout: &self.local_denoise_layout[0],
                 entries: &[
                     view_entry(4, &distance),
+                    view_entry(7, &visibility),
                     view_entry(29, &normal),
                     entry(40, sun_walked),
                     entry(43, geometry_last),

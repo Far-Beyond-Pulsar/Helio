@@ -48,6 +48,10 @@ pub struct GraphMaterial {
     graph: psgc::GraphDescription,
     /// Each sampled texture, by the asset path the graph names it with.
     textures: Vec<(String, AssetId, Arc<LoadedTexture>)>,
+    /// Compiled while the asset loader parses this material, which runs on a
+    /// SceneDB worker. Renderer initialization must only register this source;
+    /// compiling here would make the first GPU mirror attach wait on PSGC.
+    compiled_snippet: String,
     /// Whether the compiled surface reads the frame clock (a `time` node).
     pub reads_time: bool,
 }
@@ -299,8 +303,9 @@ fn load_graph(source: &str, bytes: &[u8]) -> Result<GraphMaterial, String> {
         let id = AssetId::of(crate::texture_assets::TEXTURE_ASSET_KIND, &texture_source);
         textures.push((asset, id, Arc::new(image)));
     }
-    // Compile once against placeholder slots: a graph that does not compile
-    // fails the asset here, and the result tells whether it reads the clock.
+    // Compile against placeholder slots while the SceneDB asset loader is on
+    // a worker. Graph-local ordinals produce the same slot-independent source
+    // later used by the renderer, so mirror attachment never runs PSGC.
     let placeholders = textures
         .iter()
         .enumerate()
@@ -311,6 +316,7 @@ fn load_graph(source: &str, bytes: &[u8]) -> Result<GraphMaterial, String> {
         reads_time: snippet.contains("radiant_graph_time()"),
         graph,
         textures,
+        compiled_snippet: snippet,
     })
 }
 
@@ -421,10 +427,10 @@ fn compiled_graphs() -> &'static Mutex<CompiledGraphs> {
     COMPILED.get_or_init(Default::default)
 }
 
-/// Register `graph`'s textures in `mirror`'s store, compile its slot-independent
-/// source once per content version, and return the scene-local slots that the
-/// material row binds. Register the source on every use because the renderer's
-/// graph registry is bounded.
+/// Register `graph`'s textures in `mirror`'s store, register its worker-compiled
+/// slot-independent source, and return the scene-local slots that the material
+/// row binds. Register the source on every use because the renderer's graph
+/// registry is bounded.
 fn compiled_graph(
     id: AssetId,
     version: u64,
@@ -465,8 +471,9 @@ fn compiled_graph(
     for (asset, texture, image) in &graph.textures {
         // A texture's GPU copy follows the material's version: the material
         // reloads when one of its textures changes.
-        let slot = crate::texture_assets::resident_slot(*texture, version, image, use_of(asset), mirror)
-            .map_err(|error| format!("texture '{asset}': {error}"))?;
+        let slot =
+            crate::texture_assets::resident_slot(*texture, version, image, use_of(asset), mirror)
+                .map_err(|error| format!("texture '{asset}': {error}"))?;
         let ordinal = *bindings
             .get(asset)
             .ok_or_else(|| format!("texture '{asset}' is not sampled by the graph"))?
@@ -477,14 +484,12 @@ fn compiled_graph(
         .lock()
         .map_err(|_| "compiled graph cache poisoned".to_string())?;
     let result = compiled.entry((id, version)).or_insert_with(|| {
-        crate::material_graph::compile_material_graph(&graph.graph, &bindings).map(|snippet| {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            snippet.hash(&mut hasher);
-            CompiledGraph {
-                hash: hasher.finish().max(1),
-                snippet,
-            }
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        graph.compiled_snippet.hash(&mut hasher);
+        Ok(CompiledGraph {
+            hash: hasher.finish().max(1),
+            snippet: graph.compiled_snippet.clone(),
         })
     });
     let compiled = result.as_ref().map_err(Clone::clone)?;

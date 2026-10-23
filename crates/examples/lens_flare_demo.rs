@@ -12,8 +12,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    GpuLight, LightType, Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
+    LightType, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
 use v3_demo_common::{
@@ -144,7 +144,13 @@ impl ApplicationHandler for App {
             },
         );
 
-        let (scene_db, renderer) = build_scene(device.clone(), queue.clone(), size.width, size.height, format);
+        let (scene_db, renderer) = build_scene(
+            device.clone(),
+            queue.clone(),
+            size.width,
+            size.height,
+            format,
+        );
 
         self.state = Some(AppState {
             window,
@@ -366,20 +372,14 @@ fn build_scene(
         .build(device.clone(), queue.clone(), width, height, format);
 
     // ── Scene objects ──────────────────────────────────────────────────────
-    let mat_wall = spawn_material(&mut scene_db.world, make_material(
-        [0.6, 0.58, 0.55, 1.0],
-        0.7,
-        0.0,
-        [0.0, 0.0, 0.0],
-        0.0,
-    ));
-    let mat_floor = spawn_material(&mut scene_db.world, make_material(
-        [0.3, 0.28, 0.25, 1.0],
-        0.4,
-        0.0,
-        [0.0, 0.0, 0.0],
-        0.0,
-    ));
+    let mat_wall = spawn_material(
+        &mut scene_db.world,
+        make_material([0.6, 0.58, 0.55, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0),
+    );
+    let mat_floor = spawn_material(
+        &mut scene_db.world,
+        make_material([0.3, 0.28, 0.25, 1.0], 0.4, 0.0, [0.0, 0.0, 0.0], 0.0),
+    );
     // Lens flare is camera optics, authored on the camera's post-process
     // settings (view 0). It responds to whatever is bright in frame, so
     // the lamp below gets a visible emissive bulb; the light alone would
@@ -397,36 +397,74 @@ fn build_scene(
     };
     v3_demo_common::set_camera_postprocess(&mut scene_db.world, 0, &post);
 
-    let mat_bulb = spawn_material(&mut scene_db.world, make_material(
-        [1.0, 0.85, 0.55, 1.0],
-        0.5,
-        0.0,
-        [1.0, 0.85, 0.55],
-        // Radiance x projected area (~0.0144 m^2) matches the 8 cd light inside,
-        // so the image path and the analytic light hand over seamlessly.
-        555.0,
-    ));
-    let bulb = spawn_mesh(&mut scene_db.world, box_mesh([-1.5, 2.0, -1.0], [0.06, 0.06, 0.06]));
-    let _ = spawn_object(&mut scene_db.world, bulb, mat_bulb, glam::Mat4::IDENTITY, 0.1);
+    let mat_bulb = spawn_material(
+        &mut scene_db.world,
+        make_material(
+            [1.0, 0.85, 0.55, 1.0],
+            0.5,
+            0.0,
+            [1.0, 0.85, 0.55],
+            // Radiance x projected area (~0.0144 m^2) matches the 8 cd light inside,
+            // so the image path and the analytic light hand over seamlessly.
+            555.0,
+        ),
+    );
+    let bulb = spawn_mesh(
+        &mut scene_db.world,
+        box_mesh([-1.5, 2.0, -1.0], [0.06, 0.06, 0.06]),
+    );
+    let _ = spawn_object(
+        &mut scene_db.world,
+        bulb,
+        mat_bulb,
+        glam::Mat4::IDENTITY,
+        0.1,
+    );
 
     // Ground plane
     let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, -0.5, 0.0], 6.0));
-    let _ = spawn_object(&mut scene_db.world, floor, mat_floor, glam::Mat4::IDENTITY, 6.0);
+    let _ = spawn_object(
+        &mut scene_db.world,
+        floor,
+        mat_floor,
+        glam::Mat4::IDENTITY,
+        6.0,
+    );
 
     // Back wall — catches the light
-    let back_wall = spawn_mesh(&mut scene_db.world, box_mesh([0.0, 1.5, -5.0], [6.0, 3.0, 0.1]));
-    let _ = spawn_object(&mut scene_db.world, back_wall, mat_wall, glam::Mat4::IDENTITY, 6.0);
+    let back_wall = spawn_mesh(
+        &mut scene_db.world,
+        box_mesh([0.0, 1.5, -5.0], [6.0, 3.0, 0.1]),
+    );
+    let _ = spawn_object(
+        &mut scene_db.world,
+        back_wall,
+        mat_wall,
+        glam::Mat4::IDENTITY,
+        6.0,
+    );
 
     // Some pillars / columns to create depth
     for (x, z) in &[(-2.5, -2.0), (2.5, -2.0), (-2.5, 2.0), (2.5, 2.0)] {
-        let pillar = spawn_mesh(&mut scene_db.world, box_mesh([*x, 0.5, *z], [0.3, 1.5, 0.3]));
-        let _ = spawn_object(&mut scene_db.world, pillar, mat_wall, glam::Mat4::IDENTITY, 1.0);
+        let pillar = spawn_mesh(
+            &mut scene_db.world,
+            box_mesh([*x, 0.5, *z], [0.3, 1.5, 0.3]),
+        );
+        let _ = spawn_object(
+            &mut scene_db.world,
+            pillar,
+            mat_wall,
+            glam::Mat4::IDENTITY,
+            1.0,
+        );
     }
 
     // ── Lighting ───────────────────────────────────────────────────────────
     // Bright directional light shining toward the scene from above-right-front
     let sun_dir = glam::Vec3::new(-0.4, -0.6, 0.7).normalize();
-    spawn_light(&mut scene_db.world, GpuLight {
+    spawn_light(
+        &mut scene_db.world,
+        GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [sun_dir.x, sun_dir.y, sun_dir.z, 0.0],
             color_intensity: [1.0, 0.95, 0.85, 6.0],
@@ -450,11 +488,14 @@ fn build_scene(
             light_function_index: 0,
             ies_angle_scale: 0.0,
             ies_angle_offset: 0.0,
-        });
+        },
+    );
 
     // A few fill point lights
     // Point light inside the emissive bulb — off-centre so ghosts spread across the axis
-    spawn_light(&mut scene_db.world, GpuLight {
+    spawn_light(
+        &mut scene_db.world,
+        GpuLight {
             position_range: [-1.5, 2.0, -1.0, 8.0],
             direction_outer: [0.0, -1.0, 0.0, 0.0],
             color_intensity: [1.0, 0.85, 0.55, 8.0],
@@ -478,9 +519,12 @@ fn build_scene(
             light_function_index: 0,
             ies_angle_scale: 0.0,
             ies_angle_offset: 0.0,
-        });
+        },
+    );
 
-    spawn_light(&mut scene_db.world, GpuLight {
+    spawn_light(
+        &mut scene_db.world,
+        GpuLight {
             position_range: [-3.0, 1.0, -3.0, 5.0],
             direction_outer: [0.0, -1.0, 0.0, 0.0],
             color_intensity: [0.3, 0.4, 0.6, 2.0],
@@ -489,8 +533,11 @@ fn build_scene(
             inner_angle: 0.0,
             _pad: 0,
             ..Default::default()
-        });
-    spawn_light(&mut scene_db.world, GpuLight {
+        },
+    );
+    spawn_light(
+        &mut scene_db.world,
+        GpuLight {
             position_range: [3.0, 1.0, 2.0, 4.0],
             direction_outer: [0.0, -1.0, 0.0, 0.0],
             color_intensity: [0.6, 0.3, 0.2, 1.5],
@@ -499,7 +546,8 @@ fn build_scene(
             inner_angle: 0.0,
             _pad: 0,
             ..Default::default()
-        });
+        },
+    );
 
     renderer.set_ambient([0.05, 0.05, 0.08], 0.02);
     renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);
@@ -509,7 +557,8 @@ fn build_scene(
 /// Headless check: render the demo offscreen through the same graph and
 /// report scene-referred output statistics. `cargo run --bin lens_flare_demo -- --probe`
 fn probe() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
@@ -523,13 +572,20 @@ fn probe() {
         ..Default::default()
     }))
     .expect("device");
-    device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU UNCAPTURED ERROR] {e:?}")));
+    device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
+        panic!("[GPU UNCAPTURED ERROR] {e:?}")
+    }));
     let (device, queue) = (Arc::new(device), Arc::new(queue));
     let (width, height, format) = (1280u32, 720u32, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let (scene_db, mut renderer) = build_scene(device.clone(), queue.clone(), width, height, format);
+    let (scene_db, mut renderer) =
+        build_scene(device.clone(), queue.clone(), width, height, format);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Lens probe target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -538,10 +594,17 @@ fn probe() {
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    let camera_at = |eye: glam::Vec3, look_at: glam::Vec3| Camera::perspective_look_at(
-        eye, look_at, glam::Vec3::Y, std::f32::consts::FRAC_PI_4,
-        width as f32 / height as f32, 0.01, 100.0,
-    );
+    let camera_at = |eye: glam::Vec3, look_at: glam::Vec3| {
+        Camera::perspective_look_at(
+            eye,
+            look_at,
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            width as f32 / height as f32,
+            0.01,
+            100.0,
+        )
+    };
     let mut render = |camera: &Camera, frames: u32| -> Vec<u8> {
         for _ in 0..frames {
             v3_demo_common::flush_scene_db(&scene_db, &queue);
@@ -559,20 +622,36 @@ fn probe() {
             target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit([encoder.finish()]);
-        readback.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let pixels = readback.slice(..).get_mapped_range().unwrap().to_vec();
         pixels
     };
     let stats = |pixels: &[u8]| {
-        let mean = pixels.chunks_exact(4).map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0).sum::<f64>()
+        let mean = pixels
+            .chunks_exact(4)
+            .map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0)
+            .sum::<f64>()
             / (width * height) as f64;
-        let saturated = pixels.chunks_exact(4).filter(|p| p[0] > 250 && p[1] > 250).count();
+        let saturated = pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 250 && p[1] > 250)
+            .count();
         (mean, saturated)
     };
     let home = glam::Vec3::new(0.0, 1.2, 3.5);
@@ -588,7 +667,14 @@ fn probe() {
             let (mean, saturated) = stats(&pixels);
             println!("[sweep] {step:2} yaw {yaw:+.3} mean {mean:7.3} saturated {saturated:5}");
             if step % 12 == 0 {
-                image::save_buffer(format!("lens_sweep_{step:02}.png"), &pixels, width, height, image::ColorType::Rgba8).unwrap();
+                image::save_buffer(
+                    format!("lens_sweep_{step:02}.png"),
+                    &pixels,
+                    width,
+                    height,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
             }
         }
         return;
@@ -601,15 +687,31 @@ fn probe() {
         .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
         .unwrap_or_default();
     let (eye, look_at) = if pose.len() == 6 {
-        (glam::Vec3::new(pose[0], pose[1], pose[2]), glam::Vec3::new(pose[3], pose[4], pose[5]))
+        (
+            glam::Vec3::new(pose[0], pose[1], pose[2]),
+            glam::Vec3::new(pose[3], pose[4], pose[5]),
+        )
     } else {
-        (home, home + glam::Quat::from_rotation_x(-0.1) * -glam::Vec3::Z)
+        (
+            home,
+            home + glam::Quat::from_rotation_x(-0.1) * -glam::Vec3::Z,
+        )
     };
     let start = std::time::Instant::now();
     let pixels = render(&camera_at(eye, look_at), 8);
-    println!("[probe] 8 frames in {:.1} ms", start.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "[probe] 8 frames in {:.1} ms",
+        start.elapsed().as_secs_f64() * 1e3
+    );
     let (mean, saturated) = stats(&pixels);
     println!("[probe] mean {mean:.2}/255, saturated pixels {saturated}");
-    image::save_buffer("lens_flare_probe.png", &pixels, width, height, image::ColorType::Rgba8).unwrap();
+    image::save_buffer(
+        "lens_flare_probe.png",
+        &pixels,
+        width,
+        height,
+        image::ColorType::Rgba8,
+    )
+    .unwrap();
     println!("[probe] wrote lens_flare_probe.png");
 }

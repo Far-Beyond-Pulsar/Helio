@@ -1019,6 +1019,18 @@ impl RenderGraph {
             .collect()
     }
 
+    pub fn collect_debug_view_categories(&self) -> Vec<(u32, &'static str)> {
+        self.passes
+            .iter()
+            .flat_map(|pass| {
+                pass.debug_views()
+                    .iter()
+                    .map(|view| (view.debug_mode, pass.debug_view_category(view.debug_mode)))
+                    .filter(|(_, category)| !category.is_empty())
+            })
+            .collect()
+    }
+
     /// Propagate a renderer-wide debug mode change to every pass.
     pub fn set_debug_mode(&mut self, mode: u32) {
         for pass in &mut self.passes {

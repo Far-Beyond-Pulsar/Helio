@@ -158,7 +158,7 @@ impl SpriteCullPass {
             bind_group_layouts: &[Some(&cull_bgl)],
             immediate_size: 0,
         });
-        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let cull_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Sprite Cull Pipeline"),
             layout: Some(&cull_pl),
             module: &cull_shader,
@@ -272,7 +272,7 @@ impl SpriteCullPass {
         // ── Sort ────────────────────────────────────────────────────────────
         let sort_shader = helio_core::shader::module(device, "Sprite Sort Shader", helio_core::include_wgsl!("../shaders/sprite_sort.wgsl"));
 
-        let prepare_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let prepare_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
             label: Some("Sprite Sort Prepare Pipeline"),
             layout: Some(&prepare_pl),
             module: &sort_shader,

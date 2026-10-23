@@ -501,7 +501,7 @@ impl EnvironmentJoin {
             source: wgpu::ShaderSource::Wgsl(crate::scene_join::join_source(include_str!("../shaders/environment_join.wgsl")).into()),
         });
         let pipeline = |entry_point| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some("Environment Join"),
                 layout: None,
                 module: &module,

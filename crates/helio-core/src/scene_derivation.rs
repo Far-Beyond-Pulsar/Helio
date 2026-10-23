@@ -57,6 +57,11 @@ pub trait SceneDerivation: Send {
         ctx: &SceneDerivationContext<'_>,
         encoder: &mut wgpu::CommandEncoder,
     ) -> SceneDerivationOutput;
+
+    /// Called after the command buffer returned by `derive` has been
+    /// submitted. Derivations that recorded asynchronous readbacks can begin
+    /// mapping their staging buffers here.
+    fn after_submit(&mut self) {}
 }
 
 /// Run `derivations` in order against `projection`, publishing each one's

@@ -15,8 +15,8 @@ use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::build_simple_graph_with_context;
 
@@ -203,7 +203,13 @@ impl ApplicationHandler for App {
         let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let renderer = RendererBuilder::new(config, v3_demo_common::scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_simple_graph_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, surface_format);
+            .build(
+                device.clone(),
+                queue.clone(),
+                size.width,
+                size.height,
+                surface_format,
+            );
 
         // ── initial camera: 4 units back, looking at origin ───────────────────
         self.state = Some(AppState {

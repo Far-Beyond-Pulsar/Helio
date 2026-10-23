@@ -440,7 +440,7 @@ impl FoliagePlacePass {
         let place_layout = layout("Foliage Place PL", &place_bgl);
         let cull_layout = layout("Foliage Cull PL", &cull_bgl);
         let pipeline = |label: &str, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
                 module,

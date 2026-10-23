@@ -262,7 +262,7 @@ impl ShadowDirtyPass {
         });
 
         let pipeline = |entry_point: &'static str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
                 label: Some(entry_point),
                 layout: Some(&pl),
                 module: &shader,
