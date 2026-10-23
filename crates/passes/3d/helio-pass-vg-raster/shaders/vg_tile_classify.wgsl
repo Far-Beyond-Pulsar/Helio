@@ -22,6 +22,12 @@ struct ClassifyParams {
     tri_thresh:  u32,
     hit_thresh:  u32,
     hysteresis:  f32,
+    // Upper bound on dense tiles per frame (the excess stays on Tier 2).
+    max_dense:   u32,
+    // Frames a tile stays dense after its counters last qualified (>= 1).
+    latch:       u32,
+    pad0:        u32,
+    pad1:        u32,
 }
 
 @group(0) @binding(0) var<uniform> cp: ClassifyParams;
@@ -33,6 +39,8 @@ struct ClassifyParams {
 // Estimated triangles per tile of the clusters the cull diverted to Tier 3
 // (`vg_dense_count.wgsl`); they are not rasterised, so `tile_counters` misses them.
 @group(0) @binding(6) var<storage, read> dense_est: array<u32>;
+// Persistent per-tile latch age (frames of dense status left). Never cleared.
+@group(0) @binding(7) var<storage, read_write> dense_age: array<u32>;
 
 @compute @workgroup_size(64)
 fn classify_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -41,18 +49,35 @@ fn classify_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let was_dense = prev_mask[t] != 0u;
     // Feedback-safe: the cull routes the clusters of a dense tile away from the
     // software raster, which empties its counters. A tile that WAS dense also
-    // counts the estimate of its diverted clusters, so it keeps its state while
-    // the geometry stays (and drops out when it thins). The estimate never
+    // counts the estimate of its diverted clusters (as triangles and, halved, as
+    // hits), so it keeps its state while the geometry stays. The estimate never
     // makes a tile dense on its own, so it cannot grow the mask.
-    let tris = f32(tile_counters[t * 2u]) + select(0.0, f32(dense_est[t]), was_dense);
-    let hits = f32(tile_counters[t * 2u + 1u]);
+    let est = select(0.0, f32(dense_est[t]), was_dense);
+    let tris = f32(tile_counters[t * 2u]) + est;
+    let hits = f32(tile_counters[t * 2u + 1u]) + 0.5 * est;
     let k = select(1.0, cp.hysteresis, was_dense);
-    let dense = tris >= f32(cp.tri_thresh) * k || hits >= f32(cp.hit_thresh) * k;
-    cur_mask[t] = select(0u, 1u, dense);
-    if (dense) {
-        let i = atomicAdd(&dense_args[3], 1u);
-        dense_list[i] = t;
+    let qualifies = tris >= f32(cp.tri_thresh) * k || hits >= f32(cp.hit_thresh) * k;
+    // Latch with decay: a tile that qualified stays dense for `latch` frames,
+    // so an under-estimate of the diverted clusters cannot make it flicker.
+    var age = dense_age[t];
+    if qualifies {
+        age = max(cp.latch, 1u);
+    } else if age > 0u {
+        age = age - 1u;
     }
+    var dense = age > 0u;
+    if dense {
+        let i = atomicAdd(&dense_args[3], 1u);
+        if i >= cp.max_dense {
+            atomicSub(&dense_args[3], 1u);
+            dense = false;
+            age = 0u;
+        } else {
+            dense_list[i] = t;
+        }
+    }
+    dense_age[t] = age;
+    cur_mask[t] = select(0u, 1u, dense);
 }
 
 @compute @workgroup_size(1)

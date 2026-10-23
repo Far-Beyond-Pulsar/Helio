@@ -267,6 +267,8 @@ helio-vg-build = { path = "../helio-vg-build" }
 helio-vg-format = { workspace = true }
 helio-vg-stream = { path = "../helio-vg-stream" }
 helio-pass-vg-cull = { path = "../passes/3d/helio-pass-vg-cull" }
+helio-pass-vg-bvh = { path = "../passes/3d/helio-pass-vg-bvh" }
+helio-pass-vg-raster = { path = "../passes/3d/helio-pass-vg-raster" }
 helio-mats = { workspace = true }
 helio-pass-object-batch = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }

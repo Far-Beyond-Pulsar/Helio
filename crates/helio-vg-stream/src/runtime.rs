@@ -37,8 +37,9 @@ pub struct VgRuntimeSettings {
     /// Ceiling on visible clusters per frame (a ceiling, not an allocation).
     pub max_visible_clusters: u32,
     pub two_phase_occlusion: bool,
-    /// Tier 3 (dense-tile depth peel / ray tracing). Off by default: measured at
-    /// ~200 ms/frame on the museum scene, where Tier 1/2 alone take ~7 ms.
+    /// Tier 3 (dense tiles: ray tracing where ready, depth peel on the no-int64
+    /// Tier 2 fallback). Off by default: enabled but idle it costs under 0.02 ms,
+    /// but on an RTX 4090 it measured no gain over Tier 2 (VG_STRESS.md).
     pub tier3: bool,
 }
 
@@ -339,6 +340,23 @@ pub struct VgTier3Stats {
     pub slot_overflow: u32,
     pub clamped_tiles: u32,
     pub clamped_tris: u32,
+    /// Peel layers summed over the tiles of the latest counters readback.
+    pub peel_layers: u32,
+    /// Tier 3 decided to take clusters from Tier 2 next frame (the cull diverts
+    /// them to the dense bin only while this holds; set by the `VgDense` pass).
+    pub engaged: bool,
+    /// Tier 2 runs the tiled no-int64 fallback (its per-tile lists can overflow):
+    /// the depth peel is then useful on its own. Set when the graph is built.
+    pub tier2_tile_fallback: bool,
+    pub list_total: u32,
+    pub list_max: u32,
+    pub tris_total: u32,
+    pub tris_max: u32,
+    pub masked_tiles: u32,
+    pub masked_tris: u32,
+    pub masked_tris_max: u32,
+    /// CPU microseconds `RtTier::prepare` took on the latest frame.
+    pub rt_prepare_cpu_us: u32,
 }
 
 impl VgRuntime {

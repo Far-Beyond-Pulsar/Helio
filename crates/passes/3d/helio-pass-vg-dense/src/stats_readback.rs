@@ -62,7 +62,9 @@ impl StatsReadback {
 
     /// The newest finished readback, if any (never waits).
     pub fn poll(&mut self, device: &wgpu::Device) -> Option<DenseStats> {
-        let _ = device.poll(wgpu::PollType::Poll);
+        // The renderer polls the device once per frame (and the map callbacks fire there);
+        // a second, explicit poll here measured 1.5 ms of CPU per call.
+        let _ = device;
         let mut best = None;
         for (buffer, slot) in &mut self.staging {
             let Slot::Mapping(rx) = slot else { continue };

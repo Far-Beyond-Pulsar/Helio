@@ -81,3 +81,23 @@ fn file_backed_reader_matches_memory_reader() {
         println!("ok {}", path.file_name().unwrap().to_string_lossy());
     }
 }
+
+/// Which cached assets have all their root clusters in one hierarchy leaf (the
+/// precondition of the cull's per-instance root early-out), and how many roots.
+#[test]
+#[ignore = "diagnostic: set VG_CACHE_DIR"]
+fn cached_assets_single_root_leaf() {
+    use helio_vg_stream::{VgeoBytes, VgeoSource};
+    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(PathBuf::from) else { return };
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        if e.path().extension().and_then(|x| x.to_str()) != Some("vgeo") || e.metadata().unwrap().len() > 2_000_000_000 {
+            continue;
+        }
+        let src = VgeoBytes::open(&e.path()).unwrap();
+        let (nodes, refs) = (src.hierarchy().unwrap(), src.group_refs().unwrap());
+        let root = src.header().asset.root_node;
+        let leaf = helio_vg_format::root_leaves(&nodes, root);
+        let count = leaf.as_ref().map(|l| l.iter().map(|&x| refs[x as usize].cluster_count()).collect::<Vec<_>>());
+        println!("{} tris {:>10} nodes {:>6} single_root_leaf {:?} roots {:?}", e.file_name().to_string_lossy(), src.header().asset.triangle_count, nodes.len(), leaf, count);
+    }
+}

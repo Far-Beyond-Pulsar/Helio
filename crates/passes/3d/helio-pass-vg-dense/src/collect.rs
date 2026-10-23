@@ -244,6 +244,21 @@ impl RtCollect {
         inputs: &DenseNonRtInputs<'_>,
         instance_rows: u32,
     ) {
+        self.record_scoped(device, queue, rec, dense, inputs, instance_rows, &mut crate::common::GpuScopes::none());
+    }
+
+    /// [`Self::record_rec`] with GPU timestamp scopes around the collect kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rec: &mut helio_core::CommandRecorder<'_>,
+        dense: &DenseBuffers,
+        inputs: &DenseNonRtInputs<'_>,
+        instance_rows: u32,
+        scopes: &mut crate::common::GpuScopes<'_>,
+    ) {
         self.frame += 1;
         self.ensure(device, queue, instance_rows);
         rec.clear_buffer(&self.inst_bits.buffer, 0, None);
@@ -265,6 +280,7 @@ impl RtCollect {
                 bg_entry(14, &self.covered.buffer),
             ],
         });
+        scopes.begin(rec, "vg_dense collect");
         {
             let mut pass = rec.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vg_dense collect"),
@@ -274,6 +290,7 @@ impl RtCollect {
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups_indirect(&dense.args, 12);
         }
+        scopes.end(rec, "vg_dense collect");
         // Readback: header + records, then the dense tile count, into a free slot.
         if let Some(slot) = self.staging.iter_mut().find(|s| matches!(s.state, SlotState::Free)) {
             let cand_bytes = (HEADER_WORDS + self.capacity * STRIDE_WORDS) as u64 * 4;
@@ -300,7 +317,9 @@ impl RtCollect {
     /// The most recent finished readback, if any arrived since the last call.
     /// Never blocks (a non-waiting `device.poll` only).
     pub fn poll(&mut self, device: &wgpu::Device) -> Option<CollectResult> {
-        let _ = device.poll(wgpu::PollType::Poll);
+        // The renderer polls the device once per frame (and the map callbacks fire there);
+        // a second, explicit poll here measured 1.5 ms of CPU per call.
+        let _ = device;
         let mut best: Option<CollectResult> = None;
         for slot in &mut self.staging {
             let SlotState::Mapping(frame, rx) = &slot.state else { continue };

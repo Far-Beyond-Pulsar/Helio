@@ -250,6 +250,60 @@ impl Default for GpuHierarchyNode {
     }
 }
 
+
+/// Error at or above which a parent error means "no parent" (root clusters).
+pub const ROOT_PARENT_ERROR: f32 = 1.0e30;
+
+/// The hierarchy leaves (asset-local group-ref indices) holding the root
+/// clusters of an asset, or `None` for a malformed hierarchy. Root clusters have an infinite
+/// `parent_error`, so they are exactly the clusters of the leaves reached
+/// through slots whose `max_parent_error` is infinite.
+///
+/// The GPU copy of the asset header carries these leaves (see
+/// [`gpu_header_with_root_leaves`]), which lets the cull draw the roots of a distant instance
+/// without walking the hierarchy (see `helio-pass-vg-cull`).
+pub fn root_leaves(nodes: &[GpuHierarchyNode], root_node: u32) -> Option<Vec<u32>> {
+    let mut found: Vec<u32> = Vec::new();
+    let mut stack = vec![root_node];
+    let mut visited = 0usize;
+    while let Some(n) = stack.pop() {
+        visited += 1;
+        if visited > nodes.len() + 1 {
+            return None; // cycle
+        }
+        let node = nodes.get(n as usize)?;
+        for s in 0..NODE_FANOUT {
+            let child = node.children[s];
+            if child == NODE_INVALID || node.max_parent_error[s] < ROOT_PARENT_ERROR {
+                continue;
+            }
+            if child & NODE_LEAF_BIT != 0 {
+                let leaf = child & !NODE_LEAF_BIT;
+                if !found.contains(&leaf) {
+                    found.push(leaf);
+                }
+            } else {
+                stack.push(child);
+            }
+        }
+    }
+    (!found.is_empty()).then_some(found)
+}
+
+/// GPU view of an asset header: up to [`MAX_ROOT_LEAVES`] root leaves (`leaf + 1`) are
+/// stored in the words no shader reads (`cluster_count`, `root_page_count`, `flags`),
+/// 0 = unused. More leaves than that store none (no early-out for the asset).
+pub const MAX_ROOT_LEAVES: usize = 3;
+
+pub fn gpu_header_with_root_leaves(mut header: GpuAssetHeader, nodes: &[GpuHierarchyNode]) -> GpuAssetHeader {
+    let leaves = root_leaves(nodes, header.root_node).filter(|l| l.len() <= MAX_ROOT_LEAVES).unwrap_or_default();
+    let word = |i: usize| leaves.get(i).map_or(0, |l| l + 1);
+    header.cluster_count = word(0);
+    header.root_page_count = word(1);
+    header.flags = word(2);
+    header
+}
+
 /// Leaf payload: where a group's clusters live. 8 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -426,6 +480,27 @@ pub struct PageHeader {
 mod tests {
     use super::*;
     use std::mem::size_of;
+
+    #[test]
+    fn root_leaves_follow_infinite_parent_error_slots() {
+        let mut root = GpuHierarchyNode::default();
+        root.children[0] = 1;
+        root.max_parent_error[0] = f32::INFINITY;
+        root.children[1] = NODE_LEAF_BIT | 5;
+        root.max_parent_error[1] = 3.0; // finite: not a root leaf
+        root.children[2] = NODE_LEAF_BIT | 9;
+        root.max_parent_error[2] = f32::INFINITY;
+        let mut inner = GpuHierarchyNode::default();
+        inner.children[0] = NODE_LEAF_BIT | 2;
+        inner.max_parent_error[0] = f32::INFINITY;
+        let nodes = [root, inner];
+        let mut leaves = root_leaves(&nodes, 0).unwrap();
+        leaves.sort();
+        assert_eq!(leaves, vec![2, 9]);
+        let h = gpu_header_with_root_leaves(GpuAssetHeader { root_node: 0, ..Default::default() }, &nodes);
+        assert_eq!((h.cluster_count, h.root_page_count, h.flags), (10, 3, 0)); // discovery order
+        assert!(root_leaves(&[GpuHierarchyNode::default()], 0).is_none());
+    }
 
     #[test]
     fn layouts_are_stable() {

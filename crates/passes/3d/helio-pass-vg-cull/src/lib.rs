@@ -273,7 +273,9 @@ pub mod stats {
     pub const PEAK_QUEUE: u32 = 13;
     /// Triangles in successfully emitted clusters, across both phases.
     pub const TRIANGLES: u32 = 14;
-    pub const COUNT: u32 = 15;
+    /// Instances whose roots were drawn directly (whole-asset early-out).
+    pub const ROOT_SHORTCUT: u32 = 15;
+    pub const COUNT: u32 = 16;
 }
 
 /// A decoded stats sample (one to a few frames old: the async readback of
@@ -294,6 +296,7 @@ pub struct VgCullStats {
     pub culled_sse: u32,
     pub job_overflow: u32,
     pub visible_overflow: u32,
+    pub root_shortcuts: u32,
     pub peak_queue: u32,
     pub tier_clusters: [u32; BIN_COUNT as usize],
 }
@@ -321,6 +324,7 @@ impl VgCullStats {
             job_overflow: st(stats::JOB_OVERFLOW),
             visible_overflow: st(stats::VISIBLE_OVERFLOW),
             peak_queue: st(stats::PEAK_QUEUE),
+            root_shortcuts: st(stats::ROOT_SHORTCUT),
             tier_clusters,
         })
     }
@@ -376,6 +380,8 @@ pub const FLAG_MASKED: u32 = 8;
 /// Masked clusters of the software class may use [`BIN_SW_MASKED`] (the raster
 /// has the 64-bit atomic kernel); clear = they go to [`BIN_HW_MASKED`].
 pub const FLAG_SW_MASKED: u32 = 16;
+/// Set = the per-instance root early-out is OFF (A/B and equivalence tests).
+pub const FLAG_NO_ROOT_SHORTCUT: u32 = 32;
 
 // ── Shader assembly ────────────────────────────────────────────────────────
 
@@ -411,6 +417,7 @@ pub fn wgsl_constants() -> String {
     u("VGC_FLAG_STATS", FLAG_STATS);
     u("VGC_FLAG_MASKED", FLAG_MASKED);
     u("VGC_FLAG_SW_MASKED", FLAG_SW_MASKED);
+    u("VGC_FLAG_NO_ROOT_SHORTCUT", FLAG_NO_ROOT_SHORTCUT);
     u("VGC_MAT_ALPHA_TEST", helio_mats::FLAG_ALPHA_TEST);
     u("VGC_MAT_DOUBLE_SIDED", helio_mats::FLAG_DOUBLE_SIDED);
     u("VGC_MAT_ALPHA_BLEND", helio_mats::FLAG_ALPHA_BLEND);
@@ -432,6 +439,7 @@ pub fn wgsl_constants() -> String {
         ("SPILLED", stats::SPILLED),
         ("PEAK_QUEUE", stats::PEAK_QUEUE),
         ("TRIANGLES", stats::TRIANGLES),
+        ("ROOT_SHORTCUT", stats::ROOT_SHORTCUT),
     ] {
         u(&format!("VGC_STAT_{name}"), v);
     }

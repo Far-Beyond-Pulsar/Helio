@@ -132,8 +132,12 @@ impl RenderPass for VgCullEarlyPass {
             core.config.tau_px = s.tau_px;
             core.config.mode = s.mode;
             core.config.two_phase_occlusion = s.two_phase_occlusion;
+            // One bin may hold a quarter of the visible-cluster budget (distant crowds put
+            // nearly everything in the smallest hardware class; an even 1/8 split
+            // dropped 475k clusters of a 100k-instance view). Clamped to MAX_BIN_CAPACITY
+            // by the core, so bin * capacity stays under the 24-bit visible index.
             core.config.max_bin_capacity =
-                (s.max_visible_clusters / crate::BIN_COUNT).max(16).next_power_of_two();
+                (s.max_visible_clusters / 4).max(16).next_power_of_two();
         }
         core.begin_frame(
             ctx.device,

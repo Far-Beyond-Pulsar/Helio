@@ -105,8 +105,8 @@ download size.
 
 | Preset | Tree instances | Statue instances | Source triangles |
 |---|---|---|---|
-| `small` trees, density 1 | 162 | 72 | 695 M |
-| default (full, density 1) | 162 (8 hero, 24 courtyard, 130 forest) | 72 (18 exhibits, 24 hall copies, 30 courtyard crowd) | 777 M (kit 1.7 M, statues 408 M, trees 368 M) |
+| `small` trees, density 1 | about 2,100 (8 hero, 96 courtyard, 2,000 forest) | 72 | not re-measured after the forest increase |
+| default (full, density 1) | about 580 (8 hero, 48 courtyard, 520 forest; was 162 before the forest increase) | 72 (18 exhibits, 24 hall copies, 30 courtyard crowd) | 777 M (kit 1.7 M, statues 408 M, trees 368 M) |
 | `high` (3) | 470 | 156 | 2.07 G |
 | `insane` (8) | 1240 | 173 | 3.9 G |
 
@@ -373,3 +373,170 @@ Remaining work: constant sampled leaf proxies are not canopy LODs, VG scan
 density still exceeds the desired pixel budget, and texture cooking is not yet
 persistently cached. Passing these regressions does not establish full-scene
 visual stability or a production performance target.
+
+## Tier 3 measurements (dense tiles)
+
+Per-kernel GPU timestamps: with `HELIO_VG_PROFILE=1` (or capture mode) every
+`VgDense` kernel is its own GPU scope (`vg_dense compact`, `make_args`,
+`bin (count|scan|fill)`, `peel`, `peel masked`, `collect`, `mask_union`,
+`footprint_args`, `footprint`, `vg_dense_rt compact|args|trace`). They appear in
+`gpu_ms` of every capture stats JSON; with profiling off nothing is recorded. The
+stats JSON also carries `vg.tier3` (frames per backend, dense tiles, list sizes,
+TLAS rebuilds/reuses, CPU microseconds of the RT preparation) and
+`tile_density` (distribution of the Tier 2 per-tile triangle / hit counters, read
+back once per shot).
+
+Shots: `tier3-off` (ForceHwRaster), `tier3-tier2` (Auto, Tier 3 disabled: the
+baseline for Tier 3), `tier3-on-peel` (ForceNonRtFallback), `tier3-on-rt` (Auto
+with ray queries), plus `-dense-overlap` views. Run one density at a time:
+
+```powershell
+$env:VG_STRESS_DENSITY = '3'; $env:VG_STRESS_PAGE_MB = '2048'
+$env:VG_STRESS_CAPTURE = 'out'; $env:VG_STRESS_CAPTURE_ONLY = 'tier3-tier2,tier3-on-rt'
+$env:HELIO_VG_PROFILE = '1'; cargo vg-stress
+```
+
+Calibration overrides (read when the raster is created): `HELIO_VG_DENSE_TRI`
+(triangles per tile, default 512), `HELIO_VG_DENSE_HIT` (depth-passing hits per
+tile, default 256), `HELIO_VG_DENSE_LATCH` (frames a tile stays dense, default
+8), `HELIO_VG_DENSE_MAX_TILES` (cap per frame, default 512); `VG_STRESS_PAGE_MB`
+sets the page-pool budget.
+
+### What the 93 ms was (forest shot, RTX 4090, 1600x900, density 1)
+
+| VgDense kernel (ms) | before | after, depth peel | after, ray traced |
+|---|---|---|---|
+| `peel` (opaque) | 31.64 | 0.79 | - |
+| `peel masked` | 62.80 | - (masked clusters stay on Tier 2) | - |
+| `bin` count / scan / fill | 0.14 / 0.06 / 0.31 | 0.012 / 0.045 / 0.015 | - |
+| `compact`, `make_args` | ~0.01 | 0.025, 0.007 | 0.008, 0.007 |
+| `mask_union`, `footprint(_args)` | ~0.03 | 0.007, 0.031, 0.007 | 0.006, 0.010, 0.006 |
+| `collect` | 0.054 | - | 0.012 |
+| `vg_dense_rt compact/args/trace` | - | - | 0.008 / 0.006 / 0.043 |
+| **VgDense total** | **95.0** | **0.96** | **0.15** |
+
+Root cause: not the binning, not atomics, not the readback. Tier 3 *replaced*
+every Tier 1/2 pixel inside a dense tile, so each tile's list held every cluster
+whose bounding sphere touched it (about 2,500 per tile, 8,265 at most; 478k list
+entries over 193 tiles) although only about 41 triangles per tile (opaque) and
+3,200 (masked) were real. A tile is one workgroup that re-streams its whole
+cluster list once per peel layer, so the pass lasted as long as the slowest
+tile (about 30 ms opaque, 60 ms for the masked pipeline, which also re-scanned
+the list serially). The fix is structural: Tier 3 now *adds* only the clusters
+the cull diverted to the dense bin (about 8 per tile) and `vis_resolve` takes the
+nearest of that and the Tier 1/2 pixel (`FLAG_DENSE_MERGE`), so alpha-masked
+leaves never enter Tier 3.
+
+### Does Tier 3 beat Tier 2? (measured)
+
+Tier 2 only (`tier3-tier2`), contended GPU (another process was using the card
+during these runs, so absolute times are about 2x the quiet ones; compare within a
+row): density 1: 12.6 ms for 6.2 M selected triangles, density 3: 26.7 ms for
+23.6 M, density 8: 40.3 ms for 40.2 M. The Tier 2 per-tile counters never exceed
+2,386 triangles (9.3 per pixel) or 429 depth-passing hits (1.7 per pixel) per tile,
+p99 1,257 triangles. Tier 2 resolves that at about 3 G triangles/s: a 2,386-triangle
+tile costs about 0.75 us of whole-GPU time. The depth peel costs about 4 us per
+tile on the diverted clusters alone (0.79 ms for 193 tiles on a quiet GPU), the ray
+trace about 0.2 us per tile plus 0.1 ms fixed. There is no crossover for the peel at
+any measured density on this GPU (Tier 2 uses 64-bit atomics, so overlap costs it
+nothing extra); the ray trace only breaks even above roughly 2.5 triangles per pixel
+across 100+ tiles, and at density 3 or more it never became ready with the default
+512 MiB pool because the cull's own demand holds every page slot (proxy pages are
+the lowest priority and the pool will not evict recently used pages). With a 2 GiB
+pool it did, and was not faster than Tier 2 (28.9 vs 25.9 ms contended). Hence the
+policy: Tier 3 stays opt-in; in `Auto` the peel runs only where Tier 2 is the tiled
+no-int64 fallback (its lists overflow), and the ray trace only when it is ready.
+Enabled but with nothing dense, `VgDense` costs 0.016 ms (a probe every 4th frame).
+
+`tier3-on-rt` reports `frames_rt` in the hundreds; RT and depth-peel images were
+bit-identical on the forest shot and differ from Tier 2 only on 0.0135% of pixels.
+
+## Instance-scale benchmark (`VG_STRESS_INSTANCES`)
+
+N instances of ONE asset (default the Thai statue, `VG_STRESS_BENCH_ASSET=thai|lucy|pine`)
+in a seeded jittered grid with varied yaw and scale (spacing `VG_STRESS_BENCH_SPACING`,
+default 3.2 m) over a classic ground plane, nothing else. The scene is built by the normal
+loader from the cooked caches (run `cargo vg-stress -- --prepare` once); textures are skipped.
+One process per N; it renders six fixed camera cases offscreen (no window) and exits. Tier 3
+stays off. A private-memory guard stops the process at `VG_STRESS_BENCH_MEM_GB` (default 14).
+
+```powershell
+cd D:\GitHub\Pulsar-Native\crates\renderer\helio
+$env:HELIO_VG_STRESS_SKIP_PROVISION = '1'
+# Close a running vg_stress first (Windows locks the exe), or build into another target dir:
+#   $env:CARGO_TARGET_DIR = 'D:\GitHub\helio_bench_target'
+cargo build -p examples --features vg-stress --release --bin vg_stress
+
+foreach ($n in 1000, 5000, 20000, 100000) {
+  $env:VG_STRESS_INSTANCES = "$n"     # or: vg_stress.exe --instance-bench $n
+  $env:VG_STRESS_TREES = 'none'
+  $env:VG_STRESS_CAPTURE = "out\bench_$n"
+  $env:VG_STRESS_CAPTURE_RES = '1600x900'
+  $env:HELIO_VG_PROFILE = '1'         # per-pass GPU timestamps
+  .\target\release\vg_stress.exe      # (or $env:CARGO_TARGET_DIR\release\vg_stress.exe)
+}
+# A/B of the root early-out:  $env:HELIO_VG_NO_ROOT_SHORTCUT = '1'
+# Classic instancing check:   $env:VG_STRESS_BENCH_CLASSIC = '20000'   (20k quads, one mesh + material)
+# Subset of cases:            $env:VG_STRESS_CAPTURE_ONLY = 'bench-far,bench-away'
+```
+
+Output: `out\bench_<N>\bench-<case>.json` (+ a small `.jpg` per case and `index.json`). Cases:
+`bench-far` (whole grid in view), `bench-away` (standing at the grid edge looking away),
+`bench-edge` (edge, looking along the grid), `bench-inside`, and `bench-far-move` /
+`bench-inside-move` (1% of the instances move 2 cm every frame, a rotating window). Keys of
+interest: `gpu_ms` (per pass, mean of the last 30 frames, `TOTAL`), `vg` (`selected_triangles`,
+`clusters_tested/emitted`, `jobs`, `root_shortcuts`, `culled`, `overflow.{jobs,visible,peak_queue}`,
+`pool`), and `bench`: `spawn` (ms, us/instance, private bytes per instance), `cpu_frame_ms` /
+`wall_frame_ms` (min/mean/p50/p95/max over the last 40 frames), `bvh_frames` (frames in
+skip / refit / rebuild during the shot), `derivation` (calls, rebuilds), `memory`, `gpu_bytes`
+(`static_objects` rows x 252 B, derivation buffers, BVH scratch, per instance).
+
+### Results (RTX 4090, 1600x900, Thai statue, Tier 3 off; GPU CONTENDED)
+
+Another vg_stress process (the user's own interactive window) held the GPU at 97-99% for the
+whole session, so `TOTAL` swings by several ms between runs (Atmosphere, VolumetricFog and Lens
+varied 10x with no VG change). Compare the VG pass sums and counters, which are deterministic;
+absolute times are upper bounds. Sum of the `Vg*` passes in ms, before -> after the changes below:
+
+| N | far | away | edge | inside | far, 1% moving | inside, 1% moving |
+|---|---|---|---|---|---|---|
+| 1k | 2.9 -> 2.8 | 0.36 -> 0.23 | 10.6 -> 3.4 | 7.4 -> 3.1 | 6.0 -> 1.9 | 4.7 -> 3.2 |
+| 5k | 1.1 -> 2.3 | 0.22 -> 0.28 | 7.4 -> 5.0 | 6.4 -> 4.8 | 8.0 -> 1.7 | 10.5 -> 4.6 |
+| 20k | 4.4 -> 2.2 | 0.22 -> 0.23 | 6.7 -> 5.9 | 6.0 -> 5.6 | 7.1 -> 2.8 | 9.3 -> 4.7 |
+| 100k | 5.5 -> 7.9 (*) | 2.3 -> 0.85 | 9.3 -> 12.5 (*) | 6.0 -> 6.4 | 17.6 -> 7.2 | 18.6 -> 6.8 |
+
+(*) After the change the 100k far view draws 999,510 clusters (112 M selected triangles); before it
+silently dropped 475,222 of the 1,000,000 needed clusters (bin ceiling), so "before" did half the
+work. 500k: far view needs 5.0 M clusters, 1,048,576 are kept and 3.9 M are dropped (counted).
+
+Counters (deterministic), 100k far, root early-out off -> on: jobs 3,398,441 -> 299,912; VgCullEarly
+2.13 -> 1.18 ms measured back to back (`off_100000` vs `on2_100000`); `root_shortcuts` 99,963 of
+100,000 instances. 1% moving, 100k: `VgBvh` 10.98 -> 0.09 ms (refit instead of rebuild every frame),
+`ObjectBatch` 8.53 -> 0.25 ms. Static steady state at every N: BVH skip on 69 of 70 frames
+(the first frame builds), derivation rebuilds 0.
+
+| N | spawn (all rows) | us / instance | CPU bytes / instance | GPU bytes / instance (252 B row + 16 B instance + BVH scratch) |
+|---|---|---|---|---|
+| 1k | 0.9 ms | 0.88 | (below page granularity) | 469 |
+| 5k | 4.0 ms | 0.81 | 1,225 | 593 |
+| 20k | 16.9 ms | 0.84 | 965 | 593 |
+| 100k | 78 ms | 0.78 | 732 | 525 |
+| 500k | 380 ms | 0.76 | 578 | 470 |
+
+Process private memory: 2.8 GB (1k) to 4.3 GB (500k) including ~1.2 GB of runtime/driver baseline. CPU
+frame time (render call) stays at 2-4 ms for every N once the per-frame `asset_ready_rows(N)`
+padding of the example derivation was removed (it cost 27-45 ms per frame at 500k).
+Classic instancing (`VG_STRESS_BENCH_CLASSIC=20000`, 5k VG instances): the 20k quads draw through the
+object batch (GBuffer 0.034 ms, ObjectBatch 0.002 ms), VG instances still draw, classic rows are not
+suppressed.
+
+### Limits that remain
+
+* A far instance costs its root clusters, not one: Thai's roots are 10 clusters (1.1 k triangles), so
+  100k distant instances are 1 M clusters / 112 M triangles in the micro-raster. Cost then follows the
+  instance count, not the pixel count; fixing it needs a coarser top level from the builder (see
+  plan VG-BUG-6), or an instance-level sub-pixel cull.
+* Hard caps degrade by dropping clusters: one bin holds at most a quarter of `max_visible_clusters`
+  (1,048,576 at the default, bounded by 8 bins x 2^20 < the 2^24 visible index and the 25-bit vis id).
+  Drops are counted in `vg.overflow.visible` and in the window-title stats line (`overflow N`); there
+  is no debug view for them.

@@ -41,6 +41,10 @@ fn collect(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) 
     if word >= arrayLength(&inst_bits) { return; }
     let bit = 1u << (inst & 31u);
     let masked = (rg % (CULL_RANGE_COUNT / 2u)) >= CULL_FIRST_MASKED;
+    // limits.w bit 1: only the clusters the cull diverted to the dense bin make
+    // their instance a candidate (the other tiers draw the rest and the result is merged).
+    let bin_of = rg % (CULL_RANGE_COUNT / 2u);
+    if (params.limits.w & 2u) != 0u && bin_of != BIN_DENSE_BIN && bin_of != BIN_SW_BIN { return; }
     // Masked clusters are always tested (they are counted, not deduplicated).
     if !masked && (atomicLoad(&inst_bits[word]) & bit) != 0u { return; }
     let c = vgd_load_cluster(v.cluster_slot);
@@ -58,7 +62,10 @@ fn collect(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) 
     }
     if !hit { return; }
     if masked {
+        // Alpha-masked clusters are resolved by the masked peel, never by the
+        // (opaque) proxies: counted, but they do not make their instance a candidate.
         atomicAdd(&cand[2], 1u);
+        return;
     }
     let old = atomicOr(&inst_bits[word], bit);
     if (old & bit) != 0u { return; }

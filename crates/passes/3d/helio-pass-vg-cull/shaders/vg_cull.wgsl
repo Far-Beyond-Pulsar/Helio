@@ -499,6 +499,46 @@ fn job_gcbvh(job: vec2<u32>) {
     }
 }
 
+// Whole-asset early-out. The GPU view of the asset header holds up to three
+// hierarchy leaves (group ref + 1, 0 = unused) that contain every root cluster
+// (`helio_vg_format::gpu_header_with_root_leaves`; none stored = no early-out).
+// When their pages are resident and every root cluster already projects under
+// tau, the cut is exactly the root clusters (errors and nested spheres are
+// monotone up the DAG: the property the per-node `max_parent_error` pruning
+// also relies on), so they are tested directly and the hierarchy walk is
+// skipped. Returns false to walk normally.
+fn root_leaf_ok(inst_ctx: InstCtx, leaf1: u32) -> bool {
+    if leaf1 == 0u { return true; }
+    let g = vg_group_refs[vg_group_ref_base(inst_ctx.asset) + leaf1 - 1u];
+    let slot = vg_page_slot(vg_global_page(inst_ctx.asset, g));
+    if slot == VG_PAGE_NOT_RESIDENT { return false; }
+    let first = g.first_cluster_count & 0xffffu;
+    let count = g.first_cluster_count >> 16u;
+    let k = inst_ctx.err_scale * inst_ctx.scale;
+    for (var i = 0u; i < count; i++) {
+        let c = vg_load_cluster(slot, first + i);
+        let cw = (inst_ctx.m * vec4<f32>(c.sphere.xyz, 1.0)).xyz;
+        if proj_err(c.self_error * k, cw, c.sphere.w * inst_ctx.scale) > inst_ctx.tau { return false; }
+    }
+    return true;
+}
+
+fn try_root_shortcut(inst: u32, hdr: VgAssetHeader) -> bool {
+    if (params.flags & VGC_FLAG_NO_ROOT_SHORTCUT) != 0u { return false; }
+    // Root leaves live in the header words no shader otherwise reads.
+    let l0 = hdr.cluster_count;
+    let l1 = hdr.root_page_count;
+    let l2 = hdr.flags;
+    if l0 == 0u { return false; }
+    let ic = load_inst(inst);
+    if !root_leaf_ok(ic, l0) || !root_leaf_ok(ic, l1) || !root_leaf_ok(ic, l2) { return false; }
+    stat_add(VGC_STAT_ROOT_SHORTCUT);
+    do_group(inst, l0 - 1u, ic);
+    if l1 != 0u { do_group(inst, l1 - 1u, ic); }
+    if l2 != 0u { do_group(inst, l2 - 1u, ic); }
+    return true;
+}
+
 fn job_instance(job: vec2<u32>) {
     if job.x >= params.instance_count { return; }
     let inst = vg_instances[job.x];
@@ -509,6 +549,7 @@ fn job_instance(job: vec2<u32>) {
     if !vg_asset_ready(inst.asset_slot) { return; }
     let hdr = vg_asset_headers[inst.asset_slot];
     if hdr.node_count == 0u { return; }
+    if try_root_shortcut(job.x, hdr) { return; }
     let root = vg_node_base(inst.asset_slot) + hdr.root_node;
     let children = vg_nodes[root].children;
     for (var s = 0u; s < 4u; s++) {

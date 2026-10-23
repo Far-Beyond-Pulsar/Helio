@@ -4,7 +4,10 @@
 //! Controls: WASD move, Space/Shift rise/fall, left click grabs the mouse,
 //! Escape releases it (or exits when released).
 
+#![recursion_limit = "512"]
+
 mod v3_demo_common;
+mod vg_stress_bench;
 mod vg_stress_capture;
 mod vg_stress_cook;
 mod vg_stress_loading;
@@ -59,6 +62,7 @@ const VG_INSTANCES: BufferKey = BufferKey::of("vg_instances");
 const VG_INSTANCE_COUNT: BufferKey = BufferKey::of("vg_instance_count");
 const VG_ASSET_READY: BufferKey = BufferKey::of("vg_asset_ready");
 const CLASSIC_SUPPRESSED: BufferKey = BufferKey::of("classic_suppressed");
+const SCENE_OBJECTS_STRUCTURE: BufferKey = BufferKey::of("scene_objects_structure");
 const VG_FLAGS: u32 = INST_ENABLED | INST_SHADOW_CASTER | INST_LOD_SUPPRESS | INST_CONE_CULL;
 /// The demo presents the scanned assets together on one metre-based stress
 /// grid. Normalize their imported height to this scene height while
@@ -92,6 +96,15 @@ struct VgSceneTargets {
     /// Bumped whenever `targets` changes, so the derivation can skip frames
     /// on which neither the instances nor the asset readiness moved.
     generation: u64,
+    /// Times the derivation rebuilt its rows / was called (bench counters).
+    derive_rebuilds: u64,
+    derive_calls: u64,
+    /// Bumped whenever an object row is added (the role of the scene join's
+    /// `scene_objects_structure` marker: BVH refit and object-batch placement-only
+    /// runs rely on it to tell a move from a structural change).
+    structure: u64,
+    /// Bytes of the derivation's GPU buffers (instances, count, ready, classic).
+    gpu_bytes: u64,
 }
 
 /// Which instances are drawn through virtual geometry this frame: exactly the
@@ -130,6 +143,7 @@ struct SceneVgDerivation {
     count: wgpu::Buffer,
     ready: wgpu::Buffer,
     classic: wgpu::Buffer,
+    structure_marker: wgpu::Buffer,
     instance_capacity: u32,
     object_rows: u32,
     ready_capacity: u32,
@@ -164,6 +178,7 @@ impl SceneVgDerivation {
             count: make("VG Stress Instance Count", 16),
             ready: make("VG Stress Asset Ready", 16),
             classic: make("VG Stress Classic Suppression", object_rows as u64 * 4),
+            structure_marker: make("VG Stress Structure Marker", 16),
             instance_capacity,
             object_rows,
             ready_capacity: 1,
@@ -197,6 +212,8 @@ impl SceneDerivation for SceneVgDerivation {
             self.runtime.service(ctx.device, ctx.queue);
         }
         let mut targets = self.targets.lock().expect("VG scene targets");
+        targets.derive_calls += 1;
+        let structure = targets.structure.max(1);
         let instance_count = targets.targets.len().max(1) as u32;
         let object_rows = targets.object_rows.max(1);
         let make = |label, bytes: u64| {
@@ -207,7 +224,7 @@ impl SceneDerivation for SceneVgDerivation {
                 mapped_at_creation: false,
             })
         };
-        let (ready_rows, version) = self.runtime.asset_ready_rows(targets.targets.len().max(1));
+        let (ready_rows, version) = self.runtime.asset_ready_rows(1);
         let mut grew = instance_count > self.instance_capacity || object_rows > self.object_rows;
         if ready_rows.len() > self.ready_capacity as usize {
             self.ready_capacity = ready_rows.len().next_power_of_two() as u32;
@@ -236,6 +253,11 @@ impl SceneDerivation for SceneVgDerivation {
         let inputs = (targets.generation, version);
         if grew || self.last_inputs != Some(inputs) {
             self.last_inputs = Some(inputs);
+            targets.derive_rebuilds += 1;
+            targets.gpu_bytes = u64::from(self.instance_capacity) * 16
+                + u64::from(self.object_rows) * 4
+                + u64::from(self.ready_capacity) * 16
+                + 32;
             let mut classic = vec![0u32; self.object_rows as usize];
             let visible: &[VgTarget] = if self.enabled { &targets.targets } else { &[] };
             let mut instances = select_visible(visible, &ready_rows, &mut classic);
@@ -271,6 +293,10 @@ impl SceneDerivation for SceneVgDerivation {
                 (
                     CLASSIC_SUPPRESSED,
                     Self::handle(&self.classic, 4, self.content_generation, self.buffer_epoch),
+                ),
+                (
+                    SCENE_OBJECTS_STRUCTURE,
+                    BufferHandle { buffer: self.structure_marker.clone(), epoch: 1, row_bytes: 16, content_generation: structure },
                 ),
             ],
             ..Default::default()
@@ -465,6 +491,8 @@ struct AppState {
     loading_status: String,
     last_title: std::time::Instant,
     capture: Option<vg_stress_capture::Capture>,
+    post_stack: Option<vg_stress_capture::PostStack>,
+    post_level: u8,
     sun_light: Option<Entity>,
     fog_entity: Option<Entity>,
     adapter_name: String,
@@ -478,6 +506,7 @@ struct AppState {
     vg_objects: usize,
     classic_batches: HashSet<(u32, u32)>,
     placeholder_ordinal: u32,
+    bench: Option<vg_stress_bench::BenchState>,
 }
 
 impl App {
@@ -578,15 +607,23 @@ impl ApplicationHandler for App {
             _ => helio_vg_format::VgMode::Auto,
         };
         let tier3 = std::env::var_os("VG_STRESS_TIER3").is_some_and(|v| v != "0");
-        runtime.set_settings(VgRuntimeSettings { tau_px: tau, mode, tier3, ..runtime.settings() });
+        let page_budget_mb = std::env::var("VG_STRESS_PAGE_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or_else(|| runtime.settings().page_budget_mb);
+        runtime.set_settings(VgRuntimeSettings { tau_px: tau, mode, tier3, page_budget_mb, ..runtime.settings() });
         println!("[Museum] VG mode {mode:?} (VG_STRESS_MODE=auto|hw|nonrt|off)");
         println!("[Museum] Tier 3 dense tiles {} (VG_STRESS_TIER3=1 enables)", if tier3 { "ON" } else { "off" });
         println!("[Museum] VG error tolerance tau = {tau} px (VG_STRESS_TAU; - and = keys change it live)");
         let museum_config = vg_stress_prep::catalog::Config::from_env_and_args();
-        let layout = vg_stress_data::layout::museum_layout_with(
+        let mut layout = vg_stress_data::layout::museum_layout_with(
             &vg_stress_data::dims::Dims::load(),
             &museum_config,
         );
+        // Instance benchmark: ONE asset, N placements, nothing else (VG_STRESS_INSTANCES).
+        let bench_cfg = vg_stress_bench::BenchConfig::from_env_and_args();
+        if let Some(b) = &bench_cfg {
+            layout.placements = b.placements();
+            layout.lights.clear();
+            println!("[Bench] {} instances of {:?}, grid {:.0} m, seed {}", b.instances, b.asset, b.extent(), b.seed);
+        }
         print_scene_report(&layout, &museum_config, &root);
         let textures = Arc::new(RwLock::new(pulsar_scenedb::gpu::TextureStore::new(1024)));
         let mirror = scene_db_handle(&scene_db)
@@ -704,7 +741,10 @@ impl ApplicationHandler for App {
             .map(|p| p.asset.as_str())
             .collect::<HashSet<_>>()
             .len();
-        let capture = capture_options.map(|o| vg_stress_capture::Capture::new(o, vg_stress_capture::load_shots(&root)));
+        let capture = capture_options.map(|o| {
+            let shots = bench_cfg.as_ref().map_or_else(|| vg_stress_capture::load_shots(&root), |b| b.shots());
+            vg_stress_capture::Capture::new(o, shots)
+        });
         let adapter_name = info.name.clone();
         let loader = vg_stress_loading::start(
             root,
@@ -757,6 +797,8 @@ impl ApplicationHandler for App {
             loading_status: "Loading museum".into(),
             last_title: std::time::Instant::now(),
             capture,
+            post_stack: None,
+            post_level: 0,
             sun_light: Some(sun_light),
             fog_entity,
             adapter_name,
@@ -769,7 +811,16 @@ impl ApplicationHandler for App {
             vg_objects: 0,
             classic_batches: HashSet::new(),
             placeholder_ordinal: 0,
+            bench: bench_cfg.map(vg_stress_bench::BenchState::new),
         });
+        if let Some(state) = &mut self.state {
+            if state.capture.is_none() {
+                vg_stress_capture::set_interactive_post(state, 1);
+            }
+            if state.bench.is_some() {
+                state.bench_ground();
+            }
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -964,6 +1015,12 @@ impl AppState {
                     (self.debug_index + self.debug_views.len() - 1) % self.debug_views.len();
                 None
             }
+            KeyCode::KeyP => {
+                let next = (self.post_level + 1) % 3;
+                vg_stress_capture::set_interactive_post(self, next);
+                self.update_title();
+                return true;
+            }
             KeyCode::Minus | KeyCode::Equal => {
                 self.adjust_tau(if key == KeyCode::Equal { 1.25 } else { 0.8 });
                 return true;
@@ -1033,7 +1090,8 @@ impl AppState {
             .map(|stats| stats.summary())
             .unwrap_or_default();
         self.window.set_title(&format!(
-            "Helio – VG Museum | {} | tau {:.2}px (-/=) | Scene tris: {} | VG selected: {} | VG assets {}/{} | {} | {}{}",
+            "Helio – VG Museum | post {} (P) | {} | tau {:.2}px (-/=) | Scene tris: {} | VG selected: {} | VG assets {}/{} | {} | {}{}",
+            ["off", "standard", "cinematic"][self.post_level as usize],
             self.debug_views[self.debug_index].name,
             self.tau,
             self.scene_triangles,
@@ -1051,6 +1109,34 @@ impl AppState {
             }
         ));
         self.last_title = std::time::Instant::now();
+    }
+
+    /// Benchmark scene: a ground plane, plus `VG_STRESS_BENCH_CLASSIC` copies of one
+    /// small classic mesh (the hardware-instancing check) beside the grid.
+    fn bench_ground(&mut self) {
+        let Some(cfg) = self.bench.as_ref().map(|b| b.cfg.clone()) else { return };
+        let ext = cfg.extent() * 0.75 + 200.0;
+        let material = self.materials[&Mat::StatueLimestone];
+        let (ground, _, _) = self.upload_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], ext));
+        spawn_object(&mut self.scene_db.world, ground, material, glam::Mat4::IDENTITY, ext * 1.5)
+            .expect("bench ground");
+        if cfg.classic > 0 {
+            let classic_material = self.materials[&Mat::StatueGreenStone];
+            let (quad, _, _) = self.upload_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 0.8));
+            let side = (f64::from(cfg.classic).sqrt().ceil() as u32).max(1);
+            let origin = glam::Vec3::new(-(side as f32), 0.5, cfg.extent() * 0.5 + 10.0);
+            for i in 0..cfg.classic {
+                let t = vg_stress_bench::classic_transform(i, side, 2.0, origin);
+                spawn_object(&mut self.scene_db.world, quad, classic_material, t, 1.2).expect("bench classic");
+            }
+            if let Some(b) = &mut self.bench {
+                b.classic_objects = cfg.classic;
+            }
+            self.classic_objects += cfg.classic as usize;
+        }
+        if let Ok(mut t) = self.targets.lock() {
+            t.structure += 1;
+        }
     }
 
     /// Upload one classic mesh; returns its entity and interned vertex range.
@@ -1073,6 +1159,9 @@ impl AppState {
         vg: bool,
     ) {
         let node = glam::Mat4::from_cols_array(&meta.transform);
+        let spawn_started = std::time::Instant::now();
+        let private_before = vg_stress_bench::private_bytes();
+        let objects_before = self.loaded_objects;
         let mut targets = self.targets.lock().expect("VG scene targets");
         for placement in &self.placements[asset] {
             self.scene_triangles += meta.source_triangles;
@@ -1105,6 +1194,10 @@ impl AppState {
             )
             .expect("museum object mesh ranges");
             targets.object_rows = targets.object_rows.max(object.index() + 1);
+            targets.structure += 1;
+            if let Some(bench) = &mut self.bench {
+                bench.entities.push(object);
+            }
             if vg {
                 targets.targets.push(VgTarget {
                     vertex_offset: range.0,
@@ -1118,6 +1211,14 @@ impl AppState {
                 self.classic_batches.insert((mesh.index(), self.materials[&material].index()));
             }
             self.loaded_objects += 1;
+        }
+        if let Some(bench) = &mut self.bench {
+            if vg {
+                bench.spawn_ms += spawn_started.elapsed().as_secs_f64() * 1000.0;
+                bench.spawned_objects += (self.loaded_objects - objects_before) as u64;
+                bench.private_before_spawn = private_before;
+                bench.private_after_spawn = vg_stress_bench::private_bytes();
+            }
         }
     }
 

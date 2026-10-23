@@ -212,6 +212,8 @@ fn upload(g: &Gpu, s: &Scene) -> Resources {
         triangle_count: 0,
         flags: 0,
     };
+    // As the production store uploads it: root leaves in the unread header words.
+    let header = helio_vg_format::gpu_header_with_root_leaves(header, &s.dag.nodes);
     let residency: Vec<u32> = (0..s.dag.page_count())
         .map(|p| if s.resident[p] { p as u32 } else { PAGE_NOT_RESIDENT })
         .collect();
@@ -909,4 +911,50 @@ fn two_sided_masked_clusters_skip_the_normal_cone_test() {
     );
     assert_eq!(out.state[(state::STATS + stats::CULLED_CONE) as usize], 0);
     assert!(out.items.iter().any(|i| i.0 == 0), "instance 0 survives for two-sided foliage");
+}
+
+/// The per-instance root early-out must not change the cut: identical visible
+/// sets and page requests with and without it, over distances (including ones
+/// where it fires for every instance), taus, scales and partial residency.
+#[test]
+fn root_shortcut_gives_the_same_cut_as_the_full_walk() {
+    let Some(g) = gpu() else {
+        eprintln!("skipping vg-cull GPU test: no adapter");
+        return;
+    };
+    let mut fired_total = 0u32;
+    for root_only in [false, true] {
+        let s = scene(root_only);
+        let r = upload(&g, &s);
+        let mut core = VgCullCore::new(
+            &g.device,
+            VgCullConfig { two_phase_occlusion: false, initial_bin_capacity: 4096, ..Default::default() },
+        );
+        for dist in [300.0f32, 700.0, 4000.0, 30000.0] {
+            let _v = set_camera(&g, &r, [31.0, 0.0, dist]);
+            for tau in [0.01f32, 0.5, 2.0, 20.0, 1.0e3, 1.0e5] {
+                core.config.tau_px = tau;
+                let mut results = Vec::new();
+                for shortcut in [false, true] {
+                    core.config.root_shortcut = shortcut;
+                    r.reset_feedback(&g);
+                    begin(&g, &mut core, &r);
+                    run_phase(&g, &mut core, &r, 0);
+                    let (out, req) = collect(&g, &core, &r, 0);
+                    let stat = |i: u32| out.state[(state::STATS + i) as usize];
+                    if !shortcut {
+                        assert_eq!(stat(stats::ROOT_SHORTCUT), 0);
+                    }
+                    results.push((out.items.clone(), req.iter().copied().collect::<BTreeSet<u32>>(), stat(stats::ROOT_SHORTCUT), stat(stats::JOBS)));
+                }
+                assert_eq!(results[0].0, results[1].0, "root_only={root_only} dist={dist} tau={tau}: cut differs");
+                assert_eq!(results[0].1, results[1].1, "root_only={root_only} dist={dist} tau={tau}: page requests differ");
+                fired_total += results[1].2;
+                if results[1].2 > 0 {
+                    assert!(results[1].3 <= results[0].3, "the early-out never adds jobs");
+                }
+            }
+        }
+    }
+    assert!(fired_total > 0, "the early-out never fired: the test would prove nothing");
 }

@@ -11,7 +11,7 @@ use helio_vg_format::VgMode;
 
 use crate::{
     mode_bits, state, stats, FLAG_DENSE_MASK, FLAG_MASKED, FLAG_STATS, FLAG_SW_MASKED,
-    FLAG_TWO_PHASE, MAX_BIN_CAPACITY,
+    FLAG_TWO_PHASE, MAX_BIN_CAPACITY, FLAG_NO_ROOT_SHORTCUT,
 };
 
 const ROUND_STRIDE: u64 = 256;
@@ -50,6 +50,10 @@ pub struct VgCullConfig {
     /// masked bin (the raster must have the 64-bit atomic kernel). Default false:
     /// they use the hardware masked bin.
     pub sw_masked: bool,
+    /// Draw the root clusters of an instance whose whole-asset root error projects
+    /// under tau directly, without walking its hierarchy (exactly the same cut).
+    /// `HELIO_VG_NO_ROOT_SHORTCUT=1` turns it off for A/B measurements.
+    pub root_shortcut: bool,
 }
 
 impl Default for VgCullConfig {
@@ -67,6 +71,7 @@ impl Default for VgCullConfig {
             stats: true,
             max_bin_capacity: MAX_BIN_CAPACITY,
             sw_masked: false,
+            root_shortcut: std::env::var_os("HELIO_VG_NO_ROOT_SHORTCUT").is_none(),
         }
     }
 }
@@ -534,6 +539,9 @@ impl VgCullCore {
         }
         if self.config.stats {
             flags |= FLAG_STATS;
+        }
+        if !self.config.root_shortcut {
+            flags |= FLAG_NO_ROOT_SHORTCUT;
         }
         if inputs.materials.is_some() {
             flags |= FLAG_MASKED;

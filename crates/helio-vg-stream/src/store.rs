@@ -192,7 +192,10 @@ impl VgAssetStore {
             let a = self.core.asset(reg.slot).expect("registered asset");
             self.queue.write_buffer(&self.nodes.buffer, u64::from(reg.nodes.start) * 96, bytemuck::cast_slice(nodes));
             self.queue.write_buffer(&self.group_refs.buffer, u64::from(reg.group_refs.start) * 8, bytemuck::cast_slice(refs));
-            self.queue.write_buffer(&self.headers.buffer, u64::from(reg.slot) * 32, bytemuck::bytes_of(&a.header));
+            // GPU view of the header: root leaves (+1) in the words no shader reads,
+            // see `helio_vg_format::gpu_header_with_root_leaves`.
+            let gpu_header = helio_vg_format::gpu_header_with_root_leaves(a.header, nodes);
+            self.queue.write_buffer(&self.headers.buffer, u64::from(reg.slot) * 32, bytemuck::bytes_of(&gpu_header));
             let bases = [reg.nodes.start, reg.group_refs.start, reg.page_base, 0u32];
             self.queue.write_buffer(&self.bases.buffer, u64::from(reg.slot) * 16, bytemuck::cast_slice(&bases));
             self.queue.write_buffer(&self.quant.buffer, u64::from(reg.slot) * 16, bytemuck::bytes_of(&reg.quant));

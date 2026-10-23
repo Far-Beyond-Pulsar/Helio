@@ -29,24 +29,32 @@ fn bin_visit(i: u32, fill: bool) {
     let u = bin_args[8u + rg] + (i - bin_args[ARGS_PREFIX + rg]);
     // Range `rg` is `phase * BIN_COUNT + bin`: bins from CULL_FIRST_MASKED hold
     // alpha-tested clusters.
-    let tagged = select(u, u | LIST_MASKED_BIT, (rg % (CULL_RANGE_COUNT / 2u)) >= CULL_FIRST_MASKED);
+    let masked = (rg % (CULL_RANGE_COUNT / 2u)) >= CULL_FIRST_MASKED;
+    // limits.w bit 0: only the alpha-masked class (the ray-traced backend
+    // resolves the opaque class itself).
+    if (params.limits.w & 1u) != 0u && !masked { return; }
+    // limits.w bit 1: only the clusters the cull diverted to the dense bin.
+    if (params.limits.w & 2u) != 0u && (rg % (CULL_RANGE_COUNT / 2u)) != BIN_DENSE_BIN { return; }
     let v = visible[u];
     let c = vgd_load_cluster(v.cluster_slot);
     let rect = cluster_tile_rect(v, c);
     if !rect.ok { return; }
     let tiles_x = params.viewport.z;
+    let cls = select(0u, 1u, masked);
     for (var ty = rect.ty0; ty <= rect.ty1; ty++) {
         for (var tx = rect.tx0; tx <= rect.tx1; tx++) {
             let s = tile_slot[ty * tiles_x + tx];
             if s == SLOT_INVALID { continue; }
+            let h = s * LIST_HDR;
             if fill {
-                let k = atomicAdd(&slot_lists[s * LIST_HDR + 2u], 1u);
-                if k < atomicLoad(&slot_lists[s * LIST_HDR]) {
-                    let start = atomicLoad(&slot_lists[s * LIST_HDR + 1u]);
-                    atomicStore(&slot_lists[LIST_POOL_BASE + start + k], tagged);
+                let k = atomicAdd(&slot_lists[h + 3u + cls], 1u);
+                if k < atomicLoad(&slot_lists[h + cls]) {
+                    var start = atomicLoad(&slot_lists[h + 2u]);
+                    if masked { start += atomicLoad(&slot_lists[h]); }
+                    atomicStore(&slot_lists[LIST_POOL_BASE + start + k], u);
                 }
             } else {
-                atomicAdd(&slot_lists[s * LIST_HDR], 1u);
+                atomicAdd(&slot_lists[h + cls], 1u);
             }
         }
     }
@@ -68,12 +76,22 @@ fn bin_scan() {
     let n = min(atomicLoad(&state[STATE_DENSE_COUNT]), params.limits.y);
     var acc = 0u;
     for (var s = 0u; s < n; s++) {
-        let c = atomicLoad(&slot_lists[s * LIST_HDR]);
-        let eff = min(c, LIST_POOL_CAP - acc);
-        atomicStore(&slot_lists[s * LIST_HDR], eff);
-        atomicStore(&slot_lists[s * LIST_HDR + 1u], acc);
-        atomicStore(&slot_lists[s * LIST_HDR + 2u], 0u);
-        acc += eff;
-        if c > eff { atomicAdd(&state[STAT_BIN_OVERFLOW], c - eff); }
+        let h = s * LIST_HDR;
+        let c_op = atomicLoad(&slot_lists[h]);
+        let c_m = atomicLoad(&slot_lists[h + 1u]);
+        atomicAdd(&state[STAT_LIST_TOTAL], c_op + c_m);
+        atomicMax(&state[STAT_LIST_MAX], c_op + c_m);
+        let start = acc;
+        let e_op = min(c_op, LIST_POOL_CAP - acc);
+        acc += e_op;
+        let e_m = min(c_m, LIST_POOL_CAP - acc);
+        acc += e_m;
+        atomicStore(&slot_lists[h], e_op);
+        atomicStore(&slot_lists[h + 1u], e_m);
+        atomicStore(&slot_lists[h + 2u], start);
+        atomicStore(&slot_lists[h + 3u], 0u);
+        atomicStore(&slot_lists[h + 4u], 0u);
+        let lost = (c_op - e_op) + (c_m - e_m);
+        if lost > 0u { atomicAdd(&state[STAT_BIN_OVERFLOW], lost); }
     }
 }

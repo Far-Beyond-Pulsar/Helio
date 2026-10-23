@@ -175,7 +175,9 @@ impl RenderPass for VgInputsPass {
         };
         self.raster.ensure_targets(ctx.device, ctx.width, ctx.height);
         let (dense_mask, dense_tiles) = match self.raster.dense_mask_last_frame() {
-            Some((mask, tiles)) if self.dense_enabled && settings.tier3 => (Some(mask), tiles),
+            Some((mask, tiles)) if self.dense_enabled && settings.tier3 && self.runtime.tier3_stats().engaged => {
+                (Some(mask), tiles)
+            }
             Some((_, tiles)) => (None, tiles),
             None => (None, [1, 1]),
         };
@@ -292,6 +294,8 @@ pub(crate) fn add_virtual_geometry_passes(
 
     let raster = VgRasterPasses::new(device, VgRasterConfig::default());
     let raster_shared = raster.shared.clone();
+    let tile_fallback = raster.shared.uses_tile_fallback();
+    runtime.update_tier3_stats(|s| s.tier2_tile_fallback = tile_fallback);
 
     let source_runtime = runtime.clone();
     let cull_config = VgCullConfig { sw_masked: !raster.shared.uses_tile_fallback(), ..VgCullConfig::default() };
