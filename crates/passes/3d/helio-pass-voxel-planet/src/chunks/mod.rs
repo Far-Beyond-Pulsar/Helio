@@ -37,6 +37,14 @@ const TILE_COLUMNS: u64 = 4096;
 /// Tiles generated per dispatch (their columns are scratch until their
 /// chunks are built).
 pub(crate) const TILE_BATCH: usize = 512;
+
+/// Words of a computed footprint's measured layers (`RANGE_WORDS` of
+/// chunk_generate.wgsl): four a quarter, by quarter (each a child footprint's).
+const RANGE_WORDS: usize = 16;
+
+/// A footprint's measured ranges by quarter (none past a face's edge):
+/// what the planner classifies its nodes by (`residency::Event::Measured`).
+type Quarters = [Option<Ranges>; 4];
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
 /// Chunk slots by default (`Capacity::chunks`), within what the device can
@@ -60,7 +68,7 @@ const KEPT_OVERHEAD: usize = 64;
 /// Kept chunks' bytes (`KeptChunks::to_bytes`): magic, and the pack format
 /// (bump with `pack_main`'s layout).
 const KEPT_MAGIC: [u8; 4] = *b"HVPK";
-const KEPT_FORMAT: u16 = 1;
+const KEPT_FORMAT: u16 = 2;
 
 /// A uniform brick's table entry flag (`UNIFORM_BRICK` of
 /// chunk_generate.wgsl): its cells' one edit in the low 16 bits.
@@ -900,14 +908,18 @@ struct Resident {
     /// last job result's flags.
     edited: bool,
     flags: i32,
+    /// Its footprint's measurement, once read back: kept with its chunk, so
+    /// a restore classifies its footprint as the generation did.
+    measured: Option<Quarters>,
 }
 
 /// An edited chunk kept across eviction: its packed tree (`pack_main`; none:
-/// it is empty), its job result's flags, the frame it was last restored or
-/// kept.
+/// it is empty), its job result's flags, its footprint's measurement, the
+/// frame it was last restored or kept.
 struct Kept {
     pack: std::sync::Arc<[u32]>,
     flags: i32,
+    measured: Option<Quarters>,
     used: u64,
 }
 
@@ -920,8 +932,9 @@ pub struct KeptChunks {
     fingerprint: u64,
     /// The history's length and hash.
     history: (u64, u64),
-    /// Each node, its result flags and its pack, in node order.
-    chunks: Vec<(NodeKey, i32, std::sync::Arc<[u32]>)>,
+    /// Each node, its result flags, its footprint's measurement and its
+    /// pack, in node order.
+    chunks: Vec<(NodeKey, i32, Option<Quarters>, std::sync::Arc<[u32]>)>,
 }
 
 impl KeptChunks {
@@ -936,7 +949,9 @@ impl KeptChunks {
 
     /// As bytes: a header (magic, format, fingerprint, the history's length
     /// and hash, the chunk count), then each chunk (node, result flags, its
-    /// pack's length and words) deflated, then a checksum of it all.
+    /// pack's length; its footprint's measured quarters: a byte of those
+    /// present, bit 4 for any, then 16 words; its pack's words) deflated,
+    /// then a checksum of it all.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&KEPT_MAGIC);
@@ -945,11 +960,19 @@ impl KeptChunks {
             out.extend_from_slice(&v.to_le_bytes());
         }
         let mut body = Vec::new();
-        for (key, flags, pack) in &self.chunks {
+        for (key, flags, measured, pack) in &self.chunks {
             body.push(key.face);
             body.push(key.level as u8);
             for v in [key.cx, key.cy, key.cz, *flags, pack.len() as i32] {
                 body.extend_from_slice(&v.to_le_bytes());
+            }
+            let quarters = measured.unwrap_or_default();
+            body.push(quarters.iter().enumerate().fold(u8::from(measured.is_some()) << 4, |m, (q, r)| m | (u8::from(r.is_some()) << q)));
+            for r in quarters {
+                let r = r.unwrap_or(Ranges { volume: (0, 0), surface: (0, 0) });
+                for v in [r.volume.0, r.volume.1, r.surface.0, r.surface.1] {
+                    body.extend_from_slice(&v.to_le_bytes());
+                }
             }
             body.extend_from_slice(bytemuck::cast_slice(pack));
         }
@@ -988,8 +1011,13 @@ impl KeptChunks {
             let i32_at = |n: usize| i32::from_le_bytes(head[2 + 4 * n..6 + 4 * n].try_into().unwrap());
             let key = NodeKey { face: head[0], level: u32::from(head[1]), cx: i32_at(0), cy: i32_at(1), cz: i32_at(2) };
             let (flags, len) = (i32_at(3), i32_at(4).max(0) as usize);
+            let present = take(1)?[0];
+            let words = take(64)?;
+            let word = |n: usize| i32::from_le_bytes(words[4 * n..4 * n + 4].try_into().unwrap());
+            let quarters: Quarters = std::array::from_fn(|q| (present >> q & 1 != 0).then(|| Ranges { volume: (word(4 * q), word(4 * q + 1)), surface: (word(4 * q + 2), word(4 * q + 3)) }));
+            let measured = (present & 16 != 0).then_some(quarters);
             let pack: std::sync::Arc<[u32]> = take(len * 4)?.chunks(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
-            chunks.push((key, flags, pack));
+            chunks.push((key, flags, measured, pack));
         }
         if at != body.len() {
             return Err("kept chunks: trailing data".into());
@@ -1003,8 +1031,9 @@ impl KeptChunks {
 struct PackReadback {
     buffer: wgpu::Buffer,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Each node, its result flags, and its serial when packed resident.
-    nodes: Vec<(NodeKey, i32, Option<u64>)>,
+    /// Each node, its result flags, its footprint's measurement, and its
+    /// serial when packed resident.
+    nodes: Vec<(NodeKey, i32, Option<Quarters>, Option<u64>)>,
 }
 
 /// What the traces did (counting builds).
@@ -1572,8 +1601,10 @@ pub struct ChunkWorld {
     /// The latest finished plan, and events for the next.
     plan: residency::Plan,
     events: Vec<residency::Event>,
-    /// Footprints whose columns are on the GPU, and this update's frame.
+    /// Footprints whose columns are on the GPU, and this update's frame;
+    /// each pool slot's footprint's measurement once read back.
     pool: SlotPool<Footprint>,
+    pool_measured: Vec<Option<Quarters>>,
     frame_now: u64,
     /// Generated nodes with a chunk, and their layers by footprint.
     nodes: FxHashMap<NodeKey, Resident>,
@@ -2639,7 +2670,7 @@ impl ChunkWorld {
             features: features.clone(),
             has_features: !features.is_empty(),
             // Four words a tile, then the batch's tile count.
-            tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
+            tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * RANGE_WORDS * 4 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
             chunk_jobs: buffer("chunk jobs", (CHUNK_BATCH * 32) as u64, s),
             column_masks: buffer("chunk column masks", CHUNK_BATCH as u64 * TILE_COLUMNS * 8, wgpu::BufferUsages::STORAGE),
             chunk_meta: buffer("chunk meta", (max_chunks * 48) as u64, s | wgpu::BufferUsages::COPY_SRC),
@@ -2758,6 +2789,7 @@ impl ChunkWorld {
             plan: Default::default(),
             events: Vec::new(),
             pool: SlotPool::new(pool_size),
+            pool_measured: vec![None; pool_size],
             frame_now: 0,
             nodes: Default::default(),
             footprint_nodes: Default::default(),
@@ -2891,6 +2923,11 @@ impl ChunkWorld {
     /// `key` restored from what was kept of it into a new slot (a restore
     /// job of `restores`, its result after the batch's `generated` jobs):
     /// whether it was.
+    /// `fp`'s measurement, while the footprint pool holds it.
+    fn footprint_measured(&self, fp: Footprint) -> Option<Quarters> {
+        self.pool.slots.get(&fp).and_then(|&slot| self.pool_measured[slot as usize])
+    }
+
     fn restore(&mut self, key: NodeKey, restores: &mut Restores, generated: usize, evictions: &mut Vec<u32>, stats: &mut UpdateStats) -> bool {
         if generated + restores.jobs.len() >= CHUNK_BATCH || self.free_slots.is_empty() {
             return false;
@@ -2898,6 +2935,13 @@ impl ChunkWorld {
         let frame = self.frame_now;
         let Some(kept) = self.kept.get_mut(&key) else { return false };
         kept.used = frame;
+        // Its footprint as generation measured it: a footprint whose nodes
+        // are all restored is never measured again, and the estimate from
+        // its parent may classify it otherwise.
+        let measured = kept.measured;
+        if let Some(quarters) = measured {
+            self.events.push(residency::Event::Measured(key.footprint(), quarters));
+        }
         if kept.pack.is_empty() {
             // Empty: the plan learns it again, nothing is generated.
             self.events.push(residency::Event::Emptied(key));
@@ -2915,7 +2959,7 @@ impl ChunkWorld {
         self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&key.table_key()));
         self.slot_keys[slot as usize] = key.table_key();
         let shown = self.drawn_set.holds(key);
-        if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown, edited: true, flags }) {
+        if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown, edited: true, flags, measured }) {
             evictions.push(old.slot);
         }
         stats.shown_chunks += usize::from(shown);
@@ -3013,6 +3057,9 @@ impl ChunkWorld {
             return 0;
         }
         let Some((pool_slot, cached)) = self.pool.take(fp, self.frame_now) else { return 0 };
+        if !cached {
+            self.pool_measured[pool_slot as usize] = None;
+        }
         let job = TileJob { face: u32::from(fp.face), level: fp.level, cx: fp.cx, cy: fp.cy, slot: pool_slot, _pad: [0; 3] };
         // A footprint already in this batch is in the pool by now (its
         // columns are computed before any chunk reads them).
@@ -3057,7 +3104,7 @@ impl ChunkWorld {
             let shown = self.drawn_set.holds(key);
             // Generated again: what was kept of it no longer holds.
             self.drop_kept(key);
-            if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown, edited: under_edits, flags: 0 }) {
+            if let Some(old) = self.insert_resident(key, Resident { slot, serial: self.serial, z: None, shown, edited: under_edits, flags: 0, measured: None }) {
                 evictions.push(old.slot);
             }
             stats.shown_chunks += usize::from(shown);
@@ -3312,12 +3359,19 @@ impl ChunkWorld {
                 let data = r.buffer.slice(..).get_mapped_range().unwrap();
                 let words: &[i32] = bytemuck::cast_slice(&data);
                 for (n, fp) in r.footprints.iter().enumerate() {
-                    let w = &words[n * 4..n * 4 + 4];
-                    if w[0] <= w[1] {
-                        self.events.push(residency::Event::Measured(*fp, Ranges { volume: (w[0], w[1]), surface: (w[2], w[1]) }));
+                    // By quarter: a quarter past a face's edge measured nothing.
+                    let quarters: [Option<Ranges>; 4] = std::array::from_fn(|q| {
+                        let w = &words[n * RANGE_WORDS + q * 4..n * RANGE_WORDS + q * 4 + 4];
+                        (w[0] <= w[1]).then_some(Ranges { volume: (w[0], w[1]), surface: (w[2], w[1]) })
+                    });
+                    if quarters.iter().any(Option::is_some) {
+                        self.events.push(residency::Event::Measured(*fp, quarters));
+                        if let Some(&slot) = self.pool.slots.get(fp) {
+                            self.pool_measured[slot as usize] = Some(quarters);
+                        }
                     }
                 }
-                let base = r.footprints.len() * 4;
+                let base = r.footprints.len() * RANGE_WORDS;
                 for (n, &(key, _, serial)) in r.chunks.iter().enumerate() {
                     let w = &words[base + n * 4..base + n * 4 + 4];
                     if self.nodes.get(&key).is_none_or(|c| c.serial != serial) {
@@ -3337,7 +3391,8 @@ impl ChunkWorld {
                         // An edited one is remembered empty (generating it
                         // again would read the edits over it again).
                         if old.edited && self.kept_limit > 0 {
-                            self.keep(key, Kept { pack: Vec::new().into(), flags: w[3], used: frame });
+                            let measured = old.measured.or(self.footprint_measured(key.footprint()));
+                            self.keep(key, Kept { pack: Vec::new().into(), flags: w[3], measured, used: frame });
                         }
                         evictions.push(old.slot);
                         self.events.push(residency::Event::Emptied(key));
@@ -3349,9 +3404,12 @@ impl ChunkWorld {
                             stats.out_of_details = true;
                             self.detail_starved.insert(key);
                         }
+                        let measured = self.footprint_measured(key.footprint());
                         let c = self.nodes.get_mut(&key).unwrap();
                         c.z = Some((w[1], w[2]));
                         c.flags = w[3];
+                        c.measured = measured.or(c.measured);
+                        self.events.push(residency::Event::Occupied(key, (key.cz * CHUNK + w[1], key.cz * CHUNK + w[2])));
                         // Its frame about its columns' mean top (its ground),
                         // else its occupied layers.
                         let surface = (w[3] as u32) >> 16;
@@ -3379,7 +3437,7 @@ impl ChunkWorld {
                 let data = r.buffer.slice(..).get_mapped_range().unwrap();
                 let words: &[u32] = bytemuck::cast_slice(&data);
                 let data_at = 1 + 2 * MAX_PACKS;
-                for (n, &(key, flags, serial)) in r.nodes.iter().enumerate() {
+                for (n, &(key, flags, measured, serial)) in r.nodes.iter().enumerate() {
                     let (offset, len) = (words[1 + 2 * n], words[2 + 2 * n] as usize);
                     // Not packed (out of room), or edited since, or wanted
                     // again (evicted) or generated again (resident) since.
@@ -3398,7 +3456,7 @@ impl ChunkWorld {
                         continue;
                     }
                     let at = data_at + offset as usize;
-                    self.keep(key, Kept { pack: words[at..at + len].into(), flags, used: frame });
+                    self.keep(key, Kept { pack: words[at..at + len].into(), flags, measured, used: frame });
                 }
             }
             r.buffer.unmap();
@@ -3430,7 +3488,7 @@ impl ChunkWorld {
         }
         stats.plan_age = frame.saturating_sub(self.plan_made.0);
         stats.plan_ms = self.plan_made.1;
-        let mut packs: Vec<(NodeKey, u32, i32, Option<u64>)> = Vec::new();
+        let mut packs: Vec<(NodeKey, u32, i32, Option<Quarters>, Option<u64>)> = Vec::new();
         for key in evicted {
             // An edited chunk to keep past this frame's packs stays resident
             // (the planner told so: it is evicted again, packed, by a later
@@ -3444,7 +3502,7 @@ impl ChunkWorld {
             }
             if let Some(old) = self.remove_resident(key) {
                 if keep {
-                    packs.push((key, old.slot, old.flags, None));
+                    packs.push((key, old.slot, old.flags, old.measured, None));
                     self.packed_since.insert(key);
                 }
                 evictions.push(old.slot);
@@ -3461,7 +3519,7 @@ impl ChunkWorld {
             let Some(key) = self.to_pack.pop() else { break };
             let Some(c) = self.nodes.get(&key) else { continue };
             if c.edited && c.z.is_some() && !self.kept.contains_key(&key) && !self.packed_since.contains(&key) && !self.urgent.contains(&key) && !self.stale.contains(&key) {
-                packs.push((key, c.slot, c.flags, Some(c.serial)));
+                packs.push((key, c.slot, c.flags, c.measured, Some(c.serial)));
                 self.packed_since.insert(key);
             }
         }
@@ -3626,9 +3684,9 @@ impl ChunkWorld {
         let group = self.gen_group(&refs_buffer, &evictions_buffer, &baked_refs_buffer, &self.brick_cache.buffer);
         if !tile_jobs.is_empty() {
             self.queue.write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
-            let empty: Vec<[i32; 4]> = vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; computed_count.max(1)];
+            let empty: Vec<[i32; 4]> = vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; computed_count.max(1) * 4];
             self.queue.write_buffer(&self.tile_ranges, 0, bytemuck::cast_slice(&empty));
-            self.queue.write_buffer(&self.tile_ranges, (TILE_BATCH * 16) as u64, bytemuck::bytes_of(&(computed_count as i32)));
+            self.queue.write_buffer(&self.tile_ranges, (TILE_BATCH * RANGE_WORDS * 4) as u64, bytemuck::bytes_of(&(computed_count as i32)));
         }
         // The frame's candidate block jobs and its computed footprints'
         // block tables.
@@ -3747,12 +3805,12 @@ impl ChunkWorld {
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk packs read"), size: directory + PACK_WORDS * 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             encoder.copy_buffer_to_buffer(&self.pack_alloc, 0, &buffer, 0, directory);
             encoder.copy_buffer_to_buffer(&self.pack_data, 0, &buffer, directory, PACK_WORDS * 4);
-            self.pack_pending = Some(PackReadback { buffer, ready: Default::default(), nodes: packs.iter().map(|&(key, _, flags, serial)| (key, flags, serial)).collect() });
+            self.pack_pending = Some(PackReadback { buffer, ready: Default::default(), nodes: packs.iter().map(|&(key, _, flags, measured, serial)| (key, flags, measured, serial)).collect() });
         }
         // Results back: footprints' layers, each chunk's job result, the
         // free leaf pages.
         if !tile_jobs.is_empty() || !restores.jobs.is_empty() {
-            let tiles = (computed_count * 16) as u64;
+            let tiles = (computed_count * RANGE_WORDS * 4) as u64;
             let chunks = ((chunk_jobs.len() + restores.jobs.len()) * 16) as u64;
             readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: tiles + chunks + 24, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
             if tiles > 0 {
@@ -4995,7 +5053,7 @@ impl ChunkWorld {
     /// what a save stores ([`KeptChunks::to_bytes`]). Shares the packs.
     pub fn kept_chunks(&self, planet: &Planet) -> KeptChunks {
         let edits = planet.edits();
-        let mut chunks: Vec<_> = self.kept.iter().map(|(key, kept)| (*key, kept.flags, kept.pack.clone())).collect();
+        let mut chunks: Vec<_> = self.kept.iter().map(|(key, kept)| (*key, kept.flags, kept.measured, kept.pack.clone())).collect();
         chunks.sort_unstable_by_key(|(k, ..)| (k.face, k.level, k.cx, k.cy, k.cz));
         KeptChunks { fingerprint: self.fingerprint, history: (edits.len() as u64, edits.hash()), chunks }
     }
@@ -5013,8 +5071,8 @@ impl ChunkWorld {
             return Err("kept chunks of another history".into());
         }
         let frame = self.frame_now;
-        for (key, flags, pack) in &kept.chunks {
-            self.keep(*key, Kept { pack: pack.clone(), flags: *flags, used: frame });
+        for (key, flags, measured, pack) in &kept.chunks {
+            self.keep(*key, Kept { pack: pack.clone(), flags: *flags, measured: *measured, used: frame });
         }
         Ok(kept.chunks.len())
     }
@@ -5081,6 +5139,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Kept chunks' bytes hold each chunk's footprint measurement, quarter
+    /// by quarter (one past a face's edge measured nothing; a chunk kept
+    /// before its footprint's came back has none).
+    #[test]
+    fn kept_chunks_keep_their_footprints_measurement() {
+        use super::{KeptChunks, NodeKey, Ranges};
+        let r = |a: i32| Ranges { volume: (a - 9, a + 3), surface: (a - 2, a + 3) };
+        let chunks = vec![
+            (NodeKey { face: 2, level: 0, cx: 7, cy: -3, cz: 1 }, 5, Some([Some(r(10)), None, Some(r(-40)), Some(r(7))]), vec![1u32, 2, 3].into()),
+            (NodeKey { face: 4, level: 3, cx: 1, cy: 2, cz: -1 }, 2, None, Vec::new().into()),
+        ];
+        let kept = KeptChunks { fingerprint: 11, history: (3, 99), chunks };
+        let back = KeptChunks::from_bytes(&kept.to_bytes()).unwrap();
+        assert_eq!((back.fingerprint, back.history), (11, (3, 99)));
+        for (a, b) in kept.chunks.iter().zip(&back.chunks) {
+            assert_eq!((a.0, a.1, a.2, &a.3[..]), (b.0, b.1, b.2, &b.3[..]));
+        }
+        assert_eq!(back.chunks.len(), 2);
     }
 
     #[test]

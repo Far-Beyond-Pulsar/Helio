@@ -84,12 +84,19 @@ struct Node {
     drawn: u64,
     /// Buried, and met by a ray: generated like a Mixed node.
     reached: bool,
+    /// The layers (level cells, [lo, hi)) its chunk occupies, once its
+    /// result came back (generated or restored).
+    occupied: Option<(i32, i32)>,
 }
 
 struct Fp {
     ranges: Ranges,
-    /// Measured on the GPU (else estimated from the parent's).
+    /// Measured on the GPU (else estimated from the parent's quarter over
+    /// it, or the parent's whole ranges while it is estimated too).
     exact: bool,
+    /// Measured: each quarter's ranges (32x32 columns, x then y: a child
+    /// footprint's; none past a face's edge).
+    quarters: [Option<Ranges>; 4],
     /// Levels under the nearest measured ancestor (0: measured, or a root):
     /// an estimate's margin doubles at each.
     guess: u8,
@@ -102,12 +109,14 @@ struct Fp {
 #[derive(Clone, Copy, Debug)]
 struct Decision {
     error: f64,
-    now: f64,
     seen: bool,
     allowance: f64,
     ready: bool,
     exact: bool,
     guess: u8,
+    /// Its cells' pixels from the eye now, measured to the cells its
+    /// chunks occupy, once known.
+    cells: Option<f64>,
 }
 
 /// Where the eye looks: nodes in view are generated first.
@@ -133,14 +142,16 @@ pub struct Plan {
     /// as a share of them (the refinement still to come).
     pub coarse_share: f64,
     /// Pixels the largest cell of a drawn node in view spans from the eye
-    /// (above the finest level), and the largest of those over its
+    /// (above the finest level; measured to the cells its chunks occupy,
+    /// once their results are back), and the largest of those over its
     /// allowances (`PlanConfig::motion_flow`, `unseen_pixels`; 1: as
     /// wanted).
     pub worst_px: f64,
     pub worst_wanted: f64,
     pub worst: Option<Worst>,
     /// Nodes in view this plan switches between levels, and the pixels the
-    /// largest cell of those spans from the eye.
+    /// largest cell of those spans from the eye (measured to their cells,
+    /// as `worst_px`).
     pub switches: usize,
     pub switch_px: f64,
 }
@@ -224,7 +235,7 @@ impl Planner {
             for cx in 0..n {
                 for cy in 0..n {
                     let fp = Footprint { face, level, cx, cy };
-                    self.footprints.entry(fp).or_insert(Fp { ranges, exact: false, guess: 0, used: 0, class: None });
+                    self.footprints.entry(fp).or_insert(Fp { ranges, exact: false, quarters: [None; 4], guess: 0, used: 0, class: None });
                     self.roots.extend((cz(lo)..=cz(hi)).map(|z| fp.node(z)));
                 }
             }
@@ -246,14 +257,18 @@ impl Planner {
         edits.kind(key.footprint(), class, key.cz)
     }
 
-    /// The footprints under `key`'s, estimated from its ranges unless
-    /// measured.
+    /// The footprints under `key`'s, estimated unless measured: from the
+    /// measured quarter of its columns over each (a coarse footprint spans
+    /// all its children's relief: one on the Moon 200 m across holds crater
+    /// walls tens of metres over the plain beside them), else from its
+    /// ranges.
     fn estimate_children(&mut self, key: NodeKey, frame: u64) {
         let Some(parent) = self.footprints.get(&key.footprint()) else { return };
-        let (ranges, guess) = (parent.ranges.child(), if parent.exact { 1 } else { parent.guess.saturating_add(1) });
-        for (a, b) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        let (whole, quarters, guess) = (parent.ranges, parent.quarters, if parent.exact { 1 } else { parent.guess.saturating_add(1) });
+        for (q, (a, b)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+            let ranges = quarters[q].unwrap_or(whole).child();
             let fp = Footprint { face: key.face, level: key.level - 1, cx: key.cx * 2 + a, cy: key.cy * 2 + b };
-            let entry = self.footprints.entry(fp).or_insert(Fp { ranges, exact: false, guess, used: frame, class: None });
+            let entry = self.footprints.entry(fp).or_insert(Fp { ranges, exact: false, quarters: [None; 4], guess, used: frame, class: None });
             entry.used = frame;
             if !entry.exact && entry.ranges != ranges {
                 entry.ranges = ranges;
@@ -319,6 +334,21 @@ impl Planner {
         class.mixed.iter().find(|(a, b)| (*a..=*b).contains(&key.cz)).copied().unwrap_or((key.cz, key.cz))
     }
 
+    /// The layers (level cells) the chunks of nodes `members` (a band)
+    /// occupy, once every one's result came back (the same whether
+    /// generated or restored).
+    fn occupied_of(&self, members: &[NodeKey]) -> Option<(i32, i32)> {
+        let mut occupied: Option<(i32, i32)> = None;
+        for m in members {
+            match self.nodes.get(m) {
+                Some(n) if n.generated && n.empty => {}
+                Some(Node { generated: true, occupied: Some(o), .. }) => occupied = Some(occupied.map_or(*o, |a| (a.0.min(o.0), a.1.max(o.1)))),
+                _ => return None,
+            }
+        }
+        occupied
+    }
+
     /// Whether `key`'s band (`band`, its footprint's layers) is refined,
     /// from its box: its error, in view, allowances; ready once every Mixed
     /// child of every node in it is generated (the children wanted, and the
@@ -327,10 +357,14 @@ impl Planner {
     #[allow(clippy::too_many_arguments)]
     fn decide(&mut self, grid: &Grid, key: NodeKey, band: (i32, i32), eyes: &[Eye; 2], velocity: DVec3, view: Option<View>, guarded: f64, frame: u64, tiles: &[i32], wanted: &mut Vec<(f64, NodeKey)>) -> Decision {
         let fp = key.footprint();
+        // Refinement measures to the band's chunks, air over its ground
+        // included (under a hovering eye, more than its cells' own distance
+        // asks); the plan's worst cell, to the cells drawn (`cells`).
         let layers = (band.0 * CHUNK, (band.1 + 1) * CHUNK);
         let members: Vec<NodeKey> = (band.0..=band.1).map(|cz| fp.node(cz)).collect();
         let error = self.error_box(grid, fp, layers, eyes);
         let now = self.error_box(grid, fp, layers, &eyes[..1]);
+        let cells = self.occupied_of(&members).map(|o| self.error_box(grid, fp, o, &eyes[..1]));
         // In view: the band's nearest point within the cone (generous for
         // its extent: anything beside it is near it).
         let cone = |cos_half: f64| -> bool {
@@ -415,7 +449,7 @@ impl Planner {
                 at = next;
             }
         }
-        Decision { error, now, seen, allowance, ready, exact, guess }
+        Decision { error, seen, allowance, ready, exact, guess, cells }
     }
 
     /// Whether `kind` at `key` must be generated before it is drawn: Mixed,
@@ -494,7 +528,7 @@ impl Planner {
                     d
                 }
             };
-            let (error, now, seen, allowance, ready) = (d.error, d.now, d.seen, d.allowance, d.ready);
+            let (error, seen, allowance, ready) = (d.error, d.seen, d.allowance, d.ready);
             let shows = seen && !hidden;
             let (exact, guess) = (d.exact, d.guess);
             let children: Vec<NodeKey> = if ready { key.children(tiles[key.level as usize - 1]).collect() } else { Vec::new() };
@@ -503,12 +537,15 @@ impl Planner {
             let shown = |nodes: &FxHashMap<NodeKey, Node>, k: &NodeKey| last != 0 && nodes.get(k).is_some_and(|n| n.drawn == last);
             if shows && node.refined != ready && if ready { shown(&self.nodes, &key) } else { key.children(tiles[key.level as usize - 1]).any(|c| shown(&self.nodes, &c)) } {
                 plan.switches += 1;
-                plan.switch_px = plan.switch_px.max(now);
+                plan.switch_px = plan.switch_px.max(d.cells.unwrap_or(0.0));
             }
-            if shows && !ready && key.level > 0 {
-                plan.worst_wanted = plan.worst_wanted.max(now / allowance);
-                if now > plan.worst_px {
-                    plan.worst_px = now;
+            // Measured to the cells drawn (an eye in a chunk's air is not
+            // at its cells); a band whose chunks' results are not back yet
+            // counts once they are.
+            if let Some(cells) = d.cells.filter(|_| shows && !ready && key.level > 0) {
+                plan.worst_wanted = plan.worst_wanted.max(cells / allowance);
+                if cells > plan.worst_px {
+                    plan.worst_px = cells;
                     let below: Vec<NodeKey> = key.children(tiles[key.level as usize - 1]).collect();
                     let generated = below.iter().filter(|c| self.nodes.get(c).is_some_and(|n| n.generated)).count();
                     plan.worst = Some(Worst { key, exact, guess, children: below.len(), generated });
@@ -565,6 +602,8 @@ impl Planner {
     pub fn apply(&mut self, event: Event, frame: u64) {
         match event {
             Event::Generated(k) => {
+                // (Its layers stay until its result comes back: a chunk
+                // generated again holds about what it held.)
                 let n = self.nodes.entry(k).or_default();
                 n.generated = true;
                 n.empty = false;
@@ -573,11 +612,18 @@ impl Planner {
                 let n = self.nodes.entry(k).or_default();
                 n.generated = true;
                 n.empty = true;
+                n.occupied = None;
+            }
+            Event::Occupied(k, layers) => {
+                if let Some(n) = self.nodes.get_mut(&k).filter(|n| n.generated) {
+                    n.occupied = Some(layers);
+                }
             }
             Event::Stale(k) => {
                 if let Some(n) = self.nodes.get_mut(&k) {
                     n.generated = false;
                     n.empty = false;
+                    n.occupied = None;
                 }
             }
             Event::Edited(face, boxes) => {
@@ -588,12 +634,13 @@ impl Planner {
                     }
                 }
             }
-            Event::Measured(fp, ranges) => {
-                if let Some(f) = self.footprints.get_mut(&fp) {
+            Event::Measured(fp, quarters) => {
+                if let (Some(f), Some(ranges)) = (self.footprints.get_mut(&fp), Ranges::hull(&quarters)) {
                     if f.ranges != ranges || !f.exact {
                         f.class = None;
                     }
                     f.ranges = ranges;
+                    f.quarters = quarters;
                     f.exact = true;
                     f.guess = 0;
                 }
@@ -656,10 +703,14 @@ pub enum Event {
     Generated(NodeKey),
     /// Generated and found to hold nothing.
     Emptied(NodeKey),
+    /// Its chunk came back (generated or restored) occupying these layers
+    /// (level cells, [lo, hi)).
+    Occupied(NodeKey, (i32, i32)),
     /// Edited and not generated again yet, or its chunk dropped: its
     /// nearest generated ancestor is drawn until it is `Generated` again.
     Stale(NodeKey),
-    Measured(Footprint, Ranges),
+    /// A footprint's ranges by quarter (`Fp::quarters`).
+    Measured(Footprint, [Option<Ranges>; 4]),
     /// A ray met it or a node under it.
     Seen(NodeKey),
     /// A ray met this Buried node: generate it.
@@ -880,7 +931,7 @@ mod tests {
             for k in plan.requests {
                 planner.apply(Event::Generated(k), *frame);
                 let band = ((-200 >> k.level) - 1, (200 >> k.level) + 1);
-                planner.apply(Event::Measured(k.footprint(), Ranges { volume: band, surface: band }), *frame);
+                planner.apply(Event::Measured(k.footprint(), [Some(Ranges { volume: band, surface: band }); 4]), *frame);
             }
         }
     }
@@ -1059,7 +1110,7 @@ mod tests {
                 for k in plan.requests {
                     planner.apply(Event::Generated(k), frame);
                     let band = ((-200 >> k.level) - 1, (200 >> k.level) + 1);
-                    planner.apply(Event::Measured(k.footprint(), Ranges { volume: band, surface: band }), frame);
+                    planner.apply(Event::Measured(k.footprint(), [Some(Ranges { volume: band, surface: band }); 4]), frame);
                 }
             }
         };
@@ -1068,6 +1119,74 @@ mod tests {
         // In view only (out of view is a level coarser either way).
         assert!(mixed(&unmet) * 4 < mixed(&met) * 3, "{} {}", mixed(&unmet), mixed(&met));
         assert_eq!(met.coarse_share, 0.0);
+    }
+
+    /// An eye 20 m over flat ground is inside the level-2 chunk over it
+    /// (25.6 m tall), not at its cells: with that node drawn for want of
+    /// its children, the plan's worst cell is measured to the cells its
+    /// chunks occupy (about 43 pixels), not to a chunk at no distance; a
+    /// band whose chunks' results are not back does not count yet.
+    #[test]
+    fn the_worst_cell_is_measured_to_the_cells_drawn() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let at = [f64::from(grid.cells()) * 0.47, f64::from(grid.cells()) * 0.53];
+        let eye = grid.position(2, [at[0], at[1], 200.0]);
+        let mut planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
+        let mut frame = 0;
+        // Ground within a metre of layer 0 everywhere.
+        loop {
+            frame += 1;
+            let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+            if plan.requests.is_empty() {
+                break;
+            }
+            for k in plan.requests {
+                planner.apply(Event::Generated(k), frame);
+                let band = ((-10 >> k.level) - 1, (10 >> k.level) + 1);
+                planner.apply(Event::Measured(k.footprint(), [Some(Ranges { volume: band, surface: band }); 4]), frame);
+            }
+        }
+        // The level-2 node holding the eye, its children dropped.
+        let tiles: Vec<i32> = (0..grid.levels()).map(|l| tiles_at(&grid, l)).collect();
+        let held = NodeKey { face: 2, level: 2, cx: (at[0] as i32 >> 2) / CHUNK, cy: (at[1] as i32 >> 2) / CHUNK, cz: 0 };
+        assert!(held.layers().1 << 2 > 200, "the eye is inside {held:?}");
+        for child in held.children(tiles[1]) {
+            planner.apply(Event::Stale(child), frame);
+        }
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(plan.drawn.iter().any(|d| d.0 == held), "{held:?} drawn");
+        assert!(plan.requests.iter().any(|k| k.level == 1), "its children wanted");
+        assert_eq!(plan.worst_px, 0.0, "no cells known");
+        // Its band's chunks back, the ground's top 8 m over the plain.
+        planner.apply(Event::Occupied(held, (0, 20)), frame);
+        planner.apply(Event::Occupied(NodeKey { cz: -1, ..held }, (-3, 0)), frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        let cells_px = grid.level_size(2) / 12.0 / config().pixel_angle;
+        assert!(plan.worst_px > cells_px * 0.9 && plan.worst_px < cells_px * 1.1, "worst {} px, its cells' {cells_px:.1}", plan.worst_px);
+    }
+
+    /// A measured footprint's children are estimated from the quarter of
+    /// its columns over each: a crater wall in one quarter raises that
+    /// child's band only.
+    #[test]
+    fn children_are_estimated_from_their_quarter() {
+        let (grid, _, mut planner) = setup();
+        let key = NodeKey { face: 2, level: 6, cx: 10, cy: 12, cz: 0 };
+        planner.footprints.insert(key.footprint(), Fp { ranges: Ranges { volume: (0, 0), surface: (0, 0) }, exact: false, quarters: [None; 4], guess: 0, used: 0, class: None });
+        let plain = Ranges { volume: (-3, 2), surface: (-2, 2) };
+        let wall = Ranges { volume: (-3, 40), surface: (-2, 40) };
+        planner.apply(Event::Measured(key.footprint(), [Some(plain), Some(plain), Some(wall), None]), 1);
+        assert_eq!(planner.footprints[&key.footprint()].ranges, Ranges { volume: (-3, 40), surface: (-2, 40) });
+        planner.estimate_children(key, 1);
+        let child = |a: i32, b: i32| planner.footprints[&Footprint { face: 2, level: 5, cx: 20 + a, cy: 24 + b }].ranges;
+        assert_eq!(child(0, 0), plain.child());
+        assert_eq!(child(1, 0), plain.child());
+        assert_eq!(child(0, 1), wall.child());
+        // A quarter that measured nothing (past a face's edge): the whole.
+        assert_eq!(child(1, 1), wall.child());
+        let _ = grid;
     }
 
     #[test]

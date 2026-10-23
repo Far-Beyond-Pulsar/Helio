@@ -88,7 +88,12 @@ const LEAF_PAGES: u32 = 64u;
 
 @group(0) @binding(2) var<storage, read> tile_jobs: array<TileJob>;
 @group(0) @binding(3) var<storage, read_write> tile_columns: array<vec4<i32>>;
+// Each computed footprint's measured layers, by quarter (32x32 columns:
+// x then y, each a child footprint's), four words a quarter: the volume's
+// lowest and highest, the surface's lowest and highest (level cells); the
+// batch's computed count last.
 @group(0) @binding(4) var<storage, read_write> tile_ranges: array<atomic<i32>>;
+const RANGE_WORDS: u32 = 16u;
 @group(0) @binding(5) var<storage, read> chunk_jobs: array<ChunkJob>;
 @group(0) @binding(6) var<storage, read_write> column_masks: array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read> brushes: array<FaceBrush>;
@@ -392,11 +397,13 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
     }
     workgroupBarrier();
+    // The quarter its 8x8 columns lie in.
+    let at = wg.y * RANGE_WORDS + (((wg.x & 7u) >> 2u) | ((wg.x >> 5u) << 1u)) * 4u;
     if li == 0u {
-        atomicMin(&tile_ranges[wg.y * 4u], atomicLoad(&w_range[0]));
-        atomicMax(&tile_ranges[wg.y * 4u + 1u], atomicLoad(&w_range[1]));
-        atomicMin(&tile_ranges[wg.y * 4u + 2u], atomicLoad(&w_range[2]));
-        atomicMax(&tile_ranges[wg.y * 4u + 3u], atomicLoad(&w_range[3]));
+        atomicMin(&tile_ranges[at], atomicLoad(&w_range[0]));
+        atomicMax(&tile_ranges[at + 1u], atomicLoad(&w_range[1]));
+        atomicMin(&tile_ranges[at + 2u], atomicLoad(&w_range[2]));
+        atomicMax(&tile_ranges[at + 3u], atomicLoad(&w_range[3]));
     }
 }
 
@@ -665,7 +672,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // edge. (Chunks are asked for before their footprints are measured.)
     if li == 0u {
         let computed = u32(atomicLoad(&tile_ranges[arrayLength(&tile_ranges) - 1u]));
-        w_air = u32(job.tile < computed && job.brush_count == 0u && job.baked == NONE && job.cz * 64 >= atomicLoad(&tile_ranges[job.tile * 4u + 1u]));
+        var high = atomicLoad(&tile_ranges[job.tile * RANGE_WORDS + 1u]);
+        for (var q = 1u; q < 4u; q++) { high = max(high, atomicLoad(&tile_ranges[job.tile * RANGE_WORDS + q * 4u + 1u])); }
+        w_air = u32(job.tile < computed && job.brush_count == 0u && job.baked == NONE && job.cz * 64 >= high);
     }
     if workgroupUniformLoad(&w_air) != 0u {
         column_masks[at] = vec2<u32>(0u);
@@ -2455,9 +2464,14 @@ fn tile_features_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         } else {
             let lo = p.anchor.y + bitcast<i32>(stamp_word(p.stamp, 1u));
             let hi = ((lo + i32(stamp_word(p.stamp, 5u)) - 1) >> job.level) + 1;
-            atomicMin(&tile_ranges[t * 4u], lo >> job.level);
-            atomicMax(&tile_ranges[t * 4u + 1u], hi);
-            atomicMin(&tile_ranges[t * 4u + 2u], lo >> job.level);
+            // Each quarter it reaches.
+            for (var q = 0u; q < 4u; q++) {
+                let quarter = first + (vec2<i32>(i32(q & 1u), i32(q >> 1u)) << vec2<u32>(job.level + 5u));
+                if !placed_meets(p, quarter, quarter + (32 << job.level) - 1) { continue; }
+                atomicMin(&tile_ranges[t * RANGE_WORDS + q * 4u], lo >> job.level);
+                atomicMax(&tile_ranges[t * RANGE_WORDS + q * 4u + 1u], hi);
+                atomicMin(&tile_ranges[t * RANGE_WORDS + q * 4u + 2u], lo >> job.level);
+            }
         }
     }
     tile_placements[job.slot * features[4] + n] = word;

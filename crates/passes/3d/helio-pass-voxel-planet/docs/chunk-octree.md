@@ -78,7 +78,8 @@ A node is one of (`classify::Kind`):
 
 `EditView::classify` decides a footprint's nodes from its ranges (the
 field's volume and surface band, measured on the GPU or estimated from the
-parent's, widened by a parent cell) and the edits over it: the field's
+parent's quarter of columns over it, widened by a parent cell; the
+parent's whole ranges while it is estimated too) and the edits over it: the field's
 surface band and every edit's are Mixed (merged where fewer than two
 chunks apart), the rest of the field's volume Buried, the rest uniform.
 Outside every band a node lies wholly inside or outside each brush:
@@ -173,7 +174,9 @@ Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):
    ([`two-rate-field.md`](two-rate-field.md)).
 3. `tile_slope_nodes_main`, `tile_columns_main`, `tile_slope_heights_main`,
    `tile_slopes_main`: each column's height, surface word and volume
-   extent, and the footprint's measured ranges; for levels 0 to 3 the
+   extent, and the footprint's measured ranges by quarter (each a child
+   footprint's: a coarse footprint's whole range spans all its children's
+   relief); for levels 0 to 3 the
    level-4 heights and block slopes materials read
    (`Planet::material_slope`), kept with the columns in the pool.
 4. `tile_halo_main`: the lean lattice's heights past the footprint's
@@ -223,9 +226,12 @@ the plan evicts is packed on the GPU before its pages go back
 (`pack_main`: meta, mids, leaves, materials, normals and detail pages,
 about 12 KB), read back with the frame's results (64 a frame) and kept on
 the CPU (`Capacity::kept_bytes`, 256 MB by default, least recently used
-dropped). A kept node the plan wants again is restored by copy
-(`restore_main`): no footprint, terrain program or brushes. An edit over a
-kept node drops it.
+dropped), with its footprint's measured ranges. A kept node the plan
+wants again is restored by copy (`restore_main`): no footprint, terrain
+program or brushes; the planner is given the footprint's measurement
+again (one whose nodes are all restored is never measured, and the
+estimate from its parent classifies it otherwise). An edit over a kept
+node drops it.
 
 Saves keep them too: `ChunkWorld::keep_resident` packs the resident
 edited chunks, `kept_chunks` takes them, and `KeptChunks::to_bytes` writes
