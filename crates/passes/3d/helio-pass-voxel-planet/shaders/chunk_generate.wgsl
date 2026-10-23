@@ -924,9 +924,21 @@ fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -
 
 // One column's top material voting for the surface of the leaf its top
 // cell is in (`chunk_build_main`): the leaf's top material and votes after
-// it (a majority vote of all but single-voxel specks, which a leaf of 4x4
-// columns would spread).
-fn vote_top(top: u32, votes: u32, column_material: u32) -> vec2<u32> {
+// it. With per-cell materials (`detailed`: a chunk of `DETAIL_LEVELS`) the
+// pair only decides which cells need a byte of their own: a majority vote
+// of all but single-voxel specks, which a leaf of 4x4 columns would spread,
+// leaves the fewest. Without, the pair is what the leaf draws: one of its
+// columns' tops, the one of least `pick` (a hash of the column), so over
+// many leaves each material covers the share of the columns it tops, as
+// the finer levels' cells average to. A majority drew the ground's
+// minority materials (lunar ejecta and rock, specks) at no coarse level:
+// the ground changed colour where a detail level met a coarser one.
+fn vote_top(top: u32, votes: u32, column_material: u32, detailed: bool, pick: u32) -> vec2<u32> {
+    if !detailed {
+        let key = pick | 1u;
+        if votes == 0u || key < votes { return vec2<u32>(column_material, key); }
+        return vec2<u32>(top, votes);
+    }
     if (column_material & 0x80u) != 0u {
         // A speck: the surface only while nothing else votes.
         return vec2<u32>(select(top, column_material, votes == 0u), votes);
@@ -1088,7 +1100,7 @@ fn chunk_cells_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         let high = select(firstLeadingBit(cm.x), 32u + firstLeadingBit(cm.y), cm.y != 0u);
         if (high >> 2u) == lz {
             topped = true;
-            let v = vote_top(top, votes, material);
+            let v = vote_top(top, votes, material, true, 0u);
             top = v.x;
             votes = v.y;
         }
@@ -1169,6 +1181,8 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     // Each column's top (one past its highest solid cell; 0: none).
     var tops: array<i32, 16>;
     var fit: array<i32, 9>;
+    let tile = tile_jobs[job.tile];
+    let detailed = job.detail != NONE;
     for (var c = 0u; c < 16u; c++) {
         let cx = lx * 4u + (c & 3u);
         let cy = ly * 4u + (c >> 2u);
@@ -1193,7 +1207,8 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         fit[8] += y * z;
         let top_leaf = u32(high) >> 2u;
         topped |= 1u << top_leaf;
-        let vote = vote_top(leaf_top[top_leaf], votes[top_leaf], column_material);
+        let pick = hash3(tile.cx * 64 + i32(cx), tile.cy * 64 + i32(cy), i32(tile.level | (tile.face << 8u)), 0x7f4a7c15u);
+        let vote = vote_top(leaf_top[top_leaf], votes[top_leaf], column_material, detailed, pick);
         leaf_top[top_leaf] = vote.x;
         votes[top_leaf] = vote.y;
         for (var lz = 0u; lz < 16u; lz++) {
@@ -1209,7 +1224,6 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     // The heightfield's slope over this leaf column: its exact heights a
     // column past each side (central differences, one-sided at the tile's
     // edge), where every column's top here is the heightfield's.
-    let tile = tile_jobs[job.tile];
     let cell_mm = f32(world.grid.y << tile.level);
     let base = job.cz * 64;
     var natural = true;

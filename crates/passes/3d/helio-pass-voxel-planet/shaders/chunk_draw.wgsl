@@ -1673,28 +1673,40 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
     let key = chunk_keys[slot];
     let projected = length(c.m0.xyz) / max(pixel_m, 1e-6);
     // Material boundaries filtered where cells are a pixel or less: a
-    // leaf's one surface material (its 4x4 columns' vote) would show as
-    // blocks of four pixels. A top face takes the surface material at a
-    // point jittered up to a leaf's width each frame, of the stored leaf
-    // there (TSR averages the frames into a filtered boundary).
+    // leaf's one surface and one subsurface material (coarse leaves draw
+    // one of their columns' tops, `vote_top`) would show as blocks of four
+    // pixels. A face takes the material at a point jittered up to a leaf's
+    // width across it each frame: the material a cell there shows on the
+    // same side (solid, the cell beyond it open), of the stored leaf there
+    // (TSR averages the frames into a filtered boundary, and a coarse
+    // level's leaves into the mixture its finer levels' cells show). Top
+    // faces alone left the risers of coarse slopes blocky.
     var material = hit_material;
     let filtered = 1.0 - smoothstep(1.0, 3.0, projected);
-    if filtered > 0.0 && axis == 2u && sign == 1u {
+    if filtered > 0.0 {
         let r = vec2<f32>(f32(fade_dither(pixel)), f32(fade_dither(pixel + vec2<u32>(37u, 11u)))) / 1024.0;
         let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
-        let at = vec2<i32>(floor(local.xy + (r - 0.5) * 4.0 * filtered));
-        // A top cell there (solid under air): its leaf holds a surface.
-        let there = vec3<i32>(at, cell.z);
-        if any((at >> vec2<u32>(2u)) != (cell.xy >> vec2<u32>(2u))) && solid_at(slot, there) && !solid_at(slot, there + vec3<i32>(0, 0, 1)) {
+        // The face's two axes across it (u, v), the cell's along it.
+        let across_u = select(select(0u, 2u, axis == 1u), 1u, axis == 0u);
+        let across_v = select(select(1u, 0u, axis == 1u), 2u, axis == 0u);
+        var there = cell;
+        there[across_u] = i32(floor(local[across_u] + (r.x - 0.5) * 4.0 * filtered));
+        there[across_v] = i32(floor(local[across_v] + (r.y - 0.5) * 4.0 * filtered));
+        var out = vec3<i32>(0);
+        out[axis] = select(-1, 1, sign == 1u);
+        let top = axis == 2u && sign == 1u;
+        // A cell there showing that side: its leaf holds a face of it.
+        if any((there >> vec3<u32>(2u)) != (cell >> vec3<u32>(2u))) && solid_at(slot, there) && !solid_near(slot, key, there + out) {
             let index = stored_leaf(slot, there);
             if index != NONE {
                 var own = 0u;
                 if slot_details[slot] != 0u { own = leaf_detail(index, there); }
                 let pair = leaf_pair(index);
+                let shown = select((pair >> 8u) & 0xffu, pair & 0xffu, top || !solid_over(slot, there));
                 if own != 0u {
                     material = min(own, 31u);
-                } else if (pair & 0xffu) != 0u {
-                    material = min(pair & 0xffu, 31u);
+                } else if shown != 0u {
+                    material = min(shown, 31u);
                 }
             }
         }

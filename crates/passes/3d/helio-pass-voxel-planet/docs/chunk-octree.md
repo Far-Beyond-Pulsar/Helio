@@ -273,7 +273,15 @@ view needs grows with the level 0-1 surface it shows: at 1600x900 a
 meadow takes ~1.3k pages, the Moon's speckled regolith ~18k, inside an
 Earth wood ~29k, an Earth mountain's snow and rock ~81k (its pages ~80%
 full of leaves that need them).
-Coarser chunks keep their pairs (an edit's top materials vote in them).
+Coarser chunks keep their pairs, and with nothing to correct them a pair
+is what a leaf draws: its surface is one of its columns' tops, the one of
+least hash (`vote_top`), not their majority. Over many leaves each
+material then covers the share of the columns it tops, which is what the
+finer levels' cells average to: a majority dropped every minority
+material (the Moon's ejecta and rock specks, an edit's few blocks) at
+every coarse level, so the ground changed colour where a detail level
+met a coarser one. At detail levels the pair only decides which
+cells need a byte of their own, so it stays the majority (fewest bytes).
 
 ## The drawn cut
 
@@ -418,8 +426,11 @@ where tiles held more (toward the horizon): the list has no per-tile cap.
 The publish pass writes Helio's gbuffer and depth: material colour
 (`material_albedo`: per-voxel pigment and the materials' patches, clumps
 and blades from the appearance table, sampled at the cell centre's domain
-point), corner occlusion from the cells around the air in front of the
-face (across chunks by the chunk table) times sky visibility, crisp edges
+point; where cells are a pixel or less, each face's material taken at a
+point jittered up to a leaf across it each frame, so TSR averages the
+leaves' materials into their mixture), corner occlusion from the cells
+around the air in front of the face (across chunks by the chunk table)
+times sky visibility, crisp edges
 while a cell spans several pixels, and the shading normal. A natural step
 (air above) may be lit partly with the slope's normal (`detail.w`, step
 softness) and its sun ray passes its own steps. Helio's deferred lighting,
