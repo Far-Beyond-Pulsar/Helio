@@ -34,8 +34,9 @@ pub use renderer::{
     BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex,
     GraphRebuilder,
     PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,
-    RendererBuilder, RendererConfig, SceneDbHandle,
+    RendererBuilder, RendererConfig, SceneDbHandle, TsrSetting,
 };
+pub use helio_settings;
 pub use camera::Camera;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use renderer::{ReloadMode, ShaderReloadStatus};

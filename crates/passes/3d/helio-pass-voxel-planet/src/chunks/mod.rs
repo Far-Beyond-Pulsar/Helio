@@ -1297,6 +1297,44 @@ impl Default for ResidencyConfig {
     }
 }
 
+impl ResidencyConfig {
+    /// A host's [`helio_settings::VOXEL_RESIDENCY`] values (the pixel
+    /// angle is the pass's: it follows the view).
+    pub fn from_settings(settings: &helio_settings::Resolved) -> Self {
+        debug_assert!(std::ptr::eq(settings.group(), &helio_settings::VOXEL_RESIDENCY));
+        let n = |key| settings.number(key);
+        let defaults = Self::default();
+        Self {
+            plan: residency::PlanConfig {
+                pixel_angle: defaults.plan.pixel_angle,
+                lod_pixels: n("lod_pixels"),
+                offscreen_pixels: n("offscreen_pixels"),
+                view_guard: n("view_guard"),
+                unseen_pixels: n("unseen_pixels"),
+                seen_frames: n("seen_frames") as _,
+                coarsen: n("coarsen"),
+                max_distance: n("view_distance_km") * 1000.0,
+                prefetch_seconds: n("prefetch_seconds"),
+                keep_frames: n("keep_frames") as _,
+                release_frames: n("release_frames") as _,
+                motion_flow: n("motion_flow"),
+                motion_max: n("motion_max"),
+                near_cells: n("near_cells"),
+            },
+            footprints_per_frame: n("footprints_per_frame") as usize,
+            generate_ms: settings.optional("generate_ms"),
+            frame_ms: settings.optional("frame_ms"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn default_settings_are_the_default_residency() {
+    let configured = ResidencyConfig::from_settings(&helio_settings::VOXEL_RESIDENCY.defaults());
+    assert_eq!(format!("{configured:?}"), format!("{:?}", ResidencyConfig::default()));
+}
+
 /// Publishing with the host's scene materials (`scene`).
 struct SceneState {
     pipeline: wgpu::RenderPipeline,

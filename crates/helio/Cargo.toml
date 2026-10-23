@@ -14,6 +14,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 image = { workspace = true, features = ["png"] }
 helio-core = { workspace = true }
+helio-settings = { workspace = true }
 helio-vg-stream = { path = "../helio-vg-stream" }
 helio-vg-format = { path = "../helio-vg-format" }
 helio-pass-portal-cull = { workspace = true }

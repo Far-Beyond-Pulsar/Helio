@@ -1575,6 +1575,7 @@ dependencies = [
  "helio-pass-sky",
  "helio-pass-tsr",
  "helio-pass-volumetric-fog",
+ "helio-settings",
  "helio-vg-format",
  "helio-vg-stream",
  "helio-xr",
@@ -2443,6 +2444,7 @@ dependencies = [
  "helio-pass-foliage-place",
  "helio-pass-gi",
  "helio-pass-shadow-matrix",
+ "helio-settings",
  "image",
  "miniz_oxide",
  "naga",
@@ -2487,6 +2489,10 @@ dependencies = [
 [[package]]
 name = "helio-passes"
 version = "0.0.0"
+
+[[package]]
+name = "helio-settings"
+version = "0.1.0"
 
 [[package]]
 name = "helio-snapshot"

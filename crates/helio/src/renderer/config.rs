@@ -443,13 +443,13 @@ impl RendererConfig {
         self
     }
 
-    /// Enable/disable the screen-space reflection pass.
     /// The GI probes' finest spacing (metres; [`Self::gi_probe_spacing`]).
     pub fn with_gi_probe_spacing(mut self, metres: f32) -> Self {
         self.gi_probe_spacing = Some(metres);
         self
     }
 
+    /// Enable/disable the screen-space reflection pass.
     pub fn with_ssr(mut self, enabled: bool) -> Self {
         self.enable_ssr = enabled;
         self
