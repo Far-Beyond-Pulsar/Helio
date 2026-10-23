@@ -123,10 +123,10 @@ about 4 GiB). The kit's UVs repeat every 2 m, so the marble texel density is far
 above the photographed scale (the tiles are 0.75 to 2 m): veins look larger than
 life, the price of keeping the kit untouched.
 
-### Alpha-masked tree parts (known limitation)
+### Alpha-masked tree parts
 
-Virtual geometry has no alpha-tested/blended materials, and
-`VirtualGeometryHost` skips meshes with a translucent/masked slot. The tree
+Virtual geometry draws alpha-tested materials but not blended ones, and
+`VirtualGeometryHost` keeps blended surfaces classic. The tree
 glTFs mark these materials `alphaMode: BLEND`:
 
 | Tree | Masked slot | Masked triangles | Opaque (VG-eligible) |
@@ -135,38 +135,77 @@ glTFs mark these materials `alphaMode: BLEND`:
 | `fir_tree_01` | `fir_tree_01_twig` | 6.72M of 6.98M | bark, trunk, dead branches |
 | `island_tree_01/02/03` | `*_leaves` | 1.06M / 0.71M / 1.41M | trunk and branches |
 | `tree_small_02` | `tree_small_02_leaves` | 1.94M of 2.06M | trunk and branches |
+Each tree variant stays one glTF mesh per material slot (parts). The glTFs mark
+the leaf/twig materials `alphaMode: BLEND` (never VG-eligible), so the museum
+authors them as `FLAG_ALPHA_TEST | FLAG_DOUBLE_SIDED` (cutoff 0.5 via the
+single-row fallback) and `MASKED_PARTS_USE_VG` is `true`: masked parts are
+cooked and drawn through the masked VG raster like every other part, with no
+classic stand-in. The leaf colour JPEGs carry no alpha; the separate
+`*_alpha_*.png` shipped with the package is combined with the albedo into one
+RGBA upload at load time (`decode_with_opacity`), so the alpha test samples the
+albedo texture's alpha. Setting the flag to `false` hides masked parts (there is
+no classic path). `KHR_texture_transform` UV scale/offset (bark, branches) is
+baked into the vertices at import.
 
-Each tree variant stays one glTF mesh per material slot (parts). The loader reads
-the real `alphaMode` from the glTF; masked parts are given no VG content id, are
-not cooked, and render through the classic path with a 60,000-vertex sampled
-stand-in each (opaque parts keep the usual 300,000-vertex temporary proxy until
-their VG roots stream in). With the default density that is roughly 100 tree
-instances times one or two 20k-triangle masked stand-ins in the classic pass, a
-few million triangles, which is survivable. When masked-material support lands,
-flip `MASKED_PARTS_USE_VG` in `vg_stress_loading.rs` to `true`; nothing else
-changes (placements, materials and data are already per slot). Note that the
-leaf textures are cards on black (the alpha mask is not part of the glTF
-download), so until masking exists the stand-ins show dark card edges.
-`KHR_texture_transform` UV scale/offset (bark, branches) is baked into the
-vertices at import.
+## Loading and scale (cook-first)
 
-## Loading and scale
+Virtual-geometry assets (scans, trees) are **never shown in a stand-in form**.
+The window opens at once and renders the architecture kit (the only
+always-classic geometry); the loader thread then works in this order: kit,
+textures, assets whose caches are already valid, then the cook phase. An asset's
+instances are created only after its `.vgeo` exists, and they draw only after the
+streaming runtime reports its root pages resident (`select_visible` in
+`vg_stress.rs`, unit tested). If a cook fails, one error is logged and nothing is
+shown for that asset; there is no classic fallback. A device without the VG
+passes shows no scans or trees (one warning).
 
-The window renders while a background worker loads architecture, then scan
-previews. Preview uploads are bounded to one event per frame. Scan previews
-contain at most 300,000 vertices and use sampled source triangles; they are
-temporary fallbacks, not finished low-detail meshes.
+* **Persistent and resumable.** `.vgeo` files in `assets/vg_stress/cache` are
+  keyed by content id and validated against the format version and cook
+  revision in their header; a valid file is never cooked again. Writes are
+  atomic (unique temp file, fsync, rename), so a killed run leaves at most a
+  stale `*.tmp` (removed on the next start) and never a corrupt cache. A small
+  per-asset part record (`parts-v6-*.bin`: transform, slot, radius, content id,
+  records) makes a warm start skip source parsing entirely.
+* **Memory-bounded.** Source files are cooked as jobs (a file's variants share
+  one import). Each job's peak is estimated from triangle counts (96 B/triangle
+  imported + 200 B/triangle of the largest part). A gate admits jobs while the
+  sum of estimates stays within the budget (60% of free RAM, clamped to
+  2-24 GiB, `VG_STRESS_COOK_MEM_GB=<n>` overrides), at most one 10M+ triangle
+  file (pine, Thai, Lucy) at a time, at most `cpus/4` (1-3) files at once, smallest
+  first so cheap assets appear first. A job larger than the whole budget runs alone.
+  `VG_STRESS_COOK_THREADS` sets the cook pool (default `cpus - 2`, 2-8).
+* **Progress.** The title bar and the console show
+  `Cooking VG k/N assets (done of total tris) | now: <asset (tris, time)> | elapsed | ETA`;
+  per-asset start/finish lines and a 15 s heartbeat go to the console.
+* **Headless prepare.** `cargo vg-stress -- --prepare` (or `VG_STRESS_PREPARE=1`)
+  provisions the sources and cooks every cache with no window or GPU, then exits
+  (non-zero on errors). After that the demo starts with everything ready.
+  `build.rs` cannot cook: the build script has no VG builder/importer
+  dependencies, so provisioning (download/convert) stays there and cooking runs in
+* **Alpha-masked parts** are cooked like every other part (they are the
+  largest by triangle count, e.g. fir variant a is 4.1M of which 4.07M masked;
+  the per-file memory estimate already counts all triangles of the file).
 
-The worker loads existing `.vgeo` caches before cooking missing assets in a
-four-thread pool. VG replaces the preview in rendering once the required root
-pages are resident. A failed asset keeps its preview and reports an error.
-First-time cooking can still take substantial CPU time and memory; rendering
-does not wait for it.
+### Instancing
 
-Generated preview and VG caches live in `assets/vg_stress/cache` (gitignored).
-Warm preview loads bypass mesh parsing. Cold loads import scans again for VG
-cooking after previews have been published, retaining scratch data for one
-scan at a time. Prepared GLBs are never rewritten by the loader.
+One asset key is one mesh (kit) or one VG asset (one placeholder
+mesh row, one `.vgeo`, one asset slot) however many placements use it; a
+placement adds only an object row. The default scene (565 placements) has 31
+distinct kit meshes for 331 kit instances and 16 distinct VG assets for 234 VG
+instances. VG parts own no classic geometry: their mesh row is a one-triangle
+zero-area placeholder whose interned vertex range is the key of the VG asset.
+The kit's instances go through the object-batch pass (per-mesh batches). The VG
+derivation re-publishes its buffers only when an instance is added or an asset's
+readiness changes, not every frame. The startup log prints the live counts
+(`[Museum instancing]`).
+
+### Triangle selection and tau
+
+`VG_STRESS_TAU=<px>` sets the VG error tolerance (default 1 px); `-` and `=`
+lower and raise it by 20% / 25% live (0.1-64). The title shows tau, scene
+triangles and VG selected triangles. Once the first pine (or first VG asset)
+is ready the console prints the CPU reference cut at 20/50/100 m
+(`[Museum LOD] ...`).
 
 Architectural dimensions are calibrated against the kit manifest. Each scan is
 displayed two metres tall; importer node transforms are included in the
@@ -219,7 +258,7 @@ counters), read from the same asynchronous readback, so it adds no GPU stall.
 cargo test --release -p helio-vg-build --test build distant_sphere_has_bounded_density_and_sampled_surface_error -- --nocapture
 cargo test --release -p helio-pass-vg-cull -p helio-pass-vg-shade
 cargo test --release -p examples --features vg-stress --bin vg_stress
-# Rebuilds stale preview caches from local scans and checks the actual cached cuts:
+# Checks the cooked caches (run `cargo vg-stress -- --prepare` first):
 cargo test --release -p examples --features vg-stress --bin vg_stress cached_museum_scans_reduce_triangles_with_distance -- --ignored --nocapture
 ```
 

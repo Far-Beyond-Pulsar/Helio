@@ -29,6 +29,10 @@ struct Params {
 const FLAG_SW: u32 = 1u;
 const FLAG_DENSE: u32 = 2u;
 const FLAG_RT: u32 = 4u;
+// `dense_mask` is bound: pixels of a dense tile take ONLY the dense result (it
+// replaces Tier 1/2 there, so the tiers never mix); pixels outside ignore
+// `dense_keys` (stale or unrelated).
+const FLAG_DENSE_MASK: u32 = 8u;
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> params: Params;
@@ -44,6 +48,7 @@ const FLAG_RT: u32 = 4u;
 @group(0) @binding(9) var<storage, read> dense_keys: array<u32>;
 @group(0) @binding(10) var<storage, read_write> pixel_material: array<u32>;
 @group(0) @binding(11) var<storage, read> rt_visible: array<VgVisibleCluster>;
+@group(0) @binding(12) var<storage, read> dense_mask: array<u32>;
 
 @group(1) @binding(0) var hw_vis: texture_2d<u32>;
 @group(1) @binding(1) var hw_depth: texture_depth_2d;
@@ -74,8 +79,15 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     var best_src = 0u; // 0 none, 1 raster id (HW/SW/dense), 2 ray-traced payload
     var rt_bary = 0u;
 
+    var in_dense = false;
+    if (params.flags & FLAG_DENSE_MASK) != 0u {
+        let tile = (px.y / 16u) * ((params.width + 15u) / 16u) + (px.x / 16u);
+        in_dense = tile < arrayLength(&dense_mask) && dense_mask[tile] != 0u;
+    }
+    let use_dense = (params.flags & FLAG_DENSE) != 0u && (in_dense || (params.flags & FLAG_DENSE_MASK) == 0u);
+
     let hv = textureLoad(hw_vis, ipx, 0).x;
-    if hv != VGS_INVALID {
+    if hv != VGS_INVALID && !in_dense {
         let z = textureLoad(hw_depth, ipx, 0);
         if z > best_z {
             best_z = z;
@@ -83,7 +95,7 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
             best_src = 1u;
         }
     }
-    if (params.flags & FLAG_SW) != 0u {
+    if (params.flags & FLAG_SW) != 0u && !in_dense {
         let zbits = sw_keys[pidx * 2u + 1u];
         let z = bitcast<f32>(zbits);
         if zbits != 0u && z > best_z {
@@ -92,7 +104,7 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
             best_src = 1u;
         }
     }
-    if (params.flags & FLAG_DENSE) != 0u {
+    if use_dense {
         let zbits = dense_keys[pidx * 2u + 1u];
         let z = bitcast<f32>(zbits);
         if zbits != 0u && z > best_z {

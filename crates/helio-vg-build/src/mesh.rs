@@ -40,6 +40,9 @@ pub enum BuildError {
     /// stride too large).
     GroupTooLarge,
     FileTooLarge,
+    /// The DAG could not be reduced below [`crate::MAX_ROOT_PAGES`] root pages
+    /// (geometry that does not simplify): the asset must not be pinned.
+    RootTooLarge { pages: u32 },
 }
 
 impl fmt::Display for BuildError {
@@ -96,6 +99,9 @@ pub struct VertexStore {
     pub pid: Vec<u32>,
     /// True if another vertex shares this position (attribute seam).
     pub seam: Vec<bool>,
+    /// Vertex belongs to a small connected piece of the source mesh (see
+    /// [`mark_floating`]); the flag follows the vertex up the DAG.
+    pub floating: Vec<bool>,
     pid_map: HashMap<[u32; 3], u32>,
     pid_first: Vec<u32>,
 }
@@ -107,6 +113,7 @@ impl VertexStore {
             attr: Vec::new(),
             pid: Vec::new(),
             seam: Vec::new(),
+            floating: Vec::new(),
             pid_map: HashMap::new(),
             pid_first: Vec::new(),
         }
@@ -148,6 +155,7 @@ impl VertexStore {
         self.attr.push(attr);
         self.pid.push(pid);
         self.seam.push(seam);
+        self.floating.push(false);
         id
     }
 }
@@ -217,4 +225,39 @@ pub fn weld(mesh: &MeshInput) -> (VertexStore, Vec<Tri>) {
         tris.push(Tri { v, mat });
     }
     (store, tris)
+}
+
+/// Source connected components (by position id) with at most
+/// `max_tris` triangles are "floating pieces" (needle/leaf cards, branch
+/// fragments): flag their vertices. Decided once on the source mesh so that a
+/// coarse level's small remainder of a big surface is never mistaken for one.
+pub fn mark_floating(vs: &mut VertexStore, tris: &[Tri], max_tris: usize) {
+    let np = vs.pid.iter().copied().max().map_or(0, |m| m as usize + 1);
+    let mut parent: Vec<u32> = (0..np as u32).collect();
+    fn find(p: &mut [u32], mut x: u32) -> u32 {
+        while p[x as usize] != x {
+            p[x as usize] = p[p[x as usize] as usize];
+            x = p[x as usize];
+        }
+        x
+    }
+    for t in tris {
+        let a = find(&mut parent, vs.pid[t.v[0] as usize]);
+        for k in 1..3 {
+            let a = find(&mut parent, a);
+            let b = find(&mut parent, vs.pid[t.v[k] as usize]);
+            if a != b {
+                parent[b as usize] = a;
+            }
+        }
+    }
+    let mut size = vec![0u32; np];
+    for t in tris {
+        let r = find(&mut parent, vs.pid[t.v[0] as usize]);
+        size[r as usize] += 1;
+    }
+    for i in 0..vs.len() {
+        let r = find(&mut parent, vs.pid[i]);
+        vs.floating[i] = size[r as usize] as usize <= max_tris && size[r as usize] > 0;
+    }
 }

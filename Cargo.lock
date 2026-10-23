@@ -1762,7 +1762,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "image",
  "log",
+ "naga",
  "wgpu",
 ]
 
@@ -2338,6 +2340,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "helio-pass-gbuffer",
  "helio-pass-vg-bvh",
  "helio-vg-build",
@@ -2356,9 +2359,11 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "helio-pass-vg-cull",
  "helio-pass-vg-raster",
  "helio-vg-format",
+ "helio-vg-stream",
  "log",
  "naga",
  "pollster 0.4.0",
@@ -2372,6 +2377,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "helio-pass-vg-cull",
  "helio-vg-format",
  "log",

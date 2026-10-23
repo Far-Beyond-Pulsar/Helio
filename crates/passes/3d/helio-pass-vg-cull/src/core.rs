@@ -10,7 +10,8 @@ use helio_core::CommandRecorder;
 use helio_vg_format::VgMode;
 
 use crate::{
-    mode_bits, state, stats, FLAG_DENSE_MASK, FLAG_STATS, FLAG_TWO_PHASE, MAX_BIN_CAPACITY,
+    mode_bits, state, stats, FLAG_DENSE_MASK, FLAG_MASKED, FLAG_STATS, FLAG_SW_MASKED,
+    FLAG_TWO_PHASE, MAX_BIN_CAPACITY,
 };
 
 const ROUND_STRIDE: u64 = 256;
@@ -43,8 +44,12 @@ pub struct VgCullConfig {
     /// Maintain the stats counters (small atomic cost).
     pub stats: bool,
     /// Upper bound on entries per bin (a ceiling, never an allocation): the
-    /// visible-cluster ceiling of the settings divided over the six bins.
+    /// visible-cluster ceiling of the settings divided over the bins.
     pub max_bin_capacity: u32,
+    /// Alpha-tested clusters of the software class may be routed to the software
+    /// masked bin (the raster must have the 64-bit atomic kernel). Default false:
+    /// they use the hardware masked bin.
+    pub sw_masked: bool,
 }
 
 impl Default for VgCullConfig {
@@ -61,6 +66,7 @@ impl Default for VgCullConfig {
             history_bits: 1 << 22,
             stats: true,
             max_bin_capacity: MAX_BIN_CAPACITY,
+            sw_masked: false,
         }
     }
 }
@@ -85,6 +91,9 @@ pub struct VgCullInputs<'a> {
     pub gcbvh_header: &'a wgpu::Buffer,
     pub gcbvh_items: &'a wgpu::Buffer,
     pub dense_mask: Option<&'a wgpu::Buffer>,
+    /// The scene's `materials` table (`GpuMaterial` rows, 24 words). `Some` turns on
+    /// alpha-mask routing; `None` is the opaque-only path with no material loads.
+    pub materials: Option<&'a wgpu::Buffer>,
     /// Rows of `instances` (the traversal ignores BVH leaves beyond it).
     pub instance_count: u32,
     /// Dense-mask grid `[tiles_x, tiles_y]`.
@@ -279,6 +288,7 @@ impl VgCullCore {
         for b in 18..=21 {
             entries0.push(storage_entry(b, false));
         }
+        entries0.push(storage_entry(22, true));
         let bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VgCull BGL0"),
             entries: &entries0,
@@ -525,6 +535,12 @@ impl VgCullCore {
         if self.config.stats {
             flags |= FLAG_STATS;
         }
+        if inputs.materials.is_some() {
+            flags |= FLAG_MASKED;
+            if self.config.sw_masked {
+                flags |= FLAG_SW_MASKED;
+            }
+        }
         let params = GpuParams {
             screen_width: self.size.0,
             screen_height: self.size.1,
@@ -671,9 +687,11 @@ impl VgCullCore {
         b: &VgCullBuffers,
     ) -> wgpu::BindGroup {
         let dense = i.dense_mask.unwrap_or(&self.dummy_buf);
+        let materials = i.materials.unwrap_or(&self.dummy_buf);
         let mut bufs: Vec<&wgpu::Buffer> = vec![camera, &self.params_buf, i.instances, i.objects];
         bufs.extend(i.stream.as_array());
         bufs.extend([i.gcbvh_nodes, i.gcbvh_header, i.gcbvh_items, dense, &b.state, &b.queues, &b.visible, &b.history]);
+        bufs.push(materials);
         let key: Vec<wgpu::Buffer> = bufs.iter().map(|b| (*b).clone()).collect();
         if let Some((k, v, bg)) = &self.bind_cache[slot] {
             if *k == key && v.as_ref() == hiz {
@@ -689,9 +707,10 @@ impl VgCullCore {
         }
         entries.push(wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(view) });
         entries.push(wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) });
-        for (n, buf) in bufs.iter().enumerate().skip(16) {
+        for (n, buf) in bufs.iter().enumerate().skip(16).take(4) {
             entries.push(wgpu::BindGroupEntry { binding: n as u32 + 2, resource: buf.as_entire_binding() });
         }
+        entries.push(wgpu::BindGroupEntry { binding: 22, resource: bufs[20].as_entire_binding() });
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgCull BG0"),
             layout: &self.bgl0,

@@ -15,14 +15,14 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
+use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
 use helio_pass_vg_cull::{
-    sw_dispatch_args_offset, state, VgCullFrameData, VgCullInputs, ARGS_BYTE_OFFSET,
-    ARGS_PHASE_BYTES, BIN_COUNT, BIN_SW, KEY_CULL, KEY_CULL_EARLY, KEY_HIZ_LATE, KEY_INPUTS,
+    dense_dispatch_args_offset, hw_masked_draw_args_offset, sw_dispatch_args_offset, sw_masked_dispatch_args_offset, state, VgCullFrameData, VgCullInputs, ARGS_BYTE_OFFSET,
+    ARGS_PHASE_BYTES, BIN_COUNT, BIN_DENSE, BIN_SW, BIN_SW_MASKED, KEY_CULL, KEY_CULL_EARLY, KEY_HIZ_LATE, KEY_INPUTS,
 };
 use wgpu::util::DeviceExt;
 
-use crate::{VgRaster, VgRasterConfig, VgRasterInputs, VgTargets};
+use crate::{VgDenseInputs, VgMaskedInputs, VgRaster, VgRasterConfig, VgRasterInputs, VgTargets};
 
 /// [`VgRasterFrameData`] after phase 0.
 pub const KEY_RASTER_EARLY: &str = "vg_raster_early";
@@ -154,6 +154,21 @@ fn record_phase(
     let Shared { raster, targets } = &mut *guard;
     let targets = targets.as_mut()?;
     let hw_offset = ARGS_BYTE_OFFSET + u64::from(phase) * ARGS_PHASE_BYTES;
+    // Alpha-masked clusters need the material table; without it the cull emits
+    // no masked bins either (it gets the same `materials` buffer).
+    let masked = match (
+        ctx.scene_buffers.get(BufferKey::of("materials")),
+        ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures()),
+    ) {
+        (Some(materials), Some(material_textures)) => Some(VgMaskedInputs {
+            materials: &materials.buffer,
+            material_textures,
+            hw_indirect_offset: hw_masked_draw_args_offset(phase),
+            sw_meta_offset_words: state::RANGES + phase * BIN_COUNT * 2 + BIN_SW_MASKED * 2,
+            sw_dispatch_offset: sw_masked_dispatch_args_offset(phase),
+        }),
+        _ => None,
+    };
     let raster_inputs = VgRasterInputs {
         camera: ctx.camera,
         view_index: 0,
@@ -168,6 +183,13 @@ fn record_phase(
         sw_meta_offset_words: state::RANGES + phase * BIN_COUNT * 2 + BIN_SW * 2,
         sw_dispatch: cull.state,
         sw_dispatch_offset: sw_dispatch_args_offset(phase),
+        masked,
+        dense: Some(VgDenseInputs {
+            meta: cull.state,
+            meta_offset_words: state::RANGES + phase * BIN_COUNT * 2 + BIN_DENSE * 2,
+            dispatch: cull.state,
+            dispatch_offset: dense_dispatch_args_offset(phase),
+        }),
     };
     let mut rec = ctx.graphics_cmds();
     raster.encode_phase(ctx.device, ctx.queue, &mut rec, targets, &raster_inputs, phase);
@@ -192,6 +214,10 @@ impl VgRasterEarlyPass {
 impl RenderPass for VgRasterEarlyPass {
     fn name(&self) -> &'static str {
         "VgRasterEarly"
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        &["material_textures"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -234,6 +260,10 @@ impl VgRasterLatePass {
 impl RenderPass for VgRasterLatePass {
     fn name(&self) -> &'static str {
         "VgRasterLate"
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        &["material_textures"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

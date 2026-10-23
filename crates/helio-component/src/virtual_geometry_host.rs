@@ -147,7 +147,7 @@ impl VirtualGeometryHost {
                 continue;
             }
             let content = mesh.geometry_key.0;
-            if content == 0 || !is_opaque(mesh) {
+            if content == 0 || !is_vg_eligible(mesh) {
                 continue;
             }
             if !self.assets.contains_key(&content) {
@@ -166,9 +166,13 @@ impl VirtualGeometryHost {
     }
 }
 
-/// Virtual geometry shades opaque surfaces only (no alpha test or blend, plan
-/// section 9 T9 notes): a mesh with a translucent surface slot stays classic.
-fn is_opaque(mesh: &StaticMeshComponent) -> bool {
+/// Whether a mesh may be virtual geometry. Blended (translucent) surfaces never
+/// can: a mesh with a translucent surface slot stays classic. Alpha-TESTED
+/// (masked) materials can: their rows carry `FLAG_ALPHA_TEST`, the cull routes
+/// those clusters to the masked bins and the raster tiers evaluate the alpha
+/// test (plan section 12, "Masked materials"). Masked-ness lives in the scene
+/// material row, not in the surface, so nothing here needs to know about it.
+fn is_vg_eligible(mesh: &StaticMeshComponent) -> bool {
     mesh.material_slots.slots.iter().all(|slot| {
         let surface = slot.surface_override.as_ref().unwrap_or(&slot.imported_surface);
         surface.alpha >= 0.999

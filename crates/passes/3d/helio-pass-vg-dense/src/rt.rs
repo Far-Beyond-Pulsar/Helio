@@ -56,7 +56,7 @@ impl From<AccelerationError> for RtError {
 /// vis id and the hardware barycentrics apply to that cluster triangle's
 /// vertices. `clusters[ordinal]` is the `cluster_slot` (`pool_slot << 11 | local`)
 /// of that proxy cluster in the page pool.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProxyLod {
     /// Object-space simplification error of this cut (same units as
     /// `GpuCluster::self_error`), non-decreasing from LOD 0 (finest) up.
@@ -64,7 +64,14 @@ pub struct ProxyLod {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
     pub prim_map: Vec<u32>,
+    /// Per proxy cluster: `cluster_slot`, or, when `cluster_pages` is non-empty,
+    /// the cluster's local index inside its page.
     pub clusters: Vec<u32>,
+    /// Per proxy cluster: asset-local page id. Non-empty means the slots are
+    /// resolved every frame through the pool residency (a page that is not
+    /// resident makes the instance incomplete); empty means `clusters` already
+    /// holds final `cluster_slot`s (tests, fixed pools).
+    pub cluster_pages: Vec<u32>,
 }
 
 impl ProxyLod {
@@ -82,6 +89,9 @@ impl ProxyLod {
         if max_ord as usize >= self.clusters.len() {
             return Err("prim_map references a missing proxy cluster".into());
         }
+        if !self.cluster_pages.is_empty() && self.cluster_pages.len() != self.clusters.len() {
+            return Err("cluster_pages must have one entry per proxy cluster".into());
+        }
         Ok(())
     }
 }
@@ -91,6 +101,12 @@ pub struct ProxyAsset {
     pub asset_key: u64,
     /// Finest first; `error` non-decreasing.
     pub lods: Vec<ProxyLod>,
+}
+
+/// Pixels per world unit at distance 1 from a column-major projection matrix
+/// (`proj[5]` is `1 / tan(fov_y / 2)` for a perspective projection).
+pub fn pixels_per_unit_from_proj(proj: &[f32; 16], viewport_height: u32) -> f32 {
+    viewport_height as f32 * 0.5 * proj[5].abs()
 }
 
 /// Pixels per world unit at distance 1 for a vertical field of view.
@@ -180,12 +196,26 @@ pub struct RtFrameInfo {
     pub over_tau_instances: u32,
     pub selections: Vec<(u32, ProxySelection)>,
     pub blas_builds: u32,
+    /// Instances left out because a page of their chosen proxy level is not
+    /// resident in the pool (cluster slots cannot be resolved).
+    pub unresolved_page_instances: u32,
+    /// Instances left out because the RT visible table would exceed
+    /// `max_visible_rows`.
+    pub dropped_instances: u32,
+    /// Distinct `(asset key, lod)` selected this frame, including instances
+    /// that were left out for non-resident pages.
+    pub wanted_lods: Vec<(u64, usize)>,
+    /// The TLAS was (re)built this frame (false: instance set, selected
+    /// levels and BLASes were identical to the previous frame).
+    pub tlas_rebuilt: bool,
+    /// The instance / visible tables were rewritten this frame.
+    pub tables_rebuilt: bool,
 }
 
 impl RtFrameInfo {
     /// Every requested instance is covered.
     pub fn complete(&self) -> bool {
-        self.missing_proxy_instances == 0
+        self.missing_proxy_instances == 0 && self.unresolved_page_instances == 0 && self.dropped_instances == 0
     }
 }
 
@@ -195,14 +225,19 @@ struct GpuLod {
     vertex_count: u32,
     index_count: u32,
     prim_map_offset: u32,
-    cluster_count: u32,
+    prim_map: Vec<u32>,
+    /// Distinct asset-local pages of the proxy clusters (empty when slots are final).
+    pages: Vec<u32>,
     error: f32,
     last_used: u64,
 }
 
 struct GpuAsset {
     lods: Vec<GpuLod>,
+    /// Per LOD: `cluster_slot`s, or local indices when `cluster_pages` is set.
     clusters: Vec<Vec<u32>>,
+    cluster_pages: Vec<Vec<u32>>,
+    gpu_bytes: u64,
 }
 
 /// Growable storage buffer.
@@ -254,6 +289,13 @@ pub struct DenseRtPass {
     rt_visible_buf: Grow,
     frame_counter: u64,
     rt_instance_count: u32,
+    rt_visible_rows: u32,
+    max_visible_rows: u32,
+    prim_map_garbage: usize,
+    /// Bumped whenever the proxy set or the prim_map pool layout changes.
+    pool_epoch: u64,
+    last_tlas: Option<(Vec<TlasInstanceInput>, u64)>,
+    last_table_sig: Option<u64>,
 }
 
 impl DenseRtPass {
@@ -311,11 +353,23 @@ impl DenseRtPass {
             rt_visible_buf: Grow::new(device, "vg_dense_rt visible"),
             frame_counter: 0,
             rt_instance_count: 0,
+            rt_visible_rows: 0,
+            max_visible_rows: 1 << 22,
+            prim_map_garbage: 0,
+            pool_epoch: 0,
+            last_tlas: None,
+            last_table_sig: None,
         })
     }
 
     pub fn config(&self) -> &DenseConfig {
         &self.cfg
+    }
+
+    /// Cap on rows of the RT visible table (ids are `1 << 24 + row`, so it must
+    /// stay below `1 << 24`).
+    pub fn set_max_visible_rows(&mut self, rows: u32) {
+        self.max_visible_rows = rows.min(DENSE_RT_VISIBLE_BASE - 1);
     }
 
     /// Output buffers (`dense_key`, stats) once a frame has been recorded.
@@ -340,18 +394,26 @@ impl DenseRtPass {
         self.assets.contains_key(&asset_key)
     }
 
-    /// Upload an asset's proxy LODs (streamed in by T3's proxy stream).
-    /// Replaces any previous registration of `asset_key`.
-    pub fn register_proxy_asset(&mut self, device: &wgpu::Device, asset: &ProxyAsset) -> Result<(), String> {
-        let mut lods = Vec::new();
-        let mut clusters = Vec::new();
-        let mut last_err = 0.0f32;
+    /// Upload an asset's proxy LODs (built by `helio_vg_stream::proxy`).
+    /// Replaces any previous registration of `asset_key`. Returns the GPU bytes
+    /// the asset holds (vertex + index + prim_map).
+    pub fn register_proxy_asset(&mut self, device: &wgpu::Device, asset: &ProxyAsset) -> Result<u64, String> {
         for lod in &asset.lods {
             lod.validate()?;
+        }
+        let mut last_err = 0.0f32;
+        for lod in &asset.lods {
             if lod.error < last_err {
                 return Err("proxy LOD errors must be non-decreasing".into());
             }
             last_err = lod.error;
+        }
+        self.drop_asset(asset.asset_key);
+        let mut lods = Vec::new();
+        let mut clusters = Vec::new();
+        let mut cluster_pages = Vec::new();
+        let mut gpu_bytes = 0u64;
+        for lod in &asset.lods {
             let usage = wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vg_dense_rt proxy vertices"),
@@ -371,26 +433,72 @@ impl DenseRtPass {
             indices.unmap();
             let prim_map_offset = self.prim_map_pool.len() as u32;
             self.prim_map_pool.extend_from_slice(&lod.prim_map);
+            let mut pages = lod.cluster_pages.clone();
+            pages.sort_unstable();
+            pages.dedup();
+            gpu_bytes += (lod.positions.len() * 12 + lod.indices.len() * 4 + lod.prim_map.len() * 4) as u64;
             lods.push(GpuLod {
                 vertices,
                 indices,
                 vertex_count: lod.positions.len() as u32,
                 index_count: lod.indices.len() as u32,
                 prim_map_offset,
-                cluster_count: lod.clusters.len() as u32,
+                prim_map: lod.prim_map.clone(),
+                pages,
                 error: lod.error,
                 last_used: 0,
             });
             clusters.push(lod.clusters.clone());
+            cluster_pages.push(lod.cluster_pages.clone());
         }
         self.prim_map_dirty = true;
-        self.assets.insert(asset.asset_key, GpuAsset { lods, clusters });
-        Ok(())
+        self.pool_epoch += 1;
+        self.assets.insert(asset.asset_key, GpuAsset { lods, clusters, cluster_pages, gpu_bytes });
+        Ok(gpu_bytes)
+    }
+
+    fn drop_asset(&mut self, asset_key: u64) -> Option<GpuAsset> {
+        let removed = self.assets.remove(&asset_key)?;
+        self.prim_map_garbage += removed.lods.iter().map(|l| l.prim_map.len()).sum::<usize>();
+        // Compact the shared prim_map pool once half of it is dead.
+        if self.prim_map_garbage * 2 > self.prim_map_pool.len() {
+            let mut pool = Vec::with_capacity(self.prim_map_pool.len() - self.prim_map_garbage);
+            for asset in self.assets.values_mut() {
+                for lod in &mut asset.lods {
+                    lod.prim_map_offset = pool.len() as u32;
+                    pool.extend_from_slice(&lod.prim_map);
+                }
+            }
+            self.prim_map_pool = pool;
+            self.prim_map_garbage = 0;
+            self.prim_map_dirty = true;
+        }
+        self.pool_epoch += 1;
+        Some(removed)
+    }
+
+    /// Forget an asset's proxies and drop its BLASes. Returns the GPU bytes
+    /// released.
+    pub fn unregister_proxy_asset(&mut self, blas: &mut BlasManager, asset_key: u64) -> u64 {
+        let Some(removed) = self.drop_asset(asset_key) else { return 0 };
+        for l in 0..removed.lods.len() {
+            blas.remove_blas(proxy_mesh_id(asset_key, l));
+        }
+        removed.gpu_bytes
+    }
+
+    /// Registered assets and the GPU bytes they hold.
+    pub fn proxy_stats(&self) -> (u32, u64) {
+        (self.assets.len() as u32, self.assets.values().map(|a| a.gpu_bytes).sum())
     }
 
     /// Select proxy LODs, build any missing BLASes, and (re)build the TLAS and
     /// the per-instance tables for this frame. Record before
     /// [`DenseRtPass::record`] in the same (or an earlier) submission.
+    ///
+    /// Proxies whose clusters carry a page list ([`ProxyLod::cluster_pages`])
+    /// need [`DenseRtPass::prepare_frame_resolved`]; with this entry point they
+    /// count as unresolved.
     pub fn prepare_frame(
         &mut self,
         device: &wgpu::Device,
@@ -403,13 +511,42 @@ impl DenseRtPass {
         tau_px: f32,
         px_per_unit: f32,
     ) -> Result<RtFrameInfo, RtError> {
+        self.prepare_frame_resolved(device, queue, encoder, blas, tlas, frame, requests, tau_px, px_per_unit, 0, &|_, _| None)
+    }
+
+    /// As [`Self::prepare_frame`], resolving page-addressed proxy clusters to
+    /// `cluster_slot`s: `resolve_page(asset_key, page)` is the page's pool slot
+    /// (`None` = not resident, the instance is left out and counted in
+    /// [`RtFrameInfo::unresolved_page_instances`]). `residency_version` must
+    /// change whenever any answer of `resolve_page` may have (the store's
+    /// `table_version`); while it, the selected levels and the instance set are
+    /// unchanged the tables and TLAS are not rebuilt.
+    ///
+    /// CPU cost: O(requests) per frame; O(sum of proxy clusters of the
+    /// requested instances) only when the set, a level or the residency changed.
+    pub fn prepare_frame_resolved(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        blas: &mut BlasManager,
+        tlas: &mut TlasManager,
+        frame: &DenseFrame,
+        requests: &[RtInstanceRequest],
+        tau_px: f32,
+        px_per_unit: f32,
+        residency_version: u64,
+        resolve_page: &dyn Fn(u64, u32) -> Option<u32>,
+    ) -> Result<RtFrameInfo, RtError> {
         self.frame_counter += 1;
         let frame_no = self.frame_counter;
         let mut info = RtFrameInfo::default();
-        let mut tlas_inputs = Vec::with_capacity(requests.len());
-        let mut rows = Vec::with_capacity(requests.len());
-        let mut visible: Vec<DenseVisibleGpu> = Vec::new();
-        for r in requests {
+        // (request index, selected lod, within tau) of every traceable instance.
+        let mut chosen: Vec<(usize, usize, bool)> = Vec::with_capacity(requests.len());
+        let mut resolvable: HashMap<(u64, usize), bool> = HashMap::new();
+        let mut errors: Vec<f32> = Vec::new();
+        let mut rows_used = 0u32;
+        for (ri, r) in requests.iter().enumerate() {
             let Some(asset) = self.assets.get_mut(&r.asset_key) else {
                 info.missing_proxy_instances += 1;
                 continue;
@@ -422,16 +559,35 @@ impl DenseRtPass {
             // Nearest possible distance of any point of the instance: never
             // farther than the tile's nearest distance, so at least as fine.
             let near = (d - r.world_radius).max(frame.ray_t[0]);
-            let errors: Vec<f32> = asset.lods.iter().map(|l| l.error).collect();
+            errors.clear();
+            errors.extend(asset.lods.iter().map(|l| l.error));
             let sel = select_proxy_lod(&errors, r.error_scale, near, tau_px, px_per_unit);
+            asset.lods[sel.lod].last_used = frame_no;
+            if !info.wanted_lods.contains(&(r.asset_key, sel.lod)) {
+                info.wanted_lods.push((r.asset_key, sel.lod));
+            }
+            if !asset.cluster_pages[sel.lod].is_empty() {
+                let lod = &asset.lods[sel.lod];
+                let ok = *resolvable
+                    .entry((r.asset_key, sel.lod))
+                    .or_insert_with(|| lod.pages.iter().all(|&p| resolve_page(r.asset_key, p).is_some()));
+                if !ok {
+                    info.unresolved_page_instances += 1;
+                    continue;
+                }
+            }
+            let cluster_rows = asset.clusters[sel.lod].len() as u32;
+            if rows_used + cluster_rows > self.max_visible_rows {
+                info.dropped_instances += 1;
+                continue;
+            }
+            rows_used += cluster_rows;
             if !sel.within_tau {
                 info.over_tau_instances += 1;
             }
-            let lod = &mut asset.lods[sel.lod];
-            lod.last_used = frame_no;
-            let mesh_id = proxy_mesh_id(r.asset_key, sel.lod);
+            let lod = &asset.lods[sel.lod];
             if blas.build_from_buffers(
-                mesh_id,
+                proxy_mesh_id(r.asset_key, sel.lod),
                 encoder,
                 BlasGeometry {
                     revision: 0,
@@ -446,32 +602,89 @@ impl DenseRtPass {
             )? {
                 info.blas_builds += 1;
             }
-            tlas_inputs.push(TlasInstanceInput { mesh_id, transform: r.transform });
-            let visible_base = DENSE_RT_VISIBLE_BASE + visible.len() as u32;
-            for &cluster_slot in &asset.clusters[sel.lod] {
-                visible.push(DenseVisibleGpu { instance: r.instance_id, cluster_slot });
-            }
-            rows.push(RtInstanceGpu {
-                visible_base,
-                prim_map_offset: lod.prim_map_offset,
-                instance_id: r.instance_id,
-                flags: sel.within_tau as u32,
-            });
             info.selections.push((r.instance_id, sel));
-            let _ = lod.cluster_count;
+            chosen.push((ri, sel.lod, sel.within_tau));
         }
-        tlas.build(encoder, &tlas_inputs, blas)?;
-        info.tlas_instances = tlas_inputs.len() as u32;
-        info.rt_visible_count = visible.len() as u32;
-        self.rt_instance_count = rows.len() as u32;
 
-        if self.prim_map_dirty {
-            let bytes = bytemuck::cast_slice(&self.prim_map_pool).to_vec();
-            self.prim_map_buf.write(device, queue, "vg_dense_rt prim_map", &bytes);
-            self.prim_map_dirty = false;
+        let tlas_inputs: Vec<TlasInstanceInput> = chosen
+            .iter()
+            .map(|&(ri, l, _)| TlasInstanceInput {
+                mesh_id: proxy_mesh_id(requests[ri].asset_key, l),
+                transform: requests[ri].transform,
+            })
+            .collect();
+        info.tlas_instances = tlas_inputs.len() as u32;
+        if tlas_inputs.is_empty() {
+            self.rt_instance_count = 0;
+            self.last_tlas = None;
+            return Ok(info);
         }
-        self.instances_buf.write(device, queue, "vg_dense_rt instances", bytemuck::cast_slice(&rows));
-        self.rt_visible_buf.write(device, queue, "vg_dense_rt visible", bytemuck::cast_slice(&visible));
+        let tlas_same = self
+            .last_tlas
+            .as_ref()
+            .is_some_and(|(inputs, rev)| *rev == blas.revision() && *inputs == tlas_inputs)
+            && tlas.tlas().is_some();
+        tlas.build(encoder, &tlas_inputs, blas)?;
+        info.tlas_rebuilt = !tlas_same;
+        self.last_tlas = Some((tlas_inputs, blas.revision()));
+
+        // Table signature: which instances, which level, which asset, under
+        // which residency/pool layout.
+        let mut sig: u64 = 0xcbf2_9ce4_8422_2325 ^ residency_version.rotate_left(17) ^ self.pool_epoch;
+        let mut mix = |v: u64| {
+            sig = (sig ^ v).wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        for &(ri, l, within) in &chosen {
+            let r = &requests[ri];
+            mix(r.instance_id as u64);
+            mix(r.asset_key);
+            mix(l as u64 | ((within as u64) << 32));
+        }
+        if self.last_table_sig != Some(sig) {
+            let mut rows = Vec::with_capacity(chosen.len());
+            let mut visible: Vec<DenseVisibleGpu> = Vec::new();
+            let mut slot_memo: HashMap<(u64, u32), u32> = HashMap::new();
+            for &(ri, l, within) in &chosen {
+                let r = &requests[ri];
+                let asset = &self.assets[&r.asset_key];
+                let lod = &asset.lods[l];
+                let visible_base = DENSE_RT_VISIBLE_BASE + visible.len() as u32;
+                let locals = &asset.clusters[l];
+                let pages = &asset.cluster_pages[l];
+                for (c, &cl) in locals.iter().enumerate() {
+                    let cluster_slot = if pages.is_empty() {
+                        cl
+                    } else {
+                        let page = pages[c];
+                        let pool = *slot_memo
+                            .entry((r.asset_key, page))
+                            .or_insert_with(|| resolve_page(r.asset_key, page).unwrap_or(0));
+                        (pool << helio_vg_format::PAGE_CLUSTER_SHIFT) | cl
+                    };
+                    visible.push(DenseVisibleGpu { instance: r.instance_id, cluster_slot });
+                }
+                rows.push(RtInstanceGpu {
+                    visible_base,
+                    prim_map_offset: lod.prim_map_offset,
+                    instance_id: r.instance_id,
+                    flags: within as u32,
+                });
+            }
+            info.rt_visible_count = visible.len() as u32;
+            self.rt_visible_rows = visible.len() as u32;
+            if self.prim_map_dirty {
+                let bytes = bytemuck::cast_slice(&self.prim_map_pool).to_vec();
+                self.prim_map_buf.write(device, queue, "vg_dense_rt prim_map", &bytes);
+                self.prim_map_dirty = false;
+            }
+            self.instances_buf.write(device, queue, "vg_dense_rt instances", bytemuck::cast_slice(&rows));
+            self.rt_visible_buf.write(device, queue, "vg_dense_rt visible", bytemuck::cast_slice(&visible));
+            self.rt_instance_count = rows.len() as u32;
+            self.last_table_sig = Some(sig);
+            info.tables_rebuilt = true;
+        } else {
+            info.rt_visible_count = self.rt_visible_rows;
+        }
         Ok(info)
     }
 
@@ -503,6 +716,20 @@ impl DenseRtPass {
         tile_mask: &wgpu::Buffer,
         tlas: &TlasManager,
     ) -> Result<(), RtError> {
+        let mut rec = helio_core::CommandRecorder::from_encoder(encoder);
+        self.record_rec(device, queue, &mut rec, frame, tile_mask, tlas)
+    }
+
+    /// As [`Self::record`], into a render-graph command stream.
+    pub fn record_rec(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        tile_mask: &wgpu::Buffer,
+        tlas: &TlasManager,
+    ) -> Result<(), RtError> {
         let Some(tlas_res) = tlas.as_binding() else {
             return Err(RtError::Acceleration(AccelerationError::Unsupported));
         };
@@ -519,6 +746,11 @@ impl DenseRtPass {
         let b = self.buffers.as_ref().unwrap();
         b.write_params(queue, frame);
         encoder.clear_buffer(&b.state, 0, Some(STATE_HEADER_WORDS as u64 * 4));
+        // See `DenseNonRtPass`: stale keys outside dense tiles would ghost.
+        encoder.clear_buffer(&b.dense_key, 0, None);
+        if let Some(bary) = &self.dense_bary {
+            encoder.clear_buffer(bary, 0, None);
+        }
 
         let compact_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vg_dense_rt compact"),
@@ -543,7 +775,7 @@ impl DenseRtPass {
                 bg_entry(10, self.dense_bary.as_ref().unwrap()),
             ],
         });
-        let mut run = |label: &str, f: &dyn Fn(&mut wgpu::ComputePass<'_>)| {
+        let mut run = |label: &str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
             let mut pass = encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
             f(&mut pass);
@@ -564,6 +796,13 @@ impl DenseRtPass {
             p.dispatch_workgroups_indirect(&b.args, 0);
         });
         Ok(())
+    }
+
+    /// Distinct `(asset key, lod)` the last [`Self::prepare_frame_resolved`] selected
+    /// (including instances left out for non-resident pages), so the caller can
+    /// request exactly those pages.
+    pub fn lod_pages(&self, asset_key: u64, lod: usize) -> &[u32] {
+        self.assets.get(&asset_key).and_then(|a| a.lods.get(lod)).map_or(&[], |l| l.pages.as_slice())
     }
 
     pub fn tlas_instance_count(&self) -> u32 {
@@ -633,6 +872,7 @@ mod tests {
             indices: vec![0, 1, 2],
             prim_map: vec![0],
             clusters: vec![0],
+            cluster_pages: vec![],
         };
         assert!(ok.validate().is_ok());
         let mut bad = ok.clone();

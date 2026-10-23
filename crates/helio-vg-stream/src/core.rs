@@ -138,6 +138,7 @@ pub struct StoreCore {
     sched: PageScheduler,
     caches: HashMap<u32, CacheEntry>,
     pub asset_slot_capacity: u32,
+    table_version: u64,
 }
 
 fn validate_page(bytes: &[u8], local: u32) -> Result<(), String> {
@@ -168,6 +169,7 @@ impl StoreCore {
             sched,
             caches: HashMap::new(),
             asset_slot_capacity: 16,
+            table_version: 1,
         }
     }
 
@@ -214,6 +216,36 @@ impl StoreCore {
     pub fn slot_of_page(&self, global: u32) -> Option<u32> {
         self.sched.slot_of(global)
     }
+    /// Increments whenever any page residency changes (uploads, evictions,
+    /// releases): caches of resolved pool slots are valid while it is unchanged.
+    pub fn table_version(&self) -> u64 {
+        self.table_version
+    }
+
+    /// Pool slot of asset-local page `local`, if resident.
+    pub fn local_page_slot(&self, asset_slot: u32, local: u32) -> Option<u32> {
+        let a = self.asset(asset_slot)?;
+        self.sched.slot_of(a.pages.start + local)
+    }
+
+    /// Ask for (or keep resident) asset-local pages: each call is a request for
+    /// non-resident pages and a recency touch for resident ones, so calling it
+    /// every frame while the pages are wanted keeps them from being evicted.
+    pub fn request_local_pages(&mut self, asset_slot: u32, locals: &[u32]) {
+        let frame = self.frame;
+        let Some(base) = self.asset(asset_slot).map(|a| (a.pages.start, a.pages.len)) else { return };
+        for &l in locals {
+            if l < base.1 {
+                self.sched.request(base.0 + l, 1, frame);
+            }
+        }
+    }
+
+    /// The asset's source, content id and lattice (for proxy builds).
+    pub fn asset_source(&self, asset_slot: u32) -> Option<(Arc<dyn VgeoSource>, [u64; 2], GpuAssetQuant)> {
+        self.asset(asset_slot).map(|a| (a.source.clone(), a.content, a.quant))
+    }
+
     pub fn scheduler_stats(&self) -> SchedulerStats {
         self.sched.stats()
     }
@@ -337,6 +369,7 @@ impl StoreCore {
         self.ref_alloc.free(a.group_refs);
         self.page_alloc.free(a.pages);
         self.free_slots.push(slot);
+        self.table_version += 1;
         Released { freed: true, slot, table_writes }
     }
 
@@ -433,6 +466,9 @@ impl StoreCore {
                 a.ready = true;
                 ready_changed.push((slot as u32, true));
             }
+        }
+        if !table_writes.is_empty() {
+            self.table_version += 1;
         }
         UpdateOps { uploads, table_writes, ready_changed }
     }

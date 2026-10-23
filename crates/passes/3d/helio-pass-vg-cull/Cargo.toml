@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core = { workspace = true }
+helio-mats = { workspace = true }
 helio-vg-format = { workspace = true }
 helio-vg-stream = { path = "../../../helio-vg-stream" }
 helio-pass-vg-bvh = { path = "../helio-pass-vg-bvh" }

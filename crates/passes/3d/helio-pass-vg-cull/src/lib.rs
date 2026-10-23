@@ -45,7 +45,7 @@
 //!
 //! | buffer | layout |
 //! |---|---|
-//! | `visible_clusters` | `array<vec2<u32>>` = `{instance_id, cluster_slot}`. Six bins of `bin_capacity` entries: entry `k` of bin `b` is at `b * bin_capacity + k`, and that **unified index** is the "visible cluster index" of the vis-buffer id (`helio_vg_format::vis_pack`). `instance_id` is a row of `vg_instances`, `cluster_slot` is `helio_vg_format::cluster_slot(pool_slot, local)` = `pool_slot << 11 | local` (page word base `pool_slot * 32768`). |
+//! | `visible_clusters` | `array<vec2<u32>>` = `{instance_id, cluster_slot}`. Eight bins of `bin_capacity` entries: entry `k` of bin `b` is at `b * bin_capacity + k`, and that **unified index** is the "visible cluster index" of the vis-buffer id (`helio_vg_format::vis_pack`). `instance_id` is a row of `vg_instances`, `cluster_slot` is `helio_vg_format::cluster_slot(pool_slot, local)` = `pool_slot << 11 | local` (page word base `pool_slot * 32768`). |
 //! | `state` | `array<u32>`, see [`state`]: bin counts, [`stats`], queue cursors, phase-0 counts, **ranges** and **indirect args**. |
 //! | page requests | Not a buffer of this pass: unresident pages are requested and used pages touched directly in `helio-vg-stream`'s `vg_feedback` (`vg_request_page`, `vg_use_or_request_page`), which the store reads back. `stats::PAGE_REQUESTS` is no longer counted. |
 //!
@@ -56,7 +56,16 @@
 //! tile marked dense in last frame's `dense_tile_mask`, plus
 //! `TierLock::Dense`). Hardware-class clusters are never moved to dense:
 //! the dense tier re-processes tiles, it does not claim whole clusters.
-//! `TierLock` overrides apply per instance; `VgMode::ForceHwRaster` routes
+//! **Alpha-masked clusters** (their section's material has `FLAG_ALPHA_TEST`; needs
+//! `VgCullInputs::materials`, otherwise the cull is the opaque-only path with no
+//! material loads) leave those bins: `6` = hardware masked (always 384 vertices per
+//! cluster, one `draw_indirect` at word 24 of the phase's args block), `7` = software
+//! masked (only with [`VgCullConfig::sw_masked`], i.e. the 64-bit atomic raster
+//! kernel; dispatch args at word 28). Software- and dense-class masked clusters go to
+//! `7`, or to `6` without `sw_masked`; tier locks and `ForceHwRaster` apply to the
+//! unmasked class the same way. The dense peel bins every range, so it picks masked
+//! clusters up from bins `>= CULL_FIRST_MASKED_BIN`. Two-sided materials skip the
+//! normal-cone test (their back faces are visible). `TierLock` overrides apply per instance; `VgMode::ForceHwRaster` routes
 //! everything to the hardware bins; `VgMode::Off` produces nothing.
 //!
 //! **Ranges** (`state[RANGES ..]`, byte offset [`RANGES_BYTE_OFFSET`]): per
@@ -72,6 +81,8 @@
 //! | `b * 16`, `b < 4` | `DrawIndirect {vertex_count = 96 * (b + 1), instance_count, first_vertex = 0, first_instance = first_unified_index}`. T6 pulls vertices with `instance_index` = visible cluster index (needs `INDIRECT_FIRST_INSTANCE`). |
 //! | `64` | SW `DispatchIndirect {x = min(n, SW_GROUP_WIDTH), y = ceil(n / SW_GROUP_WIDTH), z = 1}`; workgroup `(x, y)` is cluster `first + y * SW_GROUP_WIDTH + x` (guard `< first + n`). |
 //! | `80` | Dense candidates, same shape as SW. |
+//! | `96` | Masked hardware `DrawIndirect {vertex_count = 384, instance_count, 0, first_instance}` (bin 6). |
+//! | `112` | Masked software dispatch, same shape as SW (bin 7). |
 //!
 //! Because `state` is both a storage buffer here and the indirect source in
 //! later passes, a consumer must not bind it as storage in the same dispatch
@@ -79,8 +90,8 @@
 //!
 //! # Required device limits
 //!
-//! The main bind group has 19 storage buffers and one sampled texture; request
-//! `max_storage_buffers_per_shader_stage >= 20` (native adapters report far
+//! The main bind group has 20 storage buffers (the material table is the 20th) and one
+//! sampled texture; request `max_storage_buffers_per_shader_stage >= 20` (native adapters report far
 //! more, WebGPU defaults do not suffice; VG is off where unavailable).
 //!
 //! # Contracts with neighbouring crates (reconciled in T10a)
@@ -145,6 +156,15 @@ pub const BIN_HW_96: u32 = 2;
 pub const BIN_HW_128: u32 = 3;
 pub const BIN_SW: u32 = 4;
 pub const BIN_DENSE: u32 = 5;
+/// Hardware raster of clusters whose material is alpha tested (one bin: every
+/// cluster is drawn with `HW_MASKED_VERTICES` vertices, a fragment shader
+/// samples the alpha texture and discards).
+pub const BIN_HW_MASKED: u32 = 6;
+/// Software micro-raster of alpha-tested clusters (64-bit atomic kernel only; see
+/// [`FLAG_SW_MASKED`]).
+pub const BIN_SW_MASKED: u32 = 7;
+/// Vertices drawn per cluster of the masked hardware bin (the 128-triangle class).
+pub const HW_MASKED_VERTICES: u32 = 384;
 pub const BIN_COUNT: u32 = helio_vg_format::CULL_BIN_COUNT;
 /// Vertices drawn per cluster for hardware bin `b`: `96 * (b + 1)`.
 pub const fn hw_bin_vertex_count(bin: u32) -> u32 {
@@ -166,7 +186,7 @@ pub const fn hw_bin_for_tris(tris: u32) -> u32 {
 /// Hard ceiling on a bin's capacity: `BIN_COUNT * this < 2^24`, so unified
 /// visible indices stay below the 3-RT id base (`1 << 24`, well inside the 25-bit
 /// visible cluster index of the vis id).
-pub const MAX_BIN_CAPACITY: u32 = 1 << 21;
+pub const MAX_BIN_CAPACITY: u32 = 1 << 20;
 const _: () = assert!(BIN_COUNT * MAX_BIN_CAPACITY < helio_vg_format::VISIBLE_INDEX_LIMIT);
 /// Workgroups per row of the SW/dense indirect dispatches.
 pub const SW_GROUP_WIDTH: u32 = helio_vg_format::SW_GROUP_WIDTH;
@@ -196,9 +216,9 @@ pub mod state {
     /// Clamped per-bin counts after phase 0.
     pub const PHASE0_COUNTS: u32 = 32;
     pub const RANGES: u32 = helio_vg_format::CULL_STATE_RANGES;
-    pub const ARGS: u32 = 64;
-    pub const ARGS_PHASE_WORDS: u32 = 24;
-    pub const WORDS: u32 = 128;
+    pub const ARGS: u32 = 72;
+    pub const ARGS_PHASE_WORDS: u32 = 32;
+    pub const WORDS: u32 = 144;
 }
 
 pub const RANGES_BYTE_OFFSET: u64 = state::RANGES as u64 * 4;
@@ -217,6 +237,15 @@ pub const fn sw_dispatch_args_offset(phase: u32) -> u64 {
 /// Byte offset of the dense dispatch args.
 pub const fn dense_dispatch_args_offset(phase: u32) -> u64 {
     ARGS_BYTE_OFFSET + phase as u64 * ARGS_PHASE_BYTES + 80
+}
+/// Byte offset of the masked hardware draw args (one `DrawIndirect`, vertex
+/// count [`HW_MASKED_VERTICES`]) for `phase`.
+pub const fn hw_masked_draw_args_offset(phase: u32) -> u64 {
+    ARGS_BYTE_OFFSET + phase as u64 * ARGS_PHASE_BYTES + 96
+}
+/// Byte offset of the masked software dispatch args for `phase`.
+pub const fn sw_masked_dispatch_args_offset(phase: u32) -> u64 {
+    ARGS_BYTE_OFFSET + phase as u64 * ARGS_PHASE_BYTES + 112
 }
 /// Byte offset of `{first, count}` for `phase` and `bin`.
 pub const fn range_offset(phase: u32, bin: u32) -> u64 {
@@ -298,8 +327,12 @@ impl VgCullStats {
 
     /// Software + dense clusters, and the hardware clusters, of the sample.
     pub fn tier_split(&self) -> (u32, u32, u32) {
-        let hw: u32 = self.tier_clusters[..BIN_SW as usize].iter().sum();
-        (hw, self.tier_clusters[BIN_SW as usize], self.tier_clusters[BIN_DENSE as usize])
+        let hw: u32 = self.tier_clusters[..BIN_SW as usize].iter().sum::<u32>() + self.tier_clusters[BIN_HW_MASKED as usize];
+        (
+            hw,
+            self.tier_clusters[BIN_SW as usize] + self.tier_clusters[BIN_SW_MASKED as usize],
+            self.tier_clusters[BIN_DENSE as usize],
+        )
     }
 
     /// One line for an on-screen overlay or window title.
@@ -336,6 +369,13 @@ pub const fn mode_bits(mode: VgMode) -> u32 {
 pub const FLAG_TWO_PHASE: u32 = 1;
 pub const FLAG_DENSE_MASK: u32 = 2;
 pub const FLAG_STATS: u32 = 4;
+/// The material table is bound: clusters are checked for an alpha-tested
+/// material and routed to the masked bins (and two-sided materials skip the
+/// normal-cone test). Clear = the opaque-only path, no material loads at all.
+pub const FLAG_MASKED: u32 = 8;
+/// Masked clusters of the software class may use [`BIN_SW_MASKED`] (the raster
+/// has the 64-bit atomic kernel); clear = they go to [`BIN_HW_MASKED`].
+pub const FLAG_SW_MASKED: u32 = 16;
 
 // ── Shader assembly ────────────────────────────────────────────────────────
 
@@ -350,6 +390,9 @@ pub fn wgsl_constants() -> String {
     };
     u("VGC_BIN_SW", BIN_SW);
     u("VGC_BIN_DENSE", BIN_DENSE);
+    u("VGC_BIN_HW_MASKED", BIN_HW_MASKED);
+    u("VGC_BIN_SW_MASKED", BIN_SW_MASKED);
+    u("VGC_HW_MASKED_VERTS", HW_MASKED_VERTICES);
     u("VGC_BIN_COUNT", BIN_COUNT);
     u("VGC_ST_BINS", state::BINS);
     u("VGC_ST_STATS", state::STATS);
@@ -366,6 +409,12 @@ pub fn wgsl_constants() -> String {
     u("VGC_FLAG_TWO_PHASE", FLAG_TWO_PHASE);
     u("VGC_FLAG_DENSE_MASK", FLAG_DENSE_MASK);
     u("VGC_FLAG_STATS", FLAG_STATS);
+    u("VGC_FLAG_MASKED", FLAG_MASKED);
+    u("VGC_FLAG_SW_MASKED", FLAG_SW_MASKED);
+    u("VGC_MAT_ALPHA_TEST", helio_mats::FLAG_ALPHA_TEST);
+    u("VGC_MAT_DOUBLE_SIDED", helio_mats::FLAG_DOUBLE_SIDED);
+    u("VGC_MAT_ALPHA_BLEND", helio_mats::FLAG_ALPHA_BLEND);
+    u("VGC_MAT_CUSTOM", helio_mats::FLAG_HAS_CUSTOM_SHADER);
     u("VGC_CLUSTER_FLAG_LEAF", GpuCluster::FLAG_LEAF);
     for (name, v) in [
         ("JOBS", stats::JOBS),

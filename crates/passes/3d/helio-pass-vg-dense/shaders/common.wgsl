@@ -27,7 +27,9 @@ const STAT_TILES: u32 = 7u;
 const STATE_HEADER: u32 = 16u;
 
 const SLOT_INVALID: u32 = 0xffffffffu;
-const SLOT_STRIDE: u32 = CLUSTER_CAP + 1u;
+// `slot_lists`: per slot [count, start, cursor] (LIST_HDR words), then the entry pool
+// at LIST_POOL_BASE; the entries of slot s are pool[start .. start + count).
+const LIST_HDR: u32 = 3u;
 // Edge-function slack: turns would-be cracks on shared edges into (harmless)
 // double coverage resolved by depth.
 const EDGE_EPS: f32 = 1.0e-7;

@@ -133,6 +133,8 @@ struct Resources {
     camera: wgpu::Buffer,
     page_count: u32,
     instance_count: u32,
+    /// The scene's `materials` table; `Some` turns on alpha-mask routing.
+    materials: Option<wgpu::Buffer>,
 }
 
 impl Resources {
@@ -154,6 +156,7 @@ impl Resources {
             gcbvh_header: &self.bvh_header,
             gcbvh_items: &self.bvh_items,
             dense_mask: None,
+            materials: self.materials.as_ref(),
             instance_count: self.instance_count,
             dense_tiles: [1, 1],
         }
@@ -247,6 +250,7 @@ fn upload(g: &Gpu, s: &Scene) -> Resources {
         }),
         page_count: s.dag.page_count() as u32,
         instance_count: n,
+        materials: None,
     }
 }
 
@@ -782,4 +786,127 @@ fn redistributed_frontier_matches_reference_without_lost_or_duplicate_clusters()
             assert!(out.state[(state::STATS + stats::SPILLED) as usize] > 0, "exercise actual redistribution");
         }
     }
+}
+
+/// One `GpuMaterial` row (24 words) with the given flags.
+fn material_table(g: &Gpu, flags: u32) -> wgpu::Buffer {
+    let mut row = [0u32; 24];
+    row[18] = flags;
+    buf(g, "materials", &row)
+}
+
+fn masked_cull(
+    g: &Gpu,
+    s: &Scene,
+    flags: u32,
+    sw_masked: bool,
+    cone: bool,
+) -> (PhaseOut, BTreeSet<(u32, u32)>, Vec<u32>) {
+    let mut r = upload(g, s);
+    r.materials = Some(material_table(g, flags));
+    let v = set_camera(g, &r, [31.0, 0.0, 400.0]);
+    let mut core = VgCullCore::new(
+        &g.device,
+        VgCullConfig {
+            two_phase_occlusion: false,
+            initial_bin_capacity: 4096,
+            tau_px: 2.0,
+            sw_masked,
+            ..Default::default()
+        },
+    );
+    begin(g, &mut core, &r);
+    run_phase(g, &mut core, &r, 0);
+    let (out, _) = collect(g, &core, &r, 0);
+    let (all, _) = expected(s, &v, 2.0, VgMode::Auto);
+    let want: BTreeSet<(u32, u32)> = all
+        .into_iter()
+        .filter(|i| !cone || i.0 != 0)
+        .map(|i| (i.0, i.1))
+        .collect();
+    let args = out.state.clone();
+    (out, want, args)
+}
+
+#[test]
+fn alpha_tested_material_routes_clusters_to_the_masked_bins() {
+    use helio_pass_vg_cull::{BIN_HW_MASKED, BIN_SW_MASKED, HW_MASKED_VERTICES};
+    let Some(g) = gpu() else {
+        return;
+    };
+    let s = scene(false);
+    let flags = helio_mats::FLAG_ALPHA_TEST;
+
+    // Hardware masked only: every cluster, whatever its class, lands in bin 6.
+    let (out, want, st) = masked_cull(&g, &s, flags, false, false);
+    assert!(!want.is_empty());
+    let got: BTreeSet<(u32, u32)> = out.items.iter().map(|i| (i.0, i.1)).collect();
+    assert_eq!(got, want, "masked routing selects the same clusters, only the bin differs");
+    for item in &out.items {
+        assert_eq!(item.2, BIN_HW_MASKED, "{item:?}");
+    }
+    for b in 0..BIN_COUNT as usize {
+        let n = out.ranges[b].1;
+        assert_eq!(n == 0, b != BIN_HW_MASKED as usize, "bin {b} holds {n}");
+    }
+    let a = state::ARGS as usize;
+    let (first, count) = out.ranges[BIN_HW_MASKED as usize];
+    assert_eq!(&st[a + 24..a + 28], &[HW_MASKED_VERTICES, count, 0, first], "masked draw args");
+    assert_eq!(helio_pass_vg_cull::hw_masked_draw_args_offset(0), (a as u64 + 24) * 4);
+
+    // With the software masked kernel available, SW-class clusters go to bin 7.
+    let (out, want_sw, st) = masked_cull(&g, &s, flags, true, false);
+    let got: BTreeSet<(u32, u32)> = out.items.iter().map(|i| (i.0, i.1)).collect();
+    assert_eq!(got, want_sw);
+    let sw_n = out.ranges[BIN_SW_MASKED as usize].1;
+    assert!(sw_n > 0, "the scene has software-class clusters");
+    for item in &out.items {
+        assert!(item.2 == BIN_HW_MASKED || item.2 == BIN_SW_MASKED, "{item:?}");
+    }
+    assert_eq!(&st[a + 28..a + 31], &[sw_n.min(helio_pass_vg_cull::SW_GROUP_WIDTH), sw_n.div_ceil(helio_pass_vg_cull::SW_GROUP_WIDTH), 1]);
+    for b in 0..6usize {
+        assert_eq!(out.ranges[b].1, 0, "opaque bin {b} stays empty");
+    }
+}
+
+#[test]
+fn opaque_materials_leave_the_opaque_bins_untouched() {
+    use helio_pass_vg_cull::{BIN_HW_MASKED, BIN_SW_MASKED};
+    let Some(g) = gpu() else {
+        return;
+    };
+    let s = scene(false);
+    // The material table is bound, but the material is not alpha tested.
+    let (out, want, _) = masked_cull(&g, &s, helio_mats::FLAG_DOUBLE_SIDED, true, false);
+    let got: BTreeSet<(u32, u32)> = out.items.iter().map(|i| (i.0, i.1)).collect();
+    assert_eq!(got, want);
+    assert_eq!(out.ranges[BIN_HW_MASKED as usize].1 + out.ranges[BIN_SW_MASKED as usize].1, 0);
+}
+
+#[test]
+fn two_sided_masked_clusters_skip_the_normal_cone_test() {
+    let Some(g) = gpu() else {
+        return;
+    };
+    let mut s = scene(false);
+    let cone = helio_vg_format::pack_cone([0.0, 0.0, -1.0], 0.866);
+    for c in &mut s.dag.clusters {
+        c.cone = cone;
+    }
+    s.instances[0].inst.flags |= helio_vg_format::INST_CONE_CULL;
+    // Single-sided masked: instance 0 faces away and is cone culled.
+    let (out, want, _) = masked_cull(&g, &s, helio_mats::FLAG_ALPHA_TEST, false, true);
+    let got: BTreeSet<(u32, u32)> = out.items.iter().map(|i| (i.0, i.1)).collect();
+    assert_eq!(got, want);
+    assert!(out.state[(state::STATS + stats::CULLED_CONE) as usize] > 0);
+    // Two-sided masked (foliage): back faces are visible, nothing is cone culled.
+    let (out, _, _) = masked_cull(
+        &g,
+        &s,
+        helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_DOUBLE_SIDED,
+        false,
+        false,
+    );
+    assert_eq!(out.state[(state::STATS + stats::CULLED_CONE) as usize], 0);
+    assert!(out.items.iter().any(|i| i.0 == 0), "instance 0 survives for two-sided foliage");
 }

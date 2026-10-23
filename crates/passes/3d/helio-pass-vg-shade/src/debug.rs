@@ -25,7 +25,13 @@ pub struct VgShadeDebug<'a> {
     pub bin_capacity: u32,
     /// The software raster's per-tile counters.
     pub tile_counters: &'a wgpu::Buffer,
+    /// The raster's own dense-tile classification of this frame.
     pub dense_mask: &'a wgpu::Buffer,
+    /// The tiles Tier 3 resolved this frame (the dense pass's union mask), when a
+    /// dense pass ran. The Raster Tier view paints those tiles dense/RT instead of
+    /// by the cull bin of the pixel's cluster; `dense_mask` stays the raster's own
+    /// classification (Dense Tile Mask view).
+    pub resolved_mask: Option<&'a wgpu::Buffer>,
     /// Tile grid `[x, y]` of the two buffers above.
     pub tiles: [u32; 2],
     /// The LOD error threshold in pixels.
@@ -42,7 +48,7 @@ pub(crate) struct DebugParams {
     tiles_x: u32,
     tiles_y: u32,
     tau_px: f32,
-    _pad: u32,
+    dense_resolved: u32,
 }
 
 pub(crate) struct DebugPipeline {
@@ -74,7 +80,7 @@ pub fn debug_source() -> String {
 impl DebugPipeline {
     fn new(device: &wgpu::Device) -> Self {
         let mut entries = vec![storage_entry(0, true), uniform_entry(1)];
-        entries.extend((2..=17).map(|b| storage_entry(b, true)));
+        entries.extend((2..=18).map(|b| storage_entry(b, true)));
         let bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VgShade debug 0"),
             entries: &entries,
@@ -144,7 +150,7 @@ impl VgShade {
                 tiles_x: debug.tiles[0].max(1),
                 tiles_y: debug.tiles[1].max(1),
                 tau_px: debug.tau_px,
-                _pad: 0,
+                dense_resolved: u32::from(debug.resolved_mask.is_some()),
             }),
         );
         let s = &debug.stream;
@@ -170,6 +176,7 @@ impl VgShade {
                 wgpu::BindGroupEntry { binding: 15, resource: buf(debug.cull_state) },
                 wgpu::BindGroupEntry { binding: 16, resource: buf(debug.tile_counters) },
                 wgpu::BindGroupEntry { binding: 17, resource: buf(debug.dense_mask) },
+                wgpu::BindGroupEntry { binding: 18, resource: buf(debug.resolved_mask.unwrap_or(&self.dummy_keys)) },
             ],
         });
         let payload_view = self.payload_view.as_ref().expect("encode_rec resized the targets");

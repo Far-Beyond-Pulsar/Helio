@@ -20,8 +20,8 @@ fn base_caps() -> Capabilities {
 #[test]
 fn modules_without_int64_validate_with_no_extra_capabilities() {
     for (label, src) in shaders::all_sources() {
-        if label == "vg_sw_raster" {
-            continue; // uses u64 atomics, see below
+        if label.starts_with("vg_sw_raster") || label.contains("(bindless)") {
+            continue; // u64 atomics / binding arrays need capabilities, see below
         }
         validate(label, &src, base_caps()).unwrap_or_else(|e| panic!("{e}"));
     }
@@ -54,6 +54,10 @@ fn entry_points_exist() {
         ("vg_sw_bin", vec!["sw_bin_main"]),
         ("vg_tile_raster", vec!["tile_raster_main"]),
         ("vg_tile_classify", vec!["classify_main", "dense_args_main"]),
+        ("vg_hw_raster_masked (bindless)", vec!["vs_masked", "fs_masked"]),
+        ("vg_hw_raster_masked (expanded)", vec!["vs_masked", "fs_masked"]),
+        ("vg_sw_raster_masked (bindless)", vec!["sw_raster_masked_main"]),
+        ("vg_sw_raster_masked (expanded)", vec!["sw_raster_masked_main"]),
     ];
     for (label, src) in shaders::all_sources() {
         let m = validate(label, &src, Capabilities::all()).unwrap();

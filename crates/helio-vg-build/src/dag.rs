@@ -22,9 +22,9 @@ use helio_vg_format::PAGE_BYTES;
 use crate::cluster::cluster_tris;
 use crate::deviation::{measure, Measured};
 use crate::math::*;
-use crate::mesh::{weld, BuildError, MeshInput, Tri, VertexStore};
+use crate::mesh::{mark_floating, weld, BuildError, MeshInput, Tri, VertexStore};
 use crate::partition::partition;
-use crate::simplify::{simplify_group, SimplifyResult};
+use crate::simplify::{simplify_group, GlobalEdges, SimplifyResult};
 
 pub const NONE: u32 = u32::MAX;
 /// Safety factor on the measured deviation (covers the interior of original
@@ -40,6 +40,9 @@ const ERR_GROWTH_TYPICAL: f32 = 3.0;
 const BUDGET_EDGE_FRACTION: f32 = 0.5;
 /// Fraction of triangles kept per level (a gentler ladder than halving keeps
 /// locked-boundary distortion, and so error growth, down).
+/// A level is abandoned only when it keeps more than this percentage of the
+/// triangles (it makes essentially no progress).
+const STALL_PERCENT: usize = 97;
 const LEVEL_KEEP: (usize, usize) = (3, 5);
 /// Roots are chunked into hierarchy leaves of at most this many clusters.
 const ROOT_CHUNK: usize = 8;
@@ -108,6 +111,7 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
     mesh.validate()?;
     let (mut vs, tris) = weld(mesh);
     vs.release_lookup();
+    mark_floating(&mut vs, &tris, crate::simplify::FLOATING_MAX_TRIS);
     if tris.is_empty() {
         return Err(BuildError::EmptyMesh);
     }
@@ -182,6 +186,9 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             v.sort_by(f32::total_cmp);
             v.get(v.len() / 2).copied().unwrap_or(0.0)
         };
+        let global = (groups.len() > 1).then(|| {
+            GlobalEdges::build(&dag.vs, cur.iter().flat_map(|&c| dag.clusters[c as usize].tris.iter()))
+        });
         let results: Vec<SimplifyResult> = groups
             .par_iter()
             .zip(child_max.par_iter())
@@ -210,7 +217,7 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
                         .max(typical * ERR_GROWTH_TYPICAL)
                         .max(BUDGET_EDGE_FRACTION * mean_edge)
                 };
-                simplify_group(&dag.vs, &tris, tris.len() * keep.0 / keep.1, budget, whole)
+                simplify_group(&dag.vs, &tris, tris.len() * keep.0 / keep.1, budget, whole, global.as_ref())
             })
             .collect();
 
@@ -218,9 +225,12 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
         // scheduling) and translate output corners to global ids.
         struct Staged {
             tris: Vec<([u32; 3], u32)>,
+            coverage: Option<f32>,
         }
+        let results_lock = results.iter().fold((0usize, 0usize, 0usize), |a, r| (a.0 + r.locked, a.1 + r.verts, a.2 + r.floating));
         let mut staged: Vec<Staged> = Vec::with_capacity(results.len());
         for res in results {
+            let coverage = res.coverage_error;
             let ids: Vec<u32> = res
                 .new_verts
                 .iter()
@@ -240,10 +250,7 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
                     ([f(c[0]), f(c[1]), f(c[2])], m)
                 })
                 .collect();
-            staged.push(Staged {
-                tris,
-
-            });
+            staged.push(Staged { tris, coverage });
         }
         let parts: Vec<Vec<(Vec<[u32; 3]>, u32)>> = staged
             .par_iter()
@@ -255,8 +262,11 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             .map(|&c| dag.clusters[c as usize].tris.len())
             .sum();
         let new_tris: usize = staged.iter().map(|s| s.tris.len()).sum();
-        if std::env::var("VG_DBG").is_ok() { eprintln!("DBG level {level} groups {} old {old_tris} new {new_tris}", groups.len()); }
-        if new_tris * 5 > old_tris * 4 || new_total == 0 {
+        if std::env::var("VG_DBG").is_ok() {
+            let (l, v, fl) = results_lock;
+            eprintln!("DBG level {level} clusters {} groups {} old {old_tris} new {new_tris} locked {:.1}% floating {:.1}%", cur.len(), groups.len(), 100.0 * l as f64 / v.max(1) as f64, 100.0 * fl as f64 / old_tris.max(1) as f64);
+        }
+        if new_tris * 100 > old_tris * STALL_PERCENT || new_total == 0 {
             // Stop once a level removes less than 20% of the triangles. Cluster
             // counts can stay unchanged while triangles fall substantially
             // (material boundaries), so triangles, not clusters, decide. A
@@ -321,7 +331,10 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             // children (monotone), never a sum. `st.error` (the simplifier's
             // own estimate) is deliberately not used.
             let floor = 1e-5 * sphere[3].max(1e-6);
-            let mut error = child_err.max(meas.error.max(meas.forward) * ERROR_MARGIN).max(floor);
+            let mut error = match st.coverage {
+                Some(cov) => child_err.max(cov).max(floor),
+                None => child_err.max(meas.error.max(meas.forward) * ERROR_MARGIN).max(floor),
+            };
             if error <= child_err {
                 error = f32::from_bits(child_err.to_bits() + 1);
             }

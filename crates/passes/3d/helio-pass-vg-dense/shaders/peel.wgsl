@@ -18,6 +18,16 @@
 //      current nearest fragments) and bumps STAT_CLAMPED_*.
 //
 // Shared memory: hist + sv + tsetup + tbox, see `DenseConfig::shared_memory_bytes`.
+//
+// ONE source, two pipelines. Lines starting `//@O ` exist only in the opaque
+// pipeline, lines starting `//@M ` only in the alpha-masked one (see
+// `config::peel_source` / `peel_masked_source`): the opaque kernel carries no
+// texture bindings, no uv staging and no per-fragment branch. Cluster-list
+// entries are tagged by `bin.wgsl` with LIST_MASKED_BIT when they came from a
+// masked cull bin; each pipeline skips the other class. The masked pipeline
+// runs after the opaque one on the same dense tiles and merges into
+// `dense_key` by depth, evaluating the alpha test per candidate fragment
+// (nearest-so-far only), so a discarded fragment lets the layer behind show.
 @group(0) @binding(0) var<uniform> params: DenseParams;
 @group(0) @binding(7) var<storage, read_write> slot_lists: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read_write> state: array<atomic<u32>>;
@@ -30,6 +40,7 @@ var<workgroup> sv: array<vec4<f32>, 128>;
 var<workgroup> tsetup: array<vec4<f32>, TRI_BATCH_X3>;
 var<workgroup> tbox: array<u32, TRI_BATCH>;
 var<workgroup> sh_tile: u32;
+var<workgroup> sh_start: u32;
 var<workgroup> sh_cnt: u32;
 var<workgroup> sh_vis: u32;
 var<workgroup> sh_tris: u32;
@@ -41,6 +52,17 @@ var<workgroup> sh_consumed: u32;
 var<workgroup> sh_unres: atomic<u32>;
 var<workgroup> sh_total_p: u32;
 var<workgroup> sh_unres_p: u32;
+//@M var<workgroup> sv_uv: array<vec2<f32>, 128>;
+//@M var<workgroup> sv_iw: array<f32, 128>;
+//@M var<workgroup> tuv: array<vec4<f32>, TRI_BATCH_X3>;
+//@M var<workgroup> sh_has_masked: u32;
+//@M fn dense_material(v: VgVisibleCluster, c: VgCluster) -> u32 {
+//@M     return vg_objects[vg_instances[v.instance].object_row + vgd_material(c)].head[2];
+//@M }
+//@M fn dense_mirrored(v: VgVisibleCluster) -> bool {
+//@M     let m = dense_xform(v);
+//@M     return dot(cross(m[0].xyz, m[1].xyz), m[2].xyz) < 0.0;
+//@M }
 
 const BOX_INVALID: u32 = 0xffffffffu;
 
@@ -102,13 +124,18 @@ fn setup_tri(v0: vec4<f32>, v1: vec4<f32>, v2: vec4<f32>, origin: vec2<f32>) -> 
 // flow only. Returns the cluster's triangle count (workgroup-uniform).
 fn stage_cluster(slot: u32, ci: u32, lid: u32) -> u32 {
     if lid == 0u {
-        let vi = atomicLoad(&slot_lists[slot * SLOT_STRIDE + 1u + ci]);
+        let entry = atomicLoad(&slot_lists[LIST_POOL_BASE + sh_start + ci]);
+        let vi = entry & LIST_INDEX_MASK;
         sh_vis = vi;
         let c = vgd_load_cluster(visible[vi].cluster_slot);
         sh_tris = c.counts_material & 0xffu;
         sh_verts = (c.counts_material >> 8u) & 0xffu;
+        // Each pipeline handles its own class of clusters.
+//@O         if (entry & LIST_MASKED_BIT) != 0u { sh_tris = 0u; }
+//@M         if (entry & LIST_MASKED_BIT) == 0u { sh_tris = 0u; }
     }
     let tris = workgroupUniformLoad(&sh_tris);
+    if tris == 0u { return 0u; }
     let vis = visible[sh_vis];
     let c = vgd_load_cluster(vis.cluster_slot);
     let blk = vgd_pos_block(vis.cluster_slot, c, dense_asset(vis));
@@ -121,8 +148,11 @@ fn stage_cluster(slot: u32, ci: u32, lid: u32) -> u32 {
         if clip.w > 1.0e-6 {
             let ndc = clip.xyz / clip.w;
             sv[i] = vec4<f32>((ndc.x * 0.5 + 0.5) * fw, (0.5 - ndc.y * 0.5) * fh, ndc.z, 1.0);
+//@M             sv_uv[i] = vga_uv0(vis.cluster_slot, blk, i);
+//@M             sv_iw[i] = 1.0 / clip.w;
         } else {
             sv[i] = vec4<f32>(0.0);
+//@M             sv_iw[i] = 0.0;
         }
     }
     workgroupBarrier();
@@ -143,18 +173,45 @@ fn peel(
     let slot = wid.x;
     if lid == 0u {
         sh_tile = atomicLoad(&state[STATE_HEADER + slot]);
-        sh_cnt = min(atomicLoad(&slot_lists[slot * SLOT_STRIDE]), CLUSTER_CAP);
+        sh_cnt = atomicLoad(&slot_lists[slot * LIST_HDR]);
+        sh_start = atomicLoad(&slot_lists[slot * LIST_HDR + 1u]);
+    }
+    let tile = workgroupUniformLoad(&sh_tile);
+    let list_len = workgroupUniformLoad(&sh_cnt);
+    let tiles_x = params.viewport.z;
+    let tile_xy = vec2<u32>(tile % tiles_x, tile / tiles_x);
+    let origin = vec2<f32>(tile_xy * TILE);
+//@M     if lid == 0u {
+//@M         var any = 0u;
+//@M         for (var ci = 0u; ci < list_len; ci++) {
+//@M             if (atomicLoad(&slot_lists[LIST_POOL_BASE + sh_start + ci]) & LIST_MASKED_BIT) != 0u { any = 1u; break; }
+//@M         }
+//@M         sh_has_masked = any;
+//@M     }
+//@M     if workgroupUniformLoad(&sh_has_masked) == 0u { return; }
+
+    var best_z = 0.0;
+    var best_id = 0u;
+    let px = f32(l3.x) + 0.5;
+    let py = f32(l3.y) + 0.5;
+    var layers = 0u;
+    // The list is peeled in chunks of at most CLUSTER_CAP clusters (the u16
+    // bucket histogram bounds a chunk); the nearest fragment is carried across
+    // chunks, so a long list loses nothing.
+    for (var chunk = 0u; chunk < list_len; chunk += CLUSTER_CAP) {
+    let cnt = min(CLUSTER_CAP, list_len - chunk);
+    // Entry `ci` of this chunk is list entry `chunk + ci`: stage_cluster reads
+    // `sh_start + ci`, so shift the start for the chunk.
+    workgroupBarrier();
+    if lid == 0u {
+        sh_start = atomicLoad(&slot_lists[slot * LIST_HDR + 1u]) + chunk;
         atomicStore(&sh_total, 0u);
         sh_consumed = 0u;
     }
     for (var i = lid; i < HIST_WORDS; i += WG_THREADS) {
         atomicStore(&hist[i], 0u);
     }
-    let tile = workgroupUniformLoad(&sh_tile);
-    let cnt = workgroupUniformLoad(&sh_cnt);
-    let tiles_x = params.viewport.z;
-    let tile_xy = vec2<u32>(tile % tiles_x, tile / tiles_x);
-    let origin = vec2<f32>(tile_xy * TILE);
+    workgroupBarrier();
 
     // H: histogram.
     for (var ci = 0u; ci < cnt; ci++) {
@@ -174,11 +231,7 @@ fn peel(
     if lid == 0u { sh_total_p = atomicLoad(&sh_total); }
     let total = workgroupUniformLoad(&sh_total_p);
 
-    var best_z = 0.0;
-    var best_id = 0u;
-    let px = f32(l3.x) + 0.5;
-    let py = f32(l3.y) + 0.5;
-    var layers = 0u;
+    var chunk_layers = 0u;
     var b0 = 0u;
     loop {
         if total == 0u { break; }
@@ -205,6 +258,8 @@ fn peel(
             let tris = stage_cluster(slot, ci, lid);
             let vis = visible[sh_vis];
             let c = vgd_load_cluster(vis.cluster_slot);
+//@M             let am = vga_load(dense_material(vis, c));
+//@M             let mirrored = dense_mirrored(vis);
             for (var base = 0u; base < tris; base += TRI_BATCH) {
                 if lid < TRI_BATCH {
                     tbox[lid] = BOX_INVALID;
@@ -216,6 +271,23 @@ fn peel(
                             tsetup[lid * 3u + 1u] = s.e1;
                             tsetup[lid * 3u + 2u] = s.e2;
                             tbox[lid] = s.bbox;
+//@M                             let ix = vgd_tri(vis.cluster_slot, c, t);
+//@M                             let p0 = sv[ix.x].xy;
+//@M                             let p1 = sv[ix.y].xy;
+//@M                             let p2 = sv[ix.z].xy;
+//@M                             let area2 = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+//@M                             if !(vga_double_sided(am) || ((area2 < 0.0) != mirrored)) {
+//@M                                 tbox[lid] = BOX_INVALID;
+//@M                             }
+//@M                             let uv0 = sv_uv[ix.x];
+//@M                             let uv1 = sv_uv[ix.y];
+//@M                             let uv2 = sv_uv[ix.z];
+//@M                             let e1 = uv1 - uv0;
+//@M                             let e2 = uv2 - uv0;
+//@M                             let lod = vga_lod_for_area(am, 0.5 * abs(e1.x * e2.y - e1.y * e2.x), 0.5 * abs(area2));
+//@M                             tuv[lid * 3u] = vec4<f32>(uv0 * sv_iw[ix.x], sv_iw[ix.x], lod);
+//@M                             tuv[lid * 3u + 1u] = vec4<f32>(uv1 * sv_iw[ix.y], sv_iw[ix.y], lod);
+//@M                             tuv[lid * 3u + 2u] = vec4<f32>(uv2 * sv_iw[ix.z], sv_iw[ix.z], lod);
                         }
                     }
                 }
@@ -239,6 +311,9 @@ fn peel(
                         if z > 0.0 {
                             let id = vg_vis_pack(sh_vis, base + i);
                             if z > best_z || (z == best_z && id > best_id) {
+//@M                                 let q = tuv[i * 3u] * w0 + tuv[i * 3u + 1u] * w1 + tuv[i * 3u + 2u] * w2;
+//@M                                 let uv = q.xy / max(q.z, 1.0e-30);
+//@M                                 if vga_rejects(am, vga_alpha_level(am, uv, tuv[i * 3u].w)) { continue; }
                                 best_z = z;
                                 best_id = id;
                             }
@@ -250,6 +325,7 @@ fn peel(
         }
 
         layers += 1u;
+        chunk_layers += 1u;
         let bound = 1.0 - f32(b1) / f32(NB);
         if !(remaining == 0u || best_z > bound + 1.0e-6) {
             atomicAdd(&sh_unres, 1u);
@@ -259,7 +335,7 @@ fn peel(
         let unres = workgroupUniformLoad(&sh_unres_p);
         b0 = b1;
         if remaining == 0u || unres == 0u { break; }
-        if layers >= MAX_LAYERS {
+        if chunk_layers >= MAX_LAYERS {
             if lid == 0u {
                 atomicAdd(&state[STAT_CLAMPED_TILES], 1u);
                 atomicAdd(&state[STAT_CLAMPED_TRIS], remaining);
@@ -267,16 +343,23 @@ fn peel(
             break;
         }
     }
-
-    if lid == 0u {
-        atomicAdd(&state[STAT_TILES], 1u);
-        atomicAdd(&state[STAT_LAYERS], layers);
-        if layers > NOMINAL_LAYERS {
-            atomicAdd(&state[STAT_EXTRA_LAYERS], layers - NOMINAL_LAYERS);
-        }
     }
+
+//@O     if lid == 0u {
+//@O         atomicAdd(&state[STAT_TILES], 1u);
+//@O         atomicAdd(&state[STAT_LAYERS], layers);
+//@O         if layers > NOMINAL_LAYERS {
+//@O             atomicAdd(&state[STAT_EXTRA_LAYERS], layers - NOMINAL_LAYERS);
+//@O         }
+//@O     }
     let pix = tile_xy * TILE + l3.xy;
     if pix.x < params.viewport.x && pix.y < params.viewport.y {
-        dense_key[pix.y * params.viewport.x + pix.x] = vg_raster_key(best_z, best_id);
+//@O         dense_key[pix.y * params.viewport.x + pix.x] = vg_raster_key(best_z, best_id);
+//@M         let at = pix.y * params.viewport.x + pix.x;
+//@M         let cur = dense_key[at];
+//@M         let cur_z = bitcast<f32>(cur.x);
+//@M         if best_z > 0.0 && (best_z > cur_z || (best_z == cur_z && best_id > cur.y)) {
+//@M             dense_key[at] = vg_raster_key(best_z, best_id);
+//@M         }
     }
 }

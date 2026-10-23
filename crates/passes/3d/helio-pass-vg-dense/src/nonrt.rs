@@ -49,12 +49,33 @@ pub struct DenseNonRtPass {
     compact: wgpu::ComputePipeline,
     args: wgpu::ComputePipeline,
     bin: wgpu::ComputePipeline,
+    bin_scan: wgpu::ComputePipeline,
+    bin_fill: wgpu::ComputePipeline,
     peel: wgpu::ComputePipeline,
     compact_bgl: wgpu::BindGroupLayout,
     args_bgl: wgpu::BindGroupLayout,
     bin_bgl: wgpu::BindGroupLayout,
     peel_bgl: wgpu::BindGroupLayout,
     buffers: Option<DenseBuffers>,
+    binding: helio_mats::MaterialBindingConfig,
+    /// Alpha-masked peel, built on first use (`None` inside: the device has too
+    /// little workgroup storage for it).
+    masked_peel: std::sync::OnceLock<Option<MaskedPeel>>,
+    masked: Option<MaskedState>,
+}
+
+struct MaskedPeel {
+    pipeline: wgpu::ComputePipeline,
+    bgl1: wgpu::BindGroupLayout,
+}
+
+/// The material tables the masked peel samples, owned (cheap `Arc` clones) so
+/// callers do not thread a lifetime through [`DenseNonRtInputs`].
+struct MaskedState {
+    materials: wgpu::Buffer,
+    material_textures: wgpu::Buffer,
+    views: Vec<wgpu::TextureView>,
+    samplers: Vec<wgpu::Sampler>,
 }
 
 impl DenseNonRtPass {
@@ -126,6 +147,8 @@ impl DenseNonRtPass {
             compact: pipeline(device, "vg_dense compact", &tiles, "compact", &compact_bgl),
             args: pipeline(device, "vg_dense make_args", &args, "make_args", &args_bgl),
             bin: pipeline(device, "vg_dense bin", &bin, "bin", &bin_bgl),
+            bin_scan: pipeline(device, "vg_dense bin_scan", &bin, "bin_scan", &bin_bgl),
+            bin_fill: pipeline(device, "vg_dense bin_fill", &bin, "bin_fill", &bin_bgl),
             peel: pipeline(device, "vg_dense peel", &peel, "peel", &peel_bgl),
             compact_bgl,
             args_bgl,
@@ -133,7 +156,63 @@ impl DenseNonRtPass {
             peel_bgl,
             cfg,
             buffers: None,
+            binding: helio_mats::MaterialBindingConfig::for_device(device),
+            masked_peel: std::sync::OnceLock::new(),
+            masked: None,
         })
+    }
+
+    /// Provide (or, with `None`, withdraw) the scene's material tables for
+    /// alpha-masked clusters (cull bins 6 and 7). While set, every dense tile is
+    /// also peeled with the masked kernel, which evaluates the alpha test per
+    /// candidate fragment. Without it masked clusters are ignored by Tier 3.
+    pub fn set_masked(
+        &mut self,
+        materials: Option<(&wgpu::Buffer, helio_mats::MaterialTextureBindings<'_>)>,
+    ) {
+        self.masked = materials.map(|(m, t)| MaskedState {
+            materials: m.clone(),
+            material_textures: t.material_textures.clone(),
+            views: t.texture_views.iter().map(|v| (*v).clone()).collect(),
+            samplers: t.samplers.iter().map(|s| (*s).clone()).collect(),
+        });
+    }
+
+    fn masked_pipeline(&self, device: &wgpu::Device) -> Option<&MaskedPeel> {
+        self.masked_peel
+            .get_or_init(|| {
+                let needed = self.cfg.shared_memory_bytes_masked();
+                let available = device.limits().max_compute_workgroup_storage_size;
+                if needed > available {
+                    log::warn!("vg dense: masked peel needs {needed} B workgroup storage, device has {available} B; alpha-masked clusters are skipped in dense tiles");
+                    return None;
+                }
+                let bgl1 = bgl(
+                    device,
+                    "vg_dense masked alpha",
+                    &helio_mats::vg_alpha::layout_entries(self.binding, 0, wgpu::ShaderStages::COMPUTE),
+                );
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("vg_dense peel masked"),
+                    source: wgpu::ShaderSource::Wgsl(config::peel_masked_source(&self.cfg, self.binding).into()),
+                });
+                let layouts = [Some(&self.peel_bgl), Some(&bgl1)];
+                let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("vg_dense peel masked"),
+                    bind_group_layouts: &layouts,
+                    immediate_size: 0,
+                });
+                let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("vg_dense peel masked"),
+                    layout: Some(&pl),
+                    module: &module,
+                    entry_point: Some("peel"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+                Some(MaskedPeel { pipeline, bgl1 })
+            })
+            .as_ref()
     }
 
     pub fn config(&self) -> &DenseConfig {
@@ -176,11 +255,59 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
+        self.record_stages(device, queue, encoder, frame, inputs, true, true);
+    }
+
+    /// Only the cheap front half: counter reset, dense-tile compaction and the
+    /// indirect args (so `tile_slot` and the bin ranges are valid). The
+    /// ray-traced backend runs this to find dense instances while it skips the
+    /// expensive peel.
+    pub fn record_setup_rec(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+    ) {
+        self.record_stages(device, queue, encoder, frame, inputs, true, false);
+    }
+
+    /// The back half (`bin` + `peel`); [`Self::record_setup_rec`] must have
+    /// been recorded earlier in the same frame.
+    pub fn record_work_rec(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+    ) {
+        self.record_stages(device, queue, encoder, frame, inputs, false, true);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_stages(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+        setup: bool,
+        work: bool,
+    ) {
         self.ensure_buffers(device, frame.viewport);
         let b = self.buffers.as_ref().unwrap();
         b.write_params(queue, frame);
         // Counters only; the tile list tail is rewritten by `compact`.
-        encoder.clear_buffer(&b.state, 0, Some(STATE_HEADER_WORDS as u64 * 4));
+        if setup {
+            encoder.clear_buffer(&b.state, 0, Some(STATE_HEADER_WORDS as u64 * 4));
+            // Pixels outside the processed dense tiles must read as empty: the
+            // resolve merges this buffer per pixel without consulting the tile
+            // mask, so a tile that stopped being dense must not keep old keys.
+            encoder.clear_buffer(&b.dense_key, 0, None);
+        }
 
         let compact_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vg_dense compact"),
@@ -241,25 +368,65 @@ impl DenseNonRtPass {
             });
             f(&mut pass);
         };
-        run("vg_dense compact", &|p| {
-            p.set_pipeline(&self.compact);
-            p.set_bind_group(0, &compact_bg, &[]);
-            p.dispatch_workgroups(b.tile_count().div_ceil(64), 1, 1);
-        });
-        run("vg_dense make_args", &|p| {
-            p.set_pipeline(&self.args);
-            p.set_bind_group(0, &args_bg, &[]);
-            p.dispatch_workgroups(1, 1, 1);
-        });
-        run("vg_dense bin", &|p| {
-            p.set_pipeline(&self.bin);
-            p.set_bind_group(0, &bin_bg, &[]);
-            p.dispatch_workgroups_indirect(&b.args, 12);
-        });
-        run("vg_dense peel", &|p| {
-            p.set_pipeline(&self.peel);
-            p.set_bind_group(0, &peel_bg, &[]);
-            p.dispatch_workgroups_indirect(&b.args, 0);
-        });
+        if setup {
+            run("vg_dense compact", &|p| {
+                p.set_pipeline(&self.compact);
+                p.set_bind_group(0, &compact_bg, &[]);
+                p.dispatch_workgroups(b.tile_count().div_ceil(64), 1, 1);
+            });
+            run("vg_dense make_args", &|p| {
+                p.set_pipeline(&self.args);
+                p.set_bind_group(0, &args_bg, &[]);
+                p.dispatch_workgroups(1, 1, 1);
+            });
+        }
+        if work {
+            run("vg_dense bin (count)", &|p| {
+                p.set_pipeline(&self.bin);
+                p.set_bind_group(0, &bin_bg, &[]);
+                p.dispatch_workgroups_indirect(&b.args, 12);
+            });
+            run("vg_dense bin (scan)", &|p| {
+                p.set_pipeline(&self.bin_scan);
+                p.set_bind_group(0, &bin_bg, &[]);
+                p.dispatch_workgroups(1, 1, 1);
+            });
+            run("vg_dense bin (fill)", &|p| {
+                p.set_pipeline(&self.bin_fill);
+                p.set_bind_group(0, &bin_bg, &[]);
+                p.dispatch_workgroups_indirect(&b.args, 12);
+            });
+            run("vg_dense peel", &|p| {
+                p.set_pipeline(&self.peel);
+                p.set_bind_group(0, &peel_bg, &[]);
+                p.dispatch_workgroups_indirect(&b.args, 0);
+            });
+            // Alpha-masked clusters: same tiles, merged by depth into `dense_key`.
+            if let (Some(ms), Some(mp)) = (&self.masked, self.masked_pipeline(device)) {
+                let view_refs: Vec<&wgpu::TextureView> = ms.views.iter().collect();
+                let sampler_refs: Vec<&wgpu::Sampler> = ms.samplers.iter().collect();
+                let alpha_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("vg_dense masked alpha"),
+                    layout: &mp.bgl1,
+                    entries: &helio_mats::vg_alpha::bind_entries(
+                        self.binding,
+                        0,
+                        &ms.materials,
+                        helio_mats::MaterialTextureBindings {
+                            material_textures: &ms.material_textures,
+                            texture_views: &view_refs,
+                            samplers: &sampler_refs,
+                            version: 0,
+                        },
+                    ),
+                });
+                run("vg_dense peel masked", &|p| {
+                    p.set_pipeline(&mp.pipeline);
+                    p.set_bind_group(0, &peel_bg, &[]);
+                    p.set_bind_group(1, &alpha_bg, &[]);
+                    p.dispatch_workgroups_indirect(&b.args, 0);
+                });
+            }
+        }
     }
 }

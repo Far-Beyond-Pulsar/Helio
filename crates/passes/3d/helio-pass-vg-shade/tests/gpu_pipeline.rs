@@ -513,6 +513,7 @@ fn resolve_bin_shade_and_final_depth() {
         dense_keys: None,
         rt: None,
         rt_visible: None,
+        dense_mask: None,
         debug: $debug,
             }
         };
@@ -705,6 +706,7 @@ fn resolve_bin_shade_and_final_depth() {
                 bin_capacity: 1,
                 tile_counters: &tile_counters,
                 dense_mask: &dense_mask,
+                resolved_mask: None,
                 tiles: [tiles, tiles],
                 tau_px: 1.0,
             })),
@@ -754,6 +756,7 @@ fn resolve_bin_shade_and_final_depth() {
             bin_capacity: 1,
             tile_counters: &tile_counters,
             dense_mask: &dense_mask,
+            resolved_mask: None,
             tiles: [tiles, tiles],
             tau_px: 1.0,
         })),

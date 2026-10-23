@@ -297,6 +297,7 @@ impl RenderPass for VgShadePass {
             dense_keys: dense.map(|d| d.dense_key),
             rt: None,
             rt_visible: dense.and_then(|d| d.rt_visible),
+            dense_mask: dense.map(|d| d.tile_mask),
             debug: VgDebugView::from_id(self.debug_mode).map(|view| VgShadeDebug {
                 view,
                 stream: cull_inputs.stream,
@@ -304,6 +305,7 @@ impl RenderPass for VgShadePass {
                 bin_capacity: cull.bin_capacity,
                 tile_counters: raster.tile_counters,
                 dense_mask: raster.dense_mask,
+                resolved_mask: dense.map(|d| d.tile_mask),
                 tiles: raster.tiles,
                 tau_px: self.tau.as_ref().map_or(1.0, |tau| tau()),
             }),

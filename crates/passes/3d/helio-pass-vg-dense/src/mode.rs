@@ -43,6 +43,17 @@ pub struct AutoPolicy {
     pub hysteresis: f32,
 }
 
+impl AutoPolicy {
+    /// Policy of the render graph: RT traces only the dense-tile list (the rest
+    /// of the frame stays on Tier 1/2), so it pays off as soon as a few clusters
+    /// of dense tiles exist; tuned on a forest view with dozens of dense tiles
+    /// per tree (hundreds of thousands of dense clusters), where the depth peel
+    /// overflows its per-tile lists.
+    pub fn dense_regions() -> Self {
+        Self { min_dense_tiles_for_rt: 16, min_dense_fraction_for_rt: 0.004, hysteresis: 0.5 }
+    }
+}
+
 impl Default for AutoPolicy {
     fn default() -> Self {
         Self { min_dense_tiles_for_rt: 256, min_dense_fraction_for_rt: 0.05, hysteresis: 0.5 }

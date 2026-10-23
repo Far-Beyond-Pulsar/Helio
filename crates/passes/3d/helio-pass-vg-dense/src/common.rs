@@ -51,7 +51,7 @@ pub struct DenseStats {
     pub clamped_tiles: u32,
     /// Triangles left unprocessed in clamped tiles.
     pub clamped_tris: u32,
-    /// Clusters dropped from per-tile lists (cap `cluster_cap`).
+    /// Cluster-list entries dropped because the shared pool (`list_pool`) was full.
     pub bin_overflow: u32,
     /// Dense tiles dropped because `max_dense_slots` was exceeded.
     pub slot_overflow: u32,
@@ -93,7 +93,8 @@ pub struct DenseBuffers {
     pub tile_slot: wgpu::Buffer,
     /// Counters header + dense tile list.
     pub state: wgpu::Buffer,
-    /// Per-slot cluster lists (3-NonRT): `[count, ids...]` x slots.
+    /// Per-slot cluster lists (3-NonRT): three words per slot `[count, start,
+    /// cursor]`, then one pool of entries (`start` indexes into it).
     pub slot_lists: wgpu::Buffer,
     /// Indirect args: `[peel x,y,z, bin x,y,z]`.
     pub args: wgpu::Buffer,
@@ -135,10 +136,10 @@ impl DenseBuffers {
             ),
             slot_lists: make(
                 "vg_dense slot_lists",
-                if with_lists { max_slots as u64 * (cfg.cluster_cap as u64 + 1) * 4 } else { 16 },
+                if with_lists { cfg.slot_list_words() * 4 } else { 16 },
                 storage,
             ),
-            args: make("vg_dense args", (8 + 12 + 13) * 4, storage | wgpu::BufferUsages::INDIRECT),
+            args: make("vg_dense args", (8 + 2 * 2 * helio_vg_format::CULL_BIN_COUNT as u64 + 1) * 4, storage | wgpu::BufferUsages::INDIRECT),
             dense_key: make(
                 "vg_dense key",
                 viewport[0] as u64 * viewport[1] as u64 * 8,

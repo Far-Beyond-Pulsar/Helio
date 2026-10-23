@@ -5,6 +5,7 @@
 //! Escape releases it (or exits when released).
 
 mod v3_demo_common;
+mod vg_stress_cook;
 mod vg_stress_loading;
 /// Self-provisioning of the scan meshes (shared with `build.rs`).
 mod vg_stress_prep;
@@ -16,19 +17,18 @@ mod vg_stress_data {
 }
 
 use helio::{
-    Camera, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig,
+    Camera, Renderer, RendererBuilder, RendererConfig,
     required_experimental_features, required_wgpu_features, required_wgpu_limits,
 };
 use helio_core::{
     BufferHandle, BufferKey, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
 };
 use helio_default_graphs::build_default_graph_external_with_context;
-use helio_vg_build::{BuildOptions, MeshInput};
 use helio_vg_format::{
-    GpuVgInstance, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS, INST_SHADOW_CASTER,
+    GpuVgInstance, VgAssetReadyRow, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS, INST_SHADOW_CASTER,
     VG_ASSET_READY_FLAG_READY,
 };
-use helio_vg_stream::{VgRuntime, VgeoBytes, VgeoSource, content_words};
+use helio_vg_stream::{VgRuntime, VgRuntimeSettings};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
@@ -63,26 +63,6 @@ const VG_FLAGS: u32 = INST_ENABLED | INST_SHADOW_CASTER | INST_LOD_SUPPRESS | IN
 /// grid. Normalize their imported height to this scene height while
 /// leaving the source mesh and its cached VG data unchanged.
 const SCAN_SCENE_HEIGHT_METERS: f32 = 2.0;
-/// Keep the classic fallback below SceneDB's 4 GiB var-len pool ceiling.
-/// The full scan is still used to build VG and is preserved in the source
-/// FBX; classic geometry is only a temporary fallback until VG roots arrive.
-const MAX_CLASSIC_PROXY_VERTICES: usize = 300_000;
-
-fn stable_content_id(vertices: &[PackedVertex], indices: &[u32]) -> u128 {
-    let mut low = 0xcbf29ce484222325u64;
-    let mut high = 0x84222325cbf29ce4u64;
-    let bytes = bytemuck::cast_slice::<PackedVertex, u8>(vertices);
-    for byte in bytes
-        .iter()
-        .copied()
-        .chain(bytemuck::cast_slice::<u32, u8>(indices).iter().copied())
-    {
-        low = (low ^ u64::from(byte)).wrapping_mul(0x100000001b3);
-        high = (high ^ u64::from(byte).rotate_left(1)).wrapping_mul(0x9e3779b185ebca87);
-    }
-    (u128::from(high) << 64) | u128::from(low)
-}
-
 /// True for the prepared Stanford scans (`vg_stress_prep::scans::MODELS`), which
 /// are normalised to [`SCAN_SCENE_HEIGHT_METERS`] on load.
 fn is_scan_asset(path: &std::path::Path) -> bool {
@@ -93,159 +73,6 @@ fn is_scan_asset(path: &std::path::Path) -> bool {
                 .iter()
                 .any(|m| m.name.eq_ignore_ascii_case(stem))
         })
-}
-
-fn load_or_build_vgeo_cache(
-    content_id: u128,
-    vertices: &[PackedVertex],
-    indices: &[u32],
-    cache_path: PathBuf,
-) -> Result<(Arc<VgeoBytes>, bool), String> {
-    if let Ok(bytes) = std::fs::read(&cache_path) {
-        if let Ok(vgeo) = VgeoBytes::new(bytes) {
-            if vgeo.header().content_id == content_words(content_id)
-                && helio_vg_build::is_current_cook(&vgeo.header())
-            {
-                return Ok((Arc::new(vgeo), true));
-            }
-        }
-    }
-
-    // Called only on the loader worker after previews are published.
-    let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
-    let attributes = pack_vgeo_attributes(vertices);
-    let mesh = MeshInput {
-        positions: &positions,
-        attributes: &attributes,
-        attribute_stride: helio_vg_format::ATTR_STRIDE as usize,
-        indices: &indices[..indices.len() / 3 * 3],
-        tri_material: &[],
-    };
-    let bytes = helio_vg_build::build_vgeo(
-        &mesh,
-        &BuildOptions {
-            content_id: content_words(content_id),
-            resident_levels: 2,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let temporary = cache_path.with_extension("vgeo.tmp");
-    std::fs::write(&temporary, &bytes).map_err(|error| error.to_string())?;
-    replace_cache_file(&temporary, &cache_path).map_err(|error| {
-        let _ = std::fs::remove_file(&temporary);
-        error
-    })?;
-    VgeoBytes::new(bytes)
-        .map(|vgeo| (Arc::new(vgeo), false))
-        .map_err(|error| error.to_string())
-}
-
-/// Install beside the destination with the platform's replacement rename.
-/// Rust uses replacement semantics on Windows as well as Unix; moving the old
-/// file aside first creates an unnecessary interval with no valid cache.
-fn replace_cache_file(
-    temporary: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<(), String> {
-    std::fs::rename(temporary, destination).map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-mod cache_file_tests {
-    use super::replace_cache_file;
-
-    #[test]
-    fn replacing_existing_cache_keeps_new_file_and_cleans_backup() {
-        let dir = std::env::temp_dir().join(format!(
-            "vg-cache-replace-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let destination = dir.join("asset.vgeo");
-        let temporary = dir.join("asset.vgeo.tmp");
-        std::fs::write(&destination, b"old cook").unwrap();
-        std::fs::write(&temporary, b"new cook").unwrap();
-
-        replace_cache_file(&temporary, &destination).unwrap();
-
-        assert_eq!(std::fs::read(&destination).unwrap(), b"new cook");
-        assert!(!temporary.exists());
-        assert!(!dir.join("asset.vgeo.bak").exists());
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-fn pack_vgeo_attributes(vertices: &[PackedVertex]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vertices.len() * helio_vg_format::ATTR_STRIDE as usize);
-    for vertex in vertices {
-        let tangent = (vertex.tangent & 0x00ff_ffff)
-            | ((if vertex.bitangent_sign < 0.0 {
-                0x81u32
-            } else {
-                0x7fu32
-            }) << 24);
-        bytes.extend_from_slice(&vertex.normal.to_le_bytes());
-        bytes.extend_from_slice(&tangent.to_le_bytes());
-        for uv in [vertex.tex_coords0, vertex.tex_coords1] {
-            bytes.extend_from_slice(&half::f16::from_f32(uv[0]).to_bits().to_le_bytes());
-            bytes.extend_from_slice(&half::f16::from_f32(uv[1]).to_bits().to_le_bytes());
-        }
-    }
-    bytes
-}
-
-/// Make a bounded classic fallback from evenly sampled source triangles.
-/// Virtual geometry is built from the untouched full-resolution input; this
-/// proxy only keeps the initial/failure rendering path within the mesh pool
-/// ceiling while root pages stream in.
-fn classic_proxy(vertices: &[PackedVertex], indices: &[u32], limit: usize) -> MeshUpload {
-    if vertices.len() <= limit {
-        return MeshUpload {
-            vertices: vertices.to_vec(),
-            indices: indices.to_vec(),
-        };
-    }
-
-    let triangle_count = indices.len() / 3;
-    let target_triangles = (limit / 3).max(1);
-    let stride = triangle_count.div_ceil(target_triangles).max(1);
-    let mut remap = std::collections::HashMap::<u32, u32>::with_capacity(limit);
-    let mut proxy_vertices = Vec::with_capacity(limit);
-    let mut proxy_indices = Vec::with_capacity(target_triangles * 3);
-
-    for triangle in (0..triangle_count).step_by(stride) {
-        let source = &indices[triangle * 3..triangle * 3 + 3];
-        if source.iter().any(|&index| index as usize >= vertices.len()) {
-            continue;
-        }
-        let new_vertices = source
-            .iter()
-            .filter(|&&index| !remap.contains_key(&index))
-            .count();
-        if proxy_vertices.len() + new_vertices > limit {
-            continue;
-        }
-        for &source_index in source {
-            let next_index = proxy_vertices.len() as u32;
-            let index = *remap.entry(source_index).or_insert_with(|| {
-                proxy_vertices.push(vertices[source_index as usize]);
-                next_index
-            });
-            proxy_indices.push(index);
-        }
-    }
-
-    MeshUpload {
-        vertices: proxy_vertices,
-        indices: proxy_indices,
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -259,6 +86,37 @@ struct VgTarget {
 struct VgSceneTargets {
     targets: Vec<VgTarget>,
     object_rows: u32,
+    /// Bumped whenever `targets` changes, so the derivation can skip frames
+    /// on which neither the instances nor the asset readiness moved.
+    generation: u64,
+}
+
+/// Which instances are drawn through virtual geometry this frame: exactly the
+/// targets whose asset reports ready (root pages resident). Everything else
+/// draws nothing, because VG parts own no classic geometry; `classic[row]` is
+/// set for the object rows VG now owns. Pure, so the gating is unit tested.
+fn select_visible(targets: &[VgTarget], ready: &[VgAssetReadyRow], classic: &mut [u32]) -> Vec<GpuVgInstance> {
+    let slots: HashMap<(u32, u32), u32> = ready
+        .iter()
+        .filter(|row| row.flags & VG_ASSET_READY_FLAG_READY != 0)
+        .map(|row| ((row.vertex_offset, row.vertex_count), row.asset_slot))
+        .collect();
+    let mut instances = Vec::new();
+    for target in targets {
+        let Some(&asset_slot) = slots.get(&(target.vertex_offset, target.vertex_count)) else {
+            continue;
+        };
+        instances.push(GpuVgInstance {
+            asset_slot,
+            flags: VG_FLAGS,
+            lod_error_scale: 1.0,
+            object_row: target.object_row,
+        });
+        if let Some(row) = classic.get_mut(target.object_row as usize) {
+            *row = 1;
+        }
+    }
+    instances
 }
 
 struct SceneVgDerivation {
@@ -274,6 +132,8 @@ struct SceneVgDerivation {
     ready_capacity: u32,
     content_generation: u64,
     buffer_epoch: u64,
+    /// (targets generation, ready version) of the last rebuild.
+    last_inputs: Option<(u64, u64)>,
 }
 
 impl SceneVgDerivation {
@@ -306,6 +166,7 @@ impl SceneVgDerivation {
             ready_capacity: 1,
             content_generation: 1,
             buffer_epoch: 1,
+            last_inputs: None,
         }
     }
 
@@ -343,6 +204,19 @@ impl SceneDerivation for SceneVgDerivation {
                 mapped_at_creation: false,
             })
         };
+        let (ready_rows, version) = self.runtime.asset_ready_rows(targets.targets.len().max(1));
+        let mut grew = instance_count > self.instance_capacity || object_rows > self.object_rows;
+        if ready_rows.len() > self.ready_capacity as usize {
+            self.ready_capacity = ready_rows.len().next_power_of_two() as u32;
+            self.ready = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("VG Stress Asset Ready"),
+                size: self.ready_capacity as u64 * 16,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.buffer_epoch += 1;
+            grew = true;
+        }
         if instance_count > self.instance_capacity {
             self.instance_capacity = instance_count.next_power_of_two();
             self.instances = make("VG Stress Instances", self.instance_capacity as u64 * 16);
@@ -353,49 +227,23 @@ impl SceneDerivation for SceneVgDerivation {
             self.classic = make("VG Stress Classic Suppression", self.object_rows as u64 * 4);
             self.buffer_epoch += 1;
         }
-        let (ready_rows, _) = self.runtime.asset_ready_rows(targets.targets.len().max(1));
-        if ready_rows.len() > self.ready_capacity as usize {
-            self.ready_capacity = ready_rows.len().next_power_of_two() as u32;
-            self.ready = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("VG Stress Asset Ready"),
-                size: self.ready_capacity as u64 * 16,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.buffer_epoch += 1;
-        }
 
-        let mut instances = Vec::with_capacity(self.instance_capacity as usize);
-        let mut classic = vec![0u32; self.object_rows as usize];
-        for target in targets.targets.iter().filter(|_| self.enabled) {
-            let Some(asset) = ready_rows.iter().find(|row| {
-                row.vertex_offset == target.vertex_offset
-                    && row.vertex_count == target.vertex_count
-                    && row.flags & VG_ASSET_READY_FLAG_READY != 0
-            }) else {
-                continue;
-            };
-            instances.push(GpuVgInstance {
-                asset_slot: asset.asset_slot,
-                flags: VG_FLAGS,
-                lod_error_scale: 1.0,
-                object_row: target.object_row,
-            });
-            if let Some(row) = classic.get_mut(target.object_row as usize) {
-                *row = 1;
-            }
+        // Instances only change when an instance is added or an asset's
+        // readiness changes: most frames rewrite and re-publish nothing.
+        let inputs = (targets.generation, version);
+        if grew || self.last_inputs != Some(inputs) {
+            self.last_inputs = Some(inputs);
+            let mut classic = vec![0u32; self.object_rows as usize];
+            let visible: &[VgTarget] = if self.enabled { &targets.targets } else { &[] };
+            let mut instances = select_visible(visible, &ready_rows, &mut classic);
+            let count = [instances.len() as u32, 0, 0, 0];
+            instances.resize(self.instance_capacity as usize, GpuVgInstance::zeroed());
+            ctx.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+            ctx.queue.write_buffer(&self.count, 0, bytemuck::cast_slice(&count));
+            ctx.queue.write_buffer(&self.ready, 0, bytemuck::cast_slice(&ready_rows));
+            ctx.queue.write_buffer(&self.classic, 0, bytemuck::cast_slice(&classic));
+            self.content_generation = self.content_generation.wrapping_add(1);
         }
-        let count = [instances.len() as u32, 0, 0, 0];
-        instances.resize(self.instance_capacity as usize, GpuVgInstance::zeroed());
-        ctx.queue
-            .write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        ctx.queue
-            .write_buffer(&self.count, 0, bytemuck::cast_slice(&count));
-        ctx.queue
-            .write_buffer(&self.ready, 0, bytemuck::cast_slice(&ready_rows));
-        ctx.queue
-            .write_buffer(&self.classic, 0, bytemuck::cast_slice(&classic));
-        self.content_generation = self.content_generation.wrapping_add(1);
 
         SceneDerivationOutput {
             buffers: vec![
@@ -471,7 +319,7 @@ fn print_scene_report(
         })
         .sum();
     println!(
-        "[Museum] of the tree triangles {} are alpha-masked cards/leaves: classic path (60k-vertex stand-ins) until VG supports masked materials",
+        "[Museum] of the tree triangles {} are alpha-masked cards/leaves (alpha-tested, cooked into VG like the rest)",
         fmt(masked)
     );
     let assets = root.join("assets/vg_stress");
@@ -497,8 +345,77 @@ fn print_scene_report(
     );
 }
 
+/// `VG_STRESS_TAU` / the `-` and `=` keys: the VG screen-space error budget in
+/// pixels. Larger is coarser and faster.
+const TAU_RANGE: (f32, f32) = (0.1, 64.0);
+
+/// The one sampler every SceneDB material texture slot shares. Helio's default
+/// (`SamplerDescriptor::default()`) is ClampToEdge + Nearest, which smears
+/// every tiled texture (UV > 1) into streaks of its edge texels and drops the
+/// mips; the kit's marble UVs tile every 2 m, so this must be Repeat + trilinear.
+fn material_sampler() -> wgpu::SamplerDescriptor<'static> {
+    wgpu::SamplerDescriptor {
+        label: Some("VG museum repeat trilinear sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..Default::default()
+    }
+}
+
+fn parse_tau(text: Option<&str>) -> f32 {
+    text.and_then(|t| t.trim().parse::<f32>().ok())
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .map_or(1.0, |t| t.clamp(TAU_RANGE.0, TAU_RANGE.1))
+}
+
+fn prepare_requested() -> bool {
+    std::env::args().skip(1).any(|a| a == "--prepare")
+        || std::env::var("VG_STRESS_PREPARE").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false"))
+}
+
+/// Headless provisioning: download/convert the sources if needed, then cook
+/// every VG cache, with no window or GPU. After this `cargo vg-stress` starts
+/// with everything ready. (`build.rs` cannot do this: cooking needs the VG
+/// builder and importer crates, which are not build dependencies.)
+fn prepare() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let config = vg_stress_prep::catalog::Config::from_env_and_args();
+    let layout = vg_stress_data::layout::museum_layout_with(&vg_stress_data::dims::Dims::load(), &config);
+    print_scene_report(&layout, &config, &root);
+    let tau = parse_tau(std::env::var("VG_STRESS_TAU").ok().as_deref());
+    let loader = vg_stress_loading::start(root, &layout.placements, true, config, tau, true);
+    let (mut vg_assets, mut errors) = (0usize, 0usize);
+    let started = std::time::Instant::now();
+    while let Ok(event) = loader.events.recv() {
+        use vg_stress_loading::Event;
+        match event {
+            Event::VgAsset { .. } => vg_assets += 1,
+            Event::Status(status) => println!("[Museum] {status}"),
+            Event::Error(error) => {
+                errors += 1;
+                eprintln!("[Museum] ERROR {error}");
+            }
+            Event::Finished => break,
+            Event::Part(_) | Event::Texture { .. } | Event::Progress(_) => {}
+        }
+    }
+    println!(
+        "[Museum prepare] {vg_assets} VG assets ready, {errors} errors, {}",
+        vg_stress_cook::format_duration(started.elapsed().as_secs_f64())
+    );
+    std::process::exit(if errors == 0 { 0 } else { 1 });
+}
+
 fn main() {
     env_logger::init();
+    if prepare_requested() {
+        return prepare();
+    }
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("Event loop error");
@@ -529,7 +446,6 @@ struct AppState {
     loader: Option<vg_stress_loading::Loader>,
     placements: HashMap<String, Vec<Placement>>,
     materials: HashMap<Mat, Entity>,
-    vg_ranges: HashMap<u128, (u32, u32)>,
     targets: Arc<Mutex<VgSceneTargets>>,
     loading_errors: usize,
     loaded_objects: usize,
@@ -544,6 +460,16 @@ struct AppState {
     scene_triangles: u64,
     loading_status: String,
     last_title: std::time::Instant,
+    tau: f32,
+    vg_expected: usize,
+    vg_loaded: usize,
+    /// Instancing audit counters (printed when loading finishes).
+    classic_meshes: usize,
+    vg_meshes: HashMap<u128, (Entity, u32, u32)>,
+    classic_objects: usize,
+    vg_objects: usize,
+    classic_batches: HashSet<(u32, u32)>,
+    placeholder_ordinal: u32,
 }
 
 impl App {
@@ -629,6 +555,18 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let runtime = VgRuntime::default();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let tau = parse_tau(std::env::var("VG_STRESS_TAU").ok().as_deref());
+        let mode = match std::env::var("VG_STRESS_MODE").ok().as_deref().map(str::trim) {
+            Some("hw") => helio_vg_format::VgMode::ForceHwRaster,
+            Some("nonrt") => helio_vg_format::VgMode::ForceNonRtFallback,
+            Some("off") => helio_vg_format::VgMode::Off,
+            _ => helio_vg_format::VgMode::Auto,
+        };
+        let tier3 = std::env::var_os("VG_STRESS_TIER3").is_some_and(|v| v != "0");
+        runtime.set_settings(VgRuntimeSettings { tau_px: tau, mode, tier3, ..runtime.settings() });
+        println!("[Museum] VG mode {mode:?} (VG_STRESS_MODE=auto|hw|nonrt|off)");
+        println!("[Museum] Tier 3 dense tiles {} (VG_STRESS_TIER3=1 enables)", if tier3 { "ON" } else { "off" });
+        println!("[Museum] VG error tolerance tau = {tau} px (VG_STRESS_TAU; - and = keys change it live)");
         let museum_config = vg_stress_prep::catalog::Config::from_env_and_args();
         let layout = vg_stress_data::layout::museum_layout_with(
             &vg_stress_data::dims::Dims::load(),
@@ -715,6 +653,7 @@ impl ApplicationHandler for App {
                 size.height,
                 format,
             );
+        renderer.set_material_sampler(&material_sampler());
         renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
         renderer.set_clear_color([0.018, 0.022, 0.035, 1.0]);
         let mut debug_views = renderer.available_debug_views();
@@ -736,8 +675,21 @@ impl ApplicationHandler for App {
         }
 
         // No source parsing or cooking takes place on the window thread.
-        let loader =
-            vg_stress_loading::start(root, &layout.placements, vg_supported, museum_config);
+        let vg_expected = layout
+            .placements
+            .iter()
+            .filter(|p| p.virtual_geometry)
+            .map(|p| p.asset.as_str())
+            .collect::<HashSet<_>>()
+            .len();
+        let loader = vg_stress_loading::start(
+            root,
+            &layout.placements,
+            vg_supported,
+            museum_config,
+            tau,
+            false,
+        );
         println!(
             "[Museum] {} placements, {} exhibits; loading in background",
             layout.placements.len(),
@@ -762,7 +714,6 @@ impl ApplicationHandler for App {
             loader: Some(loader),
             placements,
             materials,
-            vg_ranges: HashMap::new(),
             targets,
             loading_errors: 0,
             loaded_objects: 0,
@@ -781,6 +732,15 @@ impl ApplicationHandler for App {
             scene_triangles: 0,
             loading_status: "Loading museum".into(),
             last_title: std::time::Instant::now(),
+            tau,
+            vg_expected,
+            vg_loaded: 0,
+            classic_meshes: 0,
+            vg_meshes: HashMap::new(),
+            classic_objects: 0,
+            vg_objects: 0,
+            classic_batches: HashSet::new(),
+            placeholder_ordinal: 0,
         });
     }
 
@@ -918,7 +878,7 @@ impl AppState {
             "[Museum smoke] {} frames, {} objects, {} VG assets, {} loading errors, {} render errors, loader active={}",
             self.frames,
             self.loaded_objects,
-            self.vg_ranges
+            self.vg_meshes
                 .keys()
                 .filter(|&&id| self.runtime.has_asset(id))
                 .count(),
@@ -964,6 +924,10 @@ impl AppState {
                     (self.debug_index + self.debug_views.len() - 1) % self.debug_views.len();
                 None
             }
+            KeyCode::Minus | KeyCode::Equal => {
+                self.adjust_tau(if key == KeyCode::Equal { 1.25 } else { 0.8 });
+                return true;
+            }
             KeyCode::F1 => {
                 for view in &self.debug_views {
                     println!("{}: {} – {}", view.debug_mode, view.name, view.description);
@@ -1001,9 +965,20 @@ impl AppState {
             let mut passes = timing.passes.clone();
             passes.sort_by(|a, b| b.gpu_ms.unwrap_or(0.0).total_cmp(&a.gpu_ms.unwrap_or(0.0)));
             let top: Vec<_> = passes.iter().take(6).map(|p| format!("{}={:.2}ms", p.name, p.gpu_ms.unwrap_or(0.0))).collect();
-            eprintln!("[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {}",
+            let pool = self
+                .runtime
+                .with_store(|store| {
+                    let s = store.stats();
+                    format!(
+                        "pool pages={}/{} (roots {}) uploads={} evict={} fail={} resident={:.0}MiB cpu_pages={}",
+                        s.resident_pages, s.slot_limit, s.root_pages_resident, s.uploads, s.evictions, s.failures,
+                        s.resident_bytes as f64 / 1048576.0, s.cpu_tracked_pages
+                    )
+                })
+                .unwrap_or_default();
+            eprintln!("[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {} | {}",
                 self.started.elapsed().as_secs_f32(), self.frames, self.loader.is_some(), percentile(50), percentile(99),
-                self.frame_samples.last().copied().unwrap_or(0.0), timing.total_gpu_ms, timing.gpu_lag_frames, top.join(" "));
+                self.frame_samples.last().copied().unwrap_or(0.0), timing.total_gpu_ms, timing.gpu_lag_frames, top.join(" "), pool);
             self.frame_samples.clear();
         }
         let vg_triangles = self
@@ -1018,12 +993,15 @@ impl AppState {
             .map(|stats| stats.summary())
             .unwrap_or_default();
         self.window.set_title(&format!(
-            "Helio – VG Museum | {} | Scene tris: {} | VG selected: {} | {} | {}{}",
+            "Helio – VG Museum | {} | tau {:.2}px (-/=) | Scene tris: {} | VG selected: {} | VG assets {}/{} | {} | {}{}",
             self.debug_views[self.debug_index].name,
+            self.tau,
             self.scene_triangles,
             vg_triangles
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "pending".into()),
+            self.vg_loaded,
+            self.vg_expected,
             vg_stats,
             self.loading_status,
             if self.loading_errors == 0 {
@@ -1033,6 +1011,99 @@ impl AppState {
             }
         ));
         self.last_title = std::time::Instant::now();
+    }
+
+    /// Upload one classic mesh; returns its entity and interned vertex range.
+    fn upload_mesh(&mut self, upload: helio::MeshUpload) -> (Entity, u32, u32) {
+        let mesh = spawn_mesh(&mut self.scene_db.world, upload);
+        let mirror = scene_db_handle(&self.scene_db);
+        let vertices = helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+            .expect("uploaded mesh vertex range");
+        (mesh, vertices.offset, vertices.count)
+    }
+
+    /// One object row per placement of `asset`'s part: instances share the
+    /// mesh (or VG asset) and differ only by transform row.
+    fn place_instances(
+        &mut self,
+        asset: &str,
+        meta: &vg_stress_loading::PartMeta,
+        mesh: Entity,
+        range: (u32, u32),
+        vg: bool,
+    ) {
+        let node = glam::Mat4::from_cols_array(&meta.transform);
+        let mut targets = self.targets.lock().expect("VG scene targets");
+        for placement in &self.placements[asset] {
+            self.scene_triangles += meta.source_triangles;
+            let material = placement
+                .slots
+                .iter()
+                .find(|(slot, _)| {
+                    slot == &meta.slot || meta.slot.strip_suffix(".001") == Some(slot.as_str())
+                })
+                .map(|(_, material)| *material)
+                .unwrap_or_else(|| Mat::for_kit_slot(&meta.slot));
+            let [pitch, yaw, roll] = placement.rotation.map(f32::to_radians);
+            let transform = glam::Mat4::from_scale_rotation_translation(
+                glam::Vec3::from_array(placement.scale),
+                glam::Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll),
+                glam::Vec3::from_array(placement.position.map(|v| v as f32)),
+            ) * node;
+            let scale = transform
+                .x_axis
+                .truncate()
+                .length()
+                .max(transform.y_axis.truncate().length())
+                .max(transform.z_axis.truncate().length());
+            let object = spawn_object(
+                &mut self.scene_db.world,
+                mesh,
+                self.materials[&material],
+                transform,
+                meta.radius * scale,
+            )
+            .expect("museum object mesh ranges");
+            targets.object_rows = targets.object_rows.max(object.index() + 1);
+            if vg {
+                targets.targets.push(VgTarget {
+                    vertex_offset: range.0,
+                    vertex_count: range.1,
+                    object_row: object.index(),
+                });
+                targets.generation += 1;
+                self.vg_objects += 1;
+            } else {
+                self.classic_objects += 1;
+                self.classic_batches.insert((mesh.index(), self.materials[&material].index()));
+            }
+            self.loaded_objects += 1;
+        }
+    }
+
+
+    fn adjust_tau(&mut self, factor: f32) {
+        self.tau = (self.tau * factor).clamp(TAU_RANGE.0, TAU_RANGE.1);
+        self.runtime
+            .set_settings(VgRuntimeSettings { tau_px: self.tau, ..self.runtime.settings() });
+        println!("[Museum] VG tau = {:.2} px", self.tau);
+        self.update_title();
+    }
+
+    /// What is shared and what is drawn, for the instancing audit.
+    fn print_instancing_report(&self) {
+        let vg_assets = self.vg_meshes.len();
+        println!(
+            "[Museum instancing] {} classic kit meshes + {} VG assets (one placeholder row and one .vgeo each) \
+             = {} distinct geometries for {} object rows ({} VG, {} classic); classic (mesh, material) batches at spawn: {}",
+            self.classic_meshes,
+            vg_assets,
+            self.classic_meshes + vg_assets,
+            self.loaded_objects,
+            self.vg_objects,
+            self.classic_objects,
+            self.classic_batches.len(),
+        );
     }
 
     fn poll_loader(&mut self) {
@@ -1053,74 +1124,38 @@ impl AppState {
             };
             match event {
                 Event::Part(part) => {
-                    let content = part
-                        .meta
-                        .content
-                        .map(|w| u128::from(w[0]) | (u128::from(w[1]) << 64));
-                    let mesh = spawn_mesh(&mut self.scene_db.world, part.mesh);
-                    let mirror = scene_db_handle(&self.scene_db);
-                    let range = helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(
-                        mirror.store(),
-                        mesh.index(),
-                    )
-                    .expect("uploaded mesh vertex range");
-                    if let Some(content) = content {
-                        self.vg_ranges.insert(content, (range.offset, range.count));
-                    }
-                    let node = glam::Mat4::from_cols_array(&part.meta.transform);
-                    let mut targets = self.targets.lock().expect("VG scene targets");
-                    for placement in &self.placements[&part.asset] {
-                        self.scene_triangles += part.meta.source_triangles;
-                        let material = placement
-                            .slots
-                            .iter()
-                            .find(|(slot, _)| {
-                                slot == &part.meta.slot
-                                    || part.meta.slot.strip_suffix(".001") == Some(slot.as_str())
-                            })
-                            .map(|(_, material)| *material)
-                            .unwrap_or_else(|| Mat::for_kit_slot(&part.meta.slot));
-                        let [pitch, yaw, roll] = placement.rotation.map(f32::to_radians);
-                        let transform = glam::Mat4::from_scale_rotation_translation(
-                            glam::Vec3::from_array(placement.scale),
-                            glam::Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll),
-                            glam::Vec3::from_array(placement.position.map(|v| v as f32)),
-                        ) * node;
-                        let scale = transform
-                            .x_axis
-                            .truncate()
-                            .length()
-                            .max(transform.y_axis.truncate().length())
-                            .max(transform.z_axis.truncate().length());
-                        let object = spawn_object(
-                            &mut self.scene_db.world,
-                            mesh,
-                            self.materials[&material],
-                            transform,
-                            part.meta.radius * scale,
-                        )
-                        .expect("museum object mesh ranges");
-                        targets.object_rows = targets.object_rows.max(object.index() + 1);
-                        // Parts without a VG content id (alpha-masked tree cards
-                        // for now) stay on the classic path.
-                        if placement.virtual_geometry && part.meta.content.is_some() {
-                            targets.targets.push(VgTarget {
-                                vertex_offset: range.offset,
-                                vertex_count: range.count,
-                                object_row: object.index(),
-                            });
-                        }
-                        self.loaded_objects += 1;
-                    }
-                    // At most one mesh upload and its instances per frame.
+                    // Classic geometry: an architecture kit piece (one mesh).
+                    let Some(upload) = part.lods.into_iter().next() else { break };
+                    let (mesh, offset, count) = self.upload_mesh(upload);
+                    self.classic_meshes += 1;
+                    self.place_instances(&part.asset, &part.meta, mesh, (offset, count), false);
                     break;
                 }
-                Event::Vgeo(content, source) => {
-                    if let Some(&(offset, count)) = self.vg_ranges.get(&content) {
-                        self.runtime.request_asset(content, offset, count, source);
+                Event::VgAsset { asset, parts } => {
+                    // The asset is fully cooked: only now do its instances exist.
+                    for part in parts {
+                        let Some(words) = part.meta.content else { continue };
+                        let content = vg_stress_loading::content_id(words);
+                        let (mesh, offset, count) = match self.vg_meshes.get(&content) {
+                            Some(&found) => found,
+                            None => {
+                                // VG parts own no classic geometry. The mesh row is
+                                // a zero-area placeholder whose interned vertex
+                                // range is the identity of the VG asset.
+                                self.placeholder_ordinal += 1;
+                                let (mesh, offset, count) =
+                                    self.upload_mesh(vg_stress_cook::placeholder_mesh(self.placeholder_ordinal));
+                                self.runtime.request_asset(content, offset, count, part.vgeo.clone());
+                                self.vg_meshes.insert(content, (mesh, offset, count));
+                                (mesh, offset, count)
+                            }
+                        };
+                        self.place_instances(&asset, &part.meta, mesh, (offset, count), true);
                     }
+                    self.vg_loaded += 1;
                     break;
                 }
+                Event::Progress(line) => self.loading_status = line,
                 Event::Texture {
                     bindings,
                     srgb,
@@ -1199,11 +1234,15 @@ impl AppState {
                 }
                 Event::Finished => {
                     self.loader = None;
-                    self.loading_status = format!("Ready: {} objects", self.loaded_objects);
+                    self.loading_status = format!(
+                        "Ready: {} objects, {}/{} VG assets",
+                        self.loaded_objects, self.vg_loaded, self.vg_expected
+                    );
                     println!(
                         "[Museum] Loading complete: {} objects, {} errors",
                         self.loaded_objects, self.loading_errors
                     );
+                    self.print_instancing_report();
                     break;
                 }
             }
@@ -1282,5 +1321,71 @@ impl AppState {
                 self.loader.is_some()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gating_tests {
+    use super::*;
+
+    fn target(offset: u32, row: u32) -> VgTarget {
+        VgTarget { vertex_offset: offset, vertex_count: 3, object_row: row }
+    }
+
+    fn ready(offset: u32, slot: u32, flags: u32) -> VgAssetReadyRow {
+        VgAssetReadyRow { vertex_offset: offset, vertex_count: 3, asset_slot: slot, flags }
+    }
+
+    #[test]
+    fn instances_are_visible_only_once_their_asset_is_ready() {
+        // Two assets: A (rows 0, 1) and B (row 2).
+        let targets = [target(100, 0), target(100, 1), target(200, 2)];
+        let mut classic = vec![0u32; 3];
+
+        // Nothing resident yet: no instance, nothing suppressed, nothing drawn.
+        let none = select_visible(&targets, &[VgAssetReadyRow::PADDING; 4], &mut classic);
+        assert!(none.is_empty() && classic == [0, 0, 0]);
+
+        // Registered but root pages not resident (flag clear): still hidden.
+        let pending = [ready(100, 0, 0), ready(200, 1, 0)];
+        assert!(select_visible(&targets, &pending, &mut classic).is_empty());
+
+        // A becomes ready: exactly its two rows appear, B stays hidden.
+        let a_ready = [ready(100, 5, VG_ASSET_READY_FLAG_READY), ready(200, 1, 0)];
+        let visible = select_visible(&targets, &a_ready, &mut classic);
+        assert_eq!(visible.iter().map(|i| (i.asset_slot, i.object_row)).collect::<Vec<_>>(), [(5, 0), (5, 1)]);
+        assert_eq!(classic, [1, 1, 0]);
+
+        // Both ready, with the other part of the same asset key space unaffected.
+        let both = [ready(100, 5, VG_ASSET_READY_FLAG_READY), ready(200, 7, VG_ASSET_READY_FLAG_READY)];
+        let mut classic = vec![0u32; 3];
+        assert_eq!(select_visible(&targets, &both, &mut classic).len(), 3);
+        assert_eq!(classic, [1, 1, 1]);
+    }
+
+    #[test]
+    fn tau_parses_and_clamps() {
+        assert_eq!(parse_tau(None), 1.0);
+        assert_eq!(parse_tau(Some("2.5")), 2.5);
+        assert_eq!(parse_tau(Some("nope")), 1.0);
+        assert_eq!(parse_tau(Some("-3")), 1.0);
+        assert_eq!(parse_tau(Some("1000")), TAU_RANGE.1);
+    }
+
+}
+
+#[cfg(test)]
+mod sampler_tests {
+    #[test]
+    fn material_sampler_repeats_and_filters_trilinearly() {
+        let s = super::material_sampler();
+        assert_eq!(s.address_mode_u, wgpu::AddressMode::Repeat);
+        assert_eq!(s.address_mode_v, wgpu::AddressMode::Repeat);
+        assert_eq!(s.mipmap_filter, wgpu::MipmapFilterMode::Linear);
+        assert_eq!(s.min_filter, wgpu::FilterMode::Linear);
+        assert!(s.anisotropy_clamp > 1);
+        // The default it replaces is the streaking bug.
+        let d = wgpu::SamplerDescriptor::default();
+        assert_eq!(d.address_mode_u, wgpu::AddressMode::ClampToEdge);
     }
 }

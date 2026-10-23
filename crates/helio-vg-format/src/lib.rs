@@ -58,9 +58,12 @@ pub const SW_GROUP_WIDTH: u32 = 32768;
 /// Word offset of the per-phase `{first, count}` bin ranges inside the cull's
 /// `state` buffer, and the layout of that table: `phase * CULL_RANGES_PER_PHASE
 /// + bin * 2` (phase 0 = early draw set, phase 1 = the late delta; bins 0..=3
-/// HW, 4 SW, 5 dense).
+/// HW, 4 SW, 5 dense, 6 HW alpha-masked, 7 SW alpha-masked).
 pub const CULL_STATE_RANGES: u32 = 40;
-pub const CULL_BIN_COUNT: u32 = 6;
+pub const CULL_BIN_COUNT: u32 = 8;
+/// Bins `>= CULL_FIRST_MASKED_BIN` hold clusters whose material is alpha
+/// tested (6 = hardware masked, 7 = software masked).
+pub const CULL_FIRST_MASKED_BIN: u32 = 6;
 pub const CULL_RANGES_PER_PHASE: u32 = CULL_BIN_COUNT * 2;
 
 pub fn cluster_slot(pool_slot: u32, local: u32) -> u32 {

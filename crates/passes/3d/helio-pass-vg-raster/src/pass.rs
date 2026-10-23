@@ -82,6 +82,41 @@ pub struct VgRasterInputs<'a> {
     /// `DispatchIndirect` args for the software clusters `{min(n, 32768), ceil(n / 32768), 1}` (`abi::sw_dispatch_args`).
     pub sw_dispatch: &'a wgpu::Buffer,
     pub sw_dispatch_offset: u64,
+    /// Alpha-masked clusters (bins 6 and 7 of the cull). `None` records nothing
+    /// for them; the opaque tiers are identical either way.
+    pub masked: Option<VgMaskedInputs<'a>>,
+    /// Dense-bin clusters (cull bin 5) of this phase: their overlap is estimated
+    /// into the classifier so a tile does not stop being dense just because its
+    /// clusters were diverted away from Tier 2. `None` = no estimate.
+    pub dense: Option<VgDenseInputs<'a>>,
+}
+
+/// The cull's dense bin for one phase (see [`VgRasterInputs::dense`]).
+#[derive(Clone, Copy)]
+pub struct VgDenseInputs<'a> {
+    /// Buffer holding the dense bin `{first, count}` (the cull `state`).
+    pub meta: &'a wgpu::Buffer,
+    /// Word offset of the dense bin's `{first, count}` in `meta`.
+    pub meta_offset_words: u32,
+    /// `DispatchIndirect` args of the dense bin `{min(n, 32768), ceil(n / 32768), 1}`.
+    pub dispatch: &'a wgpu::Buffer,
+    pub dispatch_offset: u64,
+}
+
+/// Inputs of the alpha-masked tiers (see `helio_mats::vg_alpha`).
+#[derive(Clone, Copy)]
+pub struct VgMaskedInputs<'a> {
+    /// The scene's `materials` table (`GpuMaterial` rows).
+    pub materials: &'a wgpu::Buffer,
+    /// Material texture metadata and the texture table.
+    pub material_textures: helio_mats::MaterialTextureBindings<'a>,
+    /// Byte offset in `hw_indirect` of the masked hardware `DrawIndirectArgs`
+    /// (vertex count `3 * 128`).
+    pub hw_indirect_offset: u64,
+    /// Word offset in `sw_meta` of the masked software bin's `{first, count}`.
+    pub sw_meta_offset_words: u32,
+    /// Byte offset in `sw_dispatch` of the masked software `DispatchIndirect`.
+    pub sw_dispatch_offset: u64,
 }
 
 /// Targets and per-frame buffers owned by the raster. Recreate on resize.
@@ -110,9 +145,13 @@ pub struct VgTargets {
     pub dense_list: wgpu::Buffer,
     /// `[x, y, z, count]`: DispatchIndirect args for one workgroup per dense tile + count.
     pub dense_args: wgpu::Buffer,
+    /// Per-tile triangle estimate of this frame's dense-bin clusters (`u32`).
+    pub dense_est: wgpu::Buffer,
     pub(crate) tile_bin_counts: wgpu::Buffer,
     pub(crate) tile_bin_entries: wgpu::Buffer,
     pub(crate) params: [wgpu::Buffer; 2],
+    pub(crate) params_masked: [wgpu::Buffer; 2],
+    pub(crate) params_dense: [wgpu::Buffer; 2],
     pub(crate) classify_params: wgpu::Buffer,
     parity: usize,
 }
@@ -168,6 +207,8 @@ impl VgTargets {
             mapped_at_creation: false,
         });
         let params = [make_params(), make_params()];
+        let params_masked = [make_params(), make_params()];
+        let params_dense = [make_params(), make_params()];
         let classify_params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("VG Classify Params"),
             contents: bytemuck::bytes_of(&ClassifyParams {
@@ -196,9 +237,12 @@ impl VgTargets {
             ],
             dense_list: buf("VG Dense List", tiles * 4, st),
             dense_args: buf("VG Dense Args", 16, st | wgpu::BufferUsages::INDIRECT),
+            dense_est: buf("VG Dense Estimate", tiles * 4, st),
             tile_bin_counts: buf("VG Tile Bin Counts", if fallback { tiles * 4 } else { 16 }, st),
             tile_bin_entries: buf("VG Tile Bin Entries", if fallback { tiles * cap * 4 } else { 16 }, st),
             params,
+            params_masked,
+            params_dense,
             classify_params,
             parity: 0,
         }
@@ -309,6 +353,19 @@ pub struct VgRaster {
     classify: wgpu::ComputePipeline,
     classify_args: wgpu::ComputePipeline,
     classify_bgl: wgpu::BindGroupLayout,
+    dense_count: wgpu::ComputePipeline,
+    dense_count_bgl1: wgpu::BindGroupLayout,
+    binding: helio_mats::MaterialBindingConfig,
+    /// Built on first use: devices and scenes without alpha-tested materials
+    /// never compile (or pay for) the masked pipelines.
+    masked: std::sync::OnceLock<MaskedPipelines>,
+}
+
+struct MaskedPipelines {
+    hw: wgpu::RenderPipeline,
+    hw_bgl1: wgpu::BindGroupLayout,
+    /// Software masked kernel (64-bit atomics only) and its alpha group (2).
+    sw: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>,
 }
 
 impl VgRaster {
@@ -430,18 +487,101 @@ impl VgRaster {
                 storage_entry(3, c, false),
                 storage_entry(4, c, false),
                 storage_entry(5, c, false),
+                storage_entry(6, c, true),
             ],
         );
         let cpl = pipeline_layout(device, "VG Classify PL", &[&classify_bgl]);
         let classify = compute(device, "VG Tile Classify", &cpl, &cm, "classify_main");
         let classify_args = compute(device, "VG Dense Args", &cpl, &cm, "dense_args_main");
+        let dcm = module(device, "VG Dense Count", shaders::dense_count_source());
+        let dense_count_bgl1 = bgl(
+            device,
+            "VG Dense Count G1",
+            &[storage_entry(0, c, false), storage_entry(1, c, true)],
+        );
+        let dcpl = pipeline_layout(device, "VG Dense Count PL", &[&bgl0_compute, &dense_count_bgl1]);
+        let dense_count = compute(device, "VG Dense Count", &dcpl, &dcm, "dense_count_main");
 
-        Self { config, hw, bgl0_vertex, bgl0_compute, sw64, tile, classify, classify_args, classify_bgl }
+        Self {
+            config,
+            hw,
+            bgl0_vertex,
+            bgl0_compute,
+            sw64,
+            tile,
+            classify,
+            classify_args,
+            classify_bgl,
+            dense_count,
+            dense_count_bgl1,
+            binding: helio_mats::MaterialBindingConfig::for_device(device),
+            masked: std::sync::OnceLock::new(),
+        }
     }
 
     /// True when Tier 2 runs the tiled shared-memory fallback.
     pub fn uses_tile_fallback(&self) -> bool {
         self.tile.is_some()
+    }
+
+    /// True when the software masked kernel exists (64-bit atomics): the cull may
+    /// then route masked software-class clusters to its software masked bin.
+    pub fn supports_sw_masked(&self) -> bool {
+        self.sw64.is_some()
+    }
+
+    fn masked_pipelines(&self, device: &wgpu::Device) -> &MaskedPipelines {
+        self.masked.get_or_init(|| {
+            let f = wgpu::ShaderStages::FRAGMENT;
+            let c = wgpu::ShaderStages::COMPUTE;
+            let hw_bgl1 = bgl(device, "VG HW Masked G1 (alpha)", &helio_mats::vg_alpha::layout_entries(self.binding, 0, f));
+            let hw_mod = module(device, "VG HW Raster Masked", shaders::hw_masked_source(self.binding));
+            let hw_layout = pipeline_layout(device, "VG HW Raster Masked PL", &[&self.bgl0_vertex, &hw_bgl1]);
+            let hw = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("VG HW Raster Masked"),
+                layout: Some(&hw_layout),
+                vertex: wgpu::VertexState {
+                    module: &hw_mod,
+                    entry_point: Some("vs_masked"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &hw_mod,
+                    entry_point: Some("fs_masked"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: VIS_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::RED,
+                    })],
+                }),
+                // Two-sided foliage must keep its back faces: the fragment stage
+                // discards them for single-sided materials instead.
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(helio_core::depth::NEARER),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            let sw = self.sw64.as_ref().map(|sw64| {
+                let alpha_bgl = bgl(device, "VG SW Masked G2 (alpha)", &helio_mats::vg_alpha::layout_entries(self.binding, 0, c));
+                let m = module(device, "VG SW Raster Masked", shaders::sw_masked_source(self.binding));
+                let pl = pipeline_layout(device, "VG SW Raster Masked PL", &[&self.bgl0_compute, &sw64.bgl1, &alpha_bgl]);
+                (compute(device, "VG SW Raster Masked", &pl, &m, "sw_raster_masked_main"), alpha_bgl)
+            });
+            MaskedPipelines { hw, hw_bgl1, sw }
+        })
     }
 
     /// Record the whole raster for a single-phase frame: clears, Tier 1 draws,
@@ -490,16 +630,20 @@ impl VgRaster {
             sw_meta_word: i.sw_meta_offset_words,
         };
         queue.write_buffer(&t.params[slot], 0, bytemuck::bytes_of(&params));
+        if let Some(mi) = &i.masked {
+            let masked_params = VgRasterParams { sw_meta_word: mi.sw_meta_offset_words, ..params };
+            queue.write_buffer(&t.params_masked[slot], 0, bytemuck::bytes_of(&masked_params));
+        }
 
         if phase == 0 {
-            for b in [&t.sw_keys, &t.tile_counters, &t.stats, &t.dense_args] {
+            for b in [&t.sw_keys, &t.tile_counters, &t.stats, &t.dense_args, &t.dense_est] {
                 rec.clear_buffer(b, 0, None);
             }
         }
         // The fallback's per-tile lists are rebuilt by every phase.
         rec.clear_buffer(&t.tile_bin_counts, 0, None);
 
-        let g0 = |layout: &wgpu::BindGroupLayout| {
+        let g0 = |layout: &wgpu::BindGroupLayout, params_buf: &wgpu::Buffer| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Raster G0"),
                 layout,
@@ -510,14 +654,23 @@ impl VgRaster {
                     bind(3, i.visible),
                     bind(4, i.vg_instances),
                     bind(5, i.objects),
-                    bind(6, &t.params[slot]),
+                    bind(6, params_buf),
                 ],
             })
         };
 
         // Tier 1.
         {
-            let g0v = g0(&self.bgl0_vertex);
+            let g0v = g0(&self.bgl0_vertex, &t.params[slot]);
+            let masked_hw = i.masked.as_ref().map(|mi| {
+                let m = self.masked_pipelines(device);
+                let alpha = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("VG HW Masked alpha"),
+                    layout: &m.hw_bgl1,
+                    entries: &helio_mats::vg_alpha::bind_entries(self.binding, 0, mi.materials, mi.material_textures),
+                });
+                (m, alpha, mi.hw_indirect_offset)
+            });
             let (color_load, depth_load) = if phase == 0 {
                 (
                     wgpu::LoadOp::Clear(wgpu::Color {
@@ -553,10 +706,16 @@ impl VgRaster {
             for b in 0..abi::HW_BIN_CAPS.len() as u64 {
                 pass.draw_indirect(i.hw_indirect, i.hw_indirect_offset + b * 16);
             }
+            if let Some((m, alpha, offset)) = &masked_hw {
+                pass.set_pipeline(&m.hw);
+                pass.set_bind_group(0, &g0v, &[]);
+                pass.set_bind_group(1, alpha, &[]);
+                pass.draw_indirect(i.hw_indirect, *offset);
+            }
         }
 
         // Tier 2.
-        let g0c = g0(&self.bgl0_compute);
+        let g0c = g0(&self.bgl0_compute, &t.params[slot]);
         let depth_view = &t.depth_view;
         let mut cpass = rec.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("VG SW Raster"),
@@ -581,6 +740,51 @@ impl VgRaster {
             cpass.set_bind_group(0, &g0c, &[]);
             cpass.set_bind_group(1, &g1, &[]);
             cpass.dispatch_workgroups_indirect(i.sw_dispatch, i.sw_dispatch_offset);
+            if let Some(mi) = &i.masked {
+                if let Some((pipeline, alpha_bgl)) = &self.masked_pipelines(device).sw {
+                    let g0m = g0(&self.bgl0_compute, &t.params_masked[slot]);
+                    let g1m = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("VG SW Masked G1"),
+                        layout: &sw.bgl1,
+                        entries: &[
+                            bind(0, &t.sw_keys),
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(depth_view),
+                            },
+                            bind(2, &t.tile_counters),
+                            bind(3, &t.stats),
+                            bind(4, i.sw_meta),
+                        ],
+                    });
+                    let alpha = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("VG SW Masked alpha"),
+                        layout: alpha_bgl,
+                        entries: &helio_mats::vg_alpha::bind_entries(self.binding, 0, mi.materials, mi.material_textures),
+                    });
+                    cpass.set_pipeline(pipeline);
+                    cpass.set_bind_group(0, &g0m, &[]);
+                    cpass.set_bind_group(1, &g1m, &[]);
+                    cpass.set_bind_group(2, &alpha, &[]);
+                    cpass.dispatch_workgroups_indirect(i.sw_dispatch, mi.sw_dispatch_offset);
+                }
+            }
+        }
+        if let Some(d) = &i.dense {
+            // Estimate the overlap of clusters diverted to Tier 3, so the tiles
+            // they sit in keep counting as dense (see `vg_dense_count.wgsl`).
+            let params_dense = VgRasterParams { sw_meta_word: d.meta_offset_words, ..params };
+            queue.write_buffer(&t.params_dense[slot], 0, bytemuck::bytes_of(&params_dense));
+            let g0d = g0(&self.bgl0_compute, &t.params_dense[slot]);
+            let g1d = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("VG Dense Count G1"),
+                layout: &self.dense_count_bgl1,
+                entries: &[bind(0, &t.dense_est), bind(1, d.meta)],
+            });
+            cpass.set_pipeline(&self.dense_count);
+            cpass.set_bind_group(0, &g0d, &[]);
+            cpass.set_bind_group(1, &g1d, &[]);
+            cpass.dispatch_workgroups_indirect(d.dispatch, d.dispatch_offset);
         }
         if let Some(tf) = &self.tile {
             let g1b = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -635,6 +839,7 @@ impl VgRaster {
                 bind(3, &t.dense_masks[write]),
                 bind(4, &t.dense_list),
                 bind(5, &t.dense_args),
+                bind(6, &t.dense_est),
             ],
         });
         let mut cpass = rec.begin_compute_pass(&wgpu::ComputePassDescriptor {

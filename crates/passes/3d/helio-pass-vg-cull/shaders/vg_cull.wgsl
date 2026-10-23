@@ -80,6 +80,8 @@ struct VgObjectRow {
 @group(0) @binding(19) var<storage, read_write> queues: array<vec2<u32>>;
 @group(0) @binding(20) var<storage, read_write> visible: array<vec2<u32>>;
 @group(0) @binding(21) var<storage, read_write> history: array<atomic<u32>>;
+// GpuMaterial rows (24 words each); read only when VGC_FLAG_MASKED is set.
+@group(0) @binding(22) var<storage, read> vgc_materials: array<u32>;
 
 @group(1) @binding(0) var<uniform> rp: RoundParams;
 @group(2) @binding(0) var<storage, read_write> dispatch_args: array<u32>;
@@ -356,6 +358,26 @@ fn choose_bin(tris: u32, ic: InstCtx, cw: vec3<f32>, rw: f32) -> u32 {
     return hw_bin;
 }
 
+// `GpuMaterial::flags` of section `section` of instance `inst` (0 when out of range).
+fn section_material_flags(inst: u32, section: u32) -> u32 {
+    let row = vg_instances[inst].object_row + section;
+    if row >= arrayLength(&objects) { return 0u; }
+    let mslot = objects[row].material_slot;
+    let w = mslot * 24u + 18u;
+    if w >= arrayLength(&vgc_materials) { return 0u; }
+    return vgc_materials[w];
+}
+
+// Alpha-tested clusters leave the opaque bins: they are raster-ed by the masked
+// pipelines, which sample the alpha texture. The opaque bins (and their
+// pipelines) are untouched.
+fn masked_bin(bin: u32) -> u32 {
+    if bin == VGC_BIN_SW || bin == VGC_BIN_DENSE {
+        if (params.flags & VGC_FLAG_SW_MASKED) != 0u { return VGC_BIN_SW_MASKED; }
+    }
+    return VGC_BIN_HW_MASKED;
+}
+
 fn emit_cluster(inst: u32, slot: u32, bin: u32, triangles: u32) {
     let k = atomicAdd(&state[VGC_ST_BINS + bin], 1u);
     if k >= params.bin_capacity {
@@ -400,7 +422,12 @@ fn try_cluster(inst: u32, cs: u32, ic: InstCtx) {
     if (ic.flags & VG_INST_CONE_CULL) != 0u {
         let cone = unpack4x8snorm(c.cone);
         // cone.w = cos(half-angle of the normal cone); 1.0 disables.
-        if cone.w < 0.9999 {
+        var two_sided = false;
+        if cone.w < 0.9999 && (params.flags & VGC_FLAG_MASKED) != 0u {
+            // A two-sided surface is visible from behind: no normal-cone test.
+            two_sided = (section_material_flags(inst, c.counts_material >> 16u) & VGC_MAT_DOUBLE_SIDED) != 0u;
+        }
+        if cone.w < 0.9999 && !two_sided {
             let axis = normalize((ic.m * vec4<f32>(cone.xyz, 0.0)).xyz);
             let dv = cw - cameras[0].position_near.xyz;
             let sin_a = sqrt(max(1.0 - cone.w * cone.w, 0.0));
@@ -420,7 +447,12 @@ fn try_cluster(inst: u32, cs: u32, ic: InstCtx) {
     if pol == POLICY_DROP { stat_add(VGC_STAT_CULLED_OCCLUSION); return; }
     history_mark(job_key(job));
     let triangles = c.counts_material & 0xffu;
-    emit_cluster(inst, cs, choose_bin(triangles, ic, cw, rw), triangles);
+    var bin = choose_bin(triangles, ic, cw, rw);
+    if (params.flags & VGC_FLAG_MASKED) != 0u {
+        let mflags = section_material_flags(inst, c.counts_material >> 16u);
+        if (mflags & VGC_MAT_ALPHA_TEST) != 0u { bin = masked_bin(bin); }
+    }
+    emit_cluster(inst, cs, bin, triangles);
 }
 
 // `gidx` is an asset-local group-ref index.
@@ -654,13 +686,13 @@ fn cs_finalize() {
         let first = b * cap + skip;
         atomicStore(&state[rng + b * 2u], first);
         atomicStore(&state[rng + b * 2u + 1u], c);
-        if b < 4u {
-            atomicStore(&state[args + b * 4u], 96u * (b + 1u));
+        if b < 4u || b == VGC_BIN_HW_MASKED {
+            atomicStore(&state[args + b * 4u], select(VGC_HW_MASKED_VERTS, 96u * (b + 1u), b < 4u));
             atomicStore(&state[args + b * 4u + 1u], c);
             atomicStore(&state[args + b * 4u + 2u], 0u);
             atomicStore(&state[args + b * 4u + 3u], first);
         } else {
-            let o = args + 16u + (b - 4u) * 4u;
+            let o = args + b * 4u;
             atomicStore(&state[o], min(c, VGC_SW_GROUP_WIDTH));
             atomicStore(&state[o + 1u], (c + VGC_SW_GROUP_WIDTH - 1u) / VGC_SW_GROUP_WIDTH);
             atomicStore(&state[o + 2u], 1u);

@@ -24,6 +24,7 @@
 
 pub mod core;
 pub mod feedback;
+pub mod proxy;
 pub mod ranges;
 pub mod runtime;
 pub mod scheduler;
@@ -34,7 +35,11 @@ pub use crate::core::{
     PageBytes, StoreCore, VgStreamConfig, VgStreamError, PAGE_NOT_RESIDENT,
 };
 pub use feedback::{Feedback, FeedbackLayout};
-pub use runtime::{content_words, VgRuntime, VgRuntimeSettings};
+pub use proxy::{
+    build_proxy, error_ladder, proxy_key, ProxyBuild, ProxyCache, ProxyCacheStats, ProxyLodCpu, ProxyOptions,
+    ProxyState,
+};
+pub use runtime::{content_words, VgRuntime, VgRuntimeSettings, VgTier3Stats};
 pub use scheduler::{Fetch, PageScheduler, SchedulerConfig, SchedulerStats};
 pub use source::{testing, VgeoBytes, VgeoSource};
 pub use store::{

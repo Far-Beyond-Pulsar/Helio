@@ -38,3 +38,9 @@ fn dense_xform(v: VgVisibleCluster) -> mat4x4<f32> {
 fn dense_asset(v: VgVisibleCluster) -> u32 {
     return vg_instances[v.instance].asset_slot;
 }
+
+// Cluster-list entries (`slot_lists`) are unified visible indices; bit 31 tags
+// an entry that came from a masked (alpha-tested) cull bin, so the opaque and
+// the masked peel pipelines each take their own class.
+const LIST_MASKED_BIT: u32 = 0x80000000u;
+const LIST_INDEX_MASK: u32 = 0x7fffffffu;

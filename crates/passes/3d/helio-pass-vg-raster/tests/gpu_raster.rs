@@ -261,6 +261,8 @@ fn run(g: &Gpu, s: &Scene, force_fallback: bool, thresholds: (u32, u32)) -> Outp
         sw_meta_offset_words: 0,
         sw_dispatch: &r.sw_dispatch,
         sw_dispatch_offset: 0,
+        masked: None,
+        dense: None,
     };
     let mut enc = g.device.create_command_encoder(&Default::default());
     raster.encode(&g.device, &g.queue, &mut enc, &mut targets, &inputs);
@@ -406,6 +408,8 @@ fn dense_mask_has_hysteresis_across_frames() {
         sw_meta_offset_words: 0,
         sw_dispatch: &r.sw_dispatch,
         sw_dispatch_offset: 0,
+        masked: None,
+        dense: None,
     };
     let tiles = (targets.tiles_x * targets.tiles_y) as u64;
     let mut dense = Vec::new();

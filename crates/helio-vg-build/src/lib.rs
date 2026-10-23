@@ -35,15 +35,15 @@ pub use file::{
 };
 pub use math::sphere_contains;
 pub use mesh::{BuildError, MeshInput, VertexStore};
-pub use pack::{write_vgeo, BuildOptions};
+pub use pack::{write_vgeo, BuildOptions, MAX_ROOT_PAGES};
 pub use reader::{PageView, ParseError, VgeoReader};
 
 /// Builder revision stored in the upper 16 bits of asset flags. The binary
 /// format stays readable, but derived caches from older algorithms must cook
 /// again. Revision 2 fixed accumulated QEM error and premature hierarchy stop;
 /// revision 3 measures each group's error against the original surface
-/// (`deviation`), reduces 40% per level and stops stalled levels.
-pub const COOK_REVISION: u32 = 4;
+/// (`deviation`), reduces 40% per level and stops stalled levels. Revision 5 builds a real DAG for disconnected/island geometry (floating pieces, proximity merging, appearance error) and bounds the pinned root set to `MAX_ROOT_PAGES`.
+pub const COOK_REVISION: u32 = 5;
 
 pub fn is_current_cook(header: &helio_vg_format::VgeoHeader) -> bool {
     header.asset.flags >> 16 == COOK_REVISION

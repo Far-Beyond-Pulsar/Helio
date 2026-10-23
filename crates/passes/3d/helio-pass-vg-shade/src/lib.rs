@@ -82,6 +82,7 @@ struct VgShadeParams {
 
 const FLAG_SW: u32 = 1;
 const FLAG_DENSE: u32 = 2;
+const FLAG_DENSE_MASK: u32 = 8;
 const FLAG_RT: u32 = 4;
 
 /// The per-frame `Globals` uniform the classic G-buffer shader (and so every
@@ -242,6 +243,10 @@ pub struct VgShadeInputs<'a> {
     /// Visible rows of the ray-traced backend (ids `>= DENSE_RT_VISIBLE_BASE`
     /// index it, not the cull's list). `None` binds an empty buffer.
     pub rt_visible: Option<&'a wgpu::Buffer>,
+    /// The dense-tile mask `dense_keys` is valid under (one `u32` per 16x16 tile,
+    /// nonzero = resolved by Tier 3). With it, a dense tile takes only the dense
+    /// result and other tiles ignore `dense_keys`; `None` merges per pixel.
+    pub dense_mask: Option<&'a wgpu::Buffer>,
     /// A virtual-geometry debug view to overlay on the G-buffer albedo after
     /// shading (see [`debug_views`]); `None` records nothing extra.
     pub debug: Option<VgShadeDebug<'a>>,
@@ -397,6 +402,7 @@ impl VgShade {
         e0.extend((2..=9).map(|b| storage_entry(b, true)));
         e0.push(storage_entry(10, false));
         e0.push(storage_entry(11, true));
+        e0.push(storage_entry(12, true));
         let resolve_bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VgShade resolve 0"),
             entries: &e0,
@@ -811,6 +817,9 @@ impl VgShade {
         if inputs.rt.is_some() {
             flags |= FLAG_RT;
         }
+        if inputs.dense_keys.is_some() && inputs.dense_mask.is_some() {
+            flags |= FLAG_DENSE_MASK;
+        }
         queue.write_buffer(
             &self.params,
             0,
@@ -849,6 +858,7 @@ impl VgShade {
                 wgpu::BindGroupEntry { binding: 9, resource: buf(inputs.dense_keys.unwrap_or(&self.dummy_keys)) },
                 wgpu::BindGroupEntry { binding: 10, resource: buf(pixel_material) },
                 wgpu::BindGroupEntry { binding: 11, resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)) },
+                wgpu::BindGroupEntry { binding: 12, resource: buf(inputs.dense_mask.unwrap_or(&self.dummy_keys)) },
             ],
         });
         let (rt_payload, rt_depth) =

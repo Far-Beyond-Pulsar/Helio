@@ -38,9 +38,19 @@ pub trait VgeoSource: Send + Sync + 'static {
     }
 }
 
-/// A `.vgeo` file image held in memory.
+/// Where a [`VgeoBytes`] keeps its bytes.
+enum Storage {
+    /// The whole file image in memory.
+    Memory(Arc<[u8]>),
+    /// The file on disk: the header sections are read at open or on demand and
+    /// pages are read as the scheduler asks for them, so a multi-gigabyte cache
+    /// costs megabytes of resident memory, not gigabytes.
+    File { file: std::sync::Mutex<std::fs::File>, len: u64 },
+}
+
+/// A `.vgeo` file, in memory or backed by the file on disk.
 pub struct VgeoBytes {
-    bytes: Arc<[u8]>,
+    storage: Storage,
     header: VgeoHeader,
 }
 
@@ -52,6 +62,25 @@ impl VgeoBytes {
             return Err("vgeo: truncated header".into());
         }
         let header: VgeoHeader = bytemuck::pod_read_unaligned(&bytes[..hs]);
+        Self::validate(&header, bytes.len() as u64)?;
+        Ok(Self { storage: Storage::Memory(bytes), header })
+    }
+
+    /// Opens `path` without reading it into memory: only the header is read
+    /// now; sections and pages are read when asked for.
+    pub fn open(path: &std::path::Path) -> Result<Self, String> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).map_err(|e| format!("vgeo: {}: {e}", path.display()))?;
+        let len = file.metadata().map_err(|e| e.to_string())?.len();
+        let hs = std::mem::size_of::<VgeoHeader>();
+        let mut head = vec![0u8; hs];
+        file.read_exact(&mut head).map_err(|_| "vgeo: truncated header".to_string())?;
+        let header: VgeoHeader = bytemuck::pod_read_unaligned(&head);
+        Self::validate(&header, len)?;
+        Ok(Self { storage: Storage::File { file: std::sync::Mutex::new(file), len }, header })
+    }
+
+    fn validate(header: &VgeoHeader, len: u64) -> Result<(), String> {
         if header.magic != VGEO_MAGIC {
             return Err("vgeo: bad magic".into());
         }
@@ -59,8 +88,8 @@ impl VgeoBytes {
             return Err(format!("vgeo: version {} (expected {FORMAT_VERSION})", header.version));
         }
         let a = &header.asset;
-        let check = |name: &str, off: u32, len: u64| {
-            if u64::from(off) + len > bytes.len() as u64 {
+        let check = |name: &str, off: u32, n: u64| {
+            if u64::from(off) + n > len {
                 Err(format!("vgeo: {name} section out of bounds"))
             } else {
                 Ok(())
@@ -68,8 +97,28 @@ impl VgeoBytes {
         };
         check("hierarchy", header.hierarchy_offset, u64::from(a.node_count) * 96)?;
         check("group refs", header.group_refs_offset, u64::from(a.group_count) * 8)?;
-        check("pages", header.pages_offset, u64::from(a.page_count) * u64::from(PAGE_BYTES))?;
-        Ok(Self { bytes, header })
+        check("pages", header.pages_offset, u64::from(a.page_count) * u64::from(PAGE_BYTES))
+    }
+
+    /// `n` bytes at `off`, borrowed from memory or read from the file.
+    fn slice(&self, off: usize, n: usize) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+        match &self.storage {
+            Storage::Memory(bytes) => bytes
+                .get(off..off + n)
+                .map(std::borrow::Cow::Borrowed)
+                .ok_or_else(|| "vgeo: range out of bounds".to_string()),
+            Storage::File { file, len } => {
+                use std::io::{Read, Seek, SeekFrom};
+                if (off + n) as u64 > *len {
+                    return Err("vgeo: range out of bounds".into());
+                }
+                let mut buf = vec![0u8; n];
+                let mut f = file.lock().map_err(|_| "vgeo: file lock poisoned".to_string())?;
+                f.seek(SeekFrom::Start(off as u64)).map_err(|e| e.to_string())?;
+                f.read_exact(&mut buf).map_err(|e| e.to_string())?;
+                Ok(std::borrow::Cow::Owned(buf))
+            }
+        }
     }
 }
 
@@ -80,18 +129,17 @@ impl VgeoSource for VgeoBytes {
     fn hierarchy(&self) -> Result<Vec<GpuHierarchyNode>, String> {
         let off = self.header.hierarchy_offset as usize;
         let n = self.header.asset.node_count as usize;
-        Ok(bytemuck::pod_collect_to_vec(&self.bytes[off..off + n * 96]))
+        Ok(bytemuck::pod_collect_to_vec(&self.slice(off, n * 96)?))
     }
     fn group_refs(&self) -> Result<Vec<GpuGroupRef>, String> {
         let off = self.header.group_refs_offset as usize;
         let n = self.header.asset.group_count as usize;
-        Ok(bytemuck::pod_collect_to_vec(&self.bytes[off..off + n * 8]))
+        Ok(bytemuck::pod_collect_to_vec(&self.slice(off, n * 8)?))
     }
     fn quant(&self) -> GpuAssetQuant {
         let o = VGEO_META_OFFSET;
-        self.bytes
-            .get(o..o + 16)
-            .map(bytemuck::pod_read_unaligned)
+        self.slice(o, 16)
+            .map(|b| bytemuck::pod_read_unaligned(&b))
             .unwrap_or(GpuAssetQuant { origin: [0.0; 3], step: 1.0 })
     }
     /// Reads the builder's optional CSR table (`VgeoMeta::page_deps_offset`,
@@ -99,25 +147,25 @@ impl VgeoSource for VgeoBytes {
     fn page_deps(&self) -> Result<Vec<Vec<u32>>, String> {
         let n = self.header.asset.page_count as usize;
         let at = VGEO_META_OFFSET + 28;
-        let Some(w) = self.bytes.get(at..at + 4) else { return Ok(vec![Vec::new(); n]) };
-        let off = u32::from_le_bytes(w.try_into().unwrap()) as usize;
+        let Ok(w) = self.slice(at, 4) else { return Ok(vec![Vec::new(); n]) };
+        let off = u32::from_le_bytes(w[..4].try_into().unwrap()) as usize;
         if off == 0 {
             return Ok(vec![Vec::new(); n]);
         }
-        let word = |i: usize| -> Result<u32, String> {
-            self.bytes
-                .get(off + i * 4..off + i * 4 + 4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-                .ok_or_else(|| "vgeo: page deps out of bounds".to_string())
+        let words = |from: usize, count: usize| -> Result<Vec<u32>, String> {
+            let bytes = self.slice(off + from * 4, count * 4).map_err(|_| "vgeo: page deps out of bounds".to_string())?;
+            Ok(bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect())
         };
-        let total = word(n)? as usize;
+        let offsets = words(0, n + 1)?;
+        let total = offsets[n] as usize;
+        let items = words(n + 1, total)?;
         let mut out = Vec::with_capacity(n);
         for p in 0..n {
-            let (a, b) = (word(p)? as usize, word(p + 1)? as usize);
+            let (a, b) = (offsets[p] as usize, offsets[p + 1] as usize);
             if a > b || b > total {
                 return Err("vgeo: bad page deps table".into());
             }
-            out.push((a..b).map(|i| word(n + 1 + i)).collect::<Result<Vec<_>, _>>()?);
+            out.push(items[a..b].to_vec());
         }
         Ok(out)
     }
@@ -126,7 +174,7 @@ impl VgeoSource for VgeoBytes {
             return Err(format!("vgeo: page {page_id} out of range"));
         }
         let off = self.header.pages_offset as usize + page_id as usize * PAGE_BYTES as usize;
-        Ok(self.bytes[off..off + PAGE_BYTES as usize].to_vec())
+        Ok(self.slice(off, PAGE_BYTES as usize)?.into_owned())
     }
 }
 

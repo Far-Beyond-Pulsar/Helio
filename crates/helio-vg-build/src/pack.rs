@@ -11,6 +11,9 @@ use crate::mesh::BuildError;
 
 /// Builder knobs. Everything that changes the output bytes lives here so
 /// "same input + same options => same bytes" is checkable.
+/// Most pages an asset may pin as its always-resident root set (2 MiB).
+pub const MAX_ROOT_PAGES: u32 = 16;
+
 #[derive(Clone, Debug)]
 pub struct BuildOptions {
     /// Content id of the source geometry (xxh3-128, low then high); stored
@@ -313,16 +316,31 @@ pub fn write_vgeo(
     build_node(&items, &mut nodes);
 
     // Pages that must be resident: everything in the top `resident_levels`.
+    // Bounded by a page budget: take as many top levels as fit in
+    // `MAX_ROOT_PAGES` (at most `resident_levels`); the root level alone must fit.
     let top = level_count - 1;
-    let min_resident = top.saturating_sub(opts.resident_levels.max(1) - 1);
-    let root_page_count = dag
-        .groups
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| g.level >= min_resident)
-        .map(|(g, _)| group_page[g] + 1)
-        .max()
-        .unwrap_or(1);
+    let pages_for = |levels: u32| -> u32 {
+        let min_resident = top.saturating_sub(levels - 1);
+        dag.groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.level >= min_resident)
+            .map(|(g, _)| group_page[g] + 1)
+            .max()
+            .unwrap_or(1)
+    };
+    let root_page_count = pages_for(1);
+    if root_page_count > MAX_ROOT_PAGES {
+        return Err(BuildError::RootTooLarge { pages: root_page_count });
+    }
+    let mut root_page_count = root_page_count;
+    for levels in 2..=opts.resident_levels.max(1).min(level_count) {
+        let p = pages_for(levels);
+        if p > MAX_ROOT_PAGES {
+            break;
+        }
+        root_page_count = p;
+    }
 
     // ── container ──────────────────────────────────────────────────────────
     let hierarchy_offset = align(std::mem::size_of::<VgeoHeader>() + std::mem::size_of::<VgeoMeta>(), 16);

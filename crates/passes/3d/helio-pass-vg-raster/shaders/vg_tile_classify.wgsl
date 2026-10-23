@@ -30,14 +30,23 @@ struct ClassifyParams {
 @group(0) @binding(3) var<storage, read_write> cur_mask: array<u32>;
 @group(0) @binding(4) var<storage, read_write> dense_list: array<u32>;
 @group(0) @binding(5) var<storage, read_write> dense_args: array<atomic<u32>, 4>;
+// Estimated triangles per tile of the clusters the cull diverted to Tier 3
+// (`vg_dense_count.wgsl`); they are not rasterised, so `tile_counters` misses them.
+@group(0) @binding(6) var<storage, read> dense_est: array<u32>;
 
 @compute @workgroup_size(64)
 fn classify_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let t = gid.x;
     if (t >= cp.tile_count) { return; }
-    let tris = f32(tile_counters[t * 2u]);
+    let was_dense = prev_mask[t] != 0u;
+    // Feedback-safe: the cull routes the clusters of a dense tile away from the
+    // software raster, which empties its counters. A tile that WAS dense also
+    // counts the estimate of its diverted clusters, so it keeps its state while
+    // the geometry stays (and drops out when it thins). The estimate never
+    // makes a tile dense on its own, so it cannot grow the mask.
+    let tris = f32(tile_counters[t * 2u]) + select(0.0, f32(dense_est[t]), was_dense);
     let hits = f32(tile_counters[t * 2u + 1u]);
-    let k = select(1.0, cp.hysteresis, prev_mask[t] != 0u);
+    let k = select(1.0, cp.hysteresis, was_dense);
     let dense = tris >= f32(cp.tri_thresh) * k || hits >= f32(cp.hit_thresh) * k;
     cur_mask[t] = select(0u, 1u, dense);
     if (dense) {

@@ -178,8 +178,8 @@ fn run_nonrt_layout(g: &Gpu, scene: &Scene, cfg: DenseConfig, viewport: [u32; 2]
     if split {
         cull_state[r] = 3;
         cull_state[r + 1] = n / 2;
-        cull_state[r + 12 + 10] = 200;
-        cull_state[r + 12 + 11] = n - n / 2;
+        cull_state[r + helio_vg_format::CULL_RANGES_PER_PHASE as usize + 10] = 200;
+        cull_state[r + helio_vg_format::CULL_RANGES_PER_PHASE as usize + 11] = n - n / 2;
     } else {
         cull_state[r + 1] = n;
     }
@@ -314,10 +314,17 @@ fn nonrt_clamp_and_overflow_counters() {
     let cfg = DenseConfig { slab_tris: 8, nominal_layers: 1, max_layers: 1, ..DenseConfig::default() };
     let r = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
     assert!(r.stats.clamped_tiles > 0 && r.stats.clamped_tris > 0 && r.stats.overflowed(), "{:?}", r.stats);
-    // Tiny per-tile cluster list: clusters are dropped and counted.
-    let cfg = DenseConfig { cluster_cap: 4, ..DenseConfig::default() };
+    // Tiny shared list pool: entries past it are dropped and counted.
+    let cfg = DenseConfig { list_pool: 4, ..DenseConfig::default() };
     let r = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
     assert!(r.stats.bin_overflow > 0, "{:?}", r.stats);
+    // A tiny peel chunk loses nothing: lists longer than the chunk are peeled in
+    // several passes and give the same pixels as one pass.
+    let whole = run_nonrt(&g, &scene, DenseConfig::default(), [64, 48], &[true; 12]);
+    let cfg = DenseConfig { cluster_cap: 4, ..DenseConfig::default() };
+    let chunked = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
+    assert_eq!(chunked.stats.bin_overflow, 0, "{:?}", chunked.stats);
+    assert_eq!(chunked.keys, whole.keys, "chunked peel differs from the single pass");
     // Slot cap: only some dense tiles are processed, the rest counted.
     let cfg = DenseConfig { max_dense_slots: 3, ..DenseConfig::default() };
     let r = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
@@ -340,6 +347,7 @@ mod rt {
             indices: vec![0, 1, 2, 0, 2, 3],
             prim_map: vec![0, 1],
             clusters: vec![cluster],
+            cluster_pages: vec![],
         }
     }
 
@@ -477,6 +485,127 @@ mod rt {
         }
         assert!(hits > 500 && far_hits > 100, "hits={hits} far_hits={far_hits}");
         let _ = Vec3::ZERO;
+    }
+
+    fn paged_quad(error: f32, local: u32, page: u32) -> ProxyLod {
+        ProxyLod { cluster_pages: vec![page], ..quad(error, local) }
+    }
+
+    /// Page-addressed proxies: slots come from the residency resolver, an
+    /// instance whose pages are not resident is left out (and its pages are
+    /// reported as wanted), and unchanged inputs rebuild neither the TLAS nor
+    /// the tables; a residency change rebuilds the tables only.
+    #[test]
+    fn page_addressed_proxies_resolve_slots_and_skip_unchanged_rebuilds() {
+        let Some(g) = gpu(true) else {
+            eprintln!("SKIP: no ray-query device");
+            return;
+        };
+        let mut pass = DenseRtPass::new(&g.device, DenseConfig::default()).unwrap();
+        let mut blas = BlasManager::new(g.device.clone());
+        let mut tlas = TlasManager::new(g.device.clone(), 16);
+        pass.register_proxy_asset(
+            &g.device,
+            &ProxyAsset { asset_key: 7, lods: vec![paged_quad(0.0, 5, 3), paged_quad(1.0, 9, 4)] },
+        )
+        .unwrap();
+        assert_eq!(pass.lod_pages(7, 0), &[3]);
+        let read_rows = |pass: &DenseRtPass| {
+            let raw = read_buffer(&g.device, &g.queue, pass.rt_visible(), 8);
+            let rows: &[DenseVisibleGpu] = cast_slice(&raw);
+            rows[0]
+        };
+
+        let viewport = [64u32, 48];
+        let (near, fov) = (0.1f32, 1.0f32);
+        let proj = Mat4::perspective_infinite_reverse_rh(fov, 64.0 / 48.0, near);
+        let frame = DenseFrame {
+            view_proj: proj.to_cols_array_2d(),
+            inv_view_proj: proj.inverse().to_cols_array_2d(),
+            camera_pos: [0.0; 3],
+            viewport,
+            visible_capacity: 0,
+            ray_t: [near, 1.0e30],
+        };
+        let ppu = pixels_per_unit(viewport[1], fov);
+        let requests = [RtInstanceRequest {
+            instance_id: 4,
+            asset_key: 7,
+            transform: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., -5.0],
+            world_center: [0.0, 0.0, -5.0],
+            world_radius: 2.9,
+            error_scale: 1.0,
+        }];
+        let mut step = |pass: &mut DenseRtPass, version: u64, resident: bool| {
+            let mut enc = g.device.create_command_encoder(&Default::default());
+            let resolve = move |_key: u64, page: u32| resident.then_some(page + 10);
+            let info = pass
+                .prepare_frame_resolved(&g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &requests, 1.0, ppu, version, &resolve)
+                .expect("prepare");
+            g.queue.submit(Some(enc.finish()));
+            info
+        };
+
+        let first = step(&mut pass, 1, true);
+        assert!(first.complete() && first.tlas_instances == 1, "{first:?}");
+        assert!(first.tlas_rebuilt && first.tables_rebuilt && first.blas_builds == 1, "{first:?}");
+        let row = read_rows(&pass);
+        assert_eq!(row.instance, 4);
+        assert_eq!(row.cluster_slot, (13 << helio_vg_format::PAGE_CLUSTER_SHIFT) | 5);
+
+        // Identical inputs: nothing is rebuilt.
+        let again = step(&mut pass, 1, true);
+        assert!(!again.tlas_rebuilt && !again.tables_rebuilt && again.blas_builds == 0, "{again:?}");
+        assert_eq!(again.rt_visible_count, first.rt_visible_count);
+
+        // The pool layout changed: tables are rewritten, the TLAS is not.
+        let moved = step(&mut pass, 2, true);
+        assert!(moved.tables_rebuilt && !moved.tlas_rebuilt, "{moved:?}");
+
+        // Pages gone: the instance is left out, flagged, and its pages wanted.
+        let gone = step(&mut pass, 3, false);
+        assert_eq!(gone.unresolved_page_instances, 1, "{gone:?}");
+        assert!(!gone.complete() && gone.tlas_instances == 0, "{gone:?}");
+        assert_eq!(gone.wanted_lods, vec![(7, 0)]);
+    }
+
+    /// An instance whose proxy table would exceed the visible-row cap is
+    /// dropped and reported, never truncated silently.
+    #[test]
+    fn visible_row_cap_drops_instances_and_reports_them() {
+        let Some(g) = gpu(true) else {
+            eprintln!("SKIP: no ray-query device");
+            return;
+        };
+        let mut pass = DenseRtPass::new(&g.device, DenseConfig::default()).unwrap();
+        pass.set_max_visible_rows(1);
+        let mut blas = BlasManager::new(g.device.clone());
+        let mut tlas = TlasManager::new(g.device.clone(), 16);
+        pass.register_proxy_asset(&g.device, &ProxyAsset { asset_key: 7, lods: vec![quad(0.0, 1)] }).unwrap();
+        let proj = Mat4::perspective_infinite_reverse_rh(1.0, 64.0 / 48.0, 0.1);
+        let frame = DenseFrame {
+            view_proj: proj.to_cols_array_2d(),
+            inv_view_proj: proj.inverse().to_cols_array_2d(),
+            camera_pos: [0.0; 3],
+            viewport: [64, 48],
+            visible_capacity: 0,
+            ray_t: [0.1, 1.0e30],
+        };
+        let mk = |id: u32| RtInstanceRequest {
+            instance_id: id,
+            asset_key: 7,
+            transform: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., -5.0],
+            world_center: [0.0, 0.0, -5.0],
+            world_radius: 2.9,
+            error_scale: 1.0,
+        };
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        let info = pass
+            .prepare_frame(&g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &[mk(1), mk(2)], 1.0, 100.0)
+            .unwrap();
+        g.queue.submit(Some(enc.finish()));
+        assert_eq!((info.tlas_instances, info.dropped_instances), (1, 1), "{info:?}");
+        assert!(!info.complete());
     }
 
     #[test]

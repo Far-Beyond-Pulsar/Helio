@@ -16,6 +16,7 @@
 pub mod material;
 pub mod radiant;
 pub mod shader;
+pub mod vg_alpha;
 
 pub use material::{
     GpuMaterial, MaterialBindingConfig, MaterialBindingMode, MaterialTextureBindings,

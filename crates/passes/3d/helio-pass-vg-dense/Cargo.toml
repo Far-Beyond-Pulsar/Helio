@@ -8,8 +8,10 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 helio-core = { workspace = true }
 helio-vg-format = { workspace = true }
+helio-mats = { workspace = true }
 helio-pass-vg-cull = { path = "../helio-pass-vg-cull" }
 helio-pass-vg-raster = { path = "../helio-pass-vg-raster" }
+helio-vg-stream = { path = "../../../helio-vg-stream" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }

@@ -19,7 +19,7 @@
 //!  VgCullLate      phase 1 against that Hi-Z
 //!  VgRasterLate    delta of phase 1, tile classification
 //!  VgStreamEnd     records the page-request readback
-//!  VgDense         Tier 3 over dense tiles (3-NonRT)
+//!  VgDense         Tier 3 over dense tiles (3-NonRT depth peel, or 3-RT ray queries when ready)
 //!  VgShade         vis resolve, material bin, shade -> G-buffer, final depth
 //! foliage / decals / deferred light: unchanged
 //! ```
@@ -117,6 +117,7 @@ struct InputsSnapshot {
     header: wgpu::Buffer,
     items: wgpu::Buffer,
     dense_mask: Option<wgpu::Buffer>,
+    materials: Option<wgpu::Buffer>,
     instance_count: u32,
     dense_tiles: [u32; 2],
 }
@@ -174,7 +175,7 @@ impl RenderPass for VgInputsPass {
         };
         self.raster.ensure_targets(ctx.device, ctx.width, ctx.height);
         let (dense_mask, dense_tiles) = match self.raster.dense_mask_last_frame() {
-            Some((mask, tiles)) if self.dense_enabled => (Some(mask), tiles),
+            Some((mask, tiles)) if self.dense_enabled && settings.tier3 => (Some(mask), tiles),
             Some((_, tiles)) => (None, tiles),
             None => (None, [1, 1]),
         };
@@ -190,6 +191,7 @@ impl RenderPass for VgInputsPass {
             header: header.clone(),
             items: items.clone(),
             dense_mask,
+            materials: ctx.scene_buffers.get(BufferKey::of("materials")).map(|m| m.buffer.clone()),
             dense_tiles,
         });
         Ok(())
@@ -213,6 +215,7 @@ impl RenderPass for VgInputsPass {
                 gcbvh_header: &s.header,
                 gcbvh_items: &s.items,
                 dense_mask: s.dense_mask.as_ref(),
+                materials: s.materials.as_ref(),
                 instance_count: s.instance_count,
                 dense_tiles: s.dense_tiles,
             })
@@ -291,13 +294,24 @@ pub(crate) fn add_virtual_geometry_passes(
     let raster_shared = raster.shared.clone();
 
     let source_runtime = runtime.clone();
-    let (cull_early, cull_late) = VgCullEarlyPass::pair(device, VgCullConfig::default());
+    let cull_config = VgCullConfig { sw_masked: !raster.shared.uses_tile_fallback(), ..VgCullConfig::default() };
+    let (cull_early, cull_late) = VgCullEarlyPass::pair(device, cull_config);
     let cull_early =
         cull_early.with_settings_source(Arc::new(move || cull_settings(&source_runtime)));
 
     let mode_runtime = runtime.clone();
-    let dense = match VgDensePass::new(device, Box::new(move || mode_runtime.settings().mode)) {
-        Ok(dense) => Some(dense),
+    // Tier 3 is opt-in (`VgRuntimeSettings::tier3`): with it off the dense pass
+    // sees `Off` and records nothing, and the cull never routes clusters to it.
+    let dense = match VgDensePass::new(
+        device,
+        Box::new(move || {
+            let settings = mode_runtime.settings();
+            if settings.tier3 { settings.mode } else { VgMode::Off }
+        }),
+    ) {
+        // The runtime gives Tier 3 the stream store (proxy sources, page
+        // residency) so it can use the ray-traced backend where supported.
+        Ok(dense) => Some(dense.with_runtime(runtime.clone())),
         Err(error) => {
             log::warn!("virtual geometry: Tier 3 unavailable ({error}); dense tiles stay on Tier 1/2");
             None

@@ -27,7 +27,7 @@ struct DebugParams {
     tiles_x: u32,
     tiles_y: u32,
     tau_px: f32,
-    _pad: u32,
+    dense_resolved: u32,
 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
@@ -44,6 +44,8 @@ struct DebugParams {
 // Per tile: [software triangles overlapping it, software pixel hits].
 @group(0) @binding(16) var<storage, read> tile_counters: array<u32>;
 @group(0) @binding(17) var<storage, read> dense_mask: array<u32>;
+// Tiles Tier 3 resolved (union mask); only valid when `dp.dense_resolved != 0`.
+@group(0) @binding(18) var<storage, read> resolved_mask: array<u32>;
 
 @group(1) @binding(0) var payload_tex: texture_2d<u32>;
 @group(1) @binding(1) var out_albedo: texture_storage_2d<rgba8unorm, write>;
@@ -226,11 +228,16 @@ fn vg_debug(@builtin(global_invocation_id) gid: vec3<u32>) {
             col = dbg_heat(1.0 - t);
         }
         case VGDBG_TIER: {
+            let dtile = (px.y / DBG_TILE) * dp.tiles_x + (px.x / DBG_TILE);
+            let in_resolved = dp.dense_resolved != 0u && dtile < arrayLength(&resolved_mask) && resolved_mask[dtile] != 0u;
             if is_rt {
                 col = vec3<f32>(1.0, 0.1, 0.9);
-            } else if bin == 5u {
+            } else if bin == 5u || in_resolved {
+                // A tile Tier 3 resolved took its pixels from the dense backend,
+                // whatever cull bin the cluster of that pixel was in.
                 col = vec3<f32>(1.0, 0.55, 0.05);
-            } else if bin == 4u {
+            } else if bin == 4u || bin == 7u {
+                // 7 = software masked (alpha-tested) bin, 6 falls under the hardware blues.
                 col = vec3<f32>(0.1, 0.9, 0.2);
             } else if bin == 0u {
                 col = vec3<f32>(0.3, 0.55, 1.0);
@@ -258,7 +265,7 @@ fn vg_debug(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         case VGDBG_CULL: {
             var phase1 = false;
-            if !is_rt && bin < 6u {
+            if !is_rt && bin < 8u {
                 let k = vis_index - bin * max(dp.bin_capacity, 1u);
                 phase1 = k >= cull_state[VGDBG_ST_PHASE0 + bin];
             }

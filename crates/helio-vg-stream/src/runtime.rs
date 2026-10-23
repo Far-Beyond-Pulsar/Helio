@@ -37,6 +37,9 @@ pub struct VgRuntimeSettings {
     /// Ceiling on visible clusters per frame (a ceiling, not an allocation).
     pub max_visible_clusters: u32,
     pub two_phase_occlusion: bool,
+    /// Tier 3 (dense-tile depth peel / ray tracing). Off by default: measured at
+    /// ~200 ms/frame on the museum scene, where Tier 1/2 alone take ~7 ms.
+    pub tier3: bool,
 }
 
 impl Default for VgRuntimeSettings {
@@ -47,6 +50,7 @@ impl Default for VgRuntimeSettings {
             page_budget_mb: 512,
             max_visible_clusters: 4_194_304,
             two_phase_occlusion: true,
+            tier3: false,
         }
     }
 }
@@ -71,6 +75,7 @@ struct Inner {
     state: Mutex<State>,
     /// Bumped on every host-side change to the asset list or settings.
     host_version: AtomicU64,
+    tier3: Mutex<VgTier3Stats>,
 }
 
 /// See the module doc. Cloning shares the same runtime.
@@ -98,6 +103,7 @@ impl VgRuntime {
             settings: Mutex::new(settings),
             state: Mutex::new(State::default()),
             host_version: AtomicU64::new(1),
+            tier3: Mutex::new(VgTier3Stats::default()),
         }))
     }
 
@@ -283,5 +289,66 @@ impl VgRuntime {
             .assets
             .iter()
             .any(|e| e.handle.is_some_and(|h| store.is_ready(h)))
+    }
+}
+
+// ── Tier 3 statistics ───────────────────────────────────────────────────────
+
+/// Counters of the Tier-3 (dense overlap) backend selection, written by the
+/// `VgDense` pass and read by tools and tests. Cheap to copy.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VgTier3Stats {
+    /// Frames Tier 3 ran with the depth-peel backend.
+    pub frames_nonrt: u64,
+    /// Frames Tier 3 ran with the ray-traced backend.
+    pub frames_rt: u64,
+    /// Frames the candidate/proxy machinery of the RT tier was active
+    /// (zero under `ForceNonRtFallback` or without hardware support).
+    pub rt_tier_frames: u64,
+    /// The device supports ray queries (`rt_available`).
+    pub rt_hardware: bool,
+    /// Dense tiles of the most recent frame the CPU learned about (lagged).
+    pub dense_tiles: u32,
+    /// Distinct dense instances seen by the latest completed readback.
+    pub candidates: u32,
+    /// Instances in the current TLAS.
+    pub tlas_instances: u32,
+    /// TLAS builds recorded / skipped because nothing changed.
+    pub tlas_rebuilds: u64,
+    pub tlas_reuses: u64,
+    /// BLAS builds recorded (one per (asset, proxy level) first use).
+    pub blas_builds: u64,
+    /// Frames the selector wanted RT but proxies/instances were incomplete.
+    pub rt_incomplete_frames: u64,
+    /// Readbacks that reported dense instances missing from the TLAS.
+    pub uncovered_readbacks: u64,
+    /// Assets with GPU-resident proxies and the bytes they hold.
+    pub proxy_assets: u32,
+    pub proxy_bytes: u64,
+    pub proxy_jobs_started: u64,
+    pub proxy_jobs_failed: u64,
+    pub proxy_evictions: u64,
+    /// Over-tau instances in the latest RT frame (proxy coarser than tau).
+    pub over_tau_instances: u32,
+    /// Candidate list overflowed (more dense instances than the readback holds).
+    pub candidate_overflows: u64,
+    /// Latest Tier-3 counters (read back a few frames late): tiles resolved,
+    /// cluster-list entries and dense tiles dropped by the caps, clamped peels.
+    pub dense_tiles_processed: u32,
+    pub bin_overflow: u32,
+    pub slot_overflow: u32,
+    pub clamped_tiles: u32,
+    pub clamped_tris: u32,
+}
+
+impl VgRuntime {
+    /// The latest Tier-3 counters.
+    pub fn tier3_stats(&self) -> VgTier3Stats {
+        *lock(&self.0.tier3)
+    }
+
+    /// Update the Tier-3 counters (the `VgDense` pass).
+    pub fn update_tier3_stats(&self, f: impl FnOnce(&mut VgTier3Stats)) {
+        f(&mut lock(&self.0.tier3));
     }
 }

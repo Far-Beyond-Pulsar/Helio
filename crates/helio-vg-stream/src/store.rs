@@ -456,6 +456,12 @@ impl VgAssetStore {
     pub fn core(&self) -> &StoreCore {
         &self.core
     }
+
+    /// Mutable access for the proxy tier (page requests); the streaming step
+    /// itself stays [`Self::update`].
+    pub fn core_mut(&mut self) -> &mut StoreCore {
+        &mut self.core
+    }
 }
 
 /// The eight buffers of the stream binding group, in binding order

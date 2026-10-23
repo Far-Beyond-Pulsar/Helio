@@ -105,23 +105,59 @@
 //!   adapters with a shader-compiler crash (`usable_adapter_features`); on
 //!   those, [`rt_available`] is false and only 3-NonRT runs.
 //! * Primary rays start at `ray_t[0]` (set to the near distance) and use
-//!   opaque, force-opaque geometry: no alpha-tested proxies.
+//!   opaque, force-opaque geometry: no alpha-tested proxies (alpha-masked
+//!   clusters are only resolved by the depth peel).
+//!
+//! # 3-RT in the render graph (as wired)
+//!
+//! [`VgDensePass`] drives both backends. The CPU side is [`RtTier`]:
+//!
+//! * Proxies: `helio_vg_stream::proxy` builds the proxy ladder of an asset
+//!   (consistent DAG cuts at geometric error levels, welded `Float32x3` +
+//!   `u32`) on background threads under a byte budget with LRU eviction; at
+//!   most one finished proxy is uploaded per frame.
+//! * Instances: the `collect` kernel ([`RtCollect`]) marks, GPU-side and
+//!   deduplicated, the instances overlapping dense tiles and appends their
+//!   transform/asset to a bounded buffer that is read back asynchronously
+//!   (1-3 frames late, never waited on). CPU cost is O(dense instances).
+//! * Pages: the pool slot of a proxy cluster is only known at frame time, so
+//!   proxies are page-addressed; the tier asks the store for the pages of the
+//!   selected levels and leaves an instance out (frame falls back to NonRT)
+//!   while one is not resident.
+//! * TLAS: rebuilt only when the instance set, a selected level, a BLAS or a
+//!   transform changes (a full rebuild each time: no refit); the tables
+//!   (instance rows, RT visible rows) only when the set, a level or the pool
+//!   residency changed. Counted in `VgTier3Stats`.
+//! * Policy: see [`graph`]. `ForceNonRtFallback` never creates the tier.
+//!
+//! Known limits: 1-3 frame candidate latency (a newly dense instance can be a
+//! hole for those frames while RT is active; the selector then falls back to
+//! NonRT until the TLAS covers it); uniform proxy error (not per pixel); no
+//! TLAS refit, no per-instance material/alpha; one proxy upload per frame;
+//! proxy CPU copies of the prim_map stay resident; resolve merges the RT keys
+//! with Tier 1/2 by depth rather than replacing them.
 
+pub mod collect;
 pub mod common;
 pub mod config;
 pub mod graph;
+pub mod mask_union;
 pub mod mode;
 pub mod nonrt;
 pub mod peel_ref;
 pub mod rt;
+pub mod rt_tier;
+pub mod stats_readback;
 
+pub use collect::{Candidate, CollectResult, RtCollect, CAND_CAPACITY};
+pub use rt_tier::{RtEnv, RtPrep, RtTier, RtTierConfig};
 pub use common::{read_buffer, DenseBuffers, DenseFrame, DenseParamsGpu, DenseStats};
 pub use config::DenseConfig;
 pub use graph::{VgDenseFrameData, VgDensePass, KEY_DENSE};
 pub use mode::{rt_available, AutoPolicy, Tier3Backend, Tier3Selector};
 pub use nonrt::{DenseError, DenseNonRtInputs, DenseNonRtPass};
 pub use rt::{
-    pixels_per_unit, proxy_mesh_id, select_proxy_lod, DenseRtPass, DenseVisibleGpu, ProxyAsset,
+    pixels_per_unit, pixels_per_unit_from_proj, proxy_mesh_id, select_proxy_lod, DenseRtPass, DenseVisibleGpu, ProxyAsset,
     ProxyLod, ProxySelection, RtError, RtFrameInfo, RtInstanceGpu, RtInstanceRequest,
     DENSE_RT_VISIBLE_BASE,
 };
