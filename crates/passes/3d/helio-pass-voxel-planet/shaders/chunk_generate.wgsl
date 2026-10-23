@@ -921,14 +921,26 @@ fn tile_top(slot: u32, x: i32, y: i32, level: u32) -> i32 {
 // A leaf's two material bytes from its columns' materials
 // (`chunk_columns_main`): the surface, the top material of a column whose
 // top cell is in the leaf (`has_top`, `top`), else the subsurface's; the
-// subsurface, by its first column at the leaf's centre (layer `lz` of a
-// chunk of `level`): above the lowest terrain top around it (a natural
-// riser) its surface, within the soil depth under it soil, else rock.
+// subsurface, by the column whose risers it holds (`exposed_column`) at
+// the leaf's centre (layer `lz` of a chunk of `level`): above the lowest
+// terrain top around it (a natural riser) its surface, within the soil
+// depth under it soil, else rock.
 fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -> u32 {
     let below = (i32(column >> 24u) - 128) - 1 - i32(lz * 4u + 2u);
     var sub = select((column >> 16u) & 0xffu, (column >> 8u) & 0xffu, (below << level) < terrain.header.z);
     if below < 0 { sub = column & 0x7fu; }
     return select(sub, top & 0x7fu, has_top != 0u) | (sub << 8u);
+}
+
+// Of two columns with cells in a leaf (`chunk_columns_main`'s words; 0:
+// none yet), the one whose subsurface the leaf draws: of the lowest terrain
+// top around it, the first of those. Its cells the leaf holds are the
+// likeliest to be exposed (a riser over a lower neighbour), and those are
+// the leaf's cells under others that show. (The first column the leaf met
+// drew a slope's risers in an uphill corner's soil or rock: a forest's far
+// canopy streaked with the terrain under it.)
+fn exposed_column(held: u32, column: u32) -> u32 {
+    return select(held, column, held == 0u || (column >> 24u) < (held >> 24u));
 }
 
 // One column's top material voting for the surface of the leaf its top
@@ -1113,7 +1125,7 @@ fn chunk_cells_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             top = v.x;
             votes = v.y;
         }
-        if nib != 0u && first == 0u { first = material; }
+        if nib != 0u { first = exposed_column(first, material); }
         occupied = occupied || nib != 0u;
     }
     w_cells_pairs[li] = select(0u, leaf_materials_of(first, top, u32(topped), lz, tile.level), occupied);
@@ -1178,9 +1190,10 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let ly = t >> 4u;
     // 16 leaves along z, built from this leaf column's 4x4 cell columns.
     var leaf: array<vec2<u32>, 16>;
-    // Each leaf's materials: its first column with cells in it's, and for
-    // its surface the top material of the columns whose top cell is in it
-    // (`vote_top`; `topped` where there are any).
+    // Each leaf's materials: its column of cells in it the most exposed's
+    // (`exposed_column`), and for its surface the top material of the
+    // columns whose top cell is in it (`vote_top`; `topped` where there are
+    // any).
     var leaf_material: array<u32, 16>;
     var leaf_top: array<u32, 16>;
     var votes: array<u32, 16>;
@@ -1222,7 +1235,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         votes[top_leaf] = vote.y;
         for (var lz = 0u; lz < 16u; lz++) {
             let nib = (select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
-            if nib != 0u && leaf_material[lz] == 0u { leaf_material[lz] = column_material; }
+            if nib != 0u { leaf_material[lz] = exposed_column(leaf_material[lz], column_material); }
             leaf[lz].x |= ((nib & 1u) << c) | (((nib >> 1u) & 1u) << (c + 16u));
             leaf[lz].y |= (((nib >> 2u) & 1u) << c) | (((nib >> 3u) & 1u) << (c + 16u));
         }

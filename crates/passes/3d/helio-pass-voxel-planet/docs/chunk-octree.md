@@ -288,6 +288,13 @@ material (the Moon's ejecta and rock specks, an edit's few blocks) at
 every coarse level, so the ground changed colour where a detail level
 met a coarser one. At detail levels the pair only decides which
 cells need a byte of their own, so it stays the majority (fewest bytes).
+A leaf's subsurface byte (what its cells under others draw: risers above
+a lower neighbour show their column's surface, deeper cells soil or rock)
+is read off its most exposed column, the one with the lowest terrain top
+around it (`exposed_column`): read off its first column, a steep slope's
+leaves drew their risers in an uphill corner's soil or rock, so far
+forests' canopies on mountainsides showed the terrain as vertical
+streaks.
 
 ## The drawn cut
 
