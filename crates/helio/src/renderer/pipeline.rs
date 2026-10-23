@@ -82,6 +82,16 @@ impl RenderPipelineRegistry {
             .insert(info.id.clone(), Arc::new(Entry { info, factory }));
     }
 
+    /// Keeps the pipelines `keep` approves of.
+    pub fn retain(&mut self, mut keep: impl FnMut(&PipelineInfo) -> bool) {
+        self.entries.retain(|_, entry| keep(&entry.info));
+    }
+
+    /// Removes the pipeline named `id`, if registered.
+    pub fn remove(&mut self, id: &str) {
+        self.entries.remove(id);
+    }
+
     /// Removes every pipeline of `origin` (a project reload drops its assets).
     pub fn clear_origin(&mut self, origin: PipelineOrigin) {
         self.entries.retain(|_, entry| entry.info.origin != origin);
