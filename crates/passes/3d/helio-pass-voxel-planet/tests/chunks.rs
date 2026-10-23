@@ -2164,6 +2164,79 @@ fn one_light(gpu: &Gpu, at: Vec3, range: f32, size: [u32; 2]) -> [wgpu::Buffer; 
     [init("lights", &light), init("tile lists", &vec![0u32; tiles * 64]), init("tile counts", &vec![1u32; tiles])]
 }
 
+/// A local light behind two-sided foliage reaches its back faces through
+/// the leaf cell, as the sun does: a slab of leaves a cell or two thick
+/// stands between the eye and a point light, a brick block hides the light
+/// from part of it. Every leaf pixel turned away from the light sees it (in
+/// `local_visibility`, steady shadows) where a CPU ray from the far side of
+/// its cell reaches it; a few may differ (grazing cells). Before, a back
+/// face skipped its walk and saw every light, through walls too.
+#[test]
+fn local_lights_reach_leaves_through_their_cells() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 4, 0.37, 0.61);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = planet.grid().up(ground);
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let cell = planet.grid().voxel_size();
+    // The slab: single leaf cells over a 2 m square across the view (a cell
+    // or two thick wherever the grid's axes cross its plane).
+    let centre = ground + up * 1.2 + fwd * 2.0;
+    let brush = |center: DVec3, radius: f64, op: BrushOp, material: u32| Brush { center: center.to_array(), radius, shape: BrushShape::Cube, op, material, height: 0.0 };
+    let steps = (2.0 / cell).round() as i32;
+    for a in 0..=steps {
+        for b in 0..=steps {
+            let at = centre + side * (f64::from(a) * cell - 1.0) + up * (f64::from(b) * cell - 1.0);
+            planet.apply(brush(at, 0.55 * cell, BrushOp::Add, material::LEAVES)).unwrap();
+        }
+    }
+    // The light behind it; brick between them over one side.
+    let light = centre + fwd * 1.6;
+    planet.apply(brush(centre + fwd * 0.8 + side * 0.6, 0.35, BrushOp::Add, material::BRICK)).unwrap();
+    let eye = centre - fwd * 3.0 + up * 0.3;
+    let view = View::new(eye, (centre - eye).normalize().as_vec3(), [320, 180]);
+    let mut world = World::new(&gpu, &planet);
+    let range = 8.0;
+    world.lights = Some(one_light(&gpu, (light - eye).as_vec3(), range, view.size));
+    world.chunks.set_steady_shadows(true);
+    let hits = world.settle(&gpu, &planet, &view);
+    let mask = read_local(&gpu, &world);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut lit, mut shadowed, mut wrong) = (0, 0, 0, 0);
+    for y in (0..view.size[1]).step_by(2) {
+        for x in (0..view.size[0]).step_by(2) {
+            let ray = view.pixel_dir(view_proj, x, y);
+            let Some(cpu) = planet.raycast(view.eye, ray, 30.0) else { continue };
+            if planet.material(cpu.cell) != material::LEAVES || hits[(y * view.size[0] + x) as usize].is_none_or(|h| h.level != 0) {
+                continue;
+            }
+            let at = view.eye + ray * cpu.distance;
+            let to = light - at;
+            if to.length() > f64::from(range) - cell || cpu.normal.dot(to.normalize()) > -0.3 {
+                continue;
+            }
+            // From the far side of the hit's cell, as the walk starts.
+            let from = at - cpu.normal * (1.01 * cell);
+            let rest = light - from;
+            let seen = planet.raycast(from, rest.normalize(), rest.length() - cell).is_none();
+            compared += 1;
+            lit += usize::from(seen);
+            shadowed += usize::from(!seen);
+            if seen != (mask[(y * view.size[0] + x) as usize] > 0.5) {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: cpu {}, drawn otherwise", if seen { "lit" } else { "shadowed" });
+                }
+            }
+        }
+    }
+    eprintln!("compared {compared}, lit {lit}, shadowed {shadowed}, wrong {wrong}");
+    assert!(lit > 100 && shadowed > 100, "{compared} compared, {lit} lit, {shadowed} shadowed");
+    assert!(wrong * 50 <= compared, "{wrong} of {compared} wrong");
+}
+
 /// The terrain shadows local lights: a point light 1 m over the ground
 /// beside a raised ball, seen from above. With steady shadows (every hit
 /// walks its own), every pixel facing the light sees it (in

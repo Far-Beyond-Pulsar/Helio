@@ -2378,6 +2378,7 @@ impl ChunkWorld {
                 label: Some("chunk local light history"),
                 entries: &[
                     hits[0],
+                    hits[1],
                     float(29),
                     read(40),
                     read(43),
@@ -4855,6 +4856,7 @@ impl ChunkWorld {
                 layout: &self.local_denoise_layout[0],
                 entries: &[
                     view_entry(4, &distance),
+                    view_entry(7, &visibility),
                     view_entry(29, &normal),
                     entry(40, sun_walked),
                     entry(43, geometry_last),
