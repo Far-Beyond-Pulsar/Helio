@@ -313,9 +313,38 @@ pub fn vgeo_path(cache: &Path, content: u128) -> PathBuf {
     cache.join(format!("{content:032x}.vgeo"))
 }
 
+/// `--force-recook` or `VG_STRESS_FORCE_RECOOK=1`: ignore every valid `.vgeo` cache
+/// and cook each asset again. Applies once per asset per run (an asset cooked in
+/// this run is read back normally), so it also works with `--prepare`.
+pub fn force_recook() -> bool {
+    static FORCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCE.get_or_init(|| {
+        let on = std::env::args().skip(1).any(|a| a == "--force-recook")
+            || std::env::var("VG_STRESS_FORCE_RECOOK").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false"));
+        if on {
+            println!("[Museum cook] --force-recook: every .vgeo cache is ignored and cooked again");
+        }
+        on
+    })
+}
+
+/// Assets already cooked again in this run under [`force_recook`].
+fn recooked() -> &'static Mutex<std::collections::HashSet<u128>> {
+    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<u128>>> = std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
 /// A cache file is valid when it parses, belongs to `content` and was made by
 /// the current format version and cook revision (both live in its header).
+/// Under [`force_recook`] it is not valid until this run has cooked it again.
 pub fn read_vgeo(cache: &Path, content: u128) -> Option<Arc<VgeoBytes>> {
+    read_vgeo_with(cache, content, force_recook())
+}
+
+fn read_vgeo_with(cache: &Path, content: u128, force: bool) -> Option<Arc<VgeoBytes>> {
+    if force && !recooked().lock().unwrap().contains(&content) {
+        return None;
+    }
     // File-backed: the header is read now, pages as the streamer asks for them.
     // (Reading the whole file held ~4 GB of RAM for this scene.)
     let source = VgeoBytes::open(&vgeo_path(cache, content)).ok()?;
@@ -378,6 +407,7 @@ pub fn load_or_build_vgeo_cache(
     .map_err(|error| error.to_string())?;
     drop((positions, attributes));
     write_atomic(&vgeo_path(cache, content_id), &bytes).map_err(|error| error.to_string())?;
+    recooked().lock().unwrap().insert(content_id);
     drop(bytes);
     VgeoBytes::open(&vgeo_path(cache, content_id))
         .map(|vgeo| (Arc::new(vgeo), false))
@@ -593,6 +623,34 @@ mod tests {
         assert!(hit);
         // A different content id is its own cache entry.
         assert!(read_vgeo(&dir, content ^ 1).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn force_recook_ignores_a_valid_cache_until_this_run_cooks_it() {
+        let dir = scratch("force");
+        let (vertices, indices) = grid(40);
+        let content = stable_content_id(&vertices, &indices);
+        load_or_build_vgeo_cache(content, &vertices, &indices, &dir).unwrap();
+        // As if a new run: nothing cooked yet.
+        recooked().lock().unwrap().remove(&content);
+        assert!(read_vgeo_with(&dir, content, false).is_some(), "valid cache is used normally");
+        assert!(read_vgeo_with(&dir, content, true).is_none(), "forced: the valid cache is ignored");
+        // Cooking again writes it and marks it done; it is read back normally afterwards.
+        let before = std::fs::metadata(vgeo_path(&dir, content)).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (_, hit) = {
+            // The forced run misses the cache, so the build path runs and rewrites the file.
+            let _ = read_vgeo_with(&dir, content, true);
+            let bytes_before = std::fs::read(vgeo_path(&dir, content)).unwrap();
+            std::fs::remove_file(vgeo_path(&dir, content)).unwrap();
+            let r = load_or_build_vgeo_cache(content, &vertices, &indices, &dir).unwrap();
+            assert_eq!(std::fs::read(vgeo_path(&dir, content)).unwrap(), bytes_before, "recook is deterministic");
+            r
+        };
+        assert!(!hit);
+        assert!(std::fs::metadata(vgeo_path(&dir, content)).unwrap().modified().unwrap() >= before);
+        assert!(read_vgeo_with(&dir, content, true).is_some(), "cooked this run: read back normally");
         let _ = std::fs::remove_dir_all(dir);
     }
 

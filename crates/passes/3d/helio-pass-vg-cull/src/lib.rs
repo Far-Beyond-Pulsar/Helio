@@ -218,9 +218,11 @@ pub mod state {
     pub const RANGES: u32 = helio_vg_format::CULL_STATE_RANGES;
     pub const ARGS: u32 = 72;
     pub const ARGS_PHASE_WORDS: u32 = 32;
-    /// Clusters rejected by the frame-wide triangle-per-pixel ceiling.
-    pub const BUDGET_REJECTED: u32 = 136;
-    pub const WORDS: u32 = 144;
+    /// Tolerance multiplier chosen by the density solve (f32 bits) and the
+    /// triangles it predicted (read back with the stats).
+    pub const DENSITY: u32 = 136;
+    pub const PREDICTED: u32 = 137;
+    pub const WORDS: u32 = 140;
 }
 
 pub const RANGES_BYTE_OFFSET: u64 = state::RANGES as u64 * 4;
@@ -284,7 +286,7 @@ pub mod stats {
 /// `state`), for overlays and the demo's title. `tier_clusters` is the
 /// attempted cluster count per bin ([`BIN_HW_32`]..[`BIN_DENSE`]) of both
 /// phases.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VgCullStats {
     pub jobs: u32,
     pub clusters_tested: u32,
@@ -299,9 +301,11 @@ pub struct VgCullStats {
     pub job_overflow: u32,
     pub visible_overflow: u32,
     pub root_shortcuts: u32,
-    /// Clusters denied admission by the hard projected triangle budget.
-    pub budget_rejected: u32,
     pub peak_queue: u32,
+    /// Screen-wide tolerance multiplier the density solve chose this frame, and the
+    /// triangles it predicted at it (before occlusion).
+    pub density_scale: f32,
+    pub predicted_triangles: u32,
     pub tier_clusters: [u32; BIN_COUNT as usize],
 }
 
@@ -329,7 +333,8 @@ impl VgCullStats {
             visible_overflow: st(stats::VISIBLE_OVERFLOW),
             peak_queue: st(stats::PEAK_QUEUE),
             root_shortcuts: st(stats::ROOT_SHORTCUT),
-            budget_rejected: words[state::BUDGET_REJECTED as usize],
+            density_scale: words.get(state::DENSITY as usize).map_or(1.0, |w| f32::from_bits(*w).max(1.0)),
+            predicted_triangles: words.get(state::PREDICTED as usize).copied().unwrap_or(0),
             tier_clusters,
         })
     }
@@ -348,8 +353,10 @@ impl VgCullStats {
     pub fn summary(&self) -> String {
         let (hw, sw, dense) = self.tier_split();
         format!(
-            "tris {} clusters {}/{} (HW {} SW {} dense {}) culled F{} O{} B{} E{} budget {} overflow {}",
+            "tris {} (solve: x{:.2} tolerance, predicted {}) clusters {}/{} (HW {} SW {} dense {}) culled F{} O{} B{} E{} overflow {}",
             self.triangles,
+            self.density_scale,
+            self.predicted_triangles,
             self.emitted,
             self.clusters_tested,
             hw,
@@ -359,7 +366,6 @@ impl VgCullStats {
             self.culled_occlusion,
             self.culled_cone,
             self.culled_sse,
-            self.budget_rejected,
             self.job_overflow + self.visible_overflow,
         )
     }
@@ -413,7 +419,8 @@ pub fn wgsl_constants() -> String {
     u("VGC_ST_PHASE1", state::PHASE0_COUNTS);
     u("VGC_ST_RANGES", state::RANGES);
     u("VGC_ST_ARGS", state::ARGS);
-    u("VGC_ST_BUDGET_REJECTED", state::BUDGET_REJECTED);
+    u("VGC_ST_DENSITY", state::DENSITY);
+    u("VGC_ST_PREDICTED", state::PREDICTED);
     u("VGC_ARGS_PHASE_WORDS", state::ARGS_PHASE_WORDS);
     u("VGC_SW_GROUP_WIDTH", SW_GROUP_WIDTH);
     u("VGC_TILE", DENSE_TILE);

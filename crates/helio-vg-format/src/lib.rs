@@ -87,7 +87,7 @@ pub struct GpuAssetQuant {
     pub step: f32,
 }
 /// File offset of the builder's meta block (directly after [`VgeoHeader`]).
-pub const VGEO_META_OFFSET: usize = 72;
+pub const VGEO_META_OFFSET: usize = 136;
 
 /// One entry of the visible-cluster list written by the cull. 8 bytes.
 #[repr(C)]
@@ -128,6 +128,7 @@ pub fn decode_bindings_wgsl(group: u32, pool_binding: u32, quant_binding: u32) -
     )
 }
 
+pub mod density;
 pub mod debug_view;
 pub mod testing;
 
@@ -137,7 +138,7 @@ pub const PAGE_MAGIC: [u8; 4] = *b"VGPG";
 /// Bump on any layout or builder-semantics change; part of the cache key.
 /// 2: measured (not estimated) cluster errors, 0.6 group reduction ratio.
 /// 3: groups of up to `GROUP_MAX_CLUSTERS_LARGE` clusters at coarse levels.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 // ── Cluster ─────────────────────────────────────────────────────────────────
 
@@ -326,9 +327,13 @@ impl GpuGroupRef {
     }
 }
 
-/// Per-asset summary row. 32 bytes.
+/// Per-asset summary row. 96 bytes.
+///
+/// After the counters comes what the screen-wide density solve needs without
+/// reading any page: the asset's bounding sphere and [`LodTable`] (selected
+/// triangles against object-space error tolerance).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct GpuAssetHeader {
     pub root_node: u32,
     pub node_count: u32,
@@ -339,6 +344,64 @@ pub struct GpuAssetHeader {
     pub root_page_count: u32,
     pub triangle_count: u32,
     pub flags: u32,
+    /// Bounding sphere of the asset (object space): centre xyz, radius.
+    pub bounds: [f32; 4],
+    /// Error tolerance of [`LodTable`] entry 0 (the largest root error).
+    pub lod_error_max: f32,
+    /// [`LodTable`] entries, 4 per word, entry `k` in byte `k % 4` of word `k / 4`.
+    pub lod_table: [u32; LOD_TABLE_WORDS],
+    pub _reserved: [u32; 3],
+}
+
+/// Entries of a [`LodTable`].
+pub const LOD_TABLE_ENTRIES: usize = 32;
+pub const LOD_TABLE_WORDS: usize = LOD_TABLE_ENTRIES / 4;
+
+/// Selected triangles of one asset at a uniform object-space error tolerance:
+/// entry `k` is the cut at `error_max * 2^(-k/2)`, stored as `log2(triangles) *
+/// 8` in one byte (about 9% steps). The cull's density solve interpolates it
+/// per instance, so the screen-wide tolerance is computed rather than fed back.
+/// `vg_lod_tris` in `vg_format.wgsl` mirrors [`LodTable::tris_at`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LodTable {
+    pub error_max: f32,
+    pub q: [u8; LOD_TABLE_ENTRIES],
+}
+
+impl LodTable {
+    pub fn quantize(tris: f64) -> u8 {
+        (tris.max(1.0).log2() * 8.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    pub fn from_header(h: &GpuAssetHeader) -> Self {
+        let mut q = [0u8; LOD_TABLE_ENTRIES];
+        for (k, v) in q.iter_mut().enumerate() {
+            *v = (h.lod_table[k / 4] >> ((k % 4) * 8)) as u8;
+        }
+        Self { error_max: h.lod_error_max, q }
+    }
+
+    pub fn words(&self) -> [u32; LOD_TABLE_WORDS] {
+        let mut w = [0u32; LOD_TABLE_WORDS];
+        for (k, &v) in self.q.iter().enumerate() {
+            w[k / 4] |= u32::from(v) << ((k % 4) * 8);
+        }
+        w
+    }
+
+    /// Triangles selected at object-space tolerance `e` (a tolerance at or above
+    /// `error_max` selects the roots, one far below selects the full mesh).
+    pub fn tris_at(&self, e: f32) -> f32 {
+        if !(self.error_max > 0.0) || !e.is_finite() {
+            return 0.0;
+        }
+        let x = if e <= 0.0 { 31.0 } else { (2.0 * (self.error_max / e).log2()).clamp(0.0, 31.0) };
+        let k = x.floor() as usize;
+        let t = x - k as f32;
+        let a = f32::from(self.q[k]);
+        let b = f32::from(self.q[(k + 1).min(LOD_TABLE_ENTRIES - 1)]);
+        ((a + (b - a) * t) / 8.0).exp2()
+    }
 }
 
 // ── Instances (produced by the VG scene derivation, read by cull) ──────────
@@ -449,7 +512,7 @@ pub fn bary_unpack(w: u32) -> (f32, f32) {
 /// file; the section contents are owned by `helio-vg-build` (T2) but must
 /// stay expressible through this header.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct VgeoHeader {
     pub magic: [u8; 4],
     pub version: u32,
@@ -507,9 +570,9 @@ mod tests {
         assert_eq!(size_of::<GpuCluster>(), 64);
         assert_eq!(size_of::<GpuHierarchyNode>(), 96);
         assert_eq!(size_of::<GpuGroupRef>(), 8);
-        assert_eq!(size_of::<GpuAssetHeader>(), 32);
+        assert_eq!(size_of::<GpuAssetHeader>(), 96);
         assert_eq!(size_of::<GpuVgInstance>(), 16);
-        assert_eq!(size_of::<VgeoHeader>(), 72);
+        assert_eq!(size_of::<VgeoHeader>(), 136);
         assert_eq!(size_of::<PageHeader>(), 32);
         assert_eq!(size_of::<GpuAssetQuant>(), 16);
         assert_eq!(size_of::<GpuVisibleCluster>(), 8);

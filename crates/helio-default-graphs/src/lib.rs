@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 mod background;
+pub mod nodes;
+pub mod pipelines;
 pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
@@ -1793,6 +1795,8 @@ pub fn build_simple_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph
         ctx.device,
         ctx.config.surface_format,
     )));
+    // Executing an unlocked graph panics; every other builder locks.
+    graph.lock(ctx.config.internal_width(), ctx.config.internal_height());
     graph
 }
 

@@ -220,6 +220,7 @@ pub mod testing {
                     root_page_count: self.roots,
                     triangle_count: 128,
                     flags: 0,
+                    ..Default::default()
                 },
                 ..Default::default()
             }

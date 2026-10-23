@@ -18,7 +18,7 @@
 //! original vertices, preserving their attribute bytes and exact positions.
 
 use crate::deviation::point_deviations;
-use crate::math::{edge_key, V3};
+use crate::math::{add, cross, dist, dot, edge_key, length, normalize, scale, sub, V3};
 use crate::mesh::{Tri, VertexStore};
 use std::collections::BTreeMap;
 
@@ -39,8 +39,19 @@ pub const COVERAGE_FOOTPRINT: f32 = 2.0;
 /// proximity merging.
 const SLOPPY_TRIGGER: (usize, usize) = (115, 100);
 
+/// A floating piece with at most this many triangles is a "card" (needle, leaf
+/// quad, small polygon): it is merged with its neighbours into area-preserving
+/// quads instead of being collapsed or pruned (see [`merge_cards`]).
+const CARD_MAX_TRIS: usize = 6;
+/// A merge cell whose members spread over more than this multiple of the median
+/// cell radius is split further.
+const CELL_RADIUS_SPREAD: f32 = 2.0;
+
 pub struct SimplifyResult {
     pub tris: Vec<([u32; 3], u32)>,
+    /// Vertices created by this simplification (position, source vertex whose
+    /// attributes they use); output corners reference them as `vs.len() +
+    /// index`. Only card merging creates them, and all of them are floating.
     pub new_verts: Vec<(V3, u32)>,
     /// Diagnostics: locked / total vertices of the input group.
     pub locked: usize,
@@ -226,6 +237,8 @@ pub fn simplify_group(
         sections.entry((t.mat, f)).or_default().push(t.v);
     }
     let mut output = Vec::new();
+    let mut new_verts: Vec<(V3, u32)> = Vec::new();
+    let mut merged_cards = false;
     let (mut n_locked, mut n_verts) = (0usize, 0usize);
     for ((material, is_floating), section) in sections {
         let want = (target * section.len() / tris.len()).max(1);
@@ -253,7 +266,8 @@ pub fn simplify_group(
             }
             pinned.sort_unstable();
             pinned.dedup();
-            let (reduced, nv) = simplify_floating(vs, &section, want, &pinned);
+            let (reduced, nv, merged) = simplify_floating(vs, &section, want, &pinned, &mut new_verts);
+            merged_cards |= merged;
             n_verts += nv;
             output.extend(reduced.into_iter().map(|t| (t, material)));
             continue;
@@ -349,22 +363,331 @@ pub fn simplify_group(
     // Dominance is by source pieces (small components of the input mesh), also when
     // some of them currently straddle a group border and stay anchored.
     let src_floating = tris.iter().filter(|t| vs.floating[t.v[0] as usize]).count();
-    let float_out: Vec<[u32; 3]> = output.iter().filter(|(t, _)| vs.floating[t[0] as usize]).map(|(t, _)| *t).collect();
+    // Merged cards keep the measured deviation (their error is a real distance,
+    // not the spacing proxy used for pieces that could only be thinned).
+    let coverage = (!merged_cards && src_floating * 10 >= tris.len() * 9).then(|| {
+        let float_out: Vec<[u32; 3]> = output.iter().filter(|(t, _)| vs.floating[t[0] as usize]).map(|(t, _)| *t).collect();
+        (!float_out.is_empty()).then(|| (float_out.len(), mean_footprint(vs, &float_out)))
+    });
     SimplifyResult {
         tris: output,
-        new_verts: Vec::new(),
+        new_verts,
         locked: n_locked,
         verts: n_verts,
         floating: n_floating,
-        coverage_tris: (src_floating * 10 >= tris.len() * 9 && !float_out.is_empty())
-            .then(|| (float_out.len(), mean_footprint(vs, &float_out))),
+        coverage_tris: coverage.flatten(),
     }
+}
+
+/// Floating pieces of one material section, reduced to about `want` triangles.
+/// Card-like pieces (needles, leaf quads) are merged into area-preserving
+/// quads; larger pieces are thinned by [`collapse_floating`]. Returns
+/// (triangles, vertex count, whether cards were merged).
+fn simplify_floating(
+    vs: &VertexStore,
+    section: &[[u32; 3]],
+    want: usize,
+    pinned: &[u32],
+    new_verts: &mut Vec<(V3, u32)>,
+) -> (Vec<[u32; 3]>, usize, bool) {
+    // Connected pieces (by canonical position id).
+    let mut pids: Vec<u32> = section.iter().flatten().map(|&v| vs.pid[v as usize]).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let local = |v: u32| pids.binary_search(&vs.pid[v as usize]).unwrap() as u32;
+    let mut parent: Vec<u32> = (0..pids.len() as u32).collect();
+    for t in section {
+        for k in 1..3 {
+            let (a, b) = (find(&mut parent, local(t[0])), find(&mut parent, local(t[k])));
+            if a != b {
+                parent[a.max(b) as usize] = a.min(b);
+            }
+        }
+    }
+    let mut pieces: BTreeMap<u32, Vec<[u32; 3]>> = BTreeMap::new();
+    for t in section {
+        pieces.entry(find(&mut parent, local(t[0]))).or_default().push(*t);
+    }
+    let mut cards: Vec<Vec<[u32; 3]>> = Vec::new();
+    let mut rest: Vec<[u32; 3]> = Vec::new();
+    for (_, p) in pieces {
+        let pinned_piece = p.iter().flatten().any(|&v| pinned.binary_search(&vs.pid[v as usize]).is_ok());
+        if p.len() <= CARD_MAX_TRIS && !pinned_piece {
+            cards.push(p);
+        } else {
+            rest.extend(p);
+        }
+    }
+    let card_tris: usize = cards.iter().map(Vec::len).sum();
+    let want_cards = (want * card_tris / section.len().max(1)).max(2) / 2;
+    if cards.len() <= want_cards.max(1) {
+        // Nothing to merge: the section is thinned as a whole.
+        return {
+            let (t, n) = collapse_floating(vs, section, want, pinned);
+            (t, n, false)
+        };
+    }
+    let mut out = Vec::new();
+    let mut verts = 0;
+    if !rest.is_empty() {
+        let want_rest = (want * rest.len() / section.len()).max(1);
+        let (t, n) = collapse_floating(vs, &rest, want_rest, pinned);
+        verts += n;
+        out.extend(t);
+    }
+    let base0 = vs.len() as u32;
+    let merged = merge_cards(vs, &cards, want_cards, base0, new_verts);
+    verts += merged.len() * 2;
+    out.extend(merged);
+    (out, verts, true)
+}
+
+/// Symmetric 3x3 eigen decomposition (cyclic Jacobi, fixed sweeps, f64 so the
+/// result does not depend on the order of anything). Returns eigenvalues
+/// descending with matching unit eigenvectors.
+fn eigen_sym3(m: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut a = m;
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..24 {
+        let off = a[0][1].abs() + a[0][2].abs() + a[1][2].abs();
+        if off < 1e-18 {
+            break;
+        }
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if a[p][q].abs() < 1e-30 {
+                continue;
+            }
+            let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+            let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+            let (c, s) = (1.0 / (t * t + 1.0).sqrt(), t / (t * t + 1.0).sqrt());
+            for k in 0..3 {
+                let (akp, akq) = (a[k][p], a[k][q]);
+                a[k][p] = c * akp - s * akq;
+                a[k][q] = s * akp + c * akq;
+            }
+            for k in 0..3 {
+                let (apk, aqk) = (a[p][k], a[q][k]);
+                a[p][k] = c * apk - s * aqk;
+                a[q][k] = s * apk + c * aqk;
+            }
+            for k in 0..3 {
+                let (vkp, vkq) = (v[k][p], v[k][q]);
+                v[k][p] = c * vkp - s * vkq;
+                v[k][q] = s * vkp + c * vkq;
+            }
+        }
+    }
+    let mut order = [0usize, 1, 2];
+    order.sort_by(|&i, &j| a[j][j].total_cmp(&a[i][i]));
+    let vals = order.map(|i| a[i][i]);
+    let vecs = order.map(|i| [v[0][i], v[1][i], v[2][i]]);
+    (vals, vecs)
+}
+
+fn to_f32(v: [f64; 3]) -> V3 {
+    [v[0] as f32, v[1] as f32, v[2] as f32]
+}
+
+/// One card-like piece reduced to the quad that stands in for it.
+struct Card {
+    centre: V3,
+    axis: V3,
+    normal: V3,
+    area: f32,
+    length: f32,
+    verts: Vec<u32>,
+}
+
+fn describe_card(vs: &VertexStore, tris: &[[u32; 3]]) -> Option<Card> {
+    let mut verts: Vec<u32> = tris.iter().flatten().copied().collect();
+    verts.sort_unstable_by_key(|&v| (vs.pid[v as usize], v));
+    verts.dedup_by_key(|v| vs.pid[*v as usize]);
+    let mut area = 0.0f64;
+    let mut centre = [0.0f64; 3];
+    let mut n_sum = [0.0f64; 3];
+    for t in tris {
+        let p = t.map(|v| vs.pos[v as usize]);
+        let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+        let a = 0.5 * length(n) as f64;
+        area += a;
+        for k in 0..3 {
+            centre[k] += a * ((p[0][k] + p[1][k] + p[2][k]) / 3.0) as f64;
+            n_sum[k] += n[k] as f64;
+        }
+    }
+    if area <= 0.0 {
+        return None;
+    }
+    for c in &mut centre {
+        *c /= area;
+    }
+    let mut cov = [[0.0f64; 3]; 3];
+    for &v in &verts {
+        let d = [0, 1, 2].map(|k| vs.pos[v as usize][k] as f64 - centre[k]);
+        for i in 0..3 {
+            for j in 0..3 {
+                cov[i][j] += d[i] * d[j];
+            }
+        }
+    }
+    let (_, e) = eigen_sym3(cov);
+    let axis = to_f32(e[0]);
+    let mut normal = to_f32(e[2]);
+    if dot(normal, to_f32(n_sum)) < 0.0 {
+        normal = scale(normal, -1.0);
+    }
+    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for &v in &verts {
+        let d = dot(sub(vs.pos[v as usize], to_f32(centre)), axis);
+        lo = lo.min(d);
+        hi = hi.max(d);
+    }
+    Some(Card { centre: to_f32(centre), axis, normal, area: area as f32, length: (hi - lo).max(1e-9), verts })
+}
+
+/// Merge card-like pieces into `want_cards` quads (two triangles each).
+///
+/// Pieces are split by recursive median bisection along the widest spatial
+/// axis into `want_cards` equally populated cells; each cell becomes one
+/// quad whose area is the summed area of its members (coverage is preserved)
+/// and whose length is the members' mean length (scale is preserved) until
+/// the quad would be wider than it is long, after which it grows evenly. The
+/// quad's width is the only thing that changes: the deviation that
+/// introduces, and the spread of the members inside the cell, are what the
+/// DAG builder measures as this group's error, so a level is only selected at
+/// distances where that error is below a pixel.
+fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, base0: u32, new_verts: &mut Vec<(V3, u32)>) -> Vec<[u32; 3]> {
+    let cards: Vec<Card> = pieces.iter().filter_map(|p| describe_card(vs, p)).collect();
+    let mut cells: Vec<Vec<usize>> = Vec::new();
+    fn split(cards: &[Card], idx: Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
+        if k <= 1 || idx.len() <= 1 {
+            out.push(idx);
+            return;
+        }
+        let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+        for &i in &idx {
+            for a in 0..3 {
+                lo[a] = lo[a].min(cards[i].centre[a]);
+                hi[a] = hi[a].max(cards[i].centre[a]);
+            }
+        }
+        let axis = (0..3).max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b]))).unwrap();
+        let mut idx = idx;
+        idx.sort_by(|&a, &b| cards[a].centre[axis].total_cmp(&cards[b].centre[axis]).then(a.cmp(&b)));
+        let k1 = k / 2;
+        let cut = (idx.len() * k1 / k).clamp(1, idx.len() - 1);
+        let right = idx.split_off(cut);
+        split(cards, idx, k1, out);
+        split(cards, right, k - k1, out);
+    }
+    split(&cards, (0..cards.len()).collect(), want_cards.max(1), &mut cells);
+    // A cell that straddles a gap (stray pieces left at the edge of a group)
+    // would put its card where no piece is: split such cells until compact, at
+    // the price of fewer merges there.
+    let radius_of = |cell: &[usize]| -> f32 {
+        let mut c = [0.0f32; 3];
+        for &i in cell {
+            for a in 0..3 {
+                c[a] += cards[i].centre[a];
+            }
+        }
+        let c = scale(c, 1.0 / cell.len() as f32);
+        cell.iter().map(|&i| dist(cards[i].centre, c)).fold(0.0f32, f32::max)
+    };
+    let mut radii: Vec<f32> = cells.iter().filter(|c| c.len() > 1).map(|c| radius_of(c)).collect();
+    if !radii.is_empty() {
+        radii.sort_by(f32::total_cmp);
+        let limit = CELL_RADIUS_SPREAD * radii[radii.len() / 2];
+        fn compact(cards: &[Card], cell: Vec<usize>, limit: f32, radius_of: &dyn Fn(&[usize]) -> f32, out: &mut Vec<Vec<usize>>) {
+            if cell.len() <= 1 || radius_of(&cell) <= limit {
+                out.push(cell);
+                return;
+            }
+            let mut halves = Vec::new();
+            split(cards, cell, 2, &mut halves);
+            for h in halves {
+                compact(cards, h, limit, radius_of, out);
+            }
+        }
+        let mut refined = Vec::with_capacity(cells.len());
+        for cell in std::mem::take(&mut cells) {
+            compact(&cards, cell, limit, &radius_of, &mut refined);
+        }
+        cells = refined;
+    }
+
+    let mut out = Vec::with_capacity(cells.len() * 2);
+    for cell in cells {
+        let members: Vec<&Card> = cell.iter().map(|&i| &cards[i]).collect();
+        let area: f32 = members.iter().map(|c| c.area).sum();
+        let reference = members.iter().max_by(|a, b| a.area.total_cmp(&b.area)).unwrap();
+        // Orientation-agnostic dominant axis and consistent plane normal.
+        let mut axis_cov = [[0.0f64; 3]; 3];
+        let mut centre = [0.0f64; 3];
+        let mut n_sum = [0.0f64; 3];
+        let mut mean_len = 0.0f64;
+        for c in &members {
+            let w = c.area as f64;
+            for i in 0..3 {
+                centre[i] += w * c.centre[i] as f64;
+                for j in 0..3 {
+                    axis_cov[i][j] += w * (c.axis[i] * c.axis[j]) as f64;
+                }
+            }
+            let s = if dot(c.normal, reference.normal) < 0.0 { -1.0 } else { 1.0 };
+            for i in 0..3 {
+                n_sum[i] += w * (s * c.normal[i]) as f64;
+            }
+            mean_len += w * c.length as f64;
+        }
+        let a_total = area.max(1e-30) as f64;
+        let centre = to_f32([centre[0] / a_total, centre[1] / a_total, centre[2] / a_total]);
+        let mean_len = (mean_len / a_total) as f32;
+        let normal = {
+            let n = normalize(to_f32(n_sum));
+            if length(n) > 0.0 { n } else { reference.normal }
+        };
+        let (_, ev) = eigen_sym3(axis_cov);
+        let mut axis = sub(to_f32(ev[0]), scale(normal, dot(to_f32(ev[0]), normal)));
+        if length(axis) < 1e-6 {
+            axis = sub(reference.axis, scale(normal, dot(reference.axis, normal)));
+        }
+        let axis = normalize(axis);
+        let side = normalize(cross(normal, axis));
+        let len = mean_len.max(area.sqrt());
+        let wid = area / len;
+        let (a, b) = (scale(axis, len * 0.5), scale(side, wid * 0.5));
+        let corners = [sub(sub(centre, a), b), sub(add(centre, a), b), add(add(centre, a), b), add(sub(centre, a), b)];
+        let first = base0 + new_verts.len() as u32;
+        let signs = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+        for (p, (sa, sb)) in corners.into_iter().zip(signs) {
+            // Attribute bytes (normal, uv, ...) of all four corners come from ONE
+            // member, the largest: the vertex of that member that lies furthest
+            // toward this corner of the card. Its texture coordinates stay a
+            // coherent quad (the member's whole leaf or needle texture is
+            // stretched over the card). Taking each corner from whichever member
+            // is nearest mixes unrelated atlas islands across the card, which
+            // sampled as dark shards.
+            let mut best = (f32::NEG_INFINITY, reference.verts[0]);
+            for &v in &reference.verts {
+                let d = sub(vs.pos[v as usize], reference.centre);
+                let score = sa * dot(d, axis) + sb * dot(d, side);
+                if score > best.0 {
+                    best = (score, v);
+                }
+            }
+            new_verts.push((p, vs.attr[best.1 as usize]));
+        }
+        out.push([first, first + 1, first + 2]);
+        out.push([first, first + 2, first + 3]);
+    }
+    out
 }
 
 /// Reduce floating pieces of one material section to about `want` triangles:
 /// unlocked edge collapse with island pruning, then proximity merging if the
 /// pieces cannot collapse into each other. Returns (triangles, vertex count).
-fn simplify_floating(vs: &VertexStore, section: &[[u32; 3]], want: usize, pinned: &[u32]) -> (Vec<[u32; 3]>, usize) {
+fn collapse_floating(vs: &VertexStore, section: &[[u32; 3]], want: usize, pinned: &[u32]) -> (Vec<[u32; 3]>, usize) {
     let mut ids: Vec<u32> = section.iter().flatten().copied().collect();
     ids.sort_unstable();
     ids.dedup();

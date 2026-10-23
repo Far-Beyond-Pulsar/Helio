@@ -211,6 +211,7 @@ fn upload(g: &Gpu, s: &Scene) -> Resources {
         root_page_count: 1,
         triangle_count: 0,
         flags: 0,
+        ..Default::default()
     };
     // As the production store uploads it: root leaves in the unread header words.
     let header = helio_vg_format::gpu_header_with_root_leaves(header, &s.dag.nodes);

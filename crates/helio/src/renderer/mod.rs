@@ -3,6 +3,7 @@ mod config;
 mod debug;
 mod fullscreen;
 mod input;
+mod pipeline;
 mod render;
 mod renderer_impl;
 mod resize;
@@ -12,6 +13,9 @@ mod shader_reload;
 
 pub use builder::{
     PassBuildContext, PassGraphBuilderFn, RendererBuilder, SceneDbHandle,
+};
+pub use pipeline::{
+    IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry,
 };
 pub use config::{
     ray_queries_usable, recommended_instance_flags, required_experimental_features,

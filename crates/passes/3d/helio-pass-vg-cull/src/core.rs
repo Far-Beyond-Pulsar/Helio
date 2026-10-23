@@ -25,9 +25,17 @@ pub struct VgCullConfig {
     pub tau_px: f32,
     /// Projected average triangle edge at or below which a cluster is SW.
     pub sw_edge_px: f32,
-    /// Hard ceiling on selected cluster triangles per viewport pixel. Defaults
-    /// to 2; lower it with `HELIO_VG_TRIANGLES_PER_PIXEL` for stricter cuts.
-    pub triangles_per_pixel: f32,
+    /// Target selected cluster triangles per viewport pixel. Selection responds
+    /// by changing its error threshold, so complete parent clusters replace
+    /// finer cuts instead of visible geometry being dropped.
+    pub selection_triangles_per_pixel: f32,
+    /// Log-space response strength for the asynchronous selection feedback.
+    /// 1 by default (0 disables the screen-wide density control); the multiplier
+    /// stays within 1x to 8x of the base tau (`helio_vg_format::density`).
+    pub selection_sensitivity: f32,
+    /// Triangles the density solve may predict this frame (set by the pass each
+    /// frame from the target and the observed visible fraction; 0 disables it).
+    pub density_budget_tris: f32,
     pub mode: VgMode,
     /// Last-frame-visible-first occlusion with a Hi-Z hook between phases.
     pub two_phase_occlusion: bool,
@@ -37,10 +45,17 @@ pub struct VgCullConfig {
     pub rounds: u32,
     /// Cap on persistent workgroups per round.
     pub max_groups: u32,
-    /// Initial entries per bin; grows (x2, lazily, from read-back stats) up to
-    /// [`MAX_BIN_CAPACITY`]. A bin that overflows drops clusters that frame.
+    /// Initial entries per bin. The default is the ceiling [`MAX_BIN_CAPACITY`]:
+    /// a bin that overflows drops clusters for that frame, and growing only after
+    /// an asynchronous stats readback means several frames of silently missing
+    /// geometry (which changes with the camera: it reads as flicker) plus a
+    /// rebuild of every cull buffer that resets the visibility history. 8 bins of
+    /// 1M entries cost 64 MiB, so the ceiling is allocated up front. Tests lower it
+    /// to exercise the growth path.
     pub initial_bin_capacity: u32,
-    /// Initial entries per job queue; grows like the bins.
+    /// Initial entries per job queue (3 queues, 8 bytes per entry). Jobs past a
+    /// queue are lost work, so this also starts large (24 MiB); it still grows
+    /// like the bins if a frame ever fills it.
     pub initial_queue_capacity: u32,
     /// Bits of the visible-last-frame hash set (power of two).
     pub history_bits: u32,
@@ -61,22 +76,30 @@ pub struct VgCullConfig {
 
 impl Default for VgCullConfig {
     fn default() -> Self {
-        let triangles_per_pixel = std::env::var("HELIO_VG_TRIANGLES_PER_PIXEL")
+        let selection_triangles_per_pixel = std::env::var("HELIO_VG_SELECTION_TRIANGLES_PER_PIXEL")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| v.is_finite())
             .unwrap_or(2.0)
-            .clamp(0.25, 2.0);
+            .clamp(0.25, 32.0);
+        let selection_sensitivity = std::env::var("HELIO_VG_SELECTION_SENSITIVITY")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
         Self {
             tau_px: 1.0,
             sw_edge_px: 2.0,
-            triangles_per_pixel,
+            selection_triangles_per_pixel,
+            selection_sensitivity,
+            density_budget_tris: 0.0,
             mode: VgMode::Auto,
             two_phase_occlusion: true,
             rounds: 4,
             max_groups: 256,
-            initial_bin_capacity: 1 << 16,
-            initial_queue_capacity: 1 << 18,
+            initial_bin_capacity: MAX_BIN_CAPACITY,
+            initial_queue_capacity: 1 << 20,
             history_bits: 1 << 22,
             stats: true,
             max_bin_capacity: MAX_BIN_CAPACITY,
@@ -192,10 +215,9 @@ struct GpuParams {
     dense_tiles_x: u32,
     dense_tiles_y: u32,
     max_groups: u32,
-    triangle_budget: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    density_budget: f32,
+    density_scale_max: f32,
+    _pad: [u32; 2],
 }
 
 #[repr(C)]
@@ -212,9 +234,11 @@ struct Readback {
     ready: Arc<Mutex<Option<Vec<u32>>>>,
     copied: bool,
     in_flight: bool,
+    revision: u64,
 }
 
 struct Pipelines {
+    density: wgpu::ComputePipeline,
     seed: wgpu::ComputePipeline,
     prepare: wgpu::ComputePipeline,
     traverse: wgpu::ComputePipeline,
@@ -240,6 +264,7 @@ pub struct VgCullCore {
     frame: u64,
     readback: Readback,
     last_stats: Option<Vec<u32>>,
+    pending_capacity_stats: Option<Vec<u32>>,
     size: (u32, u32),
     prepared: bool,
 }
@@ -354,6 +379,7 @@ impl VgCullCore {
             )
         };
         let pipelines = Pipelines {
+            density: pipeline("VgCull Density", &pl2, "cs_density"),
             seed: pipeline("VgCull Seed", &pl2, "cs_seed"),
             prepare: pipeline("VgCull RoundPrepare", &pl3, "cs_round_prepare"),
             traverse: pipeline("VgCull Traverse", &pl2, "cs_traverse"),
@@ -458,8 +484,10 @@ impl VgCullCore {
                 ready: Arc::new(Mutex::new(None)),
                 copied: false,
                 in_flight: false,
+                revision: 0,
             },
             last_stats: None,
+            pending_capacity_stats: None,
             size: (1, 1),
             prepared: false,
         }
@@ -478,6 +506,11 @@ impl VgCullCore {
     /// read-back, one to a few frames old.
     pub fn last_state_words(&self) -> Option<&[u32]> {
         self.last_stats.as_deref()
+    }
+
+    /// Increments when a new asynchronous GPU stats sample becomes available.
+    pub fn stats_revision(&self) -> u64 {
+        self.readback.revision
     }
 
     /// Whether `begin_frame` ran this frame (the late pass skips otherwise).
@@ -499,7 +532,7 @@ impl VgCullCore {
         let b = &self.buffers;
         let mut bin_cap = b.bin_capacity;
         let mut queue_cap = b.queue_capacity;
-        if let Some(words) = self.last_stats.take() {
+        if let Some(words) = self.pending_capacity_stats.take() {
             let st = |i: u32| words[(state::STATS + i) as usize];
             let max_bin = (0..crate::BIN_COUNT).map(|i| words[i as usize]).max().unwrap_or(0);
             if st(stats::VISIBLE_OVERFLOW) > 0 || max_bin > bin_cap / 4 * 3 {
@@ -580,14 +613,9 @@ impl VgCullCore {
             dense_tiles_x: inputs.dense_tiles[0].max(1),
             dense_tiles_y: inputs.dense_tiles[1].max(1),
             max_groups: self.config.max_groups.max(1),
-            triangle_budget: ((self.size.0 as f64)
-                * (self.size.1 as f64)
-                * f64::from(self.config.triangles_per_pixel.clamp(0.25, 2.0)))
-            .floor()
-            .clamp(1.0, f64::from(u32::MAX)) as u32,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            density_budget: self.config.density_budget_tris.max(0.0),
+            density_scale_max: helio_vg_format::density::MAX_SCALE,
+            _pad: [0; 2],
         };
         helio_core::upload::write_buffer(queue, &self.params_buf, 0, bytemuck::bytes_of(&params));
         self.prepared = true;
@@ -614,6 +642,8 @@ impl VgCullCore {
             if let Some(words) = rb.ready.lock().unwrap().take() {
                 rb.staging.unmap();
                 rb.in_flight = false;
+                rb.revision = rb.revision.wrapping_add(1);
+                self.pending_capacity_stats = Some(words.clone());
                 self.last_stats = Some(words);
             }
         }
@@ -635,7 +665,9 @@ impl VgCullCore {
         let b = self.buffers.clone();
         let rounds = self.config.rounds.max(1);
         if phase == 0 {
-            rec.clear_buffer(&b.state, 0, None);
+            // Everything but the density multiplier, which the next solve slews from.
+            rec.clear_buffer(&b.state, 0, Some(state::DENSITY as u64 * 4));
+            rec.clear_buffer(&b.state, (state::DENSITY as u64 + 1) * 4, None);
             let parity = (self.frame & 1) as u64;
             rec.clear_buffer(
                 &b.history,
@@ -677,6 +709,8 @@ impl VgCullCore {
         pass.set_bind_group(0, &bg0, &[]);
         if phase == 0 {
             pass.set_bind_group(1, &self.bg1, &[0]);
+            pass.set_pipeline(&self.pipelines.density);
+            pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(&self.pipelines.seed);
             pass.dispatch_workgroups(1, 1, 1);
         }

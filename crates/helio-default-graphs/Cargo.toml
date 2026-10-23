@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 # The scene join's world origin (`SceneDerivationContext::world_origin`).
 glam = { workspace = true }
 helio = { path = "../helio" }
+helio-graph-asset = { path = "../helio-graph-asset" }
 helio-core = { workspace = true }
 pulsar_scenedb = { workspace = true }
 image = { workspace = true, features = ["png"] }

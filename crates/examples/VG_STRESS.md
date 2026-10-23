@@ -177,6 +177,11 @@ passes shows no scans or trees (one warning).
 * **Progress.** The title bar and the console show
   `Cooking VG k/N assets (done of total tris) | now: <asset (tris, time)> | elapsed | ETA`;
   per-asset start/finish lines and a 15 s heartbeat go to the console.
+* **Forced recook.** `cargo vg-stress -- --force-recook` (or
+  `VG_STRESS_FORCE_RECOOK=1`; combine with `--prepare` to do it headless) ignores
+  every valid `.vgeo` cache and cooks it again, once per asset per run, then
+  overwrites the cache. Without it a cache is rebuilt only when its cook revision
+  is stale.
 * **Headless prepare.** `cargo vg-stress -- --prepare` (or `VG_STRESS_PREPARE=1`)
   provisions the sources and cooks every cache with no window or GPU, then exits
   (non-zero on errors). After that the demo starts with everything ready.
@@ -250,19 +255,22 @@ architecture/preview triangles and shadow work; it is not a whole-frame count.
 
 The title also carries the cull's stats line (selected triangles, emitted/tested
 clusters, HW/SW/dense split, frustum/occlusion/backface/error culls and overflow
-counters, plus triangle-budget rejects), read from the same asynchronous
-readback, so it adds no GPU stall.
+counters), read from the same asynchronous readback, so it adds no GPU stall.
 
-The culler now applies a hard frame-wide selected-triangle limit of 2 triangles
-per viewport pixel across both culling phases. `HELIO_VG_TRIANGLES_PER_PIXEL`
-can lower that limit at culler creation (accepted range 0.25–2, default 2).
-Clusters that do not fit are rejected before entering a draw bin, and traversal
-stops expanding once the first cluster is rejected. This guarantees the
-reported selected count stays under the budget; it can leave holes when the
-minimum resident/root cut itself is too expensive. `budget` in the title is the
-number of rejected clusters. The limit is a project policy: Epic's Nanite docs
-describe triangle count scaling with pixel count but do not specify a fixed
-triangles-per-pixel ratio.
+Selection uses a screen-wide feedback controller (on by default) around the existing error-based hierarchy
+cut. It compares the previous completed frame's selected triangles per viewport
+pixel with `selection_triangles_per_pixel` (default 2) and adjusts the next
+frame's `tau_px`. A denser cut raises tau so parent clusters replace complete
+finer cuts; a lighter cut lowers tau to recover detail. It never rejects an
+otherwise visible cluster to satisfy a count. Set
+`HELIO_VG_SELECTION_TRIANGLES_PER_PIXEL` (0.25–32) for the target and
+`HELIO_VG_SELECTION_SENSITIVITY` (0 disables the controller, default 1);
+both can also be changed through `VgRuntimeSettings`. Set sensitivity to 0 to
+disable adaptation. The controller (`helio_vg_format::density`: dead band, fast attack, slow release, demand normalised for the stats delay) steers to 0.7x the target. When enabled, effective tau stays between 1x and 8x the
+authored setting; the count target cannot override quality indefinitely. If even the resident root cut exceeds the target, the
+selected count stays above target rather than dropping geometry. The target is
+a project tuning value; Epic's Nanite docs describe triangle count scaling with
+pixel count but do not prescribe a fixed triangles-per-pixel ratio.
 
 ## Validation
 
@@ -292,7 +300,7 @@ needed to measure whole-scene frame time and total draw cost.
 
 The same test also reports selected counts when the two-metre scan fills 18,
 100, and 1,000 vertical pixels, for 1/2/4/8px geometric-error tolerances. The
-current 1px results are still too dense for the requested pixel-area budget:
+current 1px results are denser than the default selection target:
 
 | Scan | 18px | 100px | 1,000px |
 |---|---:|---:|---:|
@@ -303,13 +311,12 @@ current 1px results are still too dense for the requested pixel-area budget:
 | Thai statue | 6,432 | 37,796 | 313,766 |
 | Lucy | 1,184 | 31,732 | 235,776 |
 
-Those counts confirm the distinction between error tolerance and a triangle
-budget: the selector tests projected geometric deviation while `sw_edge_px`
-only classifies selected clusters for rasterization. The new hard admission
-limit bounds the output; the longer-term selection improvement is to prefer a
-coarser, coverage-preserving cut before reaching that limit. The current cached
-scans also show cone culling removes only about 0–2% from these views, so
-backface culling does not explain or solve the main excess.
+Those counts show that an error-only cut can be far denser than the target.
+`sw_edge_px` only classifies selected clusters for rasterization; it does not
+change the cut. The feedback now responds by choosing a coarser, still
+coverage-complete hierarchy cut. The current cached scans also show cone culling
+removes only about 0–2% from these views, so backface culling does not explain
+or solve the main excess.
 
 The texture timing printed at runtime spans the whole bounded producer phase,
 including time the worker waits for the renderer to accept texture uploads; it
@@ -380,10 +387,11 @@ instead of cycling views. Run only one demo when comparing GPU times. The
 corrected pixel-height table above uses `tan(FOV/2)`; the previous report used
 `tan(FOV)` and mislabeled object sizes.
 
-Remaining work: constant sampled leaf proxies are not canopy LODs, VG scan
-density still exceeds the desired pixel budget, and texture cooking is not yet
-persistently cached. Passing these regressions does not establish full-scene
-visual stability or a production performance target.
+Remaining work: constant sampled leaf proxies are not canopy LODs, the cooked
+trees should approach the density target at the authored base error before
+runtime feedback has to raise tau, and texture cooking is not yet persistently
+cached. Passing these regressions does not establish full-scene visual
+stability or a production performance target.
 
 ## Tier 3 measurements (dense tiles)
 
@@ -576,3 +584,66 @@ suppressed.
   (1,048,576 at the default, bounded by 8 bins x 2^20 < the 2^24 visible index and the 25-bit vis id).
   Drops are counted in `vg.overflow.visible` and in the window-title stats line (`overflow N`); there
   is no debug view for them.
+
+### Foliage rollback (cook revision 7)
+
+Revision 7 restores the revision 5 foliage builder. Revision 6 grew surviving
+connected pieces using a material/group-wide area ratio, which did not preserve
+local projected coverage. It also imposed geometric distance error on sparse
+foliage, making LOD selection retain much finer cuts. Its section-wide rejection
+rules could prevent simplification altogether. These changes are reverted.
+
+Run `cargo vg-stress -- --prepare` to rebuild stale caches, including revision 6.
+Triangle-density adaptation remains opt-in and bounded; compare selection at a
+fixed tau with adaptation disabled when evaluating future builder changes.
+
+The synthetic 63,200-triangle canopy test isolates the selection regression at
+240 units and fixed tau 1: revision 5 selects 15,763 triangles; revision 6 selects
+62,090; adding only the geometric-distance error selects 62,244; adding only
+area compensation selects 16,861. The geometric-distance floor is therefore
+the dominant selection regression in this fixture. These are CPU selection
+measurements, not museum GPU timings or visual validation. The existing test
+now requires substantial reduction at this distance, where its older assertions
+allowed revision 6 to pass. Future coverage work needs local projected coverage
+and silhouette comparisons before changing the selection metric.
+
+### Cook revisions 8 to 10: foliage coverage and the density bound
+
+Revision 8 replaced the proximity merge of floating pieces (needle and leaf
+cards) with an area-preserving card merge: nearby cards are merged by recursive
+bisection into one quad whose area is the sum of its members' (coverage is kept),
+whose length is the members' mean length (scale is kept) and whose width is the
+only thing that grows, and cells that straddle a gap are split instead of merged.
+The merged group keeps the measured deviation, so the cut selects it only where
+that error is below the tolerance. Group partitioning also gained a spatial
+fallback: clusters that share no edges (disconnected foliage) are grouped with the
+nearest free cluster in a Morton window rather than the next one in curve order,
+which had been stringing far-apart clusters into one group and pinning the error
+of every ancestor.
+
+Revisions 9 and 10 bound selected triangles per pixel in the stored errors. A
+group whose children are over `DENSITY_TARGET` (1.5) triangles per pixel for a
+whole-asset level (level triangles over the mean silhouette area of the asset) may
+be selected before its measured error reaches the tolerance, never below
+`measured / 12`. Geometry is never dropped: the coarser level stands in for all of it.
+
+Validate with `cargo test --release -p helio-vg-build --test lod_validation --
+--nocapture --include-ignored` (set `VG_LOD_OUT` for images). Real caches:
+`VG_CACHE_DIR=<cache dir> VG_REBUILD=1 ... real_cached_assets_ladder_and_images`.
+
+### Computed screen-wide density (cook revision 11, format version 4)
+
+The feedback controller described above is gone. Every asset header now carries
+its bounding sphere and a 32-entry `LodTable` (selected triangles against
+object-space error tolerance, written by the builder). Before traversal the cull
+pass runs `cs_density` (one workgroup): each frustum-visible instance looks its
+asset's table up at the tolerance its centre distance implies, for 13 candidate
+multipliers (1x to 8x); the smallest multiplier that fits
+`0.75 * selection_triangles_per_pixel * pixels` is written to the state buffer
+and used by `load_inst` for every cut that frame, rate limited to x1.25 up and
+x0.96 down per frame. Only the occlusion share is learned (CPU, from the late
+stats: `VisibleFraction`), and it only scales the budget. CPU mirror and tests:
+`helio_vg_format::density`; benchmark: `forest_density_is_computed_screen_wide`
+(demo trees, ~2,100 instances: worst 1.92 triangles/pixel, mean 1.25, prediction
+within x1.29, per-frame multiplier change <= x1.16). Merged foliage cards now take
+all four corners' attributes from one member so their texture stays coherent.

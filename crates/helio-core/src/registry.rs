@@ -259,6 +259,24 @@ impl<'a> ResourceRegistry<'a> {
         }
     }
 
+    /// Publishes a pass-owned buffer into the reflected-binding projection,
+    /// the buffer counterpart of [`write_texture_binding`](Self::write_texture_binding).
+    pub fn write_buffer_binding(
+        &mut self,
+        name: impl Into<String>,
+        buffer: &wgpu::Buffer,
+        writer: &'static str,
+    ) {
+        // SAFETY: the buffer is owned by a pass in the RenderGraph, which
+        // outlives this per-frame registry (same contract as the texture form).
+        let resource = unsafe {
+            std::mem::transmute::<wgpu::BindingResource<'_>, wgpu::BindingResource<'a>>(
+                buffer.as_entire_binding(),
+            )
+        };
+        self.write_binding(name, resource, writer);
+    }
+
     /// Removes graph-generated bindings before the next execution.
     pub fn clear_graph_bindings(&mut self) {
         for name in self.graph_bindings.drain() {

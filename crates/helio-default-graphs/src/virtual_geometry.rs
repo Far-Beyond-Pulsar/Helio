@@ -263,6 +263,8 @@ fn cull_settings(runtime: &VgRuntime) -> VgCullDynamic {
     let s = runtime.settings();
     VgCullDynamic {
         tau_px: s.tau_px,
+        selection_triangles_per_pixel: s.selection_triangles_per_pixel,
+        selection_sensitivity: s.selection_sensitivity,
         mode: s.mode,
         two_phase_occlusion: s.two_phase_occlusion,
         max_visible_clusters: s.max_visible_clusters,

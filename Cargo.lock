@@ -1694,6 +1694,7 @@ dependencies = [
  "glam 0.33.5",
  "helio",
  "helio-core",
+ "helio-graph-asset",
  "helio-mats",
  "helio-pass-billboard",
  "helio-pass-buffer-view",
@@ -1746,6 +1747,18 @@ dependencies = [
  "pulsar_scenedb",
  "serde_json",
  "twox-hash",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-graph-asset"
+version = "0.1.0"
+dependencies = [
+ "helio",
+ "helio-core",
+ "log",
+ "serde",
+ "serde_json",
  "wgpu",
 ]
 
@@ -2504,6 +2517,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-vg-format",
+ "image",
  "meshopt",
  "rayon",
  "serde_json",

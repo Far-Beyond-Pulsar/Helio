@@ -95,6 +95,11 @@ fn disjoint_canopy_selection_tracks_screen_size() {
         assert!(w[1] <= w[0], "{s:?}");
     }
     assert!(s[4] * 20 < s[0], "selection must collapse with distance: {s:?}");
+    // Sparse foliage must already coarsen at the second sample. Applying
+    // point-to-surface distance as its coverage error retained 62,090 of
+    // 63,200 triangles here; the coverage metric selects about 15,763.
+    // Keep margin for partition changes while rejecting that regression.
+    assert!(s[1] < mesh.tri_count() / 2, "mid-distance foliage failed to coarsen: {s:?}");
     assert!(s[2] < mesh.tri_count() / 2, "{s:?}");
 }
 
