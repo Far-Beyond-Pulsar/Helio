@@ -82,8 +82,8 @@ helio-core = { path = "crates/helio-core" }
 helio-vg-format = { path = "crates/helio-vg-format" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8b5b1144c4ef80411592985fcd9767134ee03941", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8b5b1144c4ef80411592985fcd9767134ee03941" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "017252c3c84331a29e53eaa627185597954a3241", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "017252c3c84331a29e53eaa627185597954a3241" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's
