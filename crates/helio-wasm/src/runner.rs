@@ -425,7 +425,7 @@ async fn init_wgpu<T: HelioWasmApp>(
                     ctx.cull_stats_buffer,
                 )
                 .unwrap_or_else(|| {
-                    helio_default_graphs::build_default_graph_external_with_context(ctx)
+                    helio_default_passes::build_default_graph_external_with_context(ctx)
                 })
             }))
             .build(device.clone(), queue.clone(), width, height, surface_format)

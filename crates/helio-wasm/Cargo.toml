@@ -9,7 +9,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 helio = { workspace = true }
-helio-default-graphs = { path = "../helio-default-graphs" }
+helio-default-passes = { path = "../helio-default-passes" }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-forward-lit = { workspace = true }
 helio-pass-portal-cull = { workspace = true }

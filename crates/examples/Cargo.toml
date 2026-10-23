@@ -295,7 +295,7 @@ helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
-helio-default-graphs = { path = "../helio-default-graphs" }
+helio-default-passes = { path = "../helio-default-passes" }
 helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }

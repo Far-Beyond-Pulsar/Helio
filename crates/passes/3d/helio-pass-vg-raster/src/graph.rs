@@ -3,7 +3,7 @@
 //! for the late cull) and [`VgRasterLatePass`] (phase 1 delta + tile
 //! classification). The three share one [`VgRasterShared`].
 //!
-//! Graph order (see `helio-default-graphs`):
+//! Graph order (see `helio-default-passes`):
 //!
 //! ```text
 //! VgCullEarly -> VgRasterEarly -> VgHizLate -> VgCullLate -> VgRasterLate

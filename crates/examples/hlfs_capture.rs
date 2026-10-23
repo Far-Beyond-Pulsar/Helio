@@ -11,7 +11,7 @@ pub mod architectural_materials;
 pub fn warm_up_cathedral(
     scene_db: &SceneDb,
     renderer: &mut Renderer,
-    acceleration: Option<&helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<&helio_default_passes::ray_tracing::SceneDbRayTracing>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     camera: &Camera,
@@ -204,7 +204,7 @@ pub fn run_scene_animated(
         if ray_traced {
             enable_ray_shadows(&mut scene_db.world);
         }
-        let mut acceleration = helio_default_graphs::ray_tracing::SceneDbRayTracing::new(
+        let mut acceleration = helio_default_passes::ray_tracing::SceneDbRayTracing::new(
             device.clone(),
             queue.clone(),
         );
@@ -248,9 +248,9 @@ pub fn run_scene_animated(
             .with_editor_mode(false)
             .with_pass_build_context(Box::new(move |ctx| {
                 if fxaa {
-                    helio_default_graphs::build_fxaa_hlfs_graph_with_context(ctx)
+                    helio_default_passes::build_fxaa_hlfs_graph_with_context(ctx)
                 } else {
-                    helio_default_graphs::build_hlfs_graph_with_context(ctx)
+                    helio_default_passes::build_hlfs_graph_with_context(ctx)
                 }
             }))
             .build(device.clone(), queue.clone(), width, height, format);
@@ -1005,7 +1005,7 @@ pub fn enable_ray_shadows(world: &mut World) {
                 entity.index() == object.material_slot
                     && material.flags & helio_mats::FLAG_ALPHA_BLEND != 0
                     && world
-                        .get::<helio_default_graphs::ray_tracing::RayTransmission>(entity)
+                        .get::<helio_default_passes::ray_tracing::RayTransmission>(entity)
                         .is_none()
             });
         // Display alpha alone is not a transmission model.

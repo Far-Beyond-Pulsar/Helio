@@ -26,7 +26,7 @@ planet frame and sun disk without air are not done). Open: #4, #5, #6, #7, #9, #
 | 4 | P1 | Voxel sun visibility (`directional_visibility`) is applied to every pixel whose light direction matches, including meshes drawn in front of terrain (`deferred_lighting.wgsl:1261-1267`). Meshes are never shadowed by terrain. | Props/foliage take the shadow state of the terrain behind them; objects under a mountain's shadow are sunlit. | Gate by the voxel tag; walk the chunk trees from non-voxel gbuffer pixels too (reuse `shadow_fallback`). | 0.1-0.5 ms with many mesh pixels. |
 | 5 | P1 | No sky specular: the environment cube is the baked probe or a black 1x1 cube (`helio-pass-deferred-light/src/lib.rs:1023-1028`); SSR is off by default and fades out above roughness 0.4-0.7. | Water, ice, wet/snowy ground show no Fresnel sky reflection; oceans are dark at grazing angles and from orbit. | Runtime sky capture from the atmosphere into env layer 0 (GGX-prefiltered), captured at the eye inside the air and at the ground under the view when in space. | ~0.1-0.2 ms amortised. |
 | 6 | P1 | Voxel sun walks are binary point-sun rays (`chunk_draw.wgsl:1918-1922`); the 0.267 deg solar disk is ignored. | Razor-hard shadows at kilometre range (real penumbra of a 1 km occluder is ~9 m). | Jitter the walk direction inside the solar cone per pixel per frame; TSR integrates. | ~0 ms. |
-| 7 | P1 | No bounce light at all on planets: radiance cascades are not in the default graph (`helio-default-graphs/src/lib.rs:921`), no SSAO/SSGI, Pulsar sets ambient to 0. | Lunar shadows are pitch black (real ones are filled by sunlit crater walls); Earth valleys miss warm ground bounce. | Analytic terrain-bounce term from the existing sky-visibility complement; later one-bounce diffuse rays on the chunk trees. | ~0 ms now; ~0.5-1 ms for traced bounce. |
+| 7 | P1 | No bounce light at all on planets: radiance cascades are not in the default graph (`helio-default-passes/src/lib.rs:921`), no SSAO/SSGI, Pulsar sets ambient to 0. | Lunar shadows are pitch black (real ones are filled by sunlit crater walls); Earth valleys miss warm ground bounce. | Analytic terrain-bounce term from the existing sky-visibility complement; later one-bounce diffuse rays on the chunk trees. | ~0 ms now; ~0.5-1 ms for traced bounce. |
 | 8 | P1 | Colour grading bugs: `color_saturation` and `color_contrast` are plain multipliers (`postprocess.wgsl:819-824`); the LUT path clamps scene-linear HDR to [0,1] before the LUT (`:797-800`); white balance gives r x1.54, b x0.65 at its default 6500 K (`:829-837`). | The level's "saturation 0.85 / contrast 1.15" just scales brightness by 0.98; any LUT clips highlights before tone mapping; enabling WB tints the frame orange. | Luminance-preserving saturation, log-space contrast around 0.18, grade after tone mapping (or in a log/ACEScct shaper), Bradford/CAT02 white balance from CCT. | ~0 ms. |
 | 9 | P1 | Regolith is Lambertian with an authored albedo of ~0.27 linear; no Lunar-Lambert/Hapke, no opposition surge, no sub-pixel relief roughness/micro-shadowing. | Moons look like matte plaster balls with limb darkening; terminator too soft and too bright on unresolved relief. | Material flag for regolith BRDF (McEwen 1991 Lunar-Lambert + Hapke opposition), slope-variance roughness and micro-shadowing from the generator's octave table. | ~0.02 ms ALU. |
 | 10 | P1 | From space the atmosphere is marched per pixel with 32 **uniform** steps along the whole shell chord (`atmosphere_composite.wgsl:25,48-66`). | ~70 km steps across a 2,000+ km limb chord vs. 8 km / 1.2 km scale heights: limb glow and grazing haze band and misestimate; visible pop when crossing `top_radius`. | Tangent-point-centred step distribution (or Bruneton 4D table for space), blend band around `top_radius`. | Same or lower cost (~0.3-0.6 ms). |
@@ -59,7 +59,7 @@ aerial RGB transmittance, LUT caching, multi-body atmospheres, night sky) is P2 
 - Sun: Pulsar's directional `intensity` is passed through as lux whatever the unit selector says
   (`crates/helio-component/src/components/light_component/mapping.rs:81-95`). The shipped level uses
   **3.0** (`Pulsar:assets/examples/voxel_planet.level`, `voxel_sun.intensity = 3.0`, unit label
-  "Lumens"); `voxel_flight` also uses 3.0 (`crates/helio-default-graphs/examples/voxel_flight.rs:146`).
+  "Lumens"); `voxel_flight` also uses 3.0 (`crates/helio-default-passes/examples/voxel_flight.rs:146`).
   The atmosphere treats it as top-of-atmosphere illuminance (`atmosphere_luts.wgsl:58-70`), and sky
   radiance, aerial in-scatter and the SH ambient all scale with it, so sun and sky are mutually
   consistent.
@@ -238,7 +238,7 @@ Precompute **sky irradiance per (r, mu_s) as SH in the local frame** (z = local 
 ### 4.1 What exists
 
 - Helio: "Without a row there is no atmosphere (space, a moon)" (`helio-pass-sky/src/atmosphere.rs:7-8`).
-  With no row: composite inactive, background stays black (`helio-default-graphs/src/background.rs:1-10`),
+  With no row: composite inactive, background stays black (`helio-default-passes/src/background.rs:1-10`),
   so **no sun disk**; deferred falls back to `globals.ambient_color` as a hemisphere around **world +Y**
   (`deferred_lighting.wgsl:1327-1330`) - wrong anywhere on a sphere but the north pole. Pulsar sets
   that ambient to 0 (`Pulsar:crates/core/engine_backend/src/subsystems/render/helio_renderer/renderer.rs:1240`).
@@ -341,7 +341,7 @@ Make the **planet body the single source of truth** and derive rendering rows fr
   for voxel pixels (`deferred_lighting.wgsl:1113-1117`) and is not in the default graph at all.
 - Voxel sky visibility: 4 cosine-weighted rays about the planet's up per 4x4 block per frame, range
   48 **cells** (`chunk_draw.wgsl:1778-1779, 1928-1951`), times corner AO (`:1505-1531`).
-- Radiance cascades: not in the default graph (`helio-default-graphs/src/lib.rs:921`); the deferred
+- Radiance cascades: not in the default graph (`helio-default-passes/src/lib.rs:921`); the deferred
   sampler is a 16^3 camera-centred probe grid (`deferred_lighting.wgsl:916-1009`), meaningless at
   planetary scale. SSR off by default (`lib.rs:944`). Pulsar ambient 0.
 

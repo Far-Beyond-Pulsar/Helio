@@ -59,7 +59,7 @@ pub type SceneDbHandle = GpuMirrorHandle;
 ///     .with_editor_mode(true)
 ///     .with_ambient([0.0, 0.0, 0.0], 0.0)
 ///     .with_pass_build_context(Box::new(
-///         helio_default_graphs::build_default_graph_external_with_context,
+///         helio_default_passes::build_default_graph_external_with_context,
 ///     ))
 ///     .build(device, queue, 1920, 1080, surface_format);
 /// ```
@@ -69,7 +69,7 @@ pub type SceneDbHandle = GpuMirrorHandle;
 /// ```rust,ignore
 /// let renderer = RendererBuilder::new(config, scene_db)
 ///     .with_pass_build_context(Box::new(
-///         helio_default_graphs::build_fxaa_graph_with_context,
+///         helio_default_passes::build_fxaa_graph_with_context,
 ///     ))
 ///     .build(device, queue, 1920, 1080, fmt);
 /// ```

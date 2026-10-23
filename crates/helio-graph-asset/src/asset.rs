@@ -47,6 +47,20 @@ pub struct NodeInstance {
     pub position: [f32; 2],
 }
 
+/// A labelled box drawn around a group of nodes, editor-only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphComment {
+    pub id: String,
+    pub text: String,
+    pub position: [f32; 2],
+    pub size: [f32; 2],
+    /// Normalised RGBA.
+    pub color: [f32; 4],
+    /// Nodes the box surrounds.
+    #[serde(default)]
+    pub nodes: Vec<String>,
+}
+
 /// A render graph asset (`.rendergraph`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -56,6 +70,8 @@ pub struct GraphAsset {
     pub description: String,
     pub nodes: Vec<NodeInstance>,
     pub connections: Vec<Connection>,
+    #[serde(default)]
+    pub comments: Vec<GraphComment>,
 }
 
 impl Default for GraphAsset {
@@ -66,6 +82,7 @@ impl Default for GraphAsset {
             description: String::new(),
             nodes: Vec::new(),
             connections: Vec::new(),
+            comments: Vec::new(),
         }
     }
 }

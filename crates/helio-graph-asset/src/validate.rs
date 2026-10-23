@@ -1,10 +1,22 @@
 //! Checks a graph asset against the node registry and orders its nodes.
+//!
+//! Rules a graph follows:
+//!
+//! * a wire joins an output to an input of the same kind, persistence and
+//!   resource name; a non-flow input has at most one wire;
+//! * every node builds, ordered by its wires (ties by the order the nodes were
+//!   authored). A node with `enabled` set to `false` is bypassed instead;
+//! * a *history* input reads the previous frame's value, so its wire does not
+//!   order the graph: feedback is not a cycle;
+//! * exactly one Output node ends the pipeline.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::asset::GraphAsset;
-use crate::core_nodes::OUTPUT;
+use serde_json::Value;
+
+use crate::asset::{GraphAsset, NodeInstance};
+use crate::core_nodes::{ON_FRAME_START, OUTPUT};
 use crate::pins::{PinKind, PinType};
 use crate::registry::{NodePins, NodeRegistry};
 
@@ -40,10 +52,11 @@ impl fmt::Display for Diagnostic {
 /// Which nodes to build, and in what order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
-    /// Node indices into [`GraphAsset::nodes`], dependencies first.
+    /// Node indices into [`GraphAsset::nodes`], dependencies first. Disabled
+    /// nodes are not in it.
     pub order: Vec<usize>,
-    /// Nodes that lead nowhere near the output.
-    pub skipped: Vec<usize>,
+    /// Nodes with `enabled: false`, which build nothing.
+    pub disabled: Vec<usize>,
 }
 
 /// The result of [`validate`]: every finding, and a plan if none is an error.
@@ -51,6 +64,9 @@ pub struct Plan {
 pub struct Validation {
     pub diagnostics: Vec<Diagnostic>,
     pub plan: Option<Plan>,
+    /// The graph the plan is about: the asset with its buffer nodes flattened away
+    /// ([`crate::buffers`]). `plan.order` indexes its nodes.
+    pub flat: Option<GraphAsset>,
 }
 
 impl Validation {
@@ -63,7 +79,25 @@ impl Validation {
     }
 }
 
+/// Whether a node is bypassed.
+pub fn is_disabled(node: &NodeInstance) -> bool {
+    matches!(node.params.get("enabled"), Some(Value::Bool(false)))
+}
+
+/// Checks `asset`: first its buffer nodes are flattened away, then the resulting graph
+/// is checked and ordered.
 pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
+    let flattened = crate::buffers::flatten(asset, registry);
+    let mut validation = validate_flat(&flattened.asset, registry);
+    validation.diagnostics.splice(0..0, flattened.diagnostics);
+    if validation.diagnostics.iter().any(|d| d.severity == Severity::Error) {
+        validation.plan = None;
+    }
+    validation.flat = Some(flattened.asset);
+    validation
+}
+
+fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     macro_rules! error {
         ($node:expr, $message:expr $(,)?) => {
@@ -102,8 +136,8 @@ pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
         }
     }
 
-    // Wires.
-    let mut edges: Vec<(usize, usize)> = Vec::new();
+    // Wires: (from, to, history).
+    let mut edges: Vec<(usize, usize, bool, bool)> = Vec::new();
     let mut feeds: HashMap<(usize, &str), usize> = HashMap::new();
     for connection in &asset.connections {
         let (from, to) = (&connection.from, &connection.to);
@@ -145,67 +179,101 @@ pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
                 error!(Some(&to.node), format!("input `{}` has more than one wire", to.pin));
             }
         }
-        if !edges.contains(&(from_idx, to_idx)) {
-            edges.push((from_idx, to_idx));
+        let flow = out_pin.ty.kind == PinKind::Flow;
+        if !edges.iter().any(|e| e.0 == from_idx && e.1 == to_idx && e.2 == in_pin.history && e.3 == flow) {
+            edges.push((from_idx, to_idx, in_pin.history, flow));
         }
     }
 
-    let outputs: Vec<usize> =
-        asset.nodes.iter().enumerate().filter(|(_, n)| n.kind == OUTPUT).map(|(i, _)| i).collect();
-    if outputs.len() != 1 {
-        error!(None::<&str>, format!("a render graph needs exactly one Output node, found {}", outputs.len()));
+    let outputs = asset.nodes.iter().filter(|n| n.kind == OUTPUT).count();
+    if outputs != 1 {
+        error!(None::<&str>, format!("a render graph needs exactly one Output node, found {outputs}"));
+    }
+    let starts = asset.nodes.iter().filter(|n| n.kind == ON_FRAME_START).count();
+    if starts != 1 {
+        error!(None::<&str>, format!("a render graph needs exactly one On Frame Start node, found {starts}"));
     }
 
-    let cyclic = find_cycle(asset.nodes.len(), &edges);
-    if let Some(node) = cyclic {
+    // History wires do not order the graph, so only the others can cycle.
+    let ordering: Vec<(usize, usize)> =
+        edges.iter().filter(|e| !e.2).map(|e| (e.0, e.1)).collect();
+    if let Some(node) = find_cycle(asset.nodes.len(), &ordering) {
         error!(Some(&asset.nodes[node].id), "is part of a cycle".into());
     }
 
-    let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
-    if has_errors {
-        return Validation { diagnostics, plan: None };
+    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+        return Validation { diagnostics, plan: None, flat: None };
     }
 
-    // Keep what leads to the output.
-    let mut keep: HashSet<usize> = HashSet::new();
-    let mut stack = vec![outputs[0]];
-    while let Some(node) = stack.pop() {
-        if keep.insert(node) {
-            stack.extend(edges.iter().filter(|(_, to)| *to == node).map(|(from, _)| *from));
-        }
-    }
+    let disabled: Vec<usize> =
+        asset.nodes.iter().enumerate().filter(|(_, n)| is_disabled(n)).map(|(i, _)| i).collect();
+    let disabled_set: HashSet<usize> = disabled.iter().copied().collect();
 
-    let mut skipped = Vec::new();
-    for (index, node) in asset.nodes.iter().enumerate() {
-        if !keep.contains(&index) {
-            skipped.push(index);
+    // What a bypassed node would have supplied is missing downstream.
+    for &(from, to, history, _) in &edges {
+        if disabled_set.contains(&from) && !disabled_set.contains(&to) && !history {
             diagnostics.push(Diagnostic {
                 severity: Severity::Warning,
-                node: Some(node.id.clone()),
-                message: "does not lead to the Output and is not built".into(),
+                node: Some(asset.nodes[to].id.clone()),
+                message: format!("reads from `{}`, which is disabled", asset.nodes[from].id),
             });
         }
     }
 
+    // Everything that executes hangs off On Frame Start: a node with a flow pin that
+    // the chain of flow wires does not reach still builds, but nothing orders it
+    // except its data wires.
+    let start = asset.nodes.iter().position(|n| n.kind == ON_FRAME_START);
+    if let Some(start) = start {
+        let mut reached: HashSet<usize> = HashSet::from([start]);
+        let mut pending = vec![start];
+        while let Some(node) = pending.pop() {
+            for &(from, to, _, flow) in &edges {
+                if flow && from == node && reached.insert(to) {
+                    pending.push(to);
+                }
+            }
+        }
+        for (index, node_pins) in pins.iter().enumerate() {
+            let Some(node_pins) = node_pins else { continue };
+            let executes = node_pins
+                .inputs
+                .iter()
+                .chain(&node_pins.outputs)
+                .any(|pin| pin.ty.kind == PinKind::Flow);
+            if executes && !reached.contains(&index) && !disabled_set.contains(&index) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Warning,
+                    node: Some(asset.nodes[index].id.clone()),
+                    message: "is not on the execution chain from On Frame Start".to_string(),
+                });
+            }
+        }
+    }
+
     // A resource read that nothing writes: Helio rejects it when the graph locks,
-    // unless the host supplies it.
-    let fed: HashSet<(usize, &str)> =
-        feeds.keys().copied().collect();
-    for &index in &keep {
-        let Some(node_pins) = &pins[index] else { continue };
+    // unless the host supplies it or the pass has a fallback.
+    let fed: HashSet<(usize, &str)> = feeds.keys().copied().collect();
+    for (index, node_pins) in pins.iter().enumerate() {
+        let Some(node_pins) = node_pins else { continue };
+        if disabled_set.contains(&index) {
+            continue;
+        }
         for pin in &node_pins.inputs {
-            // The host supplies Scene inputs and SceneDB buffers; a flow pin carries no data.
+            // The host supplies Scene inputs and SceneDB buffers; a flow pin
+            // carries no data; an optional input has a fallback.
             let host_supplied = pin.ty.kind == PinKind::Scene
                 || pin.resource.starts_with(crate::probe::SCENEDB_PREFIX);
             if pin.ty.kind != PinKind::Flow
                 && !host_supplied
+                && !pin.optional
                 && !fed.contains(&(index, pin.name.as_str()))
             {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
                     node: Some(asset.nodes[index].id.clone()),
                     message: format!(
-                        "input `{}` is not connected; `{}` must come from a pass outside this graph or a Scene Input",
+                        "input `{}` is not connected; `{}` must come from a pass outside this graph",
                         pin.name, pin.resource
                     ),
                 });
@@ -216,18 +284,25 @@ pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     // Dependencies first, ties by the order nodes were authored.
     let mut order = Vec::new();
     let mut placed: HashSet<usize> = HashSet::new();
-    while order.len() < keep.len() {
-        let next = (0..asset.nodes.len())
-            .filter(|i| keep.contains(i) && !placed.contains(i))
+    let building: Vec<usize> =
+        (0..asset.nodes.len()).filter(|i| !disabled_set.contains(i)).collect();
+    while order.len() < building.len() {
+        let next = building
+            .iter()
+            .copied()
+            .filter(|i| !placed.contains(i))
             .find(|i| {
-                edges.iter().filter(|(_, to)| to == i).all(|(from, _)| placed.contains(from) || !keep.contains(from))
+                ordering
+                    .iter()
+                    .filter(|(_, to)| to == i)
+                    .all(|(from, _)| placed.contains(from) || disabled_set.contains(from))
             })
             .expect("an acyclic graph always has a node whose dependencies are placed");
         placed.insert(next);
         order.push(next);
     }
 
-    Validation { diagnostics, plan: Some(Plan { order, skipped }) }
+    Validation { diagnostics, plan: Some(Plan { order, disabled }), flat: None }
 }
 
 fn describe(ty: PinType, resource: &str) -> String {
@@ -265,6 +340,8 @@ mod tests {
     use super::*;
     use crate::asset::{Connection, NodeInstance, PinRef};
     use crate::core_nodes::{PERSISTENT_BUFFER, TEXTURE};
+    use crate::pins::PinDesc;
+    use crate::registry::NodeDescriptor;
     use serde_json::json;
 
     fn node(id: &str, kind: &str, name: Option<&str>) -> NodeInstance {
@@ -288,33 +365,75 @@ mod tests {
         NodeRegistry::with_core()
     }
 
-    #[test]
-    fn requires_exactly_one_output() {
-        let asset = GraphAsset::default();
-        let result = validate(&asset, &registry());
-        assert!(result.has_errors());
-        assert!(result.plan.is_none());
+    /// A graph with the nodes every graph has: `start` and `out`.
+    fn graph() -> GraphAsset {
+        let mut asset = GraphAsset::default();
+        asset.nodes.push(node("start", ON_FRAME_START, None));
+        asset.nodes.push(node("out", OUTPUT, None));
+        asset
+    }
+
+    fn flow_node(kind: &str) -> NodeDescriptor {
+        NodeDescriptor::new(kind, "Flow", "Test", "", |_| Ok(()))
+            .with_pins(vec![PinDesc::flow("in")], vec![PinDesc::flow("out")])
+    }
+
+    fn order_ids(asset: &GraphAsset, plan: &Plan) -> Vec<String> {
+        plan.order.iter().map(|i| asset.nodes[*i].id.clone()).collect()
     }
 
     #[test]
-    fn unreachable_nodes_are_skipped_with_a_warning() {
-        let mut asset = GraphAsset::default();
-        asset.nodes.push(node("out", OUTPUT, None));
+    fn requires_one_start_and_one_output() {
+        let result = validate(&GraphAsset::default(), &registry());
+        assert!(result.has_errors());
+        assert!(result.plan.is_none());
+        let mut only_output = GraphAsset::default();
+        only_output.nodes.push(node("out", OUTPUT, None));
+        assert!(validate(&only_output, &registry())
+            .errors()
+            .any(|d| d.message.contains("On Frame Start")));
+        assert!(!validate(&graph(), &registry()).has_errors());
+    }
+
+    #[test]
+    fn every_node_builds_and_disabled_ones_are_bypassed() {
+        let mut asset = graph();
         asset.nodes.push(node("tex", TEXTURE, Some("a")));
-        let result = validate(&asset, &registry());
-        let plan = result.plan.expect("valid");
-        assert_eq!(plan.order, vec![0]);
-        assert_eq!(plan.skipped, vec![1]);
-        assert!(result.diagnostics.iter().any(|d| d.severity == Severity::Warning));
+        asset.nodes.push(node("off", TEXTURE, Some("b")));
+        asset.nodes[3].params.insert("enabled".into(), json!(false));
+        let plan = validate(&asset, &registry()).plan.expect("valid");
+        let built = order_ids(&asset, &plan);
+        assert!(built.contains(&"tex".to_string()), "{built:?}");
+        assert!(!built.contains(&"off".to_string()), "{built:?}");
+        assert_eq!(plan.disabled, vec![3]);
+    }
+
+    #[test]
+    fn a_reader_of_a_disabled_node_is_warned() {
+        let mut registry = registry();
+        registry.register(
+            NodeDescriptor::new("t.read", "Read", "Test", "", |_| Ok(())).with_pins(
+                vec![PinDesc::resource(PinType::TEXTURE, "x")],
+                vec![PinDesc::flow("out")],
+            ),
+        );
+        let mut asset = graph();
+        asset.nodes.push(node("tex", TEXTURE, Some("x")));
+        asset.nodes[2].params.insert("enabled".into(), json!(false));
+        asset.nodes.push(node("r", "t.read", None));
+        asset.connections.push(wire("tex", "x", "r", "x"));
+        let validation = validate(&asset, &registry);
+        assert!(validation
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains("disabled")));
     }
 
     #[test]
     fn rejects_mismatched_pins_and_unknown_kinds() {
-        let mut asset = GraphAsset::default();
-        asset.nodes.push(node("out", OUTPUT, None));
+        let mut asset = graph();
         asset.nodes.push(node("buf", PERSISTENT_BUFFER, Some("b")));
         asset.nodes.push(node("mystery", "no.such.node", None));
-        // A buffer cannot feed a flow input.
         asset.connections.push(wire("buf", "b", "out", "in"));
         let result = validate(&asset, &registry());
         let messages: Vec<_> = result.errors().map(|d| d.message.clone()).collect();
@@ -324,53 +443,89 @@ mod tests {
 
     #[test]
     fn orders_dependencies_first() {
-        // A resource feeding a custom node that precedes the output.
         let mut registry = registry();
         registry.register(
-            crate::registry::NodeDescriptor::new("t.pass", "Pass", "Test", "", |_| Ok(())).with_pins(
-                vec![
-                    PinDesc::resource(PinType::TEXTURE, "a"),
-                    PinDesc::flow("in"),
-                ],
+            NodeDescriptor::new("t.pass", "Pass", "Test", "", |_| Ok(())).with_pins(
+                vec![PinDesc::resource(PinType::TEXTURE, "a"), PinDesc::flow("in")],
                 vec![PinDesc::flow("out")],
             ),
         );
-        use crate::pins::PinDesc;
-        let mut asset = GraphAsset::default();
-        asset.nodes.push(node("out", OUTPUT, None));
+        let mut asset = graph();
         asset.nodes.push(node("pass", "t.pass", None));
         asset.nodes.push(node("tex", TEXTURE, Some("a")));
+        asset.connections.push(wire("start", "out", "pass", "in"));
         asset.connections.push(wire("tex", "a", "pass", "a"));
         asset.connections.push(wire("pass", "out", "out", "in"));
         let plan = validate(&asset, &registry).plan.expect("valid");
-        let position = |i| plan.order.iter().position(|n| *n == i).unwrap();
-        assert!(position(2) < position(1) && position(1) < position(0), "{:?}", plan.order);
+        let ids = order_ids(&asset, &plan);
+        let at = |id: &str| ids.iter().position(|k| k == id).unwrap();
+        assert!(at("tex") < at("pass") && at("pass") < at("out"), "{ids:?}");
+        assert!(at("start") < at("pass"), "{ids:?}");
+    }
+
+    #[test]
+    fn an_executing_node_off_the_chain_is_warned() {
+        let mut registry = registry();
+        registry.register(flow_node("t.flow"));
+        let mut asset = graph();
+        asset.nodes.push(node("on", "t.flow", None));
+        asset.nodes.push(node("off", "t.flow", None));
+        asset.connections.push(wire("start", "out", "on", "in"));
+        asset.connections.push(wire("on", "out", "out", "in"));
+        let warned: Vec<_> = validate(&asset, &registry)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains("execution chain"))
+            .filter_map(|d| d.node)
+            .collect();
+        assert_eq!(warned, vec!["off".to_string()]);
+    }
+
+    #[test]
+    fn history_wires_do_not_make_cycles() {
+        // `a` writes x and reads last frame's y; `b` reads x and writes y.
+        let mut registry = registry();
+        registry.register(
+            NodeDescriptor::new("t.a", "A", "Test", "", |_| Ok(())).with_pins(
+                vec![PinDesc::resource(PinType::TEXTURE, "y").history()],
+                vec![PinDesc::resource(PinType::TEXTURE, "x")],
+            ),
+        );
+        registry.register(
+            NodeDescriptor::new("t.b", "B", "Test", "", |_| Ok(())).with_pins(
+                vec![PinDesc::resource(PinType::TEXTURE, "x")],
+                vec![PinDesc::resource(PinType::TEXTURE, "y")],
+            ),
+        );
+        let mut asset = graph();
+        asset.nodes.push(node("a", "t.a", None));
+        asset.nodes.push(node("b", "t.b", None));
+        asset.connections.push(wire("a", "x", "b", "x"));
+        asset.connections.push(wire("b", "y", "a", "y")); // feedback
+        let result = validate(&asset, &registry);
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        let plan = result.plan.expect("valid");
+        let ids = order_ids(&asset, &plan);
+        let at = |id: &str| ids.iter().position(|k| k == id).unwrap();
+        assert!(at("a") < at("b"), "a (writer of x) builds before b: {ids:?}");
     }
 
     #[test]
     fn detects_cycles_and_double_fed_inputs() {
         let mut registry = registry();
-        use crate::pins::PinDesc;
-        registry.register(
-            crate::registry::NodeDescriptor::new("t.flow", "Flow", "Test", "", |_| Ok(()))
-                .with_pins(vec![PinDesc::flow("in")], vec![PinDesc::flow("out")]),
-        );
-        let mut asset = GraphAsset::default();
-        asset.nodes.push(node("out", OUTPUT, None));
+        registry.register(flow_node("t.flow"));
+        let mut asset = graph();
         asset.nodes.push(node("a", "t.flow", None));
         asset.nodes.push(node("b", "t.flow", None));
         asset.connections.push(wire("a", "out", "b", "in"));
         asset.connections.push(wire("b", "out", "a", "in"));
-        asset.connections.push(wire("b", "out", "out", "in"));
-        let result = validate(&asset, &registry);
-        assert!(result.errors().any(|d| d.message.contains("cycle")));
+        assert!(validate(&asset, &registry).errors().any(|d| d.message.contains("cycle")));
 
-        let mut asset = GraphAsset::default();
-        asset.nodes.push(node("out", OUTPUT, None));
+        let mut asset = graph();
         asset.nodes.push(node("t1", TEXTURE, Some("x")));
         asset.nodes.push(node("t2", TEXTURE, Some("x")));
         registry.register(
-            crate::registry::NodeDescriptor::new("t.read", "Read", "Test", "", |_| Ok(())).with_pins(
+            NodeDescriptor::new("t.read", "Read", "Test", "", |_| Ok(())).with_pins(
                 vec![PinDesc::resource(PinType::TEXTURE, "x")],
                 vec![PinDesc::flow("out")],
             ),
@@ -378,8 +533,8 @@ mod tests {
         asset.nodes.push(node("r", "t.read", None));
         asset.connections.push(wire("t1", "x", "r", "x"));
         asset.connections.push(wire("t2", "x", "r", "x"));
-        asset.connections.push(wire("r", "out", "out", "in"));
-        let result = validate(&asset, &registry);
-        assert!(result.errors().any(|d| d.message.contains("more than one wire")));
+        assert!(validate(&asset, &registry)
+            .errors()
+            .any(|d| d.message.contains("more than one wire")));
     }
 }

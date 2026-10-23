@@ -1,5 +1,5 @@
 use helio::{PassBuildContext, PassGraphBuilderFn};
-use helio_default_graphs::{
+use helio_default_passes::{
     build_default_graph_external_with_context, build_default_graph_with_context,
     build_forward_only_graph_with_context, build_forward_opaque_graph_with_context,
     build_fxaa_graph_with_context, build_fxaa_hlfs_graph_with_context,

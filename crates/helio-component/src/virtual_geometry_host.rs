@@ -11,7 +11,7 @@
 //! scene derivations   VgAssetReadyPublisher  -> `vg_asset_ready` (rows from the runtime)
 //!                     VirtualGeometryInstances -> `vg_instances`, `lod_suppressed`,
 //!                                                 `classic_suppressed`
-//! graph passes        stream pages, cull, raster, shade (helio-default-graphs)
+//! graph passes        stream pages, cull, raster, shade (helio-default-passes)
 //! ```
 //!
 //! Until an asset's root pages are resident its instances are not VG-active:

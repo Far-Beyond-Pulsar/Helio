@@ -23,7 +23,7 @@ Because the GPU drives the draws, the CPU never loops over draw calls. Scene dat
 
 The render graph is a little smart about its own lifecycle. When you build one, the builder tucks a rebuilder closure inside it, and the renderer pulls that out at construction time. The practical result is that resizing the window rebuilds the whole pipeline, recreates depth targets, and rewires everything for you, with no resize boilerplate in your code.
 
-If you want to see where things live: `helio` is the public API you program against (the renderer, scene, camera, the Radiant material system, debug helpers), `helio-core` is the graph runtime and the `RenderPass` trait, `libhelio` holds the plain GPU-shared structs like `GpuLight` and `GpuMaterial`, `helio-default-graphs` has the ready-made pipelines, the `helio-pass-*` crates are the passes, `helio-wasm` is the cross-platform app runner, `helio-web-demos` compiles every example to WebAssembly, and `helio-asset-compat` handles model loading. The runnable native demos and the editor are in `crates/examples`.
+If you want to see where things live: `helio` is the public API you program against (the renderer, scene, camera, the Radiant material system, debug helpers), `helio-core` is the graph runtime and the `RenderPass` trait, `libhelio` holds the plain GPU-shared structs like `GpuLight` and `GpuMaterial`, `helio-default-passes` has the ready-made pipelines, the `helio-pass-*` crates are the passes, `helio-wasm` is the cross-platform app runner, `helio-web-demos` compiles every example to WebAssembly, and `helio-asset-compat` handles model loading. The runnable native demos and the editor are in `crates/examples`.
 
 ## Drawing a frame
 
@@ -54,7 +54,7 @@ To wire the renderer up to your own window, the shape of it is always the same. 
 ```rust
 use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene,
             required_wgpu_features, required_wgpu_limits};
-use helio_default_graphs::build_default_graph;
+use helio_default_passes::build_default_graph;
 
 let features = required_wgpu_features(adapter.features());
 let limits   = required_wgpu_limits(adapter.limits());

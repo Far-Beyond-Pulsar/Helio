@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 mod background;
-pub mod nodes;
+pub mod graph_nodes;
+pub mod graphs;
 pub mod pipelines;
 pub mod environment_join;
 pub mod portal_projection;
@@ -137,10 +138,9 @@ fn new_graph(
 /// all of these names; `build_simple_graph` uses none of this and is the one
 /// entry point that legitimately calls none of these.
 fn declare_common_external_inputs(graph: &mut RenderGraph) {
-    graph.declare_external_input("material_textures");
-    graph.declare_external_input("render_environment");
-    graph.declare_external_input("billboards");
-    graph.declare_external_input("corona_emitters");
+    for &name in graph_nodes::HOST_INPUTS {
+        graph.declare_external_input(name);
+    }
 }
 
 /// Which of this crate's passes shader hot reload may swap on their own

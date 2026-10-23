@@ -12,7 +12,10 @@ use crate::resources::{
     TransientTexturePass,
 };
 
+pub const ON_FRAME_START: &str = "core.on_frame_start";
 pub const OUTPUT: &str = "core.output";
+pub const BUFFER_GET: &str = "core.buffer_get";
+pub const BUFFER_SET: &str = "core.buffer_set";
 pub const EXTERNAL: &str = "core.external";
 pub const TEXTURE: &str = "core.texture";
 pub const DEPTH: &str = "core.depth";
@@ -69,13 +72,60 @@ fn named_output(ty: PinType) -> impl Fn(&Params) -> NodePins + Send + Sync {
     }
 }
 
+/// The pin of a buffer node: the buffer its `buffer` parameter names. An empty
+/// resource (no valid buffer yet) is reported when the graph is flattened.
+fn buffer_pin(params: &Params) -> PinDesc {
+    let (ty, name) = params
+        .get("buffer")
+        .and_then(|value| value.as_str())
+        .and_then(crate::buffers::parse_entry)
+        .unwrap_or((PinType::TEXTURE, String::new()));
+    PinDesc::resource(ty, name)
+}
+
 pub fn register(registry: &mut NodeRegistry) {
+    registry.register(
+        NodeDescriptor::new(
+            BUFFER_GET,
+            "Get Buffer",
+            "Buffers",
+            "Offers a buffer wherever it is placed. Place as many as you like; they read the latest Set of the buffer before the node using them.",
+            |_| Ok(()),
+        )
+        .with_param(ParamDesc::text("buffer", "Buffer", "tex:pre_aa"))
+        .with_dynamic_pins(|params| NodePins { inputs: Vec::new(), outputs: vec![buffer_pin(params)] })
+        .with_data_only(),
+    );
+    registry.register(
+        NodeDescriptor::new(
+            BUFFER_SET,
+            "Set Buffer",
+            "Buffers",
+            "Names the value wired into it as a buffer, so Get Buffer nodes can read it elsewhere. Compiles away.",
+            |_| Ok(()),
+        )
+        .with_param(ParamDesc::text("buffer", "Buffer", "tex:pre_aa"))
+        .with_dynamic_pins(|params| NodePins { inputs: vec![buffer_pin(params)], outputs: Vec::new() })
+        .with_data_only(),
+    );
+
+    registry.register(
+        NodeDescriptor::new(
+            ON_FRAME_START,
+            "On Frame Start",
+            "Graph",
+            "Where a frame begins. Every pass that executes is chained from here, in the order the flow wires give.",
+            |_| Ok(()),
+        )
+        .with_pins(Vec::new(), vec![PinDesc::flow("out")]),
+    );
+
     registry.register(
         NodeDescriptor::new(
             OUTPUT,
             "Output",
             "Graph",
-            "The end of the pipeline. Only nodes that lead here are built.",
+            "The end of the frame. The last pass in the chain flows into it.",
             |_| Ok(()),
         )
         .with_pins(vec![PinDesc::flow("in")], Vec::new()),

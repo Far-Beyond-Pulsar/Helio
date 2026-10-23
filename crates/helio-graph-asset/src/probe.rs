@@ -5,20 +5,20 @@
 //! `declare_resources`, [`RenderPass::scene_buffers`](helio_core::RenderPass::scene_buffers)),
 //! and derive the pins from that. Nothing here names a pass or a resource.
 //!
-//! For each node, over the passes it added, in graph order:
+//! The graph is built in the order given, unlocked, and for each node:
 //!
-//! * **outputs**: every resource a pass writes;
-//! * **inputs**: every resource a pass reads that an earlier node wrote, or
-//!   that the host supplies (a Scene pin). A resource only a *later* pass
-//!   writes is last frame's value (feedback) and is not an input, and one
-//!   nothing writes is an optional input with a fallback;
-//! * **host inputs offered**: a node that declares a resource as supplied by the host
-//!   (`declare_external_input`) gets a Scene output pin for it;
+//! * **outputs**: every resource its passes write, typed by how the pass
+//!   declares it (a buffer for `write_buffer`, a depth or colour texture for the
+//!   others);
+//! * **inputs**: every resource its passes read, by who supplies it:
+//!   - written by an earlier node: an ordinary input;
+//!   - written only by a *later* node: a **history** input (last frame's value:
+//!     Hi-Z reads `depth`, which the geometry pass writes later in the frame);
+//!   - supplied by the host (`declare_external_input`): a Scene input;
+//!   - written by no node: an **optional** input, the pass binds a fallback;
 //! * **SceneDB inputs**: a Buffer pin `scenedb.<key>` for each SceneDB buffer a
-//!   pass consumes.
-//!
-//! The kind of a pin is the kind its producer declares: a buffer for
-//! `write_buffer`, a depth or colour texture for the others.
+//!   pass consumes;
+//! * a node that declares a host-supplied resource offers it as a Scene output.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -43,6 +43,15 @@ pub struct Probe {
     pub scene_buffers: Vec<String>,
 }
 
+impl Probe {
+    /// Gives the generated nodes of `registry` the pins found.
+    pub fn apply(&self, registry: &NodeRegistry) {
+        for (kind, pins) in &self.nodes {
+            registry.set_pins(kind, pins.clone());
+        }
+    }
+}
+
 fn pin_type(kind: DeclaredKind) -> Option<PinType> {
     match kind {
         DeclaredKind::Texture => Some(PinType::TEXTURE),
@@ -55,7 +64,13 @@ fn pin_type(kind: DeclaredKind) -> Option<PinType> {
 /// The pin an output named `resource` gets. Its id differs from an input of
 /// the same resource, because a node may read and write one (`pre_aa`).
 pub fn output_pin(ty: PinType, resource: &str) -> PinDesc {
-    PinDesc { name: format!("out_{resource}"), ty, resource: resource.to_string() }
+    PinDesc {
+        name: format!("out_{resource}"),
+        ty,
+        resource: resource.to_string(),
+        history: false,
+        optional: false,
+    }
 }
 
 /// Builds `asset` on `env`'s device without locking it, and derives the pins of
@@ -102,10 +117,21 @@ pub fn probe(
             .iter()
             .flat_map(|declaration| declaration.writes.iter().map(|write| write.name))
             .collect();
+        let written_after: HashSet<&'static str> = declarations[range.end..]
+            .iter()
+            .flat_map(|declaration| declaration.writes.iter().map(|write| write.name))
+            .collect();
 
-        let mut inputs = vec![PinDesc::flow("in")];
-        let mut outputs = vec![PinDesc::flow("out")];
-        // What the node declared as host-supplied is what it offers on its outputs.
+        // A node that adds no pass only supplies data, and does not execute.
+        let executes = !range.is_empty();
+        let mut inputs = if executes { vec![PinDesc::flow("in")] } else { Vec::new() };
+        let mut outputs = if executes { vec![PinDesc::flow("out")] } else { Vec::new() };
+        let mut seen_inputs: HashSet<&'static str> = HashSet::new();
+        let mut seen_outputs: HashSet<&'static str> = HashSet::new();
+        let mut written_inside: HashSet<&'static str> = HashSet::new();
+        let mut consumed: BTreeSet<&'static str> = BTreeSet::new();
+
+        // What the node declared as host-supplied is what it offers.
         let mut offered: Vec<&'static str> =
             externals.difference(&declared_externals).copied().collect();
         offered.sort_unstable();
@@ -113,23 +139,22 @@ pub fn probe(
             outputs.push(PinDesc::resource(PinType::SCENE, name));
         }
         declared_externals.extend(externals);
-        let mut seen_inputs: HashSet<&'static str> = HashSet::new();
-        let mut seen_outputs: HashSet<&'static str> = HashSet::new();
-        let mut written_inside: HashSet<&'static str> = HashSet::new();
-        let mut consumed: BTreeSet<&'static str> = BTreeSet::new();
 
         for declaration in &declarations[range.clone()] {
             for read in &declaration.reads {
                 if written_inside.contains(read.name) || !seen_inputs.insert(read.name) {
                     continue;
                 }
-                if written_before.contains(read.name) {
-                    inputs.push(PinDesc::resource(kind_of(read.name), read.name));
-                } else if external.contains(read.name) {
-                    inputs.push(PinDesc::resource(PinType::SCENE, read.name));
+                let ty = kind_of(read.name);
+                inputs.push(if external.contains(read.name) && !written_before.contains(read.name) {
+                    PinDesc::resource(PinType::SCENE, read.name)
+                } else if written_before.contains(read.name) {
+                    PinDesc::resource(ty, read.name)
+                } else if written_after.contains(read.name) {
+                    PinDesc::resource(ty, read.name).history()
                 } else {
-                    seen_inputs.remove(read.name);
-                }
+                    PinDesc::resource(ty, read.name).optional()
+                });
             }
             consumed.extend(declaration.scene_buffers.iter().copied());
             for write in &declaration.writes {

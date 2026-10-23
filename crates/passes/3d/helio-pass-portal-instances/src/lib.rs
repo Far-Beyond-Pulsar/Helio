@@ -544,7 +544,7 @@ impl RenderPass for PortalInstancePass {
         }
 
         // helio-pass-portal-mask must run before this pass every frame (see
-        // helio-default-graphs' add_pass order) — its output gates every
+        // helio-default-passes' add_pass order) — its output gates every
         // fragment below on actual on-screen portal visibility.
         let Some(portal_mask_view) = ctx.resource_pool.get_view("portal_mask") else {
             log::warn!("[PortalInstance] frame={} portal_mask not available — PortalMaskPass not wired before this pass?", ctx.frame_num);

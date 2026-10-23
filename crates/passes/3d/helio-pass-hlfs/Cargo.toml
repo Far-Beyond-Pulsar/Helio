@@ -20,8 +20,8 @@ image = { workspace = true }
 half = "2"
 helio-pass-forward-lit = { workspace = true }
 # The SceneDB projection tests in `tests/gpu_hlfs_rt.rs` drive the frontend's
-# `helio_default_graphs::ray_tracing` adapter; the pass itself reads no World.
-helio-default-graphs = { workspace = true }
+# `helio_default_passes::ray_tracing` adapter; the pass itself reads no World.
+helio-default-passes = { workspace = true }
 pulsar_scenedb = { workspace = true }
 helio-pass-object-batch = { workspace = true }
 helio-mats = { workspace = true }

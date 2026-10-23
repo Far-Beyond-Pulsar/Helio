@@ -22,7 +22,7 @@ pub const FORWARD_OPAQUE: &str = "helio.forward_opaque";
 pub const FORWARD_ONLY: &str = "helio.forward_only";
 pub const SIMPLE: &str = "helio.simple";
 /// The default deferred pipeline built from its node graph
-/// ([`crate::nodes::default_graph_asset`]) rather than from code.
+/// ([`crate::graphs::deferred_graph_asset`]) rather than from code.
 pub const DEFERRED_GRAPH: &str = "helio.deferred_graph";
 
 /// One shipped graph builder as a pipeline.
@@ -122,9 +122,10 @@ pub fn register_builtin_pipelines(registry: &mut RenderPipelineRegistry) {
             origin: PipelineOrigin::BuiltIn,
         },
         Arc::new(|| {
+            let registry = crate::graphs::base_registry();
             Box::new(helio_graph_asset::GraphAssetPipeline::new(
-                Arc::new(crate::nodes::default_graph_asset(&helio_graph_asset::Probe::default())),
-                Arc::new(crate::nodes::base_registry()),
+                Arc::new(crate::graphs::deferred_graph_asset(&registry)),
+                Arc::new(registry),
                 crate::build_default_graph_external_with_context,
             )) as Box<dyn IntoGraph>
         }),

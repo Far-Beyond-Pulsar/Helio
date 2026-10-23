@@ -8,11 +8,13 @@
 //! other pipeline.
 //!
 //! This crate knows no pass. Registries are filled by the crates that own the
-//! passes (`helio-default-graphs` registers Helio's), plus the core resource
+//! passes (`helio-default-passes` registers Helio's), plus the core resource
 //! nodes in [`core_nodes`].
 
 mod asset;
+pub mod buffers;
 mod compile;
+pub mod layout;
 pub mod core_nodes;
 mod pins;
 mod probe;
@@ -21,13 +23,15 @@ pub mod resources;
 mod validate;
 
 pub use asset::{
-    Connection, GraphAsset, NodeInstance, Params, PinRef, EXTENSION, FORMAT_VERSION,
+    Connection, GraphAsset, GraphComment, NodeInstance, Params, PinRef, EXTENSION, FORMAT_VERSION,
 };
 pub use compile::{compile, Fallback, GraphAssetPipeline};
+pub use layout::{auto_layout, LANE_PREFIX};
 pub use pins::{PinDesc, PinKind, PinShape, PinType};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 pub use registry::{
-    BuildEnv, BuildFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType,
+    BuildEnv, BuildFn, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc,
+    ParamType, PinTable,
     PinsFn,
 };
 pub use validate::{validate, Diagnostic, Plan, Severity, Validation};

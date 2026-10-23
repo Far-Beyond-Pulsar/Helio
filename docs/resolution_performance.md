@@ -312,7 +312,7 @@ camera sways sideways every frame, so camera-keyed caches are rebuilt).
 Round 1 found that nothing in the default graphs consumes the pass's output:
 no pass publishes `rc_view`, so `has_rc_gi` is always 0. The pass is gone from
 the default, FXAA and forward graphs (and its dependency from
-`helio-default-graphs`). Bit-identical in all 9 runs.
+`helio-default-passes`). Bit-identical in all 9 runs.
 
 ### 9. DeferredLight: skip shadow atlases with no casters
 
@@ -702,5 +702,5 @@ Tests were run on lavapipe.
     `__PP_TAIL_VEC4__` placeholder in `volumetric_fog.wgsl`.
   - `helio-pass-water-sim`'s integration tests, which no longer compile
     against current APIs.
-  - `helio-default-graphs`' `limited_native` test, which also no longer
+  - `helio-default-passes`' `limited_native` test, which also no longer
     compiles against current APIs.

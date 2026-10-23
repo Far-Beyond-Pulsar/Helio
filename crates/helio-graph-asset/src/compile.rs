@@ -43,6 +43,8 @@ pub(crate) fn build_graph(
     let Some(plan) = validation.plan else {
         return Err(validation.diagnostics);
     };
+    // The plan is about the flattened graph, without its buffer nodes.
+    let flat = validation.flat.unwrap_or_else(|| asset.clone());
 
     let mut graph = if env.owns_device {
         RenderGraph::new(env.device, env.queue)
@@ -55,7 +57,7 @@ pub(crate) fn build_graph(
     }
 
     for &index in &plan.order {
-        let node = &asset.nodes[index];
+        let node = &flat.nodes[index];
         let descriptor = registry.get(&node.kind).expect("validated node kinds are registered");
         let params = descriptor.effective_params(&node.params);
         let first_pass = graph.pass_count();
@@ -65,6 +67,13 @@ pub(crate) fn build_graph(
             descriptor.run(&mut build).map_err(|message| {
                 vec![Diagnostic { severity: Severity::Error, node: Some(node.id.clone()), message }]
             })?;
+            // Performance markers belong to the compiler, not to the graph: a node
+            // that ends a phase asks for one, the registry says what it is.
+            if descriptor.marker_after {
+                if let Some(marker) = registry.marker() {
+                    marker(&mut build, &node.kind);
+                }
+            }
         }
         observe(node, &graph, first_pass..graph.pass_count());
     }

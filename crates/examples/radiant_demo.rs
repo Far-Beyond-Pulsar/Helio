@@ -13,7 +13,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     GpuMaterial, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use helio_mats::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE,

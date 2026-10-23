@@ -131,7 +131,7 @@ fn objects_keep_their_material_while_other_objects_change_theirs() {
     )
     .with_external_device()
     .with_pass_build_context(Box::new(
-        helio_default_graphs::build_default_graph_external_with_context,
+        helio_default_passes::build_default_graph_external_with_context,
     ))
     .build(device.clone(), queue.clone(), SIZE, SIZE, format);
     renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);

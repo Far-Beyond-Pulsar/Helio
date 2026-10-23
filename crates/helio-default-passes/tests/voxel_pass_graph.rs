@@ -7,7 +7,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder,
     RendererConfig,
 };
-use helio_default_graphs::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
+use helio_default_passes::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};

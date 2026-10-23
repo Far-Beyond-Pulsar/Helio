@@ -92,7 +92,7 @@ pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", 
 # never its own direct git pin -- same reasoning as pulsar_scenedb's fleet
 # of stale per-crate pins fixed in the same session.
 pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "091eae569b4dce9de7def958e8a77ff620b07047" }
-helio-default-graphs = { path = "crates/helio-default-graphs"}
+helio-default-passes = { path = "crates/helio-default-passes"}
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
 helio-pass-portal-cull = { path = "crates/passes/3d/helio-pass-portal-cull" }

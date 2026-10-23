@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 mod support;
 use helio_core::{BlasGeometry, TlasInstanceInput};
-use helio_default_graphs::ray_tracing::{RayTransmission, SceneDbRayTracing};
+use helio_default_passes::ray_tracing::{RayTransmission, SceneDbRayTracing};
 use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode, HlfsMode, HlfsPass};
 use support::{mean, ortho_depth, point, Fixture};
 use wgpu::util::DeviceExt;

@@ -24,7 +24,7 @@ editor_demo_mini = []
 [dependencies]
 helio               = { workspace = true }
 helio-wasm          = { path = "../helio-wasm" }
-helio-default-graphs = { workspace = true }
+helio-default-passes = { workspace = true }
 wgpu                = { workspace = true }
 glam                = { workspace = true }
 log                 = { workspace = true }

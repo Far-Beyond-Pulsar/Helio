@@ -165,7 +165,7 @@ pub fn build_default_renderer(
     RendererBuilder::new(config, graph_scene_db.clone())
         .with_external_device()
         .with_pass_build_context(Box::new(
-            helio_default_graphs::build_default_graph_external_with_context,
+            helio_default_passes::build_default_graph_external_with_context,
         ))
         .build(
             device,

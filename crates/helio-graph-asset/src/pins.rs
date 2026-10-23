@@ -56,6 +56,33 @@ impl PinType {
         Self { kind, persistent }
     }
 
+    /// The short tag the type is written with in a buffer list (`tex`, `ptex`,
+    /// `depth`, `buf`, `pbuf`, `scene`); `None` for flow, which is no buffer.
+    pub fn prefix(self) -> Option<&'static str> {
+        Some(match (self.kind, self.persistent) {
+            (PinKind::Flow, _) => return None,
+            (PinKind::Texture, false) => "tex",
+            (PinKind::Texture, true) => "ptex",
+            (PinKind::Depth, _) => "depth",
+            (PinKind::Buffer, false) => "buf",
+            (PinKind::Buffer, true) => "pbuf",
+            (PinKind::Scene, _) => "scene",
+        })
+    }
+
+    /// The inverse of [`prefix`](Self::prefix).
+    pub fn from_prefix(prefix: &str) -> Option<Self> {
+        Some(match prefix {
+            "tex" => Self::TEXTURE,
+            "ptex" => Self::PERSISTENT_TEXTURE,
+            "depth" => Self::DEPTH,
+            "buf" => Self::BUFFER,
+            "pbuf" => Self::PERSISTENT_BUFFER,
+            "scene" => Self::SCENE,
+            _ => return None,
+        })
+    }
+
     pub fn shape(self) -> PinShape {
         match self.kind {
             PinKind::Flow => PinShape::Arrow,
@@ -93,17 +120,42 @@ pub struct PinDesc {
     /// Helio resolves resources by name, so two pins connect only when they
     /// carry the same name.
     pub resource: String,
+    /// An input that reads the value from the previous frame (temporal feedback:
+    /// Hi-Z reading last frame's depth). It connects to the resource's producer
+    /// like any input, but does not order the graph, so it cannot form a cycle.
+    pub history: bool,
+    /// An input nothing in the graph has to supply: the pass binds a fallback
+    /// when it is absent. Unconnected, it is not a problem.
+    pub optional: bool,
 }
 
 impl PinDesc {
     pub fn flow(name: impl Into<String>) -> Self {
-        Self { name: name.into(), ty: PinType::FLOW, resource: String::new() }
+        Self {
+            name: name.into(),
+            ty: PinType::FLOW,
+            resource: String::new(),
+            history: false,
+            optional: false,
+        }
+    }
+
+    /// Marks this input as reading the previous frame's value.
+    pub fn history(mut self) -> Self {
+        self.history = true;
+        self
+    }
+
+    /// Marks this input as optional.
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
+        self
     }
 
     /// A resource pin named after the resource it binds.
     pub fn resource(ty: PinType, resource: impl Into<String>) -> Self {
         let resource = resource.into();
-        Self { name: resource.clone(), ty, resource }
+        Self { name: resource.clone(), ty, resource, history: false, optional: false }
     }
 
     /// Whether a wire from `self` (an output) to `to` (an input) is legal.

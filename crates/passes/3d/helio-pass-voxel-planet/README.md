@@ -62,7 +62,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `shaders/chunk_draw.wgsl` | The cut walk, chunk tracing, fades, sun shadows, sky visibility, appearance, gbuffer publish and ray reports. |
 | `shaders/chunk_table.wgsl` | Scatters a frame's chunk-table changes. |
 | `tests/chunks.rs` | GPU correctness against the CPU planet (see [Tests](#tests)). |
-| `../../../helio-default-graphs/examples/voxel_flight.rs` | The flight harness: held views, flights, digs, picks, captures. |
+| `../../../helio-default-passes/examples/voxel_flight.rs` | The flight harness: held views, flights, digs, picks, captures. |
 
 ## Data model
 
@@ -272,11 +272,11 @@ phase's measurements. In short, a frame of `ChunkPass`:
 ## Measuring
 
 Everything is measured in Helio's graph or on `ChunkWorld` directly with
-`helio-default-graphs`' `voxel_flight` example (its module docs list every
+`helio-default-passes`' `voxel_flight` example (its module docs list every
 variable):
 
 ```
-cargo run -p helio-default-graphs --release --example voxel_flight -- OUT [W H [native|quality]]
+cargo run -p helio-default-passes --release --example voxel_flight -- OUT [W H [native|quality]]
 ```
 
 | Variable | Effect |
@@ -300,7 +300,7 @@ GPU.
 
 `cargo test --release -p helio-pass-voxel-planet -- --test-threads=1` (CPU
 unit tests, `tests/chunks.rs`, `tests/wide_products.rs`) and
-`cargo test --release -p helio-default-graphs --test voxel_pass_graph --
+`cargo test --release -p helio-default-passes --test voxel_pass_graph --
 --test-threads=1` (the pass inside the deferred graph).
 
 - Field: `terrain_programs_are_bit_identical_to_cpu` (every generator and

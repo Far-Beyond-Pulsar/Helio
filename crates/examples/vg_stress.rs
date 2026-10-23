@@ -27,7 +27,7 @@ use helio::{
 use helio_core::{
     BufferHandle, BufferKey, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use helio_vg_format::{
     GpuVgInstance, VgAssetReadyRow, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS, INST_SHADOW_CASTER,
     VG_ASSET_READY_FLAG_READY,
@@ -690,7 +690,7 @@ impl ApplicationHandler for App {
                 .or_default()
                 .push(placement.clone());
         }
-        let vg_supported = helio_default_graphs::virtual_geometry_supported(&device);
+        let vg_supported = helio_default_passes::virtual_geometry_supported(&device);
         if !vg_supported {
             log::warn!(
                 "This device does not support Helio's virtual-geometry passes; rendering scans through the classic mesh path."

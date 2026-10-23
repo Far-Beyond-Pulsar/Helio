@@ -1075,7 +1075,7 @@ dependencies = [
  "helio-asset-compat",
  "helio-controls",
  "helio-core",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-mats",
  "helio-pass-billboard",
  "helio-pass-corona",
@@ -1602,7 +1602,7 @@ dependencies = [
  "env_logger",
  "glam 0.33.5",
  "helio",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-wasm",
  "log",
  "wgpu",
@@ -1669,7 +1669,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-mats",
  "helio-pass-foliage-place",
  "helio-pass-hiz",
@@ -1687,7 +1687,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-default-graphs"
+name = "helio-default-passes"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
@@ -1985,7 +1985,7 @@ dependencies = [
  "glam 0.33.5",
  "half",
  "helio-core",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-mats",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
@@ -2500,7 +2500,7 @@ dependencies = [
  "glam 0.33.5",
  "helio",
  "helio-asset-compat",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
  "image",
@@ -2562,7 +2562,7 @@ dependencies = [
  "env_logger",
  "glam 0.33.5",
  "helio",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
  "helio-pass-portal-cull",
@@ -2589,7 +2589,7 @@ dependencies = [
  "helio",
  "helio-asset-compat",
  "helio-core",
- "helio-default-graphs",
+ "helio-default-passes",
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",

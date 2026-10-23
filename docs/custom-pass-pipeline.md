@@ -4,11 +4,11 @@ This guide covers how to assemble multiple `RenderPass` implementations into a g
 
 ## Pick the composition point
 
-- **Add an effect to an existing 3D pipeline:** use the relevant `helio-default-graphs` builder or its pass-factory arguments. Those builders add passes at defined pipeline stages, declare common external inputs, and install a graph rebuilder.
+- **Add an effect to an existing 3D pipeline:** use the relevant `helio-default-passes` builder or its pass-factory arguments. Those builders add passes at defined pipeline stages, declare common external inputs, and install a graph rebuilder.
 - **Build a standalone/custom pipeline:** create a `RenderGraph`, add each pass, declare host-provided resources, then `lock` it at the intended render dimensions.
 - **Use Helio's `Renderer`:** provide a graph-building closure with `RendererBuilder::with_pass_build_context`. The closure receives the device, queue, renderer config, camera/debug buffers, and the frontend's GPU-only SceneDB handle. The closure builds the graph before the renderer starts; it is not a per-frame callback.
 
-The full deferred pipeline builders are in `crates/helio-default-graphs/src/lib.rs`. `hlfs_viewer.rs` demonstrates wrapping a default graph builder to adjust a pass, and `helio-wasm/src/lib.rs` documents the custom-graph hook for wasm applications.
+The full deferred pipeline builders are in `crates/helio-default-passes/src/lib.rs`. `hlfs_viewer.rs` demonstrates wrapping a default graph builder to adjust a pass, and `helio-wasm/src/lib.rs` documents the custom-graph hook for wasm applications.
 
 ## Build a graph before locking it
 
@@ -52,7 +52,7 @@ fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
 
 The next pass declares `builder.read("scene_color")`. `write_color` makes the graph allocate and lifetime-manage a texture; the producer chooses that view in its render descriptor and the graph routes named graph textures into the registry. For compound attachments, use `write_group`. For a storage buffer the pass allocates itself, use `write_buffer` to declare the dependency; this tracks ordering but does not allocate the buffer.
 
-If a resource comes from the host before pass zero, declare it once with `graph.declare_external_input("resource_name")`. For example, `helio-default-graphs` declares host-fed `material_textures`, `render_environment`, `vg`, `billboards`, and `corona_emitters`. A read with neither an earlier writer nor an external-input declaration fails graph dependency validation.
+If a resource comes from the host before pass zero, declare it once with `graph.declare_external_input("resource_name")`. For example, `helio-default-passes` declares host-fed `material_textures`, `render_environment`, `vg`, `billboards`, and `corona_emitters`. A read with neither an earlier writer nor an external-input declaration fails graph dependency validation.
 
 Named textures appear in `PassContext::registry` by `ResourceKey`. Pass-owned non-graph resources (such as a buffer or a view held by a pass) need the producer to publish them with `publish_frame_inputs` when consumers need them before execution, or `publish` after execution. The graph invokes publication at the corresponding frame stage. The `ResourceRegistry` is per-frame; do not cache its borrowed views across frames.
 
@@ -100,4 +100,4 @@ Passes whose persistent state can safely move to the rebuilt graph may implement
 - `declare_bindings` and `reflected_shader` are advanced reflected-binding paths; use them only when the WGSL and pipeline layout match the declared interface.
 - `add_pass_live` is a graph edit, not the ordinary frame loop. It relocks resources and invalidates graph execution caches to account for the new pass.
 
-For model examples, compare `helio-default-graphs/src/lib.rs` for production 3D stage composition, `crates/examples/sprite_demo.rs` for a small `SpriteCullPass` → `SpriteBatchPass` graph, and `crates/examples/sprite_dig_demo.rs` for a SceneDB-backed 2D graph that flushes its GPU mirror before execution.
+For model examples, compare `helio-default-passes/src/lib.rs` for production 3D stage composition, `crates/examples/sprite_demo.rs` for a small `SpriteCullPass` → `SpriteBatchPass` graph, and `crates/examples/sprite_dig_demo.rs` for a SceneDB-backed 2D graph that flushes its GPU mirror before execution.

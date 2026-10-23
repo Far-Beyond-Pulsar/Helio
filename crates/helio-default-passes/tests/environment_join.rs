@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use helio_default_graphs::environment_join::{
+use helio_default_passes::environment_join::{
     BufferHandle, BufferKey, EnvironmentJoin, EnvironmentJoinKeys, SceneBufferProjection,
     SceneDerivation, SceneDerivationContext, DECALS_KEY, DECAL_SOURCE_ROW_BYTES, WATER_VOLUMES_KEY,
     WATER_VOLUME_SOURCE_ROW_BYTES,
