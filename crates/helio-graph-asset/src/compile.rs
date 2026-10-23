@@ -1,14 +1,19 @@
 //! Compiles a graph asset into a Helio [`RenderGraph`], and wraps it as an
 //! [`IntoGraph`] pipeline.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use helio::{GraphRebuilder, IntoGraph, PassBuildContext};
 use helio_core::RenderGraph;
 
-use crate::asset::GraphAsset;
+use crate::asset::{GraphAsset, NodeInstance};
 use crate::registry::{BuildEnv, NodeBuild, NodeRegistry};
 use crate::validate::{validate, Diagnostic, Severity};
+
+/// Called after each node is built with the node, the graph so far and the
+/// range of pass indices the node added.
+pub(crate) type NodeObserver<'a> = &'a mut dyn FnMut(&NodeInstance, &RenderGraph, Range<usize>);
 
 /// Builds `asset`'s graph. Fails with the validation errors, or with the
 /// message of the first node that cannot build.
@@ -17,10 +22,22 @@ pub fn compile(
     registry: &NodeRegistry,
     env: &mut BuildEnv<'_>,
 ) -> Result<RenderGraph, Vec<Diagnostic>> {
+    build_graph(asset, registry, env, true, &mut |_, _, _| {})
+}
+
+/// The shared build. `lock` finishes the graph (what a renderer needs); a
+/// probe leaves it open, since it only wants to read what the passes declare.
+pub(crate) fn build_graph(
+    asset: &GraphAsset,
+    registry: &NodeRegistry,
+    env: &mut BuildEnv<'_>,
+    lock: bool,
+    observe: NodeObserver<'_>,
+) -> Result<RenderGraph, Vec<Diagnostic>> {
     let validation = validate(asset, registry);
     for diagnostic in &validation.diagnostics {
         if diagnostic.severity == Severity::Warning {
-            log::warn!("render graph `{}`: {diagnostic}", asset.name);
+            log::debug!("render graph `{}`: {diagnostic}", asset.name);
         }
     }
     let Some(plan) = validation.plan else {
@@ -41,14 +58,21 @@ pub fn compile(
         let node = &asset.nodes[index];
         let descriptor = registry.get(&node.kind).expect("validated node kinds are registered");
         let params = descriptor.effective_params(&node.params);
-        let mut build = NodeBuild { graph: &mut graph, env: &mut *env, params: &params, node_id: &node.id };
-        descriptor.run(&mut build).map_err(|message| {
-            vec![Diagnostic { severity: Severity::Error, node: Some(node.id.clone()), message }]
-        })?;
+        let first_pass = graph.pass_count();
+        {
+            let mut build =
+                NodeBuild { graph: &mut graph, env: &mut *env, params: &params, node_id: &node.id };
+            descriptor.run(&mut build).map_err(|message| {
+                vec![Diagnostic { severity: Severity::Error, node: Some(node.id.clone()), message }]
+            })?;
+        }
+        observe(node, &graph, first_pass..graph.pass_count());
     }
 
-    let (width, height) = env.internal_size();
-    graph.lock(width, height);
+    if lock {
+        let (width, height) = env.internal_size();
+        graph.lock(width, height);
+    }
     Ok(graph)
 }
 

@@ -384,6 +384,10 @@ fn uniform_entry(
 }
 
 impl RenderPass for PortalInstancePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["builtin_mesh_index", "builtin_mesh_vertex", "materials", "portal_views", "skeletal_bone_palette", "skeletal_skin_vertices"]
+    }
+
     fn name(&self) -> &'static str {
         "PortalInstance"
     }

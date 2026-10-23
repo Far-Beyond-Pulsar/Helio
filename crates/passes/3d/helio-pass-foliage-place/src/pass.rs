@@ -756,6 +756,10 @@ impl FoliagePlacePass {
 }
 
 impl RenderPass for FoliagePlacePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["foliage_layers", "foliage_types"]
+    }
+
     fn name(&self) -> &'static str {
         "FoliagePlace"
     }

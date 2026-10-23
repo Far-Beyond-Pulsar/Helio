@@ -339,6 +339,10 @@ impl PortalEditorOverlayPass {
 }
 
 impl RenderPass for PortalEditorOverlayPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["portal_views"]
+    }
+
     fn name(&self) -> &'static str {
         "PortalEditorOverlay"
     }

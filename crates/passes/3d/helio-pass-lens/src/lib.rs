@@ -828,6 +828,10 @@ impl LensPass {
 }
 
 impl RenderPass for LensPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["camera_lenses", "lens_elements"]
+    }
+
     fn name(&self) -> &'static str { "Lens" }
     fn writes(&self) -> &'static [&'static str] { &[LENS_COLOR, RESOLVED_KEY] }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

@@ -123,8 +123,8 @@ pub fn register_builtin_pipelines(registry: &mut RenderPipelineRegistry) {
         },
         Arc::new(|| {
             Box::new(helio_graph_asset::GraphAssetPipeline::new(
-                Arc::new(crate::nodes::default_graph_asset()),
-                Arc::new(crate::nodes::node_registry()),
+                Arc::new(crate::nodes::default_graph_asset(&helio_graph_asset::Probe::default())),
+                Arc::new(crate::nodes::base_registry()),
                 crate::build_default_graph_external_with_context,
             )) as Box<dyn IntoGraph>
         }),

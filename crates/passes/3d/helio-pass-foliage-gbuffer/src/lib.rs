@@ -879,6 +879,10 @@ impl FoliageGBufferPass {
 }
 
 impl RenderPass for FoliageGBufferPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["foliage_types", "foliage_wind"]
+    }
+
     fn name(&self) -> &'static str {
         "FoliageGBuffer"
     }

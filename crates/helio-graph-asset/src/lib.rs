@@ -15,6 +15,7 @@ mod asset;
 mod compile;
 pub mod core_nodes;
 mod pins;
+mod probe;
 mod registry;
 pub mod resources;
 mod validate;
@@ -24,6 +25,7 @@ pub use asset::{
 };
 pub use compile::{compile, Fallback, GraphAssetPipeline};
 pub use pins::{PinDesc, PinKind, PinShape, PinType};
+pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 pub use registry::{
     BuildEnv, BuildFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType,
     PinsFn,

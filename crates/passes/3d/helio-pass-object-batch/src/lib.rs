@@ -1618,6 +1618,10 @@ impl ObjectBatchPass {
 }
 
 impl RenderPass for ObjectBatchPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["materials", "static_objects"]
+    }
+
     fn name(&self) -> &'static str {
         "ObjectBatch"
     }

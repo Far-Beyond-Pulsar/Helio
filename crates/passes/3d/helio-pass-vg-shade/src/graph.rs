@@ -163,6 +163,10 @@ impl VgShadePass {
 }
 
 impl RenderPass for VgShadePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["materials", "scene_lights"]
+    }
+
     fn name(&self) -> &'static str {
         "VgShade"
     }

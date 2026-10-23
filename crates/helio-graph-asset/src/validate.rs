@@ -194,7 +194,13 @@ pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     for &index in &keep {
         let Some(node_pins) = &pins[index] else { continue };
         for pin in &node_pins.inputs {
-            if pin.ty.kind != PinKind::Flow && !fed.contains(&(index, pin.name.as_str())) {
+            // The host supplies Scene inputs and SceneDB buffers; a flow pin carries no data.
+            let host_supplied = pin.ty.kind == PinKind::Scene
+                || pin.resource.starts_with(crate::probe::SCENEDB_PREFIX);
+            if pin.ty.kind != PinKind::Flow
+                && !host_supplied
+                && !fed.contains(&(index, pin.name.as_str()))
+            {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Warning,
                     node: Some(asset.nodes[index].id.clone()),

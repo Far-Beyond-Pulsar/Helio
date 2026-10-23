@@ -208,6 +208,10 @@ fn column_major(m: &[f32; 16]) -> [[f32; 4]; 4] {
 }
 
 impl RenderPass for VgDensePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["materials"]
+    }
+
     fn name(&self) -> &'static str {
         "VgDense"
     }

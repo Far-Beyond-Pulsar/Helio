@@ -393,6 +393,10 @@ impl ShadowMatrixPass {
     }
 }
 impl RenderPass for ShadowMatrixPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["scene_lights"]
+    }
+
     fn name(&self) -> &'static str {
         "ShadowMatrix"
     }

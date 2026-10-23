@@ -986,6 +986,10 @@ fn create_atlas_array_texture(
 }
 
 impl RenderPass for SpriteBatchPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["sprite_instances"]
+    }
+
     fn name(&self) -> &'static str {
         "SpriteBatch"
     }

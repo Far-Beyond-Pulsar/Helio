@@ -16,6 +16,7 @@ pub use attachments::{
 pub use executor::{
     DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData, GraphTimelineData,
     GraphTimelinePass, RenderGraph,
+    DeclaredKind, DeclaredResource, PassDeclaration,
 };
 pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
 pub use pipeline_cache::{

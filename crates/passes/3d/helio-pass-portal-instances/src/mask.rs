@@ -212,6 +212,10 @@ impl PortalMaskPass {
 }
 
 impl RenderPass for PortalMaskPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["portal_views"]
+    }
+
     fn name(&self) -> &'static str {
         "PortalMask"
     }

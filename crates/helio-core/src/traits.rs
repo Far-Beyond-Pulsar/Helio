@@ -392,6 +392,17 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         &[]
     }
 
+    /// SceneDB GPU buffers (by registry key, e.g. `"scene_lights"`) this pass
+    /// reads from `ctx.scene_buffers` / `PrepareContext::scene_buffers`.
+    ///
+    /// Purely descriptive: the graph does not schedule on it. Tools build from
+    /// it, such as the render graph editor, which gives a pass an input pin for
+    /// each key. List every key the pass fetches with `BufferKey::of`, so the
+    /// graph shows what a pass consumes.
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Called whenever the host application toggles game/editor mode (see
     /// `helio::Renderer::set_editor_mode`), once per frame for every pass in
     /// the graph. Default no-op — override for passes whose output should

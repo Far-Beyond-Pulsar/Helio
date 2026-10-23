@@ -852,6 +852,10 @@ impl DeferredLightPass {
 }
 
 impl RenderPass for DeferredLightPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["portal_chain_unmap", "reflection_captures", "scene_lights", "water_volumes"]
+    }
+
     fn name(&self) -> &'static str {
         "DeferredLight"
     }

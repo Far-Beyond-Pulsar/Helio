@@ -642,6 +642,10 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl RenderPass for SpriteCullPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["sprite_instances"]
+    }
+
     fn name(&self) -> &'static str {
         "SpriteCull"
     }

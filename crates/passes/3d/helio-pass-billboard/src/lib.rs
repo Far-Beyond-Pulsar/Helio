@@ -441,6 +441,10 @@ impl BillboardPass {
 }
 
 impl RenderPass for BillboardPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["billboard_instances"]
+    }
+
     fn name(&self) -> &'static str {
         "Billboard"
     }

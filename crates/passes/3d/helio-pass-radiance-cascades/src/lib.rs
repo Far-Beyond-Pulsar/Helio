@@ -729,6 +729,10 @@ impl RadianceCascadesPass {
 }
 
 impl RenderPass for RadianceCascadesPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["scene_lights"]
+    }
+
     fn name(&self) -> &'static str {
         "RadianceCascades"
     }

@@ -659,6 +659,10 @@ impl VolumetricFogPass {
 }
 
 impl RenderPass for VolumetricFogPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["post_process_volumes", "scene_lights"]
+    }
+
     fn name(&self) -> &'static str {
         "VolumetricFogPass"
     }
