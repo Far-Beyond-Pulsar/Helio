@@ -1324,6 +1324,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
     }
     for (n, (eye, forward)) in samples.iter().enumerate() {
+        eprintln!("CHUNKSTRESS {mode}: sample {n:02} at HELIO_VOXEL_FLIGHT_EYE={},{},{},{},{},{}", eye.x, eye.y, eye.z, forward.x, forward.y, forward.z);
         settle(flight, *eye, *forward);
         flight.capture(&format!("stress_{mode}_{n:02}_ref"));
         for _ in 0..30 {
@@ -1710,9 +1711,16 @@ fn mountain(planet: &Planet, heading: f64) -> Vec<(&'static str, DVec3, Vec3)> {
     eprintln!("VOXEL_FLIGHT mountain summit {height:.0} m");
     let peak = planet.surface_point(peak_dir, 0.0);
     let away = tangent(peak, heading + std::f64::consts::PI).as_dvec3();
-    let air = planet.surface_point(peak + away * 12_000.0, 300.0);
+    // `HELIO_VOXEL_FLIGHT_MOUNTAIN_AIR=metres,height`: the air view that
+    // far from the summit and that high over the ground (12 000, 300).
+    let air_at: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_MOUNTAIN_AIR").ok().map_or(vec![12_000.0, 300.0], |v| v.split(',').map(|x| x.trim().parse().unwrap()).collect());
+    let air = planet.surface_point(peak + away * air_at[0], air_at[1]);
     let slope = planet.surface_point(peak + away * 1_500.0, 1.7);
-    [("mountain_air", air), ("mountain_slope", slope)].into_iter().map(|(name, eye)| (name, eye, (peak - eye).normalize().as_vec3())).collect()
+    let views: Vec<_> = [("mountain_air", air), ("mountain_slope", slope)].into_iter().map(|(name, eye)| (name, eye, (peak - eye).normalize().as_vec3())).collect();
+    for (name, eye, forward) in &views {
+        eprintln!("VOXEL_FLIGHT {name} at HELIO_VOXEL_FLIGHT_EYE={},{},{},{},{},{}", eye.x, eye.y, eye.z, forward.x, forward.y, forward.z);
+    }
+    views
 }
 
 fn main() {
