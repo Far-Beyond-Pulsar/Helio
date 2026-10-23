@@ -258,7 +258,10 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
         add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
     }
 
+    // Lay out once so the lanes (runs of one category) are known, then make each lane a
+    // section: a collapsed node holding its passes and the buffers around them.
     auto_layout(&mut asset, registry);
+    helio_graph_asset::sections::sectionize(&mut asset, registry);
     asset
 }
 
@@ -292,8 +295,9 @@ mod tests {
             "every pass is on the chain: {:?}",
             validation.diagnostics
         );
+        let flat = validation.flat.expect("expanded");
         let plan = validation.plan.expect("valid");
-        let ids: Vec<_> = plan.order.iter().map(|i| asset.nodes[*i].id.as_str()).collect();
+        let ids: Vec<_> = plan.order.iter().map(|i| flat.nodes[*i].id.as_str()).collect();
         let at = |id: &str| ids.iter().position(|k| *k == id).unwrap();
         assert!(at("start") < at("object_batch"));
         assert!(at("shadow_matrix") < at("shadow_dirty") && at("shadow_dirty") < at("shadow"));
@@ -302,8 +306,10 @@ mod tests {
         assert!(at("gbuffer") < at("deferred_light"));
         assert!(at("deferred_light") < at("post_process"));
         assert_eq!(ids.last(), Some(&"output"));
-        // Laid out: lanes are comments.
-        assert!(asset.comments.len() >= 4, "{:?}", asset.comments);
+        // Laid out: each lane is a section, and the main graph is the chain through them.
+        assert!(asset.sections.len() >= 4, "{:?}", asset.sections.len());
+        assert!(asset.nodes.iter().any(|n| asset.section_of(n).is_some()));
+        assert!(asset.nodes.len() < 12, "the passes are inside sections: {}", asset.nodes.len());
     }
 
     fn pins(inputs: Vec<PinDesc>, outputs: Vec<PinDesc>) -> NodePins {
@@ -345,8 +351,14 @@ mod tests {
         apply_probe(&mut registry, &probe);
 
         let asset = deferred_graph_asset(&registry);
+        // The wiring inside the sections, which is where the buffers are.
+        let all: Vec<&Connection> = asset
+            .connections
+            .iter()
+            .chain(asset.sections.iter().flat_map(|s| s.connections.iter()))
+            .collect();
         let has = |from: (&str, &str), to: (&str, &str)| {
-            asset.connections.contains(&Connection {
+            all.contains(&&Connection {
                 from: PinRef::new(from.0, from.1),
                 to: PinRef::new(to.0, to.1),
             })
@@ -358,9 +370,7 @@ mod tests {
         assert!(has(("get:depth@hiz", "depth"), ("hiz", "depth")));
         assert!(has(("gbuffer", "out_depth"), ("set:depth@gbuffer", "depth")));
         assert!(has(("get:scenedb.materials@gbuffer", "scenedb.materials"), ("gbuffer", "scenedb.materials")));
-        assert!(!asset.connections.iter().any(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull"));
-        // The execution chain is still there.
-        assert!(has(("start", "out"), ("object_batch", "in")));
+        assert!(!all.iter().any(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull"));
 
         // The buffers resolve: occlusion cull reads what Hi-Z set, and Hi-Z reads the
         // depth the GBuffer sets later in the frame (history).
@@ -379,9 +389,19 @@ mod tests {
         };
         assert!(flat_has(("hiz", "out_hiz"), ("occlusion_cull", "hiz")));
         assert!(flat_has(("gbuffer", "out_depth"), ("hiz", "depth")));
+        // The execution chain runs from On Frame Start through the sections.
+        assert!(flat_has(("start", "out"), ("object_batch", "in")));
 
         // A Get sits left of the pass that reads it, a Set right of the pass that writes.
-        let x = |id: &str| asset.node(id).unwrap().position[0];
+        let x = |id: &str| {
+            asset
+                .sections
+                .iter()
+                .flat_map(|s| s.nodes.iter())
+                .find(|n| n.id == id)
+                .unwrap()
+                .position[0]
+        };
         assert!(x("get:scenedb.materials@gbuffer") < x("gbuffer"));
         assert!(x("set:depth@gbuffer") > x("gbuffer"));
     }

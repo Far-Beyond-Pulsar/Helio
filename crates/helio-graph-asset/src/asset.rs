@@ -61,6 +61,57 @@ pub struct GraphComment {
     pub nodes: Vec<String>,
 }
 
+/// A pin a section shows on the outside: where a wire crosses its boundary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SectionPort {
+    /// Id of the pin on the section's node, and of the matching pin on its entry
+    /// or exit inside.
+    pub name: String,
+    pub ty: crate::pins::PinType,
+    /// The resource the pin carries, empty for flow.
+    #[serde(default)]
+    pub resource: String,
+}
+
+impl SectionPort {
+    pub fn to_pin(&self) -> crate::pins::PinDesc {
+        crate::pins::PinDesc {
+            name: self.name.clone(),
+            ty: self.ty,
+            resource: self.resource.clone(),
+            history: false,
+            optional: false,
+        }
+    }
+}
+
+/// A named group of nodes shown as one node (a collapsed graph in the editor).
+/// A section is organisation only: it is expanded in place before the graph is
+/// checked or built, so the pipeline is the one its nodes would make unboxed.
+///
+/// Inside, [`SECTION_ENTRY`] stands for the section's input pins (as the source
+/// of wires) and [`SECTION_EXIT`] for its output pins (as their target).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphSection {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub inputs: Vec<SectionPort>,
+    #[serde(default)]
+    pub outputs: Vec<SectionPort>,
+    #[serde(default)]
+    pub nodes: Vec<NodeInstance>,
+    #[serde(default)]
+    pub connections: Vec<Connection>,
+}
+
+/// Prefix of the kind of a node standing for a section: `section:<id>`.
+pub const SECTION_PREFIX: &str = "section:";
+/// The pseudo node inside a section whose output pins are the section's inputs.
+pub const SECTION_ENTRY: &str = "$entry";
+/// The pseudo node inside a section whose input pins are the section's outputs.
+pub const SECTION_EXIT: &str = "$exit";
+
 /// A render graph asset (`.rendergraph`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -72,6 +123,9 @@ pub struct GraphAsset {
     pub connections: Vec<Connection>,
     #[serde(default)]
     pub comments: Vec<GraphComment>,
+    /// Groups of nodes shown as single nodes; each is placed by a `section:<id>` node.
+    #[serde(default)]
+    pub sections: Vec<GraphSection>,
 }
 
 impl Default for GraphAsset {
@@ -83,6 +137,7 @@ impl Default for GraphAsset {
             nodes: Vec::new(),
             connections: Vec::new(),
             comments: Vec::new(),
+            sections: Vec::new(),
         }
     }
 }
@@ -90,6 +145,12 @@ impl Default for GraphAsset {
 impl GraphAsset {
     pub fn node(&self, id: &str) -> Option<&NodeInstance> {
         self.nodes.iter().find(|node| node.id == id)
+    }
+
+    /// The section a `section:<id>` node stands for.
+    pub fn section_of(&self, node: &NodeInstance) -> Option<&GraphSection> {
+        let id = node.kind.strip_prefix(SECTION_PREFIX)?;
+        self.sections.iter().find(|section| section.id == id)
     }
 
     /// An id not used by any node, `prefix` followed by a number.

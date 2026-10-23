@@ -20,10 +20,12 @@ mod pins;
 mod probe;
 mod registry;
 pub mod resources;
+pub mod sections;
 mod validate;
 
 pub use asset::{
-    Connection, GraphAsset, GraphComment, NodeInstance, Params, PinRef, EXTENSION, FORMAT_VERSION,
+    Connection, GraphAsset, GraphComment, GraphSection, NodeInstance, Params, PinRef, SectionPort,
+    EXTENSION, FORMAT_VERSION, SECTION_ENTRY, SECTION_EXIT, SECTION_PREFIX,
 };
 pub use compile::{compile, Fallback, GraphAssetPipeline};
 pub use layout::{auto_layout, LANE_PREFIX};

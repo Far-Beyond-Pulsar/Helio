@@ -92,8 +92,78 @@ struct Item {
     executes: bool,
 }
 
+/// Lays out a graph that holds sections: each section's own nodes as a graph of
+/// their own, then the main graph as a row of nodes (the sections among them) in
+/// execution order, wrapping when it gets too wide.
+fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
+    for section in &mut asset.sections {
+        let mut inner = GraphAsset {
+            nodes: std::mem::take(&mut section.nodes),
+            connections: section.connections.clone(),
+            ..GraphAsset::default()
+        };
+        auto_layout(&mut inner, registry);
+        section.nodes = inner.nodes;
+    }
+
+    let count = asset.nodes.len();
+    let index: HashMap<&str, usize> =
+        asset.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let sizes: Vec<(f32, f32)> = asset
+        .nodes
+        .iter()
+        .map(|node| match asset.section_of(node) {
+            Some(section) => {
+                estimated_size(&section.name, &crate::sections::section_pins(section))
+            }
+            None => match registry.get(&node.kind) {
+                Some(descriptor) => {
+                    let title = crate::buffers::title_of(node)
+                        .unwrap_or_else(|| descriptor.title.clone());
+                    estimated_size(&title, &descriptor.pins(&node.params))
+                }
+                None => estimated_size(&node.kind, &NodePins::default()),
+            },
+        })
+        .collect();
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for wire in &asset.connections {
+        if let (Some(&from), Some(&to)) =
+            (index.get(wire.from.node.as_str()), index.get(wire.to.node.as_str()))
+        {
+            if from != to && !edges.contains(&(from, to)) {
+                edges.push((from, to));
+            }
+        }
+    }
+    let all: Vec<usize> = (0..count).collect();
+    let order = stable_topological_order(&all, &edges);
+
+    let (mut x, mut y, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
+    let mut positions = vec![[0.0_f32; 2]; count];
+    for node in order {
+        let (w, h) = sizes[node];
+        if x > 0.0 && x + w > MAX_ROW_WIDTH {
+            y += row_h + ROW_GAP;
+            x = 0.0;
+            row_h = 0.0;
+        }
+        positions[node] = [x, y];
+        x += w + NODE_GAP;
+        row_h = row_h.max(h);
+    }
+    for (node, position) in asset.nodes.iter_mut().zip(positions) {
+        node.position = position;
+    }
+    asset.comments.retain(|c| !c.id.starts_with(LANE_PREFIX));
+}
+
 /// Lays `asset` out. Positions every node and replaces the lane comments.
 pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
+    if !asset.sections.is_empty() && asset.nodes.iter().any(|n| asset.section_of(n).is_some()) {
+        layout_sections(asset, registry);
+        return;
+    }
     let count = asset.nodes.len();
     if count == 0 {
         asset.comments.retain(|c| !c.id.starts_with(LANE_PREFIX));

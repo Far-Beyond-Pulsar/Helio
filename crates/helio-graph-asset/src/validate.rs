@@ -84,12 +84,13 @@ pub fn is_disabled(node: &NodeInstance) -> bool {
     matches!(node.params.get("enabled"), Some(Value::Bool(false)))
 }
 
-/// Checks `asset`: first its buffer nodes are flattened away, then the resulting graph
+/// Checks `asset`: first its sections are expanded and its buffer nodes flattened away, then the resulting graph
 /// is checked and ordered.
 pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
-    let flattened = crate::buffers::flatten(asset, registry);
+    let expanded = crate::sections::expand(asset);
+    let flattened = crate::buffers::flatten(&expanded.asset, registry);
     let mut validation = validate_flat(&flattened.asset, registry);
-    validation.diagnostics.splice(0..0, flattened.diagnostics);
+    validation.diagnostics.splice(0..0, expanded.diagnostics.into_iter().chain(flattened.diagnostics));
     if validation.diagnostics.iter().any(|d| d.severity == Severity::Error) {
         validation.plan = None;
     }
