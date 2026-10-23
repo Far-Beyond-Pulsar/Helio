@@ -234,22 +234,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Publish an already-built frontend acceleration projection for the next
-    /// frame only. Call after flushing SceneDB and preparing its BLAS/TLAS; an
+    /// Publish an already-built frontend acceleration projection (its TLAS
+    /// and the rows that follow its instance order) for the next frame
+    /// only. Call after flushing SceneDB and preparing its BLAS/TLAS; an
     /// omitted update expires instead of reusing potentially stale geometry.
-    pub fn set_ray_tracing_frame(&mut self, tlas: Option<&wgpu::Tlas>) {
-        self.ray_frame.publish(self.frame_count, tlas);
-    }
-
-    /// Publish a TLAS and its matching per-instance transmission buffer for one
-    /// frame. Material rows must follow the exact TLAS instance ordering.
-    pub fn set_ray_tracing_frame_with_transmission(
-        &mut self,
-        tlas: Option<&wgpu::Tlas>,
-        transmission: Option<&wgpu::Buffer>,
-    ) {
-        self.ray_frame
-            .publish_with_transmission(self.frame_count, tlas, transmission);
+    pub fn set_ray_tracing_frame(&mut self, rays: helio_core::RayFrame<'_>) {
+        self.ray_frame.publish(self.frame_count, rays);
     }
 
     /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for

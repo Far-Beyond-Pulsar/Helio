@@ -5,6 +5,7 @@ pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
 pub mod ray_tracing;
+mod texture_means;
 pub mod scene_join;
 pub mod virtual_geometry;
 pub use virtual_geometry::{virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass};
@@ -46,7 +47,7 @@ use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
-use helio_pass_gi::{GiPass, GiResolvePass};
+use helio_pass_gi::{GiConfig, GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
 
 use background::BackgroundPass;
@@ -180,6 +181,7 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<BackgroundPass>()
         .independent::<AtmospherePass>()
         .independent::<GiPass>()
+        .independent::<GiMeshTracePass>()
         .independent::<GiResolvePass>()
         .independent::<CloudTracePass>()
         .independent::<AtmosphereCompositePass>()
@@ -378,6 +380,38 @@ fn add_common_early_passes(
     ))));
 
     perf_overlay_shared
+}
+
+/// World-space GI (helio-pass-gi), the update and its tracers: the voxel
+/// terrain (`voxel_passes`, added here), if any, and the scene's meshes on
+/// a device with ray queries (against the frame's TLAS, when the frontend
+/// publishes one). Without voxel terrain the probes are finer (rooms,
+/// pillars, furniture) and update only on frames with a TLAS. Returns
+/// whether there is GI: the resolve then goes after the G-buffer is
+/// complete, before deferred lighting.
+fn add_gi_tracers(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    iw: u32,
+    ih: u32,
+    config: &RendererConfig,
+    voxel_passes: &[VoxelPassFactory],
+) -> bool {
+    let voxel = !voxel_passes.is_empty();
+    let mesh_rays = GiMeshTracePass::new(device);
+    let gi = voxel || mesh_rays.is_some();
+    if gi {
+        let finest_spacing = config.gi_probe_spacing.map_or(if voxel { helio_pass_gi::DEFAULT_FINEST_SPACING } else { 0.5 }, f64::from);
+        graph.add_pass(Box::new(GiPass::new(device, GiConfig { finest_spacing, needs_tlas: !voxel })));
+    }
+    for factory in voxel_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
+    if let Some(mesh_rays) = mesh_rays {
+        graph.add_pass(Box::new(mesh_rays));
+    }
+    gi
 }
 
 /// The clouds' trace, once the depth is complete and before deferred
@@ -1063,16 +1097,8 @@ fn build_default_graph_internal_with_lens_user(
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
-    // World-space GI (helio-pass-gi): its probes' rays are traced by the
-    // voxel terrain, so they run with voxel passes, the update before them
-    // and the resolve once the G-buffer is complete.
-    let gi = !voxel_passes.is_empty();
-    if gi {
-        graph.add_pass(Box::new(GiPass::new(device)));
-    }
-    for factory in &voxel_passes {
-        graph.add_pass(factory(device, queue, iw, ih));
-    }
+    let voxel = !voxel_passes.is_empty();
+    let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &voxel_passes);
     // Foliage grows on the voxel terrain when there is one: its pass answers the
     // placement's ground queries (`helio_pass_voxel_planet::chunks::ground`).
     let voxel_ground = graph.find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>().map(|p| p.foliage_ground());
@@ -1156,7 +1182,7 @@ fn build_default_graph_internal_with_lens_user(
             // The G-buffer passes write motion vectors: moving objects reproject with themselves.
             let tsr = TsrPass::new(device, iw, ih, config.width, config.height, config.surface_format, quality)
                 .with_motion_vectors();
-            SceneAa::Tsr(if gi { tsr.with_stochastic_mask() } else { tsr })
+            SceneAa::Tsr(if voxel { tsr.with_stochastic_mask() } else { tsr })
         }
         None => SceneAa::Fxaa,
     };
@@ -1327,6 +1353,7 @@ fn build_fxaa_graph_internal(
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
@@ -1346,6 +1373,9 @@ fn build_fxaa_graph_internal(
         )));
     }
 
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
     add_cloud_trace(&mut graph, device);
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
@@ -1467,9 +1497,14 @@ fn build_hlfs_graph_internal(
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
+    // The probes' irradiance, the lighting's indirect diffuse.
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
     let lighting_format = HlfsPass::preferred_output_format(device);
@@ -1710,9 +1745,14 @@ fn build_fxaa_hlfs_graph_internal(
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    let gi = add_gi_tracers(&mut graph, device, queue, w, h, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, w, h)));
+    // The probes' irradiance, the lighting's indirect diffuse.
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
     let lighting_format = HlfsPass::preferred_output_format(device);

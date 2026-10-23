@@ -776,7 +776,7 @@ impl ApplicationHandler for App {
             ball_prev_pos: ball_start,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
+            cam_yaw: 0.0,
             cam_pitch: -0.05,
             keys: HashSet::new(),
             cursor_grabbed: false,

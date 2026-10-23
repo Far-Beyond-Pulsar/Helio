@@ -4,7 +4,7 @@
 
 use crate::player::avatar::Avatar;
 use crate::palette;
-use crate::v3_demo_common::{directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle, set_camera_postprocess, spawn_light, update_light};
+use crate::v3_demo_common::{directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle, set_camera_postprocess, spawn_light, update_light, SceneRays};
 use glam::{DMat4, DVec3, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
@@ -30,6 +30,9 @@ pub struct Gfx {
     pub renderer: Renderer,
     pub scene: SceneDb,
     pub avatar: Avatar,
+    /// The scene's meshes (the character, what it holds) for ray queries:
+    /// the GI probes trace them as they trace the terrain.
+    rays: SceneRays,
     /// The player's feet pressing the meadow (a `FoliageInteractorComponent` row).
     feet: Entity,
     source: SharedPlanetFrame,
@@ -301,7 +304,8 @@ impl Gfx {
             generation: [0.0; 7],
             generated: [0; 2],
         });
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings }
+        let rays = SceneRays::new(&device, &queue);
+        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, rays, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -413,6 +417,7 @@ impl Gfx {
         };
         let target = output.texture.create_view(&Default::default());
         flush_scene_db(&self.scene, &self.queue);
+        self.rays.publish(&self.scene.world, &mut self.renderer);
         if let Err(error) = self.renderer.render(&camera, &target) {
             log::error!("render: {error:?}");
         }

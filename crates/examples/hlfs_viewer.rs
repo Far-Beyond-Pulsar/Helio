@@ -259,14 +259,9 @@ impl ApplicationHandler for App {
                     })
                     .collect();
                 s.renderer.debug_set_editor_volume_bounds(&volume_bounds);
-                if let Some(acceleration) = &mut s.acceleration {
-                    acceleration
-                        .prepare(&s.scene_db.world)
-                        .expect("scene acceleration");
-                    s.renderer.set_ray_tracing_frame_with_transmission(
-                        acceleration.tlas(),
-                        acceleration.transmission(),
-                    );
+                if let Some(acceleration)=&mut s.acceleration {
+                    acceleration.prepare(&s.scene_db.world).expect("scene acceleration");
+                    s.renderer.set_ray_tracing_frame(acceleration.frame());
                 }
                 s.renderer
                     .render(&camera, &frame.texture.create_view(&Default::default()))

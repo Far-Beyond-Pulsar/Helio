@@ -153,6 +153,9 @@ pub(crate) struct Inputs<'a> {
     /// albedo, normal, ORM, emissive, depth, lightmap UV, lightmap, pre-AA, velocity
     pub textures: [&'a wgpu::TextureView; 9],
     pub lightmap_sampler: &'a wgpu::Sampler,
+    /// The GI probes' irradiance at each pixel (`helio_pass_gi`), or a
+    /// buffer holding none.
+    pub gi_irradiance: &'a wgpu::Buffer,
 }
 struct CommonKey {
     buffers: [wgpu::Buffer; 4],
@@ -174,6 +177,7 @@ impl CommonKey {
 struct GBufferKey {
     textures: [wgpu::TextureView; 9],
     sampler: wgpu::Sampler,
+    gi_irradiance: wgpu::Buffer,
 }
 impl GBufferKey {
     fn matches(&self, i: &Inputs<'_>) -> bool {
@@ -182,6 +186,7 @@ impl GBufferKey {
             .zip(i.textures)
             .all(|(old, new)| old == new)
             && &self.sampler == i.lightmap_sampler
+            && &self.gi_irradiance == i.gi_irradiance
     }
 }
 #[derive(Default)]
@@ -304,11 +309,13 @@ impl ExternalBindings {
                     wgpu::BindingResource::Sampler(i.lightmap_sampler),
                     view(i.textures[7]),
                     view(i.textures[8]),
+                    i.gi_irradiance.as_entire_binding(),
                 ],
             ));
             self.gbuffer_key = Some(GBufferKey {
                 textures: i.textures.map(Clone::clone),
                 sampler: i.lightmap_sampler.clone(),
+                gi_irradiance: i.gi_irradiance.clone(),
             });
         }
     }

@@ -6,6 +6,7 @@ description = "Helio render pass: Hierarchical Light-Field Sampling (HLFS)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-pass-gi = { workspace = true }
 helio-core  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }

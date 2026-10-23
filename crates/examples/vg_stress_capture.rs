@@ -1017,6 +1017,7 @@ impl Capture {
         );
         s.renderer.set_frame_delta_override(Some(DT));
         super::v3_demo_common::flush_scene_db(&s.scene_db, &s.queue);
+        s.rays.publish(&s.scene_db.world, &mut s.renderer);
         let view = &self.target.as_ref().expect("capture target").1;
         if let Err(e) = s.renderer.render(&camera, view) {
             log::error!("Capture render: {e:?}");

@@ -589,39 +589,72 @@ pub struct TlasInstanceInput {
     pub transform: [f32; 12],
 }
 
+/// The surface of a TLAS instance, for shading ray hits without a G-buffer
+/// (`ray_instances` rows, indexed by TLAS instance index): where its
+/// triangles are in the scene's mesh pools and its material's colours.
+/// Triangle `p` of the instance is pool indices `first_index + 3p ..`
+/// (mesh-local), plus `base_vertex`, into `builtin_mesh_vertex`
+/// (`PackedVertex`). Textures are not sampled at hits: `base_color` is the
+/// material's factor times its base colour texture's mean (as the
+/// projection measured it). An instance with a nonzero `transmission` is a thin
+/// sheet (glass) its BLAS marks non-opaque: rays pass it, tinted.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RayInstance {
+    pub first_index: u32,
+    pub base_vertex: u32,
+    pub _pad: [u32; 2],
+    /// Linear RGB base colour: the material's factor times its base colour
+    /// texture's mean.
+    pub base_color: [f32; 4],
+    /// The radiance it gives off (RGB: colour times strength).
+    pub emissive: [f32; 4],
+    /// The linear RGB share of light it lets through (zero: opaque).
+    pub transmission: [f32; 4],
+}
+
+/// Graph key of the `RayInstance` rows of the frame's TLAS.
+pub const RAY_INSTANCES: &str = "ray_instances";
+
+/// One frame's ray-tracing input, built by a frontend projection: the TLAS
+/// and the rows that follow its instance order.
+#[derive(Clone, Copy, Default)]
+pub struct RayFrame<'a> {
+    pub tlas: Option<&'a wgpu::Tlas>,
+    /// Thin-sheet transmission. Storage starts with a `[u32; 4]` header:
+    /// flags, row count, zero, zero. Flag bit 0 means BLAS triangle opacity
+    /// matches the rows (zero RGB opaque, all other rows non-opaque). With
+    /// flags=0 the shader overrides BLAS opacity. Rows are `[f32; 4]`: finite
+    /// linear RGB in [0, 1], then zero padding. Opaque instances use RGB zero.
+    pub transmission: Option<&'a wgpu::Buffer>,
+    /// [`RayInstance`] rows, a row an instance.
+    pub instances: Option<&'a wgpu::Buffer>,
+}
+
 /// Frontend-published acceleration input valid for exactly one render frame.
-/// Owns a cheap TLAS handle clone; the frontend retains its BLAS cache.
+/// Owns cheap handle clones; the frontend retains its BLAS cache.
 #[derive(Default)]
 pub struct FrameAcceleration {
     frame: Option<(u64, wgpu::Tlas)>,
     transmission: Option<wgpu::Buffer>,
+    instances: Option<wgpu::Buffer>,
 }
 impl FrameAcceleration {
-    pub fn publish(&mut self, frame: u64, tlas: Option<&wgpu::Tlas>) {
-        self.transmission = None;
-        self.frame = tlas.map(|tlas| (frame, tlas.clone()));
-    }
-    /// Storage starts with a `[u32; 4]` header: flags, row count, zero, zero.
-    /// Flag bit 0 means BLAS triangle opacity matches the rows (zero RGB opaque,
-    /// all other rows non-opaque). With flags=0 the shader overrides BLAS opacity.
-    /// Rows are `[f32; 4]`: finite linear RGB in [0, 1], then zero padding.
-    /// Opaque instances use RGB zero.
-    /// Transmission rows are indexed by TLAS instance index and must be built
-    /// from the same authoritative instance ordering as the acceleration data.
-    /// An opaque-only publication explicitly discards any older material rows.
-    pub fn publish_with_transmission(
-        &mut self,
-        frame: u64,
-        tlas: Option<&wgpu::Tlas>,
-        transmission: Option<&wgpu::Buffer>,
-    ) {
-        self.publish(frame, tlas);
-        if self.frame.is_some() {
-            self.transmission = transmission.cloned();
-        }
+    /// Publishes `rays` for frame `frame`. Rows are indexed by TLAS instance
+    /// index and must be built from the same authoritative instance ordering
+    /// as the acceleration data; a publication without them discards any
+    /// older rows, and rows without a TLAS are not published.
+    pub fn publish(&mut self, frame: u64, rays: RayFrame<'_>) {
+        self.frame = rays.tlas.map(|tlas| (frame, tlas.clone()));
+        let with_tlas = |buffer: Option<&wgpu::Buffer>| rays.tlas.and(buffer).cloned();
+        self.transmission = with_tlas(rays.transmission);
+        self.instances = with_tlas(rays.instances);
     }
     pub fn transmission(&self, frame: u64) -> Option<&wgpu::Buffer> {
         self.tlas(frame).and(self.transmission.as_ref())
+    }
+    pub fn instances(&self, frame: u64) -> Option<&wgpu::Buffer> {
+        self.tlas(frame).and(self.instances.as_ref())
     }
     pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
         self.frame

@@ -20,10 +20,7 @@ pub fn warm_up_cathedral(
     for _ in 0..4 {
         crate::v3_demo_common::flush_scene_db(scene_db, queue);
         if let Some(acceleration) = acceleration {
-            renderer.set_ray_tracing_frame_with_transmission(
-                acceleration.tlas(),
-                acceleration.transmission(),
-            );
+            renderer.set_ray_tracing_frame(acceleration.frame());
         }
         renderer
             .render(camera, target)
@@ -205,13 +202,19 @@ pub fn run_scene_animated(
         if ray_traced {
             enable_ray_shadows(&mut scene_db.world);
         }
-        let mut acceleration = helio_default_graphs::ray_tracing::SceneDbRayTracing::new(
-            device.clone(),
-            queue.clone(),
-        );
-        let mut scene_handle = crate::v3_demo_common::scene_db_handle(&scene_db);
-        let architectural_store =
-            architectural_materials::load(&device, &queue, &mut scene_db.world);
+        // Ray-traced shadows need every caster; without them the scene's
+        // meshes are still published for the GI probes to trace, partially
+        // (`HELIO_SCENE_RAYS=off`: none, for A/B).
+        let scene_rays = ray_traced
+            || (device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"));
+        let mut acceleration = if ray_traced {
+            helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
+        } else {
+            helio_default_graphs::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone())
+        };
+        let mut scene_handle=crate::v3_demo_common::scene_db_handle(&scene_db);
+        let architectural_store = architectural_materials::load(&device, &queue, &mut scene_db.world);
         let has_architectural_textures = architectural_store.is_some();
         if let Some(store) = architectural_store {
             scene_handle = scene_handle.with_texture_store(store).unwrap();
@@ -283,7 +286,7 @@ pub fn run_scene_animated(
         renderer.set_frame_delta_override(Some(1.0 / 60.0));
         // These capture scenes author geometry once. Keep the prepared BLAS
         // and TLAS while the camera moves; only per-frame lights change.
-        if ray_traced {
+        if scene_rays {
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             acceleration
                 .prepare(&scene_db.world)
@@ -358,18 +361,10 @@ pub fn run_scene_animated(
                 );
         }
         if name.starts_with("cathedral") {
-            let camera = view_override(width as f32 / height as f32).unwrap_or_else(|| {
-                camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32)
-            });
-            warm_up_cathedral(
-                &scene_db,
-                &mut renderer,
-                ray_traced.then_some(&acceleration),
-                &device,
-                &queue,
-                &camera,
-                &view,
-            );
+            let camera = view_override(width as f32 / height as f32)
+                .unwrap_or_else(|| camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32));
+            warm_up_cathedral(&scene_db, &mut renderer,
+                scene_rays.then_some(&acceleration), &device, &queue, &camera, &view);
         }
         let mut frame_times = Vec::new();
         let graph_timings = std::env::var_os("HLFS_GRAPH_TIMINGS").is_some();
@@ -559,14 +554,9 @@ pub fn run_scene_animated(
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             let after_flush = std::time::Instant::now();
-            if ray_traced {
-                acceleration
-                    .prepare(&scene_db.world)
-                    .expect("animated capture geometry");
-                renderer.set_ray_tracing_frame_with_transmission(
-                    acceleration.tlas(),
-                    acceleration.transmission(),
-                );
+            if scene_rays {
+                acceleration.prepare(&scene_db.world).expect("animated capture geometry");
+                renderer.set_ray_tracing_frame(acceleration.frame());
             }
             let after_rt = std::time::Instant::now();
             renderer.render(&camera, &view).expect("cathedral frame");

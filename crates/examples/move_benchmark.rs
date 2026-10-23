@@ -649,10 +649,8 @@ impl Bench {
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("device poll");
             timing.rt_gpu = ms(t);
-            self.renderer.set_ray_tracing_frame_with_transmission(
-                acceleration.tlas(),
-                acceleration.transmission(),
-            );
+            self.renderer
+                .set_ray_tracing_frame(acceleration.frame());
         }
 
         let t = Instant::now();

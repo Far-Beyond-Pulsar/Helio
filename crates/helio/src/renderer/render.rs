@@ -391,6 +391,9 @@ impl Renderer {
                 "Renderer",
             );
         }
+        if let Some(instances) = self.ray_frame.instances(self.frame_count) {
+            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_INSTANCES), instances, "Renderer");
+        }
         // Every instance
         // implicitly uses `space_id = 0` (identity) until a real portal/
         // sublevel producer exists. Without this, `OcclusionCullPass`/

@@ -260,7 +260,7 @@ impl Fixture {
         self.scene.flush();
         if self.publish_ray_frame {
             self.ray_frame
-                .publish_with_transmission(self.scene.frame_count, self.scene.tlas_manager.tlas(), self.transmission.as_ref());
+                .publish(self.scene.frame_count, helio_core::RayFrame { tlas: self.scene.tlas_manager.tlas(), transmission: self.transmission.as_ref(), instances: None });
         }
         let mut resources = helio_core::ResourceRegistry::empty();
         resources.write(

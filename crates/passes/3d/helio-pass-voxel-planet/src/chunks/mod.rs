@@ -4228,7 +4228,7 @@ impl ChunkWorld {
             light_eye: light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
             // Two of the finest probes' spacings: the probes' visibility
             // holds the occlusion past them.
-            sky: [if gi { 2.0 * helio_pass_gi::FINEST_SPACING as f32 } else { 0.0 }, self.sun_angular_radius, 0.0, 0.0],
+            sky: [self.gi_clipmap.filter(|_| gi).map_or(0.0, |c| 2.0 * c.finest as f32), self.sun_angular_radius, 0.0, 0.0],
             ortho: [0.0; 4],
             history: [jitter[0].x - jitter[1].x, jitter[0].y - jitter[1].y, jitter[0].x, jitter[0].y],
             // The camera's (an orthographic view's rays all run one way).

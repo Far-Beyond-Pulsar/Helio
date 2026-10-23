@@ -2,9 +2,11 @@
 //! No renderer-owned scene table or GPU readback is involved.
 //!
 //! A host adapter: it reads a CPU `World` through change cursors, so it lives
-//! with the frontend graphs. `helio_pass_hlfs` consumes only the TLAS and
-//! transmission rows the renderer publishes (Pulsar-Native#1066).
-use helio_core::{BlasGeometry, BlasManager, Movability, TlasInstanceInput, TlasManager};
+//! with the frontend graphs. Passes consume only what the renderer publishes
+//! of it ([`SceneDbRayTracing::frame`]): the TLAS, transmission rows
+//! (`helio_pass_hlfs`, Pulsar-Native#1066) and each instance's surface
+//! (`RayInstance`: the GI probes' mesh tracer shades its hits from them).
+use helio_core::{BlasGeometry, BlasManager, Movability, RayInstance, TlasInstanceInput, TlasManager};
 use helio_pass_gbuffer::{
     MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent,
 };
@@ -67,6 +69,19 @@ impl CasterKey {
     }
 }
 
+/// A caster material, resolved once a build.
+#[derive(Clone, Copy)]
+struct MaterialRow {
+    generation: u32,
+    rgb: [f32; 3],
+    transmits: bool,
+    /// Whether the projection can represent it (opaque or explicitly
+    /// transmitting, no custom shader).
+    supported: bool,
+    base_color: [f32; 4],
+    emissive: [f32; 4],
+}
+
 fn casts_shadow(object: &StaticObjectComponent) -> bool {
     object.flags & helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW != 0
 }
@@ -85,6 +100,15 @@ pub struct SceneDbRayTracing {
     transmission: Option<wgpu::Buffer>,
     has_transmission: bool,
     transmission_rows: Vec<[f32; 4]>,
+    /// Each instance's surface (`RayInstance`), in TLAS order.
+    instances_buffer: Option<wgpu::Buffer>,
+    instance_rows: Vec<RayInstance>,
+    /// Whether objects the projection cannot represent are left out
+    /// ([`Self::partial`]) instead of failing the build.
+    partial: bool,
+    /// Objects left out, by the key they were left out with: their moves
+    /// change nothing.
+    skipped: HashMap<Entity, CasterKey>,
     geometry_ids: HashMap<(u64, bool), u64>,
     next_geometry_id: u64,
     /// `None` until the first full build, and after any error or journal
@@ -96,10 +120,32 @@ pub struct SceneDbRayTracing {
     casters: Vec<(Entity, CasterKey)>,
     caster_slots: HashMap<Entity, usize>,
     changes: Vec<ComponentChange>,
+    /// Base colour textures' means: a hit's colour is its material's factor
+    /// times its texture's mean.
+    texture_means: crate::texture_means::TextureMeans,
 }
 impl SceneDbRayTracing {
+    /// The scene's shadow casters, all of them: an object the projection
+    /// cannot represent (masked or custom-shader materials, group or
+    /// coordinate-space visibility, non-triangle geometry families) fails
+    /// the build, so ray-traced shadows never silently miss a caster.
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self::with_partial(device, queue, false)
+    }
+
+    /// Every object the projection can represent, shadow caster
+    /// (`INSTANCE_FLAG_CASTS_SHADOW`) or not; the others (and geometry
+    /// families it has no projection for: foliage, voxel volumes, virtual
+    /// geometry, sectioned objects) are left out. For consumers that
+    /// tolerate a missing object, such as the GI probes, whose rays then see
+    /// past it.
+    pub fn partial(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self::with_partial(device, queue, true)
+    }
+
+    fn with_partial(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, partial: bool) -> Self {
         Self {
+            texture_means: crate::texture_means::TextureMeans::new(&device),
             blas: BlasManager::new(device.clone()),
             tlas: TlasManager::new(device.clone(), 1),
             device,
@@ -107,6 +153,10 @@ impl SceneDbRayTracing {
             transmission: None,
             has_transmission: false,
             transmission_rows: Vec::new(),
+            instances_buffer: None,
+            instance_rows: Vec::new(),
+            partial,
+            skipped: HashMap::new(),
             geometry_ids: HashMap::new(),
             next_geometry_id: 0,
             cursors: None,
@@ -134,6 +184,10 @@ impl SceneDbRayTracing {
     /// mesh entity to skip that hash: its BLAS is then built once and reused
     /// until SceneDB reallocates or replaces the mesh's geometry range.
     pub fn prepare(&mut self, world: &World) -> helio_core::Result<&wgpu::Tlas> {
+        // Texture means that arrived change the instances' colours: rebuild.
+        if self.texture_means.collect() {
+            self.cursors = None;
+        }
         let result = match self.update(world) {
             Ok(true) => Ok(()),
             Ok(false) => self.build(world),
@@ -146,6 +200,7 @@ impl SceneDbRayTracing {
             self.cursors = None;
             return Err(error);
         }
+        self.texture_means.dispatch(&self.device, &self.queue);
         Ok(self.tlas.tlas().expect("successful TLAS build"))
     }
 
@@ -160,6 +215,23 @@ impl SceneDbRayTracing {
         self.tlas.tlas()
     }
 
+    /// The frame to publish (`Renderer::set_ray_tracing_frame`): the TLAS
+    /// and its rows, valid after a successful preparation.
+    pub fn frame(&self) -> helio_core::RayFrame<'_> {
+        let tlas = self.tlas();
+        helio_core::RayFrame {
+            tlas,
+            transmission: tlas.and(self.transmission()),
+            instances: tlas.and(self.instances_buffer.as_ref()),
+        }
+    }
+
+    /// Whether `object` is projected: a shadow caster, or any object in a
+    /// partial projection.
+    fn projects(&self, object: &StaticObjectComponent) -> bool {
+        self.partial || casts_shadow(object)
+    }
+
     /// Applies journaled changes to the previous build. `Ok(false)` means
     /// the changes need a full rebuild (or there is nothing to update yet).
     fn update(&mut self, world: &World) -> helio_core::Result<bool> {
@@ -169,7 +241,9 @@ impl SceneDbRayTracing {
         if self.tlas.tlas().is_none() {
             return Ok(false);
         }
-        reject_unsupported_geometry(world)?;
+        if !self.partial {
+            reject_unsupported_geometry(world)?;
+        }
         self.changes.clear();
         for cursor in &mut cursors.others {
             if world.read_changes(cursor, &mut self.changes) != ChangeRead::Complete
@@ -193,9 +267,12 @@ impl SceneDbRayTracing {
             match (slot, object) {
                 // A non-caster changed and still is not one.
                 (None, None) => {}
-                (None, Some(object)) if !casts_shadow(object) => {}
+                (None, Some(object)) if !self.projects(object) => {}
+                // One left out moved, or went.
+                (None, object)
+                    if self.skipped.get(&change.entity).is_some_and(|key| object.is_none_or(|o| CasterKey::of(o) == *key)) => {}
                 (Some(slot), Some(object))
-                    if casts_shadow(object) && CasterKey::of(object) == self.casters[slot].1 =>
+                    if self.projects(object) && CasterKey::of(object) == self.casters[slot].1 =>
                 {
                     let transform = tlas_transform(object);
                     if self.instances[slot].transform != transform {
@@ -228,8 +305,11 @@ impl SceneDbRayTracing {
         self.cursors = Some(Cursors::open(world));
         self.casters.clear();
         self.caster_slots.clear();
+        self.skipped.clear();
         let error = rt_error;
-        reject_unsupported_geometry(world)?;
+        if !self.partial {
+            reject_unsupported_geometry(world)?;
+        }
         let store = world
             .gpu_mirror()
             .ok_or_else(|| error("GPU mirror is required"))?
@@ -255,53 +335,75 @@ impl SceneDbRayTracing {
         let mut material_rows = HashMap::new();
         let mut instances = Vec::new();
         let mut transmission_rows = Vec::<[f32; 4]>::new();
+        let mut instance_rows = Vec::<RayInstance>::new();
         let mut has_transmission = false;
         for (object_entity, (object,)) in world.query::<(&StaticObjectComponent,)>() {
-            if !casts_shadow(object) {
+            if !self.projects(object) {
                 continue;
+            }
+            // An object the projection cannot represent: left out of a
+            // partial projection, else the build fails.
+            macro_rules! unsupported {
+                ($message:expr) => {{
+                    if self.partial {
+                        self.skipped.insert(object_entity, CasterKey::of(object));
+                        continue;
+                    }
+                    return Err(error($message));
+                }};
             }
             if world
                 .get::<RenderGroupComponent>(object_entity)
                 .is_some_and(|group| group.group_mask != 0)
             {
-                return Err(error("group visibility needs an explicit RT projection"));
+                unsupported!("group visibility needs an explicit RT projection");
             }
             if helio_pass_object_batch::coordinate_space(object.flags) != 0 {
-                return Err(error("non-world coordinate-space casters are unsupported"));
+                unsupported!("non-world coordinate-space casters are unsupported");
             }
             // Resolve each material once per frame; many objects share one.
-            let (material_generation, rgb, transmits) = match material_rows.get(&object.material_slot) {
+            let row = match material_rows.get(&object.material_slot) {
                 Some(row) => *row,
                 None => {
                     let (material_entity, material) = materials
                         .get(&object.material_slot)
                         .ok_or_else(|| error("missing caster material"))?;
                     let transmission = world.get::<RayTransmission>(*material_entity);
-                    if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER)
-                        != 0
-                        || (material.flags & helio_mats::FLAG_ALPHA_BLEND != 0 && transmission.is_none())
-                    {
-                        return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
-                    }
+                    let supported = material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER) == 0
+                        && (material.flags & helio_mats::FLAG_ALPHA_BLEND == 0 || transmission.is_some());
                     let rgb = transmission.map_or([0.0; 3], |value| value.0);
                     if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
                         return Err(error("transmission must be finite linear RGB in [0, 1]"));
                     }
-                    let row = (
-                        material_entity.generation().wrapping_add(1),
+                    // The factor times the base colour texture's mean
+                    // (white until measured).
+                    let texture = (material.tex_base_color != helio_mats::GpuMaterial::NO_TEXTURE)
+                        .then(|| world.gpu_mirror().and_then(|m| m.texture_store()))
+                        .flatten()
+                        .and_then(|store| store.read().ok()?.texture(material.tex_base_color).cloned());
+                    let mean = texture.and_then(|t| self.texture_means.mean(&t)).unwrap_or([1.0; 3]);
+                    let [r, g, b, _] = material.base_color;
+                    let [r, g, b] = [r * mean[0], g * mean[1], b * mean[2]];
+                    let [er, eg, eb, strength] = material.emissive;
+                    let row = MaterialRow {
+                        generation: material_entity.generation().wrapping_add(1),
                         rgb,
-                        transmission.is_some(),
-                    );
+                        transmits: transmission.is_some(),
+                        supported,
+                        base_color: [r, g, b, 1.0],
+                        emissive: [er * strength, eg * strength, eb * strength, 0.0],
+                    };
                     material_rows.insert(object.material_slot, row);
                     row
                 }
             };
-            if material_generation != object.material_generation {
+            if !row.supported || object.graph_hash() != 0 {
+                unsupported!("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported");
+            }
+            if row.generation != object.material_generation {
                 return Err(error("stale caster material identity"));
             }
-            if object.graph_hash() != 0 {
-                return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
-            }
+            let (rgb, transmits) = (row.rgb, row.transmits);
             has_transmission |= transmits;
             transmission_rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
             let (entity, mesh) = meshes
@@ -391,6 +493,14 @@ impl SceneDbRayTracing {
                     )
                     .map_err(|e| error(&e.to_string()))?;
             }
+            instance_rows.push(RayInstance {
+                first_index: index_range.offset,
+                base_vertex: vertex_range.offset,
+                _pad: [0; 2],
+                base_color: row.base_color,
+                emissive: row.emissive,
+                transmission: [rgb[0], rgb[1], rgb[2], 0.0],
+            });
             self.caster_slots.insert(object_entity, self.casters.len());
             self.casters.push((object_entity, CasterKey::of(object)));
             instances.push(TlasInstanceInput {
@@ -433,6 +543,21 @@ impl SceneDbRayTracing {
             self.transmission_rows.clear();
         }
         self.has_transmission = has_transmission;
+        // The instances' surfaces, a row each (at least one: a binding).
+        let size = (instance_rows.len().max(1) * std::mem::size_of::<RayInstance>()) as u64;
+        if self.instances_buffer.as_ref().is_none_or(|buffer| buffer.size() < size) {
+            self.instances_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("SceneDB RT instance surfaces"),
+                size: size.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.instance_rows.clear();
+        }
+        if self.instance_rows != instance_rows && !instance_rows.is_empty() {
+            self.queue.write_buffer(self.instances_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&instance_rows));
+        }
+        self.instance_rows = instance_rows;
         self.instances = instances;
         self.queue.submit([encoder.finish()]);
         Ok(())

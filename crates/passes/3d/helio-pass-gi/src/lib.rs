@@ -4,15 +4,17 @@
 //!
 //! [`GiPass`] runs before the tracers: it integrates last frame's hits into
 //! their probes, resets the probes that came into the clipmap and writes
-//! this frame's rays (`gi_rays`). Tracers (the voxel terrain's today) write
-//! a hit a ray (`gi_hits`). [`GiResolvePass`] runs after them, before
-//! deferred lighting: the probes' irradiance at every pixel
-//! (`gi_irradiance`).
+//! this frame's rays (`gi_rays`). Tracers write a hit a ray (`gi_hits`): the
+//! voxel terrain's, then the meshes' ([`GiMeshTracePass`], hardware ray
+//! queries against the scene's TLAS), which keeps the nearer and lights
+//! the hit from the scene's lights (`gi_light`). [`GiResolvePass`] runs
+//! after them, before deferred lighting: the probes' irradiance at every
+//! pixel (`gi_irradiance`).
 //!
-//! The clipmap is a function of the eye's world position alone
-//! ([`Clipmap::around`], [`eye`]): a tracer that keeps state per probe (the
-//! voxel terrain locates each probe's cell once) follows it by computing it
-//! too.
+//! The clipmap is a function of the eye's world position and the finest
+//! spacing alone ([`Clipmap::around`], [`eye`]), published each frame
+//! (`gi_clipmap`): a tracer that keeps state per probe (the voxel terrain
+//! locates each probe's cell once) follows it.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, I64Vec3, Vec3};
@@ -24,14 +26,18 @@ use helio_pass_sky::atmosphere::{
 };
 use std::collections::VecDeque;
 
+mod mesh;
+pub use mesh::GiMeshTracePass;
+
 /// Levels of the clipmap, each twice as far apart as the one inside it.
 pub const LEVELS: usize = 6;
 /// Probes along a level's side.
 pub const SIDE: i64 = 24;
 pub const LEVEL_PROBES: u32 = (SIDE * SIDE * SIDE) as u32;
 pub const PROBES: u32 = LEVEL_PROBES * LEVELS as u32;
-/// The finest level's probe spacing (metres).
-pub const FINEST_SPACING: f64 = 1.0;
+/// The finest level's probe spacing by default (metres): open ground, a
+/// voxel planet's.
+pub const DEFAULT_FINEST_SPACING: f64 = 1.0;
 /// Rays a probe update traces.
 pub const RAYS: u32 = 64;
 /// Probes updated a frame, by level: the two finest every 20 frames or so,
@@ -57,13 +63,17 @@ pub const GI_PROBES: &str = "gi_probes";
 pub const GI_RAYS: &str = "gi_rays";
 pub const GI_HITS: &str = "gi_hits";
 pub const GI_SUN: &str = "gi_sun";
+pub const GI_LIGHT: &str = "gi_light";
 pub const GI_IRRADIANCE: &str = "gi_irradiance";
+/// The frame's [`Clipmap`] (a registry value).
+pub const GI_CLIPMAP: &str = "gi_clipmap";
 /// Debug mode of the probes' view (`GiResolvePass`; deferred lighting shows
 /// it as it shows `gi_irradiance`).
 pub const GI_PROBES_VIEW: u32 = 36;
-/// Bytes of a `GiRay` and a `GiHit`.
+/// Bytes of a `GiRay`, a `GiHit` and a hit's light (`gi_light`).
 pub const RAY_BYTES: u64 = 32;
 pub const HIT_BYTES: u64 = 16;
+pub const HIT_LIGHT_BYTES: u64 = 8;
 
 /// The probes' shared WGSL (`gi_common.wgsl`: the clipmap, a probe's record,
 /// rays and hits): a tracer opts in with `//!use gi_common`.
@@ -74,11 +84,6 @@ pub const GI_COMMON_SNIPPET: helio_core::shader::ShaderSnippet =
 pub const GI_SAMPLE_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!("//!use gi_sample", "../shaders/gi_sample.wgsl");
 
-/// The probe spacing of `level`.
-pub fn spacing(level: usize) -> f64 {
-    FINEST_SPACING * f64::from(1u32 << level)
-}
-
 /// The eye's world position this frame: the frame's origin and the
 /// camera's position in it.
 pub fn eye(ctx: &PrepareContext) -> DVec3 {
@@ -86,24 +91,32 @@ pub fn eye(ctx: &PrepareContext) -> DVec3 {
 }
 
 /// Where each level's probes are: the world coordinates (in its spacings)
-/// of its logical probe 0. Probes sit at whole multiples of their spacing
-/// and are stored toroidally (storage coordinates are world coordinates
-/// modulo [`SIDE`]), so a probe keeps its storage while it stays in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// of its logical probe 0, and the finest level's spacing. Probes sit at
+/// whole multiples of their spacing and are stored toroidally (storage
+/// coordinates are world coordinates modulo [`SIDE`]), so a probe keeps its
+/// storage while it stays in.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Clipmap {
     pub first: [I64Vec3; LEVELS],
+    pub finest: f64,
 }
 
 impl Clipmap {
-    /// The clipmap around world point `eye`: each level's grid with the eye
-    /// between its middle probes.
-    pub fn around(eye: DVec3) -> Self {
+    /// The clipmap around world point `eye` with the finest level's probes
+    /// `finest` apart: each level's grid with the eye between its middle
+    /// probes.
+    pub fn around(eye: DVec3, finest: f64) -> Self {
         let mut first = [I64Vec3::ZERO; LEVELS];
         for (level, first) in first.iter_mut().enumerate() {
-            let cell = (eye / spacing(level)).floor();
+            let cell = (eye / (finest * f64::from(1u32 << level))).floor();
             *first = I64Vec3::new(cell.x as i64, cell.y as i64, cell.z as i64) - (SIDE / 2 - 1);
         }
-        Self { first }
+        Self { first, finest }
+    }
+
+    /// The probe spacing of `level`.
+    pub fn spacing(&self, level: usize) -> f64 {
+        self.finest * f64::from(1u32 << level)
     }
 
     /// The storage index of world probe `world` (in spacings) of `level`.
@@ -124,7 +137,7 @@ impl Clipmap {
     /// Probe `index`'s world position.
     pub fn position(&self, index: u32) -> DVec3 {
         let (level, world) = self.probe(index);
-        world.as_dvec3() * spacing(level)
+        world.as_dvec3() * self.spacing(level)
     }
 
     /// Whether world probe `world` of `level` is in the clipmap.
@@ -138,14 +151,14 @@ impl Clipmap {
     pub fn entered(&self, before: Option<&Clipmap>) -> Vec<u32> {
         let mut out = Vec::new();
         for level in 0..LEVELS {
-            if before.is_some_and(|b| b.first[level] == self.first[level]) {
+            if before.is_some_and(|b| b.first[level] == self.first[level] && b.finest == self.finest) {
                 continue;
             }
             for z in 0..SIDE {
                 for y in 0..SIDE {
                     for x in 0..SIDE {
                         let world = self.first[level] + I64Vec3::new(x, y, z);
-                        if !before.is_some_and(|b| b.holds(level, world)) {
+                        if !before.is_some_and(|b| b.finest == self.finest && b.holds(level, world)) {
                             out.push(Self::index(level, world));
                         }
                     }
@@ -158,7 +171,7 @@ impl Clipmap {
     /// The frame's levels for the GPU, relative to world point `eye`.
     pub fn levels(&self, eye: DVec3) -> [GpuLevel; LEVELS] {
         std::array::from_fn(|level| {
-            let s = spacing(level);
+            let s = self.spacing(level);
             let origin = (self.first[level].as_dvec3() * s - eye).as_vec3();
             let base = self.first[level].rem_euclid(I64Vec3::splat(SIDE));
             GpuLevel {
@@ -284,6 +297,7 @@ struct Probes {
     probes: wgpu::Buffer,
     rays: wgpu::Buffer,
     hits: wgpu::Buffer,
+    light: wgpu::Buffer,
     lists: wgpu::Buffer,
     sun: wgpu::Buffer,
     clipmap: Option<Clipmap>,
@@ -302,6 +316,7 @@ impl Probes {
             probes: buffer(device, "GI probes", u64::from(PROBES * PROBE_WORDS) * 4, storage),
             rays: buffer(device, "GI rays", u64::from(MAX_RAYS) * RAY_BYTES, storage),
             hits: buffer(device, "GI hits", u64::from(MAX_RAYS) * HIT_BYTES, storage),
+            light: buffer(device, "GI hit light", u64::from(MAX_RAYS) * HIT_LIGHT_BYTES, storage),
             lists: buffer(device, "GI lists", u64::from(2 * MAX_UPDATES + PROBES) * 4, storage),
             sun: buffer(device, "GI sun", 32, storage),
             clipmap: None,
@@ -313,8 +328,30 @@ impl Probes {
     }
 }
 
+/// How a [`GiPass`] runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GiConfig {
+    /// The finest level's probe spacing (metres; each coarser level's
+    /// doubles): finer indoors, where rooms, pillars and furniture are a few
+    /// metres apart, than over open ground.
+    pub finest_spacing: f64,
+    /// Whether the probes' only tracer is the meshes' ([`GiMeshTracePass`]):
+    /// they then update only on frames with a TLAS to trace, and publish
+    /// nothing on the others (deferred lighting keeps the sky's ambient).
+    pub needs_tlas: bool,
+}
+
+impl Default for GiConfig {
+    fn default() -> Self {
+        Self { finest_spacing: DEFAULT_FINEST_SPACING, needs_tlas: false }
+    }
+}
+
 /// The probes' update (module docs): before the tracers.
 pub struct GiPass {
+    config: GiConfig,
+    /// Whether this frame updates the probes (`GiConfig::needs_tlas`).
+    live: bool,
     state: Probes,
     layout: wgpu::BindGroupLayout,
     sun: wgpu::ComputePipeline,
@@ -333,7 +370,7 @@ pub struct GiPass {
 }
 
 impl GiPass {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, config: GiConfig) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI update"),
             entries: &[
@@ -346,6 +383,7 @@ impl GiPass {
                 storage(6, true),
                 uniform(7, ATMOSPHERE_FRAME_BYTES),
                 uniform(8, ATMOSPHERE_SKY_TABLE_BYTES),
+                storage(9, true),
             ],
         });
         let module = helio_core::shader::module_with(
@@ -371,6 +409,8 @@ impl GiPass {
         };
         let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
         Self {
+            config,
+            live: true,
             state: Probes::new(device),
             sun: pipeline("gi_sun_main"),
             integrate: pipeline("gi_integrate"),
@@ -394,7 +434,7 @@ impl GiPass {
     /// `ground` below it.
     pub fn begin(&mut self, queue: &wgpu::Queue, eye: DVec3, frame: u64, sky: Vec3, ground: Vec3) {
         let state = &mut self.state;
-        let clipmap = Clipmap::around(eye);
+        let clipmap = Clipmap::around(eye, self.config.finest_spacing);
         let entered = clipmap.entered(state.clipmap.as_ref());
         for &index in &entered {
             state.schedule.enter(index);
@@ -443,6 +483,7 @@ impl GiPass {
                     wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 7, resource: atmosphere.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 8, resource: sky_table.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 9, resource: s.light.as_entire_binding() },
                 ],
             });
             self.group = Some((group, key));
@@ -465,17 +506,23 @@ impl GiPass {
             pass.set_pipeline(&self.rays);
             pass.dispatch_workgroups((self.counts[0] * RAYS).div_ceil(64), 1, 1);
         }
-        // The tracers write each ray's hit, or leave it none.
+        // The tracers write each ray's hit and its light, or leave them none.
         cmds.clear_buffer(&state.hits, 0, None);
+        cmds.clear_buffer(&state.light, 0, None);
         state.updated = self.counts[0];
         state.parity = 1 - state.parity;
         state.prev_rotation = self.rotation;
     }
 
-    /// The probes' buffers: frame, probes, rays, hits, sun.
-    pub fn buffers(&self) -> [&wgpu::Buffer; 5] {
+    /// The probes' buffers: frame, probes, rays, hits, sun, the hits' light.
+    pub fn buffers(&self) -> [&wgpu::Buffer; 6] {
         let s = &self.state;
-        [&s.frame, &s.probes, &s.rays, &s.hits, &s.sun]
+        [&s.frame, &s.probes, &s.rays, &s.hits, &s.sun, &s.light]
+    }
+
+    /// The clipmap `begin` placed.
+    pub fn clipmap(&self) -> Option<Clipmap> {
+        self.state.clipmap
     }
 
     /// The probes this frame updates (storage indices, in ray order).
@@ -494,7 +541,7 @@ impl RenderPass for GiPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[GI_FRAME, GI_PROBES, GI_RAYS, GI_HITS, GI_SUN]
+        &[GI_FRAME, GI_PROBES, GI_RAYS, GI_HITS, GI_SUN, GI_LIGHT, GI_CLIPMAP]
     }
 
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
@@ -516,6 +563,10 @@ impl RenderPass for GiPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
+        self.live = !self.config.needs_tlas || environment.is_some_and(|e| e.tlas.is_some());
+        if !self.live {
+            return Ok(());
+        }
         let (ambient, intensity) = environment.map_or(([0.5, 0.5, 0.6], 1.0), |e| (e.ambient_color, e.ambient_intensity));
         let sky = Vec3::from(ambient) * intensity;
         self.begin(ctx.queue, eye(ctx), ctx.frame_num, sky, sky * 0.15);
@@ -523,6 +574,9 @@ impl RenderPass for GiPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if !self.live {
+            return Ok(());
+        }
         let atmosphere = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)).cloned();
         let sky_table = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE)).cloned();
         let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
@@ -533,11 +587,14 @@ impl RenderPass for GiPass {
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let s = &self.state;
+        let Some(clipmap) = s.clipmap.filter(|_| self.live) else { return };
         frame.write_buffer_binding(GI_FRAME, &s.frame, "GI");
         frame.write_buffer_binding(GI_PROBES, &s.probes, "GI");
         frame.write_buffer_binding(GI_RAYS, &s.rays, "GI");
         frame.write_buffer_binding(GI_HITS, &s.hits, "GI");
         frame.write_buffer_binding(GI_SUN, &s.sun, "GI");
+        frame.write_buffer_binding(GI_LIGHT, &s.light, "GI");
+        frame.write(ResourceKey::new(GI_CLIPMAP), clipmap, "GI");
     }
 }
 
@@ -706,8 +763,8 @@ mod tests {
 
     #[test]
     fn probes_keep_their_storage_while_they_stay_in() {
-        let a = Clipmap::around(DVec3::new(10.3, -4.0, 1e6 + 0.5));
-        let b = Clipmap::around(DVec3::new(13.9, -4.0, 1e6 + 0.5));
+        let a = Clipmap::around(DVec3::new(10.3, -4.0, 1e6 + 0.5), DEFAULT_FINEST_SPACING);
+        let b = Clipmap::around(DVec3::new(13.9, -4.0, 1e6 + 0.5), DEFAULT_FINEST_SPACING);
         for index in 0..PROBES {
             let (level, world) = b.probe(index);
             assert_eq!(Clipmap::index(level, world), index);
@@ -726,15 +783,20 @@ mod tests {
             assert_eq!(count(level), moved(level) * SIDE * SIDE);
         }
         assert_eq!(a.entered(None).len(), PROBES as usize);
+        // Another spacing: every probe is new.
+        let finer = Clipmap::around(DVec3::new(10.3, -4.0, 1e6 + 0.5), 0.5);
+        assert_eq!(finer.entered(Some(&a)).len(), PROBES as usize);
     }
 
     #[test]
     fn the_eye_is_between_each_level_middle_probes() {
         let eye = DVec3::new(-123.45, 6.0, 789.0);
-        let c = Clipmap::around(eye);
-        for level in 0..LEVELS {
-            let local = eye / spacing(level) - c.first[level].as_dvec3();
-            assert!(local.cmpge(DVec3::splat(11.0)).all() && local.cmplt(DVec3::splat(12.0)).all(), "{level} {local}");
+        for finest in [DEFAULT_FINEST_SPACING, 0.5] {
+            let c = Clipmap::around(eye, finest);
+            for level in 0..LEVELS {
+                let local = eye / c.spacing(level) - c.first[level].as_dvec3();
+                assert!(local.cmpge(DVec3::splat(11.0)).all() && local.cmplt(DVec3::splat(12.0)).all(), "{level} {local}");
+            }
         }
     }
 
@@ -796,5 +858,6 @@ mod shader_tests {
     fn shaders_validate() {
         validate("gi_update", include_str!("../shaders/gi_update.wgsl"), &[ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
         validate("gi_resolve", include_str!("../shaders/gi_resolve.wgsl"), &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
+        validate("gi_mesh_trace", include_str!("../shaders/gi_mesh_trace.wgsl"), &[GI_COMMON_SNIPPET, helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET]);
     }
 }

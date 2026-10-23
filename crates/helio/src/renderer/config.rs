@@ -372,6 +372,11 @@ pub struct RendererConfig {
     /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
     pub enable_portals: bool,
 
+    /// The world-space GI probes' finest spacing (metres; each coarser
+    /// level doubles it). `None` (default): the graph's choice, 1 m over
+    /// voxel terrain and 0.5 m in mesh scenes, whose rooms, pillars and
+    /// furniture are a few metres apart.
+    pub gi_probe_spacing: Option<f32>,
     /// Opaque id of the virtual-geometry runtime (`helio_vg_stream::VgRuntime::handle_id`)
     /// the default deferred graph builds its virtual-geometry passes for, or
     /// `None` (the default) for classic rendering only. The passes are added
@@ -407,6 +412,7 @@ impl RendererConfig {
             render_mode: RenderMode::Deferred,
             enable_xr: false,
             enable_portals: true,
+            gi_probe_spacing: None,
             virtual_geometry: None,
         }
     }
@@ -438,6 +444,12 @@ impl RendererConfig {
     }
 
     /// Enable/disable the screen-space reflection pass.
+    /// The GI probes' finest spacing (metres; [`Self::gi_probe_spacing`]).
+    pub fn with_gi_probe_spacing(mut self, metres: f32) -> Self {
+        self.gi_probe_spacing = Some(metres);
+        self
+    }
+
     pub fn with_ssr(mut self, enabled: bool) -> Self {
         self.enable_ssr = enabled;
         self
