@@ -446,6 +446,8 @@ struct AppState {
     mouse_delta: (f32, f32),
 
     scene_db: SceneDb,
+    /// The scene's meshes for ray queries (the GI probes trace them).
+    rays: v3_demo_common::SceneRays,
     runtime: VgRuntime,
     loader: Option<vg_stress_loading::Loader>,
     placements: HashMap<String, Vec<Placement>>,
@@ -719,6 +721,7 @@ impl ApplicationHandler for App {
             layout.placements.len(),
             layout.statues.len()
         );
+        let rays = v3_demo_common::SceneRays::new(&device, &queue);
         self.state = Some(AppState {
             window,
             surface,
@@ -734,6 +737,7 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             scene_db,
+            rays,
             runtime,
             loader: Some(loader),
             placements,
@@ -1344,6 +1348,7 @@ impl AppState {
         let view = output.texture.create_view(&Default::default());
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
+        self.rays.publish(&self.scene_db.world, &mut self.renderer);
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
             self.render_errors += 1;

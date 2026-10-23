@@ -92,7 +92,7 @@ impl GiMeshTracePass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = helio_core::shader::create_compute_pipeline(device, wgpu::ComputePipelineDescriptor {
             label: Some("gi_mesh_trace"),
             layout: Some(&pipeline_layout),
             module: &module,
@@ -105,7 +105,7 @@ impl GiMeshTracePass {
             bind_group_layouts: &[Some(&gather_layout)],
             immediate_size: 0,
         });
-        let gather = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let gather = helio_core::shader::create_compute_pipeline(device, wgpu::ComputePipelineDescriptor {
             label: Some("gi_gather_lights"),
             layout: Some(&gather_pipeline_layout),
             module: &module,

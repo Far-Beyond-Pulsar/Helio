@@ -187,11 +187,16 @@ fn gi_mesh_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var hit = gi_hits[id.x];
     let origin = ray.origin.xyz + trace.eye.xyz;
     let far = select(min(ray.origin.w, 1e9), hit.t, hit.t > 0.0);
-    // Sheets are candidates, never confirmed: probes see through glass.
+    // The query starts `behind` the probe, so a surface the probe lies on
+    // is met whichever side f32 rounding put the probe (a hit at t = 0 is
+    // not reported). Sheets are candidates, never confirmed: probes see
+    // through glass.
+    let behind = offset(origin);
     var q: ray_query;
-    rayQueryInitialize(&q, acc_struct, RayDesc(0u, 0xFFu, 0.0, far, origin, ray.dir));
+    rayQueryInitialize(&q, acc_struct, RayDesc(0u, 0xFFu, 0.0, far + behind, origin - ray.dir * behind, ray.dir));
     while rayQueryProceed(&q) {}
-    let c = rayQueryGetCommittedIntersection(&q);
+    var c = rayQueryGetCommittedIntersection(&q);
+    c.t -= behind;
     let sun_towards = gi_sun[0].xyz;
     let has_sun = any(gi_sun[1].rgb > vec3<f32>(0.0));
     var n: vec3<f32>;
@@ -221,8 +226,10 @@ fn gi_mesh_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         shading = normalize(shading);
         if dot(face, shading) < 0.0 { face = -face; }
-        if dot(face, ray.dir) > 0.0 {
-            // Its inside: a back face (the probe is in a wall or a solid).
+        // Its inside: a back face (the probe is in a wall or a solid); and
+        // a probe on a surface (within `behind` of it): inside it, so
+        // probes on a floor are dropped alike, not some of them.
+        if dot(face, ray.dir) > 0.0 || c.t < behind {
             gi_hits[id.x] = GiHit(max(c.t, 1e-3), gi_pack_unit(ray.dir), 0u, MESH_TRACER);
             return;
         }

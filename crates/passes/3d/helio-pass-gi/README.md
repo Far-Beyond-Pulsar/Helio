@@ -29,6 +29,9 @@ or under overhangs, and light that changes as the world is dug and built.
 
   A probe whose rays mostly meet back faces (a quarter or more) is inside
   the ground, a wall or a solid mesh: inactive, so it takes no weight.
+  A probe on a mesh's surface (a hit within millimetres of it: probes on
+  a floor at a whole multiple of the spacing) counts as inside, so all of
+  them are dropped alike rather than some, as f32 rounding would pick.
   Probes are not moved out of geometry (DDGI's relocation): a probe
   inside is dropped, and the visibility test keeps its neighbours from
   leaking through.
@@ -49,12 +52,15 @@ or under overhangs, and light that changes as the world is dug and built.
    directional light.
 2. **`gi_integrate`:** last frame's rays, a workgroup per probe, a lane per
    ray. A ray that hit lights its probe with radiance `albedo * (sun *
-   visible * cos / pi + probe irradiance at the hit)`; the probes' own
+   visible * cos / pi + probe irradiance at the hit) + gi_light`; the probes' own
    irradiance at the hit gives every further bounce. A back face gives
    nothing. A miss sees the sky: the atmosphere's sky table at the probe,
    cosine-convolved L2 harmonics turned back into radiance band by band.
    Without an atmosphere, the flat ambient above the horizon and 0.15 of it
-   below.
+   below. Once a probe holds light, a ray's radiance is capped at 16
+   times the probe's mean irradiance / pi plus 2: a ray meeting a surface
+   centimetres from a point light (its fitting) would otherwise dominate
+   its probe for many updates (fireflies).
 3. **`gi_reset`:** the probes that came in.
 4. **`gi_rays_main`:** this frame's rays (`gi_rays`).
 

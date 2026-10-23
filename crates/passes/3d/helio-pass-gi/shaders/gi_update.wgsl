@@ -35,6 +35,7 @@ struct SceneLight {
 @group(0) @binding(9) var<storage, read> gi_light: array<vec2<u32>>;
 
 const PI: f32 = 3.14159265;
+const LUMINANCE: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 
 // The sun: the atmosphere's, through the air to the eye; without one, the
 // scene's first directional light.
@@ -128,6 +129,18 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
         }
     } else {
         radiance = sky_radiance(probe * 0.001, dir);
+    }
+    // Fireflies: a ray meeting a surface a few centimetres from a point
+    // light (its fitting) carries tens of times the room's light, and would
+    // dominate its probe for many updates. Once the probe holds light, a
+    // ray is capped at 16 times its mean irradiance / pi, plus 2 (so a dark
+    // probe still sees a sunlit opening).
+    let held = gi_probes[index * GI_PROBE_WORDS + GI_STATE_WORD] >> 8u;
+    if held > 0u {
+        let dc = vec3<f32>(gi_half2(gi_probes[index * GI_PROBE_WORDS]), gi_half2(gi_probes[index * GI_PROBE_WORDS + 1u]).x) * 0.282095;
+        let cap = 16.0 * dot(max(dc, vec3<f32>(0.0)), LUMINANCE) + 2.0;
+        let l = dot(radiance, LUMINANCE);
+        if l > cap { radiance *= cap / l; }
     }
     w_radiance[li] = radiance;
     w_dir[li] = dir;
