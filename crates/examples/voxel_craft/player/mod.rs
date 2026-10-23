@@ -182,3 +182,49 @@ fn rotate(v: DVec3, axis: DVec3, angle: f64) -> DVec3 {
     let (s, c) = angle.sin_cos();
     v * c + axis.cross(v) * s + axis * axis.dot(v) * (1.0 - c)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocks::Block;
+    use crate::terrain::recipe::recipe;
+    use crate::world::edits::Edit;
+    use helio_pass_voxel_planet::Planet;
+
+    /// A player standing on blocks with a gap under the middle of its soles
+    /// (leaves, a ledge between two blocks) is held by the blocks under the
+    /// rest of them: grounded every frame, and still. (Grounded by the sole's
+    /// centre alone it fell and landed every few frames, its eye moving by
+    /// rounding, and a still view on a tree never settled.)
+    #[test]
+    fn a_player_over_a_gap_stands_still() {
+        let mut world = World::new(Planet::new(recipe()).unwrap());
+        let grid = *world.planet().grid();
+        let n = f64::from(grid.cells());
+        let ground = world.planet().surface_point(grid.position(2, [n * 0.5, n * 0.5, 0.0]), 6.0);
+        let plate = world.cell_centre(world.cell_at(ground));
+        let frame = Frame::new(plate, plate.normalize().any_orthonormal_vector());
+        // A plate of blocks three across without its middle one.
+        let mut edits = Vec::new();
+        for a in -1..=1 {
+            for b in -1..=1 {
+                if (a, b) != (0, 0) {
+                    edits.push(Edit::Build(world.cell_at(plate + frame.right * (BLOCK_M * f64::from(a)) + frame.forward * (BLOCK_M * f64::from(b))), Block::Cobblestone));
+                }
+            }
+        }
+        world.edit(&edits);
+        let mut player = Player::new(plate + frame.up * 1.0);
+        let controls = Controls::default();
+        let mut rest = Vec::new();
+        for step in 0..240 {
+            player.update(&world, &controls, 1.0 / 60.0);
+            if step >= 120 {
+                rest.push((player.position, player.on_ground));
+            }
+        }
+        assert!(rest.iter().all(|r| r.1), "grounded every frame: {:?}", rest.iter().map(|r| r.1).collect::<Vec<_>>());
+        assert!(rest.iter().all(|r| r.0 == rest[0].0), "still: {:?}", rest.iter().map(|r| (r.0 - rest[0].0).length()).fold(0.0, f64::max));
+        assert!((player.position - plate).dot(frame.up) > 0.0 && (player.position - plate).dot(frame.up) < BLOCK_M, "on the plate");
+    }
+}

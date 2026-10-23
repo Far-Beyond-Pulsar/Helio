@@ -29,11 +29,17 @@ impl Frame {
     }
 }
 
-/// Offsets of the sample points: across the box at three heights.
-fn samples() -> impl Iterator<Item = (f64, f64, f64)> {
+/// Offsets of the sample points across the box (right, forward): its
+/// centre, corners and edges' middles.
+fn across() -> impl Iterator<Item = (f64, f64)> + Clone {
     let r = PLAYER_WIDTH * 0.5 - 0.02;
+    [(0.0, 0.0), (r, r), (-r, r), (r, -r), (-r, -r), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)].into_iter()
+}
+
+/// Offsets of the sample points: across the box at five heights.
+fn samples() -> impl Iterator<Item = (f64, f64, f64)> {
     let heights = [0.002, 0.55, 1.1, 1.65, PLAYER_HEIGHT - 0.04];
-    heights.into_iter().flat_map(move |h| [(0.0, 0.0), (r, r), (-r, r), (r, -r), (-r, -r), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)].into_iter().map(move |(x, z)| (h, x, z)))
+    heights.into_iter().flat_map(|h| across().map(move |(x, z)| (h, x, z)))
 }
 
 /// Whether the box standing at `feet` (in `frame`) overlaps solid blocks.
@@ -45,6 +51,9 @@ pub fn collides(world: &World, feet: DVec3, frame: &Frame) -> bool {
 pub fn occupies(world: &World, feet: DVec3, frame: &Frame, cell: helio_pass_voxel_planet::Cell) -> bool {
     samples().any(|(h, x, z)| world.cell_at(feet + frame.up * h + frame.right * x + frame.forward * z) == cell)
 }
+
+/// Movements shorter than this (metres) are not made.
+const MIN_MOVE: f64 = 1e-9;
 
 /// What a movement did.
 #[derive(Clone, Copy, Debug, Default)]
@@ -61,26 +70,31 @@ pub fn slide(world: &World, mut feet: DVec3, delta: DVec3, frame: &Frame, can_st
     let vertical = delta.dot(frame.up);
     let horizontal = [frame.right * delta.dot(frame.right), frame.forward * delta.dot(frame.forward)];
 
-    // Vertical, in steps shorter than a block.
-    let steps = (vertical.abs() / 0.2).ceil().max(1.0) as i32;
-    for _ in 0..steps {
-        let next = feet + frame.up * (vertical / f64::from(steps));
-        if collides(world, next, frame) {
-            if vertical < 0.0 {
-                moved.landed = true;
-                feet = rest_on_floor(world, feet, frame);
-            } else {
-                moved.hit_ceiling = true;
+    // Vertical, in steps shorter than a block. A movement under a
+    // nanometre is a velocity's rounding residue (the grip's decay never
+    // reaches zero), on every axis: applied, it moved a standing player by
+    // a rounding step every frame, and a still view never settled.
+    if vertical.abs() >= MIN_MOVE {
+        let steps = (vertical.abs() / 0.2).ceil().max(1.0) as i32;
+        for _ in 0..steps {
+            let next = feet + frame.up * (vertical / f64::from(steps));
+            if collides(world, next, frame) {
+                if vertical < 0.0 {
+                    moved.landed = true;
+                    feet = rest_on_floor(world, feet, frame);
+                } else {
+                    moved.hit_ceiling = true;
+                }
+                break;
             }
-            break;
+            feet = next;
         }
-        feet = next;
     }
 
     // Horizontal axes.
     for part in horizontal {
         let length = part.length();
-        if length < 1e-9 {
+        if length < MIN_MOVE {
             continue;
         }
         let steps = (length / 0.2).ceil().max(1.0) as i32;
@@ -108,33 +122,47 @@ pub fn slide(world: &World, mut feet: DVec3, delta: DVec3, frame: &Frame, can_st
     (feet, moved)
 }
 
-/// `feet` lowered to rest on the floor under it (the top of the cell its sole
-/// is in), when it is in one; otherwise unchanged.
+/// `feet` lowered to rest on the floor under its sole: the top of the
+/// highest solid cell under any of the sole's points within a block (the box
+/// stands on whatever part of it is over, as `collides` holds it); otherwise
+/// unchanged.
 pub fn rest_on_floor(world: &World, feet: DVec3, frame: &Frame) -> DVec3 {
     let grid = world.planet().grid();
-    let mut down = feet;
-    // Down to the first solid cell under the sole, within a block.
-    for _ in 0..24 {
-        let next = down - frame.up * 0.05;
-        if world.is_solid(world.cell_at(next)) {
+    let mut top: Option<f64> = None;
+    for (x, z) in across() {
+        let mut down = feet + frame.right * x + frame.forward * z;
+        for _ in 0..24 {
+            let next = down - frame.up * 0.05;
             let cell = world.cell_at(next);
-            let top = grid.layer_radius(f64::from(cell.k) + 1.0);
-            return grid.at_radial(next, top + 0.001);
+            if world.is_solid(cell) {
+                let radial = grid.layer_radius(f64::from(cell.k) + 1.0);
+                top = Some(top.map_or(radial, |t: f64| t.max(radial)));
+                break;
+            }
+            down = next;
         }
-        down = next;
     }
-    feet
+    top.map_or(feet, |t| grid.at_radial(feet, t + 0.001))
 }
 
-/// Height above the nearest floor below, up to `limit` metres (None if
-/// there is none within it).
+/// Height of the sole above the nearest floor under any of its points, up
+/// to `limit` metres (None if there is none within it): the box is held
+/// wherever part of it is over a floor, as `collides` holds it. (The sole's
+/// centre alone found none on leaves with a gap under the middle: a player
+/// standing there fell and landed again every few frames, its eye moving by
+/// rounding, and a still view never settled.)
 pub fn floor_below(world: &World, feet: DVec3, frame: &Frame, limit: f64) -> Option<f64> {
-    let mut d = 0.0;
-    while d <= limit {
-        if world.is_solid(world.cell_at(feet - frame.up * d)) {
-            return Some(d);
-        }
-        d += 0.01;
-    }
-    None
+    across()
+        .filter_map(|(x, z)| {
+            let at = feet + frame.right * x + frame.forward * z;
+            let mut d = 0.0;
+            while d <= limit {
+                if world.is_solid(world.cell_at(at - frame.up * d)) {
+                    return Some(d);
+                }
+                d += 0.01;
+            }
+            None
+        })
+        .reduce(f64::min)
 }

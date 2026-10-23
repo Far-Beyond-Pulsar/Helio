@@ -447,3 +447,28 @@ fn nearest_wood(world: &World, from: Cell, reach: i32) -> Option<(Cell, Block)> 
     }
     best.map(|(_, c, b)| (c, b))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A player left standing at the spawn stays exactly where it stands
+    /// (hosts plan their views for an eye, and a view whose eye moves by a
+    /// rounding step never settles).
+    #[test]
+    fn a_player_at_the_spawn_stands_still() {
+        let planet = Planet::new(terrain::recipe::recipe()).unwrap();
+        let spawn = find_spawn(&planet);
+        let world = World::new(planet);
+        let mut player = Player::new(spawn);
+        let controls = crate::input::Controls::default();
+        let mut rest = Vec::new();
+        for step in 0..240 {
+            player.update(&world, &controls, 1.0 / 60.0);
+            if step >= 60 {
+                rest.push((player.position, player.on_ground));
+            }
+        }
+        assert!(rest.iter().all(|r| r.1 && r.0 == rest[0].0), "moved {:e} m", rest.iter().map(|r| (r.0 - rest[0].0).length()).fold(0.0, f64::max));
+    }
+}
