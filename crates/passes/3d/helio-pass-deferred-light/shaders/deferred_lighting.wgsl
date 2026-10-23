@@ -1243,7 +1243,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Per-surface work is displayed as a scalar heat map. Do not shade this
     // diagnostic with light intensity, N·L, or material response: those create
     // shape contrast that obscures the work being measured.
-    if globals.debug_mode == 40u || globals.debug_mode == 41u || globals.debug_mode == 42u {
+    if globals.debug_mode == 50u || globals.debug_mode == 51u || globals.debug_mode == 52u {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
         let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
         let tile_idx = tile_y * globals.num_tiles_x + tile_x;
@@ -1270,7 +1270,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if light.shadow_index != 0xffffffffu && !is_vg && !in_portal { shadow_work += 1.0; }
         }
 
-        if globals.debug_mode == 40u {
+        if globals.debug_mode == 50u {
             return vec4<f32>(complexity_color(affecting_lights / 8.0), 1.0);
         }
 
@@ -1282,7 +1282,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         material_work += select(0.0, 1.8, is_anisotropic) + select(0.0, 1.2, has_subsurface);
         material_work += select(0.0, 0.4, has_lightmap) + select(0.0, 0.6, is_vg);
         let surface_work = 2.0 + material_work * 2.0 + affecting_lights * 1.6 + shadow_work * 1.1;
-        if globals.debug_mode == 42u {
+        if globals.debug_mode == 52u {
             // Show an absolute estimated time contribution per output pixel.
             // The pass timestamp is real GPU timing; surface_work distributes
             // that measured duration according to this pixel's known shader
@@ -1561,8 +1561,8 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || (globals.debug_mode >= 100u && globals.debug_mode < 128u)
         || globals.debug_mode == 20u || globals.debug_mode == 21u
         || globals.debug_mode == 32u || globals.debug_mode == 33u
-        || globals.debug_mode == 40u || globals.debug_mode == 41u
-        || globals.debug_mode == 42u {
+        || globals.debug_mode == 50u || globals.debug_mode == 51u
+        || globals.debug_mode == 52u {
         return vec4<f32>(0.0);
     }
 

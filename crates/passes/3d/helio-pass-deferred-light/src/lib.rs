@@ -1567,17 +1567,17 @@ impl RenderPass for DeferredLightPass {
             },
             DebugViewDescriptor {
                 name: "Light Complexity",
-                debug_mode: 40,
+                debug_mode: 50,
                 description: "Scalar heat map of directional lights and local lights within their attenuation radii",
             },
             DebugViewDescriptor {
                 name: "Shader Complexity",
-                debug_mode: 41,
+                debug_mode: 51,
                 description: "Scalar heat map of per-surface light and material shader work, without lighting contrast",
             },
             DebugViewDescriptor {
                 name: "GPU-Time-Weighted Shader Cost",
-                debug_mode: 42,
+                debug_mode: 52,
                 description: "Estimated absolute shader time contribution per pixel in microseconds, weighted by the last measured DeferredLight GPU duration",
             },
             DebugViewDescriptor {
