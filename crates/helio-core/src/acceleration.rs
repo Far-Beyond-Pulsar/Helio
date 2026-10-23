@@ -595,7 +595,8 @@ pub struct TlasInstanceInput {
 /// Triangle `p` of the instance is pool indices `first_index + 3p ..`
 /// (mesh-local), plus `base_vertex`, into `builtin_mesh_vertex`
 /// (`PackedVertex`). Textures are not sampled at hits: `base_color` is the
-/// material's factor. An instance with a nonzero `transmission` is a thin
+/// material's factor times its base colour texture's mean (as the
+/// projection measured it). An instance with a nonzero `transmission` is a thin
 /// sheet (glass) its BLAS marks non-opaque: rays pass it, tinted.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -603,7 +604,8 @@ pub struct RayInstance {
     pub first_index: u32,
     pub base_vertex: u32,
     pub _pad: [u32; 2],
-    /// Linear RGB base colour.
+    /// Linear RGB base colour: the material's factor times its base colour
+    /// texture's mean.
     pub base_color: [f32; 4],
     /// The radiance it gives off (RGB: colour times strength).
     pub emissive: [f32; 4],

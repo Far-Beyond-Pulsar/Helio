@@ -120,6 +120,9 @@ pub struct SceneDbRayTracing {
     casters: Vec<(Entity, CasterKey)>,
     caster_slots: HashMap<Entity, usize>,
     changes: Vec<ComponentChange>,
+    /// Base colour textures' means: a hit's colour is its material's factor
+    /// times its texture's mean.
+    texture_means: crate::texture_means::TextureMeans,
 }
 impl SceneDbRayTracing {
     /// The scene's shadow casters, all of them: an object the projection
@@ -142,6 +145,7 @@ impl SceneDbRayTracing {
 
     fn with_partial(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, partial: bool) -> Self {
         Self {
+            texture_means: crate::texture_means::TextureMeans::new(&device),
             blas: BlasManager::new(device.clone()),
             tlas: TlasManager::new(device.clone(), 1),
             device,
@@ -180,6 +184,10 @@ impl SceneDbRayTracing {
     /// mesh entity to skip that hash: its BLAS is then built once and reused
     /// until SceneDB reallocates or replaces the mesh's geometry range.
     pub fn prepare(&mut self, world: &World) -> helio_core::Result<&wgpu::Tlas> {
+        // Texture means that arrived change the instances' colours: rebuild.
+        if self.texture_means.collect() {
+            self.cursors = None;
+        }
         let result = match self.update(world) {
             Ok(true) => Ok(()),
             Ok(false) => self.build(world),
@@ -192,6 +200,7 @@ impl SceneDbRayTracing {
             self.cursors = None;
             return Err(error);
         }
+        self.texture_means.dispatch(&self.device, &self.queue);
         Ok(self.tlas.tlas().expect("successful TLAS build"))
     }
 
@@ -366,7 +375,15 @@ impl SceneDbRayTracing {
                     if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
                         return Err(error("transmission must be finite linear RGB in [0, 1]"));
                     }
+                    // The factor times the base colour texture's mean
+                    // (white until measured).
+                    let texture = (material.tex_base_color != helio_mats::GpuMaterial::NO_TEXTURE)
+                        .then(|| world.gpu_mirror().and_then(|m| m.texture_store()))
+                        .flatten()
+                        .and_then(|store| store.read().ok()?.texture(material.tex_base_color).cloned());
+                    let mean = texture.and_then(|t| self.texture_means.mean(&t)).unwrap_or([1.0; 3]);
                     let [r, g, b, _] = material.base_color;
+                    let [r, g, b] = [r * mean[0], g * mean[1], b * mean[2]];
                     let [er, eg, eb, strength] = material.emissive;
                     let row = MaterialRow {
                         generation: material_entity.generation().wrapping_add(1),

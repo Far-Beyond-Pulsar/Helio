@@ -5,6 +5,7 @@ pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
 pub mod ray_tracing;
+mod texture_means;
 pub mod scene_join;
 pub mod virtual_geometry;
 pub use virtual_geometry::{virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass};

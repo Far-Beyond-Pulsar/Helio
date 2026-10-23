@@ -100,9 +100,16 @@ and the probes' (`gi_light`, RGB half floats, added as is). Tracers:
   (`Renderer::set_ray_tracing_frame`, from
   `helio_default_graphs::ray_tracing::SceneDbRayTracing`; `partial`
   leaves out what it cannot represent, such as foliage and masked
-  materials, so the probes see past it). Textures are not sampled at hits
-  (the material's factor), and local lights' shadow rays see meshes only,
-  not voxel terrain.
+  materials, so the probes see past it). Textures are not sampled at hits:
+  the projection folds each base colour texture's mean (its coarsest mip,
+  measured once on the GPU) into the row, so a textured material whose
+  factor is white does not bounce as white. Local lights' shadow rays see
+  meshes only, not voxel terrain.
+
+  Virtual geometry is not in the TLAS yet: a VG-only asset's mesh row is a
+  placeholder triangle, so the probes see past VG statues and trees (the
+  projection would need each asset's coarse proxy cut; `helio_vg_stream`
+  builds them for the dense tier's own, view-dependent TLAS).
 
   Without ray queries (software Vulkan, WebGPU) the tracer is not built:
   over voxel terrain the probes see the terrain alone (meshes receive GI

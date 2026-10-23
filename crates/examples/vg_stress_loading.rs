@@ -760,8 +760,11 @@ fn run(
     let cache = root.join("assets/vg_stress/cache");
     // Runtime fallback of the build-script provisioning: download and convert
     // the scans if they are missing. Status shows in the window title.
+    // `HELIO_VG_STRESS_SKIP_PROVISION` skips it here as in `build.rs`: the
+    // museum opens with what is on disk (offline, or a source unreachable).
     let assets_dir = root.join("assets/vg_stress");
-    if !crate::vg_stress_prep::is_provisioned_with(&assets_dir, config) {
+    let skip = std::env::var_os("HELIO_VG_STRESS_SKIP_PROVISION").is_some();
+    if !skip && !crate::vg_stress_prep::is_provisioned_with(&assets_dir, config) {
         let progress = |message: &str| {
             let _ = tx.send(Event::Status(format!("Preparing assets: {message}")));
         };
