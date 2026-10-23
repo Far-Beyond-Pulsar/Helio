@@ -664,12 +664,15 @@ impl Planet {
     pub fn material_slope(&self, face: u8, i: i32, j: i32) -> i32 {
         const LEVEL: u32 = 4;
         // Central differences two level-4 cells each way, in base layers
-        // (Q16 level-4 cells in the shader).
+        // (Q16 level-4 cells in the shader), and the gradient's length,
+        // rounded down exactly (`gradient_length` in the shader): the larger
+        // difference alone measured slopes across the axes short, and a
+        // material threshold on it traced squares on the face's grid.
         let block = |mi: i32, mj: i32| {
             let top = |x: i32, y: i32| terrain::top_cells(&self.grid, self.column_height(face, x, y, LEVEL), 0);
-            let di = (top(mi + 2, mj) - top(mi - 2, mj)).abs();
-            let dj = (top(mi, mj + 2) - top(mi, mj - 2)).abs();
-            (di.max(dj) << (16 - LEVEL)) / 32_768
+            let di = (top(mi + 2, mj) - top(mi - 2, mj)).unsigned_abs().min(46_340);
+            let dj = (top(mi, mj + 2) - top(mi, mj - 2)).unsigned_abs().min(46_340);
+            (((di * di + dj * dj).isqrt() as i32) << (16 - LEVEL)) / 32_768
         };
         let (ri, rj) = (i * 2 + 1 - 16, j * 2 + 1 - 16);
         let (ai, aj) = (ri >> 5, rj >> 5);

@@ -300,7 +300,24 @@ fn tile_slopes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let b = vec2<i32>(n % blocks, n / blocks) + 2;
     let di = abs(slope_lattice[at + u32(b.y * side + b.x + 2)] - slope_lattice[at + u32(b.y * side + b.x - 2)]);
     let dj = abs(slope_lattice[at + u32((b.y + 2) * side + b.x)] - slope_lattice[at + u32((b.y - 2) * side + b.x)]);
-    tile_slopes[job.slot * SLOPE_STRIDE + u32(n)] = (max(di, dj) << (16u - MATERIAL_SLOPE_LEVEL)) / 32768;
+    tile_slopes[job.slot * SLOPE_STRIDE + u32(n)] = (gradient_length(di, dj) << (16u - MATERIAL_SLOPE_LEVEL)) / 32768;
+}
+
+// The length of a gradient's differences `di`, `dj` (base layers, each
+// held to 46340 so their squares sum in a u32), rounded down exactly, as
+// `Planet::material_slope` takes it. (The larger difference alone measured
+// slopes across the axes short, by up to 29% on a diagonal: a material
+// threshold on it traced squares on the face's grid, the Moon's rock specks
+// stopping at the straight edges of a crater wall's level ground.)
+fn gradient_length(di: i32, dj: i32) -> i32 {
+    let a = u32(min(abs(di), 46340));
+    let b = u32(min(abs(dj), 46340));
+    let x = a * a + b * b;
+    // f32's root is within a step of the exact one below 2^32.
+    var r = min(u32(sqrt(f32(x))), 65535u);
+    for (var n = 0u; n < 2u && r * r > x; n++) { r -= 1u; }
+    for (var n = 0u; n < 2u && r < 65535u && (r + 1u) * (r + 1u) <= x; n++) { r += 1u; }
+    return i32(r);
 }
 
 // The material slope of level column (i, j) of footprint `job` (below
@@ -869,7 +886,8 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
 // The materials' slope of column (x, y) of footprint `tile`:
 // `Planet::material_slope` (one scale, level-4 relief, whatever level draws
 // it) below MATERIAL_SLOPE_LEVEL. A coarser column spans many base columns:
-// the gradient over 64 base cells (in the tile; eighths of a cell per cell).
+// the gradient's length over 64 base cells (in the tile; eighths of a cell
+// per cell).
 fn column_slope(tile: TileJob, x: u32, y: u32) -> i32 {
     if tile.level < MATERIAL_SLOPE_LEVEL {
         return material_slope(tile, tile.cx * 64 + i32(x), tile.cy * 64 + i32(y));
@@ -882,7 +900,7 @@ fn column_slope(tile: TileJob, x: u32, y: u32) -> i32 {
     let yb = max(i32(y) - n, 0);
     let gx = f32(tile_top(tile.slot, xa, i32(y), level) - tile_top(tile.slot, xb, i32(y), level)) / f32(max(xa - xb, 1));
     let gy = f32(tile_top(tile.slot, i32(x), ya, level) - tile_top(tile.slot, i32(x), yb, level)) / f32(max(ya - yb, 1));
-    return i32(round(max(abs(gx), abs(gy)) * 8.0));
+    return i32(round(length(vec2<f32>(gx, gy)) * 8.0));
 }
 
 // The top (level cells) of column (x, y) of the footprint in pool slot `slot`.

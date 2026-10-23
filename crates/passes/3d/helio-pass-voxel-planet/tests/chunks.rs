@@ -1992,13 +1992,13 @@ fn feature_cells_draw_their_own_materials() {
 
 /// Coarse levels draw features' cells as the CPU makes them: from 60 m up
 /// near stamps and the forest's first far levels (levels 1 and 2), from
-/// 400 m the far canopy (levels 3 to 5): every hit on a cell features
+/// 300 m the far canopy (levels 3 to 5): every hit on a cell features
 /// decide is solid there for the CPU too.
 #[test]
 fn coarse_feature_cells_are_the_cpu_cells() {
     let Some(gpu) = gpu() else { return };
     let (planet, dir) = forest_planet();
-    for (height, down, levels) in [(60.0, 0.8, 1..3), (400.0, 0.35, 3..6)] {
+    for (height, down, levels) in [(60.0, 0.8, 1..3), (300.0, 0.35, 3..6)] {
         coarse_features_match(&gpu, &planet, dir, height, down, levels);
     }
 }

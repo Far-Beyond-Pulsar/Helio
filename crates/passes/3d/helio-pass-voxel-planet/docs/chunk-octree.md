@@ -245,9 +245,13 @@ same inputs:
 - **Point.** Each evaluation (a column's top cell, its soil and rock
   samples) uses its cell's volume point.
 - **Slope.** `Planet::material_slope`: level-4 heights two cells each way,
-  block slopes interpolated in 32nds, one scale at whatever level draws it.
+  the gradient's length (an exact integer root on both sides), block
+  slopes interpolated in 32nds, one scale at whatever level draws it.
   For levels 0 to 3 a column reads the base column at its centre; coarser
   cells span many base columns and keep the gradient over 64 base cells.
+  (The larger of the two differences measured diagonal slopes short:
+  slope thresholds traced squares on the face's grid, the Moon's rock
+  specks ending at straight edges on crater walls.)
 - **Surface word.** Its byte, as the CPU masks it.
 
 Leaves draw their pair. Chunks of `DETAIL_LEVELS` (levels 0 and 1) take a
