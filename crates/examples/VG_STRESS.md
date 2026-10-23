@@ -94,7 +94,7 @@ download, the material keeps a flat colour and the scene still opens.
 | Setting | CLI | Environment | Values |
 |---|---|---|---|
 | Trees | `--trees <v>` / `--small-trees` | `VG_STRESS_TREES` | `full` (default, about 1.5 GB), `small` (island trees + tree_small_02, about 0.35 GB), `none`, or a list of ids |
-| Density | `--density <v>` | `VG_STRESS_DENSITY` | `low` 0.4, `normal` 1 (default), `high` 3, `insane` 8, or a number |
+| Density | `--density <v>` | `VG_STRESS_DENSITY` | `low` 0.4, `normal` 1 (default), `high` 3, `insane` 8, or a number (clamped to 128x) |
 | Textures | `--textures <v>` | `VG_STRESS_TEXTURES` | `low`, `balanced` (default), `max` |
 
 Pass CLI flags after `--`: `cargo vg-stress -- --trees small --density high`. The
@@ -250,7 +250,19 @@ architecture/preview triangles and shadow work; it is not a whole-frame count.
 
 The title also carries the cull's stats line (selected triangles, emitted/tested
 clusters, HW/SW/dense split, frustum/occlusion/backface/error culls and overflow
-counters), read from the same asynchronous readback, so it adds no GPU stall.
+counters, plus triangle-budget rejects), read from the same asynchronous
+readback, so it adds no GPU stall.
+
+The culler now applies a hard frame-wide selected-triangle limit of 2 triangles
+per viewport pixel across both culling phases. `HELIO_VG_TRIANGLES_PER_PIXEL`
+can lower that limit at culler creation (accepted range 0.25–2, default 2).
+Clusters that do not fit are rejected before entering a draw bin, and traversal
+stops expanding once the first cluster is rejected. This guarantees the
+reported selected count stays under the budget; it can leave holes when the
+minimum resident/root cut itself is too expensive. `budget` in the title is the
+number of rejected clusters. The limit is a project policy: Epic's Nanite docs
+describe triangle count scaling with pixel count but do not specify a fixed
+triangles-per-pixel ratio.
 
 ## Validation
 
@@ -292,13 +304,12 @@ current 1px results are still too dense for the requested pixel-area budget:
 | Lucy | 1,184 | 31,732 | 235,776 |
 
 Those counts confirm the distinction between error tolerance and a triangle
-budget: the selector only tests projected geometric deviation. `sw_edge_px`
-classifies a selected cluster for rasterization; it does not stop traversal or
-reduce the cut. The current cached scans also show cone culling removes only
-about 0–2% from these views, so backface culling does not explain or solve the
-main excess. The next VG selection change needs an explicit projected-density
-budget and tests for it; raising the global error tolerance would visibly
-loosen geometry and is not a substitute.
+budget: the selector tests projected geometric deviation while `sw_edge_px`
+only classifies selected clusters for rasterization. The new hard admission
+limit bounds the output; the longer-term selection improvement is to prefer a
+coarser, coverage-preserving cut before reaching that limit. The current cached
+scans also show cone culling removes only about 0–2% from these views, so
+backface culling does not explain or solve the main excess.
 
 The texture timing printed at runtime spans the whole bounded producer phase,
 including time the worker waits for the renderer to accept texture uploads; it
@@ -396,11 +407,36 @@ $env:VG_STRESS_CAPTURE = 'out'; $env:VG_STRESS_CAPTURE_ONLY = 'tier3-tier2,tier3
 $env:HELIO_VG_PROFILE = '1'; cargo vg-stress
 ```
 
+Tier 3 is opt-in for this demo: set `VG_STRESS_TIER3=1` to run its ray-traced
+dense-tile backend when hardware and proxy residency allow it. The “Ray Trace vs
+Raster” debug view only shows which path produced each pixel; it does not enable
+Tier 3.
+
+In RT mode, the resolved dense-tile mask replaces raster visibility for those
+tiles. Culling diverts clusters wholly contained by the mask out of the raster
+bins; clusters crossing tile boundaries remain rasterized outside the mask.
+Candidate collection includes HW, SW, and dense bins so the TLAS covers all
+visible opaque VG geometry touching the tiles. Candidate readback and TLAS
+limits are currently 16,384 instances; overflow or incomplete proxy coverage
+falls back to the non-RT dense path. Alpha-masked materials are not represented
+by RT proxies yet; replacement mode currently resolves the proxy's geometric
+surface without its alpha texture.
+
 Calibration overrides (read when the raster is created): `HELIO_VG_DENSE_TRI`
-(triangles per tile, default 512), `HELIO_VG_DENSE_HIT` (depth-passing hits per
-tile, default 256), `HELIO_VG_DENSE_LATCH` (frames a tile stays dense, default
-8), `HELIO_VG_DENSE_MAX_TILES` (cap per frame, default 512); `VG_STRESS_PAGE_MB`
-sets the page-pool budget.
+(base triangles per tile, default 64), `HELIO_VG_DENSE_HIT` (base depth-passing
+hits per tile, default 64), and `HELIO_VG_DENSE_SENSITIVITY` (default 1, clamped
+to 0.125–8). Higher sensitivity divides both dense thresholds, so tiles qualify
+sooner; for example, `2` uses thresholds 32 triangles and 32 hits. The raw
+threshold overrides are scaled by sensitivity too. `HELIO_VG_DENSE_LATCH` sets
+how many frames a tile stays dense (default 8), and
+`HELIO_VG_DENSE_MAX_TILES` caps qualifying tiles per frame (default 512).
+`VG_STRESS_PAGE_MB` sets the page-pool budget.
+
+```powershell
+$env:HELIO_VG_DENSE_SENSITIVITY = '4'
+$env:VG_STRESS_TIER3 = '1'
+cargo vg-stress
+```
 
 ### What the 93 ms was (forest shot, RTX 4090, 1600x900, density 1)
 

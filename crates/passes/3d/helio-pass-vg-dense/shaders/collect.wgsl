@@ -7,8 +7,8 @@
 //   inst_bits  one bit per `vg_instances` row, cleared every frame
 //   cand       [0] distinct dense instances seen (may exceed capacity)
 //              [1] of those, not in `covered` (the TLAS' current instance set)
-//              [2] alpha-masked clusters overlapping a dense tile (the proxies are
-//                  opaque, so the CPU keeps ray tracing off while this is nonzero)
+//              [2] alpha-masked clusters overlapping a dense tile (diagnostic;
+//                  proxies trace their geometry as opaque surfaces)
 //              [3] spare; records of 16 words from word 4:
 //              instance, asset_slot, bitcast(lod_error_scale), 0,
 //              then the row-major 3x4 object-to-world transform (12 f32)
@@ -41,12 +41,16 @@ fn collect(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) 
     if word >= arrayLength(&inst_bits) { return; }
     let bit = 1u << (inst & 31u);
     let masked = (rg % (CULL_RANGE_COUNT / 2u)) >= CULL_FIRST_MASKED;
-    // limits.w bit 1: only the clusters the cull diverted to the dense bin make
-    // their instance a candidate (the other tiers draw the rest and the result is merged).
+    // limits.w bit 1 optionally restricts collection to the dense and SW bins.
+    // The RT replacement path leaves this off so HW/SW/dense tiers all seed
+    // the TLAS when their cluster bounds touch a selected tile.
     let bin_of = rg % (CULL_RANGE_COUNT / 2u);
     if (params.limits.w & 2u) != 0u && bin_of != BIN_DENSE_BIN && bin_of != BIN_SW_BIN { return; }
-    // Masked clusters are always tested (they are counted, not deduplicated).
-    if !masked && (atomicLoad(&inst_bits[word]) & bit) != 0u { return; }
+    // Count masked geometry for diagnostics, but still collect its instance:
+    // RT replacement traces every proxy triangle. Proxy alpha-texture support
+    // is not available yet, so those surfaces are geometrically opaque.
+    if masked { atomicAdd(&cand[2], 1u); }
+    if (atomicLoad(&inst_bits[word]) & bit) != 0u { return; }
     let c = vgd_load_cluster(v.cluster_slot);
     let rect = cluster_tile_rect(v, c);
     if !rect.ok { return; }
@@ -61,12 +65,6 @@ fn collect(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) 
         }
     }
     if !hit { return; }
-    if masked {
-        // Alpha-masked clusters are resolved by the masked peel, never by the
-        // (opaque) proxies: counted, but they do not make their instance a candidate.
-        atomicAdd(&cand[2], 1u);
-        return;
-    }
     let old = atomicOr(&inst_bits[word], bit);
     if (old & bit) != 0u { return; }
     let idx = atomicAdd(&cand[0], 1u);

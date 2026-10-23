@@ -70,7 +70,7 @@ impl Default for RtTierConfig {
             proxy_budget_bytes: 384 << 20,
             candidate_capacity: CAND_CAPACITY,
             retain_frames: 90,
-            max_tlas_instances: 2048,
+            max_tlas_instances: 16_384,
             registrations_per_frame: 1,
             proxy: ProxyOptionsCfg { levels: p.levels, ratio: p.ratio, max_triangles_per_lod: p.max_triangles_per_lod },
         }

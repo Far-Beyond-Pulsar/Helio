@@ -12,7 +12,8 @@
 //   1  asset hierarchy item x = instance,   y = TAG | (parent_node << 2 | slot)
 //   2  cluster item         x = instance,   y = TAG | cluster_slot (pool_slot << 11 | local)
 //   3  instance             x = instance,   y = TAG
-// Every job tests only its own bound, so deferring/dropping a job is exact.
+// Every job tests only its own bound, so deferring/dropping a job is exact,
+// except the explicit frame triangle budget, which may reject the remaining cut.
 
 struct CullParams {
     screen_width: u32,
@@ -31,6 +32,10 @@ struct CullParams {
     dense_tiles_x: u32,
     dense_tiles_y: u32,
     max_groups: u32,
+    triangle_budget: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct RoundParams {
@@ -107,6 +112,28 @@ fn stat_add(i: u32) {
     if (params.flags & VGC_FLAG_STATS) != 0u {
         atomicAdd(&state[VGC_ST_STATS + i], 1u);
     }
+}
+
+// Reserve against one frame-wide budget shared by the early and late cull.
+// This is an exact admission ceiling; over-budget clusters are rejected before
+// they enter a raster or dense bin.
+fn reserve_triangle_budget(triangles: u32) -> bool {
+    let counter = VGC_ST_STATS + VGC_STAT_TRIANGLES;
+    let used = atomicAdd(&state[counter], triangles);
+    if used > params.triangle_budget {
+        atomicSub(&state[counter], triangles);
+        atomicAdd(&state[VGC_ST_BUDGET_REJECTED], 1u);
+        return false;
+    }
+    if triangles > params.triangle_budget - used {
+        // The rollback can make this conservative under contention (a later
+        // cluster may be denied while an earlier reservation rolls back), but
+        // accepted geometry can never exceed the hard ceiling.
+        atomicSub(&state[counter], triangles);
+        atomicAdd(&state[VGC_ST_BUDGET_REJECTED], 1u);
+        return false;
+    }
+    return true;
 }
 
 fn vg_hash(a: u32, b: u32) -> u32 {
@@ -339,15 +366,45 @@ fn dense_overlap(cw: vec3<f32>, r_px: f32) -> bool {
     return false;
 }
 
+// A cluster wholly covered by dense tiles can leave the raster bins entirely:
+// every pixel it could touch will be supplied by Tier 3. Clusters crossing a
+// dense-tile boundary stay rasterized for their pixels outside the mask.
+fn dense_fully_covered(cw: vec3<f32>, r_px: f32) -> bool {
+    let clip = cameras[0].view_proj * vec4<f32>(cw, 1.0);
+    if clip.w <= 0.0 { return false; }
+    let uv = helio_ndc_to_uv(clip.xy / clip.w);
+    let px = uv * vec2<f32>(f32(params.screen_width), f32(params.screen_height));
+    let tmax = vec2<i32>(i32(params.dense_tiles_x) - 1, i32(params.dense_tiles_y) - 1);
+    let lo = vec2<i32>(floor((px - vec2<f32>(r_px)) / f32(VGC_TILE)));
+    let hi = vec2<i32>(floor((px + vec2<f32>(r_px)) / f32(VGC_TILE)));
+    // The screen edge is not a dense tile. Keep partially off-screen clusters
+    // on raster so clipping at the viewport cannot create missing pixels.
+    if any(lo < vec2<i32>(0)) || any(hi > tmax) { return false; }
+    for (var y = lo.y; y <= hi.y; y++) {
+        for (var x = lo.x; x <= hi.x; x++) {
+            let idx = u32(y) * params.dense_tiles_x + u32(x);
+            if idx >= arrayLength(&dense_mask) || dense_mask[idx] == 0u { return false; }
+        }
+    }
+    return true;
+}
+
 fn choose_bin(tris: u32, ic: InstCtx, cw: vec3<f32>, rw: f32) -> u32 {
     let hw_bin = tri_class(tris);
     if params.mode == VGC_MODE_FORCE_HW { return hw_bin; }
+    let d = max(view_depth_of(cw), cameras[0].position_near.w);
+    let r_px = rw * cameras[0].proj[1][1] * 0.5 * f32(params.screen_height) / d;
+    // Use the sphere's nearest depth for the raster-removal proof. The cheaper
+    // center-depth radius below still drives normal tier selection.
+    let safe_d = max(d - rw, cameras[0].position_near.w);
+    let safe_r_px = rw * cameras[0].proj[1][1] * 0.5 * f32(params.screen_height) / safe_d;
+    if (params.flags & VGC_FLAG_DENSE_MASK) != 0u && d > rw + cameras[0].position_near.w && dense_fully_covered(cw, safe_r_px) {
+        return VGC_BIN_DENSE;
+    }
     let lock = (ic.flags >> VG_INST_TIER_SHIFT) & VG_INST_TIER_MASK;
     if lock == 1u { return hw_bin; }
     if lock == 2u { return VGC_BIN_SW; }
     if lock == 3u { return VGC_BIN_DENSE; }
-    let d = max(view_depth_of(cw), cameras[0].position_near.w);
-    let r_px = rw * cameras[0].proj[1][1] * 0.5 * f32(params.screen_height) / d;
     let edge = VGC_EDGE_FACTOR * r_px / sqrt(f32(max(tris, 1u)));
     if edge <= params.sw_edge_px {
         if (params.flags & VGC_FLAG_DENSE_MASK) != 0u && dense_overlap(cw, r_px) {
@@ -379,21 +436,21 @@ fn masked_bin(bin: u32) -> u32 {
 }
 
 fn emit_cluster(inst: u32, slot: u32, bin: u32, triangles: u32) {
+    if !reserve_triangle_budget(triangles) { return; }
     let k = atomicAdd(&state[VGC_ST_BINS + bin], 1u);
     if k >= params.bin_capacity {
         stat_add(VGC_STAT_VISIBLE_OVERFLOW);
+        atomicSub(&state[VGC_ST_STATS + VGC_STAT_TRIANGLES], triangles);
         return;
     }
     visible[bin * params.bin_capacity + k] = vec2<u32>(inst, slot);
     stat_add(VGC_STAT_EMITTED);
-    if (params.flags & VGC_FLAG_STATS) != 0u {
-        atomicAdd(&state[VGC_ST_STATS + VGC_STAT_TRIANGLES], triangles);
-    }
 }
 
 // ── Cluster test (cut rule, cone, frustum, occlusion, binning) ─────────────
 
 fn try_cluster(inst: u32, cs: u32, ic: InstCtx) {
+    if atomicLoad(&state[VGC_ST_BUDGET_REJECTED]) != 0u { return; }
     stat_add(VGC_STAT_CLUSTERS_TESTED);
     let c = vg_load_cluster(cs >> VG_PAGE_CLUSTER_SHIFT, cs & VG_PAGE_CLUSTER_MASK);
     let cw = (ic.m * vec4<f32>(c.sphere.xyz, 1.0)).xyz;
@@ -601,6 +658,10 @@ fn job_cluster(job: vec2<u32>) {
 }
 
 fn process_job(job: vec2<u32>) {
+    // Once a visible cluster has failed the remaining budget, stop expanding
+    // the cut this frame. Otherwise dense scenes keep traversing jobs whose
+    // clusters cannot possibly be admitted.
+    if atomicLoad(&state[VGC_ST_BUDGET_REJECTED]) != 0u { return; }
     stat_add(VGC_STAT_JOBS);
     switch job.y >> 30u {
         case 0u: { job_gcbvh(job); }

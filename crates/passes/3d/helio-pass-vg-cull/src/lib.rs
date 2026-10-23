@@ -218,6 +218,8 @@ pub mod state {
     pub const RANGES: u32 = helio_vg_format::CULL_STATE_RANGES;
     pub const ARGS: u32 = 72;
     pub const ARGS_PHASE_WORDS: u32 = 32;
+    /// Clusters rejected by the frame-wide triangle-per-pixel ceiling.
+    pub const BUDGET_REJECTED: u32 = 136;
     pub const WORDS: u32 = 144;
 }
 
@@ -297,6 +299,8 @@ pub struct VgCullStats {
     pub job_overflow: u32,
     pub visible_overflow: u32,
     pub root_shortcuts: u32,
+    /// Clusters denied admission by the hard projected triangle budget.
+    pub budget_rejected: u32,
     pub peak_queue: u32,
     pub tier_clusters: [u32; BIN_COUNT as usize],
 }
@@ -325,6 +329,7 @@ impl VgCullStats {
             visible_overflow: st(stats::VISIBLE_OVERFLOW),
             peak_queue: st(stats::PEAK_QUEUE),
             root_shortcuts: st(stats::ROOT_SHORTCUT),
+            budget_rejected: words[state::BUDGET_REJECTED as usize],
             tier_clusters,
         })
     }
@@ -343,7 +348,7 @@ impl VgCullStats {
     pub fn summary(&self) -> String {
         let (hw, sw, dense) = self.tier_split();
         format!(
-            "tris {} clusters {}/{} (HW {} SW {} dense {}) culled F{} O{} B{} E{} overflow {}",
+            "tris {} clusters {}/{} (HW {} SW {} dense {}) culled F{} O{} B{} E{} budget {} overflow {}",
             self.triangles,
             self.emitted,
             self.clusters_tested,
@@ -354,6 +359,7 @@ impl VgCullStats {
             self.culled_occlusion,
             self.culled_cone,
             self.culled_sse,
+            self.budget_rejected,
             self.job_overflow + self.visible_overflow,
         )
     }
@@ -407,6 +413,7 @@ pub fn wgsl_constants() -> String {
     u("VGC_ST_PHASE1", state::PHASE0_COUNTS);
     u("VGC_ST_RANGES", state::RANGES);
     u("VGC_ST_ARGS", state::ARGS);
+    u("VGC_ST_BUDGET_REJECTED", state::BUDGET_REJECTED);
     u("VGC_ARGS_PHASE_WORDS", state::ARGS_PHASE_WORDS);
     u("VGC_SW_GROUP_WIDTH", SW_GROUP_WIDTH);
     u("VGC_TILE", DENSE_TILE);

@@ -25,6 +25,9 @@ pub struct VgCullConfig {
     pub tau_px: f32,
     /// Projected average triangle edge at or below which a cluster is SW.
     pub sw_edge_px: f32,
+    /// Hard ceiling on selected cluster triangles per viewport pixel. Defaults
+    /// to 2; lower it with `HELIO_VG_TRIANGLES_PER_PIXEL` for stricter cuts.
+    pub triangles_per_pixel: f32,
     pub mode: VgMode,
     /// Last-frame-visible-first occlusion with a Hi-Z hook between phases.
     pub two_phase_occlusion: bool,
@@ -58,9 +61,16 @@ pub struct VgCullConfig {
 
 impl Default for VgCullConfig {
     fn default() -> Self {
+        let triangles_per_pixel = std::env::var("HELIO_VG_TRIANGLES_PER_PIXEL")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(2.0)
+            .clamp(0.25, 2.0);
         Self {
             tau_px: 1.0,
             sw_edge_px: 2.0,
+            triangles_per_pixel,
             mode: VgMode::Auto,
             two_phase_occlusion: true,
             rounds: 4,
@@ -182,6 +192,10 @@ struct GpuParams {
     dense_tiles_x: u32,
     dense_tiles_y: u32,
     max_groups: u32,
+    triangle_budget: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 #[repr(C)]
@@ -566,6 +580,14 @@ impl VgCullCore {
             dense_tiles_x: inputs.dense_tiles[0].max(1),
             dense_tiles_y: inputs.dense_tiles[1].max(1),
             max_groups: self.config.max_groups.max(1),
+            triangle_budget: ((self.size.0 as f64)
+                * (self.size.1 as f64)
+                * f64::from(self.config.triangles_per_pixel.clamp(0.25, 2.0)))
+            .floor()
+            .clamp(1.0, f64::from(u32::MAX)) as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
         helio_core::upload::write_buffer(queue, &self.params_buf, 0, bytemuck::bytes_of(&params));
         self.prepared = true;

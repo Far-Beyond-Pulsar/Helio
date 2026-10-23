@@ -363,9 +363,10 @@ impl RenderPass for VgDensePass {
             (Some(materials), Some(textures)) => Some((materials, textures)),
             _ => None,
         };
-        // Merge semantic: only diverted (dense-bin, opaque) clusters are Tier 3's;
-        // alpha-masked clusters stay with the Tier 2 masked kernels.
-        self.nonrt.set_dense_bin_only(true);
+        // Collect every visible VG tier intersecting the selected tiles. Clusters
+        // wholly contained by the dense mask are routed to BIN_DENSE by the cull;
+        // boundary-crossing clusters remain rasterized outside the selected tiles.
+        self.nonrt.set_dense_bin_only(false);
         let _ = masked_tables;
         self.nonrt.set_masked(None);
         let mut rec = ctx.graphics_cmds();
@@ -480,7 +481,9 @@ impl RenderPass for VgDensePass {
             };
             frame.write(
                 ResourceKey::new(KEY_DENSE),
-                VgDenseFrameData { dense_key, tile_mask, rt_bary, rt_visible, merge: true },
+                // RT owns visibility inside the resolved dense tiles. The resolve
+                // replaces raster there; outside them, raster remains authoritative.
+                VgDenseFrameData { dense_key, tile_mask, rt_bary, rt_visible, merge: self.backend != Tier3Backend::Rt },
                 "VgDense",
             );
         }

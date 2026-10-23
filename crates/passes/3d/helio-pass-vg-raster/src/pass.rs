@@ -51,13 +51,38 @@ fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
 }
 
+/// Higher sensitivity lowers the overlap required before a tile is classified
+/// as dense. Kept as a startup setting because the classifier pipelines are
+/// built with the raster pass.
+fn dense_sensitivity() -> f32 {
+    std::env::var("HELIO_VG_DENSE_SENSITIVITY")
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0)
+        .clamp(0.125, 8.0)
+}
+
+fn sensitivity_threshold(base: u32, sensitivity: f32) -> u32 {
+    (f64::from(base.max(1)) / f64::from(sensitivity))
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
 impl Default for VgRasterConfig {
     fn default() -> Self {
+        let sensitivity = dense_sensitivity();
         Self {
             cull_back: true,
             tile_bin_cap: 1024,
-            dense_tri_threshold: env_u32("HELIO_VG_DENSE_TRI").unwrap_or(512),
-            dense_hit_threshold: env_u32("HELIO_VG_DENSE_HIT").unwrap_or(256),
+            dense_tri_threshold: sensitivity_threshold(
+                env_u32("HELIO_VG_DENSE_TRI").unwrap_or(64),
+                sensitivity,
+            ),
+            dense_hit_threshold: sensitivity_threshold(
+                env_u32("HELIO_VG_DENSE_HIT").unwrap_or(64),
+                sensitivity,
+            ),
             dense_hysteresis: 0.5,
             dense_latch_frames: env_u32("HELIO_VG_DENSE_LATCH").unwrap_or(8),
             dense_max_tiles: env_u32("HELIO_VG_DENSE_MAX_TILES").unwrap_or(512),

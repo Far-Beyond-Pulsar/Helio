@@ -5,8 +5,8 @@
 //! known after the raster. [`RtCollect`] closes that gap without a CPU stall:
 //!
 //! 1. `collect` (compute, one thread per visible cluster, dispatched like
-//!    `bin`) marks every instance that has a visible cluster overlapping a
-//!    dense tile, deduplicated GPU-side through a per-instance bitmap, and
+//!    `bin`) marks every instance that has a visible cluster from any raster
+//!    tier overlapping a dense tile, deduplicated GPU-side through a per-instance bitmap, and
 //!    appends one 64-byte record per distinct instance (transform, asset slot,
 //!    error scale) to a bounded candidate buffer.
 //! 2. The header + records (at most `capacity` of them) and the dense-tile
@@ -25,7 +25,10 @@ use crate::nonrt::DenseNonRtInputs;
 use std::sync::mpsc;
 
 /// Candidate record capacity of the readback.
-pub const CAND_CAPACITY: u32 = 2048;
+// Dense tiles can contain many small foliage instances. Keep enough room for
+// their deduplicated instance list so RT does not silently fall back at the
+// old 2k-instance stress-scene ceiling.
+pub const CAND_CAPACITY: u32 = 16_384;
 const HEADER_WORDS: u32 = 4;
 const STRIDE_WORDS: u32 = 16;
 const SLOTS: usize = 3;
