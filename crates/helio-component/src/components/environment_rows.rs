@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 144 * 4);
         assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 136 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
-        assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 48 * 4);
         assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 44 * 4);
         assert_eq!(std::mem::size_of::<DecalSourceRow>(), 36 * 4);
         assert_eq!(std::mem::size_of::<CoronaEmitterSourceRow>(), 60 * 4);
@@ -727,10 +727,8 @@ mod tests {
         foliage.placement.layer_extent = 25.0;
         let row = FoliageSourceRow::of(&foliage);
         let foliage_type = super::super::foliage_component::runtime::gpu_type(&foliage);
-        assert_eq!(
-            &bytemuck::bytes_of(&row)[..96],
-            bytemuck::bytes_of(&foliage_type)
-        );
+        let type_bytes = bytemuck::bytes_of(&foliage_type);
+        assert_eq!(&bytemuck::bytes_of(&row)[..type_bytes.len()], type_bytes);
         assert_eq!(row.type_params[0], 12.0, "density first: the join's gate");
         assert_eq!(row.layer[0], 25.0);
         foliage.general.enabled = false;
