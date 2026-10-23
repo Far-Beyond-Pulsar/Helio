@@ -12,6 +12,31 @@ pub struct GeneralFoliageProps {
     /// Slice in the density texture array driving where this type grows.
     #[property(min = 0.0, max = 255.0, step = 1.0, category = "General")]
     pub density_layer: u64,
+    /// What a blade is: a smooth strip, or on voxel ground a stack of
+    /// cubes (edge Width min) upright on one grid.
+    #[serde(default)]
+    #[property(category = "General")]
+    pub kind: FoliageForm,
+}
+
+/// What a foliage type's blades are (`helio_pass_foliage_place::FoliageKind`).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
+pub enum FoliageForm {
+    /// A procedural blade strip.
+    #[default]
+    Blade,
+    /// A stack of cubes (voxel worlds' grass).
+    Block,
 }
 
 impl Default for GeneralFoliageProps {
@@ -20,6 +45,7 @@ impl Default for GeneralFoliageProps {
             enabled: true,
             density: 256.0,
             density_layer: 0,
+            kind: FoliageForm::Blade,
         }
     }
 }

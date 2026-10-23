@@ -19,8 +19,9 @@ pub struct PlacementFoliageProps {
     /// Acceptance band lower edge on terrain slope, in degrees from horizontal.
     #[property(min = 0.0, max = 90.0, step = 0.5, category = "Placement")]
     pub slope_min_degrees: f32,
-    /// Acceptance band upper edge on terrain slope, in degrees from horizontal.
-    #[property(min = 0.0, max = 90.0, step = 0.5, category = "Placement")]
+    /// Acceptance band upper edge on terrain slope, in degrees from
+    /// horizontal (180: any ground, overhangs too).
+    #[property(min = 0.0, max = 180.0, step = 0.5, category = "Placement")]
     pub slope_max_degrees: f32,
     /// Acceptance band lower edge on world altitude in metres.
     #[property(category = "Placement")]
@@ -36,6 +37,11 @@ pub struct PlacementFoliageProps {
     /// foliage ring around the camera instead of stopping at the volume box.
     #[property(category = "Placement")]
     pub has_infinite_extent: bool,
+    /// The ground it grows on (empty: any): on voxel ground its terrain
+    /// materials, by name or id ("Grass").
+    #[serde(default)]
+    #[property(category = "Placement", label = "Grows on")]
+    pub grows_on: crate::VoxelMaterialList,
 }
 
 impl Default for PlacementFoliageProps {
@@ -51,6 +57,7 @@ impl Default for PlacementFoliageProps {
             altitude_max: 50.0,
             layer_extent: 120.0,
             has_infinite_extent: false,
+            grows_on: crate::VoxelMaterialList::default(),
         }
     }
 }

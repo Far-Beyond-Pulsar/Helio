@@ -11,7 +11,8 @@
 //! `fill_sphere`, `fill_cube`, `raycast_distance`), and every setting of
 //! the world, read and written: `world_shape`, `planet_radius`,
 //! `plane_size`, `voxel_size`, `seed`, `air`, `air_density`, `air_tint_*`,
-//! `air_haze`, `is_editable` and their `set_*`. Material ids are the
+//! `air_haze`, `is_editable` and their `set_*`; its features by preset
+//! (`use_feature_preset`). Material ids are the
 //! engine terrain materials (`helio_pass_voxel_planet::terrain::material`);
 //! 0 is air. They shape the built-in generator's layer stack through
 //! [`VoxelTerrainLayersComponent`]: `use_preset`, `add_layer`,
@@ -33,8 +34,10 @@ use helio_voxel_data::{
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
+use helio_pass_voxel_planet::feature_recipe::FeatureRecipe;
+
 use super::{
-    BlockData, BlockMaterialChange, VoxelAir, VoxelLayerKind, VoxelTerrainComponent,
+    BlockData, BlockMaterialChange, VoxelAir, feature_recipe, VoxelLayerKind, VoxelTerrainComponent,
     VoxelTerrainLayer, VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape,
 };
 
@@ -49,8 +52,46 @@ pub fn material_colour(id: u32) -> [f32; 3] {
     [colour[0], colour[1], colour[2]]
 }
 
-/// The world of a terrain form and generator.
+/// The world of a terrain form, generator and features (grown with the
+/// generator's seed in cells of the voxel size).
 pub fn world_recipe(
+    shape: VoxelWorldShape,
+    planet_radius: f64,
+    plane_size: f64,
+    voxel_size: f64,
+    source: TerrainSource,
+    features: &FeatureRecipe,
+) -> PlanetRecipe {
+    let mut recipe = ground_recipe(shape, planet_radius, plane_size, voxel_size, source);
+    recipe.features = features.grow(voxel_size, recipe.terrain.seed);
+    recipe
+}
+
+/// Fingerprint of the ground a terrain makes, its features included: its
+/// edits belong to it (`VoxelEditJournal::made_on`). The features count as
+/// their recipe (never grown here, so it is cheap every frame); a world
+/// without features keeps its recipe's own fingerprint.
+pub fn ground_fingerprint(
+    shape: VoxelWorldShape,
+    planet_radius: f64,
+    plane_size: f64,
+    voxel_size: f64,
+    source: TerrainSource,
+    features: &FeatureRecipe,
+) -> u64 {
+    let ground = ground_recipe(shape, planet_radius, plane_size, voxel_size, source).fingerprint();
+    if features.is_empty() {
+        return ground;
+    }
+    let recipe = serde_json::to_string(features).expect("a feature recipe serializes");
+    recipe
+        .bytes()
+        .fold(ground, |h, byte| (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3))
+        .max(1)
+}
+
+/// The world without its features.
+fn ground_recipe(
     shape: VoxelWorldShape,
     planet_radius: f64,
     plane_size: f64,
@@ -121,12 +162,13 @@ pub fn is_generated(component: &VoxelTerrainComponent) -> bool {
     terrain::find(&component.generator.id, component.generator.version).is_some()
 }
 
-/// The recipe of a terrain instance, with its owner's uniform scale.
+/// The recipe of a terrain instance, with its owner's uniform scale, without
+/// its features, and the features' recipe (grown when a world is built).
 fn entity_recipe(
     world: &World,
     entity: Entity,
     component: &VoxelTerrainComponent,
-) -> Result<PlanetRecipe, String> {
+) -> Result<(PlanetRecipe, FeatureRecipe), String> {
     let transform = pulsar_scene_model::attachments::owner_component::<Transform>(world, entity)
         .copied()
         .unwrap_or_default();
@@ -145,17 +187,29 @@ fn entity_recipe(
         seed: component.seed,
         settings: generator_settings(world, entity, component),
     };
-    Ok(world_recipe(
-        component.shape,
-        component.planet_radius * sx,
-        component.plane_size * sx,
-        component.voxel_size * sx,
-        source,
+    Ok((
+        ground_recipe(
+            component.shape,
+            component.planet_radius * sx,
+            component.plane_size * sx,
+            component.voxel_size * sx,
+            source,
+        ),
+        feature_recipe(&component.features),
     ))
+}
+
+/// `recipe` with `features` grown with its seed in cells of its voxel size.
+fn grown(recipe: PlanetRecipe, features: &FeatureRecipe) -> PlanetRecipe {
+    PlanetRecipe {
+        features: features.grow(recipe.voxel_size_m, recipe.terrain.seed),
+        ..recipe
+    }
 }
 
 struct CachedWorld {
     recipe: PlanetRecipe,
+    features: FeatureRecipe,
     edits: VoxelEditJournal,
     planet: Arc<Planet>,
 }
@@ -180,14 +234,17 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
             component.generator.id, component.generator.version
         ));
     }
-    let recipe = entity_recipe(world, entity, component)?;
+    let (recipe, features) = entity_recipe(world, entity, component)?;
     let mut worlds = WORLDS.lock().unwrap_or_else(|e| e.into_inner());
     let worlds = worlds.get_or_insert_with(HashMap::new);
     // A scene's address names it while it lives; a later scene at the same
     // address only finds a world whose recipe and edits match its own.
     let key = (world as *const World as usize, entity.bits());
     if let Some(cached) = worlds.get_mut(&key) {
-        if cached.recipe == recipe && component.edits.starts_with(&cached.edits) {
+        if cached.recipe == recipe
+            && cached.features == features
+            && component.edits.starts_with(&cached.edits)
+        {
             let start = cached.edits.len();
             if component.edits.len() > start {
                 // Scripts append edit after edit: extend the world in place
@@ -204,7 +261,7 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
             return Ok(Arc::clone(&cached.planet));
         }
     }
-    let planet = Arc::new(journal_planet(recipe.clone(), &component.edits)?);
+    let planet = Arc::new(journal_planet(grown(recipe.clone(), &features), &component.edits)?);
     if worlds.len() >= 16 && !worlds.contains_key(&key) {
         worlds.clear();
     }
@@ -212,6 +269,7 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
         key,
         CachedWorld {
             recipe,
+            features,
             edits: component.edits.clone(),
             planet: Arc::clone(&planet),
         },
@@ -288,11 +346,8 @@ pub fn journals_to_compact(world: &World) -> Vec<(Entity, PlanetRecipe, VoxelEdi
         .into_iter()
         .filter(|(_, c)| c.edits.len() - c.edits.base_len() > LISTED_EDITS && is_generated(c))
         .filter_map(|(entity, c)| {
-            Some((
-                entity,
-                entity_recipe(world, entity, c).ok()?,
-                c.edits.clone(),
-            ))
+            let (recipe, features) = entity_recipe(world, entity, c).ok()?;
+            Some((entity, grown(recipe, &features), c.edits.clone()))
         })
         .collect()
 }
@@ -717,6 +772,26 @@ impl VoxelTerrainComponent {
     fn set_seed(world: &mut World, entity: Entity, seed: i64) -> Result<(), String> {
         terrain_mut(world, entity)?.seed = seed as u64;
         Ok(())
+    }
+
+    /// Replace the world's features with a preset's: "earth", "moon",
+    /// "desert" or "none" (`FeatureRecipe::PRESETS`).
+    #[world_method(category = "Voxel|Features")]
+    fn use_feature_preset(world: &mut World, entity: Entity, name: String) -> Result<(), String> {
+        let preset = FeatureRecipe::preset(&name).ok_or_else(|| {
+            format!(
+                "unknown feature preset {name:?} ({})",
+                FeatureRecipe::PRESETS.join(", ")
+            )
+        })?;
+        terrain_mut(world, entity)?.features = super::feature_spawns(&preset);
+        Ok(())
+    }
+
+    /// Number of feature spawns (what grows where).
+    #[world_method(pure, category = "Voxel|Features")]
+    fn feature_spawn_count(world: &World, entity: Entity) -> Result<u32, String> {
+        Ok(terrain(world, entity)?.features.len() as u32)
     }
 
     /// The world's air: "custom" (the authored sky), "none", "earthlike",

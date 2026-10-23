@@ -23,7 +23,7 @@
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert, [`worlds`]: the planet, its features, look, sky and
-//! ground cover) or `_LAYERS=<json>` (a layer stack), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
+//! ground cover) or `_LAYERS=<json>` (a layer stack), `_EXPORT=<dir>` (its layers, features and look as a Pulsar level holds them), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
@@ -1777,8 +1777,22 @@ fn main() {
         stack.source(seed)
     };
     // HELIO_VOXEL_FLIGHT_NO_FEATURES: bare terrain (A/B for their cost).
-    let features = if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_FEATURES").is_some() { Default::default() } else { preset.features(voxel, seed) };
-    let planet = Planet::new(PlanetRecipe { radius_m: preset.radius_m(), voxel_size_m: voxel, terrain, features, ..Default::default() }).unwrap();
+    let features = if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_FEATURES").is_some() { Default::default() } else { preset.features() };
+    let planet = Planet::new(PlanetRecipe { radius_m: preset.radius_m(), voxel_size_m: voxel, terrain, features: features.grow(voxel, seed), ..Default::default() }).unwrap();
+    // HELIO_VOXEL_FLIGHT_EXPORT=<dir>: the preset's layer stack, features
+    // recipe and look as a Pulsar level holds them
+    // (`VoxelTerrainLayersComponent`, `VoxelTerrainComponent::features`,
+    // `appearance_parameters`), written to `layers.json`, `features.json`
+    // and `appearance.json`; nothing is drawn.
+    if let Ok(dir) = std::env::var("HELIO_VOXEL_FLIGHT_EXPORT") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).expect("export directory");
+        std::fs::write(dir.join("layers.json"), serde_json::to_string_pretty(&preset.stack()).unwrap()).unwrap();
+        std::fs::write(dir.join("features.json"), serde_json::to_string_pretty(&features).unwrap()).unwrap();
+        std::fs::write(dir.join("appearance.json"), serde_json::to_string(&preset.appearance(planet.field().appearance())).unwrap()).unwrap();
+        eprintln!("exported {preset:?} to {}", dir.display());
+        return;
+    }
     let mut flight = Flight::new(&output, size, quality, planet, preset);
 
     // Ground spawn on the +Y face.

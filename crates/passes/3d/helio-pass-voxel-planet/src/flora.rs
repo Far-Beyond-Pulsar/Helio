@@ -17,9 +17,11 @@ pub use rng::Rng;
 
 use crate::stamp::{Part, Shape, Stamp};
 use glam::DVec3;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Species {
+    #[default]
     Oak,
     DarkOak,
     Birch,

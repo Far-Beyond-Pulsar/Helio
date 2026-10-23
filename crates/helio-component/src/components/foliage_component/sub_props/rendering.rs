@@ -31,6 +31,11 @@ pub struct RenderingFoliageProps {
     /// Metallic factor of the foliage material (0 = dielectric, 1 = metal).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Rendering")]
     pub metallic: f32,
+    /// Each tuft takes the colour of the ground under it, times twice the
+    /// base colour (0.5: the ground's own), so a meadow reads as its turf.
+    #[serde(default)]
+    #[property(category = "Rendering", label = "Ground colour")]
+    pub ground_colour: bool,
 }
 
 impl Default for RenderingFoliageProps {
@@ -45,6 +50,7 @@ impl Default for RenderingFoliageProps {
             base_color: [0.28, 0.46, 0.14, 1.0],
             roughness: 0.85,
             metallic: 0.0,
+            ground_colour: false,
         }
     }
 }
