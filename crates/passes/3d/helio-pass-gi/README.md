@@ -9,22 +9,29 @@ or under overhangs, and light that changes as the world is dug and built.
 ## Probes
 
 - **Clipmap.** `LEVELS` (6) cubic grids of `SIDE`^3 (24^3) probes, each
-  twice as far apart as the one inside it (1, 2, 4 .. 32 m): half-extents
-  of 12 to 384 m around the eye. Probes sit at whole multiples of their
-  spacing in world coordinates, and are stored toroidally: storage
-  coordinates are world coordinates modulo `SIDE`. A probe keeps its record
-  while it stays in the clipmap, and a grid that scrolls resets only the
-  slabs that came in. The clipmap is a function of the eye's world position
-  alone (`Clipmap::around(eye(ctx))`), so a tracer keeping state per probe
-  follows it by computing it too.
+  twice as far apart as the one inside it. The finest spacing is the
+  pass's (`GiConfig::finest_spacing`, `RendererConfig::gi_probe_spacing`):
+  1 m over voxel terrain (1, 2, 4 .. 32 m apart: half-extents of 12 to
+  384 m around the eye), 0.5 m in mesh scenes, whose rooms, pillars and
+  furniture are a few metres apart (6 to 192 m). Probes sit at whole
+  multiples of their spacing in world coordinates, and are stored
+  toroidally: storage coordinates are world coordinates modulo `SIDE`. A
+  probe keeps its record while it stays in the clipmap, and a grid that
+  scrolls resets only the slabs that came in. The clipmap is a function of
+  the eye's world position and the finest spacing alone
+  (`Clipmap::around`), published each frame as `gi_clipmap`, so a tracer
+  keeping state per probe follows it.
 - **A probe** (`gi_probes`, 72 words) holds:
   - its irradiance / pi as L1 spherical harmonics (RGB, half floats);
   - its state (active, updates taken);
   - its visibility as an 8x8 octahedral map of ray distance moments (mean,
     mean^2; half floats), as in DDGI.
 
-  A probe whose rays mostly meet back faces is inside the ground: inactive,
-  so it takes no weight.
+  A probe whose rays mostly meet back faces (a quarter or more) is inside
+  the ground, a wall or a solid mesh: inactive, so it takes no weight.
+  Probes are not moved out of geometry (DDGI's relocation): a probe
+  inside is dropped, and the visibility test keeps its neighbours from
+  leaking through.
 - **Updates.** Each frame updates `LEVEL_UPDATES` probes per level (680
   on the two finest, 340 on the coarser, whose far surroundings change
   slowly and whose rays walk farthest): those that came in first, oldest
@@ -51,12 +58,16 @@ or under overhangs, and light that changes as the world is dug and built.
 3. **`gi_reset`:** the probes that came in.
 4. **`gi_rays_main`:** this frame's rays (`gi_rays`).
 
-It then clears `gi_hits` and publishes `gi_frame`, `gi_probes`, `gi_rays`,
-`gi_hits` and `gi_sun`.
+It then clears `gi_hits` and `gi_light` and publishes `gi_frame`,
+`gi_probes`, `gi_rays`, `gi_hits`, `gi_sun`, `gi_light` and `gi_clipmap`.
+A pass whose only tracer is the meshes' (`GiConfig::needs_tlas`: no voxel
+terrain) runs only on frames with a TLAS and publishes nothing on the
+others, so deferred lighting keeps the sky's ambient.
 
 **Tracers** read every ray and write the hits of their own geometry
 (`GiHit`: distance, packed normal, albedo RGB8 with the sun's visibility in
-alpha, and the tracer). Tracers today:
+alpha, and the tracer), and any light the hit gives off beyond the sun's
+and the probes' (`gi_light`, RGB half floats, added as is). Tracers:
 
 - **Voxel terrain** (`helio-pass-voxel-planet`, `gi_trace`): each probe's
   base cell is located on the CPU in f64 when the probe comes in
@@ -66,8 +77,31 @@ alpha, and the tracer). Tracers today:
   the face. Probe rays see the cut as the camera drew it: coarser where the
   camera needs less detail. The test `terrain_traces_gi_probe_rays` checks
   them against CPU rays.
-- **Meshes** (hardware ray queries against the scene's TLAS) are next.
-  Until then, meshes receive GI but neither occlude nor bounce it.
+- **Meshes** (`GiMeshTracePass`, `gi_mesh_trace.wgsl`), after the others,
+  on a device with hardware ray queries: a ray queries the frame's TLAS
+  (`RenderEnvironment::tlas`) up to the hit already written and keeps the
+  nearer. The hit is shaded without a G-buffer from its instance's row
+  (`helio_core::RayInstance`, `ray_instances`: the material's base colour
+  and emission, where its triangles are in the scene's mesh pools): the
+  triangle's normal, turned to the side its vertex normals call outside,
+  and their interpolation; a hit on the inside is a back face. The sun's
+  visibility is a shadow ray through the TLAS times the sun's occlusion
+  maps (terrain, when published). Whichever hit stands (the terrain's
+  too), if it faces the ray, then takes the meshes' shadow of the sun and
+  the light of one of the scene's point and spot lights: chosen in
+  proportion to its unshadowed irradiance there, with a shadow ray, over
+  its chance (`gi_light`). The frontend publishes the TLAS and its rows
+  (`Renderer::set_ray_tracing_frame`, from
+  `helio_default_graphs::ray_tracing::SceneDbRayTracing`; `partial`
+  leaves out what it cannot represent, such as foliage and masked
+  materials, so the probes see past it). Textures are not sampled at hits
+  (the material's factor), and local lights' shadow rays see meshes only,
+  not voxel terrain.
+
+  Without ray queries (software Vulkan, WebGPU) the tracer is not built:
+  over voxel terrain the probes see the terrain alone (meshes receive GI
+  but neither occlude nor bounce it); a mesh scene has no GI, the sky's
+  ambient as before.
 
 `GiResolvePass` runs after the tracers and before deferred lighting. For
 each pixel it writes `gi_irradiance` (`gi_sample.wgsl`): irradiance / pi
@@ -83,6 +117,8 @@ Near its grid's edge, the level blends into the next one.
 
 ## Costs (targets, 1080p, RTX 3060 class)
 
-About 4k probe updates a frame (261k rays, each with its sun walk): under
-2 ms with the terrain tracer. Memory: 6 x 24^3 probes x 288 bytes (24 MB),
-plus rays and hits (12.5 MB).
+2720 probe updates a frame (174k rays). With the terrain tracer about
+2 ms (its sun from the occlusion maps). The mesh tracer: a ray query a
+ray, a shadow ray to the sun from hits facing it and one to a chosen
+light. Memory: 6 x 24^3 probes x 288 bytes (24 MB), plus rays, hits and
+their light (9.8 MB).

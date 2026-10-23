@@ -29,6 +29,10 @@ struct SceneLight {
 @group(0) @binding(6) var<storage, read> scene_lights: array<SceneLight>;
 @group(0) @binding(7) var<uniform> atmosphere: AtmosphereFrame;
 @group(0) @binding(8) var<uniform> atmosphere_sky_table: array<vec4<f32>, 2304>;
+// A ray's hit's light beyond the sun's and the probes' (`GiMeshTracePass`:
+// the scene's lights on it, the light it gives off), radiance RGB in half
+// floats; zero where no tracer wrote any.
+@group(0) @binding(9) var<storage, read> gi_light: array<vec2<u32>>;
 
 const PI: f32 = 3.14159265;
 
@@ -81,9 +85,10 @@ var<workgroup> w_inside: atomic<u32>;
 
 // Last frame's probes, a workgroup each, a lane a ray: each ray's radiance
 // (the sky, or its hit's: albedo times the sun's light and the probes'
-// there; nothing from a back face), projected on L1 harmonics and blended
-// into the probe; its distances into the probe's moments (a lane a texel).
-// A probe whose rays mostly meet back faces is inside the ground.
+// there, plus its `gi_light`; nothing from a back face), projected on L1
+// harmonics and blended into the probe; its distances into the probe's
+// moments (a lane a texel). A probe whose rays mostly meet back faces is
+// inside the ground (or a wall).
 @compute @workgroup_size(64)
 fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     if wg.x >= frame_gi.counts.y { return; }
@@ -115,9 +120,11 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
                 let seen = f32((hit.light >> 16u) & 255u) / 255.0;
                 back = gi_sun[1].rgb * seen * max(dot(-n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, -n).rgb;
             }
-            // And the light it gives off.
+            // And the light it gives off, and the scene's lights' on it.
             let glow = f32(hit.light >> 24u) / 16.0;
-            radiance = albedo.rgb * (front + through * back + glow);
+            let lit = gi_light[wg.x * GI_RAYS + li];
+            let extra = vec3<f32>(unpack2x16float(lit.x), unpack2x16float(lit.y).x);
+            radiance = albedo.rgb * (front + through * back + glow) + extra;
         }
     } else {
         radiance = sky_radiance(probe * 0.001, dir);

@@ -137,7 +137,7 @@ impl World {
         let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, config);
         let lights = self.lights.as_ref().map(|[lights, tile_lists, tile_counts]| SceneLights { lights, tile_lists, tile_counts, eye: Vec3::ZERO });
         if self.gi.is_some() {
-            self.chunks.follow_gi(helio_pass_gi::Clipmap::around(view.eye), view.eye, view.eye);
+            self.chunks.follow_gi(helio_pass_gi::Clipmap::around(view.eye, helio_pass_gi::DEFAULT_FINEST_SPACING), view.eye, view.eye);
         }
         let gi = self.gi.as_ref().map(|[frame, rays, hits, sun]| GiRays { frame, rays, hits, sun });
         // As the pass: the sun's occlusion before the draw (its GI hits read it).
@@ -2293,7 +2293,7 @@ fn terrain_shadows_local_lights() {
 /// toward `sun`.
 fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [wgpu::Buffer; 4] {
     use wgpu::util::DeviceExt;
-    let clipmap = helio_pass_gi::Clipmap::around(eye);
+    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
     let frame = helio_pass_gi::GpuFrame {
         levels: clipmap.levels(eye),
         sky: [0.0; 4],
@@ -2357,7 +2357,7 @@ struct GiRayCheck {
 /// rays; their hits' sun against the sun's occlusion maps read back.
 fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCheck {
     let view_proj = view.view_proj(planet);
-    let clipmap = helio_pass_gi::Clipmap::around(eye);
+    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
     let mut probes = Vec::new();
     for z in 8..16 {
         for y in 8..16 {

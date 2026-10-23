@@ -129,11 +129,20 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
             }
         }
     }
-    // Ambient supplies indirect diffuse when no baked lighting is available.
-    // Lightmapped surfaces use the bake directly, without an additional AO term.
+    // Ambient supplies indirect diffuse when no baked lighting is available:
+    // the GI probes' irradiance where they hold the point, else the flat
+    // ambient. Lightmapped surfaces use the bake directly, without an
+    // additional AO term.
     let orm=textureLoad(gbuf_orm,pixel,0).rgb;
     let f=s.f0+(max(vec3<f32>(1.0-s.roughness),s.f0)-s.f0)*pow5(1.0-max(dot(s.normal,s.view),0.0));
-    var indirect=(1.0-f)*(1.0-s.metallic)*globals.ambient.rgb*s.albedo*clamp(orm.r,0.0,1.0);
+    var ambient=globals.ambient.rgb;
+    let gi_word=u32(pixel.y)*textureDimensions(gbuf_depth).x+u32(pixel.x);
+    if arrayLength(&gi_irradiance)>1u && gi_word<arrayLength(&gi_irradiance) {
+        let g=gi_irradiance[gi_word];
+        let ba=unpack2x16float(g.y);
+        ambient=mix(ambient,vec3<f32>(unpack2x16float(g.x),ba.x),clamp(ba.y,0.0,1.0));
+    }
+    var indirect=(1.0-f)*(1.0-s.metallic)*ambient*s.albedo*clamp(orm.r,0.0,1.0);
     let lm_uv=textureLoad(gbuf_lightmap_uv,pixel,0).xy;
     if (globals.surface_flags&1u)!=0u && lm_uv.x>=0.0 {
         indirect=textureSampleLevel(baked_lightmap,lightmap_sampler,lm_uv,0.0).rgb*s.albedo;

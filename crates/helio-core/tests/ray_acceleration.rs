@@ -322,14 +322,18 @@ fn transmission_rows_expire_with_their_acceleration_frame() {
         usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
     });
     let mut frame = helio_core::FrameAcceleration::default();
-    frame.publish_with_transmission(7, Some(&tlas), Some(&rows));
+    let rays = |tlas, transmission, instances| helio_core::RayFrame { tlas, transmission, instances };
+    frame.publish(7, rays(Some(&tlas), Some(&rows), Some(&rows)));
     assert_eq!(frame.transmission(7), Some(&rows));
+    assert_eq!(frame.instances(7), Some(&rows));
     assert!(frame.transmission(6).is_none());
     assert!(frame.transmission(8).is_none());
-    frame.publish(8, Some(&tlas));
+    frame.publish(8, rays(Some(&tlas), None, None));
     assert!(frame.transmission(8).is_none(), "opaque publication retained stale glass");
-    frame.publish_with_transmission(9, None, Some(&rows));
+    assert!(frame.instances(8).is_none(), "publication retained stale instance rows");
+    frame.publish(9, rays(None, Some(&rows), Some(&rows)));
     assert!(frame.transmission(9).is_none(), "materials published without their TLAS");
+    assert!(frame.instances(9).is_none(), "instance rows published without their TLAS");
 }
 
 #[test]

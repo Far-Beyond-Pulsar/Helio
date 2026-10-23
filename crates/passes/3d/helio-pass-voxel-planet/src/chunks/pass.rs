@@ -39,8 +39,8 @@ pub struct ChunkPass {
     scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
     /// Every hit walks its own sun ray (`set_steady_shadows`).
     steady_shadows: bool,
-    /// The eye's world position this frame (`helio_pass_gi::eye`), for the
-    /// GI clipmap the terrain traces rays of.
+    /// The eye's world position this frame (`helio_pass_gi::eye`), where
+    /// the GI clipmap the terrain traces rays of is centred.
     gi_eye: Option<DVec3>,
     /// The last frame's projection jitter (NDC).
     last_jitter: Vec2,
@@ -221,6 +221,7 @@ const READS: &[&str] = &[
     helio_pass_gi::GI_FRAME,
     helio_pass_gi::GI_RAYS,
     helio_pass_gi::GI_SUN,
+    helio_pass_gi::GI_CLIPMAP,
     ATMOSPHERE_FRAME,
 ];
 /// helio-pass-sky's frame of the atmosphere (its sun's disk).
@@ -512,9 +513,10 @@ impl ChunkPass {
         let tile_counts = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")).map(|b| (*b).clone());
         // The GI probes' rays, when a GI pass runs before this one.
         let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
-        let gi = match (binding(helio_pass_gi::GI_FRAME), binding(helio_pass_gi::GI_RAYS), binding(helio_pass_gi::GI_HITS), binding(helio_pass_gi::GI_SUN), self.gi_eye) {
-            (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(world_eye)) => {
-                world.follow_gi(helio_pass_gi::Clipmap::around(world_eye), world_eye, frame.eye);
+        let clipmap = ctx.registry.get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
+        let gi = match (binding(helio_pass_gi::GI_FRAME), binding(helio_pass_gi::GI_RAYS), binding(helio_pass_gi::GI_HITS), binding(helio_pass_gi::GI_SUN), clipmap, self.gi_eye) {
+            (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(clipmap), Some(world_eye)) => {
+                world.follow_gi(clipmap, world_eye, frame.eye);
                 Some((frame_gi, rays, hits, sun))
             }
             _ => None,

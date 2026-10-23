@@ -150,6 +150,9 @@ struct AppState {
 
     scene_db: SceneDb,
     acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    /// Whether lights cast ray-traced shadows (`HLFS_RT`); without, any
+    /// `acceleration` is the meshes for the GI probes only.
+    ray_traced: bool,
 
     // Scene state
     chandelier_light_ids: Vec<Entity>,
@@ -276,6 +279,11 @@ impl ApplicationHandler for App {
             eprintln!("Interactive HLFS configuration: {:?}",
                 renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
             Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
+        } else if device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off")
+        {
+            // No ray-traced shadows: the meshes for the GI probes alone.
+            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()))
         } else { None };
         renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -337,6 +345,7 @@ impl ApplicationHandler for App {
             last_frame: std::time::Instant::now(),
             scene_db,
             acceleration,
+            ray_traced,
             // Start at entrance, looking toward the altar
             cam_pos: if large { glam::Vec3::new(0.0, 2.3, 67.0) }
                 else { glam::Vec3::new(0.0, 2.0, 24.0) },
@@ -609,7 +618,7 @@ impl AppState {
         }
 
         flicker_lights(&mut self.scene_db.world, &self.chandelier_light_ids, &self.candle_light_ids,
-            self.large, time, self.acceleration.is_some());
+            self.large, time, self.ray_traced);
 
         // Scene state is persistent — no per-frame setup needed.
 
@@ -622,12 +631,12 @@ impl AppState {
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Some(acceleration) = &self.acceleration {
-            renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
+            renderer.set_ray_tracing_frame(acceleration.frame());
         }
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
-        if self.acceleration.is_some() {
+        if self.ray_traced {
             static CONFIG_LOGGED: std::sync::Once = std::sync::Once::new();
             CONFIG_LOGGED.call_once(|| eprintln!("HLFS after first live render: {:?}",
                 renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config()));

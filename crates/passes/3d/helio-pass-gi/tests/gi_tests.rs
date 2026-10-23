@@ -1,12 +1,26 @@
 //! The probes' light against what it must be: a uniform sky (a white
 //! furnace), the sun on flat ground, and the resolve at pixels.
 
+mod common;
+
+use common::{half2, pack, probe};
 use glam::{DVec3, Mat4, Vec3};
-use helio_pass_gi::{Clipmap, GiPass, GiResolvePass, LEVEL_PROBES, PROBES, PROBE_WORDS, RAYS};
+use helio_pass_gi::{Clipmap, GiConfig, GiPass, GiResolvePass, DEFAULT_FINEST_SPACING, LEVEL_PROBES, PROBES, RAYS};
 
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+}
+
+fn read(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<u32> {
+    common::read(&gpu.device, &gpu.queue, buffer)
+}
+
+/// A directional light straight down, illuminance `e`.
+fn sun_down(gpu: &Gpu, e: f32) -> wgpu::Buffer {
+    use wgpu::util::DeviceExt;
+    let light = common::sun_down(e);
+    gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sun"), contents: bytemuck::cast_slice(&light), usage: wgpu::BufferUsages::STORAGE })
 }
 
 fn gpu() -> Option<&'static Gpu> {
@@ -25,46 +39,6 @@ fn gpu() -> Option<&'static Gpu> {
     .as_ref()
 }
 
-fn read(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<u32> {
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: buffer.size(), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-    let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
-    gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
-}
-
-fn half2(w: u32) -> [f32; 2] {
-    let f = |h: u32| {
-        let (s, e, m) = ((h >> 15) & 1, (h >> 10) & 31, h & 1023);
-        let v = if e == 0 { m as f32 * 2f32.powi(-24) } else { (1.0 + m as f32 / 1024.0) * 2f32.powi(e as i32 - 15) };
-        if s == 1 { -v } else { v }
-    };
-    [f(w & 0xffff), f(w >> 16)]
-}
-
-/// Probe `index`'s irradiance / pi toward unit `n` (its L1 harmonics), its
-/// state.
-fn probe(words: &[u32], index: u32, n: Vec3) -> (Vec3, u32) {
-    let at = (index * PROBE_WORDS) as usize;
-    let h: Vec<[f32; 2]> = (0..6).map(|w| half2(words[at + w])).collect();
-    let (r, g, b) = ([h[0][0], h[1][1], h[3][0], h[4][1]], [h[0][1], h[2][0], h[3][1], h[5][0]], [h[1][0], h[2][1], h[4][0], h[5][1]]);
-    let basis = [0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x];
-    let dot = |c: [f32; 4]| (0..4).map(|k| c[k] * basis[k]).sum::<f32>().max(0.0);
-    (Vec3::new(dot(r), dot(g), dot(b)), words[at + 6])
-}
-
-/// A directional light straight down, illuminance `e` (Helio's `GpuLight`).
-fn sun_down(gpu: &Gpu, e: f32) -> wgpu::Buffer {
-    use wgpu::util::DeviceExt;
-    let mut light = [0u32; 32];
-    light[4..8].copy_from_slice(&[0f32.to_bits(), (-1f32).to_bits(), 0f32.to_bits(), 0f32.to_bits()]);
-    light[8..12].copy_from_slice(&[1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), e.to_bits()]);
-    light[13] = 0;
-    gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("sun"), contents: bytemuck::cast_slice(&light), usage: wgpu::BufferUsages::STORAGE })
-}
-
 /// One frame of the pass; `tracer` writes the hits of its rays (`gi_rays`
 /// words, a ray each: origin, most distance, direction, probe) into words of
 /// `gi_hits`.
@@ -76,7 +50,7 @@ fn frame(gpu: &Gpu, pass: &mut GiPass, eye: DVec3, n: u64, sky: f32, lights: Opt
     drop(cmds);
     gpu.queue.submit([encoder.finish()]);
     if let Some(trace) = tracer {
-        let [_, _, rays, hits, _] = pass.buffers();
+        let [_, _, rays, hits, ..] = pass.buffers();
         let rays = read(gpu, rays);
         let count = pass.updates().len() * RAYS as usize;
         let words = trace(&rays[..count * 8]);
@@ -91,7 +65,7 @@ fn frame(gpu: &Gpu, pass: &mut GiPass, eye: DVec3, n: u64, sky: f32, lights: Opt
 #[test]
 fn a_uniform_sky_lights_probes_evenly() {
     let Some(gpu) = gpu() else { return };
-    let mut pass = GiPass::new(&gpu.device);
+    let mut pass = GiPass::new(&gpu.device, GiConfig::default());
     let eye = DVec3::new(0.3, 1.7, -0.2);
     for n in 0..4 {
         frame(gpu, &mut pass, eye, n, 1.0, None, None);
@@ -122,7 +96,7 @@ fn a_uniform_sky_lights_probes_evenly() {
 #[test]
 fn the_sun_on_the_ground_lights_probes_from_below() {
     let Some(gpu) = gpu() else { return };
-    let mut pass = GiPass::new(&gpu.device);
+    let mut pass = GiPass::new(&gpu.device, GiConfig::default());
     let sun = sun_down(gpu, 2.0);
     let eye = DVec3::new(0.3, 1.7, -0.2);
     let ground = |rays: &[u32]| -> Vec<u32> {
@@ -131,10 +105,6 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
             let f = |w: u32| f32::from_bits(w);
             let origin = Vec3::new(f(ray[0]), f(ray[1]), f(ray[2])).as_dvec3() + eye;
             let dir = Vec3::new(f(ray[4]), f(ray[5]), f(ray[6]));
-            let pack = |n: Vec3| {
-                let e = (n * 0.5 + 0.5).clamp(Vec3::ZERO, Vec3::ONE) * 1023.0 + 0.5;
-                e.x as u32 | ((e.y as u32) << 10) | ((e.z as u32) << 20)
-            };
             let hit = if origin.y < 0.0 {
                 // Inside the ground: a back face at once.
                 Some((1e-3f32, pack(dir), 0u32))
@@ -153,7 +123,7 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
     for n in 0..4 {
         frame(gpu, &mut pass, eye, n, 0.0, Some(&sun), Some(&ground));
     }
-    let clipmap = Clipmap::around(eye);
+    let clipmap = Clipmap::around(eye, DEFAULT_FINEST_SPACING);
     let words = read(gpu, pass.buffers()[1]);
     // Albedo 128/255 (RGB8), illuminance 2.
     let below = 128.0 / 255.0 * 2.0 / std::f32::consts::PI;
@@ -189,7 +159,7 @@ fn the_sun_on_the_ground_lights_probes_from_below() {
 #[test]
 fn the_resolve_reads_the_probes_at_pixels() {
     let Some(gpu) = gpu() else { return };
-    let mut pass = GiPass::new(&gpu.device);
+    let mut pass = GiPass::new(&gpu.device, GiConfig::default());
     let eye = DVec3::new(0.3, 1.7, -0.2);
     // Every probe updated: 13824 a level at 680 a frame.
     for n in 0..22 {
@@ -228,12 +198,6 @@ fn the_resolve_reads_the_probes_at_pixels() {
     }
 }
 
-/// Unit `n` packed as the tracers pack normals.
-fn pack(n: Vec3) -> u32 {
-    let e = (n * 0.5 + 0.5).clamp(Vec3::ZERO, Vec3::ONE) * 1023.0 + 0.5;
-    e.x as u32 | ((e.y as u32) << 10) | ((e.z as u32) << 20)
-}
-
 /// No sky; the sun (illuminance 2) straight down on a canopy at height 4.5
 /// that lets a leaf's share of light through (0.3; albedo about 0.5, its
 /// far side seen by the sun). A probe under it sees the canopy's underside
@@ -242,7 +206,7 @@ fn pack(n: Vec3) -> u32 {
 #[test]
 fn light_through_a_canopy_lights_probes_under_it() {
     let Some(gpu) = gpu() else { return };
-    let mut pass = GiPass::new(&gpu.device);
+    let mut pass = GiPass::new(&gpu.device, GiConfig::default());
     let sun = sun_down(gpu, 2.0);
     let eye = DVec3::new(0.3, 1.7, -0.2);
     let canopy = |rays: &[u32]| -> Vec<u32> {
@@ -271,7 +235,7 @@ fn light_through_a_canopy_lights_probes_under_it() {
     for n in 0..4 {
         frame(gpu, &mut pass, eye, n, 0.0, Some(&sun), Some(&canopy));
     }
-    let clipmap = Clipmap::around(eye);
+    let clipmap = Clipmap::around(eye, DEFAULT_FINEST_SPACING);
     let words = read(gpu, pass.buffers()[1]);
     let above = 77.0 / 255.0 * 128.0 / 255.0 * 2.0 / std::f32::consts::PI;
     // The underside also passes on the light under it (the probes' own,
@@ -306,7 +270,7 @@ fn light_through_a_canopy_lights_probes_under_it() {
 #[test]
 fn glowing_ground_lights_probes() {
     let Some(gpu) = gpu() else { return };
-    let mut pass = GiPass::new(&gpu.device);
+    let mut pass = GiPass::new(&gpu.device, GiConfig::default());
     let eye = DVec3::new(0.3, 1.7, -0.2);
     let floor = |rays: &[u32]| -> Vec<u32> {
         let mut hits = vec![0u32; rays.len() / 2];
@@ -325,7 +289,7 @@ fn glowing_ground_lights_probes() {
     for n in 0..4 {
         frame(gpu, &mut pass, eye, n, 0.0, None, Some(&floor));
     }
-    let clipmap = Clipmap::around(eye);
+    let clipmap = Clipmap::around(eye, DEFAULT_FINEST_SPACING);
     let words = read(gpu, pass.buffers()[1]);
     let below = 128.0 / 255.0 * 4.0;
     let mut over = 0;

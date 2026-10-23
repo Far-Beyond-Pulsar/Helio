@@ -687,7 +687,7 @@ impl ApplicationHandler for App {
             _chandelier_chains,
             _chandelier_rings,
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
+            cam_yaw: 0.0,
             cam_pitch: -0.05,
             keys: HashSet::new(),
             cursor_grabbed: false,
