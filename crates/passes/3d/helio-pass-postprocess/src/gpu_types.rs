@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TonemapOperator {
-    None = 5, // skip tonemapping entirely (default)
+    None = 5, // skip tonemapping entirely (clips highlights)
     Aces = 0,
     Filmic = 1,
     Reinhard = 2,
@@ -324,7 +324,7 @@ impl Default for GpuPostProcessUniforms {
             white_balance_enabled: 0,
             pad_wb: 0.0,
 
-            tonemap_operator: TonemapOperator::None as u32,
+            tonemap_operator: TonemapOperator::AgxPunchy as u32,
             tonemap_exposure: 1.0,
             tonemap_white_point: 1.0,
             pad_tm: 0.0,
@@ -685,7 +685,9 @@ impl Default for PostProcessSettings {
             white_tint: 0.0,
             white_balance_enabled: false,
 
-            tonemap_operator: TonemapOperator::None,
+            // AgX punchy: every host and scene without a look of its own
+            // renders the engine's calibrated one, never clipped HDR.
+            tonemap_operator: TonemapOperator::AgxPunchy,
             tonemap_exposure: 1.0,
             tonemap_white_point: 1.0,
 

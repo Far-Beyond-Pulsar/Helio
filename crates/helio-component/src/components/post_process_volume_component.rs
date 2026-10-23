@@ -573,7 +573,7 @@ impl Default for PostProcessSettingsProps {
             white_balance_enabled: false,
             white_temp: 6500.0,
             white_tint: 0.0,
-            tonemap_operator: TonemapOperator::None,
+            tonemap_operator: TonemapOperator::AgxPunchy,
             tonemap_exposure: 1.0,
             tonemap_white_point: 1.0,
             local_exposure_highlight_contrast: helio_pass_postprocess::LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST,
@@ -739,3 +739,19 @@ impl PostProcessVolumeComponent {
 
 #[register_world_component]
 impl PostProcessVolumeComponent {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An authored component left at its defaults renders the engine's
+    /// defaults: the editor and every host start from the same look Helio's
+    /// own renderer does.
+    #[test]
+    fn default_props_are_the_engines_defaults() {
+        assert_eq!(
+            format!("{:?}", PostProcessSettingsProps::default().to_settings()),
+            format!("{:?}", PostProcessSettings::default()),
+        );
+    }
+}
