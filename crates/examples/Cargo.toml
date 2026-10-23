@@ -302,7 +302,7 @@ helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 pulsar_scenedb = { workspace = true }
 scenedb-inspector-agent = { path = "../scenedb-inspector-agent" }
 rapier3d = "0.24"
-image = { workspace = true, features = ["png"] }
+image = { workspace = true, features = ["png", "jpeg"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }

@@ -5,6 +5,7 @@
 //! Escape releases it (or exits when released).
 
 mod v3_demo_common;
+mod vg_stress_capture;
 mod vg_stress_cook;
 mod vg_stress_loading;
 /// Self-provisioning of the scan meshes (shared with `build.rs`).
@@ -86,6 +87,8 @@ struct VgTarget {
 struct VgSceneTargets {
     targets: Vec<VgTarget>,
     object_rows: u32,
+    /// Instances the last derivation made visible (ready assets only).
+    visible: usize,
     /// Bumped whenever `targets` changes, so the derivation can skip frames
     /// on which neither the instances nor the asset readiness moved.
     generation: u64,
@@ -193,7 +196,7 @@ impl SceneDerivation for SceneVgDerivation {
         if self.enabled {
             self.runtime.service(ctx.device, ctx.queue);
         }
-        let targets = self.targets.lock().expect("VG scene targets");
+        let mut targets = self.targets.lock().expect("VG scene targets");
         let instance_count = targets.targets.len().max(1) as u32;
         let object_rows = targets.object_rows.max(1);
         let make = |label, bytes: u64| {
@@ -237,6 +240,7 @@ impl SceneDerivation for SceneVgDerivation {
             let visible: &[VgTarget] = if self.enabled { &targets.targets } else { &[] };
             let mut instances = select_visible(visible, &ready_rows, &mut classic);
             let count = [instances.len() as u32, 0, 0, 0];
+            targets.visible = instances.len();
             instances.resize(self.instance_capacity as usize, GpuVgInstance::zeroed());
             ctx.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
             ctx.queue.write_buffer(&self.count, 0, bytemuck::cast_slice(&count));
@@ -460,6 +464,10 @@ struct AppState {
     scene_triangles: u64,
     loading_status: String,
     last_title: std::time::Instant,
+    capture: Option<vg_stress_capture::Capture>,
+    sun_light: Option<Entity>,
+    fog_entity: Option<Entity>,
+    adapter_name: String,
     tau: f32,
     vg_expected: usize,
     vg_loaded: usize,
@@ -484,12 +492,13 @@ impl ApplicationHandler for App {
             return;
         }
 
+        let capture_options = vg_stress_capture::Options::from_env_and_args();
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
                         .with_title("Helio – VG Museum | starting")
-                        .with_visible(std::env::var_os("HELIO_VG_SMOKE_SECONDS").is_none())
+                        .with_visible(std::env::var_os("HELIO_VG_SMOKE_SECONDS").is_none() && capture_options.is_none())
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
@@ -536,21 +545,27 @@ impl ApplicationHandler for App {
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-                color_space: wgpu::SurfaceColorSpace::Auto,
-            },
-        );
+        let mut size = window.inner_size();
+        let format = if capture_options.is_some() { wgpu::TextureFormat::Rgba8UnormSrgb } else { format };
+        if let Some(o) = &capture_options {
+            size = winit::dpi::PhysicalSize::new(o.size.0, o.size.1);
+        }
+        if capture_options.is_none() {
+            surface.configure(
+                &device,
+                &wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format,
+                    width: size.width,
+                    height: size.height,
+                    present_mode: wgpu::PresentMode::Fifo,
+                    alpha_mode: caps.alpha_modes[0],
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                    color_space: wgpu::SurfaceColorSpace::Auto,
+                },
+            );
+        }
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let runtime = VgRuntime::default();
@@ -597,10 +612,17 @@ impl ApplicationHandler for App {
             materials.insert(material, entity);
         }
         spawn_sky(&mut scene_db.world, [1.0, 1.0, 1.0]);
-        spawn_light(
+        let sun_light = spawn_light(
             &mut scene_db.world,
             directional_light([0.35, -0.8, -0.3], [1.0, 0.94, 0.82], 3.0),
         );
+        let fog_entity = capture_options.as_ref().map(|_| {
+            v3_demo_common::set_volumetric_quality(&mut scene_db.world, 1, 260.0);
+            v3_demo_common::spawn_global_fog(
+                &mut scene_db.world,
+                v3_demo_common::GlobalFogComponent { enabled: 0, ..Default::default() },
+            )
+        });
         for light in &layout.lights {
             let direction = glam::Vec3::from_array(light.direction)
                 .normalize_or_zero()
@@ -682,6 +704,8 @@ impl ApplicationHandler for App {
             .map(|p| p.asset.as_str())
             .collect::<HashSet<_>>()
             .len();
+        let capture = capture_options.map(|o| vg_stress_capture::Capture::new(o, vg_stress_capture::load_shots(&root)));
+        let adapter_name = info.name.clone();
         let loader = vg_stress_loading::start(
             root,
             &layout.placements,
@@ -732,6 +756,10 @@ impl ApplicationHandler for App {
             scene_triangles: 0,
             loading_status: "Loading museum".into(),
             last_title: std::time::Instant::now(),
+            capture,
+            sun_light: Some(sun_light),
+            fog_entity,
+            adapter_name,
             tau,
             vg_expected,
             vg_loaded: 0,
@@ -820,6 +848,9 @@ impl ApplicationHandler for App {
                 state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
+                if state.capture.is_some() {
+                    return;
+                }
                 let now = std::time::Instant::now();
                 let dt = (now - state.last_frame).as_secs_f32();
                 state.last_frame = now;
@@ -846,6 +877,15 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(s) = &mut self.state {
+            if let Some(mut capture) = s.capture.take() {
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+                let done = capture.step(s);
+                s.capture = Some(capture);
+                if done {
+                    event_loop.exit();
+                }
+                return;
+            }
             if s.smoke_seconds.is_some() {
                 // Hidden windows do not receive normal redraw events on Windows.
                 event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

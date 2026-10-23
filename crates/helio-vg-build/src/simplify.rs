@@ -25,13 +25,18 @@ use std::collections::BTreeMap;
 /// A connected component with at most this many triangles that touches no
 /// other group is "floating".
 pub const FLOATING_MAX_TRIS: usize = 1536;
+/// Appearance error of a floating-dominated group (see
+/// [`SimplifyResult::coverage_tris`]): `COVERAGE_FACTOR` x the spacing of its
+/// output triangles, `r * cbrt(4pi/3 / n)` for `n` triangles in a group sphere
+/// of radius `r`. Below that scale the extra triangles of a canopy add detail
+/// the viewer cannot resolve (a node smaller than ~1/COVERAGE_FACTOR spacings
+/// per pixel).
+pub const COVERAGE_FACTOR: f32 = 0.05;
+/// ... and never below this many linear footprints (sqrt of mean triangle area) of
+/// the output: triangles smaller than a pixel add nothing.
+pub const COVERAGE_FOOTPRINT: f32 = 2.0;
 /// Edge collapse that ends above this ratio of the target hands over to
 /// proximity merging.
-/// A floating-dominated group is as coarse as its output's mean edge length
-/// times this factor (see [`SimplifyResult::coverage_error`]): the level's
-/// triangles are about one footprint apart, so below ~2 edge lengths per pixel
-/// the extra triangles add nothing the viewer can resolve.
-pub const COVERAGE_EDGE_FACTOR: f32 = 2.0;
 const SLOPPY_TRIGGER: (usize, usize) = (115, 100);
 
 pub struct SimplifyResult {
@@ -42,13 +47,13 @@ pub struct SimplifyResult {
     pub verts: usize,
     /// Diagnostics: input triangles in floating pieces.
     pub floating: usize,
-    /// Appearance error of a group that is (>= 90%) floating pieces:
-    /// [`COVERAGE_EDGE_FACTOR`] x the mean edge length of the output.
-    /// For needle/leaf canopies the Hausdorff distance to the nearest remaining
-    /// card says little (a vanished card leaves a hole its own size, and the
-    /// neighbours are further away than that), so the DAG builder uses this in
-    /// place of the measured distance. `None` for all other groups.
-    pub coverage_error: Option<f32>,
+    /// Floating output triangles when the group is (>= 90%) floating pieces
+    /// (needle/leaf cards, branch fragments); `None` for all other groups.
+    /// For those the DAG builder replaces the Hausdorff distance (a vanished
+    /// card leaves a hole its own size while its neighbours are further away
+    /// than that, so the distance says little about a canopy) by the spacing
+    /// error above.
+    pub coverage_tris: Option<(usize, f32)>,
 }
 
 /// Edges of one DAG level whose global use count is not 2 (open, non-manifold),
@@ -221,7 +226,6 @@ pub fn simplify_group(
         sections.entry((t.mat, f)).or_default().push(t.v);
     }
     let mut output = Vec::new();
-    let mut float_out: Vec<[u32; 3]> = Vec::new();
     let (mut n_locked, mut n_verts) = (0usize, 0usize);
     for ((material, is_floating), section) in sections {
         let want = (target * section.len() / tris.len()).max(1);
@@ -251,7 +255,6 @@ pub fn simplify_group(
             pinned.dedup();
             let (reduced, nv) = simplify_floating(vs, &section, want, &pinned);
             n_verts += nv;
-            float_out.extend_from_slice(&reduced);
             output.extend(reduced.into_iter().map(|t| (t, material)));
             continue;
         }
@@ -343,14 +346,18 @@ pub fn simplify_group(
             output.extend(section.into_iter().map(|t| (t, material)));
         }
     }
+    // Dominance is by source pieces (small components of the input mesh), also when
+    // some of them currently straddle a group border and stay anchored.
+    let src_floating = tris.iter().filter(|t| vs.floating[t.v[0] as usize]).count();
+    let float_out: Vec<[u32; 3]> = output.iter().filter(|(t, _)| vs.floating[t[0] as usize]).map(|(t, _)| *t).collect();
     SimplifyResult {
         tris: output,
         new_verts: Vec::new(),
         locked: n_locked,
         verts: n_verts,
         floating: n_floating,
-        coverage_error: (n_floating * 10 >= tris.len() * 9 && !float_out.is_empty())
-            .then(|| COVERAGE_EDGE_FACTOR * mean_edge(vs, &float_out)),
+        coverage_tris: (src_floating * 10 >= tris.len() * 9 && !float_out.is_empty())
+            .then(|| (float_out.len(), mean_footprint(vs, &float_out))),
     }
 }
 
@@ -411,12 +418,14 @@ fn nonmanifold(vs: &VertexStore, tris: &[[u32; 3]]) -> usize {
     edges.values().filter(|&&n| n > 2).count()
 }
 
-fn mean_edge(vs: &VertexStore, tris: &[[u32; 3]]) -> f32 {
+
+/// Square root of the mean triangle area: the linear footprint of one output
+/// triangle (thin needles count as thin, not as long).
+fn mean_footprint(vs: &VertexStore, tris: &[[u32; 3]]) -> f32 {
     let mut s = 0.0f64;
     for t in tris {
-        for e in 0..3 {
-            s += crate::math::dist(vs.pos[t[e] as usize], vs.pos[t[(e + 1) % 3] as usize]) as f64;
-        }
+        let p = t.map(|v| vs.pos[v as usize]);
+        s += 0.5 * crate::math::length(crate::math::cross(crate::math::sub(p[1], p[0]), crate::math::sub(p[2], p[0]))) as f64;
     }
-    (s / (3 * tris.len().max(1)) as f64) as f32
+    (s / tris.len().max(1) as f64).sqrt() as f32
 }

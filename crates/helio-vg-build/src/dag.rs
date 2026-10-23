@@ -24,7 +24,7 @@ use crate::deviation::{measure, Measured};
 use crate::math::*;
 use crate::mesh::{mark_floating, weld, BuildError, MeshInput, Tri, VertexStore};
 use crate::partition::partition;
-use crate::simplify::{simplify_group, GlobalEdges, SimplifyResult};
+use crate::simplify::{simplify_group, GlobalEdges, SimplifyResult, COVERAGE_FACTOR, COVERAGE_FOOTPRINT};
 
 pub const NONE: u32 = u32::MAX;
 /// Safety factor on the measured deviation (covers the interior of original
@@ -225,12 +225,12 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
         // scheduling) and translate output corners to global ids.
         struct Staged {
             tris: Vec<([u32; 3], u32)>,
-            coverage: Option<f32>,
+            coverage: Option<(usize, f32)>,
         }
         let results_lock = results.iter().fold((0usize, 0usize, 0usize), |a, r| (a.0 + r.locked, a.1 + r.verts, a.2 + r.floating));
         let mut staged: Vec<Staged> = Vec::with_capacity(results.len());
         for res in results {
-            let coverage = res.coverage_error;
+            let coverage = res.coverage_tris;
             let ids: Vec<u32> = res
                 .new_verts
                 .iter()
@@ -332,7 +332,9 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             // own estimate) is deliberately not used.
             let floor = 1e-5 * sphere[3].max(1e-6);
             let mut error = match st.coverage {
-                Some(cov) => child_err.max(cov).max(floor),
+                Some((n, foot)) => {                    let spacing = sphere[3] * (4.18879 / n.max(1) as f32).cbrt();
+                    child_err.max(COVERAGE_FOOTPRINT * foot).max(COVERAGE_FACTOR * spacing).max(floor)
+                }
                 None => child_err.max(meas.error.max(meas.forward) * ERROR_MARGIN).max(floor),
             };
             if error <= child_err {
