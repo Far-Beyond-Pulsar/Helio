@@ -176,7 +176,10 @@ pub struct PostProcessPass {
     bloom_extract_pipeline: wgpu::ComputePipeline,
     bloom_down_pipeline: wgpu::ComputePipeline,
     bloom_upsample_pipeline: wgpu::ComputePipeline,
-    uber_pipeline: wgpu::RenderPipeline,
+    /// The image's pipeline, and its debug-view variant (`DEBUG_VIEW`).
+    uber_pipelines: [wgpu::RenderPipeline; 2],
+    /// A renderer debug view is on: the scene colour is shown as it is.
+    debug_view: bool,
 
     // Separate BGLs for compute vs render
     compute_main_bgl: wgpu::BindGroupLayout,
@@ -240,7 +243,7 @@ pub struct PostProcessPass {
 
     uber_pl: wgpu::PipelineLayout,
 
-    // Current user shader snippet (the one baked into uber_pipeline).
+    // Current user shader snippet (the one baked into uber_pipelines).
     user_shader_snippet: Option<String>,
     // Pending snippet queued by set_user_shader — applied in prepare().
     pending_shader_snippet: Option<String>,
@@ -248,6 +251,50 @@ pub struct PostProcessPass {
     user_effect_entries: Vec<UserEffectEntry>,
     // Cached built shader source to avoid rebuilding identical configs.
     cached_shader_source: Option<String>,
+}
+
+/// The uber pipeline for `format`, and its debug-view variant: a renderer
+/// debug view (buffers, GI, voxel levels) shows the scene colour as the
+/// view wrote it, without the camera's exposure, grade or tone curve.
+fn uber_pipelines(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> [wgpu::RenderPipeline; 2] {
+    [false, true].map(|debug_view| {
+        helio_core::shader::create_render_pipeline(device, wgpu::RenderPipelineDescriptor {
+            label: Some(if debug_view { "PostProcess Uber (debug view)" } else { "PostProcess Uber" }),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_uber"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("DEBUG_VIEW", f64::from(u8::from(debug_view)))],
+                    ..Default::default()
+                },
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    })
 }
 
 impl PostProcessPass {
@@ -642,34 +689,7 @@ impl PostProcessPass {
         let bloom_upsample_pipeline =
             mk_compute("PostProcess Bloom Upsample", "cs_bloom_upsample", &bloom_upsample_pl);
 
-        let uber_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("PostProcess Uber Pipeline"),
-            layout: Some(&render_pl),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_uber"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let uber_pipelines = uber_pipelines(&device, &render_pl, &shader, format);
 
         // ── Noise texture ──────────────────────────────────────────────────
         let noise_size = 64u32;
@@ -853,7 +873,8 @@ impl PostProcessPass {
             bloom_extract_pipeline,
             bloom_down_pipeline,
             bloom_upsample_pipeline,
-            uber_pipeline,
+            uber_pipelines,
+            debug_view: false,
             compute_main_bgl,
             render_main_bgl,
             bloom_compute_bgl,
@@ -968,34 +989,7 @@ impl PostProcessPass {
             return; // identical — skip rebuild
         }
         let shader_mod = helio_core::shader::module(device, "PostProcess Shader", &source);
-        self.uber_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("PostProcess Uber"),
-            layout: Some(&self.uber_pl),
-            vertex: wgpu::VertexState {
-                module: &shader_mod,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_mod,
-                entry_point: Some("fs_uber"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        self.uber_pipelines = uber_pipelines(device, &self.uber_pl, &shader_mod, self.format);
         self.cached_shader_source = Some(source);
     }
 
@@ -1319,6 +1313,10 @@ impl PostProcessPass {
 impl RenderPass for PostProcessPass {
     fn name(&self) -> &'static str {
         "PostProcess"
+    }
+
+    fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_view = mode != 0;
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -1677,7 +1675,7 @@ impl PostProcessPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.uber_pipeline);
+            pass.set_pipeline(&self.uber_pipelines[usize::from(self.debug_view)]);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);
         }

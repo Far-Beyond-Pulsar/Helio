@@ -49,6 +49,10 @@ const WG_EXPOSURE_Y: u32 = 16u;
 // `MAX_PP_VOLUMES` doc for why the two must never drift apart.
 const MAX_PP_VOLUMES: u32 = 64u;
 
+// A renderer debug view is on: show the scene colour as the view wrote it
+// (no exposure, bloom, grade or tone curve). Set per pipeline.
+override DEBUG_VIEW: bool = false;
+
 // ── GpuPostProcessUniforms ─────────────────────────────────────────────────────
 // Matches CPU-side layout in libhelio/src/postprocess.rs
 
@@ -1208,6 +1212,9 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // extraction below all see scattered light.
     let source = textureSampleLevel(hdr_input, linear_samp, uv, 0.0);
     var color = source.rgb;
+    if DEBUG_VIEW {
+        return source;
+    }
 
     //%P0
 
