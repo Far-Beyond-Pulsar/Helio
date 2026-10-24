@@ -33,8 +33,7 @@ impl Interaction {
     /// Updates the target and applies this frame's clicks.
     pub fn update(&mut self, player: &mut Player, world: &mut World, controls: &Controls, dt: f64) {
         self.cooldown = (self.cooldown - dt).max(0.0);
-        let eye = player.eye();
-        let look = player.look();
+        let (eye, look) = controls.aim.unwrap_or_else(|| (player.eye(), player.look()));
         self.target = world.raycast(eye, look, REACH).map(|hit| Target { cell: hit.cell, front: hit.previous, point: eye + look * hit.distance });
         let Some(target) = self.target else { return };
 

@@ -16,12 +16,16 @@
 //! left mouse dig, right mouse build a half-metre block, middle mouse pick,
 //! mouse wheel or 1-9 pick from the hotbar, V third-person camera, T speed
 //! up time, R respawn, Esc release the mouse.
+//! A connected OpenXR headset selects VR automatically: left stick moves,
+//! right stick snap-turns/cycles blocks, triggers dig/build, A jumps, B flies,
+//! X picks a block, Y recentres. See the README for all VR controls.
 //!
 //! Environment: `VOXEL_CRAFT_QUALITY` (performance|balanced|quality|native,
 //! or fxaa: no TSR),
 //! `VOXEL_CRAFT_LOD` (cells per pixel, 0.6), `VOXEL_CRAFT_DISTANCE` (view
 //! distance in metres); `VOXEL_CRAFT_SHOTS=<dir>` runs the screenshot tour
 //! (see the README).
+//! `VOXEL_CRAFT_VR=off` forces desktop; `VOXEL_CRAFT_FRAMES=<n>` bounds a smoke run.
 //!
 //! Layout: `terrain/` the planet's recipe and biomes, `world/` edits, the
 //! worker thread and decoration (trees and rocks grown by the engine's
@@ -44,6 +48,8 @@ mod player;
 mod structures;
 mod terrain;
 mod world;
+#[cfg(not(target_arch = "wasm32"))]
+mod xr;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,voxel_craft=info")).init();

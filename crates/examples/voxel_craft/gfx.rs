@@ -21,7 +21,44 @@ use winit::window::Window;
 /// `WORLD_ORIGIN_CELL`): scene positions stay small near the camera.
 const ORIGIN_CELL: f64 = 1024.0;
 
+/// A complete device/surface pair, created either through OpenXR or wgpu.
+pub(super) struct Gpu {
+    pub surface: wgpu::Surface<'static>,
+    pub surface_format: wgpu::TextureFormat,
+    pub alpha_mode: wgpu::CompositeAlphaMode,
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+}
+
+impl Gpu {
+    fn desktop(window: Arc<Window>) -> Self {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            flags: wgpu::InstanceFlags::empty().with_env(),
+            ..helio_core::wgpu_instance_descriptor()
+        });
+        let surface = instance.create_surface(window).expect("surface");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface), force_fallback_adapter: false, apply_limit_buckets: false,
+        })).expect("a GPU adapter");
+        log::info!("adapter: {:?}", adapter.get_info());
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Voxel Craft"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
+            ..Default::default()
+        })).expect("device");
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        Self { surface, surface_format, alpha_mode: caps.alpha_modes[0], device: Arc::new(device), queue: Arc::new(queue) }
+    }
+}
+
 pub struct Gfx {
+    #[cfg(not(target_arch = "wasm32"))]
+    xr: Option<crate::xr::Runtime>,
+    pub failed: bool,
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     surface_format: wgpu::TextureFormat,
@@ -172,39 +209,23 @@ fn tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
 
 impl Gfx {
     pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            // `WGPU_VALIDATION=1`, `WGPU_DEBUG=1`: the validation layer, labels.
-            flags: wgpu::InstanceFlags::empty().with_env(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("a GPU adapter");
-        log::info!("adapter: {:?}", adapter.get_info());
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Voxel Craft"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
+        // OpenXR must choose/create the Vulkan device before a renderer exists.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (gpu, xr) = crate::xr::try_init(window.clone()).map(|(gpu, xr)| (gpu, Some(xr)))
+            .unwrap_or_else(|| (Gpu::desktop(window.clone()), None));
+        #[cfg(target_arch = "wasm32")]
+        let gpu = Gpu::desktop(window.clone());
+        let Gpu { surface, surface_format, alpha_mode, device, queue } = gpu;
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("[GPU] {e:?}")));
-        let (device, queue) = (Arc::new(device), Arc::new(queue));
-
-        let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
         // The surface is configured at the first frame (`configure`): just
         // after the window opens its reported size can still be the one
         // before the display's scale applies, larger than the surface.
-        let alpha_mode = caps.alpha_modes[0];
         let size = window.inner_size();
         let size = [size.width.max(1), size.height.max(1)];
+        #[cfg(not(target_arch = "wasm32"))]
+        let (render_size, render_format, vr) = xr.as_ref().map_or((size, surface_format, false), |xr| (xr.size(), xr.format(), true));
+        #[cfg(target_arch = "wasm32")]
+        let (render_size, render_format, vr) = (size, surface_format, false);
 
         // The scene: SceneDB rows for the sun, the air, the blocks' materials
         // and the character.
@@ -264,16 +285,17 @@ impl Gfx {
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
         let appearance = palette.appearance;
-        let config = chunk_config(size[1]);
+        let config = chunk_config(render_size[1]);
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
             Box::new(pass)
         });
-        let renderer_config = RendererConfig::new(size[0], size[1], surface_format);
-        let mut renderer_config = match tsr_quality() {
+        let renderer_config = RendererConfig::new(render_size[0], render_size[1], render_format);
+        // Native per-eye targets and spatial AA: no desktop TSR scaling/jitter.
+        let mut renderer_config = match if vr { None } else { tsr_quality() } {
             Some(quality) => renderer_config.with_tsr_quality(quality),
-            None => renderer_config.without_tsr(),
+            None => renderer_config.without_tsr().with_render_scale(1.0),
         };
         // The meadow, grown on the terrain the planet pass draws
         // (`VOXEL_CRAFT_NO_FOLIAGE`: bare turf, for A/B measurements).
@@ -285,7 +307,8 @@ impl Gfx {
         let mut renderer = RendererBuilder::new(renderer_config, handle)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
-            .build(device.clone(), queue.clone(), size[0], size[1], surface_format);
+            .build(device.clone(), queue.clone(), render_size[0], render_size[1], render_format);
+        if vr { renderer.set_jitter_enabled(false); }
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         // `VOXEL_CRAFT_DEBUG=<mode>`: one of the renderer's debug views.
         if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {
@@ -304,7 +327,23 @@ impl Gfx {
             generated: [0; 2],
         });
         let rays = SceneRays::new(&device, &queue);
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, rays, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings }
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            xr,
+            failed: false, window, surface, surface_format, device, queue, renderer, scene, avatar, rays, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings
+        }
+    }
+
+    pub fn vr_active(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.xr.is_some() }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn begin_vr(&mut self) -> helio_xr::Result<crate::xr::Begin> {
+        self.xr.as_mut().expect("VR active").begin()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -325,14 +364,14 @@ impl Gfx {
                 format: self.surface_format,
                 width: size[0],
                 height: size[1],
-                present_mode: wgpu::PresentMode::Fifo,
+                present_mode: if self.vr_active() { wgpu::PresentMode::AutoNoVsync } else { wgpu::PresentMode::Fifo },
                 alpha_mode: self.alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
                 color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
-        if size != self.size {
+        if size != self.size && !self.vr_active() {
             self.renderer.set_render_size(size[0], size[1]);
         }
         self.size = size;
@@ -369,13 +408,18 @@ impl Gfx {
                 },
             ),
         );
-        self.renderer.set_frame_clock_delta(Some((view.weather - self.clock).clamp(0.0, 0.1) as f32));
+        let weather_delta = (view.weather - self.clock).clamp(0.0, 0.1) as f32;
+        self.renderer.set_frame_clock_delta(Some(weather_delta));
         self.clock = view.weather;
         self.origin = Self::origin_for(eye);
         self.renderer.set_world_origin(Some(self.origin));
         let origin = self.origin;
         // The character and what it holds, and the targeted block's outline.
-        self.avatar.pose(&mut self.scene.world, &mut self.renderer, view.player, (eye, forward), origin, view.time);
+        #[cfg(not(target_arch = "wasm32"))]
+        let hand = view.vr.map(|vr| vr.grips[1].map(|pose| (DMat4::from_translation(-origin) * pose).as_mat4()));
+        #[cfg(target_arch = "wasm32")]
+        let hand = None;
+        self.avatar.pose(&mut self.scene.world, &mut self.renderer, view.player, (eye, forward), origin, view.time, hand);
         if let Some(mut feet) = self.scene.world.get_mut::<FoliageInteractorComponent>(self.feet) {
             feet.set_motion(view.player.position, view.player.velocity.as_vec3());
         }
@@ -384,7 +428,7 @@ impl Gfx {
             self.renderer.debug_line((*a - origin).as_vec3().to_array(), (*b - origin).as_vec3().to_array(), [0.05, 0.05, 0.05, 1.0]);
         }
         // A crosshair fixed in front of the eye.
-        if !view.player.third_person {
+        if !view.player.third_person && !self.vr_active() {
             let look = forward.normalize();
             let right = look.cross(eye.normalize()).normalize_or_zero();
             let above = right.cross(look);
@@ -399,6 +443,58 @@ impl Gfx {
         let now = self.window.inner_size();
         if now.width > 0 && now.height > 0 {
             self.configure([now.width, now.height]);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(vr) = view.vr {
+            let (start, direction) = vr.aim;
+            let end = view.target.unwrap_or(start + direction * crate::config::REACH);
+            self.renderer.debug_line((start - origin).as_vec3().to_array(), (end - origin).as_vec3().to_array(), [0.3, 0.85, 1.0, 0.8]);
+            for grip in vr.grips.iter().flatten() {
+                let a = grip.transform_point3(DVec3::new(0.0, 0.0, 0.04)) - origin;
+                let b = grip.transform_point3(DVec3::new(0.0, 0.0, -0.12)) - origin;
+                self.renderer.debug_line(a.as_vec3().to_array(), b.as_vec3().to_array(), [0.9, 0.9, 0.95, 1.0]);
+            }
+            let output = if now.width > 0 && now.height > 0 {
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                    _ => { self.configured = None; None }
+                }
+            } else { None };
+            let mirror = output.as_ref().map(|t| t.texture.create_view(&Default::default()));
+            flush_scene_db(&self.scene, &self.queue);
+            if let Some(pass) = self.renderer.find_pass_mut::<ChunkPass>() {
+                pass.set_residency_eye(Some(view.eye));
+            }
+            let mut xr = self.xr.take().expect("VR frame has a runtime");
+            let xr_size = xr.size();
+            let device = self.device.clone();
+            let queue = self.queue.clone();
+            let result = xr.draw(&device, &queue, vr.world_from_stage, origin, mirror.as_ref().map(|v| (v, self.size)), |eye_index, camera, target| {
+                if let Some(frame) = self.source.lock().unwrap().as_mut() {
+                    frame.eye = origin + camera.position.as_dvec3();
+                }
+                // Advance animation once. Retain the previous draw's camera for
+                // lighting reprojection as the view alternates between eyes.
+                // The renderer requires a positive integration interval. Split it
+                // across the two draws; only the world clock may hold at zero.
+                self.renderer.set_frame_delta_override(Some((view.dt * 0.5).max(1.0e-6)));
+                self.renderer.set_frame_clock_delta(Some(if eye_index == 0 { weather_delta } else { 0.0 }));
+                self.rays.publish(&self.scene.world, &mut self.renderer);
+                self.renderer.render(camera, target)?;
+                if let Some(timings) = &mut self.timings {
+                    let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
+                    let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());
+                    timings.add(self.renderer.timing_snapshot(), &voxel, stats, xr_size);
+                }
+                Ok(())
+            });
+            self.xr = Some(xr);
+            if let Err(error) = result {
+                log::error!("[XR] render: {error}");
+                self.failed = true;
+            }
+            if let Some(output) = output { self.queue.present(output); }
+            return;
         }
         let up = eye.normalize().as_vec3();
         let forward = forward.normalize().as_vec3();
@@ -467,6 +563,10 @@ impl Gfx {
 
 /// What a frame shows.
 pub struct View<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub vr: Option<&'a crate::xr::rig::RigView>,
+    pub target: Option<DVec3>,
+    pub dt: f32,
     pub planet: &'a Arc<Planet>,
     pub player: &'a crate::player::Player,
     /// The camera: position and look direction (planet-centred).

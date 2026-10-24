@@ -28,6 +28,9 @@ pub struct ChunkPass {
     /// many, or why they were refused.
     kept_loaded: Option<Result<usize, String>>,
     last_eye: Option<(DVec3, std::time::Instant)>,
+    /// Stereo draws can share a head-centred residency viewpoint while tracing
+    /// from each actual eye. Inter-eye distance must not become movement velocity.
+    residency_eye: Option<DVec3>,
     stats: UpdateStats,
     /// Frames whose GPU times came back, until taken.
     timings: Vec<FrameTimings>,
@@ -72,6 +75,7 @@ impl ChunkPass {
             exporting: false,
             kept_loaded: None,
             last_eye: None,
+            residency_eye: None,
             stats: UpdateStats::default(),
             timings: Vec::new(),
             budget_ms: None,
@@ -107,6 +111,12 @@ impl ChunkPass {
     /// shadows).
     pub fn set_steady_shadows(&mut self, on: bool) {
         self.steady_shadows = on;
+    }
+
+    /// Override the position used for residency/prefetch, without changing the
+    /// frame's tracing eye. Use the head centre for both draws of a stereo pair.
+    pub fn set_residency_eye(&mut self, eye: Option<DVec3>) {
+        self.residency_eye = eye;
     }
 
     /// The host's art settings; whether they changed.
@@ -270,6 +280,7 @@ impl RenderPass for ChunkPass {
             self.scene = previous.scene.take();
         }
         self.steady_shadows |= previous.steady_shadows;
+        self.residency_eye = previous.residency_eye;
         self.world.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
@@ -486,23 +497,23 @@ impl ChunkPass {
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
         let jitter = [jitter, std::mem::replace(&mut self.last_jitter, jitter)];
         let now = std::time::Instant::now();
+        let residency_eye = self.residency_eye.unwrap_or(frame.eye);
         let interval = self
             .last_eye
             .map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
         let velocity = match (self.last_eye, interval) {
-            (Some((eye, _)), Some(dt)) => (frame.eye - eye) / dt,
+            (Some((eye, _)), Some(dt)) => (residency_eye - eye) / dt,
             _ => DVec3::ZERO,
         };
-        self.last_eye = Some((frame.eye, now));
+        self.last_eye = Some((residency_eye, now));
         // In view: the cone around the camera's forward reaching the
         // frustum's corners. A pixel's angle sets the cut's detail.
         let tan_y = 1.0 / f64::from(proj.y_axis.y);
-        let tan_x = 1.0 / f64::from(proj.x_axis.x);
         let view = residency::View {
             forward: glam::Vec3::from_slice(&camera.forward_far[..3])
                 .as_dvec3()
                 .normalize(),
-            cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos(),
+            cos_half: frustum_cos_half(proj),
         };
         self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
@@ -548,7 +559,7 @@ impl ChunkPass {
         }
         self.stats = world.update(
             encoder,
-            frame.eye,
+            residency_eye,
             velocity,
             Some(view),
             ctx.frame_num,
@@ -598,5 +609,35 @@ impl ChunkPass {
             world.copy_picks(encoder, picks);
         }
         Ok(())
+    }
+}
+
+/// XR frusta are asymmetric: include the offset on each axis so chunks at the
+/// wider edge of either eye are not rejected by the residency cone.
+fn frustum_cos_half(proj: Mat4) -> f64 {
+    let tan_x = (1.0 + f64::from(proj.z_axis.x).abs()) / f64::from(proj.x_axis.x).abs();
+    let tan_y = (1.0 + f64::from(proj.z_axis.y).abs()) / f64::from(proj.y_axis.y).abs();
+    (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos()
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+
+    #[test]
+    fn residency_cone_contains_all_asymmetric_frustum_corners() {
+        for offset in [-0.45, 0.0, 0.45] {
+            let mut proj = helio_core::depth::perspective(1.4, 1.1, 0.05);
+            proj.z_axis.x = offset;
+            proj.z_axis.y = 0.2;
+            let inverse = proj.inverse();
+            let cos_half = frustum_cos_half(proj);
+            for x in [-1.0, 1.0] {
+                for y in [-1.0, 1.0] {
+                    let ray = inverse.project_point3(Vec3::new(x, y, 1.0)).normalize();
+                    assert!(f64::from(-ray.z) + 1e-7 >= cos_half, "corner {ray:?} was culled");
+                }
+            }
+        }
     }
 }

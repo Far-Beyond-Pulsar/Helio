@@ -1114,6 +1114,7 @@ dependencies = [
  "image",
  "log",
  "microfont",
+ "openxr",
  "pollster 0.4.0",
  "pulsar_scenedb",
  "rapier3d 0.24.0",

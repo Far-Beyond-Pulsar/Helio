@@ -58,6 +58,18 @@ impl Player {
         Frame::new(self.position, self.heading)
     }
 
+    /// Room movement uses the same collision solver as stick/keyboard movement.
+    pub fn move_room(&mut self, world: &World, displacement: DVec3) {
+        let frame = self.frame();
+        let (position, _) = physics::slide(world, self.position, displacement, &frame, false);
+        self.position = position;
+    }
+
+    pub fn turn(&mut self, angle: f64) {
+        let frame = self.frame();
+        self.heading = rotate(frame.forward, frame.up, angle);
+    }
+
     /// The eye, planet-centred.
     pub fn eye(&self) -> DVec3 {
         let frame = self.frame();
@@ -99,7 +111,8 @@ impl Player {
         self.jump_tap += dt;
         self.sneaking = controls.sneak && !self.flying;
 
-        let wish_planar = (frame.forward * controls.forward + frame.right * controls.strafe).normalize_or_zero();
+        // Preserve analogue stick magnitude while limiting keyboard diagonals.
+        let wish_planar = (frame.forward * controls.forward + frame.right * controls.strafe).clamp_length_max(1.0);
         self.sprinting = controls.sprint && controls.forward > 0.0;
         if self.flying {
             let speed = if controls.sprint { FLY_FAST_SPEED } else { FLY_SPEED };
