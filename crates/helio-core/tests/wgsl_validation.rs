@@ -117,6 +117,10 @@ fn is_composed(path: &Path) -> bool {
         "helio-pass-vg-shade/shaders/vg_debug.wgsl",
         "helio-pass-vg-shade/shaders/vg_resolve.wgsl",
         "helio-pass-vg-shade/shaders/vg_shade.wgsl",
+        // Prefixed with the cut-outs' alpha evaluator (`helio_mats::vg_alpha`,
+        // in the device's material binding mode); validated composed, both
+        // modes, by `helio-pass-gi`'s `shaders_validate`.
+        "helio-pass-gi/shaders/gi_mesh_trace.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
