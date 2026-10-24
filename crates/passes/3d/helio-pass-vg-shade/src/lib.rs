@@ -95,8 +95,6 @@ pub struct VgShadeGlobals {
     pub light_count: u32,
     pub ambient_intensity: f32,
     pub ambient_color: [f32; 4],
-    pub rc_world_min: [f32; 4],
-    pub rc_world_max: [f32; 4],
     pub csm_splits: [f32; 4],
     pub debug_mode: u32,
     pub screen_width: f32,
@@ -153,18 +151,24 @@ pub mod shader_source {
         let declarations = between(&gbuffer, "struct Camera {", "/// Per-instance data");
         // SurfaceData .. radiant_eval_surface, compute_velocity, material_texture_data.
         let evaluator = between(&gbuffer, "struct SurfaceData {", "@fragment");
+        // The evaluator widens roughness by the normals a pixel covers, as the
+        // G-buffer's does (its marker, outside the slices, opts in).
         format!(
-            "enable wgpu_binding_array;\n{}\n{COMMON_WGSL}\n{decode}\n{declarations}\n{SHADE_WGSL}\n{evaluator}",
+            "enable wgpu_binding_array;\n{}\n{}\n{COMMON_WGSL}\n{decode}\n{declarations}\n{SHADE_WGSL}\n{evaluator}",
+            helio_mats::SPECULAR_AA_MARKER,
             helio_vg_format::WGSL
         )
     }
 
     /// Compute shaders have no implicit derivatives: rewrite the evaluator's
     /// texture sampling to `textureSampleGrad` with the analytic UV
-    /// derivatives (`vg_duv_dx/dy`). Handles both material binding modes (the
-    /// expanded one must already have had its WebGPU fixups applied).
+    /// derivatives (`vg_duv_dx/dy`), and specular anti-aliasing's normal
+    /// derivatives to the analytic ones (`vg_dn_dx/dy`). Handles both
+    /// material binding modes (the expanded one must already have had its
+    /// WebGPU fixups applied).
     pub fn gradient_sampling(src: &str, max_textures: usize, bindless: bool) -> String {
         const GRAD: &str = "uv, vg_slot_grad(slot, vg_duv_dx), vg_slot_grad(slot, vg_duv_dy)";
+        let src = &src.replace("dpdx(n)", "vg_dn_dx").replace("dpdy(n)", "vg_dn_dy");
         if bindless {
             return src.replace(
                 "textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv)",
@@ -1146,7 +1150,7 @@ mod tests {
     fn rust_layouts() {
         assert_eq!(std::mem::size_of::<VgVisibleCluster>(), 8);
         assert_eq!(std::mem::size_of::<VgShadeParams>(), 32);
-        assert_eq!(std::mem::size_of::<VgShadeGlobals>(), 96);
+        assert_eq!(std::mem::size_of::<VgShadeGlobals>(), 64);
         assert_eq!(OBJECT_ROW_WORDS * 4, 252);
     }
 
