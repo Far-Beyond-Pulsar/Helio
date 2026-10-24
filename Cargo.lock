@@ -1963,6 +1963,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "pollster 0.4.0",

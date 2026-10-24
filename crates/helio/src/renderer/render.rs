@@ -394,8 +394,8 @@ impl Renderer {
         if let Some(instances) = self.ray_frame.instances(self.frame_count) {
             resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_INSTANCES), instances, "Renderer");
         }
-        if let Some((positions, indices)) = self.ray_frame.proxies(self.frame_count) {
-            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_POSITIONS), positions, "Renderer");
+        if let Some((vertices, indices)) = self.ray_frame.proxies(self.frame_count) {
+            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_VERTICES), vertices, "Renderer");
             resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_INDICES), indices, "Renderer");
         }
         // Every instance

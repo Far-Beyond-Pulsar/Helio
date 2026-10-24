@@ -11,11 +11,12 @@
 //! asset's bytes ([`ProxyCache`]) the first time an object uses it, shared
 //! by all its instances. Ray hits on it are shaded as the object's material
 //! (`RayInstance` rows flagged [`helio_core::RAY_INSTANCE_PROXY`], the
-//! face's winding as its normal).
+//! face's winding as its normal); its vertices keep their uv0, so an
+//! alpha-tested material is tested on it as on a classic mesh.
 //!
-//! The proxies live in one pool of packed positions and indices (the
-//! `RayProxies` a frame publishes), used directly as BLAS input and by
-//! shaders that read hit triangles. It only grows by appending; when full it
+//! The proxies live in one pool of packed vertices (position, then uv0) and
+//! indices (the `RayProxies` a frame publishes), used directly as BLAS input
+//! and by shaders that read hit triangles. It only grows by appending; when full it
 //! is reallocated at twice the live size and the live proxies are copied in,
 //! packed (their BLASes rebuild: their input moved). An asset no object uses
 //! any more is dropped at the next build.
@@ -27,8 +28,8 @@ use helio_vg_stream::{proxy_key, ProxyBuild, ProxyCache, ProxyOptions, ProxyStat
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Bytes of a pool vertex: a packed `Float32x3` position.
-const POSITION_BYTES: u64 = 12;
+/// Bytes of a pool vertex: a `Float32x3` position, then a `Float32x2` uv0.
+const VERTEX_BYTES: u64 = helio_core::RAY_PROXY_VERTEX_BYTES;
 /// The cache's accounting budget for proxies not yet uploaded. Every proxy
 /// an object uses stays (live ones are pinned); this only bounds a single
 /// build ([`ProxyOptions::TRACE_MAX_TRIANGLES`] keeps it far below).
@@ -64,13 +65,13 @@ pub struct VgRayStats {
     /// Proxy builds running or queued, and those that failed.
     pub pending: u32,
     pub failed: u32,
-    /// Live bytes of positions and indices, and the pool's allocated bytes.
+    /// Live bytes of vertices and indices, and the pool's allocated bytes.
     pub live_bytes: u64,
     pub pool_bytes: u64,
 }
 
 struct Pool {
-    positions: wgpu::Buffer,
+    vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     vertex_capacity: u32,
     index_capacity: u32,
@@ -92,7 +93,7 @@ impl Pool {
             })
         };
         Self {
-            positions: buffer("VG ray proxy positions", u64::from(vertex_capacity) * POSITION_BYTES),
+            vertices: buffer("VG ray proxy vertices", u64::from(vertex_capacity) * VERTEX_BYTES),
             indices: buffer("VG ray proxy indices", u64::from(index_capacity) * 4),
             vertex_capacity,
             index_capacity,
@@ -102,7 +103,7 @@ impl Pool {
     }
 
     fn bytes(&self) -> u64 {
-        self.positions.size() + self.indices.size()
+        self.vertices.size() + self.indices.size()
     }
 }
 
@@ -193,9 +194,9 @@ impl VgRayProxies {
         }
     }
 
-    /// The pool's positions and indices (after the first upload).
+    /// The pool's vertices and indices (after the first upload).
     pub fn buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
-        self.pool.as_ref().map(|p| (&p.positions, &p.indices))
+        self.pool.as_ref().map(|p| (&p.vertices, &p.indices))
     }
 
     pub fn stats(&self) -> VgRayStats {
@@ -203,7 +204,7 @@ impl VgRayProxies {
         for proxy in self.proxies.values() {
             stats.triangles += u64::from(proxy.range.index_count / 3);
             stats.source_triangles += u64::from(proxy.source_triangles);
-            stats.live_bytes += u64::from(proxy.range.vertex_count) * POSITION_BYTES + u64::from(proxy.range.index_count) * 4;
+            stats.live_bytes += u64::from(proxy.range.vertex_count) * VERTEX_BYTES + u64::from(proxy.range.index_count) * 4;
         }
         for (key, _) in self.assets.values() {
             match self.cache.state(*key) {
@@ -238,17 +239,26 @@ impl VgRayProxies {
                 first_index: pool.index_end,
                 index_count: lod.indices.len() as u32,
             };
-            queue.write_buffer(&pool.positions, u64::from(range.first_vertex) * POSITION_BYTES, bytemuck::cast_slice(&lod.positions));
+            let vertices: Vec<[f32; 5]> = lod
+                .positions
+                .iter()
+                .enumerate()
+                .map(|(v, p)| {
+                    let uv = lod.uvs.get(v).copied().unwrap_or([0.0; 2]);
+                    [p[0], p[1], p[2], uv[0], uv[1]]
+                })
+                .collect();
+            queue.write_buffer(&pool.vertices, u64::from(range.first_vertex) * VERTEX_BYTES, bytemuck::cast_slice(&vertices));
             queue.write_buffer(&pool.indices, u64::from(range.first_index) * 4, bytemuck::cast_slice(&lod.indices));
             pool.vertex_end += range.vertex_count;
             pool.index_end += range.index_count;
             log::info!(
-                "VG ray proxy {key:#018x}: {} triangles of {} (error {:.4}, bounding radius {:.3}), {} KiB of positions and indices",
+                "VG ray proxy {key:#018x}: {} triangles of {} (error {:.4}, bounding radius {:.3}), {} KiB of vertices and indices",
                 lod.triangle_count(),
                 build.source_triangles,
                 lod.error,
                 build.bounds[3],
-                (u64::from(range.vertex_count) * POSITION_BYTES + u64::from(range.index_count) * 4) / 1024,
+                (u64::from(range.vertex_count) * VERTEX_BYTES + u64::from(range.index_count) * 4) / 1024,
             );
             self.proxies.insert(key, Proxy { range, source_triangles: build.source_triangles });
         }
@@ -269,11 +279,11 @@ impl VgRayProxies {
             for key in keys {
                 let range = &mut self.proxies.get_mut(&key).expect("listed above").range;
                 encoder.copy_buffer_to_buffer(
-                    &old.positions,
-                    u64::from(range.first_vertex) * POSITION_BYTES,
-                    &pool.positions,
-                    u64::from(pool.vertex_end) * POSITION_BYTES,
-                    u64::from(range.vertex_count) * POSITION_BYTES,
+                    &old.vertices,
+                    u64::from(range.first_vertex) * VERTEX_BYTES,
+                    &pool.vertices,
+                    u64::from(pool.vertex_end) * VERTEX_BYTES,
+                    u64::from(range.vertex_count) * VERTEX_BYTES,
                 );
                 encoder.copy_buffer_to_buffer(
                     &old.indices,

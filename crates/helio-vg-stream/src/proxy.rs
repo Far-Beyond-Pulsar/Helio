@@ -28,7 +28,10 @@
 //! Limitations (documented, not hidden): a proxy is a *uniform* cut, so error
 //! is bounded by the level's `error` in object space, not per pixel; one level
 //! per asset per frame (large instances spanning a wide distance range use the
-//! level for their nearest point); no per-triangle material or alpha data.
+//! level for their nearest point); no per-triangle material data. With
+//! [`ProxyOptions::uvs`] each vertex also carries its uv0 (the attribute
+//! stream's, decoded from f16), so alpha-tested materials can be tested at
+//! a hit; vertices then weld on lattice coordinate and uv, keeping UV seams.
 //!
 //! Two ladders use this: the dense tier's ([`ProxyOptions::default`]: the
 //! leaves, then cuts up to the root, one picked per instance and frame from
@@ -61,11 +64,13 @@ pub struct ProxyOptions {
     pub finest_relative_error: f32,
     /// Keep at most this many levels: the finest that fit the triangle cap.
     pub max_lods: usize,
+    /// Decode each vertex's uv0 into [`ProxyLodCpu::uvs`].
+    pub uvs: bool,
 }
 
 impl Default for ProxyOptions {
     fn default() -> Self {
-        Self { levels: 5, ratio: 4.0, max_triangles_per_lod: 8 << 20, finest_relative_error: 0.0, max_lods: usize::MAX }
+        Self { levels: 5, ratio: 4.0, max_triangles_per_lod: 8 << 20, finest_relative_error: 0.0, max_lods: usize::MAX, uvs: false }
     }
 }
 
@@ -87,7 +92,8 @@ impl ProxyOptions {
     /// One proxy per asset for the scene's TLAS: the finest cut whose error
     /// is at most [`Self::TRACE_RELATIVE_ERROR`] of the asset's bounding
     /// radius and that fits [`Self::TRACE_MAX_TRIANGLES`], else the first
-    /// coarser cut (each twice the error, up to the root) that fits.
+    /// coarser cut (each twice the error, up to the root) that fits. With
+    /// UVs: rays alpha-test cut-out materials on it.
     pub fn trace() -> Self {
         Self {
             levels: 12,
@@ -95,6 +101,7 @@ impl ProxyOptions {
             max_triangles_per_lod: Self::TRACE_MAX_TRIANGLES,
             finest_relative_error: Self::TRACE_RELATIVE_ERROR,
             max_lods: 1,
+            uvs: true,
         }
     }
 }
@@ -105,6 +112,8 @@ pub struct ProxyLodCpu {
     /// Object-space error bound of this cut (units of `GpuCluster::self_error`).
     pub error: f32,
     pub positions: Vec<[f32; 3]>,
+    /// Per vertex, uv0 ([`ProxyOptions::uvs`]; else empty).
+    pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
     /// Per triangle: `proxy cluster ordinal << VIS_TRI_BITS | triangle in cluster`.
     pub prim_map: Vec<u32>,
@@ -121,10 +130,10 @@ impl ProxyLodCpu {
         self.indices.len() / 3
     }
 
-    /// Bytes of GPU + CPU-side tables this level costs (vertex + index +
-    /// prim_map + per-cluster rows).
+    /// Bytes of GPU + CPU-side tables this level costs (vertex + uv + index
+    /// + prim_map + per-cluster rows).
     pub fn bytes(&self) -> usize {
-        self.positions.len() * 12 + self.indices.len() * 4 + self.prim_map.len() * 4 + self.clusters.len() * 8
+        self.positions.len() * 12 + self.uvs.len() * 8 + self.indices.len() * 4 + self.prim_map.len() * 4 + self.clusters.len() * 8
     }
 }
 
@@ -176,7 +185,7 @@ fn root_cut_radius(source: &dyn VgeoSource, quant: &GpuAssetQuant) -> Result<f32
                 .map(bytemuck::pod_read_unaligned)
                 .ok_or_else(|| format!("proxy: page {page_id} cluster {local} out of range"))?;
             if c.flags & GpuCluster::FLAG_ROOT != 0 {
-                points.extend(decode_cluster(&bytes, &c, quant)?.0);
+                points.extend(decode_cluster(&bytes, &c, quant, false)?.positions);
             }
         }
     }
@@ -218,11 +227,13 @@ pub fn error_ladder(root_error: f32, radius: f32, opts: &ProxyOptions) -> Vec<f3
 struct LodBuild {
     error: f32,
     positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
     indices: Vec<u32>,
     prim_map: Vec<u32>,
     clusters: Vec<u32>,
     cluster_pages: Vec<u32>,
-    weld: HashMap<[u32; 3], u32>,
+    /// Lattice coordinate and uv0 bits (zero without UVs) to vertex.
+    weld: HashMap<([u32; 3], u32), u32>,
     over_cap: bool,
 }
 
@@ -248,6 +259,7 @@ pub fn build_proxy(
         .map(|&error| LodBuild {
             error,
             positions: Vec::new(),
+            uvs: Vec::new(),
             indices: Vec::new(),
             prim_map: Vec::new(),
             clusters: Vec::new(),
@@ -281,29 +293,35 @@ pub fn build_proxy(
                 source_triangles += c.tri_count();
             }
             // Which levels select this cluster: self <= E < parent.
-            let mut decoded: Option<(Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[u8; 3]>)> = None;
+            let mut decoded: Option<Decoded> = None;
             for lod in lods.iter_mut() {
                 if lod.over_cap || !(c.self_error <= lod.error && lod.error < c.parent_error) {
                     continue;
                 }
                 if decoded.is_none() {
-                    decoded = Some(decode_cluster(&bytes, &c, &quant)?);
+                    decoded = Some(decode_cluster(&bytes, &c, &quant, opts.uvs)?);
                 }
-                let (positions, lattice, tris) = decoded.as_ref().unwrap();
+                let d = decoded.as_ref().unwrap();
                 let ordinal = lod.clusters.len() as u32;
                 lod.clusters.push(local);
                 lod.cluster_pages.push(page_id);
                 // Weld on the lattice coordinate: shared vertices decode
                 // bit-identically across clusters (asset-global lattice).
+                // With UVs, on the uv too: a seam's two sides stay apart.
                 let mut map = [0u32; 128];
-                for (v, (p, q)) in positions.iter().zip(lattice).enumerate() {
+                for (v, (p, q)) in d.positions.iter().zip(&d.lattice).enumerate() {
+                    let uv_bits = d.uv_bits.get(v).copied().unwrap_or(0);
                     let next = lod.positions.len() as u32;
-                    let id = *lod.weld.entry(*q).or_insert(next);
+                    let id = *lod.weld.entry((*q, uv_bits)).or_insert(next);
                     if id == next {
                         lod.positions.push(*p);
+                        if opts.uvs {
+                            lod.uvs.push(uv0(uv_bits));
+                        }
                     }
                     map[v] = id;
                 }
+                let tris = &d.tris;
                 for (t, tri) in tris.iter().enumerate() {
                     lod.indices.extend_from_slice(&[map[tri[0] as usize], map[tri[1] as usize], map[tri[2] as usize]]);
                     lod.prim_map.push((ordinal << VIS_TRI_BITS) | t as u32);
@@ -313,6 +331,7 @@ pub fn build_proxy(
                     // dominate memory while the other levels finish.
                     lod.over_cap = true;
                     lod.positions = Vec::new();
+                    lod.uvs = Vec::new();
                     lod.indices = Vec::new();
                     lod.prim_map = Vec::new();
                     lod.clusters = Vec::new();
@@ -349,6 +368,7 @@ pub fn build_proxy(
         out.push(ProxyLodCpu {
             error: lod.error,
             positions: lod.positions,
+            uvs: lod.uvs,
             indices: lod.indices,
             prim_map: lod.prim_map,
             clusters: lod.clusters,
@@ -383,14 +403,40 @@ fn bounding_sphere(points: &[[f32; 3]]) -> [f32; 4] {
     [c[0], c[1], c[2], r2.sqrt()]
 }
 
-/// CPU decode of one cluster's positions (lattice + dequantized) and indices;
-/// the mirror of `vg_decode.wgsl` / `VgeoReader::decode_cluster`.
-#[allow(clippy::type_complexity)]
-fn decode_cluster(
-    page: &[u8],
-    c: &GpuCluster,
-    quant: &GpuAssetQuant,
-) -> Result<(Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<[u8; 3]>), String> {
+/// One cluster, decoded.
+struct Decoded {
+    positions: Vec<[f32; 3]>,
+    lattice: Vec<[u32; 3]>,
+    /// uv0 as stored (f16x2 bits), when asked for.
+    uv_bits: Vec<u32>,
+    tris: Vec<[u8; 3]>,
+}
+
+/// uv0 of f16x2 bits.
+fn uv0(bits: u32) -> [f32; 2] {
+    [f16_to_f32(bits & 0xffff), f16_to_f32(bits >> 16)]
+}
+
+fn f16_to_f32(h: u32) -> f32 {
+    let (e, m) = ((h >> 10) & 31, h & 1023);
+    let v = match e {
+        0 => m as f32 * 2f32.powi(-24),
+        31 if m == 0 => f32::INFINITY,
+        31 => f32::NAN,
+        _ => f32::from_bits(((e + 112) << 23) | (m << 13)),
+    };
+    if h & 0x8000 != 0 {
+        -v
+    } else {
+        v
+    }
+}
+
+/// CPU decode of one cluster's positions (lattice + dequantized), its uv0s
+/// (`uvs`; word 2 of each [`ATTR_STRIDE`] attribute record, whose stream
+/// starts at the position block's word 4) and indices; the mirror of
+/// `vg_decode.wgsl` / `vg_alpha_uv.wgsl` / `VgeoReader::decode_cluster`.
+fn decode_cluster(page: &[u8], c: &GpuCluster, quant: &GpuAssetQuant, uvs: bool) -> Result<Decoded, String> {
     let (nv, nt) = (c.vert_count() as usize, c.tri_count() as usize);
     let po = c.vertex_offset as usize;
     let word = |k: usize| -> Result<u32, String> {
@@ -440,7 +486,16 @@ fn decode_cluster(
     if tris.iter().flatten().any(|&i| i as usize >= nv) {
         return Err("proxy: triangle index out of range".into());
     }
-    Ok((positions, lattice, tris))
+    let mut uv_bits = Vec::new();
+    if uvs {
+        let attributes = word(4)? as usize;
+        for v in 0..nv {
+            let at = attributes + v * ATTR_STRIDE as usize + 8;
+            let bytes = page.get(at..at + 4).ok_or_else(|| "proxy: attribute stream out of range".to_string())?;
+            uv_bits.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+        }
+    }
+    Ok(Decoded { positions, lattice, uv_bits, tris })
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────

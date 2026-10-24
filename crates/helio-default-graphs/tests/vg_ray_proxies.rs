@@ -4,10 +4,12 @@
 //! placeholder mesh (the VG asset's identity, as `vg_stress` places its
 //! statues), so without proxies the GI probes' rays and the light's shadow
 //! rays pass it and the other half fills with light; through its proxy the
-//! far half stays dark until the wall moves away. Needs hardware ray
+//! far half stays dark until the wall moves away. A wall of an
+//! alpha-tested material (a cut-out, classic or VG) stops rays where its
+//! alpha is 1 and lets them through where it is 0. Needs hardware ray
 //! queries: without them each test returns at once.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use glam::{DVec3, Mat4, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig};
@@ -29,7 +31,9 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
     MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
     StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
     helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut store, helio_pass_forward_lit::MAX_LIGHTS, device);
-    scene_db.world.attach_gpu_mirror(pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(store), queue.clone()));
+    let textures = Arc::new(RwLock::new(pulsar_scenedb::gpu::TextureStore::new(64)));
+    let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(store), queue.clone()).with_texture_store(textures).unwrap();
+    scene_db.world.attach_gpu_mirror(mirror);
     scene_db
 }
 
@@ -96,6 +100,12 @@ fn place(world: &mut World, mesh: Entity, (material, row): (Entity, MaterialComp
 
 /// A classic box of half extent `half` at `centre` in `colour`.
 fn spawn_box(world: &mut World, centre: Vec3, half: Vec3, colour: [f32; 3]) {
+    let material = material(world, colour, 0.0);
+    spawn_box_in(world, centre, half, material);
+}
+
+/// A classic box of half extent `half` at `centre` in `material`.
+fn spawn_box_in(world: &mut World, centre: Vec3, half: Vec3, material: (Entity, MaterialComponent)) {
     let (positions, normals, indices) = box_faces(half, 1);
     let vertices = positions
         .iter()
@@ -104,7 +114,6 @@ fn spawn_box(world: &mut World, centre: Vec3, half: Vec3, colour: [f32; 3]) {
         .collect();
     let mesh = world.spawn();
     world.insert(mesh, MeshComponent { vertices, indices });
-    let material = material(world, colour, 0.0);
     place(world, mesh, material, Mat4::from_translation(centre), half.length());
 }
 
@@ -131,6 +140,12 @@ fn wall_vgeo() -> Arc<dyn VgeoSource> {
 /// The VG wall's object: a zero-area placeholder mesh whose interned vertex
 /// range `runtime` knows as the wall's asset.
 fn spawn_vg_wall(world: &mut World, runtime: &VgRuntime, colour: [f32; 3], emissive: f32) -> Entity {
+    let material = material(world, colour, emissive);
+    spawn_vg_wall_in(world, runtime, material)
+}
+
+/// The VG wall's object in `material`.
+fn spawn_vg_wall_in(world: &mut World, runtime: &VgRuntime, material: (Entity, MaterialComponent)) -> Entity {
     let mut vertex = helio::PackedVertex::default();
     vertex.tex_coords0 = [7.0, 0.0];
     let mesh = world.spawn();
@@ -138,7 +153,6 @@ fn spawn_vg_wall(world: &mut World, runtime: &VgRuntime, colour: [f32; 3], emiss
     let store = world.gpu_mirror().cloned().unwrap();
     let range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
     runtime.request_asset(WALL_CONTENT, range.offset, range.count, wall_vgeo());
-    let material = material(world, colour, emissive);
     place(world, mesh, material, Mat4::from_translation(Vec3::new(0.0, 2.0, 0.0)), WALL_HALF.length())
 }
 
@@ -215,6 +229,7 @@ struct Harness {
     scene: pulsar_scenedb::SceneDb,
     renderer: helio::Renderer,
     rays: SceneDbRayTracing,
+    runtime: VgRuntime,
     _target: wgpu::Texture,
     view: wgpu::TextureView,
     camera: Camera,
@@ -261,10 +276,34 @@ impl Harness {
         let view = target.create_view(&Default::default());
         let mut rays = SceneDbRayTracing::partial(device.clone(), queue.clone());
         if vg {
-            rays = rays.with_virtual_geometry(runtime);
+            rays = rays.with_virtual_geometry(runtime.clone());
         }
         let camera = Camera::perspective_look_at(EYE, Vec3::new(0.0, 1.5, -1.0), Vec3::Y, 1.0, 1.0, 0.1, 100.0);
-        Some(Self { device, queue, scene, renderer, rays, _target: target, view, camera })
+        Some(Self { device, queue, scene, renderer, rays, runtime, _target: target, view, camera })
+    }
+
+    /// A grey cut-out material (alpha-tested, double-sided, as leaf cards
+    /// are) whose base colour texture's alpha is `alpha` everywhere.
+    fn cut_out_material(&mut self, alpha: u8) -> (Entity, MaterialComponent) {
+        let textures = self.scene.world.gpu_mirror().and_then(|m| m.texture_store()).unwrap();
+        let texels = [255, 255, 255, alpha].repeat(16);
+        let descriptor = wgpu::TextureDescriptor {
+            label: Some("cut-out alpha"),
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        };
+        let slot = textures.write().unwrap().register_mips(&self.device, &self.queue, &descriptor, &[&texels]).unwrap();
+        let entity = self.scene.world.spawn();
+        let mut row = MaterialComponent::new([0.7, 0.7, 0.7, 1.0], 0.8, 0.0, [0.0; 3], 0.0);
+        row.flags |= helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_DOUBLE_SIDED;
+        row.tex_base_color = slot;
+        self.scene.world.insert(entity, row);
+        (entity, row)
     }
 
     fn frame(&mut self) {
@@ -389,6 +428,44 @@ fn a_vg_proxy_hit_takes_its_object_s_material() {
         let (probes, light) = probe_light(&words, lo, hi);
         eprintln!("by the glowing VG wall: {probes} probes, mean light {light:.4}");
         assert!(probes > 300 && light > 0.05, "{probes} probes by the glowing wall got {light}");
+    }
+}
+
+/// Cut-outs in the TLAS: the room split by a wall of an alpha-tested
+/// material, as a classic mesh and through a VG proxy (its UVs from the
+/// asset's attribute records). Where the material's alpha is 1 the wall
+/// stops probe and shadow rays as an opaque one does; where it is 0 the far
+/// half fills with light as if there were no wall.
+#[test]
+fn a_cut_out_wall_stops_rays_where_its_alpha_says() {
+    let Some(open) = far_light(false, |world, _| room(world, true)) else {
+        return;
+    };
+    for vg in [false, true] {
+        for alpha in [255u8, 0] {
+            let mut harness = Harness::new(vg, |world, _| room(world, true)).unwrap();
+            let material = harness.cut_out_material(alpha);
+            if vg {
+                spawn_vg_wall_in(&mut harness.scene.world, &harness.runtime, material);
+                harness.wait_for_proxy();
+            } else {
+                spawn_box_in(&mut harness.scene.world, Vec3::new(0.0, 2.0, 0.0), WALL_HALF, material);
+            }
+            let errors = harness.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            for _ in 0..FRAMES {
+                harness.frame();
+            }
+            let (probes, far) = probe_light(&harness.probes(), DARK_LO, DARK_HI);
+            let error = pollster::block_on(errors.pop());
+            assert!(error.is_none(), "{error:?}");
+            eprintln!("cut-out wall (vg {vg}, alpha {alpha}): far half {far:.6} of the open room's {open:.5}");
+            assert!(probes > 300, "{probes} probes in the far half");
+            if alpha == 255 {
+                assert!(far < open * 1e-3, "a solid cut-out wall (vg {vg}) let {far} through of {open}");
+            } else {
+                assert!(far > open * 0.8, "a cut-out wall of holes (vg {vg}) let {far} through of {open}");
+            }
+        }
     }
 }
 

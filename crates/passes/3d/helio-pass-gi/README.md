@@ -99,17 +99,29 @@ and the probes' (`gi_light`, RGB half floats, added as is). Tracers:
   its chance (`gi_light`). The frontend publishes the TLAS and its rows
   (`Renderer::set_ray_tracing_frame`, from
   `helio_default_graphs::ray_tracing::SceneDbRayTracing`; `partial`
-  leaves out what it cannot represent, such as foliage and masked
-  materials, so the probes see past it). Textures are not sampled at hits:
-  the projection folds each base colour texture's mean (its coarsest mip,
+  leaves out what it cannot represent, such as engine foliage layers, so
+  the probes see past it). Textures are not sampled for shading: the
+  projection folds each base colour texture's mean (its coarsest mip,
   measured once on the GPU) into the row, so a textured material whose
   factor is white does not bounce as white. Local lights' shadow rays see
   meshes only, not voxel terrain.
 
-  Virtual geometry is not in the TLAS yet: a VG-only asset's mesh row is a
-  placeholder triangle, so the probes see past VG statues and trees (the
-  projection would need each asset's coarse proxy cut; `helio_vg_stream`
-  builds them for the dense tier's own, view-dependent TLAS).
+  Cut-outs (alpha-tested materials: leaf cards, fences) are non-opaque in
+  the TLAS, their rows flagged `RAY_INSTANCE_MASKED` with their material
+  row. Probe and shadow rays test each candidate as the raster does
+  (`helio_mats::vg_alpha`: base colour alpha times the factor against the
+  cutoff, uv0 by the barycentrics), sampled at the mip whose texels match
+  the ray's footprint there (a cone of one probe ray's solid angle). Past
+  the finest mip the test is stochastic (alpha against a uniform
+  threshold), so a canopy stops rays in proportion to its coverage however
+  far, instead of its thin leaves vanishing with the mips; at most
+  `MAX_CUT_OUTS` candidates are tested a ray, the next one stops it. A hit
+  on a cut-out is shaded as any mesh hit; a double-sided material's faces
+  are both outside.
+
+  Virtual geometry is traced through one coarse proxy cut per asset
+  (`helio_default_graphs::ray_proxies`, rows flagged `RAY_INSTANCE_PROXY`:
+  positions and uv0 in the proxy pool, the face's winding as its normal).
 
   Without ray queries (software Vulkan, WebGPU) the tracer is not built:
   over voxel terrain the probes see the terrain alone (meshes receive GI

@@ -858,6 +858,12 @@ mod shader_tests {
     fn shaders_validate() {
         validate("gi_update", include_str!("../shaders/gi_update.wgsl"), &[ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
         validate("gi_resolve", include_str!("../shaders/gi_resolve.wgsl"), &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
-        validate("gi_mesh_trace", include_str!("../shaders/gi_mesh_trace.wgsl"), &[GI_COMMON_SNIPPET, helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET]);
+        use helio_mats::{MaterialBindingConfig, MaterialBindingMode};
+        for binding in [
+            MaterialBindingConfig { mode: MaterialBindingMode::BindingArray, max_textures: 256 },
+            MaterialBindingConfig { mode: MaterialBindingMode::Expanded, max_textures: 16 },
+        ] {
+            validate("gi_mesh_trace", &crate::mesh::mesh_trace_source(binding), &[GI_COMMON_SNIPPET, helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET]);
+        }
     }
 }
