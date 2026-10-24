@@ -499,7 +499,7 @@ fn enable_ray_shadows(world: &mut World, objects: &[Entity]) {
             .is_some_and(|(entity, (m,))| {
                 m.flags & helio_mats::FLAG_ALPHA_BLEND != 0
                     && world
-                        .get::<helio_default_graphs::ray_tracing::RayTransmission>(entity)
+                        .get::<helio_default_passes::ray_tracing::RayTransmission>(entity)
                         .is_none()
             });
         if !blended {
@@ -612,7 +612,7 @@ struct Bench {
     queue: Arc<wgpu::Queue>,
     scene_db: SceneDb,
     renderer: Renderer,
-    acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
     target: wgpu::Texture,
     view: wgpu::TextureView,
     scene: BenchScene,
@@ -887,9 +887,9 @@ fn build_bench(
         .with_external_device()
         .with_editor_mode(args.editor)
         .with_pass_build_context(match args.graph.as_str() {
-            "hlfs" => Box::new(helio_default_graphs::build_hlfs_graph_with_context),
+            "hlfs" => Box::new(helio_default_passes::build_hlfs_graph_with_context),
             // The graph Pulsar-Native's editor viewport builds.
-            "default" => Box::new(helio_default_graphs::build_default_graph_external_with_context),
+            "default" => Box::new(helio_default_passes::build_default_graph_external_with_context),
             other => panic!("unknown graph {other}; use hlfs or default"),
         })
         .build(device.clone(), queue.clone(), WIDTH, HEIGHT, format);
@@ -905,7 +905,7 @@ fn build_bench(
                 },
             );
         }
-        helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
+        helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
     });
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("move_benchmark target"),

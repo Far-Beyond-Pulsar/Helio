@@ -108,7 +108,7 @@ impl HelioWasmApp for Demo {
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
-        let graph = helio_default_graphs::build_hlfs_graph(
+        let graph = helio_default_passes::build_hlfs_graph(
             &device,
             &queue,
             renderer.camera_buf(),

@@ -28,6 +28,7 @@ use helio_pass_vg_raster::{VgRasterFrameData, KEY_RASTER};
 use helio_vg_format::VgMode;
 use helio_vg_stream::VgRuntime;
 
+use crate::common::GpuScopes;
 use crate::mask_union::MaskUnion;
 use crate::stats_readback::StatsReadback;
 use crate::{
@@ -51,6 +52,10 @@ pub struct VgDenseFrameData<'a> {
     /// The ray-traced backend's visible rows (ids `>= DENSE_RT_VISIBLE_BASE`),
     /// when it ran.
     pub rt_visible: Option<&'a wgpu::Buffer>,
+    /// Tier 3 holds only the clusters the cull diverted to the dense bin: the
+    /// resolve takes the nearest of it and the Tier 1/2 result inside dense
+    /// tiles instead of replacing them.
+    pub merge: bool,
 }
 
 struct Published {
@@ -59,6 +64,13 @@ struct Published {
     bary: Option<wgpu::Buffer>,
     visible: Option<wgpu::Buffer>,
 }
+
+/// While no dense tile was seen for [`ACTIVE_FRAMES`] frames, Tier 3 probes (the
+/// cheap compaction, no work) once every this many frames: its idle cost is then
+/// that of a handful of tiny dispatches divided by the stride.
+pub const IDLE_PROBE_STRIDE: u64 = 4;
+/// Frames Tier 3 stays active after the last readback that reported dense tiles.
+pub const ACTIVE_FRAMES: u64 = 16;
 
 /// Tier 3 as a graph pass.
 pub struct VgDensePass {
@@ -76,10 +88,71 @@ pub struct VgDensePass {
     backend: Tier3Backend,
     tier_active: bool,
     prep_dense_tiles: u32,
+    /// Learning frame: run the compaction and the candidate collection so the
+    /// ray-traced backend can become ready, but resolve nothing (Tier 2 draws
+    /// everything; the cull is not diverting yet).
+    learn_only: bool,
+    /// Frame counter of this pass, and the frame until which dense tiles were
+    /// recently seen (stats / candidate readbacks, a few frames late). While idle
+    /// the pass only probes every [`IDLE_PROBE_STRIDE`] frames.
+    frame: u64,
+    active_until: u64,
     published: Option<Published>,
 }
 
 impl VgDensePass {
+    /// Decide what Tier 3 does this frame and whether the cull diverts clusters to
+    /// it NEXT frame (`VgTier3Stats::engaged`).
+    ///
+    /// Tier 3 costs nothing unless it is going to be cheaper than Tier 2 on the
+    /// dense tiles. Measured on an RTX 4090 (see VG_STRESS.md): the ray-traced
+    /// backend is, the depth peel is not, so in `Auto`:
+    ///
+    /// * RT ready (proxies resident, TLAS covers every candidate) -> engage; RT runs;
+    /// * no RT, but Tier 2 is the tiled no-int64 fallback (its lists overflow) ->
+    ///   engage; the peel runs;
+    /// * otherwise do not engage: dense tiles stay on Tier 2, and (with RT
+    ///   hardware) the pass only runs the cheap candidate collection so RT can
+    ///   become ready.
+    ///
+    /// A frame whose clusters were diverted (`engaged_prev`) is always resolved
+    /// by some backend (RT if chosen, else the peel), so nothing is ever a hole.
+    /// `ForceNonRtFallback` always engages the peel.
+    fn engage(&mut self, mode: VgMode, rt_choice: bool, engaged_prev: bool, tile_fallback: bool) {
+        let Some(runtime) = self.runtime.clone() else { return };
+        let active = self.frame < self.active_until;
+        let probe = !active && self.frame % IDLE_PROBE_STRIDE == 0;
+        let (engaged_next, backend) = match mode {
+            VgMode::Off | VgMode::ForceHwRaster => (false, Tier3Backend::Off),
+            VgMode::ForceNonRtFallback => {
+                let backend = if engaged_prev || active {
+                    Tier3Backend::NonRt
+                } else if probe {
+                    self.learn_only = true;
+                    Tier3Backend::NonRt
+                } else {
+                    Tier3Backend::Off
+                };
+                (active, backend)
+            }
+            VgMode::Auto => {
+                let backend = if rt_choice && engaged_prev {
+                    Tier3Backend::Rt
+                } else if engaged_prev || (tile_fallback && active) {
+                    Tier3Backend::NonRt
+                } else if self.tier_active && (active || probe) || tile_fallback && probe {
+                    self.learn_only = true;
+                    Tier3Backend::NonRt
+                } else {
+                    Tier3Backend::Off
+                };
+                ((rt_choice || tile_fallback) && active, backend)
+            }
+        };
+        self.backend = backend;
+        runtime.update_tier3_stats(|s| s.engaged = engaged_next);
+    }
+
     /// `mode` is read every frame (the project setting).
     pub fn new(
         device: &wgpu::Device,
@@ -100,6 +173,9 @@ impl VgDensePass {
             backend: Tier3Backend::Off,
             tier_active: false,
             prep_dense_tiles: 0,
+            learn_only: false,
+            frame: 0,
+            active_until: 0,
             published: None,
         })
     }
@@ -132,6 +208,10 @@ fn column_major(m: &[f32; 16]) -> [[f32; 4]; 4] {
 }
 
 impl RenderPass for VgDensePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["materials"]
+    }
+
     fn name(&self) -> &'static str {
         "VgDense"
     }
@@ -145,15 +225,32 @@ impl RenderPass for VgDensePass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let mode = (self.mode)();
+        self.frame += 1;
         self.tier_active = false;
+        self.learn_only = false;
+        let (engaged_prev, tile_fallback) = self.runtime.as_ref().map_or((true, false), |r| {
+            let t = r.tier3_stats();
+            (t.engaged, t.tier2_tile_fallback)
+        });
         self.stats_rb.begin_maps();
         if let (Some(s), Some(runtime)) = (self.stats_rb.poll(ctx.device), self.runtime.as_ref()) {
+            if s.dense_tiles > 0 {
+                self.active_until = self.frame + ACTIVE_FRAMES;
+            }
             runtime.update_tier3_stats(|t| {
                 t.dense_tiles_processed = s.tiles_processed;
                 t.bin_overflow = s.bin_overflow;
                 t.slot_overflow = s.slot_overflow;
                 t.clamped_tiles = s.clamped_tiles;
                 t.clamped_tris = s.clamped_tris;
+                t.peel_layers = s.layers;
+                t.list_total = s.list_total;
+                t.list_max = s.list_max;
+                t.tris_total = s.tris_total;
+                t.tris_max = s.tris_max;
+                t.masked_tiles = s.masked_tiles;
+                t.masked_tris = s.masked_tris;
+                t.masked_tris_max = s.masked_tris_max;
             });
         }
         self.prep_dense_tiles = 0;
@@ -170,6 +267,7 @@ impl RenderPass for VgDensePass {
             && self.runtime.as_ref().is_some_and(|r| r.any_ready());
         if !want_tier {
             self.backend = self.selector.select(mode, false, false, 0, tiles_total);
+            self.engage(mode, false, engaged_prev, tile_fallback);
             return Ok(());
         }
         let runtime = self.runtime.clone().expect("checked above");
@@ -180,6 +278,7 @@ impl RenderPass for VgDensePass {
                     log::warn!("virtual geometry: ray-traced Tier 3 unavailable ({e}); dense tiles use the depth peel");
                     self.tier_failed = true;
                     self.backend = self.selector.select(mode, false, false, 0, tiles_total);
+                    self.engage(mode, false, engaged_prev, tile_fallback);
                     return Ok(());
                 }
             }
@@ -202,9 +301,15 @@ impl RenderPass for VgDensePass {
             px_per_unit: pixels_per_unit_from_proj(&cam.proj, ctx.height),
         };
         let tier = self.tier.as_mut().expect("created above");
+        let t0 = std::time::Instant::now();
         let prep = tier.prepare(&env);
+        let us = t0.elapsed().as_micros().min(u32::MAX as u128) as u32;
+        runtime.update_tier3_stats(|t| t.rt_prepare_cpu_us = us);
         self.tier_active = true;
         self.prep_dense_tiles = prep.dense_tiles;
+        if prep.dense_tiles > 0 {
+            self.active_until = self.frame + ACTIVE_FRAMES;
+        }
         // A depth peel that overflowed its per-tile cluster lists is losing
         // geometry: prefer RT (the mask size alone may undercount the need).
         let overflowing = self.runtime.as_ref().is_some_and(|r| r.tier3_stats().bin_overflow > 0);
@@ -213,25 +318,28 @@ impl RenderPass for VgDensePass {
         if self.backend != Tier3Backend::Rt && prep.dense_tiles > 0 && !prep.rt_ready {
             tier.note_incomplete(&runtime);
         }
+        let rt_choice = self.backend == Tier3Backend::Rt;
+        self.engage(mode, rt_choice, engaged_prev, tile_fallback);
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.published = None;
-        let Some(inputs) = ctx.registry.get::<VgCullInputs<'_>>(ResourceKey::new(KEY_INPUTS)) else {
+        let registry = ctx.registry;
+        let Some(inputs) = registry.get::<VgCullInputs<'_>>(ResourceKey::new(KEY_INPUTS)) else {
             return Ok(());
         };
-        let Some(cull) = ctx.registry.get::<VgCullFrameData<'_>>(ResourceKey::new(KEY_CULL)) else {
+        let Some(cull) = registry.get::<VgCullFrameData<'_>>(ResourceKey::new(KEY_CULL)) else {
             return Ok(());
         };
-        let Some(raster) = ctx.registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER))
-        else {
+        let Some(raster) = registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER)) else {
             return Ok(());
         };
         let mut backend = self.backend;
         if backend == Tier3Backend::Off {
             return Ok(());
         }
+        let (device, queue) = (ctx.device, ctx.queue);
         let cam = ctx.camera_data;
         let frame = DenseFrame {
             view_proj: column_major(&cam.view_proj),
@@ -250,43 +358,57 @@ impl RenderPass for VgDensePass {
             vg_instances: inputs.instances,
             objects: inputs.objects,
         };
-        // Tiles to resolve: this frame's classification, the mask the cull routed
-        // clusters by, and the footprint of the dense-bin clusters (see
-        // `mask_union.rs`: `raster.dense_mask` alone alternates ON/OFF and misses
-        // the pixels of diverted clusters outside the dense tiles).
-        let union_mask: wgpu::Buffer = {
-            let mut urec = ctx.graphics_cmds();
-            let last = inputs.dense_mask.unwrap_or(raster.dense_mask);
-            self.mask_union
-                .record(ctx.device, ctx.queue, &mut urec, &frame, &nonrt_inputs, raster.dense_mask, last)
-                .clone()
-        };
-        nonrt_inputs.tile_mask = &union_mask;
         // Alpha-masked clusters (cull bins 6 and 7) need the material tables: the
         // masked peel evaluates the alpha test per fragment.
         let masked_tables = match (
             ctx.scene_buffers.get(helio_core::BufferKey::of("materials")),
-            ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures()),
+            registry.get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures()),
         ) {
             (Some(materials), Some(textures)) => Some((materials, textures)),
             _ => None,
         };
-        self.nonrt.set_masked(masked_tables.as_ref().map(|(m, t)| (&m.buffer, *t)));
+        // Collect every visible VG tier intersecting the selected tiles. Clusters
+        // wholly contained by the dense mask are routed to BIN_DENSE by the cull;
+        // boundary-crossing clusters remain rasterized outside the selected tiles.
+        self.nonrt.set_dense_bin_only(false);
+        let _ = masked_tables;
+        self.nonrt.set_masked(None);
         let mut rec = ctx.graphics_cmds();
+        let scopes_on = ctx.gpu_scopes_enabled();
+        let mut scope_fn = |rec: &mut helio_core::CommandRecorder<'_>, name: &'static str, begin: bool| {
+            if begin {
+                ctx.begin_gpu_scope(rec, name);
+            } else {
+                ctx.end_gpu_scope(rec, name);
+            }
+        };
+        let mut scopes = if scopes_on { GpuScopes::new(&mut scope_fn) } else { GpuScopes::none() };
+        // Tiles to resolve: this frame's classification, the mask the cull routed
+        // clusters by, and the footprint of the dense-bin clusters (see
+        // mask_union.rs).
+        let union_mask: wgpu::Buffer = {
+            let last = inputs.dense_mask.unwrap_or(raster.dense_mask);
+            self.mask_union
+                .record(device, queue, &mut rec, &frame, &nonrt_inputs, raster.dense_mask, last, &mut scopes)
+                .clone()
+        };
+        nonrt_inputs.tile_mask = &union_mask;
         let tier_on = self.tier_active && self.tier.is_some();
         if tier_on {
-            // Cheap front half first: compaction + args give `tile_slot` and
+            // Cheap front half first: compaction + args give tile_slot and
             // the bin ranges, which the candidate collection needs whichever
             // backend draws.
-            self.nonrt.record_setup_rec(ctx.device, ctx.queue, &mut rec, &frame, &nonrt_inputs);
+            self.nonrt.record_setup_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
             if let (Some(tier), Some(dense)) = (self.tier.as_mut(), self.nonrt.buffers()) {
-                tier.record_collect(ctx.device, ctx.queue, &mut rec, dense, &nonrt_inputs, inputs.instance_count);
+                tier.record_collect(device, queue, &mut rec, dense, &nonrt_inputs, inputs.instance_count, &mut scopes);
             }
-            if backend == Tier3Backend::Rt {
+            if self.learn_only {
+                // Nothing is diverted yet: Tier 2 draws everything.
+            } else if backend == Tier3Backend::Rt {
                 let ok = self
                     .tier
                     .as_mut()
-                    .map(|t| t.record_rt(ctx.device, ctx.queue, &mut rec, &frame, &union_mask))
+                    .map(|t| t.record_rt(device, queue, &mut rec, &frame, &union_mask, &mut scopes))
                     .is_some_and(|r| match r {
                         Ok(()) => true,
                         Err(e) => {
@@ -298,23 +420,24 @@ impl RenderPass for VgDensePass {
                     backend = Tier3Backend::NonRt;
                 }
             }
-            if backend == Tier3Backend::NonRt {
-                self.nonrt.record_work_rec(ctx.device, ctx.queue, &mut rec, &frame, &nonrt_inputs);
+            if backend == Tier3Backend::NonRt && !self.learn_only {
+                self.nonrt.record_work_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
             }
+        } else if self.learn_only {
+            self.nonrt.record_setup_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
         } else {
-            self.nonrt.record_rec(ctx.device, ctx.queue, &mut rec, &frame, &nonrt_inputs);
+            self.nonrt.record_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
         }
-        drop(rec);
         {
             let counters = match backend {
                 Tier3Backend::Rt => self.tier.as_ref().and_then(|t| t.rt().buffers()),
                 _ => self.nonrt.buffers(),
             };
             if let Some(counters) = counters {
-                let mut srec = ctx.graphics_cmds();
-                self.stats_rb.record(&mut srec, counters);
+                self.stats_rb.record(&mut rec, counters);
             }
         }
+        drop(rec);
 
         let published = match backend {
             Tier3Backend::Rt => self.tier.as_ref().and_then(|t| t.outputs()).map(|(key, bary, visible)| Published {
@@ -330,6 +453,9 @@ impl RenderPass for VgDensePass {
                 visible: None,
             }),
         };
+        if self.learn_only {
+            return Ok(());
+        }
         if let Some(runtime) = &self.runtime {
             runtime.update_tier3_stats(|s| match backend {
                 Tier3Backend::Rt => s.frames_rt += 1,
@@ -359,7 +485,9 @@ impl RenderPass for VgDensePass {
             };
             frame.write(
                 ResourceKey::new(KEY_DENSE),
-                VgDenseFrameData { dense_key, tile_mask, rt_bary, rt_visible },
+                // RT owns visibility inside the resolved dense tiles. The resolve
+                // replaces raster there; outside them, raster remains authoritative.
+                VgDenseFrameData { dense_key, tile_mask, rt_bary, rt_visible, merge: self.backend != Tier3Backend::Rt },
                 "VgDense",
             );
         }

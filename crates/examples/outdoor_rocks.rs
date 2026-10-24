@@ -30,7 +30,7 @@ use helio::{
 use helio_asset_compat::{
     load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     cube_mesh, directional_light, flush_scene_db, make_material, new_scene_db_with_gpu_mirror,

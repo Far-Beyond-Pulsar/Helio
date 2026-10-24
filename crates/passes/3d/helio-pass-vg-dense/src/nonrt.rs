@@ -62,6 +62,10 @@ pub struct DenseNonRtPass {
     /// little workgroup storage for it).
     masked_peel: std::sync::OnceLock<Option<MaskedPeel>>,
     masked: Option<MaskedState>,
+    /// Set around [`Self::record_masked_into_scoped`].
+    masked_only: bool,
+    dense_bin_only: bool,
+    out_override: Option<wgpu::Buffer>,
 }
 
 struct MaskedPeel {
@@ -159,6 +163,9 @@ impl DenseNonRtPass {
             binding: helio_mats::MaterialBindingConfig::for_device(device),
             masked_peel: std::sync::OnceLock::new(),
             masked: None,
+            masked_only: false,
+            dense_bin_only: false,
+            out_override: None,
         })
     }
 
@@ -215,6 +222,14 @@ impl DenseNonRtPass {
             .as_ref()
     }
 
+    /// Bin (and, for the ray-traced backend, collect) only the clusters the cull
+    /// diverted to the dense bin. Tier 3 then adds just those clusters to the
+    /// Tier 1/2 result, which must be depth-MERGED with it (`VgDenseFrameData::merge`)
+    /// instead of replaced inside dense tiles; every other cluster costs Tier 3 nothing.
+    pub fn set_dense_bin_only(&mut self, on: bool) {
+        self.dense_bin_only = on;
+    }
+
     pub fn config(&self) -> &DenseConfig {
         &self.cfg
     }
@@ -255,7 +270,7 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
-        self.record_stages(device, queue, encoder, frame, inputs, true, true);
+        self.record_stages(device, queue, encoder, frame, inputs, true, true, &mut GpuScopes::none());
     }
 
     /// Only the cheap front half: counter reset, dense-tile compaction and the
@@ -270,7 +285,67 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
-        self.record_stages(device, queue, encoder, frame, inputs, true, false);
+        self.record_stages(device, queue, encoder, frame, inputs, true, false, &mut GpuScopes::none());
+    }
+
+    /// [`Self::record_setup_rec`] with per-kernel GPU timestamp scopes.
+    pub fn record_setup_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+        scopes: &mut GpuScopes<'_>,
+    ) {
+        self.record_stages(device, queue, encoder, frame, inputs, true, false, scopes);
+    }
+
+    /// [`Self::record_work_rec`] with per-kernel GPU timestamp scopes.
+    pub fn record_work_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+        scopes: &mut GpuScopes<'_>,
+    ) {
+        self.record_stages(device, queue, encoder, frame, inputs, false, true, scopes);
+    }
+
+    /// The back half for the alpha-masked class only, merged by depth into
+    /// `out_key` (the ray-traced backend's key buffer): the opaque class is
+    /// resolved by the rays. [`Self::record_setup_scoped`] must have run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_masked_into_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+        out_key: &wgpu::Buffer,
+        scopes: &mut GpuScopes<'_>,
+    ) {
+        self.masked_only = true;
+        self.out_override = Some(out_key.clone());
+        self.record_stages(device, queue, encoder, frame, inputs, false, true, scopes);
+        self.masked_only = false;
+        self.out_override = None;
+    }
+
+    /// [`Self::record_rec`] with per-kernel GPU timestamp scopes.
+    pub fn record_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        inputs: &DenseNonRtInputs<'_>,
+        scopes: &mut GpuScopes<'_>,
+    ) {
+        self.record_stages(device, queue, encoder, frame, inputs, true, true, scopes);
     }
 
     /// The back half (`bin` + `peel`); [`Self::record_setup_rec`] must have
@@ -283,7 +358,7 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
-        self.record_stages(device, queue, encoder, frame, inputs, false, true);
+        self.record_stages(device, queue, encoder, frame, inputs, false, true, &mut GpuScopes::none());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,10 +371,14 @@ impl DenseNonRtPass {
         inputs: &DenseNonRtInputs<'_>,
         setup: bool,
         work: bool,
+        scopes: &mut GpuScopes<'_>,
     ) {
         self.ensure_buffers(device, frame.viewport);
+        let masked_only = self.masked_only;
+        let out_key = self.out_override.clone();
         let b = self.buffers.as_ref().unwrap();
-        b.write_params(queue, frame);
+        b.write_params_flags(queue, frame, u32::from(masked_only) | (u32::from(self.dense_bin_only) << 1));
+        let key_buf = out_key.as_ref().unwrap_or(&b.dense_key);
         // Counters only; the tile list tail is rewritten by `compact`.
         if setup {
             encoder.clear_buffer(&b.state, 0, Some(STATE_HEADER_WORDS as u64 * 4));
@@ -356,17 +435,21 @@ impl DenseNonRtPass {
                 bg_entry(5, inputs.vg_instances),
                 bg_entry(7, &b.slot_lists),
                 bg_entry(8, &b.state),
-                bg_entry(9, &b.dense_key),
+                bg_entry(9, key_buf),
                 bg_entry(10, inputs.objects),
             ],
         });
 
-        let mut run = |label: &str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(label),
-                timestamp_writes: None,
-            });
-            f(&mut pass);
+        let mut run = |label: &'static str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
+            scopes.begin(encoder, label);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(label),
+                    timestamp_writes: None,
+                });
+                f(&mut pass);
+            }
+            scopes.end(encoder, label);
         };
         if setup {
             run("vg_dense compact", &|p| {
@@ -396,11 +479,13 @@ impl DenseNonRtPass {
                 p.set_bind_group(0, &bin_bg, &[]);
                 p.dispatch_workgroups_indirect(&b.args, 12);
             });
-            run("vg_dense peel", &|p| {
-                p.set_pipeline(&self.peel);
-                p.set_bind_group(0, &peel_bg, &[]);
-                p.dispatch_workgroups_indirect(&b.args, 0);
-            });
+            if !masked_only {
+                run("vg_dense peel", &|p| {
+                    p.set_pipeline(&self.peel);
+                    p.set_bind_group(0, &peel_bg, &[]);
+                    p.dispatch_workgroups_indirect(&b.args, 0);
+                });
+            }
             // Alpha-masked clusters: same tiles, merged by depth into `dense_key`.
             if let (Some(ms), Some(mp)) = (&self.masked, self.masked_pipeline(device)) {
                 let view_refs: Vec<&wgpu::TextureView> = ms.views.iter().collect();

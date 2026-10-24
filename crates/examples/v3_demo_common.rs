@@ -147,7 +147,7 @@ pub fn flush_scene_db(
 /// masked or blended materials, ...) is left out, so the probes see past it.
 /// `HELIO_SCENE_RAYS=off` publishes none (for A/B: no mesh GI).
 pub struct SceneRays {
-    projection: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    projection: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
     failed: bool,
 }
 
@@ -158,7 +158,7 @@ impl SceneRays {
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             .then_some(())
             .filter(|_| std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"))
-            .map(|_| helio_default_graphs::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()));
+            .map(|_| helio_default_passes::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()));
         Self { projection, failed: false }
     }
 
@@ -173,7 +173,7 @@ impl SceneRays {
     }
 
     /// The virtual-geometry proxies' counters.
-    pub fn vg_stats(&self) -> helio_default_graphs::ray_proxies::VgRayStats {
+    pub fn vg_stats(&self) -> helio_default_passes::ray_proxies::VgRayStats {
         self.projection.as_ref().map(|p| p.vg_stats()).unwrap_or_default()
     }
 
@@ -276,7 +276,7 @@ pub fn build_default_renderer(
     RendererBuilder::new(config, graph_scene_db.clone())
         .with_external_device()
         .with_pass_build_context(Box::new(
-            helio_default_graphs::build_default_graph_external_with_context,
+            helio_default_passes::build_default_graph_external_with_context,
         ))
         .build(
             device,

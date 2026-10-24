@@ -33,6 +33,9 @@ const FLAG_RT: u32 = 4u;
 // replaces Tier 1/2 there, so the tiers never mix); pixels outside ignore
 // `dense_keys` (stale or unrelated).
 const FLAG_DENSE_MASK: u32 = 8u;
+// Tier 3 holds only what the cull diverted to it: inside dense tiles take the
+// nearest of it and the Tier 1/2 pixel instead of only the dense result.
+const FLAG_DENSE_MERGE: u32 = 16u;
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> params: Params;
@@ -57,8 +60,12 @@ const FLAG_DENSE_MASK: u32 = 8u;
 @group(1) @binding(4) var rt_depth: texture_2d<f32>;
 @group(1) @binding(5) var out_payload: texture_storage_2d<rg32uint, write>;
 @group(1) @binding(6) var out_depth: texture_storage_2d<r32float, write>;
+// Per-pixel source of the winning surface (`VGS_SRC_*`): the debug views read it,
+// so they report what produced the pixel, not what the other passes think.
+@group(1) @binding(7) var out_source: texture_storage_2d<r32uint, write>;
 
 fn write_none(px: vec2<u32>, pidx: u32) {
+    textureStore(out_source, px, vec4<u32>(VGS_SRC_NONE, 0u, 0u, 0u));
     textureStore(out_payload, px, vec4<u32>(VGS_INVALID, 0u, 0u, 0u));
     textureStore(out_depth, px, vec4<f32>(0.0));
     pixel_material[pidx] = VGS_INVALID;
@@ -77,6 +84,7 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     var best_z = 0.0;
     var best_id = VGS_INVALID;
     var best_src = 0u; // 0 none, 1 raster id (HW/SW/dense), 2 ray-traced payload
+    var best_kind = VGS_SRC_NONE; // which candidate holds best_z (VGS_SRC_*)
     var rt_bary = 0u;
 
     var in_dense = false;
@@ -84,24 +92,27 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         let tile = (px.y / 16u) * ((params.width + 15u) / 16u) + (px.x / 16u);
         in_dense = tile < arrayLength(&dense_mask) && dense_mask[tile] != 0u;
     }
+    let replace = in_dense && (params.flags & FLAG_DENSE_MERGE) == 0u;
     let use_dense = (params.flags & FLAG_DENSE) != 0u && (in_dense || (params.flags & FLAG_DENSE_MASK) == 0u);
 
     let hv = textureLoad(hw_vis, ipx, 0).x;
-    if hv != VGS_INVALID && !in_dense {
+    if hv != VGS_INVALID && !replace {
         let z = textureLoad(hw_depth, ipx, 0);
         if z > best_z {
             best_z = z;
             best_id = hv;
             best_src = 1u;
+            best_kind = VGS_SRC_HW;
         }
     }
-    if (params.flags & FLAG_SW) != 0u && !in_dense {
+    if (params.flags & FLAG_SW) != 0u && !replace {
         let zbits = sw_keys[pidx * 2u + 1u];
         let z = bitcast<f32>(zbits);
         if zbits != 0u && z > best_z {
             best_z = z;
             best_id = sw_keys[pidx * 2u];
             best_src = 1u;
+            best_kind = VGS_SRC_SW;
         }
     }
     if use_dense {
@@ -111,6 +122,7 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
             best_z = z;
             best_id = dense_keys[pidx * 2u];
             best_src = 1u;
+            best_kind = VGS_SRC_DENSE;
         }
     }
     if (params.flags & FLAG_RT) != 0u {
@@ -121,6 +133,7 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
                 best_z = z;
                 best_id = rp.x;
                 best_src = 2u;
+                best_kind = VGS_SRC_RT;
                 rt_bary = rp.y;
             }
         }
@@ -172,6 +185,13 @@ fn vis_resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         bary_word = pack2x16unorm(clamp(vec2<f32>(b.y, b.z), vec2<f32>(0.0), vec2<f32>(1.0)));
     }
 
+    // An id in the ray-traced range is a ray-query hit whichever buffer carried it
+    // (the ray-traced backend can also fill the dense keys).
+    var source = best_kind;
+    if vis_index >= VGS_RT_VISIBLE_BASE {
+        source = VGS_SRC_RT;
+    }
+    textureStore(out_source, px, vec4<u32>(source, 0u, 0u, 0u));
     textureStore(out_payload, px, vec4<u32>(best_id, bary_word, 0u, 0u));
     textureStore(out_depth, px, vec4<f32>(best_z, 0.0, 0.0, 0.0));
     pixel_material[pidx] = static_objects[row_word + VGS_OBJ_MATERIAL_SLOT];

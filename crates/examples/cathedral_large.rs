@@ -419,7 +419,7 @@ pub fn populate(world: &mut World) {
         };
         world.insert(
             material,
-            helio_default_graphs::ray_tracing::RayTransmission(transmission),
+            helio_default_passes::ray_tracing::RayTransmission(transmission),
         );
         let mesh = spawn_mesh(
             world,

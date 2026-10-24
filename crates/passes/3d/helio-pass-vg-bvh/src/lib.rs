@@ -455,6 +455,19 @@ impl VgBvhPass {
     pub fn items_buffer(&self) -> &wgpu::Buffer {
         &self.scratch.idx_a
     }
+    /// Bytes of every buffer sized by instance capacity (the tree, sort scratch).
+    pub fn scratch_bytes(&self) -> u64 {
+        let s = &self.scratch;
+        [
+            &s.scene_bounds, &s.block_totals, &s.local_rank, &s.keys_a, &s.keys_b, &s.idx_a, &s.idx_b,
+            &s.block_hist, &s.chunk_leaf, &s.chunk_merge, &s.chunk_base, &s.nodes, &s.parents,
+            &s.refit_bounds, &s.counters, &s.args,
+        ]
+        .iter()
+        .map(|b| b.size())
+        .sum()
+    }
+
     /// What the last `prepare` decided.
     pub fn mode(&self) -> BvhMode {
         self.mode

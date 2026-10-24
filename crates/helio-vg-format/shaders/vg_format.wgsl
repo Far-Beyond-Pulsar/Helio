@@ -50,6 +50,25 @@ struct VgAssetHeader {
     root_page_count: u32,
     triangle_count: u32,
     flags: u32,
+    // Object-space bounding sphere (xyz centre, w radius).
+    bounds: vec4<f32>,
+    // Tolerance of lod_table entry 0 and the table (see `LodTable`).
+    lod_error_max: f32,
+    lod_table: array<u32, 8>,
+    reserved: array<u32, 3>,
+}
+
+// Mirror of `LodTable::tris_at`: triangles selected at object-space tolerance e.
+fn vg_lod_tris(h: VgAssetHeader, e: f32) -> f32 {
+    if !(h.lod_error_max > 0.0) { return 0.0; }
+    var x = 31.0;
+    if e > 0.0 { x = clamp(2.0 * log2(h.lod_error_max / e), 0.0, 31.0); }
+    let k = u32(floor(x));
+    let t = x - f32(k);
+    let k1 = min(k + 1u, 31u);
+    let a = f32((h.lod_table[k >> 2u] >> ((k & 3u) * 8u)) & 255u);
+    let b = f32((h.lod_table[k1 >> 2u] >> ((k1 & 3u) * 8u)) & 255u);
+    return exp2((a + (b - a) * t) / 8.0);
 }
 
 struct VgInstance {

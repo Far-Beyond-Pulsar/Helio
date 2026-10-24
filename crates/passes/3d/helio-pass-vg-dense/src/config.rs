@@ -78,9 +78,9 @@ impl DenseConfig {
         }
     }
 
-    /// Words of the `slot_lists` buffer: three header words per slot, then the pool.
+    /// Words of the `slot_lists` buffer: five header words per slot, then the pool.
     pub fn slot_list_words(&self) -> u64 {
-        self.max_dense_slots as u64 * 3 + self.list_pool as u64
+        self.max_dense_slots as u64 * 5 + self.list_pool as u64
     }
 
     pub fn threads(&self) -> u32 {
@@ -155,7 +155,7 @@ impl DenseConfig {
             nom = self.nominal_layers,
             max = self.max_layers,
             cap = self.cluster_cap,
-            pool_base = self.max_dense_slots * 3,
+            pool_base = self.max_dense_slots * 5,
             pool_cap = self.list_pool,
             batch = self.tri_batch,
             batch3 = self.tri_batch * 3,
@@ -199,7 +199,9 @@ pub fn args_source(cfg: &DenseConfig) -> String {
 
 /// Cluster-to-tile binning (`bin`).
 pub fn bin_source(cfg: &DenseConfig) -> String {
-    assemble(&[&cfg.prelude(), helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, BIN])
+    let bin = format!("const BIN_DENSE_BIN: u32 = {}u;
+", helio_pass_vg_cull::BIN_DENSE);
+    assemble(&[&cfg.prelude(), &bin, helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, BIN])
 }
 
 /// Tile footprint of the dense-bin clusters (`footprint_args`, `footprint`).
@@ -211,7 +213,14 @@ pub fn footprint_source(cfg: &DenseConfig) -> String {
 
 /// Dense-instance candidate collection for the ray-traced backend (`collect`).
 pub fn collect_source(cfg: &DenseConfig) -> String {
-    assemble(&[&cfg.prelude(), helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, COLLECT])
+    let bin = format!(
+        "const BIN_DENSE_BIN: u32 = {}u;
+const BIN_SW_BIN: u32 = {}u;
+",
+        helio_pass_vg_cull::BIN_DENSE,
+        helio_pass_vg_cull::BIN_SW
+    );
+    assemble(&[&cfg.prelude(), &bin, helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, COLLECT])
 }
 
 /// Depth peel (`peel`): the opaque variant of `peel.wgsl`.

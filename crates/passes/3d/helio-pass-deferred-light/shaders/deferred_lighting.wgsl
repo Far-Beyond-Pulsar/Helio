@@ -1075,8 +1075,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(0.035, 0.035, 0.035, 1.0);
     }
     if globals.debug_mode == 33u {
+        // Per-pixel source of the visible surface. Warm = rasterized, cool = ray
+        // traced. Voxel ray tracing marks its pixels with the (-1, -2) lightmap
+        // tag. The virtual-geometry shade pass paints its own pixels with the
+        // source `vis_resolve` recorded for each one (hardware raster, compute
+        // micro-raster, dense peel, ray query) and marks them with albedo alpha 0:
+        // take that colour, never a guess from this pass's own state. The lightmap
+        // tag (-1, -1) cannot be that marker, every classic mesh without a
+        // lightmap writes it too. Anything unmarked was written by the classic
+        // G-buffer raster.
+        let painted_by_virtual_geometry = albedo_a.a < 0.004;
         if is_stored_voxel {
             return vec4<f32>(0.12, 0.78, 1.0, 1.0);
+        }
+        if painted_by_virtual_geometry {
+            return vec4<f32>(albedo, 1.0);
         }
         return vec4<f32>(1.0, 0.36, 0.08, 1.0);
     }

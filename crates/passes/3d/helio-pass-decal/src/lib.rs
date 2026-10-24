@@ -351,6 +351,10 @@ fn bgl_entry_tex_storage(
 }
 
 impl RenderPass for DecalPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["decals"]
+    }
+
     fn name(&self) -> &'static str {
         "DecalApply"
     }

@@ -30,7 +30,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_hlfs_graph_with_context;
+use helio_default_passes::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
@@ -167,7 +167,7 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
-    acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
     /// Whether lights cast ray-traced shadows (`HLFS_RT`); without, any
     /// `acceleration` is the meshes for the GI probes only.
     ray_traced: bool,
@@ -314,12 +314,12 @@ impl ApplicationHandler for App {
             });
             eprintln!("Interactive HLFS configuration: {:?}",
                 renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
-            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
+            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
         } else if device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off")
         {
             // No ray-traced shadows: the meshes for the GI probes alone.
-            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()))
+            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()))
         } else { None };
         renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);

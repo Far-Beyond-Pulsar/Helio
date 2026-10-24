@@ -9,7 +9,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder,
     RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_vg_cull::VgCullEarlyPass;
 use helio_pass_vg_shade::VgShadePass;
 use helio_vg_stream::{VgRuntime, VgRuntimeSettings};
@@ -105,7 +105,7 @@ fn the_chain_is_absent_by_default_and_idle_without_assets() {
     // Requested: present when the device supports it, absent otherwise.
     let runtime = VgRuntime::new(VgRuntimeSettings::default());
     let mut renderer = build(&device, &queue, Some(&runtime));
-    let supported = helio_default_graphs::virtual_geometry_supported(&device);
+    let supported = helio_default_passes::virtual_geometry_supported(&device);
     assert_eq!(renderer.find_pass::<VgCullEarlyPass>().is_some(), supported);
     assert_eq!(renderer.find_pass::<VgShadePass>().is_some(), supported);
 
@@ -159,7 +159,7 @@ fn the_chain_registers_every_vg_debug_view_with_its_category() {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: virtual geometry debug views");
         return;
     };
-    if !helio_default_graphs::virtual_geometry_supported(&device) {
+    if !helio_default_passes::virtual_geometry_supported(&device) {
         return;
     }
     let runtime = VgRuntime::new(VgRuntimeSettings::default());

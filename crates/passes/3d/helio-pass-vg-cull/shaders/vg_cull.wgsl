@@ -5,14 +5,15 @@
 // Composed in Rust (see `shader_source()`): helio prelude, generated `VGC_*`
 // constants, vg_format.wgsl, helio-vg-stream bindings + helpers (binding 4..11),
 // helio-pass-vg-bvh `NODES_WGSL`, then this
-// file. Entry points: cs_seed, cs_round_prepare, cs_traverse, cs_finalize.
+// file. Entry points: cs_density, cs_seed, cs_round_prepare, cs_traverse, cs_finalize.
 //
 // Job = vec2<u32>(x, y), tag = y >> 30:
 //   0  GCBVH node          x = 0xffffffff, y = node index
 //   1  asset hierarchy item x = instance,   y = TAG | (parent_node << 2 | slot)
 //   2  cluster item         x = instance,   y = TAG | cluster_slot (pool_slot << 11 | local)
 //   3  instance             x = instance,   y = TAG
-// Every job tests only its own bound, so deferring/dropping a job is exact.
+// Every job tests only its own bound. The selected cut remains coverage complete;
+// the screen-wide density solve (`cs_density`) raises tau instead of rejecting geometry.
 
 struct CullParams {
     screen_width: u32,
@@ -31,6 +32,12 @@ struct CullParams {
     dense_tiles_x: u32,
     dense_tiles_y: u32,
     max_groups: u32,
+    // Triangles the density solve may predict (0 disables it) and the largest
+    // tolerance multiplier it may choose.
+    density_budget: f32,
+    density_scale_max: f32,
+    pad0: u32,
+    pad1: u32,
 }
 
 struct RoundParams {
@@ -209,7 +216,9 @@ fn load_inst(id: u32) -> InstCtx {
     c.err_scale = max(inst.lod_error_scale, 1.0e-4);
     c.flags = inst.flags;
     c.asset = inst.asset_slot;
-    c.tau = select(params.tau_px, ROOT_ONLY_TAU, (inst.flags & VG_INST_FORCE_ROOT_ONLY) != 0u);
+    // The screen-wide multiplier solved by `cs_density` this frame (0 bits = unset).
+    let density = max(bitcast<f32>(atomicLoad(&state[VGC_ST_DENSITY])), 1.0);
+    c.tau = select(params.tau_px * density, ROOT_ONLY_TAU, (inst.flags & VG_INST_FORCE_ROOT_ONLY) != 0u);
     return c;
 }
 
@@ -339,15 +348,45 @@ fn dense_overlap(cw: vec3<f32>, r_px: f32) -> bool {
     return false;
 }
 
+// A cluster wholly covered by dense tiles can leave the raster bins entirely:
+// every pixel it could touch will be supplied by Tier 3. Clusters crossing a
+// dense-tile boundary stay rasterized for their pixels outside the mask.
+fn dense_fully_covered(cw: vec3<f32>, r_px: f32) -> bool {
+    let clip = cameras[0].view_proj * vec4<f32>(cw, 1.0);
+    if clip.w <= 0.0 { return false; }
+    let uv = helio_ndc_to_uv(clip.xy / clip.w);
+    let px = uv * vec2<f32>(f32(params.screen_width), f32(params.screen_height));
+    let tmax = vec2<i32>(i32(params.dense_tiles_x) - 1, i32(params.dense_tiles_y) - 1);
+    let lo = vec2<i32>(floor((px - vec2<f32>(r_px)) / f32(VGC_TILE)));
+    let hi = vec2<i32>(floor((px + vec2<f32>(r_px)) / f32(VGC_TILE)));
+    // The screen edge is not a dense tile. Keep partially off-screen clusters
+    // on raster so clipping at the viewport cannot create missing pixels.
+    if any(lo < vec2<i32>(0)) || any(hi > tmax) { return false; }
+    for (var y = lo.y; y <= hi.y; y++) {
+        for (var x = lo.x; x <= hi.x; x++) {
+            let idx = u32(y) * params.dense_tiles_x + u32(x);
+            if idx >= arrayLength(&dense_mask) || dense_mask[idx] == 0u { return false; }
+        }
+    }
+    return true;
+}
+
 fn choose_bin(tris: u32, ic: InstCtx, cw: vec3<f32>, rw: f32) -> u32 {
     let hw_bin = tri_class(tris);
     if params.mode == VGC_MODE_FORCE_HW { return hw_bin; }
+    let d = max(view_depth_of(cw), cameras[0].position_near.w);
+    let r_px = rw * cameras[0].proj[1][1] * 0.5 * f32(params.screen_height) / d;
+    // Use the sphere's nearest depth for the raster-removal proof. The cheaper
+    // center-depth radius below still drives normal tier selection.
+    let safe_d = max(d - rw, cameras[0].position_near.w);
+    let safe_r_px = rw * cameras[0].proj[1][1] * 0.5 * f32(params.screen_height) / safe_d;
+    if (params.flags & VGC_FLAG_DENSE_MASK) != 0u && d > rw + cameras[0].position_near.w && dense_fully_covered(cw, safe_r_px) {
+        return VGC_BIN_DENSE;
+    }
     let lock = (ic.flags >> VG_INST_TIER_SHIFT) & VG_INST_TIER_MASK;
     if lock == 1u { return hw_bin; }
     if lock == 2u { return VGC_BIN_SW; }
     if lock == 3u { return VGC_BIN_DENSE; }
-    let d = max(view_depth_of(cw), cameras[0].position_near.w);
-    let r_px = rw * cameras[0].proj[1][1] * 0.5 * f32(params.screen_height) / d;
     let edge = VGC_EDGE_FACTOR * r_px / sqrt(f32(max(tris, 1u)));
     if edge <= params.sw_edge_px {
         if (params.flags & VGC_FLAG_DENSE_MASK) != 0u && dense_overlap(cw, r_px) {
@@ -385,10 +424,10 @@ fn emit_cluster(inst: u32, slot: u32, bin: u32, triangles: u32) {
         return;
     }
     visible[bin * params.bin_capacity + k] = vec2<u32>(inst, slot);
+    // Keep the selected-cut density sample accurate even when the other
+    // diagnostic counters are disabled; the host uses it for next-frame LOD.
+    atomicAdd(&state[VGC_ST_STATS + VGC_STAT_TRIANGLES], triangles);
     stat_add(VGC_STAT_EMITTED);
-    if (params.flags & VGC_FLAG_STATS) != 0u {
-        atomicAdd(&state[VGC_ST_STATS + VGC_STAT_TRIANGLES], triangles);
-    }
 }
 
 // ── Cluster test (cut rule, cone, frustum, occlusion, binning) ─────────────
@@ -499,6 +538,46 @@ fn job_gcbvh(job: vec2<u32>) {
     }
 }
 
+// Whole-asset early-out. The GPU view of the asset header holds up to three
+// hierarchy leaves (group ref + 1, 0 = unused) that contain every root cluster
+// (`helio_vg_format::gpu_header_with_root_leaves`; none stored = no early-out).
+// When their pages are resident and every root cluster already projects under
+// tau, the cut is exactly the root clusters (errors and nested spheres are
+// monotone up the DAG: the property the per-node `max_parent_error` pruning
+// also relies on), so they are tested directly and the hierarchy walk is
+// skipped. Returns false to walk normally.
+fn root_leaf_ok(inst_ctx: InstCtx, leaf1: u32) -> bool {
+    if leaf1 == 0u { return true; }
+    let g = vg_group_refs[vg_group_ref_base(inst_ctx.asset) + leaf1 - 1u];
+    let slot = vg_page_slot(vg_global_page(inst_ctx.asset, g));
+    if slot == VG_PAGE_NOT_RESIDENT { return false; }
+    let first = g.first_cluster_count & 0xffffu;
+    let count = g.first_cluster_count >> 16u;
+    let k = inst_ctx.err_scale * inst_ctx.scale;
+    for (var i = 0u; i < count; i++) {
+        let c = vg_load_cluster(slot, first + i);
+        let cw = (inst_ctx.m * vec4<f32>(c.sphere.xyz, 1.0)).xyz;
+        if proj_err(c.self_error * k, cw, c.sphere.w * inst_ctx.scale) > inst_ctx.tau { return false; }
+    }
+    return true;
+}
+
+fn try_root_shortcut(inst: u32, hdr: VgAssetHeader) -> bool {
+    if (params.flags & VGC_FLAG_NO_ROOT_SHORTCUT) != 0u { return false; }
+    // Root leaves live in the header words no shader otherwise reads.
+    let l0 = hdr.cluster_count;
+    let l1 = hdr.root_page_count;
+    let l2 = hdr.flags;
+    if l0 == 0u { return false; }
+    let ic = load_inst(inst);
+    if !root_leaf_ok(ic, l0) || !root_leaf_ok(ic, l1) || !root_leaf_ok(ic, l2) { return false; }
+    stat_add(VGC_STAT_ROOT_SHORTCUT);
+    do_group(inst, l0 - 1u, ic);
+    if l1 != 0u { do_group(inst, l1 - 1u, ic); }
+    if l2 != 0u { do_group(inst, l2 - 1u, ic); }
+    return true;
+}
+
 fn job_instance(job: vec2<u32>) {
     if job.x >= params.instance_count { return; }
     let inst = vg_instances[job.x];
@@ -509,6 +588,7 @@ fn job_instance(job: vec2<u32>) {
     if !vg_asset_ready(inst.asset_slot) { return; }
     let hdr = vg_asset_headers[inst.asset_slot];
     if hdr.node_count == 0u { return; }
+    if try_root_shortcut(job.x, hdr) { return; }
     let root = vg_node_base(inst.asset_slot) + hdr.root_node;
     let children = vg_nodes[root].children;
     for (var s = 0u; s < 4u; s++) {
@@ -570,6 +650,83 @@ fn process_job(job: vec2<u32>) {
 }
 
 // ── Entry points ───────────────────────────────────────────────────────────
+
+// ── Screen-wide density solve ───────────────────────────────────────────────
+// One workgroup, before traversal: each instance's selected triangles at the
+// candidate tolerance multipliers 2^(k/4) come from its asset's LOD table
+// (`vg_lod_tris`), summed over the frustum-visible instances; the smallest
+// multiplier that fits `params.density_budget` is written to the state buffer
+// and read back by `load_inst`. Mirrors `helio_vg_format::density::solve`.
+const DENS_STEPS: u32 = 13u;
+const DENS_THREADS: u32 = 128u;
+var<workgroup> dens_part: array<f32, 1664>;
+var<workgroup> dens_tot: array<f32, 13>;
+
+@compute @workgroup_size(128)
+fn cs_density(@builtin(local_invocation_index) lid: u32) {
+    if lid < 5u { wg_planes[lid] = frustum_plane(lid); }
+    var mine: array<f32, 13>;
+    for (var k = 0u; k < DENS_STEPS; k++) { mine[k] = 0.0; }
+    workgroupBarrier();
+    if params.density_budget > 0.0 && params.mode != VGC_MODE_OFF {
+        let px_scale = cameras[0].proj[1][1] * 0.5 * f32(params.screen_height);
+        for (var i = lid; i < params.instance_count; i += DENS_THREADS) {
+            let inst = vg_instances[i];
+            if (inst.flags & VG_INST_ENABLED) == 0u { continue; }
+            if (inst.flags & VG_INST_FORCE_ROOT_ONLY) != 0u { continue; }
+            if inst.asset_slot >= arrayLength(&vg_asset_headers) { continue; }
+            if !vg_asset_ready(inst.asset_slot) { continue; }
+            let hdr = vg_asset_headers[inst.asset_slot];
+            if !(hdr.lod_error_max > 0.0) { continue; }
+            let ic = load_inst(i);
+            let cw = (ic.m * vec4<f32>(hdr.bounds.xyz, 1.0)).xyz;
+            let rw = hdr.bounds.w * ic.scale;
+            if !sphere_in_frustum(cw, rw) { continue; }
+            // Object-space tolerance this instance's distance implies at the base tau,
+            // at its centre: the cut mixes finer near parts with coarser far ones, and
+            // the nearest point (a huge tolerance swing for a tree around the camera)
+            // over-predicted by up to 12x.
+            let d = max(view_depth_of(cw), max(0.7 * rw, cameras[0].position_near.w));
+            let base_e = params.tau_px * d / (px_scale * ic.err_scale * ic.scale);
+            for (var k = 0u; k < DENS_STEPS; k++) {
+                mine[k] += vg_lod_tris(hdr, base_e * exp2(f32(k) * 0.25));
+            }
+        }
+    }
+    for (var k = 0u; k < DENS_STEPS; k++) { dens_part[lid * DENS_STEPS + k] = mine[k]; }
+    workgroupBarrier();
+    if lid < DENS_STEPS {
+        var s = 0.0;
+        for (var t = 0u; t < DENS_THREADS; t++) { s += dens_part[t * DENS_STEPS + lid]; }
+        dens_tot[lid] = s;
+    }
+    workgroupBarrier();
+    if lid == 0u {
+        let budget = params.density_budget;
+        var g = 1.0;
+        var predicted = dens_tot[0];
+        if budget > 0.0 && dens_tot[0] > budget {
+            g = params.density_scale_max;
+            predicted = dens_tot[DENS_STEPS - 1u];
+            for (var k = 1u; k < DENS_STEPS; k++) {
+                if dens_tot[k] <= budget {
+                    let hi = log(max(dens_tot[k - 1u], 1.0));
+                    let lo = log(max(dens_tot[k], 1.0));
+                    var t = 1.0;
+                    if hi > lo { t = clamp((hi - log(max(budget, 1.0))) / (hi - lo), 0.0, 1.0); }
+                    g = exp2((f32(k - 1u) + t) * 0.25);
+                    predicted = min(budget, dens_tot[k - 1u]);
+                    break;
+                }
+            }
+        }
+        // Rate-limit against last frame's multiplier (the word survives the state clear).
+        let prev = bitcast<f32>(atomicLoad(&state[VGC_ST_DENSITY]));
+        if prev >= 1.0 { g = clamp(g, prev * 0.96, prev * 1.25); }
+        atomicStore(&state[VGC_ST_DENSITY], bitcast<u32>(clamp(g, 1.0, params.density_scale_max)));
+        atomicStore(&state[VGC_ST_PREDICTED], u32(min(predicted, 4.0e9)));
+    }
+}
 
 // One thread, frame start: seed the traversal with the GCBVH root.
 @compute @workgroup_size(1)

@@ -257,6 +257,10 @@ impl PostProcessVolumeBlendPass {
     pub fn resolved_uniforms(&self) -> &wgpu::Buffer { &self.resolved }
 }
 impl RenderPass for PostProcessVolumeBlendPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["camera_postprocess", "post_process_volumes"]
+    }
+
     fn name(&self) -> &'static str { "PostProcessVolumeBlendPass" }
     fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.write_buffer("postprocess_uniforms"); }
     fn writes(&self) -> &'static [&'static str] { &["postprocess_uniforms"] }

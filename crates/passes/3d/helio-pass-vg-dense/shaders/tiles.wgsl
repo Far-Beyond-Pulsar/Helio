@@ -35,8 +35,9 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.limits.x { return; }
     let slot = claim_slot(gid.x);
     if slot != SLOT_INVALID {
-        atomicStore(&slot_lists[slot * LIST_HDR], 0u);
-        atomicStore(&slot_lists[slot * LIST_HDR + 2u], 0u);
+        for (var h = 0u; h < LIST_HDR; h++) {
+            atomicStore(&slot_lists[slot * LIST_HDR + h], 0u);
+        }
     }
 }
 

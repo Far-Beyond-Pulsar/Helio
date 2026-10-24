@@ -218,7 +218,11 @@ pub mod state {
     pub const RANGES: u32 = helio_vg_format::CULL_STATE_RANGES;
     pub const ARGS: u32 = 72;
     pub const ARGS_PHASE_WORDS: u32 = 32;
-    pub const WORDS: u32 = 144;
+    /// Tolerance multiplier chosen by the density solve (f32 bits) and the
+    /// triangles it predicted (read back with the stats).
+    pub const DENSITY: u32 = 136;
+    pub const PREDICTED: u32 = 137;
+    pub const WORDS: u32 = 140;
 }
 
 pub const RANGES_BYTE_OFFSET: u64 = state::RANGES as u64 * 4;
@@ -273,14 +277,16 @@ pub mod stats {
     pub const PEAK_QUEUE: u32 = 13;
     /// Triangles in successfully emitted clusters, across both phases.
     pub const TRIANGLES: u32 = 14;
-    pub const COUNT: u32 = 15;
+    /// Instances whose roots were drawn directly (whole-asset early-out).
+    pub const ROOT_SHORTCUT: u32 = 15;
+    pub const COUNT: u32 = 16;
 }
 
 /// A decoded stats sample (one to a few frames old: the async readback of
 /// `state`), for overlays and the demo's title. `tier_clusters` is the
 /// attempted cluster count per bin ([`BIN_HW_32`]..[`BIN_DENSE`]) of both
 /// phases.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VgCullStats {
     pub jobs: u32,
     pub clusters_tested: u32,
@@ -294,7 +300,12 @@ pub struct VgCullStats {
     pub culled_sse: u32,
     pub job_overflow: u32,
     pub visible_overflow: u32,
+    pub root_shortcuts: u32,
     pub peak_queue: u32,
+    /// Screen-wide tolerance multiplier the density solve chose this frame, and the
+    /// triangles it predicted at it (before occlusion).
+    pub density_scale: f32,
+    pub predicted_triangles: u32,
     pub tier_clusters: [u32; BIN_COUNT as usize],
 }
 
@@ -321,6 +332,9 @@ impl VgCullStats {
             job_overflow: st(stats::JOB_OVERFLOW),
             visible_overflow: st(stats::VISIBLE_OVERFLOW),
             peak_queue: st(stats::PEAK_QUEUE),
+            root_shortcuts: st(stats::ROOT_SHORTCUT),
+            density_scale: words.get(state::DENSITY as usize).map_or(1.0, |w| f32::from_bits(*w).max(1.0)),
+            predicted_triangles: words.get(state::PREDICTED as usize).copied().unwrap_or(0),
             tier_clusters,
         })
     }
@@ -339,8 +353,10 @@ impl VgCullStats {
     pub fn summary(&self) -> String {
         let (hw, sw, dense) = self.tier_split();
         format!(
-            "tris {} clusters {}/{} (HW {} SW {} dense {}) culled F{} O{} B{} E{} overflow {}",
+            "tris {} (solve: x{:.2} tolerance, predicted {}) clusters {}/{} (HW {} SW {} dense {}) culled F{} O{} B{} E{} overflow {}",
             self.triangles,
+            self.density_scale,
+            self.predicted_triangles,
             self.emitted,
             self.clusters_tested,
             hw,
@@ -376,6 +392,8 @@ pub const FLAG_MASKED: u32 = 8;
 /// Masked clusters of the software class may use [`BIN_SW_MASKED`] (the raster
 /// has the 64-bit atomic kernel); clear = they go to [`BIN_HW_MASKED`].
 pub const FLAG_SW_MASKED: u32 = 16;
+/// Set = the per-instance root early-out is OFF (A/B and equivalence tests).
+pub const FLAG_NO_ROOT_SHORTCUT: u32 = 32;
 
 // ── Shader assembly ────────────────────────────────────────────────────────
 
@@ -401,6 +419,8 @@ pub fn wgsl_constants() -> String {
     u("VGC_ST_PHASE1", state::PHASE0_COUNTS);
     u("VGC_ST_RANGES", state::RANGES);
     u("VGC_ST_ARGS", state::ARGS);
+    u("VGC_ST_DENSITY", state::DENSITY);
+    u("VGC_ST_PREDICTED", state::PREDICTED);
     u("VGC_ARGS_PHASE_WORDS", state::ARGS_PHASE_WORDS);
     u("VGC_SW_GROUP_WIDTH", SW_GROUP_WIDTH);
     u("VGC_TILE", DENSE_TILE);
@@ -411,6 +431,7 @@ pub fn wgsl_constants() -> String {
     u("VGC_FLAG_STATS", FLAG_STATS);
     u("VGC_FLAG_MASKED", FLAG_MASKED);
     u("VGC_FLAG_SW_MASKED", FLAG_SW_MASKED);
+    u("VGC_FLAG_NO_ROOT_SHORTCUT", FLAG_NO_ROOT_SHORTCUT);
     u("VGC_MAT_ALPHA_TEST", helio_mats::FLAG_ALPHA_TEST);
     u("VGC_MAT_DOUBLE_SIDED", helio_mats::FLAG_DOUBLE_SIDED);
     u("VGC_MAT_ALPHA_BLEND", helio_mats::FLAG_ALPHA_BLEND);
@@ -432,6 +453,7 @@ pub fn wgsl_constants() -> String {
         ("SPILLED", stats::SPILLED),
         ("PEAK_QUEUE", stats::PEAK_QUEUE),
         ("TRIANGLES", stats::TRIANGLES),
+        ("ROOT_SHORTCUT", stats::ROOT_SHORTCUT),
     ] {
         u(&format!("VGC_STAT_{name}"), v);
     }

@@ -98,7 +98,7 @@ and the probes' (`gi_light`, RGB half floats, added as is). Tracers:
   proportion to its unshadowed irradiance there, with a shadow ray, over
   its chance (`gi_light`). The frontend publishes the TLAS and its rows
   (`Renderer::set_ray_tracing_frame`, from
-  `helio_default_graphs::ray_tracing::SceneDbRayTracing`; `partial`
+  `helio_default_passes::ray_tracing::SceneDbRayTracing`; `partial`
   leaves out what it cannot represent, such as engine foliage layers, so
   the probes see past it). Textures are not sampled for shading: the
   projection folds each base colour texture's mean (its coarsest mip,
@@ -120,7 +120,7 @@ and the probes' (`gi_light`, RGB half floats, added as is). Tracers:
   are both outside.
 
   Virtual geometry is traced through one coarse proxy cut per asset
-  (`helio_default_graphs::ray_proxies`, rows flagged `RAY_INSTANCE_PROXY`:
+  (`helio_default_passes::ray_proxies`, rows flagged `RAY_INSTANCE_PROXY`:
   positions and uv0 in the proxy pool, the face's winding as its normal).
 
   Without ray queries (software Vulkan, WebGPU) the tracer is not built:

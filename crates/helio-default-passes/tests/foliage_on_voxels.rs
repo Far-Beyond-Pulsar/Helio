@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use glam::{DVec3, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig};
-use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_foliage_place::components::FoliageTypeComponent;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, unpack_blade, FoliageKind, FoliagePlacePass, GpuBladeInstance, GpuFoliageTile, GpuFoliageType, GpuTileFrame, TileState,

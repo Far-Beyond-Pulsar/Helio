@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
 mod background;
+pub mod graph_nodes;
+pub mod graphs;
+pub mod pipelines;
 pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
@@ -138,10 +141,9 @@ fn new_graph(
 /// all of these names; `build_simple_graph` uses none of this and is the one
 /// entry point that legitimately calls none of these.
 fn declare_common_external_inputs(graph: &mut RenderGraph) {
-    graph.declare_external_input("material_textures");
-    graph.declare_external_input("render_environment");
-    graph.declare_external_input("billboards");
-    graph.declare_external_input("corona_emitters");
+    for &name in graph_nodes::HOST_INPUTS {
+        graph.declare_external_input(name);
+    }
 }
 
 /// Which of this crate's passes shader hot reload may swap on their own
@@ -438,32 +440,11 @@ fn add_geometry_passes(
     // FoliageGBufferPass exists to join. Nothing renders wrong either way, which is
     // exactly why this is worth a comment — the cost is a silent tile store/reload.
     let foliage_buffers = config.enable_foliage.then(|| {
-        let defaults = helio_pass_foliage_place::FoliageRange::default();
-        let place_pass = FoliagePlacePass::new_with(
-            device,
-            config.foliage_quality,
-            helio_pass_foliage_place::FoliageRange {
-                range: config.foliage_range.unwrap_or(config.foliage_quality.range()),
-                tufts_per_m2: config.foliage_tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
-                blades_per_tuft: config.foliage_blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
-                ..defaults
-            },
-        );
-        let mut draw = FoliageGBufferPass::new(
-            device,
-            Arc::clone(&place_pass.blade_arena),
-            Arc::clone(&place_pass.tile_table),
-            Arc::clone(&place_pass.tile_frames),
-            Arc::clone(&place_pass.visible_blades),
-            Arc::clone(&place_pass.foliage_indirect),
-            Arc::clone(&place_pass.bands_buffer),
-            Arc::clone(&place_pass.interactors),
-        );
-        draw.quality = config.foliage_quality;
+        let (place_pass, boxes, draw) = foliage_passes(device, &config);
         graph.add_pass(Box::new(place_pass));
         // Blocky foliage expanded into boxes, before the G-buffer: between the two raster
         // passes it would break their fusion.
-        graph.add_pass(Box::new(draw.boxes_pass(device)));
+        graph.add_pass(Box::new(boxes));
         draw
     });
 
@@ -692,6 +673,39 @@ fn add_final_passes(
             config.height,
         )));
     }
+}
+
+/// The foliage passes `config` asks for: placement, the boxes expansion (between
+/// placement and the G-buffer) and the G-buffer draw (after it), which share the
+/// placement's buffers.
+pub(crate) fn foliage_passes(
+    device: &wgpu::Device,
+    config: &RendererConfig,
+) -> (FoliagePlacePass, helio_pass_foliage_gbuffer::FoliageBoxesPass, FoliageGBufferPass) {
+    let defaults = helio_pass_foliage_place::FoliageRange::default();
+    let place = FoliagePlacePass::new_with(
+        device,
+        config.foliage_quality,
+        helio_pass_foliage_place::FoliageRange {
+            range: config.foliage_range.unwrap_or(config.foliage_quality.range()),
+            tufts_per_m2: config.foliage_tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
+            blades_per_tuft: config.foliage_blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
+            ..defaults
+        },
+    );
+    let mut draw = FoliageGBufferPass::new(
+        device,
+        Arc::clone(&place.blade_arena),
+        Arc::clone(&place.tile_table),
+        Arc::clone(&place.tile_frames),
+        Arc::clone(&place.visible_blades),
+        Arc::clone(&place.foliage_indirect),
+        Arc::clone(&place.bands_buffer),
+        Arc::clone(&place.interactors),
+    );
+    draw.quality = config.foliage_quality;
+    let boxes = draw.boxes_pass(device);
+    (place, boxes, draw)
 }
 
 /// Build the default deferred graph from the shared renderer construction ABI.
@@ -1863,6 +1877,8 @@ pub fn build_simple_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph
         ctx.device,
         ctx.config.surface_format,
     )));
+    // Executing an unlocked graph panics; every other builder locks.
+    graph.lock(ctx.config.internal_width(), ctx.config.internal_height());
     graph
 }
 

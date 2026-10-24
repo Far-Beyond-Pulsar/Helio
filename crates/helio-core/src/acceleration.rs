@@ -557,10 +557,20 @@ impl TlasManager {
             })
         });
 
-        for i in 0..count as usize {
-            let input = &instances[i];
+        // Only the slots whose instance or mask changed are rewritten: a
+        // moving object costs its own slot, not the whole scene's. A new
+        // TLAS (`last_instances` empty) or replaced BLASes rewrite them all.
+        let blas_changed = self.last_blas_revision != Some(blas_manager.revision());
+        let mask = |masks: &[u8], i: usize| masks.get(i).copied().unwrap_or(0xFF);
+        for (i, input) in instances.iter().enumerate() {
+            let unchanged = !blas_changed
+                && self.last_instances.get(i) == Some(input)
+                && mask(&self.last_masks, i) == mask(masks, i);
+            if unchanged {
+                continue;
+            }
             if let Some(blas) = blas_manager.get_blas(input.mesh_id) {
-                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, masks.get(i).copied().unwrap_or(0xFF)));
+                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, mask(masks, i)));
             }
         }
         for i in count as usize..self.populated_slots {

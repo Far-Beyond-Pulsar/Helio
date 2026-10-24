@@ -22,7 +22,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
     LightType, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_with_context;
+use helio_default_passes::build_default_graph_with_context;
 use winit::{
     application::ApplicationHandler,
     event::*,

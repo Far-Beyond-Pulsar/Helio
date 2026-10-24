@@ -385,7 +385,7 @@ fn build_scene(
     let graph_scene_db = scene_db_handle(&scene_db);
     let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
         .with_pass_build_context(Box::new(|ctx| {
-            helio_default_graphs::build_default_graph_with_lens_user_with_context(
+            helio_default_passes::build_default_graph_with_lens_user_with_context(
                 ctx,
                 LENS_USER_HOOK,
                 None,

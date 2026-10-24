@@ -33,7 +33,8 @@ pub use renderer::{
     required_wgpu_features, required_wgpu_limits, usable_adapter_features,
     BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex,
     GraphRebuilder,
-    PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,
+    IntoGraph, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory,
+    PipelineInfo, PipelineOrigin, RenderPipelineRegistry, RenderMode, Renderer,
     RendererBuilder, RendererConfig, SceneDbHandle, TsrSetting,
 };
 pub use helio_settings;

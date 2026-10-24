@@ -616,6 +616,10 @@ impl WaterSimPass {
 // ---- RenderPass impl ----------------------------------------------------------------
 
 impl RenderPass for WaterSimPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["water_hitboxes", "water_volumes"]
+    }
+
     fn name(&self) -> &'static str {
         "WaterSim"
     }

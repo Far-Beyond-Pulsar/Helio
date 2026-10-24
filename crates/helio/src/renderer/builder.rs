@@ -8,6 +8,7 @@ use pulsar_scenedb::gpu::GpuMirrorHandle;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
+use super::pipeline::IntoGraph;
 use super::renderer_impl::Renderer;
 
 /// Shared construction inputs for passes and graph composition. New graph
@@ -58,7 +59,7 @@ pub type SceneDbHandle = GpuMirrorHandle;
 ///     .with_editor_mode(true)
 ///     .with_ambient([0.0, 0.0, 0.0], 0.0)
 ///     .with_pass_build_context(Box::new(
-///         helio_default_graphs::build_default_graph_external_with_context,
+///         helio_default_passes::build_default_graph_external_with_context,
 ///     ))
 ///     .build(device, queue, 1920, 1080, surface_format);
 /// ```
@@ -68,7 +69,7 @@ pub type SceneDbHandle = GpuMirrorHandle;
 /// ```rust,ignore
 /// let renderer = RendererBuilder::new(config, scene_db)
 ///     .with_pass_build_context(Box::new(
-///         helio_default_graphs::build_fxaa_graph_with_context,
+///         helio_default_passes::build_fxaa_graph_with_context,
 ///     ))
 ///     .build(device, queue, 1920, 1080, fmt);
 /// ```
@@ -111,6 +112,17 @@ impl RendererBuilder {
     pub fn with_pass_build_context(mut self, f: PassGraphBuilderFn) -> Self {
         self.pass_graph_fn = Some(f);
         self
+    }
+
+    /// Build the render graph from anything that implements [`IntoGraph`]: a
+    /// built-in pipeline, a render-graph asset or a plain function.
+    pub fn with_graph(self, pipeline: impl IntoGraph + 'static) -> Self {
+        self.with_boxed_graph(Box::new(pipeline))
+    }
+
+    /// [`with_graph`](Self::with_graph) for an already boxed pipeline.
+    pub fn with_boxed_graph(self, pipeline: Box<dyn IntoGraph>) -> Self {
+        self.with_pass_build_context(Box::new(move |ctx| pipeline.into_graph(ctx)))
     }
 
     /// Mark the renderer as sharing a device created externally.

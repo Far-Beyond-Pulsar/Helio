@@ -862,6 +862,10 @@ impl DeferredLightPass {
 }
 
 impl RenderPass for DeferredLightPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["portal_chain_unmap", "reflection_captures", "scene_lights", "water_volumes"]
+    }
+
     fn name(&self) -> &'static str {
         "DeferredLight"
     }
@@ -1583,7 +1587,7 @@ impl RenderPass for DeferredLightPass {
             DebugViewDescriptor {
                 name: "Ray Trace vs Raster",
                 debug_mode: 33,
-                description: "Cyan=voxel ray-traced surfaces, orange=rasterized geometry",
+                description: "Per-pixel source of the visible surface, as recorded where it was produced: warm = rasterized (orange hardware, yellow compute micro-raster, red dense-tile peel), cool = ray traced (cyan voxels, blue virtual-geometry ray queries)",
             },
         ];
         VIEWS
@@ -1612,7 +1616,18 @@ impl RenderPass for DeferredLightPass {
             DebugViewLegendStop { label: "32+", color: [255, 0, 0] },
         ];
 
+        // Colours match `deferred_lighting.wgsl` (classic, voxel) and the virtual
+        // geometry debug pass (`DBG_RVR_*` in `vg_debug.wgsl`).
+        static RAY_VS_RASTER: &[DebugViewLegendStop] = &[
+            DebugViewLegendStop { label: "Raster: hardware (classic, VG tier 1)", color: [255, 92, 20] },
+            DebugViewLegendStop { label: "Raster: compute micro-raster (VG tier 2)", color: [255, 217, 26] },
+            DebugViewLegendStop { label: "Raster: dense-tile depth peel (VG tier 3)", color: [230, 26, 26] },
+            DebugViewLegendStop { label: "Ray traced: voxels", color: [31, 199, 255] },
+            DebugViewLegendStop { label: "Ray traced: VG ray query (tier 3)", color: [77, 102, 255] },
+        ];
+
         match debug_mode {
+            33 => Some(DebugViewLegend { title: "Ray trace vs raster", unit: "", stops: RAY_VS_RASTER }),
             28 => Some(DebugViewLegend { title: "Light complexity", unit: "lights", stops: LIGHTS }),
             29 => Some(DebugViewLegend { title: "Shader complexity", unit: "work units", stops: WORK }),
             34 => Some(DebugViewLegend { title: "Estimated GPU time per pixel", unit: "µs / pixel", stops: COLORS }),

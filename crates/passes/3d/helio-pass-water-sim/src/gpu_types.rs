@@ -71,7 +71,7 @@ pub struct GpuWaterVolume {
 
     /// Direction toward the sun (dx, dy, dz) and 1 in `w` when the scene
     /// has one. The environment join writes the scene's first directional
-    /// light here (`helio-default-graphs::environment_join`); hosts that
+    /// light here (`helio-default-passes::environment_join`); hosts that
     /// write rows themselves author it.
     pub sun_direction: [f32; 4],
 

@@ -20,7 +20,7 @@ fn cull_shader_validates() {
         )
         .validate(&m)
         .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        for entry in ["cs_seed", "cs_round_prepare", "cs_traverse", "cs_finalize"] {
+        for entry in ["cs_density", "cs_seed", "cs_round_prepare", "cs_traverse", "cs_finalize"] {
             assert!(m.entry_points.iter().any(|e| e.name == entry), "missing {entry}");
         }
     }
@@ -39,7 +39,7 @@ fn shader_struct_sizes_match_the_uploads() {
             .unwrap_or_else(|| panic!("missing {name}"));
         layouter[h].size
     };
-    assert_eq!(size("CullParams"), 64);
+    assert_eq!(size("CullParams"), 80);
     assert_eq!(size("VgBvhNode"), 32);
     assert_eq!(size("VgBvhHeader"), 128);
     assert_eq!(size("RoundParams"), 16);

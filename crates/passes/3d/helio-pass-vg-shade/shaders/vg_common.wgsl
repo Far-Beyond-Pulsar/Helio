@@ -12,6 +12,13 @@ const VGS_INVALID: u32 = 0xffffffffu;
 // Ids of the ray-traced backend start here (`helio_pass_vg_dense::DENSE_RT_VISIBLE_BASE`);
 // they index `rt_visible`, not the cull's visible list.
 const VGS_RT_VISIBLE_BASE: u32 = 16777216u;
+// What produced a pixel's surface, recorded by `vis_resolve` from the candidate
+// that actually won the pixel (`helio_vg_format::debug_view::pixel_source`).
+const VGS_SRC_NONE: u32 = 0u;  // not virtual geometry (classic raster, voxel, sky)
+const VGS_SRC_HW: u32 = 1u;    // Tier 1 hardware raster
+const VGS_SRC_SW: u32 = 2u;    // Tier 2 compute micro-raster
+const VGS_SRC_DENSE: u32 = 3u; // Tier 3 depth peel
+const VGS_SRC_RT: u32 = 4u;    // Tier 3 ray query
 
 
 fn vgs_obj_mat4(base: u32) -> mat4x4<f32> {

@@ -635,6 +635,10 @@ impl AtmospherePass {
 }
 
 impl RenderPass for AtmospherePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["atmospheres", "scene_lights"]
+    }
+
     fn name(&self) -> &'static str {
         "Atmosphere"
     }

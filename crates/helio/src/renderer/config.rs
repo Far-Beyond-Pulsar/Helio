@@ -384,7 +384,7 @@ pub struct RendererConfig {
     /// Opaque id of the virtual-geometry runtime (`helio_vg_stream::VgRuntime::handle_id`)
     /// the default deferred graph builds its virtual-geometry passes for, or
     /// `None` (the default) for classic rendering only. The passes are added
-    /// only when the device supports them (`helio_default_graphs::virtual_geometry_supported`);
+    /// only when the device supports them (`helio_default_passes::virtual_geometry_supported`);
     /// otherwise the graph is exactly the classic one.
     pub virtual_geometry: Option<u64>,
 }

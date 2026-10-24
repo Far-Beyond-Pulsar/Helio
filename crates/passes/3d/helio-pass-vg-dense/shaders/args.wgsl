@@ -32,6 +32,8 @@ fn make_args() {
     args[3] = min(groups, BIN_ROW_GROUPS);
     args[4] = max((groups + BIN_ROW_GROUPS - 1u) / BIN_ROW_GROUPS, 1u);
     args[5] = 1u;
+    // Nothing dense: the binning and candidate kernels have nothing to do.
+    if n == 0u { args[3] = 0u; }
 }
 
 // RT variant: no visible list.

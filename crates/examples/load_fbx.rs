@@ -12,7 +12,7 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_light, spawn_material,

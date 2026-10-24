@@ -662,6 +662,10 @@ impl HlfsPass {
     }
 }
 impl RenderPass for HlfsPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["scene_lights"]
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.resize(device, width, height);
     }

@@ -87,7 +87,7 @@ pub struct GpuAssetQuant {
     pub step: f32,
 }
 /// File offset of the builder's meta block (directly after [`VgeoHeader`]).
-pub const VGEO_META_OFFSET: usize = 72;
+pub const VGEO_META_OFFSET: usize = 136;
 
 /// One entry of the visible-cluster list written by the cull. 8 bytes.
 #[repr(C)]
@@ -128,6 +128,7 @@ pub fn decode_bindings_wgsl(group: u32, pool_binding: u32, quant_binding: u32) -
     )
 }
 
+pub mod density;
 pub mod debug_view;
 pub mod testing;
 
@@ -137,7 +138,7 @@ pub const PAGE_MAGIC: [u8; 4] = *b"VGPG";
 /// Bump on any layout or builder-semantics change; part of the cache key.
 /// 2: measured (not estimated) cluster errors, 0.6 group reduction ratio.
 /// 3: groups of up to `GROUP_MAX_CLUSTERS_LARGE` clusters at coarse levels.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 // ── Cluster ─────────────────────────────────────────────────────────────────
 
@@ -250,6 +251,60 @@ impl Default for GpuHierarchyNode {
     }
 }
 
+
+/// Error at or above which a parent error means "no parent" (root clusters).
+pub const ROOT_PARENT_ERROR: f32 = 1.0e30;
+
+/// The hierarchy leaves (asset-local group-ref indices) holding the root
+/// clusters of an asset, or `None` for a malformed hierarchy. Root clusters have an infinite
+/// `parent_error`, so they are exactly the clusters of the leaves reached
+/// through slots whose `max_parent_error` is infinite.
+///
+/// The GPU copy of the asset header carries these leaves (see
+/// [`gpu_header_with_root_leaves`]), which lets the cull draw the roots of a distant instance
+/// without walking the hierarchy (see `helio-pass-vg-cull`).
+pub fn root_leaves(nodes: &[GpuHierarchyNode], root_node: u32) -> Option<Vec<u32>> {
+    let mut found: Vec<u32> = Vec::new();
+    let mut stack = vec![root_node];
+    let mut visited = 0usize;
+    while let Some(n) = stack.pop() {
+        visited += 1;
+        if visited > nodes.len() + 1 {
+            return None; // cycle
+        }
+        let node = nodes.get(n as usize)?;
+        for s in 0..NODE_FANOUT {
+            let child = node.children[s];
+            if child == NODE_INVALID || node.max_parent_error[s] < ROOT_PARENT_ERROR {
+                continue;
+            }
+            if child & NODE_LEAF_BIT != 0 {
+                let leaf = child & !NODE_LEAF_BIT;
+                if !found.contains(&leaf) {
+                    found.push(leaf);
+                }
+            } else {
+                stack.push(child);
+            }
+        }
+    }
+    (!found.is_empty()).then_some(found)
+}
+
+/// GPU view of an asset header: up to [`MAX_ROOT_LEAVES`] root leaves (`leaf + 1`) are
+/// stored in the words no shader reads (`cluster_count`, `root_page_count`, `flags`),
+/// 0 = unused. More leaves than that store none (no early-out for the asset).
+pub const MAX_ROOT_LEAVES: usize = 3;
+
+pub fn gpu_header_with_root_leaves(mut header: GpuAssetHeader, nodes: &[GpuHierarchyNode]) -> GpuAssetHeader {
+    let leaves = root_leaves(nodes, header.root_node).filter(|l| l.len() <= MAX_ROOT_LEAVES).unwrap_or_default();
+    let word = |i: usize| leaves.get(i).map_or(0, |l| l + 1);
+    header.cluster_count = word(0);
+    header.root_page_count = word(1);
+    header.flags = word(2);
+    header
+}
+
 /// Leaf payload: where a group's clusters live. 8 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -272,9 +327,13 @@ impl GpuGroupRef {
     }
 }
 
-/// Per-asset summary row. 32 bytes.
+/// Per-asset summary row. 96 bytes.
+///
+/// After the counters comes what the screen-wide density solve needs without
+/// reading any page: the asset's bounding sphere and [`LodTable`] (selected
+/// triangles against object-space error tolerance).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct GpuAssetHeader {
     pub root_node: u32,
     pub node_count: u32,
@@ -285,6 +344,64 @@ pub struct GpuAssetHeader {
     pub root_page_count: u32,
     pub triangle_count: u32,
     pub flags: u32,
+    /// Bounding sphere of the asset (object space): centre xyz, radius.
+    pub bounds: [f32; 4],
+    /// Error tolerance of [`LodTable`] entry 0 (the largest root error).
+    pub lod_error_max: f32,
+    /// [`LodTable`] entries, 4 per word, entry `k` in byte `k % 4` of word `k / 4`.
+    pub lod_table: [u32; LOD_TABLE_WORDS],
+    pub _reserved: [u32; 3],
+}
+
+/// Entries of a [`LodTable`].
+pub const LOD_TABLE_ENTRIES: usize = 32;
+pub const LOD_TABLE_WORDS: usize = LOD_TABLE_ENTRIES / 4;
+
+/// Selected triangles of one asset at a uniform object-space error tolerance:
+/// entry `k` is the cut at `error_max * 2^(-k/2)`, stored as `log2(triangles) *
+/// 8` in one byte (about 9% steps). The cull's density solve interpolates it
+/// per instance, so the screen-wide tolerance is computed rather than fed back.
+/// `vg_lod_tris` in `vg_format.wgsl` mirrors [`LodTable::tris_at`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LodTable {
+    pub error_max: f32,
+    pub q: [u8; LOD_TABLE_ENTRIES],
+}
+
+impl LodTable {
+    pub fn quantize(tris: f64) -> u8 {
+        (tris.max(1.0).log2() * 8.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    pub fn from_header(h: &GpuAssetHeader) -> Self {
+        let mut q = [0u8; LOD_TABLE_ENTRIES];
+        for (k, v) in q.iter_mut().enumerate() {
+            *v = (h.lod_table[k / 4] >> ((k % 4) * 8)) as u8;
+        }
+        Self { error_max: h.lod_error_max, q }
+    }
+
+    pub fn words(&self) -> [u32; LOD_TABLE_WORDS] {
+        let mut w = [0u32; LOD_TABLE_WORDS];
+        for (k, &v) in self.q.iter().enumerate() {
+            w[k / 4] |= u32::from(v) << ((k % 4) * 8);
+        }
+        w
+    }
+
+    /// Triangles selected at object-space tolerance `e` (a tolerance at or above
+    /// `error_max` selects the roots, one far below selects the full mesh).
+    pub fn tris_at(&self, e: f32) -> f32 {
+        if !(self.error_max > 0.0) || !e.is_finite() {
+            return 0.0;
+        }
+        let x = if e <= 0.0 { 31.0 } else { (2.0 * (self.error_max / e).log2()).clamp(0.0, 31.0) };
+        let k = x.floor() as usize;
+        let t = x - k as f32;
+        let a = f32::from(self.q[k]);
+        let b = f32::from(self.q[(k + 1).min(LOD_TABLE_ENTRIES - 1)]);
+        ((a + (b - a) * t) / 8.0).exp2()
+    }
 }
 
 // ── Instances (produced by the VG scene derivation, read by cull) ──────────
@@ -395,7 +512,7 @@ pub fn bary_unpack(w: u32) -> (f32, f32) {
 /// file; the section contents are owned by `helio-vg-build` (T2) but must
 /// stay expressible through this header.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct VgeoHeader {
     pub magic: [u8; 4],
     pub version: u32,
@@ -428,13 +545,34 @@ mod tests {
     use std::mem::size_of;
 
     #[test]
+    fn root_leaves_follow_infinite_parent_error_slots() {
+        let mut root = GpuHierarchyNode::default();
+        root.children[0] = 1;
+        root.max_parent_error[0] = f32::INFINITY;
+        root.children[1] = NODE_LEAF_BIT | 5;
+        root.max_parent_error[1] = 3.0; // finite: not a root leaf
+        root.children[2] = NODE_LEAF_BIT | 9;
+        root.max_parent_error[2] = f32::INFINITY;
+        let mut inner = GpuHierarchyNode::default();
+        inner.children[0] = NODE_LEAF_BIT | 2;
+        inner.max_parent_error[0] = f32::INFINITY;
+        let nodes = [root, inner];
+        let mut leaves = root_leaves(&nodes, 0).unwrap();
+        leaves.sort();
+        assert_eq!(leaves, vec![2, 9]);
+        let h = gpu_header_with_root_leaves(GpuAssetHeader { root_node: 0, ..Default::default() }, &nodes);
+        assert_eq!((h.cluster_count, h.root_page_count, h.flags), (10, 3, 0)); // discovery order
+        assert!(root_leaves(&[GpuHierarchyNode::default()], 0).is_none());
+    }
+
+    #[test]
     fn layouts_are_stable() {
         assert_eq!(size_of::<GpuCluster>(), 64);
         assert_eq!(size_of::<GpuHierarchyNode>(), 96);
         assert_eq!(size_of::<GpuGroupRef>(), 8);
-        assert_eq!(size_of::<GpuAssetHeader>(), 32);
+        assert_eq!(size_of::<GpuAssetHeader>(), 96);
         assert_eq!(size_of::<GpuVgInstance>(), 16);
-        assert_eq!(size_of::<VgeoHeader>(), 72);
+        assert_eq!(size_of::<VgeoHeader>(), 136);
         assert_eq!(size_of::<PageHeader>(), 32);
         assert_eq!(size_of::<GpuAssetQuant>(), 16);
         assert_eq!(size_of::<GpuVisibleCluster>(), 8);

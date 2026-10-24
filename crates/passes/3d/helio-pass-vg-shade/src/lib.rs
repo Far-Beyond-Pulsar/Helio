@@ -21,7 +21,7 @@
 //!    with `frag_depth`, depth-tested `>=` against the classic depth.
 //!
 //! The pass is driven through [`VgShade::encode`] with explicit resources
-//! rather than the graph registry: graph wiring is `helio-default-graphs`'
+//! rather than the graph registry: graph wiring is `helio-default-passes`'
 //! job (T10). See [`VgShadeInputs`] for the contract with the cull/raster
 //! crates and `helio_vg_format::DECODE_WGSL` for the vertex decode.
 
@@ -84,6 +84,7 @@ const FLAG_SW: u32 = 1;
 const FLAG_DENSE: u32 = 2;
 const FLAG_DENSE_MASK: u32 = 8;
 const FLAG_RT: u32 = 4;
+const FLAG_DENSE_MERGE: u32 = 16;
 
 /// The per-frame `Globals` uniform the classic G-buffer shader (and so every
 /// material template) reads. Same layout as `helio_pass_gbuffer::GBufferGlobals`.
@@ -251,6 +252,9 @@ pub struct VgShadeInputs<'a> {
     /// nonzero = resolved by Tier 3). With it, a dense tile takes only the dense
     /// result and other tiles ignore `dense_keys`; `None` merges per pixel.
     pub dense_mask: Option<&'a wgpu::Buffer>,
+    /// `dense_keys` holds only the clusters Tier 3 was given: inside dense tiles take
+    /// the nearest of it and the Tier 1/2 pixel (instead of replacing the latter).
+    pub dense_merge: bool,
     /// A virtual-geometry debug view to overlay on the G-buffer albedo after
     /// shading (see [`debug_views`]); `None` records nothing extra.
     pub debug: Option<VgShadeDebug<'a>>,
@@ -318,6 +322,10 @@ pub struct VgShade {
     depth_view: Option<wgpu::TextureView>,
     payload_tex: Option<wgpu::Texture>,
     depth_tex: Option<wgpu::Texture>,
+    /// What produced each pixel (`R32Uint`, `VGS_SRC_*`): written by `vis_resolve`
+    /// from the candidate that won, read by the debug views.
+    source_view: Option<wgpu::TextureView>,
+    source_tex: Option<wgpu::Texture>,
 }
 
 fn buf(b: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
@@ -421,6 +429,7 @@ impl VgShade {
                 texture_entry(4, CS, UNFILTERABLE),
                 storage_texture_entry(5, wgpu::TextureFormat::Rg32Uint),
                 storage_texture_entry(6, wgpu::TextureFormat::R32Float),
+                storage_texture_entry(7, wgpu::TextureFormat::R32Uint),
             ],
         });
         let resolve_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -622,6 +631,8 @@ impl VgShade {
             pixel_list: None,
             payload_view: None,
             depth_view: None,
+            source_view: None,
+            source_tex: None,
             payload_tex: None,
             depth_tex: None,
         }
@@ -646,6 +657,13 @@ impl VgShade {
     pub fn payload_view(&self) -> Option<&wgpu::TextureView> {
         self.payload_view.as_ref()
     }
+    /// What produced each pixel of the last encode (`R32Uint`, `VGS_SRC_*`; see
+    /// `helio_vg_format::debug_view::pixel_source`).
+    pub fn source_texture(&self) -> Option<&wgpu::Texture> {
+        self.source_tex.as_ref()
+    }
+
+    /// The unified payload (`Rg32Uint`: id, `bary_pack`) of the last encode.
     pub fn payload_texture(&self) -> Option<&wgpu::Texture> {
         self.payload_tex.as_ref()
     }
@@ -704,10 +722,13 @@ impl VgShade {
         self.pixel_list = Some(buf("VgShade pixel list"));
         let payload = tex("VgShade payload", wgpu::TextureFormat::Rg32Uint);
         let depth = tex("VgShade resolved depth", wgpu::TextureFormat::R32Float);
+        let source = tex("VgShade pixel source", wgpu::TextureFormat::R32Uint);
         self.payload_view = Some(payload.create_view(&Default::default()));
         self.depth_view = Some(depth.create_view(&Default::default()));
+        self.source_view = Some(source.create_view(&Default::default()));
         self.payload_tex = Some(payload);
         self.depth_tex = Some(depth);
+        self.source_tex = Some(source);
         self.size = Some(Size { width, height });
     }
 
@@ -823,6 +844,9 @@ impl VgShade {
         }
         if inputs.dense_keys.is_some() && inputs.dense_mask.is_some() {
             flags |= FLAG_DENSE_MASK;
+            if inputs.dense_merge {
+                flags |= FLAG_DENSE_MERGE;
+            }
         }
         queue.write_buffer(
             &self.params,
@@ -843,6 +867,7 @@ impl VgShade {
         let pixel_list = self.pixel_list.as_ref().unwrap();
         let payload_view = self.payload_view.as_ref().unwrap();
         let depth_view = self.depth_view.as_ref().unwrap();
+        let source_view = self.source_view.as_ref().unwrap();
         let res = wgpu::BindingResource::TextureView;
 
         // 1. vis_resolve
@@ -878,6 +903,7 @@ impl VgShade {
                 wgpu::BindGroupEntry { binding: 4, resource: res(rt_depth) },
                 wgpu::BindGroupEntry { binding: 5, resource: res(payload_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: res(depth_view) },
+                wgpu::BindGroupEntry { binding: 7, resource: res(source_view) },
             ],
         });
         {

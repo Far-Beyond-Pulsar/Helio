@@ -95,7 +95,7 @@ download, the material keeps a flat colour and the scene still opens.
 | Setting | CLI | Environment | Values |
 |---|---|---|---|
 | Trees | `--trees <v>` / `--small-trees` | `VG_STRESS_TREES` | `full` (default, about 1.5 GB), `small` (island trees + tree_small_02, about 0.35 GB), `none`, or a list of ids |
-| Density | `--density <v>` | `VG_STRESS_DENSITY` | `low` 0.4, `normal` 1 (default), `high` 3, `insane` 8, or a number |
+| Density | `--density <v>` | `VG_STRESS_DENSITY` | `low` 0.4, `normal` 1 (default), `high` 3, `insane` 8, or a number (clamped to 128x) |
 | Textures | `--textures <v>` | `VG_STRESS_TEXTURES` | `low`, `balanced` (default), `max` |
 
 Pass CLI flags after `--`: `cargo vg-stress -- --trees small --density high`. The
@@ -106,8 +106,8 @@ download size.
 
 | Preset | Tree instances | Statue instances | Source triangles |
 |---|---|---|---|
-| `small` trees, density 1 | 162 | 72 | 695 M |
-| default (full, density 1) | 162 (8 hero, 24 courtyard, 130 forest) | 72 (18 exhibits, 24 hall copies, 30 courtyard crowd) | 777 M (kit 1.7 M, statues 408 M, trees 368 M) |
+| `small` trees, density 1 | about 2,100 (8 hero, 96 courtyard, 2,000 forest) | 72 | not re-measured after the forest increase |
+| default (full, density 1) | about 580 (8 hero, 48 courtyard, 520 forest; was 162 before the forest increase) | 72 (18 exhibits, 24 hall copies, 30 courtyard crowd) | 777 M (kit 1.7 M, statues 408 M, trees 368 M) |
 | `high` (3) | 470 | 156 | 2.07 G |
 | `insane` (8) | 1240 | 173 | 3.9 G |
 
@@ -178,6 +178,11 @@ passes shows no scans or trees (one warning).
 * **Progress.** The title bar and the console show
   `Cooking VG k/N assets (done of total tris) | now: <asset (tris, time)> | elapsed | ETA`;
   per-asset start/finish lines and a 15 s heartbeat go to the console.
+* **Forced recook.** `cargo vg-stress -- --force-recook` (or
+  `VG_STRESS_FORCE_RECOOK=1`; combine with `--prepare` to do it headless) ignores
+  every valid `.vgeo` cache and cooks it again, once per asset per run, then
+  overwrites the cache. Without it a cache is rebuilt only when its cook revision
+  is stale.
 * **Headless prepare.** `cargo vg-stress -- --prepare` (or `VG_STRESS_PREPARE=1`)
   provisions the sources and cooks every cache with no window or GPU, then exits
   (non-zero on errors). After that the demo starts with everything ready.
@@ -253,6 +258,21 @@ The title also carries the cull's stats line (selected triangles, emitted/tested
 clusters, HW/SW/dense split, frustum/occlusion/backface/error culls and overflow
 counters), read from the same asynchronous readback, so it adds no GPU stall.
 
+Selection uses a screen-wide feedback controller (on by default) around the existing error-based hierarchy
+cut. It compares the previous completed frame's selected triangles per viewport
+pixel with `selection_triangles_per_pixel` (default 2) and adjusts the next
+frame's `tau_px`. A denser cut raises tau so parent clusters replace complete
+finer cuts; a lighter cut lowers tau to recover detail. It never rejects an
+otherwise visible cluster to satisfy a count. Set
+`HELIO_VG_SELECTION_TRIANGLES_PER_PIXEL` (0.25–32) for the target and
+`HELIO_VG_SELECTION_SENSITIVITY` (0 disables the controller, default 1);
+both can also be changed through `VgRuntimeSettings`. Set sensitivity to 0 to
+disable adaptation. The controller (`helio_vg_format::density`: dead band, fast attack, slow release, demand normalised for the stats delay) steers to 0.7x the target. When enabled, effective tau stays between 1x and 8x the
+authored setting; the count target cannot override quality indefinitely. If even the resident root cut exceeds the target, the
+selected count stays above target rather than dropping geometry. The target is
+a project tuning value; Epic's Nanite docs describe triangle count scaling with
+pixel count but do not prescribe a fixed triangles-per-pixel ratio.
+
 ## Validation
 
 ```powershell
@@ -281,7 +301,7 @@ needed to measure whole-scene frame time and total draw cost.
 
 The same test also reports selected counts when the two-metre scan fills 18,
 100, and 1,000 vertical pixels, for 1/2/4/8px geometric-error tolerances. The
-current 1px results are still too dense for the requested pixel-area budget:
+current 1px results are denser than the default selection target:
 
 | Scan | 18px | 100px | 1,000px |
 |---|---:|---:|---:|
@@ -292,14 +312,12 @@ current 1px results are still too dense for the requested pixel-area budget:
 | Thai statue | 6,432 | 37,796 | 313,766 |
 | Lucy | 1,184 | 31,732 | 235,776 |
 
-Those counts confirm the distinction between error tolerance and a triangle
-budget: the selector only tests projected geometric deviation. `sw_edge_px`
-classifies a selected cluster for rasterization; it does not stop traversal or
-reduce the cut. The current cached scans also show cone culling removes only
-about 0–2% from these views, so backface culling does not explain or solve the
-main excess. The next VG selection change needs an explicit projected-density
-budget and tests for it; raising the global error tolerance would visibly
-loosen geometry and is not a substitute.
+Those counts show that an error-only cut can be far denser than the target.
+`sw_edge_px` only classifies selected clusters for rasterization; it does not
+change the cut. The feedback now responds by choosing a coarser, still
+coverage-complete hierarchy cut. The current cached scans also show cone culling
+removes only about 0–2% from these views, so backface culling does not explain
+or solve the main excess.
 
 The texture timing printed at runtime spans the whole bounded producer phase,
 including time the worker waits for the renderer to accept texture uploads; it
@@ -370,7 +388,263 @@ instead of cycling views. Run only one demo when comparing GPU times. The
 corrected pixel-height table above uses `tan(FOV/2)`; the previous report used
 `tan(FOV)` and mislabeled object sizes.
 
-Remaining work: constant sampled leaf proxies are not canopy LODs, VG scan
-density still exceeds the desired pixel budget, and texture cooking is not yet
-persistently cached. Passing these regressions does not establish full-scene
-visual stability or a production performance target.
+Remaining work: constant sampled leaf proxies are not canopy LODs, the cooked
+trees should approach the density target at the authored base error before
+runtime feedback has to raise tau, and texture cooking is not yet persistently
+cached. Passing these regressions does not establish full-scene visual
+stability or a production performance target.
+
+## Tier 3 measurements (dense tiles)
+
+Per-kernel GPU timestamps: with `HELIO_VG_PROFILE=1` (or capture mode) every
+`VgDense` kernel is its own GPU scope (`vg_dense compact`, `make_args`,
+`bin (count|scan|fill)`, `peel`, `peel masked`, `collect`, `mask_union`,
+`footprint_args`, `footprint`, `vg_dense_rt compact|args|trace`). They appear in
+`gpu_ms` of every capture stats JSON; with profiling off nothing is recorded. The
+stats JSON also carries `vg.tier3` (frames per backend, dense tiles, list sizes,
+TLAS rebuilds/reuses, CPU microseconds of the RT preparation) and
+`tile_density` (distribution of the Tier 2 per-tile triangle / hit counters, read
+back once per shot).
+
+Shots: `tier3-off` (ForceHwRaster), `tier3-tier2` (Auto, Tier 3 disabled: the
+baseline for Tier 3), `tier3-on-peel` (ForceNonRtFallback), `tier3-on-rt` (Auto
+with ray queries), plus `-dense-overlap` views. Run one density at a time:
+
+```powershell
+$env:VG_STRESS_DENSITY = '3'; $env:VG_STRESS_PAGE_MB = '2048'
+$env:VG_STRESS_CAPTURE = 'out'; $env:VG_STRESS_CAPTURE_ONLY = 'tier3-tier2,tier3-on-rt'
+$env:HELIO_VG_PROFILE = '1'; cargo vg-stress
+```
+
+Tier 3 is opt-in for this demo: set `VG_STRESS_TIER3=1` to run its ray-traced
+dense-tile backend when hardware and proxy residency allow it. The “Ray Trace vs
+Raster” debug view only shows which path produced each pixel; it does not enable
+Tier 3.
+
+In RT mode, the resolved dense-tile mask replaces raster visibility for those
+tiles. Culling diverts clusters wholly contained by the mask out of the raster
+bins; clusters crossing tile boundaries remain rasterized outside the mask.
+Candidate collection includes HW, SW, and dense bins so the TLAS covers all
+visible opaque VG geometry touching the tiles. Candidate readback and TLAS
+limits are currently 16,384 instances; overflow or incomplete proxy coverage
+falls back to the non-RT dense path. Alpha-masked materials are not represented
+by RT proxies yet; replacement mode currently resolves the proxy's geometric
+surface without its alpha texture.
+
+Calibration overrides (read when the raster is created): `HELIO_VG_DENSE_TRI`
+(base triangles per tile, default 64), `HELIO_VG_DENSE_HIT` (base depth-passing
+hits per tile, default 64), and `HELIO_VG_DENSE_SENSITIVITY` (default 1, clamped
+to 0.125–8). Higher sensitivity divides both dense thresholds, so tiles qualify
+sooner; for example, `2` uses thresholds 32 triangles and 32 hits. The raw
+threshold overrides are scaled by sensitivity too. `HELIO_VG_DENSE_LATCH` sets
+how many frames a tile stays dense (default 8), and
+`HELIO_VG_DENSE_MAX_TILES` caps qualifying tiles per frame (default 512).
+`VG_STRESS_PAGE_MB` sets the page-pool budget.
+
+```powershell
+$env:HELIO_VG_DENSE_SENSITIVITY = '4'
+$env:VG_STRESS_TIER3 = '1'
+cargo vg-stress
+```
+
+### What the 93 ms was (forest shot, RTX 4090, 1600x900, density 1)
+
+| VgDense kernel (ms) | before | after, depth peel | after, ray traced |
+|---|---|---|---|
+| `peel` (opaque) | 31.64 | 0.79 | - |
+| `peel masked` | 62.80 | - (masked clusters stay on Tier 2) | - |
+| `bin` count / scan / fill | 0.14 / 0.06 / 0.31 | 0.012 / 0.045 / 0.015 | - |
+| `compact`, `make_args` | ~0.01 | 0.025, 0.007 | 0.008, 0.007 |
+| `mask_union`, `footprint(_args)` | ~0.03 | 0.007, 0.031, 0.007 | 0.006, 0.010, 0.006 |
+| `collect` | 0.054 | - | 0.012 |
+| `vg_dense_rt compact/args/trace` | - | - | 0.008 / 0.006 / 0.043 |
+| **VgDense total** | **95.0** | **0.96** | **0.15** |
+
+Root cause: not the binning, not atomics, not the readback. Tier 3 *replaced*
+every Tier 1/2 pixel inside a dense tile, so each tile's list held every cluster
+whose bounding sphere touched it (about 2,500 per tile, 8,265 at most; 478k list
+entries over 193 tiles) although only about 41 triangles per tile (opaque) and
+3,200 (masked) were real. A tile is one workgroup that re-streams its whole
+cluster list once per peel layer, so the pass lasted as long as the slowest
+tile (about 30 ms opaque, 60 ms for the masked pipeline, which also re-scanned
+the list serially). The fix is structural: Tier 3 now *adds* only the clusters
+the cull diverted to the dense bin (about 8 per tile) and `vis_resolve` takes the
+nearest of that and the Tier 1/2 pixel (`FLAG_DENSE_MERGE`), so alpha-masked
+leaves never enter Tier 3.
+
+### Does Tier 3 beat Tier 2? (measured)
+
+Tier 2 only (`tier3-tier2`), contended GPU (another process was using the card
+during these runs, so absolute times are about 2x the quiet ones; compare within a
+row): density 1: 12.6 ms for 6.2 M selected triangles, density 3: 26.7 ms for
+23.6 M, density 8: 40.3 ms for 40.2 M. The Tier 2 per-tile counters never exceed
+2,386 triangles (9.3 per pixel) or 429 depth-passing hits (1.7 per pixel) per tile,
+p99 1,257 triangles. Tier 2 resolves that at about 3 G triangles/s: a 2,386-triangle
+tile costs about 0.75 us of whole-GPU time. The depth peel costs about 4 us per
+tile on the diverted clusters alone (0.79 ms for 193 tiles on a quiet GPU), the ray
+trace about 0.2 us per tile plus 0.1 ms fixed. There is no crossover for the peel at
+any measured density on this GPU (Tier 2 uses 64-bit atomics, so overlap costs it
+nothing extra); the ray trace only breaks even above roughly 2.5 triangles per pixel
+across 100+ tiles, and at density 3 or more it never became ready with the default
+512 MiB pool because the cull's own demand holds every page slot (proxy pages are
+the lowest priority and the pool will not evict recently used pages). With a 2 GiB
+pool it did, and was not faster than Tier 2 (28.9 vs 25.9 ms contended). Hence the
+policy: Tier 3 stays opt-in; in `Auto` the peel runs only where Tier 2 is the tiled
+no-int64 fallback (its lists overflow), and the ray trace only when it is ready.
+Enabled but with nothing dense, `VgDense` costs 0.016 ms (a probe every 4th frame).
+
+`tier3-on-rt` reports `frames_rt` in the hundreds; RT and depth-peel images were
+bit-identical on the forest shot and differ from Tier 2 only on 0.0135% of pixels.
+
+## Instance-scale benchmark (`VG_STRESS_INSTANCES`)
+
+N instances of ONE asset (default the Thai statue, `VG_STRESS_BENCH_ASSET=thai|lucy|pine`)
+in a seeded jittered grid with varied yaw and scale (spacing `VG_STRESS_BENCH_SPACING`,
+default 3.2 m) over a classic ground plane, nothing else. The scene is built by the normal
+loader from the cooked caches (run `cargo vg-stress -- --prepare` once); textures are skipped.
+One process per N; it renders six fixed camera cases offscreen (no window) and exits. Tier 3
+stays off. A private-memory guard stops the process at `VG_STRESS_BENCH_MEM_GB` (default 14).
+
+```powershell
+cd D:\GitHub\Pulsar-Native\crates\renderer\helio
+$env:HELIO_VG_STRESS_SKIP_PROVISION = '1'
+# Close a running vg_stress first (Windows locks the exe), or build into another target dir:
+#   $env:CARGO_TARGET_DIR = 'D:\GitHub\helio_bench_target'
+cargo build -p examples --features vg-stress --release --bin vg_stress
+
+foreach ($n in 1000, 5000, 20000, 100000) {
+  $env:VG_STRESS_INSTANCES = "$n"     # or: vg_stress.exe --instance-bench $n
+  $env:VG_STRESS_TREES = 'none'
+  $env:VG_STRESS_CAPTURE = "out\bench_$n"
+  $env:VG_STRESS_CAPTURE_RES = '1600x900'
+  $env:HELIO_VG_PROFILE = '1'         # per-pass GPU timestamps
+  .\target\release\vg_stress.exe      # (or $env:CARGO_TARGET_DIR\release\vg_stress.exe)
+}
+# A/B of the root early-out:  $env:HELIO_VG_NO_ROOT_SHORTCUT = '1'
+# Classic instancing check:   $env:VG_STRESS_BENCH_CLASSIC = '20000'   (20k quads, one mesh + material)
+# Subset of cases:            $env:VG_STRESS_CAPTURE_ONLY = 'bench-far,bench-away'
+```
+
+Output: `out\bench_<N>\bench-<case>.json` (+ a small `.jpg` per case and `index.json`). Cases:
+`bench-far` (whole grid in view), `bench-away` (standing at the grid edge looking away),
+`bench-edge` (edge, looking along the grid), `bench-inside`, and `bench-far-move` /
+`bench-inside-move` (1% of the instances move 2 cm every frame, a rotating window). Keys of
+interest: `gpu_ms` (per pass, mean of the last 30 frames, `TOTAL`), `vg` (`selected_triangles`,
+`clusters_tested/emitted`, `jobs`, `root_shortcuts`, `culled`, `overflow.{jobs,visible,peak_queue}`,
+`pool`), and `bench`: `spawn` (ms, us/instance, private bytes per instance), `cpu_frame_ms` /
+`wall_frame_ms` (min/mean/p50/p95/max over the last 40 frames), `bvh_frames` (frames in
+skip / refit / rebuild during the shot), `derivation` (calls, rebuilds), `memory`, `gpu_bytes`
+(`static_objects` rows x 252 B, derivation buffers, BVH scratch, per instance).
+
+### Results (RTX 4090, 1600x900, Thai statue, Tier 3 off; GPU CONTENDED)
+
+Another vg_stress process (the user's own interactive window) held the GPU at 97-99% for the
+whole session, so `TOTAL` swings by several ms between runs (Atmosphere, VolumetricFog and Lens
+varied 10x with no VG change). Compare the VG pass sums and counters, which are deterministic;
+absolute times are upper bounds. Sum of the `Vg*` passes in ms, before -> after the changes below:
+
+| N | far | away | edge | inside | far, 1% moving | inside, 1% moving |
+|---|---|---|---|---|---|---|
+| 1k | 2.9 -> 2.8 | 0.36 -> 0.23 | 10.6 -> 3.4 | 7.4 -> 3.1 | 6.0 -> 1.9 | 4.7 -> 3.2 |
+| 5k | 1.1 -> 2.3 | 0.22 -> 0.28 | 7.4 -> 5.0 | 6.4 -> 4.8 | 8.0 -> 1.7 | 10.5 -> 4.6 |
+| 20k | 4.4 -> 2.2 | 0.22 -> 0.23 | 6.7 -> 5.9 | 6.0 -> 5.6 | 7.1 -> 2.8 | 9.3 -> 4.7 |
+| 100k | 5.5 -> 7.9 (*) | 2.3 -> 0.85 | 9.3 -> 12.5 (*) | 6.0 -> 6.4 | 17.6 -> 7.2 | 18.6 -> 6.8 |
+
+(*) After the change the 100k far view draws 999,510 clusters (112 M selected triangles); before it
+silently dropped 475,222 of the 1,000,000 needed clusters (bin ceiling), so "before" did half the
+work. 500k: far view needs 5.0 M clusters, 1,048,576 are kept and 3.9 M are dropped (counted).
+
+Counters (deterministic), 100k far, root early-out off -> on: jobs 3,398,441 -> 299,912; VgCullEarly
+2.13 -> 1.18 ms measured back to back (`off_100000` vs `on2_100000`); `root_shortcuts` 99,963 of
+100,000 instances. 1% moving, 100k: `VgBvh` 10.98 -> 0.09 ms (refit instead of rebuild every frame),
+`ObjectBatch` 8.53 -> 0.25 ms. Static steady state at every N: BVH skip on 69 of 70 frames
+(the first frame builds), derivation rebuilds 0.
+
+| N | spawn (all rows) | us / instance | CPU bytes / instance | GPU bytes / instance (252 B row + 16 B instance + BVH scratch) |
+|---|---|---|---|---|
+| 1k | 0.9 ms | 0.88 | (below page granularity) | 469 |
+| 5k | 4.0 ms | 0.81 | 1,225 | 593 |
+| 20k | 16.9 ms | 0.84 | 965 | 593 |
+| 100k | 78 ms | 0.78 | 732 | 525 |
+| 500k | 380 ms | 0.76 | 578 | 470 |
+
+Process private memory: 2.8 GB (1k) to 4.3 GB (500k) including ~1.2 GB of runtime/driver baseline. CPU
+frame time (render call) stays at 2-4 ms for every N once the per-frame `asset_ready_rows(N)`
+padding of the example derivation was removed (it cost 27-45 ms per frame at 500k).
+Classic instancing (`VG_STRESS_BENCH_CLASSIC=20000`, 5k VG instances): the 20k quads draw through the
+object batch (GBuffer 0.034 ms, ObjectBatch 0.002 ms), VG instances still draw, classic rows are not
+suppressed.
+
+### Limits that remain
+
+* A far instance costs its root clusters, not one: Thai's roots are 10 clusters (1.1 k triangles), so
+  100k distant instances are 1 M clusters / 112 M triangles in the micro-raster. Cost then follows the
+  instance count, not the pixel count; fixing it needs a coarser top level from the builder (see
+  plan VG-BUG-6), or an instance-level sub-pixel cull.
+* Hard caps degrade by dropping clusters: one bin holds at most a quarter of `max_visible_clusters`
+  (1,048,576 at the default, bounded by 8 bins x 2^20 < the 2^24 visible index and the 25-bit vis id).
+  Drops are counted in `vg.overflow.visible` and in the window-title stats line (`overflow N`); there
+  is no debug view for them.
+
+### Foliage rollback (cook revision 7)
+
+Revision 7 restores the revision 5 foliage builder. Revision 6 grew surviving
+connected pieces using a material/group-wide area ratio, which did not preserve
+local projected coverage. It also imposed geometric distance error on sparse
+foliage, making LOD selection retain much finer cuts. Its section-wide rejection
+rules could prevent simplification altogether. These changes are reverted.
+
+Run `cargo vg-stress -- --prepare` to rebuild stale caches, including revision 6.
+Triangle-density adaptation remains opt-in and bounded; compare selection at a
+fixed tau with adaptation disabled when evaluating future builder changes.
+
+The synthetic 63,200-triangle canopy test isolates the selection regression at
+240 units and fixed tau 1: revision 5 selects 15,763 triangles; revision 6 selects
+62,090; adding only the geometric-distance error selects 62,244; adding only
+area compensation selects 16,861. The geometric-distance floor is therefore
+the dominant selection regression in this fixture. These are CPU selection
+measurements, not museum GPU timings or visual validation. The existing test
+now requires substantial reduction at this distance, where its older assertions
+allowed revision 6 to pass. Future coverage work needs local projected coverage
+and silhouette comparisons before changing the selection metric.
+
+### Cook revisions 8 to 10: foliage coverage and the density bound
+
+Revision 8 replaced the proximity merge of floating pieces (needle and leaf
+cards) with an area-preserving card merge: nearby cards are merged by recursive
+bisection into one quad whose area is the sum of its members' (coverage is kept),
+whose length is the members' mean length (scale is kept) and whose width is the
+only thing that grows, and cells that straddle a gap are split instead of merged.
+The merged group keeps the measured deviation, so the cut selects it only where
+that error is below the tolerance. Group partitioning also gained a spatial
+fallback: clusters that share no edges (disconnected foliage) are grouped with the
+nearest free cluster in a Morton window rather than the next one in curve order,
+which had been stringing far-apart clusters into one group and pinning the error
+of every ancestor.
+
+Revisions 9 and 10 bound selected triangles per pixel in the stored errors. A
+group whose children are over `DENSITY_TARGET` (1.5) triangles per pixel for a
+whole-asset level (level triangles over the mean silhouette area of the asset) may
+be selected before its measured error reaches the tolerance, never below
+`measured / 12`. Geometry is never dropped: the coarser level stands in for all of it.
+
+Validate with `cargo test --release -p helio-vg-build --test lod_validation --
+--nocapture --include-ignored` (set `VG_LOD_OUT` for images). Real caches:
+`VG_CACHE_DIR=<cache dir> VG_REBUILD=1 ... real_cached_assets_ladder_and_images`.
+
+### Computed screen-wide density (cook revision 11, format version 4)
+
+The feedback controller described above is gone. Every asset header now carries
+its bounding sphere and a 32-entry `LodTable` (selected triangles against
+object-space error tolerance, written by the builder). Before traversal the cull
+pass runs `cs_density` (one workgroup): each frustum-visible instance looks its
+asset's table up at the tolerance its centre distance implies, for 13 candidate
+multipliers (1x to 8x); the smallest multiplier that fits
+`0.75 * selection_triangles_per_pixel * pixels` is written to the state buffer
+and used by `load_inst` for every cut that frame, rate limited to x1.25 up and
+x0.96 down per frame. Only the occlusion share is learned (CPU, from the late
+stats: `VisibleFraction`), and it only scales the budget. CPU mirror and tests:
+`helio_vg_format::density`; benchmark: `forest_density_is_computed_screen_wide`
+(demo trees, ~2,100 instances: worst 1.92 triangles/pixel, mean 1.25, prediction
+within x1.29, per-frame multiplier change <= x1.16). Merged foliage cards now take
+all four corners' attributes from one member so their texture stays coherent.

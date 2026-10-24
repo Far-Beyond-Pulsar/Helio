@@ -322,7 +322,7 @@ fn transmission_rows_expire_with_their_acceleration_frame() {
         usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
     });
     let mut frame = helio_core::FrameAcceleration::default();
-    let rays = |tlas, transmission, instances| helio_core::RayFrame { tlas, transmission, instances };
+    let rays = |tlas, transmission, instances| helio_core::RayFrame { tlas, transmission, instances, proxies: None };
     frame.publish(7, rays(Some(&tlas), Some(&rows), Some(&rows)));
     assert_eq!(frame.transmission(7), Some(&rows));
     assert_eq!(frame.instances(7), Some(&rows));

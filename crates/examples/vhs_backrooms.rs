@@ -31,7 +31,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_with_user_effects_with_context;
+use helio_default_passes::build_default_graph_with_user_effects_with_context;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb, World};

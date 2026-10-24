@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig};
-use helio_default_graphs::build_default_graph_external_with_context;
-use helio_default_graphs::ray_tracing::SceneDbRayTracing;
+use helio_default_passes::build_default_graph_external_with_context;
+use helio_default_passes::ray_tracing::SceneDbRayTracing;
 use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use helio_pass_gi::{GiMeshTracePass, GiPass, PROBES, PROBE_WORDS};
 

@@ -267,6 +267,8 @@ impl<'a> ResourceRegistry<'a> {
         buffer: &wgpu::Buffer,
         writer: &'static str,
     ) {
+        // SAFETY: the buffer is owned by a pass in the RenderGraph, which
+        // outlives this per-frame registry (same contract as the texture form).
         let name = name.into();
         let resource = unsafe {
             std::mem::transmute::<wgpu::BindingResource<'_>, wgpu::BindingResource<'a>>(

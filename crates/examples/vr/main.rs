@@ -39,7 +39,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RenderMode, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_forward_opaque_graph_with_context;
+use helio_default_passes::build_forward_opaque_graph_with_context;
 use input::FreeCam;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle, update_object_transform};

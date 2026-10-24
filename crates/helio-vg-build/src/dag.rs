@@ -30,6 +30,21 @@ pub const NONE: u32 = u32::MAX;
 /// Safety factor on the measured deviation (covers the interior of original
 /// triangles, which reference points sample only at their vertices).
 const ERROR_MARGIN: f32 = 1.4;
+/// Selected triangles per screen pixel the hierarchy is built to stay under when
+/// a whole asset is drawn at one level. Below the 2 per pixel the project aims
+/// for, because cuts mix neighbouring levels and the silhouette is estimated.
+const DENSITY_TARGET: f32 = 1.5;
+/// A group whose children are over that density (an asset-wide level of `n`
+/// triangles over a silhouette of area `a` has more than `DENSITY_TARGET`
+/// triangles per pixel once a pixel is wider than `sqrt(target * a / n)`, and
+/// likewise once it is wider than the children's own triangles) may be selected
+/// before its measured error reaches the tolerance: its stored error is relaxed
+/// to that pixel width, but never below `measured / DENSITY_TOLERANCE_GAIN`.
+/// This bounds triangles per pixel on assets whose finest detail is far below a
+/// pixel at a distance (scans, foliage) without dropping geometry: the coarser
+/// level still stands in for all of it, with at most this many times the
+/// tolerance of deviation.
+const DENSITY_TOLERANCE_GAIN: f32 = 12.0;
 /// Per-group deviation budget handed to the simplifier: at least this multiple
 /// of the group's children's error ...
 const ERR_GROWTH: f32 = 2.0;
@@ -107,6 +122,45 @@ fn split_into_clusters(vs: &VertexStore, tris: &[([u32; 3], u32)]) -> Vec<(Vec<[
     out
 }
 
+
+/// Mean projected area of the mesh over the three axis directions: each
+/// vertex and triangle centroid marks a cell of a 128 x 128 grid over the
+/// bounds. Used only to estimate how many triangles per pixel a whole level
+/// of the hierarchy puts on screen.
+fn silhouette_area(vs: &VertexStore, tris: &[crate::mesh::Tri]) -> f32 {
+    const GRID: usize = 128;
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for t in tris {
+        for &v in &t.v {
+            let p = vs.pos[v as usize];
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+    }
+    let mut total = 0.0f64;
+    for axis in 0..3 {
+        let (u, w) = ((axis + 1) % 3, (axis + 2) % 3);
+        let (du, dw) = ((hi[u] - lo[u]).max(1e-12), (hi[w] - lo[w]).max(1e-12));
+        let mut cells = vec![false; GRID * GRID];
+        let mut mark = |p: V3| {
+            let i = (((p[u] - lo[u]) / du * GRID as f32) as usize).min(GRID - 1);
+            let j = (((p[w] - lo[w]) / dw * GRID as f32) as usize).min(GRID - 1);
+            cells[j * GRID + i] = true;
+        };
+        for t in tris {
+            let p = t.v.map(|v| vs.pos[v as usize]);
+            for q in p {
+                mark(q);
+            }
+            mark(scale(add(add(p[0], p[1]), p[2]), 1.0 / 3.0));
+        }
+        let filled = cells.iter().filter(|&&c| c).count();
+        total += filled as f64 / (GRID * GRID) as f64 * du as f64 * dw as f64;
+    }
+    (total / 3.0) as f32
+}
 pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
     mesh.validate()?;
     let (mut vs, tris) = weld(mesh);
@@ -127,6 +181,7 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
     for t in &tris {
         by_mat.entry(t.mat).or_default().push(t.v);
     }
+    let silhouette = silhouette_area(&dag.vs, &tris);
     drop(tris);
     let per_mat: Vec<(u32, Vec<[u32; 3]>, Vec<Vec<u32>>)> = by_mat
         .into_par_iter()
@@ -234,7 +289,13 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             let ids: Vec<u32> = res
                 .new_verts
                 .iter()
-                .map(|&(p, a)| dag.vs.push(p, a))
+                .map(|&(p, a)| {
+                    // Only merged foliage cards create vertices: they are floating
+                    // pieces at the next level too.
+                    let id = dag.vs.push(p, a);
+                    dag.vs.floating[id as usize] = true;
+                    id
+                })
                 .collect();
             let tris = res
                 .tris
@@ -309,6 +370,9 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             })
             .collect();
 
+        // Pixel width above which this whole level would put more than
+        // `DENSITY_TARGET` triangles on each pixel of the asset's silhouette.
+        let level_pixel = (DENSITY_TARGET * silhouette / old_tris.max(1) as f32).sqrt();
         let mut next: Vec<u32> = Vec::with_capacity(new_total);
         for (((members, st), pieces), meas) in groups.into_iter().zip(staged).zip(parts).zip(measured) {
             // Group sphere contains every child sphere (so containment is
@@ -335,7 +399,22 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
                 Some((n, foot)) => {                    let spacing = sphere[3] * (4.18879 / n.max(1) as f32).cbrt();
                     child_err.max(COVERAGE_FOOTPRINT * foot).max(COVERAGE_FACTOR * spacing).max(floor)
                 }
-                None => child_err.max(meas.error.max(meas.forward) * ERROR_MARGIN).max(floor),
+                None => {
+                    // Measured deviation, relaxed by at most `DENSITY_TOLERANCE_GAIN` while
+                    // the inputs are over the target density (see the constants).
+                    let geo = meas.error.max(meas.forward) * ERROR_MARGIN;
+                    let (mut area, mut count) = (0.0f64, 0usize);
+                    for &c in &members {
+                        for t in &dag.clusters[c as usize].tris {
+                            let p = t.map(|v| dag.vs.pos[v as usize]);
+                            area += 0.5 * length(cross(sub(p[1], p[0]), sub(p[2], p[0]))) as f64;
+                            count += 1;
+                        }
+                    }
+                    let footprint = (area / count.max(1) as f64).sqrt() as f32;
+                    let pixel = level_pixel.max(0.5 * footprint);
+                    child_err.max(geo.min(pixel.max(geo / DENSITY_TOLERANCE_GAIN))).max(floor)
+                }
             };
             if error <= child_err {
                 error = f32::from_bits(child_err.to_bits() + 1);

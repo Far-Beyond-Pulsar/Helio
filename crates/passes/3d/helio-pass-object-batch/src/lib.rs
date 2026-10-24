@@ -28,12 +28,12 @@ mod readback;
 pub use gpu_types::*;
 
 const WG: u32 = 256;
-/// The scene join's structure marker (`helio_default_graphs::scene_join::
+/// The scene join's structure marker (`helio_default_passes::scene_join::
 /// OBJECTS_STRUCTURE_KEY`): moves only when objects are added, removed or
 /// change what they are, not when they move.
 const STRUCTURE_KEY: &str = "scene_objects_structure";
 /// The scene join's list of the object slots a frame that only moved objects
-/// rewrote (`helio_default_graphs::scene_join::OBJECTS_MOVED_KEY`).
+/// rewrote (`helio_default_passes::scene_join::OBJECTS_MOVED_KEY`).
 const MOVED_KEY: &str = "scene_objects_moved";
 /// Scene buffer of per-`static_objects`-row flags: a non-zero row is drawn by
 /// another renderer (virtual geometry), so the main view's frustum cull skips
@@ -1482,6 +1482,10 @@ impl ObjectBatchPass {
 }
 
 impl RenderPass for ObjectBatchPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["materials", "static_objects"]
+    }
+
     fn name(&self) -> &'static str {
         "ObjectBatch"
     }

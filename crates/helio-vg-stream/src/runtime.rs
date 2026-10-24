@@ -32,21 +32,40 @@ pub struct VgRuntimeSettings {
     pub mode: VgMode,
     /// Screen-space error threshold in pixels.
     pub tau_px: f32,
+    /// Desired VG selection density, as selected triangles per viewport pixel.
+    pub selection_triangles_per_pixel: f32,
+    /// Strength of the previous-frame density feedback (0 disables it).
+    pub selection_sensitivity: f32,
     /// Page pool budget in MiB (applied when the store is created).
     pub page_budget_mb: u32,
     /// Ceiling on visible clusters per frame (a ceiling, not an allocation).
     pub max_visible_clusters: u32,
     pub two_phase_occlusion: bool,
-    /// Tier 3 (dense-tile depth peel / ray tracing). Off by default: measured at
-    /// ~200 ms/frame on the museum scene, where Tier 1/2 alone take ~7 ms.
+    /// Tier 3 (dense tiles: ray tracing where ready, depth peel on the no-int64
+    /// Tier 2 fallback). Off by default: enabled but idle it costs under 0.02 ms,
+    /// but on an RTX 4090 it measured no gain over Tier 2 (VG_STRESS.md).
     pub tier3: bool,
 }
 
 impl Default for VgRuntimeSettings {
     fn default() -> Self {
+        let selection_triangles_per_pixel = std::env::var("HELIO_VG_SELECTION_TRIANGLES_PER_PIXEL")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(2.0)
+            .clamp(0.25, 32.0);
+        let selection_sensitivity = std::env::var("HELIO_VG_SELECTION_SENSITIVITY")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
         Self {
             mode: VgMode::Auto,
             tau_px: 1.0,
+            selection_triangles_per_pixel,
+            selection_sensitivity,
             page_budget_mb: 512,
             max_visible_clusters: 4_194_304,
             two_phase_occlusion: true,
@@ -382,6 +401,23 @@ pub struct VgTier3Stats {
     pub slot_overflow: u32,
     pub clamped_tiles: u32,
     pub clamped_tris: u32,
+    /// Peel layers summed over the tiles of the latest counters readback.
+    pub peel_layers: u32,
+    /// Tier 3 decided to take clusters from Tier 2 next frame (the cull diverts
+    /// them to the dense bin only while this holds; set by the `VgDense` pass).
+    pub engaged: bool,
+    /// Tier 2 runs the tiled no-int64 fallback (its per-tile lists can overflow):
+    /// the depth peel is then useful on its own. Set when the graph is built.
+    pub tier2_tile_fallback: bool,
+    pub list_total: u32,
+    pub list_max: u32,
+    pub tris_total: u32,
+    pub tris_max: u32,
+    pub masked_tiles: u32,
+    pub masked_tris: u32,
+    pub masked_tris_max: u32,
+    /// CPU microseconds `RtTier::prepare` took on the latest frame.
+    pub rt_prepare_cpu_us: u32,
 }
 
 impl VgRuntime {

@@ -58,6 +58,32 @@ pub enum VgDebugView {
     MaterialBin = 113,
     /// Which pixels the virtual-geometry shade wrote.
     VgMask = 114,
+    /// NOT a registered view and not in [`ALL`]: the renderer-wide "Ray Trace vs
+    /// Raster" mode ([`RAY_VS_RASTER_MODE`]), which the deferred lighting pass
+    /// registers. The shade pass runs the debug pass for it so that virtual
+    /// geometry pixels are painted from the per-pixel source `vis_resolve`
+    /// recorded ([`pixel_source`]), not guessed from other passes' state.
+    RayVsRaster = 33,
+}
+
+/// The renderer debug mode of "Ray Trace vs Raster" (registered by the deferred
+/// lighting pass; ours only paints the virtual-geometry pixels of it).
+pub const RAY_VS_RASTER_MODE: u32 = 33;
+
+/// What produced a pixel's visible surface. `vis_resolve` writes it per pixel
+/// from the candidate that actually won, and the debug views read it; mirrored
+/// as `VGS_SRC_*` in `vg_common.wgsl`.
+pub mod pixel_source {
+    /// Not virtual geometry (classic raster, voxel ray tracing, sky).
+    pub const NONE: u32 = 0;
+    /// Tier 1 hardware raster.
+    pub const HW: u32 = 1;
+    /// Tier 2 compute micro-raster (64-bit atomic or tiled).
+    pub const SW: u32 = 2;
+    /// Tier 3 dense-tile depth peel.
+    pub const DENSE: u32 = 3;
+    /// Tier 3 ray query.
+    pub const RT: u32 = 4;
 }
 
 /// Every view in menu order.
@@ -92,6 +118,13 @@ impl VgDebugView {
         ALL.iter().copied().find(|view| view.id() == id)
     }
 
+    /// Like [`Self::from_id`] but also the one mode we paint without registering:
+    /// [`RAY_VS_RASTER_MODE`]. Use this to decide whether the debug pass runs;
+    /// use [`Self::from_id`] for menus, categories and legends.
+    pub fn from_active_id(id: u32) -> Option<Self> {
+        Self::from_id(id).or((id == RAY_VS_RASTER_MODE).then_some(Self::RayVsRaster))
+    }
+
     /// Menu name.
     pub const fn name(self) -> &'static str {
         match self {
@@ -112,6 +145,7 @@ impl VgDebugView {
             Self::VisNormal => "Vis Normal",
             Self::MaterialBin => "Material Bin",
             Self::VgMask => "Classic vs VG Mask",
+            Self::RayVsRaster => "Ray Trace vs Raster",
         }
     }
 
@@ -135,6 +169,7 @@ impl VgDebugView {
             Self::VisNormal => "normal",
             Self::MaterialBin => "material",
             Self::VgMask => "mask",
+            Self::RayVsRaster => "ray_vs_raster",
         }
     }
 
@@ -176,6 +211,9 @@ impl VgDebugView {
             Self::VisNormal => "World-space normal decoded from the vis-buffer triangle",
             Self::MaterialBin => "Material bin the pixel is shaded in",
             Self::VgMask => "Green pixels were shaded by virtual geometry, grey by the classic path",
+            Self::RayVsRaster => {
+                "Per-pixel source of the visible surface: warm = rasterized, cool = ray traced (see legend)"
+            }
         }
     }
 }
@@ -203,6 +241,8 @@ pub fn wgsl_constants() -> String {
         let name = view.key().to_ascii_uppercase();
         let _ = writeln!(s, "const VGDBG_{name}: u32 = {}u;", view.id());
     }
+    // Painted but not registered by us (see [`VgDebugView::RayVsRaster`]).
+    let _ = writeln!(s, "const VGDBG_RAY_VS_RASTER: u32 = {}u;", RAY_VS_RASTER_MODE);
     s
 }
 
@@ -231,5 +271,24 @@ mod tests {
         assert_eq!(VgDebugView::ClusterId.id(), 21);
         assert_eq!(parse("nonsense"), None);
         assert_eq!(parse("7"), None);
+    }
+
+    #[test]
+    fn ray_vs_raster_is_painted_but_not_registered() {
+        assert!(!ALL.contains(&VgDebugView::RayVsRaster));
+        assert_eq!(VgDebugView::from_id(33), None);
+        assert_eq!(VgDebugView::from_active_id(33), Some(VgDebugView::RayVsRaster));
+        assert_eq!(VgDebugView::RayVsRaster.id(), RAY_VS_RASTER_MODE);
+        assert_eq!(parse("33"), None);
+        assert!(wgsl_constants().contains("const VGDBG_RAY_VS_RASTER: u32 = 33u;"));
+        // The five pixel sources are distinct, stable codes.
+        let codes = [
+            pixel_source::NONE,
+            pixel_source::HW,
+            pixel_source::SW,
+            pixel_source::DENSE,
+            pixel_source::RT,
+        ];
+        assert_eq!(codes, [0, 1, 2, 3, 4]);
     }
 }

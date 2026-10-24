@@ -27,7 +27,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_hlfs_graph_with_context;
+use helio_default_passes::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
@@ -125,7 +125,7 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
-    acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
 
     // Scene state
     chandelier_light_ids: Vec<Entity>,
@@ -245,7 +245,7 @@ impl ApplicationHandler for App {
                 .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                 .expect("HLFS pass")
                 .set_config(&device, config);
-            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(
+            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(
                 device.clone(),
                 queue.clone(),
             ))

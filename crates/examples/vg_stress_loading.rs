@@ -810,7 +810,8 @@ fn run(
 
     // 2. Poly Haven marble and tree textures: decoded, mipped and capped to the
     // quality budget off the window thread; one bounded upload per event.
-    if !prepare_only {
+    // The instance benchmark (VG_STRESS_INSTANCES) skips the texture phase.
+    if !prepare_only && std::env::var_os("VG_STRESS_INSTANCES").is_none() {
         let mats = Mat::all(config);
         let jobs = textures::jobs(&assets_dir, &mats, config);
         let texture_count = jobs.len();
