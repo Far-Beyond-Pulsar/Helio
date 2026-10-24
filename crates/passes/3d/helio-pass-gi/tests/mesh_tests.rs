@@ -396,7 +396,10 @@ fn alpha_texture(gpu: &Gpu, size: u32, alpha: impl Fn(u32, u32) -> u8) -> wgpu::
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * side), rows_per_image: None },
             wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
         );
-        let half = (side / 2).max(1);
+        if side == 1 {
+            break;
+        }
+        let half = side / 2;
         level = (0..half * half)
             .map(|i| {
                 let (x, y) = (2 * (i % half), 2 * (i / half));
