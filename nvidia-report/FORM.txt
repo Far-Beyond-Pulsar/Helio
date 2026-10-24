@@ -1,0 +1,88 @@
+=== Summary ===
+Vulkan: render-target and depth writes intermittently lost in 8x8/4x8 pixel blocks on RTX 3060 (driver 616.64); sync validation clean, D3D12 unaffected
+
+=== Relevant area ===
+Vulkan, or the graphics driver option if Vulkan isn't listed
+
+=== Description ===
+In a deferred renderer on Vulkan, a full-screen render pass writes every pixel of 8 color attachments and depth. Intermittently, in about 1 in 50 frames, scattered 8x8 and 4x8 pixel blocks of ALL of those targets, depth included, keep the values written EARLIER in the same frame. Roughly 15% of the frame is affected. The fragment shader provably ran for every pixel. Khronos synchronization validation reports no hazard. The same application on D3D12 on the same machine never shows it. It only happens while the GPU is still executing the previous frame. It looks like the same issue as https://forums.developer.nvidia.com/t/382912 (same driver, Ampere, no reply yet).
+
+API: Vulkan through wgpu 30.0.1 (Rust). One graphics queue, ordinary descriptor sets, no descriptor buffers. Submissions are chained with binary semaphores.
+
+THE FRAME
+1. G-buffer render pass: 8 color attachments (RGBA8, RGBA16F, RGBA8, RGBA16F, RG16F, RGBA16F, RGBA16F, RGBA16F) plus D32 depth. All LOAD_OP_CLEAR / STORE_OP_STORE (color to 0, depth to 0, reversed-Z).
+2. Several ms of terrain work: compute dispatches into storage buffers, render passes into a separate R32Uint target with its own separate D32 depth, and more compute.
+3. Publish render pass: the same 8 attachments and the same depth, all LOAD_OP_LOAD / STORE_OP_STORE. One full-screen triangle. The fragment shader writes all 8 outputs and frag_depth (compare GREATER; ALWAYS also tried).
+4. Lighting and post-processing sample those targets.
+Proper image barriers sit between 1 and 3 (COLOR_ATTACHMENT_OUTPUT write to COLOR_ATTACHMENT_OUTPUT read|write; early|late fragment tests for depth; same layout).
+
+EXPECTED: after the frame, every pixel holds what pass 3 wrote.
+ACTUAL: intermittently, random 8x8 blocks (sometimes 4x8, rarely 2x2) of every color target AND depth still hold pass 1's clear values.
+
+MEASURED
+- The writes were issued.
+  - An atomic counter in pass 3's fragment shader equals width x height on affected frames.
+  - A second counter shows no pixel was discarded.
+  - A compute shader run after the frame reads the clear values back from memory in the affected blocks.
+- What reappears is always an earlier write from the same frame.
+  - If pass 1 clears with a distinctive value, or clears by drawing instead of a load-op clear, the lost blocks hold exactly that value.
+  - If pass 3's own render pass does the clear (pass 1 loads instead), the lost blocks hold pass 3's clear value. Its draw writes are lost within the same render pass.
+  - Data from the previous frame never reappears: per-frame tags gave zero stale blocks in 520 captures.
+- Khronos validation (SDK 1.4.363), with synchronization validation confirmed enabled, reports no hazard over full runs.
+- D3D12 never shows it: 0 of 6 runs, against about 55% of runs on Vulkan.
+- It needs frames to overlap.
+  - Waiting for the previous frame to finish on the GPU before the frame is recorded removes it (0 of 6).
+  - Recording while the GPU is busy and only waiting before the submit still shows it.
+  - Waiting just before the terrain work is recorded removes it (0 of 8).
+- It needs the step 2 work: with only passes 1 and 3 each frame it never happens (0 of 6).
+- None of these change it:
+  - One command buffer for the frame, or many.
+  - Reusable versus one-time command buffers.
+  - Extra barriers at frame start waiting on all of the previous frame's color output, depth tests, compute writes and transfers.
+  - Persistent buffers instead of per-frame allocations.
+  - Moving the clear into pass 3's render pass, or clearing by drawing.
+
+REPRO (open source: https://github.com/Far-Beyond-Pulsar/Helio)
+  git clone https://github.com/Far-Beyond-Pulsar/Helio
+  cd Helio
+  git checkout 27142692
+  cargo build --release --example voxel_flight -p helio-default-graphs
+Then, in Windows cmd:
+  set HELIO_VOXEL_FLIGHT_SEED=75
+  set HELIO_VOXEL_STRESS_AT=0,1,0
+  set HELIO_VOXEL_FLIGHT_SUN_ELEVATION=32
+  set HELIO_VOXEL_FLIGHT_STRESS=descent
+  set HELIO_VOXEL_STRESS_STEP=1
+  set HELIO_VOXEL_FLIGHT_HOLD_SECONDS=16
+  set HELIO_VOXEL_STRESS_SAMPLE=0.25
+  target\release\examples\voxel_flight.exe out 2560 1440
+Each out\stress_descent_NN.png is one frame. About half of all runs produce at least one capture with the blocky haze pattern. The run then renders a settled reference for each capture, and lines like "CHUNKGATE descent: sample NN differs X" with X above 0.05 mark affected captures. With HELIO_VOXEL_STRESS_SAMPLE=2 the run is faster but hits only about 1 run in 7.
+
+We can provide a build with the in-shader write counters and the post-frame G-buffer probe, or work on a smaller standalone repro. Images (affected frame, settled reference, 8x zoom) will be emailed to NVSDKIssues@nvidia.com with this Bug ID.
+
+=== NVIDIA GPU or system ===
+NVIDIA GeForce RTX 3060 (GA106, 12 GB), desktop
+
+=== NVIDIA software version ===
+Display driver 616.64 (Vulkan); 32.0.16.1664 as reported by D3D12
+
+=== Operating systems ===
+Windows
+
+=== Operating system details ===
+Windows 11 Pro, build 10.0.26200, 64-bit
+
+=== Email after submitting (to NVSDKIssues@nvidia.com) ===
+Subject: Attachments for NVIDIA bug <BUG ID>: Vulkan render-target writes lost in 8x8 blocks (RTX 3060, 616.64)
+
+Hello,
+
+Attached are the images for bug <BUG ID>:
+- corrupted_frame.png: an affected frame (2560x1440); the haze-coloured 8x8 blocks are the lost writes.
+- reference_frame.png: the same view rendered settled, for comparison.
+- corrupted_zoom_8x.png: a 128x64 region of the affected frame at 8x.
+
+The repro steps are in the bug description. We're happy to provide an instrumented build or more data.
+
+Thanks,
+Thiago Maceno Rocha Goulart
