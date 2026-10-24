@@ -43,7 +43,9 @@ pub use reader::{PageView, ParseError, VgeoReader};
 /// again. Revision 2 fixed accumulated QEM error and premature hierarchy stop;
 /// revision 3 measures each group's error against the original surface
 /// (`deviation`), reduces 40% per level and stops stalled levels. Revision 5 builds a real DAG for disconnected/island geometry (floating pieces, proximity merging, appearance error) and bounds the pinned root set to `MAX_ROOT_PAGES`.
-pub const COOK_REVISION: u32 = 5;
+/// Revision 7 restores revision 5 foliage simplification and coverage error.
+/// Revision 6 produced distorted foliage and excessive refinement; recook it.
+pub const COOK_REVISION: u32 = 11;
 
 pub fn is_current_cook(header: &helio_vg_format::VgeoHeader) -> bool {
     header.asset.flags >> 16 == COOK_REVISION

@@ -1,5 +1,5 @@
 [package]
-name = "helio-default-graphs"
+name = "helio-default-passes"
 version = "0.1.0"
 edition = "2021"
 workspace = "../../"
@@ -10,11 +10,13 @@ license = "MIT OR Apache-2.0"
 # The scene join's world origin (`SceneDerivationContext::world_origin`).
 glam = { workspace = true }
 helio = { path = "../helio" }
+helio-graph-asset = { path = "../helio-graph-asset" }
 helio-core = { workspace = true }
 pulsar_scenedb = { workspace = true }
 image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
+serde_json = { workspace = true }
 log = { workspace = true }
 helio-mats = { workspace = true }
 twox-hash = { version = "2.1.3", default-features = false, features = ["alloc", "xxhash3_64"] }

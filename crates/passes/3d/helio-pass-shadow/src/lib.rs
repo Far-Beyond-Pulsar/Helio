@@ -489,6 +489,10 @@ impl ShadowPass {
 // ── RenderPass impl ───────────────────────────────────────────────────────────
 
 impl RenderPass for ShadowPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["builtin_mesh_index", "builtin_mesh_vertex", "materials", "skeletal_bone_palette", "skeletal_skin_vertices"]
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,

@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
 mod background;
+pub mod graph_nodes;
+pub mod graphs;
+pub mod pipelines;
 pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
@@ -138,10 +141,9 @@ fn new_graph(
 /// all of these names; `build_simple_graph` uses none of this and is the one
 /// entry point that legitimately calls none of these.
 fn declare_common_external_inputs(graph: &mut RenderGraph) {
-    graph.declare_external_input("material_textures");
-    graph.declare_external_input("render_environment");
-    graph.declare_external_input("billboards");
-    graph.declare_external_input("corona_emitters");
+    for &name in graph_nodes::HOST_INPUTS {
+        graph.declare_external_input(name);
+    }
 }
 
 /// Which of this crate's passes shader hot reload may swap on their own
@@ -1863,6 +1865,8 @@ pub fn build_simple_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph
         ctx.device,
         ctx.config.surface_format,
     )));
+    // Executing an unlocked graph panics; every other builder locks.
+    graph.lock(ctx.config.internal_width(), ctx.config.internal_height());
     graph
 }
 

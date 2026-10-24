@@ -539,7 +539,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     let mut renderer = RendererBuilder::new(renderer_cfg, scene_db_handle(&scene_db))
         .with_external_device()
         .with_pass_build_context(Box::new(
-            helio_default_graphs::build_default_graph_external_with_context,
+            helio_default_passes::build_default_graph_external_with_context,
         ))
         .build(device.clone(), queue.clone(), cfg.width, cfg.height, FORMAT);
 
@@ -993,7 +993,7 @@ impl SnapshotBatch {
         let renderer = RendererBuilder::new(renderer_cfg, scene_db_handle(&scene_db))
             .with_external_device()
             .with_pass_build_context(Box::new(
-                helio_default_graphs::build_default_graph_external_with_context,
+                helio_default_passes::build_default_graph_external_with_context,
             ))
             .build(
                 device.clone(),

@@ -370,6 +370,10 @@ impl ForwardLitPass {
 }
 
 impl RenderPass for ForwardLitPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["builtin_mesh_index", "builtin_mesh_vertex", "materials", "scene_lights", "skeletal_bone_palette", "skeletal_skin_vertices"]
+    }
+
     fn name(&self) -> &'static str {
         "ForwardLit"
     }

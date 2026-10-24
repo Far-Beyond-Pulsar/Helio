@@ -16,7 +16,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HdrOutputMode, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use v3_demo_common::{
     cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
     point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,

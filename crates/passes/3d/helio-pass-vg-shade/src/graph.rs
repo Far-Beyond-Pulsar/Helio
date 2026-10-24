@@ -163,6 +163,10 @@ impl VgShadePass {
 }
 
 impl RenderPass for VgShadePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["materials", "scene_lights"]
+    }
+
     fn name(&self) -> &'static str {
         "VgShade"
     }
@@ -296,7 +300,11 @@ impl RenderPass for VgShadePass {
             rt: None,
             rt_visible: dense.and_then(|d| d.rt_visible),
             dense_mask: dense.map(|d| d.tile_mask),
-            debug: VgDebugView::from_id(self.debug_mode).map(|view| VgShadeDebug {
+            dense_merge: dense.is_some_and(|d| d.merge),
+            // `from_active_id`, not `from_id`: the renderer-wide "Ray Trace vs Raster"
+            // mode is registered by the lighting pass, but the pixels of virtual
+            // geometry in it can only be painted here (they know their source).
+            debug: VgDebugView::from_active_id(self.debug_mode).map(|view| VgShadeDebug {
                 view,
                 stream: cull_inputs.stream,
                 cull_state: cull.state,

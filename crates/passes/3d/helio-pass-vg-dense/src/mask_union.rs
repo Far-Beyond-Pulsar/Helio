@@ -15,7 +15,7 @@
 //! (`mask_union.wgsl`, `footprint.wgsl`). Without the footprint, pixels of a
 //! diverted cluster outside the dense tiles stay empty on every other frame.
 
-use crate::common::{bg_entry, bgl, bgl_entry, pipeline, storage, uniform, DenseParamsGpu};
+use crate::common::{bg_entry, bgl, bgl_entry, pipeline, storage, uniform, DenseParamsGpu, GpuScopes};
 use crate::config::{self, DenseConfig};
 use crate::nonrt::DenseNonRtInputs;
 use crate::DenseFrame;
@@ -111,6 +111,7 @@ impl MaskUnion {
         inputs: &DenseNonRtInputs<'_>,
         cur: &wgpu::Buffer,
         last: &wgpu::Buffer,
+        scopes: &mut GpuScopes<'_>,
     ) -> &wgpu::Buffer {
         let tiles_x = frame.viewport[0].div_ceil(self.tile);
         let tiles_y = frame.viewport[1].div_ceil(self.tile);
@@ -159,10 +160,14 @@ impl MaskUnion {
                 bg_entry(14, &self.fp_total),
             ],
         });
-        let mut run = |label: &str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
-            let mut pass =
-                rec.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
-            f(&mut pass);
+        let mut run = |label: &'static str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
+            scopes.begin(rec, label);
+            {
+                let mut pass =
+                    rec.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+                f(&mut pass);
+            }
+            scopes.end(rec, label);
         };
         run("vg_dense mask_union", &|p| {
             p.set_pipeline(&self.union_pipeline);

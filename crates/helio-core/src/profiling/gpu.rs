@@ -83,7 +83,7 @@ use std::{
     },
 };
 
-const QUERY_CAPACITY: u32 = 256;
+const QUERY_CAPACITY: u32 = 512;
 const READBACK_SLOT_COUNT: usize = 3;
 const MAP_PENDING: u8 = 0;
 const MAP_SUCCEEDED: u8 = 1;

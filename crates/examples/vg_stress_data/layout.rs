@@ -1086,7 +1086,7 @@ fn scatter_trees(b: &mut Builder, config: &Config) {
         b.add(Placement::tree(format!("Hero Tree {n}"), tree, variant, [x, 0.0, z], rng.range(0.0, 360.0), scale));
     }
     // Courtyard accents just outside the plaza edge.
-    let accents = (24.0 * density).round() as usize;
+    let accents = (96.0 * density).round() as usize;
     let mut placed = 0;
     let mut tries = 0;
     while placed < accents && tries < accents * 60 + 100 {
@@ -1105,7 +1105,7 @@ fn scatter_trees(b: &mut Builder, config: &Config) {
         b.add(Placement::tree(format!("Courtyard Tree {n}"), tree, variant, [x, 0.0, z], rng.range(0.0, 360.0), s));
     }
     // Forests: denser with distance from the temple; the approach stays open.
-    let forest = (130.0 * density).round() as usize;
+    let forest = (2000.0 * density).round() as usize;
     let mut placed = 0;
     let mut tries = 0;
     while placed < forest && tries < forest * 40 + 200 {
@@ -1236,7 +1236,7 @@ mod tests {
         let l = layout(1.0, "full");
         let (kit, statues, trees, total) = l.triangle_report();
         assert_eq!(kit + statues + trees, total);
-        assert!(l.tree_count() >= 140 && l.tree_count() <= 200, "{}", l.tree_count());
+        assert!(l.tree_count() >= 1800 && l.tree_count() <= 2600, "{}", l.tree_count());
         assert!(l.statues.len() > 60, "{}", l.statues.len());
         assert!(trees > 100_000_000, "{trees}");
         assert!(kit > 100_000, "{kit}");

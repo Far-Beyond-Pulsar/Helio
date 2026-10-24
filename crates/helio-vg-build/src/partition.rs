@@ -17,6 +17,9 @@ use crate::mesh::VertexStore;
 const MAX_S: usize = GROUP_MAX_CLUSTERS as usize;
 const MIN_S: usize = GROUP_MIN_CLUSTERS as usize;
 const NONE: u32 = u32::MAX;
+/// Clusters on each side of a group's seed, in Morton order, searched for the
+/// nearest free cluster when adjacency runs out.
+const SPATIAL_WINDOW: usize = 96;
 
 /// Returns groups of ids taken from `cur` (each id indexes `clusters`).
 /// `cap` is the largest group the page budget allows (>= 8). While the level
@@ -118,6 +121,10 @@ pub fn partition(
         .collect();
     order.sort_unstable();
     let order: Vec<u32> = order.into_iter().map(|o| o.1).collect();
+    let mut rank = vec![0usize; n];
+    for (r, &c) in order.iter().enumerate() {
+        rank[c as usize] = r;
+    }
 
     let mut group_of = vec![NONE; n];
     let mut sizes = vec![0usize; g_count];
@@ -147,12 +154,37 @@ pub fn partition(
                 .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
                 .map(|c| c.0)
                 .unwrap_or_else(|| {
-                    // Component exhausted: continue with the next free
-                    // cluster in spatial order.
-                    while group_of[order[cursor] as usize] != NONE {
-                        cursor += 1;
-                    }
-                    order[cursor]
+                    // Component exhausted (disconnected pieces such as foliage
+                    // cards share no edges, so adjacency says nothing): take the
+                    // free cluster nearest the group among a window of the
+                    // Morton order around its seed. The window absorbs the
+                    // curve's jumps; picking the next free cluster in curve
+                    // order instead strings together far-apart clusters.
+                    let centre = {
+                        let mut s = [0.0f32; 3];
+                        for &m in &members {
+                            for k in 0..3 {
+                                s[k] += centers[m as usize][k];
+                            }
+                        }
+                        scale(s, 1.0 / members.len() as f32)
+                    };
+                    let at = rank[seed as usize];
+                    let (lo, hi) = (at.saturating_sub(SPATIAL_WINDOW), (at + SPATIAL_WINDOW).min(n - 1));
+                    let near = (lo..=hi)
+                        .map(|r| order[r])
+                        .filter(|&c| group_of[c as usize] == NONE)
+                        .min_by(|&a, &b| {
+                            dist(centers[a as usize], centre)
+                                .total_cmp(&dist(centers[b as usize], centre))
+                                .then(a.cmp(&b))
+                        });
+                    near.unwrap_or_else(|| {
+                        while group_of[order[cursor] as usize] != NONE {
+                            cursor += 1;
+                        }
+                        order[cursor]
+                    })
                 });
             group_of[pick as usize] = g as u32;
             members.push(pick);

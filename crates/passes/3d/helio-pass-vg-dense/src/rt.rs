@@ -730,6 +730,21 @@ impl DenseRtPass {
         tile_mask: &wgpu::Buffer,
         tlas: &TlasManager,
     ) -> Result<(), RtError> {
+        self.record_scoped(device, queue, encoder, frame, tile_mask, tlas, &mut GpuScopes::none())
+    }
+
+    /// [`Self::record_rec`] with per-kernel GPU timestamp scopes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: &DenseFrame,
+        tile_mask: &wgpu::Buffer,
+        tlas: &TlasManager,
+        scopes: &mut GpuScopes<'_>,
+    ) -> Result<(), RtError> {
         let Some(tlas_res) = tlas.as_binding() else {
             return Err(RtError::Acceleration(AccelerationError::Unsupported));
         };
@@ -775,10 +790,14 @@ impl DenseRtPass {
                 bg_entry(10, self.dense_bary.as_ref().unwrap()),
             ],
         });
-        let mut run = |label: &str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
-            let mut pass = encoder
-                .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
-            f(&mut pass);
+        let mut run = |label: &'static str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
+            scopes.begin(encoder, label);
+            {
+                let mut pass = encoder
+                    .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+                f(&mut pass);
+            }
+            scopes.end(encoder, label);
         };
         run("vg_dense_rt compact", &|p| {
             p.set_pipeline(&self.compact);

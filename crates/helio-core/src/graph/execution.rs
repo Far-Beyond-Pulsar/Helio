@@ -189,6 +189,33 @@ impl Drop for EncoderFinishPool {
     }
 }
 
+/// What kind of object a declared resource is, where the pass says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeclaredKind {
+    /// Only a name (`reads()`, `writes()`): the declaration gives no kind.
+    Unknown,
+    Texture,
+    Depth,
+    /// `ResourceBuilder::write_buffer`.
+    Buffer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeclaredResource {
+    pub name: &'static str,
+    pub kind: DeclaredKind,
+}
+
+/// What one pass declares, see [`RenderGraph::pass_declaration`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassDeclaration {
+    pub pass: &'static str,
+    pub reads: Vec<DeclaredResource>,
+    pub writes: Vec<DeclaredResource>,
+    /// SceneDB buffer keys the pass consumes ([`RenderPass::scene_buffers`]).
+    pub scene_buffers: Vec<&'static str>,
+}
+
 pub struct RenderGraph {
     pub(crate) passes: Vec<Box<dyn RenderPass>>,
     pass_index_map: HashMap<TypeId, usize>,
@@ -1080,6 +1107,64 @@ impl RenderGraph {
             }
         }
         (reads, writes)
+    }
+
+    /// Resources declared with [`declare_external_input`](Self::declare_external_input):
+    /// supplied by the host each frame rather than written by a pass.
+    pub fn external_input_names(&self) -> Vec<&'static str> {
+        self.external_inputs.iter().copied().collect()
+    }
+
+    /// Number of passes added so far.
+    pub fn pass_count(&self) -> usize {
+        self.passes.len()
+    }
+
+    /// What pass `index` declares, for tools: the resources it reads and
+    /// writes (from `reads()`/`writes()` and `declare_resources`) with their
+    /// kind where the pass declares one, and the SceneDB buffers it consumes.
+    pub fn pass_declaration(&self, index: usize) -> Option<PassDeclaration> {
+        let pass = self.passes.get(index)?;
+        let mut declaration = PassDeclaration {
+            pass: pass.name(),
+            reads: Vec::new(),
+            writes: Vec::new(),
+            scene_buffers: pass.scene_buffers().to_vec(),
+        };
+        let mut push = |list: &mut Vec<DeclaredResource>, name: &'static str, kind: DeclaredKind| {
+            match list.iter_mut().find(|existing| existing.name == name) {
+                // A precise kind beats the unknown one a bare name implies.
+                Some(existing) if existing.kind == DeclaredKind::Unknown => existing.kind = kind,
+                Some(_) => {}
+                None => list.push(DeclaredResource { name, kind }),
+            }
+        };
+        for &name in pass.reads() {
+            push(&mut declaration.reads, name, DeclaredKind::Unknown);
+        }
+        for &name in pass.writes() {
+            push(&mut declaration.writes, name, DeclaredKind::Unknown);
+        }
+        let mut builder = crate::graph::ResourceBuilder::new();
+        pass.declare_resources(&mut builder);
+        for resource in builder.declarations() {
+            match resource.access {
+                crate::graph::ResourceAccess::Read => {
+                    push(&mut declaration.reads, resource.name, DeclaredKind::Unknown)
+                }
+                crate::graph::ResourceAccess::Write => {
+                    let kind = match resource.format {
+                        None => DeclaredKind::Buffer,
+                        Some(crate::graph::ResourceFormat::Depth32Float) => DeclaredKind::Depth,
+                        Some(_) => DeclaredKind::Texture,
+                    };
+                    // A group member is published under the group's name, which
+                    // is what readers ask for.
+                    push(&mut declaration.writes, resource.group.unwrap_or(resource.name), kind);
+                }
+            }
+        }
+        Some(declaration)
     }
 
     pub fn dump_dependency_graph(&self) {

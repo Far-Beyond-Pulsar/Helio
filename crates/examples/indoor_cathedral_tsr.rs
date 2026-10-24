@@ -24,7 +24,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
     Camera, HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use helio_pass_tsr::TsrQuality;
 use pulsar_scenedb::{Entity, SceneDb};

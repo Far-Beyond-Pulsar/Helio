@@ -36,7 +36,7 @@
 //! orthographic camera, so the 3D camera does not move it, and it records
 //! no draw while the scene holds no sprite.
 //!
-//! This pass has no dependency on `helio` / `helio-default-graphs` — it only
+//! This pass has no dependency on `helio` / `helio-default-passes` — it only
 //! needs `helio-core` (for the [`RenderPass`] trait and graph plumbing) and
 //! `helio-core` (for [`ResourceRegistry`](helio_core::ResourceRegistry)), matching
 //! every other pass crate. It never touches `PassContext::scene`, so it is
@@ -986,6 +986,10 @@ fn create_atlas_array_texture(
 }
 
 impl RenderPass for SpriteBatchPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["sprite_instances"]
+    }
+
     fn name(&self) -> &'static str {
         "SpriteBatch"
     }

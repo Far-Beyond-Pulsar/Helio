@@ -1,6 +1,9 @@
 //! GPU half of the asset store: the page pool, the packed per-asset arrays,
 //! the residency table and the feedback readback. See the crate docs.
 
+/// Bytes of one asset header row (the cull reads `array<VgAssetHeader>`).
+const HEADER_BYTES: u64 = std::mem::size_of::<helio_vg_format::GpuAssetHeader>() as u64;
+
 use crate::core::*;
 use crate::feedback::{self, FeedbackLayout};
 use crate::source::VgeoSource;
@@ -152,7 +155,7 @@ impl VgAssetStore {
         queue.write_buffer(&residency.buffer, 0, bytemuck::cast_slice(core.table()));
         let nodes = GrowBuf::new(device, "vg-stream hierarchy", u64::from(core.node_alloc.capacity()) * 96);
         let group_refs = GrowBuf::new(device, "vg-stream group refs", u64::from(core.ref_alloc.capacity()) * 8);
-        let headers = GrowBuf::new(device, "vg-stream asset headers", u64::from(core.asset_slot_capacity) * 32);
+        let headers = GrowBuf::new(device, "vg-stream asset headers", u64::from(core.asset_slot_capacity) * HEADER_BYTES);
         let bases = GrowBuf::new(device, "vg-stream asset bases", u64::from(core.asset_slot_capacity) * 16);
         let quant = GrowBuf::new(device, "vg-stream asset quant", u64::from(core.asset_slot_capacity) * 16);
         queue.write_buffer(&quant.buffer, 0, &vec![0u8; (quant.size as usize).min(1 << 20)]);
@@ -192,7 +195,10 @@ impl VgAssetStore {
             let a = self.core.asset(reg.slot).expect("registered asset");
             self.queue.write_buffer(&self.nodes.buffer, u64::from(reg.nodes.start) * 96, bytemuck::cast_slice(nodes));
             self.queue.write_buffer(&self.group_refs.buffer, u64::from(reg.group_refs.start) * 8, bytemuck::cast_slice(refs));
-            self.queue.write_buffer(&self.headers.buffer, u64::from(reg.slot) * 32, bytemuck::bytes_of(&a.header));
+            // GPU view of the header: root leaves (+1) in the words no shader reads,
+            // see `helio_vg_format::gpu_header_with_root_leaves`.
+            let gpu_header = helio_vg_format::gpu_header_with_root_leaves(a.header, nodes);
+            self.queue.write_buffer(&self.headers.buffer, u64::from(reg.slot) * HEADER_BYTES, bytemuck::bytes_of(&gpu_header));
             let bases = [reg.nodes.start, reg.group_refs.start, reg.page_base, 0u32];
             self.queue.write_buffer(&self.bases.buffer, u64::from(reg.slot) * 16, bytemuck::cast_slice(&bases));
             self.queue.write_buffer(&self.quant.buffer, u64::from(reg.slot) * 16, bytemuck::bytes_of(&reg.quant));
@@ -211,7 +217,7 @@ impl VgAssetStore {
         for (page, value) in rel.table_writes {
             self.queue.write_buffer(&self.residency.buffer, u64::from(page) * 4, bytemuck::bytes_of(&value));
         }
-        self.queue.write_buffer(&self.headers.buffer, u64::from(rel.slot) * 32, &[0u8; 32]);
+        self.queue.write_buffer(&self.headers.buffer, u64::from(rel.slot) * HEADER_BYTES, &[0u8; HEADER_BYTES as usize]);
         self.queue.write_buffer(&self.bases.buffer, u64::from(rel.slot) * 16, &[0u8; 16]);
         self.queue.write_buffer(&self.quant.buffer, u64::from(rel.slot) * 16, &[0u8; 16]);
         self.content_version += 1;
@@ -326,7 +332,7 @@ impl VgAssetStore {
         self.pool.ensure(d, q, u64::from(self.core.slot_capacity()) * u64::from(PAGE_BYTES), true);
         self.nodes.ensure(d, q, u64::from(self.core.node_alloc.capacity()) * 96, true);
         self.group_refs.ensure(d, q, u64::from(self.core.ref_alloc.capacity()) * 8, true);
-        self.headers.ensure(d, q, u64::from(self.core.asset_slot_capacity) * 32, true);
+        self.headers.ensure(d, q, u64::from(self.core.asset_slot_capacity) * HEADER_BYTES, true);
         self.bases.ensure(d, q, u64::from(self.core.asset_slot_capacity) * 16, true);
         self.quant.ensure(d, q, u64::from(self.core.asset_slot_capacity) * 16, true);
         let page_cap = self.core.page_alloc.capacity();

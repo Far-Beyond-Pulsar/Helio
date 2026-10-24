@@ -3,7 +3,7 @@
 //! for the late cull) and [`VgRasterLatePass`] (phase 1 delta + tile
 //! classification). The three share one [`VgRasterShared`].
 //!
-//! Graph order (see `helio-default-graphs`):
+//! Graph order (see `helio-default-passes`):
 //!
 //! ```text
 //! VgCullEarly -> VgRasterEarly -> VgHizLate -> VgCullLate -> VgRasterLate
@@ -90,6 +90,33 @@ impl VgRasterShared {
 
     pub fn uses_tile_fallback(&self) -> bool {
         lock(&self.0).raster.uses_tile_fallback()
+    }
+
+    /// Diagnostics (capture / calibration tools only: it BLOCKS on the GPU).
+    /// The per-tile Tier 2 counters of the last recorded frame as
+    /// `[triangles, depth-passing hits]` per tile, row-major, plus the tile grid.
+    pub fn tile_counters_blocking(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(Vec<[u32; 2]>, [u32; 2])> {
+        let (buffer, tiles) = {
+            let shared = lock(&self.0);
+            let t = shared.targets.as_ref()?;
+            (t.tile_counters.clone(), [t.tiles_x, t.tiles_y])
+        };
+        let bytes = tiles[0] as u64 * tiles[1] as u64 * 8;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG tile counters readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(&buffer, 0, &staging, 0, bytes);
+        queue.submit(Some(enc.finish()));
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map tile counters"));
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let data: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range().ok()?).to_vec();
+        staging.unmap();
+        Some((data.chunks_exact(2).map(|c| [c[0], c[1]]).collect(), tiles))
     }
 }
 
@@ -206,6 +233,10 @@ pub struct VgRasterEarlyPass {
 }
 
 impl VgRasterEarlyPass {
+    pub fn shared(&self) -> &VgRasterShared {
+        &self.shared
+    }
+
     pub fn new(shared: VgRasterShared) -> Self {
         Self { shared, published: None }
     }

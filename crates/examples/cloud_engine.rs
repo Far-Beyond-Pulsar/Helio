@@ -20,7 +20,7 @@ use microfont::{stamp_text, FHEIGHT};
 mod v3_demo_common;
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_controls::{FlyCamera, FlyCameraConfig, WinitFlyInput};
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use v3_demo_common::{
     cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, scene_db_handle,
     spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,

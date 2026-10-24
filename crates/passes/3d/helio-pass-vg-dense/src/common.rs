@@ -59,6 +59,16 @@ pub struct DenseStats {
     pub extra_layers: u32,
     /// Tiles actually processed.
     pub tiles_processed: u32,
+    /// Cluster-list entries over all dense tiles (before the pool clamp) and the longest list.
+    pub list_total: u32,
+    pub list_max: u32,
+    /// Triangles staged by the opaque peel over all tiles, and the busiest tile.
+    pub tris_total: u32,
+    pub tris_max: u32,
+    /// Tiles the masked peel worked on, the triangles it staged, the busiest tile.
+    pub masked_tiles: u32,
+    pub masked_tris: u32,
+    pub masked_tris_max: u32,
 }
 
 impl DenseStats {
@@ -72,6 +82,13 @@ impl DenseStats {
             slot_overflow: w[5],
             extra_layers: w[6],
             tiles_processed: w[7],
+            list_total: w[8],
+            list_max: w[9],
+            tris_total: w[10],
+            tris_max: w[11],
+            masked_tiles: w[12],
+            masked_tris: w[13],
+            masked_tris_max: w[14],
         }
     }
 
@@ -162,12 +179,17 @@ impl DenseBuffers {
     }
 
     pub(crate) fn write_params(&self, queue: &wgpu::Queue, frame: &DenseFrame) {
+        self.write_params_flags(queue, frame, 0);
+    }
+
+    /// `flags` land in `limits.w` (bit 0: bin only the alpha-masked class).
+    pub(crate) fn write_params_flags(&self, queue: &wgpu::Queue, frame: &DenseFrame, flags: u32) {
         let p = DenseParamsGpu {
             view_proj: frame.view_proj,
             inv_view_proj: frame.inv_view_proj,
             camera_pos: [frame.camera_pos[0], frame.camera_pos[1], frame.camera_pos[2], 0.0],
             viewport: [frame.viewport[0], frame.viewport[1], self.tiles[0], self.tiles[1]],
-            limits: [self.tile_count(), self.max_slots, frame.visible_capacity, 0],
+            limits: [self.tile_count(), self.max_slots, frame.visible_capacity, flags],
             misc: [frame.ray_t[0], frame.ray_t[1], 0.0, 0.0],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
@@ -262,4 +284,34 @@ pub(crate) fn pipeline(
 
 pub(crate) fn bg_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+}
+
+/// Optional per-kernel GPU timestamp scopes. The render-graph wrapper hands a
+/// closure that forwards to `PassContext::begin_gpu_scope` / `end_gpu_scope`
+/// (`true` = begin). `none()` records nothing: when profiling is off the
+/// wrapper passes `none()`, so the cost is a branch per kernel.
+pub struct GpuScopes<'a> {
+    f: Option<&'a mut dyn FnMut(&mut helio_core::CommandRecorder<'_>, &'static str, bool)>,
+}
+
+impl<'a> GpuScopes<'a> {
+    pub fn none() -> Self {
+        Self { f: None }
+    }
+
+    pub fn new(f: &'a mut dyn FnMut(&mut helio_core::CommandRecorder<'_>, &'static str, bool)) -> Self {
+        Self { f: Some(f) }
+    }
+
+    pub fn begin(&mut self, rec: &mut helio_core::CommandRecorder<'_>, name: &'static str) {
+        if let Some(f) = self.f.as_mut() {
+            f(rec, name, true);
+        }
+    }
+
+    pub fn end(&mut self, rec: &mut helio_core::CommandRecorder<'_>, name: &'static str) {
+        if let Some(f) = self.f.as_mut() {
+            f(rec, name, false);
+        }
+    }
 }

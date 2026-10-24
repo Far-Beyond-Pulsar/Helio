@@ -38,7 +38,7 @@ struct State {
     queue: Arc<wgpu::Queue>,
     renderer: Renderer,
     scene_db: SceneDb,
-    acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
     keys: HashSet<KeyCode>,
     last: Instant,
     angle: f32,
@@ -115,7 +115,7 @@ impl ApplicationHandler for App {
         .with_editor_mode(true)
         .with_pass_build_context(Box::new(move |ctx| {
             let device = ctx.device.clone();
-            let mut graph = helio_default_graphs::build_fxaa_hlfs_graph_with_context(ctx);
+            let mut graph = helio_default_passes::build_fxaa_hlfs_graph_with_context(ctx);
             graph
                 .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                 .expect("HLFS")
@@ -132,7 +132,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         let acceleration = if rt {
             crate::hlfs_capture::enable_ray_shadows(&mut scene_db.world);
-            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(
+            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(
                 device.clone(),
                 queue.clone(),
             ))

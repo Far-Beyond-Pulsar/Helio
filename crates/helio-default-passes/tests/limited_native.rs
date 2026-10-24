@@ -6,7 +6,7 @@ use helio::{
     RendererConfig, BINDLESS_MATERIAL_FEATURES, EXPANDED_MATERIAL_TEXTURE_RESERVE,
     MAX_MATERIAL_TEXTURES,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 
 const PORTABLE_SAMPLED_TEXTURE_LIMIT: u32 = 16;
 

@@ -205,7 +205,7 @@ impl ApplicationHandler for App {
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
             .with_pass_build_context(Box::new(
-                helio_default_graphs::build_default_graph_external_with_context,
+                helio_default_passes::build_default_graph_external_with_context,
             ))
             .build(
                 device.clone(),

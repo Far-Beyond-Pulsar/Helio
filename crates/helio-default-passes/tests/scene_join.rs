@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use helio_default_graphs::scene_join::{
+use helio_default_passes::scene_join::{
     BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation, SceneDerivationContext,
     SceneDerivationOutput,
 };
-use helio_default_graphs::scene_join::{SceneJoin, SceneJoinKeys};
+use helio_default_passes::scene_join::{SceneJoin, SceneJoinKeys};
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());

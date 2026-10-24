@@ -280,6 +280,10 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl RenderPass for PortalCullPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["portal_views"]
+    }
+
     fn name(&self) -> &'static str {
         "PortalCull"
     }

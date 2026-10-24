@@ -95,7 +95,7 @@ impl ChunkPass {
     /// Voxel materials shown as the host's scene materials: `map` says which
     /// scene material rows each voxel material's faces use, `source` reads
     /// the frame's material table from the context (see
-    /// `helio_default_graphs::voxel_scene_materials`). Devices without
+    /// `helio_default_passes::voxel_scene_materials`). Devices without
     /// texture binding arrays keep the appearance table's colours.
     pub fn set_scene_materials(&mut self, map: super::scene::VoxelMaterialMap, source: super::scene::SceneMaterialSource) {
         self.scene = Some((map, source));

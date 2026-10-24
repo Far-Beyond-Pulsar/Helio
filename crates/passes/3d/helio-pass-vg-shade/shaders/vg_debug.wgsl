@@ -49,6 +49,17 @@ struct DebugParams {
 
 @group(1) @binding(0) var payload_tex: texture_2d<u32>;
 @group(1) @binding(1) var out_albedo: texture_storage_2d<rgba8unorm, write>;
+// What produced each pixel (`VGS_SRC_*`), recorded by `vis_resolve` from the
+// candidate that won it.
+@group(1) @binding(2) var source_tex: texture_2d<u32>;
+
+// "Ray Trace vs Raster" (renderer mode 33) palette. Warm = rasterized, cool =
+// ray traced. Classic pixels and voxel pixels are coloured by the deferred
+// lighting pass (orange / cyan); the shade pass paints only virtual geometry.
+const DBG_RVR_HW: vec3<f32> = vec3<f32>(1.0, 0.36, 0.08);    // hardware raster
+const DBG_RVR_SW: vec3<f32> = vec3<f32>(1.0, 0.85, 0.10);    // compute micro-raster
+const DBG_RVR_DENSE: vec3<f32> = vec3<f32>(0.90, 0.10, 0.10); // dense-tile depth peel
+const DBG_RVR_RT: vec3<f32> = vec3<f32>(0.30, 0.40, 1.00);    // ray query
 
 const DBG_TILE: u32 = 16u;
 const DBG_MATERIAL_WORDS: u32 = 24u;
@@ -131,6 +142,25 @@ fn vg_debug(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= dp.width || gid.y >= dp.height { return; }
     let px = gid.xy;
     let mode = dp.mode;
+
+    // Ray Trace vs Raster: the recorded source of the pixel, nothing inferred.
+    if mode == VGDBG_RAY_VS_RASTER {
+        let source = textureLoad(source_tex, vec2<i32>(px), 0).x;
+        var rvr = vec3<f32>(0.0);
+        switch source {
+            case VGS_SRC_HW: { rvr = DBG_RVR_HW; }
+            case VGS_SRC_SW: { rvr = DBG_RVR_SW; }
+            case VGS_SRC_DENSE: { rvr = DBG_RVR_DENSE; }
+            case VGS_SRC_RT: { rvr = DBG_RVR_RT; }
+            default: { return; } // not virtual geometry: the lighting pass colours it
+        }
+        // Alpha 0 is the "painted by the shade pass" marker the lighting pass looks
+        // for (no real surface has albedo alpha 0: opaque writes 1, cut-outs below
+        // the cutoff are discarded). The lightmap tag cannot say this: (-1, -1) is
+        // also what every classic mesh without a lightmap writes.
+        textureStore(out_albedo, px, vec4<f32>(rvr, 0.0));
+        return;
+    }
 
     // Tile views describe the software raster's tiles, VG pixel or not.
     if mode == VGDBG_SW_OVERDRAW || mode == VGDBG_DENSE_OVERLAP || mode == VGDBG_DENSE_MASK {
@@ -228,16 +258,16 @@ fn vg_debug(@builtin(global_invocation_id) gid: vec3<u32>) {
             col = dbg_heat(1.0 - t);
         }
         case VGDBG_TIER: {
-            let dtile = (px.y / DBG_TILE) * dp.tiles_x + (px.x / DBG_TILE);
-            let in_resolved = dp.dense_resolved != 0u && dtile < arrayLength(&resolved_mask) && resolved_mask[dtile] != 0u;
-            if is_rt {
+            // The tier is what `vis_resolve` recorded for the pixel (the candidate
+            // that won it), not inferred from the cull bin of its cluster or from
+            // a tile mask: a dense tile can still show Tier 1/2 pixels (nearest
+            // wins) and a dense-bin cluster can be won by the hardware raster.
+            let tier_source = textureLoad(source_tex, vec2<i32>(px), 0).x;
+            if tier_source == VGS_SRC_RT {
                 col = vec3<f32>(1.0, 0.1, 0.9);
-            } else if bin == 5u || in_resolved {
-                // A tile Tier 3 resolved took its pixels from the dense backend,
-                // whatever cull bin the cluster of that pixel was in.
+            } else if tier_source == VGS_SRC_DENSE {
                 col = vec3<f32>(1.0, 0.55, 0.05);
-            } else if bin == 4u || bin == 7u {
-                // 7 = software masked (alpha-tested) bin, 6 falls under the hardware blues.
+            } else if tier_source == VGS_SRC_SW {
                 col = vec3<f32>(0.1, 0.9, 0.2);
             } else if bin == 0u {
                 col = vec3<f32>(0.3, 0.55, 1.0);

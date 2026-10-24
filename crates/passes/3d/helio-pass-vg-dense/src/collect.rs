@@ -5,8 +5,8 @@
 //! known after the raster. [`RtCollect`] closes that gap without a CPU stall:
 //!
 //! 1. `collect` (compute, one thread per visible cluster, dispatched like
-//!    `bin`) marks every instance that has a visible cluster overlapping a
-//!    dense tile, deduplicated GPU-side through a per-instance bitmap, and
+//!    `bin`) marks every instance that has a visible cluster from any raster
+//!    tier overlapping a dense tile, deduplicated GPU-side through a per-instance bitmap, and
 //!    appends one 64-byte record per distinct instance (transform, asset slot,
 //!    error scale) to a bounded candidate buffer.
 //! 2. The header + records (at most `capacity` of them) and the dense-tile
@@ -25,7 +25,10 @@ use crate::nonrt::DenseNonRtInputs;
 use std::sync::mpsc;
 
 /// Candidate record capacity of the readback.
-pub const CAND_CAPACITY: u32 = 2048;
+// Dense tiles can contain many small foliage instances. Keep enough room for
+// their deduplicated instance list so RT does not silently fall back at the
+// old 2k-instance stress-scene ceiling.
+pub const CAND_CAPACITY: u32 = 16_384;
 const HEADER_WORDS: u32 = 4;
 const STRIDE_WORDS: u32 = 16;
 const SLOTS: usize = 3;
@@ -244,6 +247,21 @@ impl RtCollect {
         inputs: &DenseNonRtInputs<'_>,
         instance_rows: u32,
     ) {
+        self.record_scoped(device, queue, rec, dense, inputs, instance_rows, &mut crate::common::GpuScopes::none());
+    }
+
+    /// [`Self::record_rec`] with GPU timestamp scopes around the collect kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_scoped(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rec: &mut helio_core::CommandRecorder<'_>,
+        dense: &DenseBuffers,
+        inputs: &DenseNonRtInputs<'_>,
+        instance_rows: u32,
+        scopes: &mut crate::common::GpuScopes<'_>,
+    ) {
         self.frame += 1;
         self.ensure(device, queue, instance_rows);
         rec.clear_buffer(&self.inst_bits.buffer, 0, None);
@@ -265,6 +283,7 @@ impl RtCollect {
                 bg_entry(14, &self.covered.buffer),
             ],
         });
+        scopes.begin(rec, "vg_dense collect");
         {
             let mut pass = rec.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("vg_dense collect"),
@@ -274,6 +293,7 @@ impl RtCollect {
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups_indirect(&dense.args, 12);
         }
+        scopes.end(rec, "vg_dense collect");
         // Readback: header + records, then the dense tile count, into a free slot.
         if let Some(slot) = self.staging.iter_mut().find(|s| matches!(s.state, SlotState::Free)) {
             let cand_bytes = (HEADER_WORDS + self.capacity * STRIDE_WORDS) as u64 * 4;
@@ -300,7 +320,9 @@ impl RtCollect {
     /// The most recent finished readback, if any arrived since the last call.
     /// Never blocks (a non-waiting `device.poll` only).
     pub fn poll(&mut self, device: &wgpu::Device) -> Option<CollectResult> {
-        let _ = device.poll(wgpu::PollType::Poll);
+        // The renderer polls the device once per frame (and the map callbacks fire there);
+        // a second, explicit poll here measured 1.5 ms of CPU per call.
+        let _ = device;
         let mut best: Option<CollectResult> = None;
         for slot in &mut self.staging {
             let SlotState::Mapping(frame, rx) = &slot.state else { continue };

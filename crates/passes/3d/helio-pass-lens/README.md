@@ -418,7 +418,7 @@ samples.
 
 `USER` (39) runs WGSL the host compiles into the lens shader:
 `LensPass::new_with_user(device, w, h, Some(snippet))`, or
-`build_default_graph_with_lens_user[_with_context]` in `helio-default-graphs`
+`build_default_graph_with_lens_user[_with_context]` in `helio-default-passes`
 (the lens counterpart of the post-process `user_effects`). The snippet replaces
 the stock no-op block of `lens.wgsl` (between the `%%USER_BEGIN` and `%%USER_END`
 markers) and may define any of:

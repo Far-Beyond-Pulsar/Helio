@@ -43,7 +43,7 @@ fn screen_size_tracks_graph_resolution_across_resize() {
         });
 
         // Constructed at the same resolution `graph.lock` uses below --
-        // matches production (`helio-default-graphs::add_common_early_passes`
+        // matches production (`helio-default-passes::add_common_early_passes`
         // always constructs `OcclusionCullPass`/`HiZBuildPass` with the exact
         // `iw, ih` that the same call site's `graph.lock(iw, ih)` uses), so
         // frame 1 is already correctly sized without needing a resize pulse

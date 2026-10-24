@@ -35,11 +35,17 @@ pub(crate) fn make_passes(
     device: &wgpu::Device,
     config: VgCullConfig,
 ) -> (VgCullEarlyPass, VgCullLatePass) {
+    let base_tau_px = config.tau_px;
     let core = VgCullCore::new(device, config);
     let buffers = core.buffers().clone();
     let core = Arc::new(Mutex::new(core));
     (
-        VgCullEarlyPass { core: core.clone(), buffers: buffers.clone(), settings: None },
+        VgCullEarlyPass {
+            core: core.clone(), buffers: buffers.clone(), settings: None,
+            base_tau_px,
+            visible: helio_vg_format::density::VisibleFraction::default(),
+            last_selection_feedback_revision: 0,
+        },
         VgCullLatePass { core, buffers },
     )
 }
@@ -74,6 +80,8 @@ impl VgCullEarlyPass {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VgCullDynamic {
     pub tau_px: f32,
+    pub selection_triangles_per_pixel: f32,
+    pub selection_sensitivity: f32,
     pub mode: helio_vg_format::VgMode,
     pub two_phase_occlusion: bool,
     /// Ceiling on visible clusters per frame.
@@ -88,6 +96,10 @@ pub struct VgCullEarlyPass {
     core: Arc<Mutex<VgCullCore>>,
     buffers: Arc<VgCullBuffers>,
     settings: Option<VgCullSettingsSource>,
+    base_tau_px: f32,
+    /// Share of the predicted triangles that survives occlusion.
+    visible: helio_vg_format::density::VisibleFraction,
+    last_selection_feedback_revision: u64,
 }
 
 /// Phase 1: retest deferred work against the Hi-Z of the phase-0 depth.
@@ -129,12 +141,56 @@ impl RenderPass for VgCullEarlyPass {
         let mut core = self.core.lock().unwrap();
         if let Some(source) = &self.settings {
             let s = source();
-            core.config.tau_px = s.tau_px;
+            self.base_tau_px = if s.tau_px.is_finite() { s.tau_px.max(0.01) } else { 1.0 };
+            core.config.selection_triangles_per_pixel = if s.selection_triangles_per_pixel.is_finite() {
+                s.selection_triangles_per_pixel.clamp(0.25, 32.0)
+            } else {
+                2.0
+            };
+            core.config.selection_sensitivity = if s.selection_sensitivity.is_finite() {
+                s.selection_sensitivity.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if core.config.selection_sensitivity == 0.0 {
+                self.visible = helio_vg_format::density::VisibleFraction::default();
+            }
             core.config.mode = s.mode;
             core.config.two_phase_occlusion = s.two_phase_occlusion;
+            // One bin may hold a quarter of the visible-cluster budget (distant crowds put
+            // nearly everything in the smallest hardware class; an even 1/8 split
+            // dropped 475k clusters of a 100k-instance view). Clamped to MAX_BIN_CAPACITY
+            // by the core, so bin * capacity stays under the 24-bit visible index.
             core.config.max_bin_capacity =
-                (s.max_visible_clusters / crate::BIN_COUNT).max(16).next_power_of_two();
+                (s.max_visible_clusters / 4).max(16).next_power_of_two();
         }
+        let revision = core.stats_revision();
+        if revision != self.last_selection_feedback_revision {
+            if let Some(words) = core.last_state_words() {
+                let observed = words
+                    .get((crate::state::STATS + crate::stats::TRIANGLES) as usize)
+                    .copied()
+                    .unwrap_or(0);
+                let predicted = words.get(crate::state::PREDICTED as usize).copied().unwrap_or(0);
+                // The GPU predicts the frustum-visible triangles from the asset
+                // tables; occlusion removes some. Learn that share from the
+                // frame's own counts (they arrive a few frames late).
+                self.visible.update(predicted as f32, observed as f32);
+            }
+            self.last_selection_feedback_revision = revision;
+        }
+        // The density solve runs on the GPU before traversal (`cs_density`): the
+        // tolerance multiplier fits the triangles the target allows, with no
+        // feedback on tau itself. The target gets a margin because the table is
+        // quantised and instances in one cut mix neighbouring levels.
+        core.config.tau_px = self.base_tau_px.clamp(0.01, 1.0e6);
+        core.config.density_budget_tris = if core.config.selection_sensitivity > 0.0 {
+            let pixels = f64::from(ctx.width.max(1)) * f64::from(ctx.height.max(1));
+            let target = f64::from(core.config.selection_triangles_per_pixel.max(0.25)) * 0.75;
+            self.visible.predicted_budget(target * pixels) as f32
+        } else {
+            0.0
+        };
         core.begin_frame(
             ctx.device,
             ctx.queue,

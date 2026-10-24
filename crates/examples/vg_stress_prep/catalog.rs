@@ -173,6 +173,10 @@ pub struct Config {
 }
 
 pub const DEFAULT_DENSITY: f32 = 1.0;
+/// Highest supported museum scene-density multiplier. The layout creates
+/// individual tree instances, so keep the input bounded while allowing scenes
+/// well beyond the original 32x stress limit.
+pub const MAX_DENSITY: f32 = 128.0;
 
 impl Default for Config {
     fn default() -> Self {
@@ -193,7 +197,7 @@ pub fn parse_density(text: &str) -> Option<f32> {
     named
         .or_else(|| t.trim_end_matches('x').parse::<f32>().ok())
         .filter(|d| d.is_finite() && *d > 0.0)
-        .map(|d| d.clamp(0.05, 32.0))
+        .map(|d| d.clamp(0.05, MAX_DENSITY))
 }
 
 pub fn parse_trees(text: &str) -> Result<Vec<&'static TreeDef>, String> {
@@ -309,7 +313,7 @@ mod tests {
         assert_eq!(parse_density("2x"), Some(2.0));
         assert_eq!(parse_density("0"), None);
         assert_eq!(parse_density("nan"), None);
-        assert_eq!(parse_density("1000"), Some(32.0));
+        assert_eq!(parse_density("1000"), Some(MAX_DENSITY));
         assert_eq!(cfg(&["--density", "high"], &[("VG_STRESS_DENSITY", "low")]).density, 3.0);
     }
 

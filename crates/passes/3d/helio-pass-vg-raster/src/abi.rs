@@ -75,7 +75,7 @@ impl VgRasterParams {
     pub const FLAG_CULL_BACK: u32 = 1;
 }
 
-/// Uniform block of `tile_classify`. 16 bytes.
+/// Uniform block of `tile_classify`. 32 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct ClassifyParams {
@@ -83,6 +83,11 @@ pub struct ClassifyParams {
     pub tri_thresh: u32,
     pub hit_thresh: u32,
     pub hysteresis: f32,
+    /// Upper bound on dense tiles per frame.
+    pub max_dense: u32,
+    /// Frames a tile stays dense after its counters last qualified.
+    pub latch: u32,
+    pub pad: [u32; 2],
 }
 
 /// Slots of the `stats` buffer (`u32` counters, cleared every frame).

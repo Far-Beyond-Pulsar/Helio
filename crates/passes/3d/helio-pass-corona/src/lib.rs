@@ -837,6 +837,10 @@ impl CoronaPass {
 // ── RenderPass impl ──────────────────────────────────────────────────────────
 
 impl RenderPass for CoronaPass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["corona_emitters"]
+    }
+
     fn name(&self) -> &'static str {
         "Corona"
     }

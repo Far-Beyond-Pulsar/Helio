@@ -57,7 +57,7 @@ pub fn type_in_crate(type_name: &str, crate_name: &str) -> bool {
 ///
 /// # Audit of the default graphs
 ///
-/// The policy shipped with `helio-default-graphs` was derived by reading every
+/// The policy shipped with `helio-default-passes` was derived by reading every
 /// constructor call in that crate. Resources the builder creates itself and
 /// hands to more than one pass:
 ///

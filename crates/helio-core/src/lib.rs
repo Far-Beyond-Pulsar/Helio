@@ -475,7 +475,8 @@ pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};
 pub use frame_storage::RenderFrameStorage;
 pub use graph::{
-    BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData,
+    BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, DeclaredKind, DeclaredResource,
+    FinishSegment, FrameDebugData, PassDeclaration,
     GraphTimelineData, GraphTimelinePass, PassIdentity, PipelineFormatCache, PipelineFormatKey,
     PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
     RecordingCacheStats, RenderGraph, SwapPlan, SwapPolicy, UnitCacheStats,

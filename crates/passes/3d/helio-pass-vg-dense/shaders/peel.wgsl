@@ -41,6 +41,7 @@ var<workgroup> tsetup: array<vec4<f32>, TRI_BATCH_X3>;
 var<workgroup> tbox: array<u32, TRI_BATCH>;
 var<workgroup> sh_tile: u32;
 var<workgroup> sh_start: u32;
+var<workgroup> sh_base: u32;
 var<workgroup> sh_cnt: u32;
 var<workgroup> sh_vis: u32;
 var<workgroup> sh_tris: u32;
@@ -55,7 +56,6 @@ var<workgroup> sh_unres_p: u32;
 //@M var<workgroup> sv_uv: array<vec2<f32>, 128>;
 //@M var<workgroup> sv_iw: array<f32, 128>;
 //@M var<workgroup> tuv: array<vec4<f32>, TRI_BATCH_X3>;
-//@M var<workgroup> sh_has_masked: u32;
 //@M fn dense_material(v: VgVisibleCluster, c: VgCluster) -> u32 {
 //@M     return vg_objects[vg_instances[v.instance].object_row + vgd_material(c)].head[2];
 //@M }
@@ -130,9 +130,6 @@ fn stage_cluster(slot: u32, ci: u32, lid: u32) -> u32 {
         let c = vgd_load_cluster(visible[vi].cluster_slot);
         sh_tris = c.counts_material & 0xffu;
         sh_verts = (c.counts_material >> 8u) & 0xffu;
-        // Each pipeline handles its own class of clusters.
-//@O         if (entry & LIST_MASKED_BIT) != 0u { sh_tris = 0u; }
-//@M         if (entry & LIST_MASKED_BIT) == 0u { sh_tris = 0u; }
     }
     let tris = workgroupUniformLoad(&sh_tris);
     if tris == 0u { return 0u; }
@@ -173,28 +170,26 @@ fn peel(
     let slot = wid.x;
     if lid == 0u {
         sh_tile = atomicLoad(&state[STATE_HEADER + slot]);
-        sh_cnt = atomicLoad(&slot_lists[slot * LIST_HDR]);
-        sh_start = atomicLoad(&slot_lists[slot * LIST_HDR + 1u]);
+        // Each pipeline streams only its own class: opaque entries first, then masked.
+//@O         sh_cnt = atomicLoad(&slot_lists[slot * LIST_HDR]);
+//@O         sh_base = atomicLoad(&slot_lists[slot * LIST_HDR + 2u]);
+//@M         sh_cnt = atomicLoad(&slot_lists[slot * LIST_HDR + 1u]);
+//@M         sh_base = atomicLoad(&slot_lists[slot * LIST_HDR + 2u]) + atomicLoad(&slot_lists[slot * LIST_HDR]);
+        sh_start = sh_base;
     }
     let tile = workgroupUniformLoad(&sh_tile);
     let list_len = workgroupUniformLoad(&sh_cnt);
     let tiles_x = params.viewport.z;
     let tile_xy = vec2<u32>(tile % tiles_x, tile / tiles_x);
     let origin = vec2<f32>(tile_xy * TILE);
-//@M     if lid == 0u {
-//@M         var any = 0u;
-//@M         for (var ci = 0u; ci < list_len; ci++) {
-//@M             if (atomicLoad(&slot_lists[LIST_POOL_BASE + sh_start + ci]) & LIST_MASKED_BIT) != 0u { any = 1u; break; }
-//@M         }
-//@M         sh_has_masked = any;
-//@M     }
-//@M     if workgroupUniformLoad(&sh_has_masked) == 0u { return; }
+//@M     if list_len == 0u { return; }
 
     var best_z = 0.0;
     var best_id = 0u;
     let px = f32(l3.x) + 0.5;
     let py = f32(l3.y) + 0.5;
     var layers = 0u;
+    var tris_acc = 0u;
     // The list is peeled in chunks of at most CLUSTER_CAP clusters (the u16
     // bucket histogram bounds a chunk); the nearest fragment is carried across
     // chunks, so a long list loses nothing.
@@ -204,7 +199,7 @@ fn peel(
     // `sh_start + ci`, so shift the start for the chunk.
     workgroupBarrier();
     if lid == 0u {
-        sh_start = atomicLoad(&slot_lists[slot * LIST_HDR + 1u]) + chunk;
+        sh_start = sh_base + chunk;
         atomicStore(&sh_total, 0u);
         sh_consumed = 0u;
     }
@@ -230,6 +225,7 @@ fn peel(
     workgroupBarrier();
     if lid == 0u { sh_total_p = atomicLoad(&sh_total); }
     let total = workgroupUniformLoad(&sh_total_p);
+    tris_acc += total;
 
     var chunk_layers = 0u;
     var b0 = 0u;
@@ -346,12 +342,19 @@ fn peel(
     }
 
 //@O     if lid == 0u {
+//@O         atomicAdd(&state[STAT_TRIS_TOTAL], tris_acc);
+//@O         atomicMax(&state[STAT_TRIS_MAX], tris_acc);
 //@O         atomicAdd(&state[STAT_TILES], 1u);
 //@O         atomicAdd(&state[STAT_LAYERS], layers);
 //@O         if layers > NOMINAL_LAYERS {
 //@O             atomicAdd(&state[STAT_EXTRA_LAYERS], layers - NOMINAL_LAYERS);
 //@O         }
 //@O     }
+//@M     if lid == 0u {
+//@M         atomicAdd(&state[STAT_MASKED_TILES], 1u);
+//@M         atomicAdd(&state[STAT_MASKED_TRIS], tris_acc);
+//@M         atomicMax(&state[STAT_MASKED_TRIS_MAX], tris_acc);
+//@M     }
     let pix = tile_xy * TILE + l3.xy;
     if pix.x < params.viewport.x && pix.y < params.viewport.y {
 //@O         dense_key[pix.y * params.viewport.x + pix.x] = vg_raster_key(best_z, best_id);

@@ -621,6 +621,10 @@ fn procedural_dirt(device: &wgpu::Device) -> (wgpu::Texture, wgpu::Buffer) {
 }
 
 impl RenderPass for LensFlarePass {
+    fn scene_buffers(&self) -> &'static [&'static str] {
+        &["scene_lights"]
+    }
+
     fn name(&self) -> &'static str { "LensFlare" }
     fn writes(&self) -> &'static [&'static str] { &[OUTPUT_KEY] }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

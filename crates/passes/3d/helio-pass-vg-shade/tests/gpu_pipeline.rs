@@ -514,6 +514,7 @@ fn resolve_bin_shade_and_final_depth() {
         rt: None,
         rt_visible: None,
         dense_mask: None,
+            dense_merge: false,
         debug: $debug,
             }
         };
@@ -567,6 +568,31 @@ fn resolve_bin_shade_and_final_depth() {
     }
     assert!(worst_bary < 1e-3, "barycentric error {worst_bary}");
     eprintln!("worst barycentric error on GPU: {worst_bary:e}");
+
+    // ── resolve: the per-pixel source of each winner ──
+    // Triangle A reached the resolve through the hardware vis target and triangle
+    // B through the software keys; pixels left to classic geometry have no source.
+    {
+        use helio_vg_format::debug_view::pixel_source;
+        let source = read_texture(&gpu, pass.source_texture().unwrap(), 4, wgpu::TextureAspect::All);
+        let (mut hw, mut sw) = (0, 0);
+        for i in 0..(N * N) as usize {
+            let got = u32::from_le_bytes(source[i * 4..i * 4 + 4].try_into().unwrap());
+            let want = match &expect[i] {
+                Some(e) if e.tri == 0 => {
+                    hw += 1;
+                    pixel_source::HW
+                }
+                Some(_) => {
+                    sw += 1;
+                    pixel_source::SW
+                }
+                None => pixel_source::NONE,
+            };
+            assert_eq!(got, want, "pixel {i}: recorded source");
+        }
+        assert!(hw > 100 && sw > 100, "both sources must be exercised: {hw} hardware / {sw} software");
+    }
 
     // ── binning ──
     let bins = read_buffer(&gpu, pass.bins_buffer(), 16 * 16);
@@ -772,6 +798,55 @@ fn resolve_bin_shade_and_final_depth() {
             assert_eq!(rgba, &[38, 217, 89, 255], "pixel {i} is VG");
         } else {
             assert_eq!(rgba, &[46, 46, 46, 255], "pixel {i} is classic");
+        }
+    }
+
+    // "Ray Trace vs Raster" (renderer mode 33): VG pixels are painted from the
+    // source the resolve recorded (hardware orange, compute micro-raster yellow);
+    // everything else is left for the lighting pass (its albedo is untouched).
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    pass.encode(
+        device,
+        &gpu.queue,
+        &mut encoder,
+        N,
+        N,
+        &inputs!(Some(helio_pass_vg_shade::VgShadeDebug {
+            view: D::RayVsRaster,
+            stream: helio_vg_stream::VgStreamBuffers {
+                page_pool: &pages,
+                residency: &residency,
+                nodes: &nodes,
+                group_refs: &group_refs,
+                asset_headers: &asset_headers,
+                asset_bases: &asset_bases,
+                asset_quant: &asset_quant,
+                feedback: &feedback,
+            },
+            cull_state: &cull_state,
+            bin_capacity: 1,
+            tile_counters: &tile_counters,
+            dense_mask: &dense_mask,
+            resolved_mask: None,
+            tiles: [tiles, tiles],
+            tau_px: 1.0,
+        })),
+        &targets,
+        &VgShadeGlobals { screen_width: w, screen_height: h, ..Default::default() },
+    );
+    gpu.queue.submit([encoder.finish()]);
+    assert!(pollster::block_on(scope.pop()).is_none());
+    let px = read_texture(&gpu, &albedo, 4, wgpu::TextureAspect::All);
+    // Painted pixels carry albedo alpha 0, the marker the lighting pass looks for;
+    // a classic pixel keeps its own albedo and alpha.
+    let near = |got: &[u8], want: [u8; 3]| got[..3].iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1) && got[3] == 0;
+    for i in 0..(N * N) as usize {
+        let rgba = &px[i * 4..i * 4 + 4];
+        match &expect[i] {
+            Some(e) if e.tri == 0 => assert!(near(rgba, [255, 92, 20]), "pixel {i}: hardware raster {rgba:?}"),
+            Some(_) => assert!(near(rgba, [255, 217, 26]), "pixel {i}: micro-raster {rgba:?}"),
+            None => assert_eq!(rgba, &[46, 46, 46, 255], "pixel {i}: left to the lighting pass"),
         }
     }
 }

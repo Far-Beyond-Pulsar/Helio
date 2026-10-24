@@ -26,7 +26,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::build_default_graph_external_with_context;
+use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_portal_cull::{
     components::PortalComponent, PortalProjectionBridge, PortalProjectionConfig, SubLevelContents,
     SubLevelResolver, MAX_PORTAL_CHAINS,

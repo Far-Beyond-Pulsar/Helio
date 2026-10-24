@@ -37,18 +37,55 @@ pub struct VgRasterConfig {
     pub dense_hit_threshold: u32,
     /// A previously dense tile stays dense above this fraction of the thresholds.
     pub dense_hysteresis: f32,
+    /// Frames a tile stays dense after its counters last qualified (latch with
+    /// decay; 1 = no latch).
+    pub dense_latch_frames: u32,
+    /// Most dense tiles per frame; the excess stays on Tier 2.
+    pub dense_max_tiles: u32,
     /// Use the tiled fallback even when 64-bit atomics are available.
     pub force_tile_fallback: bool,
 }
 
+/// Calibration override (measurement runs only): a `u32` from the environment.
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
+}
+
+/// Higher sensitivity lowers the overlap required before a tile is classified
+/// as dense. Kept as a startup setting because the classifier pipelines are
+/// built with the raster pass.
+fn dense_sensitivity() -> f32 {
+    std::env::var("HELIO_VG_DENSE_SENSITIVITY")
+        .ok()
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0)
+        .clamp(0.125, 8.0)
+}
+
+fn sensitivity_threshold(base: u32, sensitivity: f32) -> u32 {
+    (f64::from(base.max(1)) / f64::from(sensitivity))
+        .round()
+        .clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
 impl Default for VgRasterConfig {
     fn default() -> Self {
+        let sensitivity = dense_sensitivity();
         Self {
             cull_back: true,
             tile_bin_cap: 1024,
-            dense_tri_threshold: 768,
-            dense_hit_threshold: 256 * 6,
+            dense_tri_threshold: sensitivity_threshold(
+                env_u32("HELIO_VG_DENSE_TRI").unwrap_or(64),
+                sensitivity,
+            ),
+            dense_hit_threshold: sensitivity_threshold(
+                env_u32("HELIO_VG_DENSE_HIT").unwrap_or(64),
+                sensitivity,
+            ),
             dense_hysteresis: 0.5,
+            dense_latch_frames: env_u32("HELIO_VG_DENSE_LATCH").unwrap_or(8),
+            dense_max_tiles: env_u32("HELIO_VG_DENSE_MAX_TILES").unwrap_or(512),
             force_tile_fallback: false,
         }
     }
@@ -147,6 +184,8 @@ pub struct VgTargets {
     pub dense_args: wgpu::Buffer,
     /// Per-tile triangle estimate of this frame's dense-bin clusters (`u32`).
     pub dense_est: wgpu::Buffer,
+    /// Persistent per-tile latch age of the dense classification.
+    pub dense_age: wgpu::Buffer,
     pub(crate) tile_bin_counts: wgpu::Buffer,
     pub(crate) tile_bin_entries: wgpu::Buffer,
     pub(crate) params: [wgpu::Buffer; 2],
@@ -216,6 +255,9 @@ impl VgTargets {
                 tri_thresh: raster.config.dense_tri_threshold,
                 hit_thresh: raster.config.dense_hit_threshold,
                 hysteresis: raster.config.dense_hysteresis,
+                max_dense: raster.config.dense_max_tiles,
+                latch: raster.config.dense_latch_frames,
+                pad: [0; 2],
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -238,6 +280,7 @@ impl VgTargets {
             dense_list: buf("VG Dense List", tiles * 4, st),
             dense_args: buf("VG Dense Args", 16, st | wgpu::BufferUsages::INDIRECT),
             dense_est: buf("VG Dense Estimate", tiles * 4, st),
+            dense_age: buf("VG Dense Age", tiles * 4, st),
             tile_bin_counts: buf("VG Tile Bin Counts", if fallback { tiles * 4 } else { 16 }, st),
             tile_bin_entries: buf("VG Tile Bin Entries", if fallback { tiles * cap * 4 } else { 16 }, st),
             params,
@@ -488,6 +531,7 @@ impl VgRaster {
                 storage_entry(4, c, false),
                 storage_entry(5, c, false),
                 storage_entry(6, c, true),
+                storage_entry(7, c, false),
             ],
         );
         let cpl = pipeline_layout(device, "VG Classify PL", &[&classify_bgl]);
@@ -840,6 +884,7 @@ impl VgRaster {
                 bind(4, &t.dense_list),
                 bind(5, &t.dense_args),
                 bind(6, &t.dense_est),
+                bind(7, &t.dense_age),
             ],
         });
         let mut cpass = rec.begin_compute_pass(&wgpu::ComputePassDescriptor {

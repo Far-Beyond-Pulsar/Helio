@@ -90,6 +90,8 @@ impl DebugPipeline {
             entries: &[
                 crate::texture_entry(0, crate::CS, crate::UINT),
                 crate::storage_texture_entry(1, wgpu::TextureFormat::Rgba8Unorm),
+                // Per-pixel source recorded by `vis_resolve`.
+                crate::texture_entry(2, crate::CS, crate::UINT),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -180,12 +182,14 @@ impl VgShade {
             ],
         });
         let payload_view = self.payload_view.as_ref().expect("encode_rec resized the targets");
+        let source_view = self.source_view.as_ref().expect("encode_rec resized the targets");
         let group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgShade debug 1"),
             layout: &pipeline.bgl1,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(payload_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(targets.albedo) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(source_view) },
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

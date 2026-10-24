@@ -70,7 +70,7 @@ impl Default for RtTierConfig {
             proxy_budget_bytes: 384 << 20,
             candidate_capacity: CAND_CAPACITY,
             retain_frames: 90,
-            max_tlas_instances: 2048,
+            max_tlas_instances: 16_384,
             registrations_per_frame: 1,
             proxy: ProxyOptionsCfg { levels: p.levels, ratio: p.ratio, max_triangles_per_lod: p.max_triangles_per_lod },
         }
@@ -198,9 +198,8 @@ impl RtTier {
         }
         self.recent_dense.push_back(res.dense_tiles);
         self.last_dense_tiles = self.recent_dense.iter().copied().max().unwrap_or(0);
-        if res.masked_clusters > 0 {
-            self.masked_until = self.frame + 12;
-        }
+        // Alpha-masked clusters no longer gate the ray-traced backend: they are
+        // not candidates and the masked peel merges them into the ray result.
         // Only a readback recorded after the last TLAS change says anything
         // about the current coverage.
         if res.recorded_frame > self.collect_frame_at_change {
@@ -245,10 +244,12 @@ impl RtTier {
     pub fn prepare(&mut self, env: &RtEnv<'_>) -> RtPrep {
         self.frame += 1;
         let frame = self.frame;
+        let t_start = std::time::Instant::now();
         self.collect.begin_maps();
         if let Some(res) = self.collect.poll(env.device) {
             self.absorb(env, res);
         }
+        let t_poll = t_start.elapsed();
 
         // Proxy builds: poll, drop evicted, upload at most N finished ones.
         for key in self.cache.poll(frame) {
@@ -293,6 +294,7 @@ impl RtTier {
         let horizon = frame.saturating_sub(self.cfg.retain_frames);
         self.seen.retain(|_, s| s.last_seen >= horizon);
 
+        let t_proxy = t_start.elapsed();
         let mut prep = RtPrep { rt_ready: false, dense_tiles: self.last_dense_tiles };
         let mut requests: Vec<RtInstanceRequest> = Vec::with_capacity(self.seen.len());
         let mut ids: Vec<u32> = self.seen.keys().copied().collect();
@@ -330,6 +332,7 @@ impl RtTier {
             });
         }
 
+        let t_requests = t_start.elapsed();
         let mut info = RtFrameInfo::default();
         if !requests.is_empty() {
             let mut encoder =
@@ -424,6 +427,17 @@ impl RtTier {
             s.proxy_evictions = cache.evictions;
             s.over_tau_instances = over_tau;
         });
+        if frame % 60 == 0 && std::env::var_os("VG_DEBUG").is_some() {
+            eprintln!(
+                "VgDense RT cpu us: poll {} proxies {} requests {} accel+rest {}",
+                t_poll.as_micros(), (t_proxy - t_poll).as_micros(), (t_requests - t_proxy).as_micros(), (t_start.elapsed() - t_requests).as_micros()
+            );
+            eprintln!(
+                "VgDense RT frame {frame}: requests {} tlas {} missing_proxy {} unresolved_pages {} dropped {} traceable {} coverage_verified {} have_result {} dense_tiles {} unknown_asset {}",
+                requests.len(), info.tlas_instances, info.missing_proxy_instances, info.unresolved_page_instances, info.dropped_instances,
+                self.traceable_ready, self.coverage_verified, self.have_result, self.last_dense_tiles, unknown_asset
+            );
+        }
         self.last_info = Some(info);
         prep
     }
@@ -455,8 +469,9 @@ impl RtTier {
         dense: &crate::DenseBuffers,
         inputs: &crate::DenseNonRtInputs<'_>,
         instance_rows: u32,
+        scopes: &mut crate::common::GpuScopes<'_>,
     ) {
-        self.collect.record_rec(device, queue, rec, dense, inputs, instance_rows);
+        self.collect.record_scoped(device, queue, rec, dense, inputs, instance_rows, scopes);
     }
 
     /// Record the ray trace over dense tiles against the current TLAS.
@@ -467,8 +482,9 @@ impl RtTier {
         rec: &mut helio_core::CommandRecorder<'_>,
         frame: &DenseFrame,
         tile_mask: &wgpu::Buffer,
+        scopes: &mut crate::common::GpuScopes<'_>,
     ) -> Result<(), RtError> {
-        self.rt.record_rec(device, queue, rec, frame, tile_mask, &self.tlas)
+        self.rt.record_scoped(device, queue, rec, frame, tile_mask, &self.tlas, scopes)
     }
 
     /// The RT output buffers: `(dense_key, bary, rt_visible)`.
