@@ -209,22 +209,24 @@ fn removing_an_occluder_under_a_static_camera_reveals_what_it_hid() {
     };
 
     // The wall is drawn, and the object behind it is (correctly) hidden
-    // long enough for the pyramid to settle into reuse.
+    // long enough for the pyramid to settle into reuse. Colours are judged
+    // by their dominant channel: the camera's tone curve shifts a saturated
+    // emissive's hue (AgX lifts a bright red's green).
     let [r, g, _] = h.render(&scene_db, 24);
     assert!(
-        r > 100 && g < 30,
+        r > 100 && g < r / 2,
         "wall not drawn in front of the object: r {r} g {g}"
     );
 
     despawn_object(&mut scene_db.world, &mut h.renderer, wall.unwrap()).unwrap();
     let [r, g, _] = h.render(&scene_db, 12);
     assert!(
-        g > 100 && r < 30,
+        g > 100 && r < g / 2,
         "object behind the removed wall never appeared: r {r} g {g}"
     );
     let [r, g, _] = h.render(&scene_db, 24);
     assert!(
-        g > 100 && r < 30,
+        g > 100 && r < g / 2,
         "revealed object vanished under a reused pyramid: r {r} g {g}"
     );
 }
