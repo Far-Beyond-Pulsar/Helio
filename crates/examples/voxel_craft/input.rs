@@ -31,6 +31,8 @@ pub struct Controls {
     pub mine: bool,
     pub place: bool,
     pub pick: bool,
+    /// An explicit world-space pointing ray (VR); desktop uses the player's gaze.
+    pub aim: Option<(glam::DVec3, glam::DVec3)>,
 }
 
 impl Input {
@@ -106,6 +108,7 @@ impl Input {
             mine: self.captured && self.buttons.contains(&MouseButton::Left),
             place: self.captured && self.clicked.contains(&MouseButton::Right),
             pick: self.captured && self.clicked.contains(&MouseButton::Middle),
+            aim: None,
         }
     }
 
@@ -115,5 +118,11 @@ impl Input {
         self.clicked.clear();
         self.look = (0.0, 0.0);
         self.scroll = 0.0;
+    }
+
+    pub fn release_all(&mut self) {
+        self.held.clear();
+        self.buttons.clear();
+        self.end_frame();
     }
 }

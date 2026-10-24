@@ -50,7 +50,7 @@ impl ApplicationHandler for App {
         let mut game = Game::new(|planet| Gfx::new(window.clone(), planet));
         // A tour takes no input (its shots compare), so it leaves the cursor
         // to whoever is at the machine.
-        if !game.touring() {
+        if !game.touring() && !game.gfx.vr_active() {
             Self::capture(&mut game, true);
         }
         self.game = Some(game);
@@ -76,14 +76,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } if input => {
-                if !game.input.captured && state == ElementState::Pressed && button == MouseButton::Left {
+                if !game.gfx.vr_active() && !game.input.captured && state == ElementState::Pressed && button == MouseButton::Left {
                     Self::capture(game, true);
                 } else {
                     game.input.button(button, state);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if input => game.input.wheel(delta),
-            WindowEvent::Focused(false) => Self::capture(game, false),
+            WindowEvent::Focused(false) => {
+                game.input.release_all();
+                Self::capture(game, false);
+            }
             WindowEvent::RedrawRequested => {
                 game.frame();
                 if game.quit {

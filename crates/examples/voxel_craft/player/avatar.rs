@@ -91,7 +91,7 @@ impl Avatar {
 
     /// Poses the figure for `player` and puts the held block in hand, with
     /// positions relative to `origin` (the renderer's world origin).
-    pub fn pose(&self, world: &mut SceneWorld, renderer: &mut helio::Renderer, player: &Player, camera: (DVec3, DVec3), origin: DVec3, time: f64) {
+    pub fn pose(&self, world: &mut SceneWorld, renderer: &mut helio::Renderer, player: &Player, camera: (DVec3, DVec3), origin: DVec3, time: f64, tracked_hand: Option<Option<Mat4>>) {
         let frame = player.frame();
         // Body axes: +X right, +Y up, +Z back (the figure faces -Z).
         let basis = DMat3::from_cols(frame.right, frame.up, -frame.forward);
@@ -130,7 +130,9 @@ impl Avatar {
         // right hand in third.
         let selected = Block::HOTBAR[player.hotbar];
         let (eye, look) = camera;
-        let hand = if player.third_person {
+        let hand = if let Some(tracked) = tracked_hand {
+            tracked.map_or_else(hidden, |pose| pose * Mat4::from_translation(Vec3::new(0.0, 0.0, -0.12)) * Mat4::from_scale(Vec3::splat(0.17)))
+        } else if player.third_person {
             let pose = Mat4::from_translation(Vec3::new(0.365, 1.22, 0.0)) * Mat4::from_quat(Quat::from_rotation_x(-swing)) * Mat4::from_translation(Vec3::new(0.0, -0.58, -0.14));
             base * pose * Mat4::from_scale(Vec3::splat(0.2))
         } else {

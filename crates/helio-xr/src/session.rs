@@ -172,8 +172,14 @@ impl XrSession {
                             return Ok(Some(SessionEvent::Focused));
                         }
                         openxr::SessionState::STOPPING => {
-                            self.session.request_exit()?;
-                            return Ok(Some(SessionEvent::Exit));
+                            // STOPPING is the runtime's instruction to end the
+                            // session, not a request for another request_exit.
+                            // It may return to IDLE/READY (headset removed/replaced).
+                            if self.session_begun {
+                                self.session.end()?;
+                                self.session_begun = false;
+                            }
+                            return Ok(Some(SessionEvent::Idle));
                         }
                         openxr::SessionState::EXITING => {
                             return Ok(Some(SessionEvent::Exit));

@@ -15,6 +15,8 @@ use std::time::Instant;
 use winit::keyboard::KeyCode;
 
 pub struct Game {
+    #[cfg(not(target_arch = "wasm32"))]
+    rig: crate::xr::rig::Rig,
     pub gfx: Gfx,
     pub world: World,
     pub player: Player,
@@ -33,6 +35,7 @@ pub struct Game {
     sun_axes: (DVec3, DVec3),
     show_help: bool,
     total_frames: u64,
+    frame_limit: Option<u64>,
     tour: Option<Tour>,
     pub quit: bool,
 }
@@ -80,6 +83,8 @@ impl Game {
         player.heading = e2;
         let tour = std::env::var("VOXEL_CRAFT_SHOTS").ok().map(Tour::new);
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            rig: crate::xr::rig::Rig::default(),
             gfx,
             world,
             player,
@@ -97,6 +102,7 @@ impl Game {
             sun_axes: (up, e1),
             show_help: true,
             total_frames: 0,
+            frame_limit: std::env::var("VOXEL_CRAFT_FRAMES").ok().and_then(|v| v.parse().ok()),
             tour,
             quit: false,
         }
@@ -118,6 +124,29 @@ impl Game {
 
     /// Runs one frame.
     pub fn frame(&mut self) {
+        // Wait for the compositor before simulation and locate input at this
+        // frame's predicted display time, rather than reusing last frame's hands.
+        #[cfg(not(target_arch = "wasm32"))]
+        let xr_input = if self.gfx.vr_active() {
+            match self.gfx.begin_vr() {
+                Ok(crate::xr::Begin::Frame(input)) => {
+                    if !input.focused { self.input.release_all(); }
+                    Some(input)
+                }
+                Ok(crate::xr::Begin::Idle) => {
+                    self.rig.reset();
+                    self.input.release_all();
+                    self.last_frame = Instant::now();
+                    return;
+                }
+                Ok(crate::xr::Begin::Exit) => { self.quit = true; return; }
+                Err(error) => {
+                    log::error!("[XR] frame: {error}");
+                    self.quit = true;
+                    return;
+                }
+            }
+        } else { None };
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f64().min(0.1);
         self.last_frame = now;
@@ -135,12 +164,16 @@ impl Game {
             self.player.flying = !self.player.flying;
             self.player.velocity = DVec3::ZERO;
         }
-        if self.input.just_pressed(KeyCode::F5) || self.input.just_pressed(KeyCode::KeyV) {
+        if !self.gfx.vr_active() && (self.input.just_pressed(KeyCode::F5) || self.input.just_pressed(KeyCode::KeyV)) {
             self.player.third_person = !self.player.third_person;
         }
         if self.input.just_pressed(KeyCode::KeyR) {
             self.player.respawn();
+            #[cfg(not(target_arch = "wasm32"))]
+            self.rig.reset();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.input.just_pressed(KeyCode::KeyC) { self.rig.reset(); }
         if self.input.just_pressed(KeyCode::KeyH) {
             self.show_help = !self.show_help;
         }
@@ -156,9 +189,17 @@ impl Game {
             self.player.hotbar = (self.player.hotbar as i32 - scroll.signum() as i32).rem_euclid(n) as usize;
         }
 
-        let controls = self.input.controls();
+        let mut controls = self.input.controls();
         self.world.update();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(input) = &xr_input {
+            self.rig.update(input, &mut self.player, &self.world, &mut controls);
+        }
         self.player.update(&self.world, &controls, dt);
+        #[cfg(not(target_arch = "wasm32"))]
+        let vr = xr_input.as_ref().map(|input| self.rig.view(&self.player, input));
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(vr) = &vr { controls.aim = Some(vr.aim); }
         self.interaction.update(&mut self.player, &mut self.world, &controls, dt);
 
         self.total_frames += 1;
@@ -187,8 +228,14 @@ impl Game {
         }
         let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, self.gfx.settled(), &mut self.quit));
         let (eye, look) = self.player.camera(&self.world);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (eye, look) = vr.as_ref().map_or((eye, look), |vr| (vr.head.w_axis.truncate(), vr.head.transform_vector3(DVec3::NEG_Z).normalize()));
         let outline = self.interaction.outline(&self.world);
         let view = View {
+            #[cfg(not(target_arch = "wasm32"))]
+            vr: vr.as_ref(),
+            target: self.interaction.target.map(|target| target.point),
+            dt: dt as f32,
             planet: self.world.planet(),
             player: &self.player,
             eye,
@@ -200,6 +247,11 @@ impl Game {
             screenshot: shot.as_deref(),
         };
         self.gfx.draw(&view);
+        self.quit |= self.gfx.failed;
+        if self.frame_limit.is_some_and(|limit| self.total_frames >= limit) {
+            log::info!("completed {} frames ({})", self.total_frames, if self.gfx.vr_active() { "VR" } else { "desktop" });
+            self.quit = true;
+        }
         self.input.end_frame();
 
         self.frames += 1;
@@ -221,7 +273,9 @@ impl Game {
             .map(|(n, b)| if n == self.player.hotbar { format!("[{} {}]", n + 1, b.name()) } else { format!("{} {}", n + 1, b.name()) })
             .collect();
         let hour = (self.time / DAY_SECONDS * 24.0 + 9.0).rem_euclid(24.0);
-        let help = if self.show_help {
+        let help = if self.show_help && self.gfx.vr_active() {
+            "  |  VR: left stick move, right stick turn/hotbar, triggers dig/build, A jump, B fly, X pick, Y recenter"
+        } else if self.show_help {
             "  |  WASD move, Space jump (tap twice or F: fly), Ctrl sprint, LMB break, RMB place, MMB pick, wheel/1-9 hotbar, V camera, T time, R respawn, H help, Esc free mouse"
         } else {
             ""
