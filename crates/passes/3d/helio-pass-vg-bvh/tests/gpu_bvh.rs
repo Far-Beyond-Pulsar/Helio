@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt;
 
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let mut adapter = None;
         for force_fallback_adapter in [false, true] {
             if let Ok(a) = instance

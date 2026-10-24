@@ -212,7 +212,7 @@ mod tests {
     /// 0.5, a frame after it is asked for.
     #[test]
     fn means_are_linear_averages_of_the_coarsest_mip() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else { return };
         let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
         let texels: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];

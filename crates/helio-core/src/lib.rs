@@ -401,6 +401,7 @@ pub mod frame_demands;
 mod frame_inputs;
 pub mod frame_storage;
 pub mod graph;
+pub mod instance;
 pub mod movability;
 pub mod profiling;
 pub mod radix_sort;
@@ -471,6 +472,7 @@ pub use crate::acceleration::{
 pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
+pub use instance::wgpu_instance_descriptor;
 pub use error::{Error, Result};
 pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};

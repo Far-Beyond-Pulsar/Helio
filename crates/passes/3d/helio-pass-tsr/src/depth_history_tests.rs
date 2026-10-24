@@ -14,7 +14,7 @@ fn translated_origin_prepare_preserves_history_and_rejects_invalid_views() {
 fn run_depth_history_fixture(translated_origin: bool) {
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("SKIP: no GPU adapter for TSR depth-history fixture");
             return;

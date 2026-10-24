@@ -25,7 +25,7 @@ pub use helio_mats::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
-pub use helio_core::{MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use helio_core::{wgpu_instance_descriptor, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{

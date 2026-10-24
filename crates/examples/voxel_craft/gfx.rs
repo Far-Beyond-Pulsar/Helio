@@ -173,10 +173,9 @@ fn tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
 impl Gfx {
     pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             // `WGPU_VALIDATION=1`, `WGPU_DEBUG=1`: the validation layer, labels.
             flags: wgpu::InstanceFlags::empty().with_env(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

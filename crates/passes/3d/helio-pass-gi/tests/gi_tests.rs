@@ -26,7 +26,7 @@ fn sun_down(gpu: &Gpu, e: f32) -> wgpu::Buffer {
 fn gpu() -> Option<&'static Gpu> {
     static GPU: std::sync::OnceLock<Option<Gpu>> = std::sync::OnceLock::new();
     GPU.get_or_init(|| {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         let limits = adapter.limits();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

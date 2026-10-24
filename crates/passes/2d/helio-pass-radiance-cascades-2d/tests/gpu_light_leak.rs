@@ -147,7 +147,7 @@ fn all_near(map: &[bool], x: u32, y: u32, radius: i32, value: bool) -> bool {
 
 /// Renders `scene` and returns cascade-0 radiance luminance per texel.
 async fn render(scene: &Scene) -> Option<Vec<f32>> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: radiance cascades light leak");
         return None;

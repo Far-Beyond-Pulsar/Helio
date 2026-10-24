@@ -121,7 +121,7 @@ fn probes_lit(words: &[u32]) -> (usize, usize) {
 }
 
 fn adapter() -> Option<wgpu::Adapter> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).ok()
 }
 

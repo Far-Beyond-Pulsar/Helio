@@ -38,7 +38,7 @@ struct Blade {
 impl Harness {
     fn new() -> Option<Self> {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
             let adapter = instance.request_adapter(&Default::default()).await.ok()?;
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {

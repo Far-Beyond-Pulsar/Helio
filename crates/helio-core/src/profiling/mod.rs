@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn dual_encoder_scopes_and_repeated_labels_export_once() {
         pollster::block_on(async {
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let instance = wgpu::Instance::new(crate::wgpu_instance_descriptor());
             let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false,

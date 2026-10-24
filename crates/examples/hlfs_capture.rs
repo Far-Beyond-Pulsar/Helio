@@ -141,7 +141,7 @@ pub fn run_scene_animated(
         t
     });
     pollster::block_on(async {
-        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        let mut instance_desc = helio_core::wgpu_instance_descriptor().with_env();
         if std::env::var_os("HLFS_VULKAN_DEBUG_MARKERS").is_some() {
             instance_desc.flags |= wgpu::InstanceFlags::DEBUG;
         }

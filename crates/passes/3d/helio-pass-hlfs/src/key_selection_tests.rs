@@ -5,7 +5,7 @@ use wgpu::util::DeviceExt;
 fn key_selection_depends_on_active_lights_not_sparse_allocation() {
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {

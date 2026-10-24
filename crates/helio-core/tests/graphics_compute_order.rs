@@ -85,7 +85,7 @@ impl RenderPass for Consumer {
 #[test]
 fn graphics_compute_reads_current_frame_with_previous_frame_negative_control() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         eprintln!("GRAPHICS_COMPUTE_ADAPTER {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();

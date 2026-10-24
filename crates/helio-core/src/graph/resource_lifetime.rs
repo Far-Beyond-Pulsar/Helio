@@ -334,7 +334,7 @@ mod publication_alias_tests {
     #[ignore = "requires a GPU device"]
     fn published_view_outlives_its_allocation_name() {
         pollster::block_on(async {
-            let instance=wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            let instance=wgpu::Instance::new(crate::wgpu_instance_descriptor().with_env());
             let adapter=instance.request_adapter(&Default::default()).await.unwrap();
             let (device,queue)=adapter.request_device(&Default::default()).await.unwrap();
             let device=std::sync::Arc::new(device);

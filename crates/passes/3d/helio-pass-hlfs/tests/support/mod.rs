@@ -33,7 +33,7 @@ impl Fixture {
         Self::new_with_ray_queries(width, height, true).await
     }
     async fn new_with_ray_queries(width: u32, height: u32, rt: bool) -> Self {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        let mut descriptor = helio_core::wgpu_instance_descriptor().with_env();
         if rt {
             descriptor.backends = wgpu::Backends::VULKAN;
         }

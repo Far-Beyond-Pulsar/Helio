@@ -37,7 +37,7 @@ impl helio_core::RenderPass for FinalResourceConsumer {
 #[test]
 fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: voxel default graph");
             return;
@@ -228,7 +228,7 @@ struct Editor {
 }
 
 fn editor(width: u32, height: u32) -> Option<Editor> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: editor overlays");
         return None;

@@ -796,7 +796,7 @@ struct Row {
 
 async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgpu::AdapterInfo) {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,

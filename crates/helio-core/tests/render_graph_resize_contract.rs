@@ -92,7 +92,7 @@ impl RenderPass for ResizeProbePass {
 #[test]
 fn prepare_receives_one_resize_pulse_after_graph_resize() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: render graph resize contract");
             return;
@@ -147,7 +147,7 @@ fn prepare_receives_one_resize_pulse_after_graph_resize() {
 #[test]
 fn graph_owned_internal_attachment_matches_depth_after_resize() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: render graph attachment resize contract");
             return;

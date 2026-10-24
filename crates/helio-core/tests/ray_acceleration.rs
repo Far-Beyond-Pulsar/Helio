@@ -12,7 +12,7 @@ impl Gpu {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::VULKAN,
-                ..wgpu::InstanceDescriptor::new_without_display_handle()
+                ..helio_core::wgpu_instance_descriptor()
             });
             let adapter = instance.request_adapter(&Default::default()).await.unwrap();
             eprintln!("RT acceleration adapter: {:?}", adapter.get_info());
