@@ -262,7 +262,7 @@ impl Harness {
     /// A device with ray queries, `build`'s scene and its renderer; `rays`
     /// gets the scene's VG runtime when `vg`.
     fn new(vg: bool, build: impl FnOnce(&mut World, &VgRuntime)) -> Option<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })).ok()?;
         let features = required_wgpu_features(helio::usable_adapter_features(&adapter));
         if !features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
