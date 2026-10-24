@@ -22,7 +22,7 @@ struct Gpu {
 fn gpu() -> Option<&'static Gpu> {
     static GPU: std::sync::OnceLock<Option<Gpu>> = std::sync::OnceLock::new();
     GPU.get_or_init(|| {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
             eprintln!("no ray queries on {:?}: skipped", adapter.get_info().name);

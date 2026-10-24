@@ -51,7 +51,7 @@ fn culled_rows(device: &wgpu::Device, queue: &wgpu::Queue, pass: &LightCullPass)
 #[test]
 fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;

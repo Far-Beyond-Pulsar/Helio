@@ -1146,7 +1146,7 @@ pub fn set_volumetric_quality(world: &mut World, quality: u32, max_distance: f32
 /// A GPU device with the renderer's required features and no window.
 pub fn headless_gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()

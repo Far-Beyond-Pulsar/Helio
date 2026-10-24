@@ -110,7 +110,7 @@ impl Flight {
     }
 
     fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality, planet: Planet, preset: worlds::Preset) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU required");
         eprintln!("VOXEL_FLIGHT_ADAPTER {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

@@ -5,7 +5,7 @@ use helio_core::CachedBindGroup;
 
 fn device() -> Option<wgpu::Device> {
     pollster::block_on(async {
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = instance.request_adapter(&Default::default()).await.ok()?;
         let (device, _queue) = adapter.request_device(&Default::default()).await.ok()?;
         Some(device)

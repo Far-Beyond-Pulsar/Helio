@@ -4,7 +4,7 @@ use wgpu::util::DeviceExt;
 #[test]
 fn leaf_opacity_casts_identical_cutout_shadows_from_both_sides() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = instance.request_adapter(&Default::default()).await.expect("GPU required");
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.unwrap();
         let bindings = helio_pass_gbuffer::depth_material::DepthMaterialBindings::new(&device);

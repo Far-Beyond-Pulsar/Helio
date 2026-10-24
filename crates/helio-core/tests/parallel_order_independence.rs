@@ -68,7 +68,7 @@ impl RenderPass for IndependentProbe {
 #[test]
 fn independent_passes_are_order_independent_for_output_and_publication() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: parallel order independence");
             return;

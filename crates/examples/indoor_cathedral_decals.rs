@@ -201,9 +201,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

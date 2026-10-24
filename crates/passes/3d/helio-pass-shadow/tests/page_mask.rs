@@ -45,7 +45,7 @@ struct Case {
 
 fn pages_on_gpu(cases: &[Case], helpers: &str) -> Option<Vec<[u32; 2]>> {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,

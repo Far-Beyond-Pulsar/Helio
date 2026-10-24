@@ -329,7 +329,7 @@ impl Fixture {
     fn new(quality: TsrQuality, output: [u32; 2]) -> Option<Self> {
         let serial = Serial::take();
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
             eprintln!("SKIP: no GPU adapter for TSR quality metrics");
             return None;

@@ -151,7 +151,7 @@ impl ApplicationHandler for App {
         );
 
         // ── wgpu ──────────────────────────────────────────────────────────────
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");

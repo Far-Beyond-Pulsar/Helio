@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 #[test]
 fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let device = Arc::new(device);
@@ -155,7 +155,7 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
 #[test]
 fn resolved_view_publication_follows_resize() {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, _) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let mut pass = TsrPass::new(
@@ -195,7 +195,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
     use wgpu::util::DeviceExt;
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let source = helio_core::shader::resolve(include_str!("../shaders/tsr_main.wgsl"));
@@ -321,7 +321,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
 fn depth_history_rejects_disocclusion_and_invalid_samples() {
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let source = helio_core::shader::resolve(include_str!("../shaders/tsr_main.wgsl"));

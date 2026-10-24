@@ -39,7 +39,7 @@ impl RenderPass for Replacement {
 
 #[test]
 fn replacement_updates_first_instance_lookup_before_and_after_lock() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let mut graph = RenderGraph::new(&Arc::new(device), &queue);
@@ -98,7 +98,7 @@ impl RenderPass for BundleObserver {
 
 #[test]
 fn replacement_rebuilds_dependent_bundles_even_when_chains_do_not_change() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let device = Arc::new(device);

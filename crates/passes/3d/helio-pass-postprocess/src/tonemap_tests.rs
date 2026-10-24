@@ -4,7 +4,7 @@ use super::PostProcessPass;
 /// read back display-linear.
 fn agx(inputs: &[[f32; 3]], punchy: bool) -> Vec<[f32; 3]> {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.unwrap();
         let probe = format!(

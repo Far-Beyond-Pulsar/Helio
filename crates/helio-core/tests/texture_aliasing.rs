@@ -17,7 +17,7 @@ async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter
 #[test]
 fn smaller_alias_has_requested_attachment_extent() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: texture alias extents");
             return;
@@ -98,7 +98,7 @@ fn smaller_alias_has_requested_attachment_extent() {
 #[test]
 fn released_compatible_aliases_reuse_one_physical_texture() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: texture aliasing");
             return;

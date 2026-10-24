@@ -322,7 +322,7 @@ impl ApplicationHandler for App {
                 )
                 .expect("failed to create window"),
         );
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let surface = instance
             .create_surface(window.clone())
             .expect("failed to create surface");

@@ -182,7 +182,7 @@ mod tests {
     fn additive_composition_respects_fresnel_confidence_ao_and_background() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                helio_core::wgpu_instance_descriptor().with_env(),
             );
             let adapter = instance.request_adapter(&Default::default()).await.unwrap();
             let (device, queue) = adapter

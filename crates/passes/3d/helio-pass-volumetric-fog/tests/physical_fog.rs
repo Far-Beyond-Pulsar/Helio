@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 fn gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&Default::default())
             .await

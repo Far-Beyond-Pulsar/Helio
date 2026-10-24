@@ -64,7 +64,7 @@ async fn run_gpu(
     view_max: [f32; 2],
     max_visible: u32,
 ) -> Option<GpuResult> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let mut adapter = None;
     for force_fallback_adapter in [false, true] {
         if let Ok(a) = instance

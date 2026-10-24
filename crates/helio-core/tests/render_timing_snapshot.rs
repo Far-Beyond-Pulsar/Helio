@@ -15,7 +15,7 @@ fn empty_snapshot_is_explicitly_pending_and_allocation_free_to_read() {
 #[test]
 fn unsupported_gpu_state_and_pass_order_are_stable() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: timing snapshot");
             return;
@@ -61,7 +61,7 @@ fn unsupported_gpu_state_and_pass_order_are_stable() {
 #[test]
 fn deferred_readback_attributes_work_after_an_external_poll() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: deferred timing readback");
             return;

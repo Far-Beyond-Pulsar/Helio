@@ -216,7 +216,7 @@ struct GpuResult {
 }
 
 async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> Option<GpuResult> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let mut adapter = None;
     for force_fallback_adapter in [false, true] {
         if let Ok(a) = instance
@@ -691,7 +691,7 @@ fn gpu_object_batch_handles_all_dead_rows() {
 #[test]
 fn readback_grows_past_initial_range_capacity_without_truncating() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("skipping: no GPU adapter available");
             return;
@@ -759,7 +759,7 @@ fn readback_grows_past_initial_range_capacity_without_truncating() {
 #[test]
 fn instance_prev_transform_is_last_frames_transform() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("skipping: no GPU adapter available");
             return;

@@ -45,7 +45,7 @@ impl RenderPass for OrphanReadPass {
 #[test]
 fn declare_external_input_is_the_source_of_truth_for_validation() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: external input declaration");
             return;

@@ -55,7 +55,7 @@ impl ApplicationHandler for App {
             .with_title(format!("Helio - {} | A/D orbit, W/S zoom, Q/E height | F fog, G quality, L lens, O occluder, M motion, P profile",self.scene.name))
             .with_inner_size(winit::dpi::LogicalSize::new(1280u32,720u32))).expect("window"));
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),

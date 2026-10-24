@@ -29,7 +29,7 @@ struct View {
 /// jitter (the clouds' own temporal filter is what is tested); with a voxel
 /// pass when `ground`.
 fn view(width: u32, height: u32, ground: bool) -> Option<View> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()

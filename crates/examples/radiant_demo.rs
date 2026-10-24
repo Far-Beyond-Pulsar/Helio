@@ -79,7 +79,7 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::PhysicalSize::new(1600, 900));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let surface = instance.create_surface(window.clone()).unwrap();
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

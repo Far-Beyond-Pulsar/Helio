@@ -974,7 +974,7 @@ impl App {
                 display: None,
                 memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             }),
-            _ => wgpu::Instance::default(),
+            _ => wgpu::Instance::new(helio_core::wgpu_instance_descriptor()),
         };
         let surface = instance
             .create_surface(window.clone())

@@ -111,7 +111,7 @@ struct Gpu {
 }
 impl Gpu {
     fn new(rows: u32, capacity: u32) -> Self {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        let mut descriptor = helio_core::wgpu_instance_descriptor();
         descriptor.backends = wgpu::Backends::VULKAN;
         let instance = wgpu::Instance::new(descriptor);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
