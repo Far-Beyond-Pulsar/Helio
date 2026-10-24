@@ -36,6 +36,17 @@ definition (its fingerprint; saves keep the recipe):
   - its stamps (variants chosen by hash), turned and mirrored by hash;
   - its **far form** (below): material and canopy height.
 
+**Recipes.** A feature set is usually grown from a **feature recipe**
+(`feature_recipe::FeatureRecipe`, a few kilobytes of JSON a level saves):
+spawns whose rules are in metres and whose stamps are growths of `flora`
+(a form: tree of a species, bush, shrub, cactus, boulder, crater; its
+materials and sizes; a seed salt; how many variants). `grow(voxel, seed)`
+makes the set for a world's voxel size and seed, the same set wherever it
+is grown. `FeatureRecipe::earth()`, `moon()` and `desert()` are the
+setups voxel_flight flies through (woods to a wandering tree line, a
+cratered moon, a stony desert); a game builds its own, or a set of its
+own stamps (voxel_craft's structures).
+
 A candidate's ground is the terrain's height over its column (the
 generator's height function) and its ground material the terrain's rules
 at its top cell on level ground (slope 0: a column's own inputs, the same

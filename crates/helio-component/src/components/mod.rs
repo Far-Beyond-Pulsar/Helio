@@ -23,6 +23,7 @@ mod sublevel_display_component;
 mod virtual_geometry_component;
 mod voxel_component;
 mod voxel_component_runtime;
+mod voxel_features;
 pub mod voxel_generator_editor;
 pub mod voxel_mesh;
 pub mod voxel_stack_editor;
@@ -53,6 +54,7 @@ pub use static_mesh_draw::*;
 pub use sublevel_display_component::*;
 pub use virtual_geometry_component::*;
 pub use voxel_component::*;
+pub use voxel_features::*;
 pub use water_volume_component::*;
 pub use wind_component::*;
 

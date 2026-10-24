@@ -8,13 +8,16 @@
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * [`features`] — procedural content (trees, rocks, buildings) generated
 //!   like the terrain (docs/features.md), from [`stamp`] models; [`flora`]
-//!   grows natural ones (trees, shrubs, boulders, craters).
+//!   grows natural ones (trees, shrubs, boulders, craters), and a
+//!   [`feature_recipe`] describes a world's (what grows where, in metres)
+//!   for any voxel size and seed.
 //! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
 //!   residency, drawing and lighting, and the Helio pass.
 //! * `engine` — what hosts share with the pass (frames, picks) and the
 //!   terrain half of the shaders, checked against the CPU field.
 pub mod edit_store;
 pub mod edits;
+pub mod feature_recipe;
 pub mod features;
 pub mod flora;
 pub mod snapshot;
