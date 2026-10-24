@@ -598,12 +598,19 @@ pub struct TlasInstanceInput {
 /// material's factor times its base colour texture's mean (as the
 /// projection measured it). An instance with a nonzero `transmission` is a thin
 /// sheet (glass) its BLAS marks non-opaque: rays pass it, tinted.
+///
+/// An instance flagged [`RAY_INSTANCE_PROXY`] is traced through a proxy of
+/// its geometry (a coarse cut of a virtual-geometry asset): its triangles are
+/// in the frame's proxy pool ([`RayProxies`]) instead, positions only, and a
+/// hit's normal is its triangle's face (the winding says outside).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RayInstance {
     pub first_index: u32,
     pub base_vertex: u32,
-    pub _pad: [u32; 2],
+    /// `RAY_INSTANCE_*` bits.
+    pub flags: u32,
+    pub _pad: u32,
     /// Linear RGB base colour: the material's factor times its base colour
     /// texture's mean.
     pub base_color: [f32; 4],
@@ -613,8 +620,25 @@ pub struct RayInstance {
     pub transmission: [f32; 4],
 }
 
+/// [`RayInstance::flags`]: the instance's triangles are in the frame's proxy
+/// pool ([`RayProxies`]), not the scene's mesh pools.
+pub const RAY_INSTANCE_PROXY: u32 = 1;
+
 /// Graph key of the `RayInstance` rows of the frame's TLAS.
 pub const RAY_INSTANCES: &str = "ray_instances";
+/// Graph key of the proxy pool's positions ([`RayProxies::positions`]).
+pub const RAY_PROXY_POSITIONS: &str = "ray_proxy_positions";
+/// Graph key of the proxy pool's indices ([`RayProxies::indices`]).
+pub const RAY_PROXY_INDICES: &str = "ray_proxy_indices";
+
+/// The triangles of the instances flagged [`RAY_INSTANCE_PROXY`]: tightly
+/// packed `Float32x3` positions and mesh-local `u32` indices, addressed as
+/// the mesh pools are (`first_index + 3p`, plus `base_vertex`).
+#[derive(Clone, Copy)]
+pub struct RayProxies<'a> {
+    pub positions: &'a wgpu::Buffer,
+    pub indices: &'a wgpu::Buffer,
+}
 
 /// One frame's ray-tracing input, built by a frontend projection: the TLAS
 /// and the rows that follow its instance order.
@@ -629,6 +653,8 @@ pub struct RayFrame<'a> {
     pub transmission: Option<&'a wgpu::Buffer>,
     /// [`RayInstance`] rows, a row an instance.
     pub instances: Option<&'a wgpu::Buffer>,
+    /// The proxy pool, when any instance is flagged [`RAY_INSTANCE_PROXY`].
+    pub proxies: Option<RayProxies<'a>>,
 }
 
 /// Frontend-published acceleration input valid for exactly one render frame.
@@ -638,6 +664,7 @@ pub struct FrameAcceleration {
     frame: Option<(u64, wgpu::Tlas)>,
     transmission: Option<wgpu::Buffer>,
     instances: Option<wgpu::Buffer>,
+    proxies: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
 impl FrameAcceleration {
     /// Publishes `rays` for frame `frame`. Rows are indexed by TLAS instance
@@ -649,12 +676,17 @@ impl FrameAcceleration {
         let with_tlas = |buffer: Option<&wgpu::Buffer>| rays.tlas.and(buffer).cloned();
         self.transmission = with_tlas(rays.transmission);
         self.instances = with_tlas(rays.instances);
+        self.proxies = rays.tlas.and(rays.proxies).map(|p| (p.positions.clone(), p.indices.clone()));
     }
     pub fn transmission(&self, frame: u64) -> Option<&wgpu::Buffer> {
         self.tlas(frame).and(self.transmission.as_ref())
     }
     pub fn instances(&self, frame: u64) -> Option<&wgpu::Buffer> {
         self.tlas(frame).and(self.instances.as_ref())
+    }
+    /// The proxy pool's positions and indices.
+    pub fn proxies(&self, frame: u64) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
+        self.tlas(frame).and(self.proxies.as_ref()).map(|(p, i)| (p, i))
     }
     pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
         self.frame

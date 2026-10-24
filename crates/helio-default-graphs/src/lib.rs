@@ -4,6 +4,7 @@ mod background;
 pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
+pub mod ray_proxies;
 pub mod ray_tracing;
 mod texture_means;
 pub mod scene_join;

@@ -80,7 +80,7 @@ fn scene(gpu: &Gpu, quads: &[Quad]) -> Scene {
             vertices.extend_from_slice(&[p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), 1f32.to_bits(), 0, 0, 0, 0, snorm8(q.normal), 0]);
         }
         indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
-        rows.push(RayInstance { first_index, base_vertex, _pad: [0; 2], base_color: q.base_color.extend(1.0).to_array(), emissive: q.emissive.extend(0.0).to_array(), transmission: [0.0; 4] });
+        rows.push(RayInstance { first_index, base_vertex, flags: 0, _pad: 0, base_color: q.base_color.extend(1.0).to_array(), emissive: q.emissive.extend(0.0).to_array(), transmission: [0.0; 4] });
     }
     let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST;
     let init = |label, contents: &[u8], usage| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
@@ -147,7 +147,7 @@ fn frame(gpu: &Gpu, pass: &mut GiPass, mesh: &GiMeshTracePass, scene: &Scene, ey
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut cmds = helio_core::CommandRecorder::from_encoder(&mut encoder);
     let eye = eye.as_vec3().to_array();
-    mesh.record(&gpu.device, &gpu.queue, &mut cmds, [frame_buffer, rays, hits, sun, light], scene.tlas.tlas().unwrap(), eye, [&scene.instances, &scene.vertices, &scene.indices], lights.map(|l| (l, 1)), None, n as u32);
+    mesh.record(&gpu.device, &gpu.queue, &mut cmds, [frame_buffer, rays, hits, sun, light], scene.tlas.tlas().unwrap(), eye, [&scene.instances, &scene.vertices, &scene.indices], None, lights.map(|l| (l, 1)), None, n as u32);
     drop(cmds);
     gpu.queue.submit([encoder.finish()]);
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();

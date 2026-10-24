@@ -64,6 +64,16 @@ struct AssetEntry {
     failed: bool,
 }
 
+/// One asset of [`VgRuntime::assets`].
+#[derive(Clone)]
+pub struct VgAssetInfo {
+    pub content: [u64; 2],
+    /// The mesh's interned classic vertex range (its identity on the GPU).
+    pub vertex_offset: u32,
+    pub vertex_count: u32,
+    pub source: Arc<dyn VgeoSource>,
+}
+
 #[derive(Default)]
 struct State {
     store: Option<VgAssetStore>,
@@ -75,6 +85,8 @@ struct Inner {
     state: Mutex<State>,
     /// Bumped on every host-side change to the asset list or settings.
     host_version: AtomicU64,
+    /// Bumped whenever [`VgRuntime::assets`] may change.
+    assets_version: AtomicU64,
     tier3: Mutex<VgTier3Stats>,
 }
 
@@ -103,6 +115,7 @@ impl VgRuntime {
             settings: Mutex::new(settings),
             state: Mutex::new(State::default()),
             host_version: AtomicU64::new(1),
+            assets_version: AtomicU64::new(1),
             tier3: Mutex::new(VgTier3Stats::default()),
         }))
     }
@@ -149,12 +162,39 @@ impl VgRuntime {
             });
         }
         self.0.host_version.fetch_add(1, Ordering::Relaxed);
+        self.0.assets_version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Whether `content_id` was requested (registered or pending).
     pub fn has_asset(&self, content_id: u128) -> bool {
         let content = content_words(content_id);
         lock(&self.0.state).assets.iter().any(|e| e.content == content)
+    }
+
+    /// Every requested asset that was not rejected, registered or pending:
+    /// its content id, interned vertex range and bytes. For consumers that
+    /// read assets on the CPU, such as the scene TLAS's proxies.
+    pub fn assets(&self) -> Vec<VgAssetInfo> {
+        let state = lock(&self.0.state);
+        state
+            .assets
+            .iter()
+            .filter(|e| !e.failed)
+            .filter_map(|e| {
+                let source = match (&e.source, e.handle, state.store.as_ref()) {
+                    (Some(source), _, _) => source.clone(),
+                    (None, Some(handle), Some(store)) => store.core().asset_source(handle.slot())?.0,
+                    _ => return None,
+                };
+                Some(VgAssetInfo { content: e.content, vertex_offset: e.vertex_offset, vertex_count: e.vertex_count, source })
+            })
+            .collect()
+    }
+
+    /// Changes whenever [`Self::assets`] may have (assets requested,
+    /// re-ranged or released).
+    pub fn assets_version(&self) -> u64 {
+        self.0.assets_version.load(Ordering::Relaxed)
     }
 
     /// Stop streaming `content_id` and free its pages.
@@ -169,6 +209,7 @@ impl VgRuntime {
             store.release(handle);
         }
         self.0.host_version.fetch_add(1, Ordering::Relaxed);
+        self.0.assets_version.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Create the store on first use and register pending assets. Cheap when
@@ -193,10 +234,12 @@ impl VgRuntime {
                 Err(error @ (VgStreamError::Source(_) | VgStreamError::Invalid(_))) => {
                     log::warn!("virtual geometry: asset rejected: {error}");
                     entry.failed = true;
+                    self.0.assets_version.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(error) => {
                     log::warn!("virtual geometry: asset not registered: {error}");
                     entry.failed = true;
+                    self.0.assets_version.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }

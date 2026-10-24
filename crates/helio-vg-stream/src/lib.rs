@@ -39,7 +39,7 @@ pub use proxy::{
     build_proxy, error_ladder, proxy_key, ProxyBuild, ProxyCache, ProxyCacheStats, ProxyLodCpu, ProxyOptions,
     ProxyState,
 };
-pub use runtime::{content_words, VgRuntime, VgRuntimeSettings, VgTier3Stats};
+pub use runtime::{content_words, VgAssetInfo, VgRuntime, VgRuntimeSettings, VgTier3Stats};
 pub use scheduler::{Fetch, PageScheduler, SchedulerConfig, SchedulerStats};
 pub use source::{testing, VgeoBytes, VgeoSource};
 pub use store::{

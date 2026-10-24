@@ -721,7 +721,7 @@ impl ApplicationHandler for App {
             layout.placements.len(),
             layout.statues.len()
         );
-        let rays = v3_demo_common::SceneRays::new(&device, &queue);
+        let rays = v3_demo_common::SceneRays::new(&device, &queue).with_virtual_geometry(runtime.clone());
         self.state = Some(AppState {
             window,
             surface,

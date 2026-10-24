@@ -1,7 +1,8 @@
 //! The scene's meshes as a tracer of the probes' rays (`gi_mesh_trace.wgsl`,
 //! README.md "Tracers"): hardware ray queries against the frame's TLAS
 //! (`RenderEnvironment::tlas`), shaded from its instances' surfaces
-//! (`helio_core::RayInstance`, `ray_instances`). It runs after the other
+//! (`helio_core::RayInstance`, `ray_instances`; proxies' triangles from
+//! `ray_proxy_positions` / `ray_proxy_indices`). It runs after the other
 //! tracers and before [`crate::GiResolvePass`]; on a frame without a TLAS
 //! or its rows it leaves the hits as they are.
 
@@ -36,6 +37,8 @@ pub struct GiMeshTracePass {
     /// No terrain: its occlusion frame says no levels.
     no_occlusion: (wgpu::Buffer, wgpu::TextureView),
     no_lights: wgpu::Buffer,
+    /// No proxy pool: a binding for each of its buffers.
+    no_proxies: wgpu::Buffer,
 }
 
 impl GiMeshTracePass {
@@ -75,6 +78,8 @@ impl GiMeshTracePass {
                     count: None,
                 },
                 storage(13, false),
+                storage(14, true),
+                storage(15, true),
             ],
         });
         let gather_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -134,13 +139,16 @@ impl GiMeshTracePass {
             trace: buffer(device, "GI mesh trace", std::mem::size_of::<GpuTrace>() as u64, uniform_usage),
             no_occlusion: (buffer(device, "GI no sun occlusion", SUN_OCCLUSION_FRAME_BYTES, uniform_usage), maps),
             no_lights: buffer(device, "GI mesh no lights", 128, wgpu::BufferUsages::STORAGE),
+            no_proxies: buffer(device, "GI mesh no proxies", 16, wgpu::BufferUsages::STORAGE),
         })
     }
 
     /// Records the meshes' hits for this frame's rays: `gi` is GiPass's
     /// frame, rays, hits, sun and hits' light; `eye` the eye in the TLAS's
     /// frame; `instances`, `vertices` and `indices` the TLAS's rows and the
-    /// scene's mesh pools; `lights` the scene's (its first `count` rows);
+    /// scene's mesh pools; `proxies` the proxy pool's positions and indices
+    /// (`helio_core::RayProxies`), if any; `lights` the scene's (its first
+    /// `count` rows);
     /// `occlusion` the sun's occlusion maps, if published.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
@@ -152,6 +160,7 @@ impl GiMeshTracePass {
         tlas: &wgpu::Tlas,
         eye: [f32; 3],
         [instances, vertices, indices]: [&wgpu::Buffer; 3],
+        proxies: Option<(&wgpu::Buffer, &wgpu::Buffer)>,
         lights: Option<(&wgpu::Buffer, u32)>,
         occlusion: Option<(&wgpu::Buffer, &wgpu::TextureView)>,
         seed: u32,
@@ -159,6 +168,7 @@ impl GiMeshTracePass {
         let (lights, count) = lights.unwrap_or((&self.no_lights, 0));
         let count = count.min((lights.size() / 128) as u32);
         let (occlusion_frame, occlusion_maps) = occlusion.unwrap_or((&self.no_occlusion.0, &self.no_occlusion.1));
+        let (proxy_positions, proxy_indices) = proxies.unwrap_or((&self.no_proxies, &self.no_proxies));
         let trace = GpuTrace { eye: [eye[0], eye[1], eye[2], 0.0], info: [count, seed, 0, 0] };
         helio_core::upload::write_buffer(queue, &self.trace, 0, bytemuck::bytes_of(&trace));
         fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
@@ -181,6 +191,8 @@ impl GiMeshTracePass {
                 entry(11, occlusion_frame),
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(occlusion_maps) },
                 entry(13, &self.local_lights),
+                entry(14, proxy_positions),
+                entry(15, proxy_indices),
             ],
         });
         let gather = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -205,7 +217,19 @@ impl RenderPass for GiMeshTracePass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[GI_FRAME, GI_RAYS, GI_HITS, GI_SUN, GI_LIGHT, "render_environment", helio_core::RAY_INSTANCES, SUN_OCCLUSION_MAPS, SUN_OCCLUSION_FRAME]
+        &[
+            GI_FRAME,
+            GI_RAYS,
+            GI_HITS,
+            GI_SUN,
+            GI_LIGHT,
+            "render_environment",
+            helio_core::RAY_INSTANCES,
+            helio_core::RAY_PROXY_POSITIONS,
+            helio_core::RAY_PROXY_INDICES,
+            SUN_OCCLUSION_MAPS,
+            SUN_OCCLUSION_FRAME,
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -243,6 +267,8 @@ impl RenderPass for GiMeshTracePass {
             return Ok(());
         };
         let lights = pool("scene_lights");
+        let proxy = |name: &'static str| ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(name));
+        let proxies = proxy(helio_core::RAY_PROXY_POSITIONS).zip(proxy(helio_core::RAY_PROXY_INDICES));
         let occlusion = match (binding(SUN_OCCLUSION_FRAME), ctx.registry.texture_binding(SUN_OCCLUSION_MAPS)) {
             (Some(frame), Some(maps)) => Some((frame, maps)),
             _ => None,
@@ -251,7 +277,7 @@ impl RenderPass for GiMeshTracePass {
         let eye = [camera.position_near[0], camera.position_near[1], camera.position_near[2]];
         let seed = (ctx.frame_num as u32).wrapping_mul(0x9e37_79b9);
         let mut cmds = ctx.graphics_cmds();
-        self.record(ctx.device, ctx.queue, &mut cmds, [frame, rays, hits, sun, light], tlas, eye, [instances, &vertices, &indices], lights.as_ref().map(|l| (l, u32::MAX)), occlusion, seed);
+        self.record(ctx.device, ctx.queue, &mut cmds, [frame, rays, hits, sun, light], tlas, eye, [instances, &vertices, &indices], proxies, lights.as_ref().map(|l| (l, u32::MAX)), occlusion, seed);
         Ok(())
     }
 }

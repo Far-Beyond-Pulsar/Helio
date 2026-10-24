@@ -29,6 +29,12 @@
 //! is bounded by the level's `error` in object space, not per pixel; one level
 //! per asset per frame (large instances spanning a wide distance range use the
 //! level for their nearest point); no per-triangle material or alpha data.
+//!
+//! Two ladders use this: the dense tier's ([`ProxyOptions::default`]: the
+//! leaves, then cuts up to the root, one picked per instance and frame from
+//! its projected error) and the scene TLAS's ([`ProxyOptions::trace`]: ONE
+//! coarse cut per asset, shared by all its instances, for rays that need the
+//! object's shape, not its pixels: GI probes, ray-traced shadows).
 
 use crate::source::VgeoSource;
 use helio_vg_format::testing::dequantize;
@@ -48,11 +54,48 @@ pub struct ProxyOptions {
     /// Levels with more triangles than this are skipped (the finest *kept*
     /// level then exceeds tau closer in, which the RT path reports).
     pub max_triangles_per_lod: u32,
+    /// Error of the finest level as a fraction of the asset's bounding
+    /// radius. Zero: the finest level is the leaves (the original geometry)
+    /// and the others divide the root's error by `ratio`; above zero, the
+    /// levels are `finest, finest * ratio, ...` up to the root's error.
+    pub finest_relative_error: f32,
+    /// Keep at most this many levels: the finest that fit the triangle cap.
+    pub max_lods: usize,
 }
 
 impl Default for ProxyOptions {
     fn default() -> Self {
-        Self { levels: 5, ratio: 4.0, max_triangles_per_lod: 8 << 20 }
+        Self { levels: 5, ratio: 4.0, max_triangles_per_lod: 8 << 20, finest_relative_error: 0.0, max_lods: usize::MAX }
+    }
+}
+
+impl ProxyOptions {
+    /// Error bound of the scene TLAS's proxies, as a fraction of the asset's
+    /// bounding radius: 1 cm on a statue 2 m across, 10 cm on a building
+    /// 20 m across. GI probes are 0.5 m apart at the finest and integrate
+    /// whole hemispheres; a ray-traced shadow of a surface displaced this
+    /// little stays on it. A coarser bound shows as light leaking through
+    /// thin VG walls and creases; a finer one only costs memory.
+    pub const TRACE_RELATIVE_ERROR: f32 = 0.01;
+    /// Triangle budget of a scene TLAS proxy. Its BLAS costs roughly 60 to
+    /// 100 bytes a triangle on current hardware (2 to 3 MiB at the budget),
+    /// plus about 18 bytes a triangle of positions and indices. An asset
+    /// whose cut at [`Self::TRACE_RELATIVE_ERROR`] needs more takes the
+    /// first coarser cut (each twice the error) that fits.
+    pub const TRACE_MAX_TRIANGLES: u32 = 32 * 1024;
+
+    /// One proxy per asset for the scene's TLAS: the finest cut whose error
+    /// is at most [`Self::TRACE_RELATIVE_ERROR`] of the asset's bounding
+    /// radius and that fits [`Self::TRACE_MAX_TRIANGLES`], else the first
+    /// coarser cut (each twice the error, up to the root) that fits.
+    pub fn trace() -> Self {
+        Self {
+            levels: 12,
+            ratio: 2.0,
+            max_triangles_per_lod: Self::TRACE_MAX_TRIANGLES,
+            finest_relative_error: Self::TRACE_RELATIVE_ERROR,
+            max_lods: 1,
+        }
     }
 }
 
@@ -115,15 +158,59 @@ fn largest_finite_parent_error(nodes: &[GpuHierarchyNode]) -> f32 {
     m
 }
 
-/// The error thresholds `build_proxy` cuts at, finest first.
-pub fn error_ladder(root_error: f32, opts: &ProxyOptions) -> Vec<f32> {
+/// Bounding radius of an asset: of its root cut's vertices (the root cut
+/// covers the whole asset and lives in the small, always-resident root
+/// pages; the hierarchy's spheres nest loosely, several times too big).
+fn root_cut_radius(source: &dyn VgeoSource, quant: &GpuAssetQuant) -> Result<f32, String> {
+    let mut points = Vec::new();
+    for page_id in source.root_pages() {
+        let bytes = source.read_page(page_id)?;
+        let ph: PageHeader = bytes
+            .get(..std::mem::size_of::<PageHeader>())
+            .map(bytemuck::pod_read_unaligned)
+            .ok_or_else(|| format!("proxy: page {page_id} truncated"))?;
+        for local in 0..ph.cluster_count {
+            let co = ph.clusters_offset as usize + local as usize * std::mem::size_of::<GpuCluster>();
+            let c: GpuCluster = bytes
+                .get(co..co + std::mem::size_of::<GpuCluster>())
+                .map(bytemuck::pod_read_unaligned)
+                .ok_or_else(|| format!("proxy: page {page_id} cluster {local} out of range"))?;
+            if c.flags & GpuCluster::FLAG_ROOT != 0 {
+                points.extend(decode_cluster(&bytes, &c, quant)?.0);
+            }
+        }
+    }
+    Ok(bounding_sphere(&points)[3])
+}
+
+/// The error thresholds `build_proxy` cuts at, finest first, for an asset
+/// whose root error is `root_error` and bounding radius `radius`.
+pub fn error_ladder(root_error: f32, radius: f32, opts: &ProxyOptions) -> Vec<f32> {
     let n = opts.levels.max(1);
+    let ratio = opts.ratio.max(1.5);
+    if !(root_error > 0.0) {
+        // One level: every cluster is both a leaf and a root.
+        return vec![0.0];
+    }
+    // Just above the root's error: the root cut (roots' parents are infinite).
+    let top = root_error * 1.0001;
     let mut out = Vec::with_capacity(n);
+    if opts.finest_relative_error > 0.0 {
+        let mut e = opts.finest_relative_error * radius;
+        while out.len() < n {
+            out.push(e.min(top));
+            if e >= top {
+                break;
+            }
+            e *= ratio;
+        }
+        return out;
+    }
     // Leaf clusters have self_error 0; a tiny positive threshold also takes
     // leaves whose measured error is a rounding residue.
     out.push(0.0);
     for k in 1..n {
-        out.push(root_error * 1.0001 / opts.ratio.max(1.5).powi((n - 1 - k) as i32));
+        out.push(top / ratio.powi((n - 1 - k) as i32));
     }
     out
 }
@@ -150,10 +237,12 @@ pub fn build_proxy(
     let quant = source.quant();
     let nodes = source.hierarchy()?;
     let root_error = largest_finite_parent_error(&nodes);
-    if !(root_error > 0.0) {
+    if !(root_error > 0.0) && opts.finest_relative_error <= 0.0 {
         return Err("proxy: asset has no finite hierarchy error (single level)".into());
     }
-    let ladder = error_ladder(root_error, opts);
+    // The radius only matters to a relative finest error (reads the root pages).
+    let radius = if opts.finest_relative_error > 0.0 { root_cut_radius(source, &quant)? } else { 0.0 };
+    let ladder = error_ladder(root_error, radius, opts);
     let mut lods: Vec<LodBuild> = ladder
         .iter()
         .map(|&error| LodBuild {
@@ -241,6 +330,9 @@ pub fn build_proxy(
         if lod.over_cap {
             skipped += 1;
             continue;
+        }
+        if out.len() >= opts.max_lods {
+            break;
         }
         if lod.indices.is_empty() {
             continue;

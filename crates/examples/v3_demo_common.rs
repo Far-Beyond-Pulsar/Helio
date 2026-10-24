@@ -162,6 +162,21 @@ impl SceneRays {
         Self { projection, failed: false }
     }
 
+    /// Traces `runtime`'s virtual-geometry instances through their assets'
+    /// proxies (`SceneDbRayTracing::with_virtual_geometry`);
+    /// `HELIO_VG_RAYS=off` leaves them out, for A/B.
+    pub fn with_virtual_geometry(mut self, runtime: helio_vg_stream::VgRuntime) -> Self {
+        if std::env::var("HELIO_VG_RAYS").as_deref() != Ok("off") {
+            self.projection = self.projection.map(|p| p.with_virtual_geometry(runtime));
+        }
+        self
+    }
+
+    /// The virtual-geometry proxies' counters.
+    pub fn vg_stats(&self) -> helio_default_graphs::ray_proxies::VgRayStats {
+        self.projection.as_ref().map(|p| p.vg_stats()).unwrap_or_default()
+    }
+
     /// Publishes this frame's to `renderer`: after flushing SceneDB, before
     /// rendering.
     pub fn publish(&mut self, world: &World, renderer: &mut Renderer) {

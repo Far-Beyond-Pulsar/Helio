@@ -5,8 +5,9 @@ enable wgpu_ray_query;
 // after the others: a ray queries the TLAS up to the hit already written
 // (the voxel terrain's) and keeps the nearer. A mesh hit is shaded from its
 // instance's surface (`RayInstance`: the material's colours, the mesh's
-// normals). Thin transmitting sheets (glass: non-opaque in their BLAS) are
-// passed by probe rays and tint shadow rays. Whichever hit stands, if it
+// normals; a proxy's face, see `RAY_INSTANCE_PROXY`). Thin transmitting
+// sheets (glass: non-opaque in their BLAS) are passed by probe rays and
+// tint shadow rays. Whichever hit stands, if it
 // faces the ray, takes the sun (a shadow ray through the meshes, times the
 // terrain's own visibility: the voxel tracer's, or the sun's occlusion
 // maps for a mesh hit) and one of the scene's point and spot lights, chosen
@@ -33,6 +34,10 @@ enable wgpu_ray_query;
 // The live point and spot lights (`gi_gather_lights`): their count, then
 // theirs.
 @group(0) @binding(13) var<storage, read_write> local_lights: LocalLights;
+// The proxy pool (`helio_core::RayProxies`): packed `Float32x3` positions
+// and mesh-local indices of the instances flagged `RAY_INSTANCE_PROXY`.
+@group(0) @binding(14) var<storage, read> proxy_positions: array<f32>;
+@group(0) @binding(15) var<storage, read> proxy_indices: array<u32>;
 
 struct MeshTrace {
     // The eye in the TLAS's frame (the renderer's origin).
@@ -61,7 +66,8 @@ struct LocalLights {
 struct RayInstance {
     first_index: u32,
     base_vertex: u32,
-    pad: vec2<u32>,
+    flags: u32,
+    pad: u32,
     base_color: vec4<f32>,
     emissive: vec4<f32>,
     transmission: vec4<f32>,
@@ -81,6 +87,9 @@ struct SceneLight {
 
 const PI: f32 = 3.14159265;
 const VERTEX_WORDS: u32 = 10u;
+// `helio_core::RAY_INSTANCE_PROXY`: the instance's triangles are in the proxy
+// pool, positions only (a virtual-geometry asset's coarse cut).
+const RAY_INSTANCE_PROXY: u32 = 1u;
 // The tracer's id in a hit's `light` byte 0.
 const MESH_TRACER: u32 = 2u;
 // Flag: a shadow ray ends at its first opaque hit.
@@ -89,6 +98,10 @@ const FIRST_HIT: u32 = 0x04u;
 fn position(v: u32) -> vec3<f32> {
     let at = v * VERTEX_WORDS;
     return vec3<f32>(bitcast<f32>(vertices[at]), bitcast<f32>(vertices[at + 1u]), bitcast<f32>(vertices[at + 2u]));
+}
+
+fn proxy_position(v: u32) -> vec3<f32> {
+    return vec3<f32>(proxy_positions[3u * v], proxy_positions[3u * v + 1u], proxy_positions[3u * v + 2u]);
 }
 
 fn vertex_normal(v: u32) -> vec3<f32> {
@@ -207,17 +220,28 @@ fn gi_mesh_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if c.kind != RAY_QUERY_INTERSECTION_NONE && c.instance_index < arrayLength(&instances) {
         // The triangle: its frame corners for the face's normal, its
         // vertex normals (object space, to the frame by the inverse
-        // transpose) for the side the mesh calls outside.
+        // transpose) for the side the mesh calls outside. A proxy has no
+        // vertex normals: its winding says outside (its object-space face).
         let instance = instances[c.instance_index];
         let base = instance.first_index + 3u * c.primitive_index;
-        let v = vec3<u32>(indices[base], indices[base + 1u], indices[base + 2u]) + instance.base_vertex;
-        let b = vec3<f32>(1.0 - c.barycentrics.x - c.barycentrics.y, c.barycentrics);
-        let p0 = c.object_to_world * vec4<f32>(position(v.x), 1.0);
-        let p1 = c.object_to_world * vec4<f32>(position(v.y), 1.0);
-        let p2 = c.object_to_world * vec4<f32>(position(v.z), 1.0);
+        var local: vec3<f32>;
+        var o: array<vec3<f32>, 3>;
+        if (instance.flags & RAY_INSTANCE_PROXY) != 0u {
+            let v = vec3<u32>(proxy_indices[base], proxy_indices[base + 1u], proxy_indices[base + 2u]) + instance.base_vertex;
+            o = array<vec3<f32>, 3>(proxy_position(v.x), proxy_position(v.y), proxy_position(v.z));
+            let f = cross(o[1] - o[0], o[2] - o[0]);
+            local = f / max(length(f), 1e-30);
+        } else {
+            let v = vec3<u32>(indices[base], indices[base + 1u], indices[base + 2u]) + instance.base_vertex;
+            let b = vec3<f32>(1.0 - c.barycentrics.x - c.barycentrics.y, c.barycentrics);
+            o = array<vec3<f32>, 3>(position(v.x), position(v.y), position(v.z));
+            local = vertex_normal(v.x) * b.x + vertex_normal(v.y) * b.y + vertex_normal(v.z) * b.z;
+        }
+        let p0 = c.object_to_world * vec4<f32>(o[0], 1.0);
+        let p1 = c.object_to_world * vec4<f32>(o[1], 1.0);
+        let p2 = c.object_to_world * vec4<f32>(o[2], 1.0);
         var face = cross(p1 - p0, p2 - p0);
         face = face / max(length(face), 1e-20);
-        let local = vertex_normal(v.x) * b.x + vertex_normal(v.y) * b.y + vertex_normal(v.z) * b.z;
         let w = c.world_to_object;
         var shading = vec3<f32>(dot(w[0], local), dot(w[1], local), dot(w[2], local));
         if dot(shading, shading) < 1e-8 {

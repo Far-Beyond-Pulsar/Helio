@@ -101,6 +101,44 @@ fn proxy_triangle_cap_skips_the_fine_levels() {
     assert!(proxy.lods[0].error > 0.0, "the leaf level should have been skipped");
 }
 
+/// The scene TLAS's proxy: one closed cut at 1 % of the bounding radius
+/// (the unit sphere: about 0.01), far fewer triangles than the source, its
+/// vertices on the surface within its error.
+#[test]
+fn trace_proxy_is_one_coarse_closed_cut_within_its_error() {
+    let (bytes, source_tris) = asset(5);
+    let source = VgeoBytes::new(bytes).unwrap();
+    let proxy = build_proxy(&source, &ProxyOptions::trace(), None).unwrap();
+    assert_eq!(proxy.lods.len(), 1);
+    let lod = &proxy.lods[0];
+    // 1 % of the radius, measured around the root cut's bounding box centre
+    // (a few percent over the sphere's own radius).
+    let bound = ProxyOptions::TRACE_RELATIVE_ERROR * proxy.bounds[3] * 1.05;
+    assert!(lod.error > 0.0 && lod.error <= bound, "error {} over {bound}", lod.error);
+    assert!(lod.triangle_count() * 4 < source_tris, "{} of {source_tris} triangles", lod.triangle_count());
+    assert!(lod.triangle_count() as u32 <= ProxyOptions::TRACE_MAX_TRIANGLES);
+    let open = edge_uses(lod).values().filter(|&&n| n != 2).count();
+    assert_eq!(open, 0, "{open} open or non-manifold edges");
+    let off = lod.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs()).fold(0.0, f32::max);
+    assert!(off <= 2.0 * lod.error + 1e-3, "a vertex {off} off the sphere (error {})", lod.error);
+}
+
+/// Over the triangle budget, the trace proxy takes the first coarser cut
+/// that fits instead.
+#[test]
+fn trace_proxy_coarsens_to_fit_its_triangle_budget() {
+    let (bytes, _) = asset(5);
+    let source = VgeoBytes::new(bytes).unwrap();
+    let fine = build_proxy(&source, &ProxyOptions::trace(), None).unwrap();
+    let budget = fine.lods[0].triangle_count() as u32 / 3;
+    let opts = ProxyOptions { max_triangles_per_lod: budget, ..ProxyOptions::trace() };
+    let proxy = build_proxy(&source, &opts, None).unwrap();
+    assert_eq!(proxy.lods.len(), 1);
+    assert!(proxy.skipped_levels > 0);
+    assert!(proxy.lods[0].triangle_count() as u32 <= budget);
+    assert!(proxy.lods[0].error > fine.lods[0].error);
+}
+
 #[test]
 fn proxy_pages_are_listed_and_bounded() {
     let (bytes, _) = asset(5);

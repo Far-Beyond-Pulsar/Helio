@@ -1741,6 +1741,7 @@ dependencies = [
  "helio-pass-volumetric-fog",
  "helio-pass-voxel-planet",
  "helio-pass-water-sim",
+ "helio-vg-build",
  "helio-vg-format",
  "helio-vg-stream",
  "image",
