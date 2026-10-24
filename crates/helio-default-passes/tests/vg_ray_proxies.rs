@@ -100,12 +100,6 @@ fn place(world: &mut World, mesh: Entity, (material, row): (Entity, MaterialComp
 
 /// A classic box of half extent `half` at `centre` in `colour`.
 fn spawn_box(world: &mut World, centre: Vec3, half: Vec3, colour: [f32; 3]) {
-    let material = material(world, colour, 0.0);
-    spawn_box_in(world, centre, half, material);
-}
-
-/// A classic box of half extent `half` at `centre` in `material`.
-fn spawn_box_in(world: &mut World, centre: Vec3, half: Vec3, material: (Entity, MaterialComponent)) {
     let (positions, normals, indices) = box_faces(half, 1);
     let vertices = positions
         .iter()
@@ -114,6 +108,7 @@ fn spawn_box_in(world: &mut World, centre: Vec3, half: Vec3, material: (Entity, 
         .collect();
     let mesh = world.spawn();
     world.insert(mesh, MeshComponent { vertices, indices });
+    let material = material(world, colour, 0.0);
     place(world, mesh, material, Mat4::from_translation(centre), half.length());
 }
 
@@ -124,35 +119,63 @@ const WALL_CONTENT: u128 = 0x5647_5241_5950_524f_5859_5741_4c4c_0001;
 
 fn wall_vgeo() -> Arc<dyn VgeoSource> {
     let (positions, _, indices) = box_faces(WALL_HALF, 48);
+    cook(&positions, &indices, WALL_CONTENT)
+}
+
+/// `positions` and `indices` cooked to a `.vgeo` of content id `content`
+/// (attribute records zero: uv0 0).
+fn cook(positions: &[Vec3], indices: &[u32], content: u128) -> Arc<dyn VgeoSource> {
     let positions: Vec<[f32; 3]> = positions.iter().map(|p| p.to_array()).collect();
     let attributes = vec![0u8; positions.len() * helio_vg_format::ATTR_STRIDE as usize];
     let mesh = helio_vg_build::MeshInput {
         positions: &positions,
         attributes: &attributes,
         attribute_stride: helio_vg_format::ATTR_STRIDE as usize,
-        indices: &indices,
+        indices,
         tri_material: &[],
     };
-    let options = helio_vg_build::BuildOptions { content_id: content_words(WALL_CONTENT), resident_levels: 2 };
+    let options = helio_vg_build::BuildOptions { content_id: content_words(content), resident_levels: 2 };
     Arc::new(VgeoBytes::new(helio_vg_build::build_vgeo(&mesh, &options).unwrap()).unwrap())
 }
+
+/// A card (a sheet, as cut-outs are): the wall's 10.2 x 4.2 m face as an
+/// `n` x `n` grid at z = 0, facing +z.
+fn card(n: u32) -> (Vec<Vec3>, Vec<u32>) {
+    let mut positions = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            let (a, b) = (2.0 * i as f32 / n as f32 - 1.0, 2.0 * j as f32 / n as f32 - 1.0);
+            positions.push(Vec3::new(a * WALL_HALF.x, b * WALL_HALF.y, 0.0));
+        }
+    }
+    let mut indices = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            let at = |i: u32, j: u32| j * (n + 1) + i;
+            indices.extend_from_slice(&[at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j), at(i + 1, j + 1), at(i, j + 1)]);
+        }
+    }
+    (positions, indices)
+}
+const CARD_CONTENT: u128 = 0x5647_5241_5950_524f_5859_4341_5244_0001;
 
 /// The VG wall's object: a zero-area placeholder mesh whose interned vertex
 /// range `runtime` knows as the wall's asset.
 fn spawn_vg_wall(world: &mut World, runtime: &VgRuntime, colour: [f32; 3], emissive: f32) -> Entity {
     let material = material(world, colour, emissive);
-    spawn_vg_wall_in(world, runtime, material)
+    spawn_vg(world, runtime, (WALL_CONTENT, wall_vgeo()), material)
 }
 
-/// The VG wall's object in `material`.
-fn spawn_vg_wall_in(world: &mut World, runtime: &VgRuntime, material: (Entity, MaterialComponent)) -> Entity {
+/// A VG object at the wall's place: asset `content` cooked as `vgeo`, in
+/// `material`.
+fn spawn_vg(world: &mut World, runtime: &VgRuntime, (content, vgeo): (u128, Arc<dyn VgeoSource>), material: (Entity, MaterialComponent)) -> Entity {
     let mut vertex = helio::PackedVertex::default();
     vertex.tex_coords0 = [7.0, 0.0];
     let mesh = world.spawn();
     world.insert(mesh, MeshComponent { vertices: vec![vertex; 3], indices: vec![0, 1, 2] });
     let store = world.gpu_mirror().cloned().unwrap();
     let range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
-    runtime.request_asset(WALL_CONTENT, range.offset, range.count, wall_vgeo());
+    runtime.request_asset(content, range.offset, range.count, vgeo);
     place(world, mesh, material, Mat4::from_translation(Vec3::new(0.0, 2.0, 0.0)), WALL_HALF.length())
 }
 
@@ -431,13 +454,15 @@ fn a_vg_proxy_hit_takes_its_object_s_material() {
     }
 }
 
-/// Cut-outs in the TLAS: the room split by a wall of an alpha-tested
-/// material, as a classic mesh and through a VG proxy (its UVs from the
-/// asset's attribute records). Where the material's alpha is 1 the wall
-/// stops probe and shadow rays as an opaque one does; where it is 0 the far
-/// half fills with light as if there were no wall.
+/// Cut-outs in the TLAS: the room split by a card (a double-sided sheet, as
+/// leaves are) of an alpha-tested material, as a classic mesh and through a
+/// VG proxy (its UVs from the asset's attribute records). Where the
+/// material's alpha is 1 the card stops probe and shadow rays as an opaque
+/// wall does; where it is 0 the far half fills with light as if there were
+/// no wall. (A closed solid of a double-sided material has no inside to the
+/// probes: those within it stay active and pass light on.)
 #[test]
-fn a_cut_out_wall_stops_rays_where_its_alpha_says() {
+fn a_cut_out_card_stops_rays_where_its_alpha_says() {
     let Some(open) = far_light(false, |world, _| room(world, true)) else {
         return;
     };
@@ -445,11 +470,17 @@ fn a_cut_out_wall_stops_rays_where_its_alpha_says() {
         for alpha in [255u8, 0] {
             let mut harness = Harness::new(vg, |world, _| room(world, true)).unwrap();
             let material = harness.cut_out_material(alpha);
+            let world = &mut harness.scene.world;
             if vg {
-                spawn_vg_wall_in(&mut harness.scene.world, &harness.runtime, material);
+                let (positions, indices) = card(48);
+                spawn_vg(world, &harness.runtime, (CARD_CONTENT, cook(&positions, &indices, CARD_CONTENT)), material);
                 harness.wait_for_proxy();
             } else {
-                spawn_box_in(&mut harness.scene.world, Vec3::new(0.0, 2.0, 0.0), WALL_HALF, material);
+                let (positions, indices) = card(1);
+                let vertices = positions.iter().map(|p| helio::PackedVertex::from_components(p.to_array(), [0.0, 0.0, 1.0], [0.0; 2], [1.0, 0.0, 0.0], 1.0)).collect();
+                let mesh = world.spawn();
+                world.insert(mesh, MeshComponent { vertices, indices });
+                place(world, mesh, material, Mat4::from_translation(Vec3::new(0.0, 2.0, 0.0)), WALL_HALF.length());
             }
             let errors = harness.device.push_error_scope(wgpu::ErrorFilter::Validation);
             for _ in 0..FRAMES {
@@ -458,12 +489,12 @@ fn a_cut_out_wall_stops_rays_where_its_alpha_says() {
             let (probes, far) = probe_light(&harness.probes(), DARK_LO, DARK_HI);
             let error = pollster::block_on(errors.pop());
             assert!(error.is_none(), "{error:?}");
-            eprintln!("cut-out wall (vg {vg}, alpha {alpha}): far half {far:.6} of the open room's {open:.5}");
+            eprintln!("cut-out card (vg {vg}, alpha {alpha}): far half {far:.6} of the open room's {open:.5}");
             assert!(probes > 300, "{probes} probes in the far half");
             if alpha == 255 {
-                assert!(far < open * 1e-3, "a solid cut-out wall (vg {vg}) let {far} through of {open}");
+                assert!(far < open * 1e-3, "a solid cut-out card (vg {vg}) let {far} through of {open}");
             } else {
-                assert!(far > open * 0.8, "a cut-out wall of holes (vg {vg}) let {far} through of {open}");
+                assert!(far > open * 0.8, "a cut-out card of holes (vg {vg}) let {far} through of {open}");
             }
         }
     }
