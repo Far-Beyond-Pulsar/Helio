@@ -52,6 +52,9 @@ pub fn host_kind(name: &str) -> String {
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
+/// The foliage G-buffer draw the placement node made, for the Foliage GBuffer node.
+struct PendingFoliageDraw(Option<FoliageGBufferPass>);
+
 /// The performance overlay's accumulator, made by whichever node needs it first.
 struct PerfState(Arc<Mutex<PerfOverlayShared>>);
 
@@ -418,11 +421,12 @@ fn register_geometry(registry: &mut NodeRegistry) {
         "Places foliage blades on the GPU. Must come before the GBuffer so subpass fusion holds.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(FoliagePlacePass::new_with_density(
-                c.device,
-                FoliageQuality::default(),
-                c.config.foliage_blades_per_m2,
-            )));
+            // The draw shares placement's buffers and its boxes run before the
+            // G-buffer: made here, the draw waits for the Foliage GBuffer node.
+            let (place, boxes, draw) = crate::foliage_passes(c.device, &c.config);
+            build.graph.add_pass(Box::new(place));
+            build.graph.add_pass(Box::new(boxes));
+            build.env.shared(|| PendingFoliageDraw(None)).0 = Some(draw);
             Ok(())
         },
     ));
@@ -487,22 +491,12 @@ fn register_geometry(registry: &mut NodeRegistry) {
         "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
         |build| {
             let c = ctx(build.env);
-            let (arena, tiles, visible, indirect, per_tile) = build
-                .graph
-                .find_pass::<FoliagePlacePass>()
-                .map(|place| {
-                    (
-                        Arc::clone(&place.blade_arena),
-                        Arc::clone(&place.tile_table),
-                        Arc::clone(&place.visible_blades),
-                        Arc::clone(&place.foliage_indirect),
-                        place.blades_per_tile(),
-                    )
-                })
+            let draw = build
+                .env
+                .shared_existing::<PendingFoliageDraw>()
+                .and_then(|pending| pending.0.take())
                 .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
-            build.graph.add_pass(Box::new(FoliageGBufferPass::new(
-                c.device, arena, tiles, visible, indirect, per_tile,
-            )));
+            build.graph.add_pass(Box::new(draw));
             Ok(())
         },
     ));
