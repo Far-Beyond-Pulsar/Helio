@@ -57,11 +57,7 @@ pub enum LightType {
 /// - `helio-pass-hlfs/shaders/hlfs_shade.wgsl`
 /// - `helio-pass-hlfs/shaders/hlfs_importance.wgsl`
 /// - `helio-pass-shadow-matrix/shaders/shadow_matrices.wgsl`
-///
-/// `helio-pass-radiance-cascades/shaders/rc_trace.wgsl` also declares a `GpuLight`,
-/// but it is dormant (bundled via `include_str!`, never compiled — it needs
-/// `EXPERIMENTAL_RAY_QUERY`) and its layout has already diverged. Reconcile it
-/// against this struct before that pass is revived.
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuLight {

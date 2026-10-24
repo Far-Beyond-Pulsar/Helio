@@ -28,6 +28,8 @@ pollster = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
+helio-pass-gi = { workspace = true }
+helio-pass-shadow-matrix = { workspace = true }
 helio-pass-sky = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
 helio-default-passes = { workspace = true }

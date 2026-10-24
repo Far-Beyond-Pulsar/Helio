@@ -13,7 +13,7 @@ use helio_default_passes::environment_join::{
 };
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let limits = helio::required_wgpu_limits(adapter.limits());
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

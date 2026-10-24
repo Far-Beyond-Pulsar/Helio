@@ -102,6 +102,8 @@ pub(crate) struct MaterialGpu {
     colour: [f32; 4],
     patches: [[f32; 4]; 3],
     links: [u32; 4],
+    /// x: transmission, y: emission (`MaterialAppearance`).
+    light: [f32; 4],
 }
 
 /// The shading table of `appearance` (linear colours; sRGB is public, so
@@ -123,6 +125,7 @@ pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; M
             colour: linear(m.colour),
             patches,
             links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
+            light: [clean(m.transmission), if m.emission.is_finite() { m.emission.clamp(0.0, 64.0) } else { 0.0 }, 0.0, 0.0],
         }
     });
     (materials, appearance.detail.map(clean))
@@ -215,10 +218,6 @@ pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
         s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
-    if !program.wgsl.contains("fn terrain_clearance") {
-        // No bound: every cell of the volume's extent is evaluated.
-        s.push_str("fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 { return 0; }\n");
-    }
     if !program.wgsl.contains("fn terrain_lean") {
         // No lean (`TerrainField::lean`).
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
@@ -234,7 +233,7 @@ pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool
 }
 
 /// Words of a node of `program`'s two-rate field (`TERRAIN_NODE_WORDS`;
-/// 0: it has none).
+/// 0 when the program does not define it).
 pub(crate) fn node_words(program: &TerrainProgram) -> u32 {
     program.wgsl.split("const TERRAIN_NODE_WORDS: u32 = ").nth(1).and_then(|r| r.split('u').next()).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
 }
@@ -255,10 +254,11 @@ pub(crate) const NODE_SCRATCH: u32 = HALO_GROUPS * 64;
 /// `field_height(face, i, j, level)` and `generation_column(face, i, j,
 /// level, display)` (height, surface word); with `generation`,
 /// `generation_tile_column(tile, ..)` for a column of a batch's tile,
-/// `generation_halo_column(tile, .., scratch)` for one near it and
-/// `generation_tile_nodes` (`tile_nodes_main`).
+/// `generation_halo_column(tile, .., scratch)` for one near it,
+/// `generation_tile_nodes` (`tile_nodes_main`) and node grids
+/// (`generation_grid_nodes`, `generation_grid_column`).
 ///
-/// A two-rate program (`terrain_node`, `docs/two-rate-field.md`) reads its
+/// The program (its two-rate column, `docs/two-rate-field.md`) reads its
 /// macro octaves through `generation_node_word(slot)`: the bilinear blend
 /// of the column's four nodes, `floor(sum w_c v_c / 256)` with the high
 /// and low bytes summed apart (`landform::lerp4`). Generation reads a
@@ -268,22 +268,8 @@ pub(crate) const NODE_SCRATCH: u32 = HALO_GROUPS * 64;
 /// private variable an entry point can reach at each invocation, and the
 /// hot kernels would clear them for nothing.
 fn column_source(program: &TerrainProgram, generation: bool) -> String {
-    let words = node_words(program);
+    assert!(node_words(program) > 0, "terrain programs define TERRAIN_NODE_WORDS (the two-rate column, `terrain`)");
     let mut s = String::new();
-    if words == 0 {
-        s.push_str(if program.wgsl.contains("fn terrain_column") {
-            "fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { return terrain_column(domain_point(face,i,j,level),level+u32(world.grid.w),display); }\n"
-        } else {
-            "fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { let h = field_height(face,i,j,level); return vec2<i32>(h, i32(terrain_surface(domain_point(face,i,j,level),level+u32(world.grid.w),h))); }\n"
-        });
-        s.push_str("fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 { return terrain_height(domain_point(face, i, j, level), level + u32(world.grid.w)); }\n");
-        if generation {
-            s.push_str("fn generation_tile_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> { return generation_column(face, i, j, level, display); }\n");
-            s.push_str("fn generation_halo_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool, scratch: u32) -> vec2<i32> { return generation_column(face, i, j, level, display); }\n");
-            s.push_str("fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lane: u32) {}\n");
-        }
-        return s;
-    }
     s.push_str(&format!(
         "const NODE_COLUMNS: i32 = {NODE_COLUMNS};
 const TILE_NODES: u32 = {TILE_NODES}u;
@@ -340,27 +326,31 @@ fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 {{
         "@group(0) @binding(25) var<storage, read_write> tile_nodes: array<i32>;
 // The first scratch node (`NODE_SCRATCH` of them).
 const NODE_SCRATCH_AT: u32 = {batch}u;
-// The column's first node's first word in `tile_nodes`, and its weights.
+// The column's first node's first word in `tile_nodes`, the nodes in a
+// row of its grid, and its weights.
 var<private> gen_node_at: u32 = 0u;
+var<private> gen_node_row: u32 = 0u;
 var<private> gen_node_w: vec4<i32> = vec4<i32>(0);
 
 fn generation_node_word(slot: u32) -> i32 {{
     let s = TERRAIN_NODE_WORDS;
     let a = gen_node_at + slot;
-    let v = vec4<i32>(tile_nodes[a], tile_nodes[a + s], tile_nodes[a + TILE_NODES * s], tile_nodes[a + (TILE_NODES + 1u) * s]);
+    let v = vec4<i32>(tile_nodes[a], tile_nodes[a + s], tile_nodes[a + gen_node_row * s], tile_nodes[a + (gen_node_row + 1u) * s]);
     let hi = (v >> vec4<u32>(8u)) * gen_node_w;
     let lo = (v & vec4<i32>(255)) * gen_node_w;
     return hi.x + hi.y + hi.z + hi.w + ((lo.x + lo.y + lo.z + lo.w) >> 8u);
 }}
 
-// The column's nodes from tile `tile`'s, when there: its first node within
-// the tile's ring.
-fn gen_tile_nodes(tile: u32, i: i32, j: i32) -> bool {{
+// The column's nodes from tile `tile`'s, when there: a column of the
+// tile's level, its first node within the tile's ring.
+fn gen_tile_nodes(tile: u32, i: i32, j: i32, level: u32) -> bool {{
     let job = tile_jobs[tile];
+    if job.level != level {{ return false; }}
     let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
     let n = (first - vec2<i32>(job.cx, job.cy) * 64) / NODE_COLUMNS + 1;
     if any(n < vec2<i32>(0)) || any(n >= vec2<i32>(i32(TILE_NODES) - 1)) {{ return false; }}
     gen_node_at = (tile * TILE_NODES * TILE_NODES + u32(n.y) * TILE_NODES + u32(n.x)) * TERRAIN_NODE_WORDS;
+    gen_node_row = TILE_NODES;
     gen_node_w = gen_node_weights(vec2<i32>(i, j) - first);
     return true;
 }}
@@ -375,14 +365,15 @@ fn gen_point_nodes(face: u32, i: i32, j: i32, level: u32, scratch: u32) {{
 
 // A column of tile `tile` (within its ring).
 fn generation_tile_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
-    if terrain_has_nodes(level + u32(world.grid.w)) {{ _ = gen_tile_nodes(tile, i, j); }}
+    if terrain_has_nodes(level + u32(world.grid.w)) {{ _ = gen_tile_nodes(tile, i, j, level); }}
     return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
 }}
 
-// A column near tile `tile`: its nodes from the tile's when there, else
-// its own four (scratch node `scratch`, one per lane).
+// A column near tile `tile` (or of another level: features read level-0
+// ground): its nodes from the tile's when there, else its own four
+// (scratch node `scratch`, one per lane).
 fn generation_halo_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool, scratch: u32) -> vec2<i32> {{
-    if terrain_has_nodes(level + u32(world.grid.w)) && !gen_tile_nodes(tile, i, j) {{ gen_point_nodes(face, i, j, level, scratch); }}
+    if terrain_has_nodes(level + u32(world.grid.w)) && !gen_tile_nodes(tile, i, j, level) {{ gen_point_nodes(face, i, j, level, scratch); }}
     return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
 }}
 
@@ -397,33 +388,39 @@ fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lan
     for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ tile_nodes[base + slot] = terrain_node_word(slot); }}
 }}
 
-// The material slope's height lattices (`tile_slopes_main`): ring `ring`
-// of nodes after the scratch ones, from node-aligned column `origin` of
-// `level` (`count`^2 of them, at most 5x5, in rows of TILE_NODES).
+// Node grids of a level: `side` x `side` nodes from node-aligned column
+// `origin`, node (x, y) at node slot `base + y row + x` of `tile_nodes`:
+// the material slopes' rings (`tile_slopes_main`: a ring a footprint of
+// the batch after the scratch nodes, at most 5x5 in rows of TILE_NODES)
+// and the features' candidate block jobs' level-0 node quads after the
+// rings (`feature_block_nodes_main`: 2x2 grids, `BLOCK_READS` a job).
 const LATTICE_AT: u32 = NODE_SCRATCH_AT + {scratch}u;
+const FEATURE_LATTICE_AT: u32 = LATTICE_AT + {rings}u;
 
-// Lane `lane`'s node of ring `ring`.
-fn generation_lattice_nodes(ring: u32, face: u32, origin: vec2<i32>, count: u32, level: u32, lane: u32) {{
-    let n = vec2<i32>(i32(lane % count), i32(lane / count));
-    if lane >= count * count || !terrain_has_nodes(level + u32(world.grid.w)) {{ return; }}
-    let at = origin + n * NODE_COLUMNS;
+// Node `n` of a grid.
+fn generation_grid_nodes(base: u32, row: u32, face: u32, origin: vec2<i32>, side: u32, level: u32, n: u32) {{
+    if n >= side * side || !terrain_has_nodes(level + u32(world.grid.w)) {{ return; }}
+    let c = vec2<u32>(n % side, n / side);
+    let at = origin + vec2<i32>(c) * NODE_COLUMNS;
     terrain_node(domain_point(face, at.x, at.y, level), level + u32(world.grid.w));
-    let base = (LATTICE_AT + ring * TILE_NODES * TILE_NODES + u32(n.y) * TILE_NODES + u32(n.x)) * TERRAIN_NODE_WORDS;
-    for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ tile_nodes[base + slot] = terrain_node_word(slot); }}
+    let slot = (base + c.y * row + c.x) * TERRAIN_NODE_WORDS;
+    for (var w = 0u; w < TERRAIN_NODE_WORDS; w++) {{ tile_nodes[slot + w] = terrain_node_word(w); }}
 }}
 
-// A column of ring `ring`'s lattice (within 64 columns of `origin`).
-fn generation_lattice_column(ring: u32, origin: vec2<i32>, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
+// A column of a grid (its first node and the one past it inside the grid).
+fn generation_grid_column(base: u32, row: u32, origin: vec2<i32>, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
     if terrain_has_nodes(level + u32(world.grid.w)) {{
         let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
-        let n = (first - origin) / NODE_COLUMNS;
-        gen_node_at = (LATTICE_AT + ring * TILE_NODES * TILE_NODES + u32(n.y) * TILE_NODES + u32(n.x)) * TERRAIN_NODE_WORDS;
+        let n = vec2<u32>((first - origin) / NODE_COLUMNS);
+        gen_node_at = (base + n.y * row + n.x) * TERRAIN_NODE_WORDS;
+        gen_node_row = row;
         gen_node_w = gen_node_weights(vec2<i32>(i, j) - first);
     }}
     return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
 }}
 ",
-        scratch = NODE_SCRATCH
+        scratch = NODE_SCRATCH,
+        rings = batch
     ));
     s
 }

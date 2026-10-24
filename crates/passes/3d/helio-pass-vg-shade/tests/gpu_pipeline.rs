@@ -19,7 +19,7 @@ struct Gpu {
 }
 
 fn gpu() -> Option<Gpu> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let mut adapter = None;
     for force_fallback_adapter in [false, true] {
         if let Ok(a) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

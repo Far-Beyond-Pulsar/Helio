@@ -8,9 +8,7 @@
 //!
 //! No sky atmosphere — the scene relies entirely on the interplay of the
 //! chandelier warm-white lights, the cool-coloured stained-glass fills, and
-//! a very dim stone-cold ambient to create a moody sacred atmosphere. The
-//! radiance cascades GI system bounces chandelier light deep into the side
-//! aisles and onto the vaulted ceiling.
+//! a very dim stone-cold ambient to create a moody sacred atmosphere.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -230,9 +228,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -778,7 +775,7 @@ impl ApplicationHandler for App {
             ball_prev_pos: ball_start,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
+            cam_yaw: 0.0,
             cam_pitch: -0.05,
             keys: HashSet::new(),
             cursor_grabbed: false,

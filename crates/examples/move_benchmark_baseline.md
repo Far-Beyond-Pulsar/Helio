@@ -19,7 +19,7 @@ with `objects`/`tris` in the `move_one` or `editor_resync` rows is a scaling bug
   move_benchmark --graph default --editor --no-ray-query --sizes 1000,4000,16000,32000 --modes ss --frames 10 --warmup 4 --segments 6
   move_benchmark --scene cathedral_large --frames 10 --warmup 4 --segments 6
   ```
-  (`--no-ray-query` only because lavapipe's compiler crashes on the radiance-cascades ray-query pipeline.)
+  (`--no-ray-query` only because lavapipe's compiler crashes on ray-query pipelines.)
 
 ## Findings
 

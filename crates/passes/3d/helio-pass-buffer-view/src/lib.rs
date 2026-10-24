@@ -16,9 +16,9 @@ use helio_core::graph::ResourceBuilder;
 use helio_core::{DebugViewDescriptor, PassContext, RenderPass, Result as HelioResult};
 
 /// Debug mode showing the scene depth.
-pub const DEPTH_VIEW: u32 = 40;
+pub const DEPTH_VIEW: u32 = 42;
 /// Debug mode showing the G-buffer normals.
-pub const NORMALS_VIEW: u32 = 41;
+pub const NORMALS_VIEW: u32 = 43;
 
 pub struct BufferViewPass {
     mode: u32,

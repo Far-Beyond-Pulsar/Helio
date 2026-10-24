@@ -57,8 +57,8 @@
 //! `--scale` is the renderer's internal render scale (the editor uses the
 //! `RendererConfig` default, 0.75). `--editor` renders in editor mode (light
 //! billboards, grid). `--tsr` switches FXAA for TSR. `--no-capture` skips PNGs.
-//! `--no-ray-query` drops ray queries; lavapipe, whose compiler crashes on the
-//! radiance-cascades ray-query pipeline, never gets them
+//! `--no-ray-query` drops ray queries; lavapipe, whose compiler crashes on
+//! ray-query pipelines, never gets them
 //! (`helio::usable_adapter_features`).
 //!
 //! No window or surface is created. On a machine without a GPU, Mesa's
@@ -455,7 +455,7 @@ fn spawn_light_billboards(world: &mut World) {
 
 async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgpu::AdapterInfo) {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,

@@ -6,6 +6,7 @@
 //! runtime data fields.
 
 use engine_class_derive::{component_events, engine_class};
+use super::VoxelFeatureSpawn;
 use helio_voxel_data::{
     VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal, VoxelStoredPayload,
 };
@@ -371,8 +372,12 @@ fn default_plane_size() -> f64 {
 ///   live in its settings component on the same entity (for the built-in
 ///   generator, [`VoxelTerrainLayersComponent`]), or in
 ///   `generator_parameters` for generators without one.
+/// - **Features**: what grows and lies on the ground (trees, bushes,
+///   shrubs, cacti, boulders, craters) and where, grown with the seed
+///   ([`VoxelFeatureSpawn`]).
 /// - **Environment**: the world's air. A preset derives the entity's
-///   `AtmosphereComponent` (the level's sky); `Custom` keeps it as
+///   `AtmosphereComponent` (the level's sky; its clouds stay as authored)
+///   and its `GlobalFogComponent` (a ground haze); `Custom` keeps both as
 ///   authored.
 /// - **Appearance**: the renderer's look of its materials.
 /// - **Editing**: whether it can be dug and built, and its edits: an
@@ -380,6 +385,7 @@ fn default_plane_size() -> f64 {
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("World", category_color = "#6FA86F")]
 #[category("Generation", category_color = "#D1A73F")]
+#[category("Features", category_color = "#7FAF5F")]
 #[category("Environment", category_color = "#6F9FD1")]
 #[category("Appearance", category_color = "#B07FD1")]
 #[category("Editing", category_color = "#D18F6F")]
@@ -441,6 +447,13 @@ pub struct VoxelTerrainComponent {
     /// settings component on the entity replaces them.
     #[serde(default)]
     pub generator_parameters: String,
+    /// What grows on the ground and lies on it, spawn by spawn from the
+    /// widest spacing to the narrowest: the engine's flora grown with the
+    /// seed in cells of the voxel size. Part of the ground: edits made
+    /// before a change to them are dropped.
+    #[serde(default)]
+    #[property(category = "Features")]
+    pub features: Vec<VoxelFeatureSpawn>,
 
     /// The world's air: a preset, or `Custom` for the entity's
     /// `AtmosphereComponent` as authored.
@@ -462,7 +475,8 @@ pub struct VoxelTerrainComponent {
     #[serde(default = "default_air_tint")]
     #[property(category = "Environment", label = "Sky tint")]
     pub air_tint: [f32; 3],
-    /// Haze and dust: the preset's aerosol scattering, times this.
+    /// Haze and dust: the preset's aerosol scattering and its ground haze,
+    /// times this.
     #[serde(default = "default_air_scale")]
     #[property(
         min = 0.0,
@@ -505,6 +519,7 @@ impl Default for VoxelTerrainComponent {
             generator: VoxelGeneratorRef::default(),
             seed: 0,
             generator_parameters: String::new(),
+            features: Vec::new(),
             air: VoxelAir::default(),
             air_density: default_air_scale(),
             air_tint: default_air_tint(),
@@ -560,6 +575,7 @@ impl Clone for VoxelTerrainComponent {
             generator: self.generator.clone(),
             seed: self.seed,
             generator_parameters: self.generator_parameters.clone(),
+            features: self.features.clone(),
             air: self.air,
             air_density: self.air_density,
             air_tint: self.air_tint,

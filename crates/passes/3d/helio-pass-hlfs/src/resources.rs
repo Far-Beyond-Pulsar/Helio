@@ -180,6 +180,8 @@ impl Targets {
 
 pub(crate) struct Fallbacks {
     pub empty_lights: wgpu::Buffer,
+    /// No GI probes: one pixel's word pair, which the composite ignores.
+    pub empty_gi: wgpu::Buffer,
     pub empty_shadow_matrices: wgpu::Buffer,
     pub black: Image,
     /// `black` as a one-layer array: the zero (unfiltered) glass transmittance.
@@ -301,6 +303,12 @@ impl Fallbacks {
             ..Default::default()
         });
         Self {
+            empty_gi: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS no GI"),
+                size: 8,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
             empty_lights: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("HLFS empty lights"),
                 size: 128,

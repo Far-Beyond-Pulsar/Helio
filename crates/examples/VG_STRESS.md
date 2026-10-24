@@ -36,8 +36,9 @@ tar involved (`vg_stress_prep/`, shared by `build.rs` and the example):
    Computer Graphics Laboratory) is printed when downloading and kept in
    `assets/vg_stress/CREDITS.md`.
 
-Set `HELIO_VG_STRESS_SKIP_PROVISION=1` to stop the build script provisioning
-(for example for `cargo check`). Delete `assets/vg_stress/meshes/prepared.json`
+Set `HELIO_VG_STRESS_SKIP_PROVISION=1` to stop the provisioning, at build time
+(for example for `cargo check`) and at run time (the museum opens with what is
+on disk: offline, or a download source unreachable). Delete `assets/vg_stress/meshes/prepared.json`
 to force re-conversion; delete `assets/vg_stress/source` to force re-download.
 
 ### Your own meshes

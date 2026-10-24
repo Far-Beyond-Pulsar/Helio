@@ -234,7 +234,7 @@ impl Renderer {
     /// off the cull-stats readback. Shared by the mono and XR render paths.
     ///
     /// `camera` supplies the post-process settings and the camera position used
-    /// for the RC volume bounds and debug-state tracking. It must have been
+    /// for debug-state tracking. It must have been
     /// written to the scene already (`update_camera` / `update_stereo_cameras`)
     /// and `scene.flush()` called before this runs.
     ///
@@ -390,6 +390,13 @@ impl Renderer {
                 transmission,
                 "Renderer",
             );
+        }
+        if let Some(instances) = self.ray_frame.instances(self.frame_count) {
+            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_INSTANCES), instances, "Renderer");
+        }
+        if let Some((vertices, indices)) = self.ray_frame.proxies(self.frame_count) {
+            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_VERTICES), vertices, "Renderer");
+            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_INDICES), indices, "Renderer");
         }
         // Every instance
         // implicitly uses `space_id = 0` (identity) until a real portal/

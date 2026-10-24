@@ -2,9 +2,26 @@
 //! No renderer-owned scene table or GPU readback is involved.
 //!
 //! A host adapter: it reads a CPU `World` through change cursors, so it lives
-//! with the frontend graphs. `helio_pass_hlfs` consumes only the TLAS and
-//! transmission rows the renderer publishes (Pulsar-Native#1066).
-use helio_core::{BlasGeometry, BlasManager, Movability, TlasInstanceInput, TlasManager};
+//! with the frontend graphs. Passes consume only what the renderer publishes
+//! of it ([`SceneDbRayTracing::frame`]): the TLAS, transmission rows
+//! (`helio_pass_hlfs`, Pulsar-Native#1066) and each instance's surface
+//! (`RayInstance`: the GI probes' mesh tracer shades its hits from them).
+//! With [`SceneDbRayTracing::with_virtual_geometry`], virtual-geometry
+//! instances are traced through their assets' proxies
+//! ([`crate::ray_proxies`]).
+//!
+//! Cut-outs (alpha-tested materials: leaves, fences) go in non-opaque, their
+//! rows flagged `RAY_INSTANCE_MASKED` with their material's row: a ray query
+//! that reads the rows tests each candidate's alpha
+//! (`helio_mats::vg_alpha`, the raster's test) and commits only where the
+//! surface is. A partial projection holds them; a full one
+//! ([`SceneDbRayTracing::new`], for consumers that take every candidate as
+//! glass or as opaque) still refuses them.
+use crate::ray_proxies::{Lookup, VgRayProxies, VgRayStats};
+use helio_core::{
+    BlasGeometry, BlasManager, Movability, RayInstance, TlasInstanceInput, TlasManager, RAY_INSTANCE_MASKED,
+    RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED,
+};
 use helio_pass_gbuffer::{
     MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent,
 };
@@ -67,6 +84,21 @@ impl CasterKey {
     }
 }
 
+/// A caster material, resolved once a build.
+#[derive(Clone, Copy)]
+struct MaterialRow {
+    generation: u32,
+    rgb: [f32; 3],
+    transmits: bool,
+    /// Whether the projection can represent it (opaque, explicitly
+    /// transmitting, or masked in a partial projection; no custom shader).
+    supported: bool,
+    /// `RAY_INSTANCE_MASKED` and `RAY_INSTANCE_TWO_SIDED` bits.
+    flags: u32,
+    base_color: [f32; 4],
+    emissive: [f32; 4],
+}
+
 fn casts_shadow(object: &StaticObjectComponent) -> bool {
     object.flags & helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW != 0
 }
@@ -85,8 +117,22 @@ pub struct SceneDbRayTracing {
     transmission: Option<wgpu::Buffer>,
     has_transmission: bool,
     transmission_rows: Vec<[f32; 4]>,
+    /// Each instance's surface (`RayInstance`), in TLAS order.
+    instances_buffer: Option<wgpu::Buffer>,
+    instance_rows: Vec<RayInstance>,
+    /// Whether objects the projection cannot represent are left out
+    /// ([`Self::partial`]) instead of failing the build.
+    partial: bool,
+    /// Objects left out, by the key they were left out with: their moves
+    /// change nothing.
+    skipped: HashMap<Entity, CasterKey>,
     geometry_ids: HashMap<(u64, bool), u64>,
+    /// BLAS identities of virtual-geometry proxies, by proxy key and
+    /// opacity.
+    proxy_ids: HashMap<(u64, bool), u64>,
     next_geometry_id: u64,
+    /// Virtual-geometry instances' proxies ([`Self::with_virtual_geometry`]).
+    vg: Option<VgRayProxies>,
     /// `None` until the first full build, and after any error or journal
     /// overflow: the next `prepare` then rebuilds from a full scan.
     cursors: Option<Cursors>,
@@ -96,10 +142,34 @@ pub struct SceneDbRayTracing {
     casters: Vec<(Entity, CasterKey)>,
     caster_slots: HashMap<Entity, usize>,
     changes: Vec<ComponentChange>,
+    /// Base colour textures' means: a hit's colour is its material's factor
+    /// times its texture's mean.
+    texture_means: crate::texture_means::TextureMeans,
 }
 impl SceneDbRayTracing {
+    /// The scene's shadow casters, all of them: an object the projection
+    /// cannot represent (masked or custom-shader materials, group or
+    /// coordinate-space visibility, non-triangle geometry families) fails
+    /// the build, so ray-traced shadows never silently miss a caster nor
+    /// take a cut-out for a solid card.
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self::with_partial(device, queue, false)
+    }
+
+    /// Every object the projection can represent, shadow caster
+    /// (`INSTANCE_FLAG_CASTS_SHADOW`) or not, cut-outs included (module
+    /// docs); the others (and geometry families it has no projection for:
+    /// foliage, voxel volumes, sectioned objects; virtual geometry without
+    /// [`Self::with_virtual_geometry`]) are left out. For consumers that
+    /// tolerate a missing object and alpha-test cut-outs, such as the GI
+    /// probes, whose rays then see past it.
+    pub fn partial(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self::with_partial(device, queue, true)
+    }
+
+    fn with_partial(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, partial: bool) -> Self {
         Self {
+            texture_means: crate::texture_means::TextureMeans::new(&device),
             blas: BlasManager::new(device.clone()),
             tlas: TlasManager::new(device.clone(), 1),
             device,
@@ -107,8 +177,14 @@ impl SceneDbRayTracing {
             transmission: None,
             has_transmission: false,
             transmission_rows: Vec::new(),
+            instances_buffer: None,
+            instance_rows: Vec::new(),
+            partial,
+            skipped: HashMap::new(),
             geometry_ids: HashMap::new(),
+            proxy_ids: HashMap::new(),
             next_geometry_id: 0,
+            vg: None,
             cursors: None,
             instances: Vec::new(),
             shadow_masks: Vec::new(),
@@ -116,6 +192,22 @@ impl SceneDbRayTracing {
             caster_slots: HashMap::new(),
             changes: Vec::new(),
         }
+    }
+
+    /// Traces virtual-geometry instances (static objects whose mesh is an
+    /// asset of `runtime`) through their assets' proxies instead of their
+    /// classic meshes ([`crate::ray_proxies`]). An instance whose proxy is
+    /// still building is left out (rays pass it); in a full projection
+    /// ([`Self::new`]) that fails the build until it is ready.
+    pub fn with_virtual_geometry(mut self, runtime: helio_vg_stream::VgRuntime) -> Self {
+        self.vg = Some(VgRayProxies::new(runtime));
+        self.cursors = None;
+        self
+    }
+
+    /// The virtual-geometry proxies' counters (zero without them).
+    pub fn vg_stats(&self) -> VgRayStats {
+        self.vg.as_ref().map_or_else(VgRayStats::default, VgRayProxies::stats)
     }
 
     /// Call after flushing the World GPU mirror and before rendering. The World
@@ -134,6 +226,14 @@ impl SceneDbRayTracing {
     /// mesh entity to skip that hash: its BLAS is then built once and reused
     /// until SceneDB reallocates or replaces the mesh's geometry range.
     pub fn prepare(&mut self, world: &World) -> helio_core::Result<&wgpu::Tlas> {
+        // Texture means that arrived change the instances' colours: rebuild.
+        if self.texture_means.collect() {
+            self.cursors = None;
+        }
+        // Proxies that arrived or went change the instances: rebuild.
+        if self.vg.as_mut().is_some_and(|vg| vg.poll(&self.device, &self.queue)) {
+            self.cursors = None;
+        }
         let result = match self.update(world) {
             Ok(true) => Ok(()),
             Ok(false) => self.build(world),
@@ -142,10 +242,12 @@ impl SceneDbRayTracing {
         if let Err(error) = result {
             self.blas.clear();
             self.geometry_ids.clear();
+            self.proxy_ids.clear();
             self.tlas.invalidate();
             self.cursors = None;
             return Err(error);
         }
+        self.texture_means.dispatch(&self.device, &self.queue);
         Ok(self.tlas.tlas().expect("successful TLAS build"))
     }
 
@@ -160,6 +262,27 @@ impl SceneDbRayTracing {
         self.tlas.tlas()
     }
 
+    /// The frame to publish (`Renderer::set_ray_tracing_frame`): the TLAS
+    /// and its rows, valid after a successful preparation.
+    pub fn frame(&self) -> helio_core::RayFrame<'_> {
+        let tlas = self.tlas();
+        helio_core::RayFrame {
+            tlas,
+            transmission: tlas.and(self.transmission()),
+            instances: tlas.and(self.instances_buffer.as_ref()),
+            proxies: tlas
+                .and(self.vg.as_ref())
+                .and_then(VgRayProxies::buffers)
+                .map(|(vertices, indices)| helio_core::RayProxies { vertices, indices }),
+        }
+    }
+
+    /// Whether `object` is projected: a shadow caster, or any object in a
+    /// partial projection.
+    fn projects(&self, object: &StaticObjectComponent) -> bool {
+        self.partial || casts_shadow(object)
+    }
+
     /// Applies journaled changes to the previous build. `Ok(false)` means
     /// the changes need a full rebuild (or there is nothing to update yet).
     fn update(&mut self, world: &World) -> helio_core::Result<bool> {
@@ -169,7 +292,9 @@ impl SceneDbRayTracing {
         if self.tlas.tlas().is_none() {
             return Ok(false);
         }
-        reject_unsupported_geometry(world)?;
+        if !self.partial {
+            reject_unsupported_geometry(world, self.vg.is_some())?;
+        }
         self.changes.clear();
         for cursor in &mut cursors.others {
             if world.read_changes(cursor, &mut self.changes) != ChangeRead::Complete
@@ -193,9 +318,12 @@ impl SceneDbRayTracing {
             match (slot, object) {
                 // A non-caster changed and still is not one.
                 (None, None) => {}
-                (None, Some(object)) if !casts_shadow(object) => {}
+                (None, Some(object)) if !self.projects(object) => {}
+                // One left out moved, or went.
+                (None, object)
+                    if self.skipped.get(&change.entity).is_some_and(|key| object.is_none_or(|o| CasterKey::of(o) == *key)) => {}
                 (Some(slot), Some(object))
-                    if casts_shadow(object) && CasterKey::of(object) == self.casters[slot].1 =>
+                    if self.projects(object) && CasterKey::of(object) == self.casters[slot].1 =>
                 {
                     let transform = tlas_transform(object);
                     if self.instances[slot].transform != transform {
@@ -228,8 +356,11 @@ impl SceneDbRayTracing {
         self.cursors = Some(Cursors::open(world));
         self.casters.clear();
         self.caster_slots.clear();
+        self.skipped.clear();
         let error = rt_error;
-        reject_unsupported_geometry(world)?;
+        if !self.partial {
+            reject_unsupported_geometry(world, self.vg.is_some())?;
+        }
         let store = world
             .gpu_mirror()
             .ok_or_else(|| error("GPU mirror is required"))?
@@ -251,59 +382,89 @@ impl SceneDbRayTracing {
                 label: Some("SceneDB RT acceleration"),
             });
         let mut live = HashSet::new();
+        let mut proxies_used = HashSet::new();
         let mut mesh_ranges = HashMap::new();
         let mut material_rows = HashMap::new();
         let mut instances = Vec::new();
         let mut transmission_rows = Vec::<[f32; 4]>::new();
+        let mut instance_rows = Vec::<RayInstance>::new();
         let mut has_transmission = false;
         for (object_entity, (object,)) in world.query::<(&StaticObjectComponent,)>() {
-            if !casts_shadow(object) {
+            if !self.projects(object) {
                 continue;
+            }
+            // An object the projection cannot represent: left out of a
+            // partial projection, else the build fails.
+            macro_rules! unsupported {
+                ($message:expr) => {{
+                    if self.partial {
+                        self.skipped.insert(object_entity, CasterKey::of(object));
+                        continue;
+                    }
+                    return Err(error($message));
+                }};
             }
             if world
                 .get::<RenderGroupComponent>(object_entity)
                 .is_some_and(|group| group.group_mask != 0)
             {
-                return Err(error("group visibility needs an explicit RT projection"));
+                unsupported!("group visibility needs an explicit RT projection");
             }
             if helio_pass_object_batch::coordinate_space(object.flags) != 0 {
-                return Err(error("non-world coordinate-space casters are unsupported"));
+                unsupported!("non-world coordinate-space casters are unsupported");
             }
             // Resolve each material once per frame; many objects share one.
-            let (material_generation, rgb, transmits) = match material_rows.get(&object.material_slot) {
+            let row = match material_rows.get(&object.material_slot) {
                 Some(row) => *row,
                 None => {
                     let (material_entity, material) = materials
                         .get(&object.material_slot)
                         .ok_or_else(|| error("missing caster material"))?;
                     let transmission = world.get::<RayTransmission>(*material_entity);
-                    if material.flags & (helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_HAS_CUSTOM_SHADER)
-                        != 0
-                        || (material.flags & helio_mats::FLAG_ALPHA_BLEND != 0 && transmission.is_none())
-                    {
-                        return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
-                    }
+                    let masked = material.flags & helio_mats::FLAG_ALPHA_TEST != 0;
+                    let supported = material.flags & helio_mats::FLAG_HAS_CUSTOM_SHADER == 0
+                        && if masked {
+                            self.partial && transmission.is_none()
+                        } else {
+                            material.flags & helio_mats::FLAG_ALPHA_BLEND == 0 || transmission.is_some()
+                        };
                     let rgb = transmission.map_or([0.0; 3], |value| value.0);
                     if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
                         return Err(error("transmission must be finite linear RGB in [0, 1]"));
                     }
-                    let row = (
-                        material_entity.generation().wrapping_add(1),
+                    // The factor times the base colour texture's mean
+                    // (white until measured).
+                    let texture = (material.tex_base_color != helio_mats::GpuMaterial::NO_TEXTURE)
+                        .then(|| world.gpu_mirror().and_then(|m| m.texture_store()))
+                        .flatten()
+                        .and_then(|store| store.read().ok()?.texture(material.tex_base_color).cloned());
+                    let mean = texture.and_then(|t| self.texture_means.mean(&t)).unwrap_or([1.0; 3]);
+                    let [r, g, b, _] = material.base_color;
+                    let [r, g, b] = [r * mean[0], g * mean[1], b * mean[2]];
+                    let [er, eg, eb, strength] = material.emissive;
+                    let two_sided = material.flags & helio_mats::FLAG_DOUBLE_SIDED != 0;
+                    let row = MaterialRow {
+                        generation: material_entity.generation().wrapping_add(1),
                         rgb,
-                        transmission.is_some(),
-                    );
+                        transmits: transmission.is_some(),
+                        supported,
+                        flags: if masked { RAY_INSTANCE_MASKED } else { 0 } | if two_sided { RAY_INSTANCE_TWO_SIDED } else { 0 },
+                        base_color: [r, g, b, 1.0],
+                        emissive: [er * strength, eg * strength, eb * strength, 0.0],
+                    };
                     material_rows.insert(object.material_slot, row);
                     row
                 }
             };
-            if material_generation != object.material_generation {
+            if !row.supported || object.graph_hash() != 0 {
+                unsupported!("custom-shader casters, transparent casters without explicit RayTransmission, and masked casters (in a full projection, or transmitting) are unsupported");
+            }
+            if row.generation != object.material_generation {
                 return Err(error("stale caster material identity"));
             }
-            if object.graph_hash() != 0 {
-                return Err(error("masked, custom-shader, and transparent casters without explicit RayTransmission are unsupported"));
-            }
-            has_transmission |= transmits;
-            transmission_rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
+            let (rgb, transmits) = (row.rgb, row.transmits);
+            // Glass and cut-outs are candidates; everything else is opaque.
+            let opaque = rgb.iter().all(|v| *v == 0.0) && row.flags & RAY_INSTANCE_MASKED == 0;
             let (entity, mesh) = meshes
                 .get(&object.mesh_slot)
                 .ok_or_else(|| error("missing caster mesh"))?;
@@ -311,28 +472,19 @@ impl SceneDbRayTracing {
                 return Err(error("stale caster mesh identity"));
             }
             let mesh_identity = ((entity.generation() as u64) << 32) | entity.index() as u64;
-            let opaque = rgb.iter().all(|v| *v == 0.0);
-            // A mesh can be instanced with both opaque and transmitting materials.
-            // Allocate separate BLAS identities without truncating entity generations.
-            let id = if let Some(id) = self.geometry_ids.get(&(mesh_identity, opaque)) {
-                *id
-            } else {
-                let id = self.next_geometry_id;
-                self.next_geometry_id = id
-                    .checked_add(1)
-                    .ok_or_else(|| error("BLAS identity exhausted"))?;
-                self.geometry_ids.insert((mesh_identity, opaque), id);
-                id
-            };
-            // Resolve each geometry once per frame; many objects share a mesh.
-            let (vertex_range, index_range) = match mesh_ranges.get(&id) {
+            // Resolve each mesh once per frame; many objects share one.
+            let (vertex_range, index_range) = match mesh_ranges.get(&mesh_identity) {
                 Some(ranges) => *ranges,
-                None => (
-                    MeshComponent::vertices_gpu_handle(store, entity.index())
-                        .ok_or_else(|| error("missing mirrored vertices"))?,
-                    MeshComponent::indices_gpu_handle(store, entity.index())
-                        .ok_or_else(|| error("missing mirrored indices"))?,
-                ),
+                None => {
+                    let ranges = (
+                        MeshComponent::vertices_gpu_handle(store, entity.index())
+                            .ok_or_else(|| error("missing mirrored vertices"))?,
+                        MeshComponent::indices_gpu_handle(store, entity.index())
+                            .ok_or_else(|| error("missing mirrored indices"))?,
+                    );
+                    mesh_ranges.insert(mesh_identity, ranges);
+                    ranges
+                }
             };
             if object.index_count != index_range.count
                 || object.first_index != index_range.offset
@@ -340,57 +492,126 @@ impl SceneDbRayTracing {
             {
                 return Err(error("caster draw range differs from current mesh; refresh the StaticObjectComponent"));
             }
-            if live.insert(id) {
-                mesh_ranges.insert(id, (vertex_range, index_range));
-                if vertex_range.count as usize != mesh.vertices.len()
-                    || index_range.count as usize != mesh.indices.len()
-                {
-                    return Err(error(
-                        "mesh mirror is not current; flush SceneDB before RT preparation",
-                    ));
+            // A virtual-geometry asset: traced through its proxy, whatever
+            // its classic mesh is (a fallback or a placeholder).
+            let lookup = match self.vg.as_mut() {
+                Some(vg) => vg.lookup((vertex_range.offset, vertex_range.count)),
+                None => Lookup::Classic,
+            };
+            let (id, first_index, base_vertex, flags) = match lookup {
+                Lookup::Pending => unsupported!("virtual geometry whose proxy is not built yet"),
+                Lookup::Proxy(..) if transmits => unsupported!("transmitting virtual geometry"),
+                Lookup::Proxy(key, range) => {
+                    let id = match self.proxy_ids.get(&(key, opaque)) {
+                        Some(id) => *id,
+                        None => {
+                            let id = self.next_geometry_id;
+                            self.next_geometry_id = id.checked_add(1).ok_or_else(|| error("BLAS identity exhausted"))?;
+                            self.proxy_ids.insert((key, opaque), id);
+                            id
+                        }
+                    };
+                    proxies_used.insert(key);
+                    if live.insert(id) {
+                        let (vertices, proxy_indices) =
+                            self.vg.as_ref().and_then(VgRayProxies::buffers).ok_or_else(|| error("missing proxy pool"))?;
+                        self.blas
+                            .build_from_buffers_with_opacity(
+                                id,
+                                &mut encoder,
+                                BlasGeometry {
+                                    revision: 0,
+                                    vertices,
+                                    first_vertex: range.first_vertex,
+                                    vertex_count: range.vertex_count,
+                                    vertex_stride: helio_core::RAY_PROXY_VERTEX_BYTES,
+                                    indices: Some(proxy_indices),
+                                    first_index: range.first_index,
+                                    index_count: range.index_count,
+                                },
+                                opaque,
+                            )
+                            .map_err(|e| error(&e.to_string()))?;
+                    }
+                    (id, range.first_index, range.first_vertex, RAY_INSTANCE_PROXY)
                 }
-                // A mesh without `Movability` keeps content-based invalidation
-                // for in-place edits. A mesh that promises not to deform is
-                // never re-read: its BLAS key (buffer, ranges, opacity) still
-                // rebuilds it when SceneDB moves or replaces the allocation.
-                let revision = if world
-                    .get::<Movability>(*entity)
-                    .is_none_or(|movability| movability.can_deform())
-                {
-                    // Streaming hash's vectorized bulk path for large meshes.
-                    let mut hash = twox_hash::XxHash3_64::default();
-                    hash.write(bytemuck::cast_slice(&mesh.vertices));
-                    hash.write(bytemuck::cast_slice(&mesh.indices));
-                    hash.finish()
-                } else {
-                    0
-                };
-                self.blas
-                    .build_from_buffers_with_opacity(
-                        id,
-                        &mut encoder,
-                        BlasGeometry {
-                            revision,
-                            vertices: &vertices
-                                .as_ref()
-                                .ok_or_else(|| error("missing vertex pool"))?
-                                .buffer,
-                            first_vertex: vertex_range.offset,
-                            vertex_count: vertex_range.count,
-                            vertex_stride: std::mem::size_of::<helio_core::PackedVertex>() as u64,
-                            indices: Some(
-                                &indices
-                                    .as_ref()
-                                    .ok_or_else(|| error("missing index pool"))?
-                                    .buffer,
-                            ),
-                            first_index: index_range.offset,
-                            index_count: index_range.count,
-                        },
-                        opaque,
-                    )
-                    .map_err(|e| error(&e.to_string()))?;
-            }
+                Lookup::Classic => {
+                    // A mesh can be instanced with both opaque and non-opaque materials.
+                    // Allocate separate BLAS identities without truncating entity generations.
+                    let id = if let Some(id) = self.geometry_ids.get(&(mesh_identity, opaque)) {
+                        *id
+                    } else {
+                        let id = self.next_geometry_id;
+                        self.next_geometry_id = id
+                            .checked_add(1)
+                            .ok_or_else(|| error("BLAS identity exhausted"))?;
+                        self.geometry_ids.insert((mesh_identity, opaque), id);
+                        id
+                    };
+                    if live.insert(id) {
+                        if vertex_range.count as usize != mesh.vertices.len()
+                            || index_range.count as usize != mesh.indices.len()
+                        {
+                            return Err(error(
+                                "mesh mirror is not current; flush SceneDB before RT preparation",
+                            ));
+                        }
+                        // A mesh without `Movability` keeps content-based invalidation
+                        // for in-place edits. A mesh that promises not to deform is
+                        // never re-read: its BLAS key (buffer, ranges, opacity) still
+                        // rebuilds it when SceneDB moves or replaces the allocation.
+                        let revision = if world
+                            .get::<Movability>(*entity)
+                            .is_none_or(|movability| movability.can_deform())
+                        {
+                            // Streaming hash's vectorized bulk path for large meshes.
+                            let mut hash = twox_hash::XxHash3_64::default();
+                            hash.write(bytemuck::cast_slice(&mesh.vertices));
+                            hash.write(bytemuck::cast_slice(&mesh.indices));
+                            hash.finish()
+                        } else {
+                            0
+                        };
+                        self.blas
+                            .build_from_buffers_with_opacity(
+                                id,
+                                &mut encoder,
+                                BlasGeometry {
+                                    revision,
+                                    vertices: &vertices
+                                        .as_ref()
+                                        .ok_or_else(|| error("missing vertex pool"))?
+                                        .buffer,
+                                    first_vertex: vertex_range.offset,
+                                    vertex_count: vertex_range.count,
+                                    vertex_stride: std::mem::size_of::<helio_core::PackedVertex>() as u64,
+                                    indices: Some(
+                                        &indices
+                                            .as_ref()
+                                            .ok_or_else(|| error("missing index pool"))?
+                                            .buffer,
+                                    ),
+                                    first_index: index_range.offset,
+                                    index_count: index_range.count,
+                                },
+                                opaque,
+                            )
+                            .map_err(|e| error(&e.to_string()))?;
+                    }
+                    (id, index_range.offset, vertex_range.offset, 0)
+                }
+            };
+            has_transmission |= transmits;
+            transmission_rows.push([rgb[0], rgb[1], rgb[2], 0.0]);
+            instance_rows.push(RayInstance {
+                first_index,
+                base_vertex,
+                flags: flags | row.flags,
+                material: object.material_slot,
+                base_color: row.base_color,
+                emissive: row.emissive,
+                transmission: [rgb[0], rgb[1], rgb[2], 0.0],
+            });
             self.caster_slots.insert(object_entity, self.casters.len());
             self.casters.push((object_entity, CasterKey::of(object)));
             instances.push(TlasInstanceInput {
@@ -398,6 +619,10 @@ impl SceneDbRayTracing {
                 transform: tlas_transform(object),
             });
         }
+        if let Some(vg) = self.vg.as_mut() {
+            vg.retain(&proxies_used);
+        }
+        self.proxy_ids.retain(|_, id| live.contains(id));
         self.blas.retain(|id| live.contains(&id));
         self.geometry_ids.retain(|_, id| live.contains(id));
         self.shadow_masks = self.casters.iter().map(|(_,key)| if key.flags & helio_pass_object_batch::INSTANCE_FLAG_MOVABLE != 0 {2} else {1}).collect();
@@ -433,6 +658,21 @@ impl SceneDbRayTracing {
             self.transmission_rows.clear();
         }
         self.has_transmission = has_transmission;
+        // The instances' surfaces, a row each (at least one: a binding).
+        let size = (instance_rows.len().max(1) * std::mem::size_of::<RayInstance>()) as u64;
+        if self.instances_buffer.as_ref().is_none_or(|buffer| buffer.size() < size) {
+            self.instances_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("SceneDB RT instance surfaces"),
+                size: size.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.instance_rows.clear();
+        }
+        if self.instance_rows != instance_rows && !instance_rows.is_empty() {
+            self.queue.write_buffer(self.instances_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&instance_rows));
+        }
+        self.instance_rows = instance_rows;
         self.instances = instances;
         self.queue.submit([encoder.finish()]);
         Ok(())
@@ -445,7 +685,8 @@ fn rt_error(message: &str) -> helio_core::Error {
 
 /// These geometry families need their own explicit projection. Never
 /// silently omit known non-triangle or multi-material scene content.
-fn reject_unsupported_geometry(world: &World) -> helio_core::Result<()> {
+/// `virtual_geometry`: VG instances are projected through proxies.
+fn reject_unsupported_geometry(world: &World, virtual_geometry: bool) -> helio_core::Result<()> {
     let store = world
         .gpu_mirror()
         .ok_or_else(|| rt_error("GPU mirror is required"))?
@@ -456,6 +697,9 @@ fn reject_unsupported_geometry(world: &World) -> helio_core::Result<()> {
         "voxel_volumes",
         "vg_instances",
     ] {
+        if virtual_geometry && name == "vg_instances" {
+            continue;
+        }
         if store
             .resolve_buffer_handle(helio_core::BufferKey::of(name))
             .is_some()

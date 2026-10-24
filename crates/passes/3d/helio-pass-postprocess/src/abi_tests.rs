@@ -7,7 +7,7 @@ use wgpu::util::DeviceExt;
 fn gpu() -> (wgpu::Device, wgpu::Queue) {
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&Default::default())
             .await
@@ -148,11 +148,11 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     // the reference every property is compared against.
     let reference = resolve_mask(PostProcessProperty::NONE).0;
 
-    // The bytes of the removed chromatic aberration and lens vignette stay
+    // The bytes of the removed lens vignette and local exposure's pad stay
     // reserved: no property may write them.
-    use std::mem::{offset_of as off, size_of as sz};
+    use std::mem::offset_of as off;
     let reserved = [
-        off!(GpuPostProcessUniforms, reserved_ca)..off!(GpuPostProcessUniforms, reserved_ca) + sz::<[f32; 4]>(),
+        off!(GpuPostProcessUniforms, pad_local_exposure)..off!(GpuPostProcessUniforms, pad_local_exposure) + 4,
         off!(GpuPostProcessUniforms, reserved_lens_vignette)..off!(GpuPostProcessUniforms, reserved_lens_vignette) + 4,
     ];
     for property in 0..PostProcessProperty::COUNT {
@@ -170,7 +170,7 @@ fn resolver_matches_the_rust_blender_property_by_property() {
 
     // Named properties land on their fields: only those bytes change.
     use std::mem::{offset_of, size_of};
-    let fields: [(usize, usize, usize); 8] = [
+    let fields: [(usize, usize, usize); 11] = [
         (PostProcessProperty::BLOOM_TINT, offset_of!(GpuPostProcessUniforms, bloom_tint), 12),
         (PostProcessProperty::MOTION_BLUR_ENABLED, offset_of!(GpuPostProcessUniforms, motion_blur_enabled), 4),
         (PostProcessProperty::BLEND_WEIGHT_EXPOSURE, offset_of!(GpuPostProcessUniforms, blend_weight_exposure), 4),
@@ -179,6 +179,9 @@ fn resolver_matches_the_rust_blender_property_by_property() {
         (PostProcessProperty::LUT_PLATFORM, offset_of!(GpuPostProcessUniforms, lut_platform), 4),
         (PostProcessProperty::LENS_ENABLED, offset_of!(GpuPostProcessUniforms, lens_enabled), 4),
         (PostProcessProperty::LENS_RESPONSE_TIME, offset_of!(GpuPostProcessUniforms, lens_response_time), 4),
+        (PostProcessProperty::LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST, offset_of!(GpuPostProcessUniforms, local_exposure_highlight_contrast), 4),
+        (PostProcessProperty::LOCAL_EXPOSURE_SHADOW_CONTRAST, offset_of!(GpuPostProcessUniforms, local_exposure_shadow_contrast), 4),
+        (PostProcessProperty::LOCAL_EXPOSURE_DETAIL_STRENGTH, offset_of!(GpuPostProcessUniforms, local_exposure_detail_strength), 4),
     ];
     for (property, offset, len) in fields {
         let (gpu, _) = resolve(property);
@@ -192,6 +195,7 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     assert_eq!(size_of::<GpuPostProcessUniforms>(), 528);
     assert_eq!(offset_of!(GpuPostProcessUniforms, fog_enabled), 272);
     assert_eq!(offset_of!(GpuPostProcessUniforms, lens_enabled), 432);
+    assert_eq!(offset_of!(GpuPostProcessUniforms, local_exposure_highlight_contrast), 192);
 }
 
 /// The uber shader and the other pipelines build against the same layout.

@@ -13,7 +13,7 @@ const PORTABLE_SAMPLED_TEXTURE_LIMIT: u32 = 16;
 #[test]
 fn default_graph_renders_on_a_native_non_bindless_device_at_the_16_texture_boundary() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: limited native default graph");
             return;
@@ -46,7 +46,7 @@ fn default_graph_renders_on_a_native_non_bindless_device_at_the_16_texture_bound
 #[test]
 fn default_graph_retains_the_bindless_material_tier_when_supported() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: bindless native default graph");
             return;
@@ -76,7 +76,7 @@ fn default_graph_retains_the_bindless_material_tier_when_supported() {
 #[test]
 fn budgeted_shadows_render_hundreds_of_requests_across_frames() {
     pollster::block_on(async {
-        let instance=wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance=wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter=request_test_adapter(&instance).await.expect("GPU required for shadow integration");
         let features=wgpu::Features::INDIRECT_FIRST_INSTANCE | BINDLESS_MATERIAL_FEATURES;
         let limits=required_wgpu_limits(adapter.limits());

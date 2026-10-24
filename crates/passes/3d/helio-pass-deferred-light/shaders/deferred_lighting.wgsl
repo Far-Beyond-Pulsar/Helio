@@ -1,12 +1,13 @@
 //!use helio_prelude
 //!use pbr_eval
 //!use atmosphere
+//!use atmosphere_sky_table
 
 //! Deferred lighting pass.
 //!
 //! Runs as a fullscreen triangle (no vertex buffer) over the G-buffer written
 //! by the gbuffer pass.  Performs the full Cook-Torrance PBR evaluation,
-//! PCF shadow sampling, Radiance-Cascades GI, environment IBL and tonemapping
+//! PCF shadow sampling, GI probes, environment IBL and tonemapping
 //! in a single screen-space draw — O(pixels) instead of O(pixels × lights).
 //!
 //! Feature override constants injected by PipelineCache:
@@ -27,25 +28,15 @@ struct Globals {
     light_count:       u32,
     ambient_intensity: f32,
     ambient_color:     vec4<f32>,
-    rc_world_min:      vec4<f32>,
-    rc_world_max:      vec4<f32>,
     csm_splits:        vec4<f32>,
     debug_mode:        u32,
-    // 1 if a real HLFS-produced radiance-cascade texture is bound this frame,
-    // 0 if it fell back to a 1x1 black dummy (FXAA/simple/default pipelines,
-    // which never run the HLFS inject/propagate passes that write rc_cascade0).
-    // rc_world_min/max are always a non-degenerate camera-centred volume
-    // regardless of pipeline, so they can't be used to detect this — has_rc_gi
-    // is the real signal, checked in sample_rc_irradiance() before doing any
-    // of its ~128 texture loads.
-    has_rc_gi:         u32,
     num_tiles_x:       u32,
     // Number of entries in reflection_captures. Zero skips capture blending
     // entirely and falls through to the skylight cubemap (layer 0).
     reflection_capture_count: u32,
     // 0 where the target does not support reflections (Apple platforms). The
     // cube array, SSR and planar composites are all skipped, leaving indirect
-    // specular at zero — direct light, ambient and RC GI still apply. SsrPass
+    // specular at zero — direct light and ambient still apply. SsrPass
     // and PlanarReflectionPass are not in the graph at all on those targets.
     enable_reflections: u32,
     // 0 disables the environment-cubemap indirect specular term specifically.
@@ -55,6 +46,7 @@ struct Globals {
     enable_env_reflections: u32,
     measured_lighting_ms: f32,
     pixel_count: u32,
+    _pad_0: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -269,7 +261,11 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 @group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
 // Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, numeric surface_flags
 @group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
-@group(1) @binding(10) var directional_visibility: texture_2d<f32>;
+// The sun's visibility at each pixel (helio-pass-sky's `sun_visibility`: the
+// clouds' shadow times the voxel terrain's `directional_visibility`), x the
+// visibility and yzw the sun's direction it holds for; zero where none is
+// published.
+@group(1) @binding(10) var sun_visibility: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -281,7 +277,6 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 // skylight fallback for surfaces no capture reaches.
 @group(2) @binding(3) var env_cube:       texture_cube_array<f32>;
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
-@group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
 @group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
 @group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
@@ -331,6 +326,29 @@ const MAX_LIGHTS_PER_TILE: u32 = 64u;
 const PORTAL_MAX_LIGHTS: u32 = 256u;
 @group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
 @group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
+// The voxel terrain's shadows of local lights (its denoiser's): three words
+// a pixel (rows of the frame): the tile slots of up to four lights it
+// tracks (a byte each, 0xff none), their visibility (a byte each), and for
+// the other slots (the first 32) bit i whether the pixel sees the tile
+// list's light i. One word (or none past its end): every light seen.
+@group(3) @binding(2) var<storage, read> local_visibility: array<u32>;
+
+// How much of tile slot `slot`'s light the terrain lets reach the pixel
+// whose words start at `at`.
+fn terrain_light_visibility(at: u32, slot: u32) -> f32 {
+    if arrayLength(&local_visibility) <= 3u || at + 2u >= arrayLength(&local_visibility) { return 1.0; }
+    let tracked = local_visibility[at];
+    for (var k = 0u; k < 4u; k++) {
+        if ((tracked >> (8u * k)) & 0xffu) == slot {
+            return f32((local_visibility[at + 1u] >> (8u * k)) & 0xffu) / 255.0;
+        }
+    }
+    return f32((local_visibility[at + 2u] >> slot) & 1u);
+}
+// The GI probes' irradiance / pi a pixel (rows of the frame, helio-pass-gi's
+// `gi_resolve`): rgb and how much the probes hold the point, half floats.
+// One entry (none held): no GI pass.
+@group(3) @binding(3) var<storage, read> gi_irradiance: array<vec2<u32>>;
 // cluster bindings removed - GPU-driven architecture
 
 // Cluster constants removed - GPU-driven architecture
@@ -860,29 +878,14 @@ fn sample_reflection_environment(P: vec3<f32>, R: vec3<f32>, lod: f32) -> vec3<f
     return accum;
 }
 
-// Evaluate one direct light with the full Cook-Torrance BRDF.
-// `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
-// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
-// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
-// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
-// transmission through the subsurface, tinted by subsurface_color.
-fn pbr_direct_light(
-    light:     GpuLight,
-    world_pos: vec3<f32>,
-    N:         vec3<f32>,
-    V:         vec3<f32>,
-    F0:        vec3<f32>,
-    albedo:    vec3<f32>,
-    roughness: f32,
-    metallic:  f32,
-    sf:        f32,
-    is_anisotropic: bool,
-    T:         vec3<f32>,
-    ax:        f32,
-    ay:        f32,
-    has_subsurface: bool,
-    subsurface_color: vec3<f32>,
-) -> vec3<f32> {
+// A light's direction from `world_pos` (toward it) and its radiance there
+// (none past its range).
+struct Incidence {
+    L: vec3<f32>,
+    radiance: vec3<f32>,
+}
+
+fn light_incidence(light: GpuLight, world_pos: vec3<f32>) -> Incidence {
     var L:        vec3<f32>;
     var radiance: vec3<f32>;
 
@@ -895,7 +898,7 @@ fn pbr_direct_light(
     } else {  // Point or spot light
         let to_light = light.position_range.xyz - world_pos;
         let dist     = length(to_light);
-        if dist > light.position_range.w { return vec3<f32>(0.0); }
+        if dist > light.position_range.w { return Incidence(to_light / max(dist, 1e-6), vec3<f32>(0.0)); }
         L = to_light / dist;
         var atten = 1.0 / (dist * dist + 0.0001);
         let normalized_dist = dist / light.position_range.w;
@@ -948,6 +951,36 @@ fn pbr_direct_light(
         radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
     }
 
+    return Incidence(L, radiance);
+}
+
+// Evaluate one direct light with the full Cook-Torrance BRDF.
+// `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
+// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
+// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
+// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
+// transmission through the subsurface, tinted by subsurface_color.
+fn pbr_direct_light(
+    light:     GpuLight,
+    world_pos: vec3<f32>,
+    N:         vec3<f32>,
+    V:         vec3<f32>,
+    F0:        vec3<f32>,
+    albedo:    vec3<f32>,
+    roughness: f32,
+    metallic:  f32,
+    sf:        f32,
+    is_anisotropic: bool,
+    T:         vec3<f32>,
+    ax:        f32,
+    ay:        f32,
+    has_subsurface: bool,
+    subsurface_color: vec3<f32>,
+) -> vec3<f32> {
+    let incidence = light_incidence(light, world_pos);
+    let L = incidence.L;
+    let radiance = incidence.radiance;
+
     let NdL = max(dot(N, L), 0.0);
     if NdL == 0.0 { return vec3<f32>(0.0); }
 
@@ -992,169 +1025,6 @@ fn pbr_direct_light(
     return (diffuse_term + specular) * radiance * NdotL_effective * sf;
 }
 
-// ── Radiance Cascades GI ──────────────────────────────────────────────────────
-
-const RC_PROBE_DIM: u32 = 16u;
-const RC_DIR_DIM:   u32 = 4u;
-
-fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
-    let f  = uv * 2.0 - 1.0;
-    let af = abs(f);
-    let l  = af.x + af.y;
-    var n: vec3<f32>;
-    if l > 1.0 {
-        let sx = select(-1.0, 1.0, f.x >= 0.0);
-        let sz = select(-1.0, 1.0, f.y >= 0.0);
-        n = vec3<f32>((1.0 - af.y) * sx, 1.0 - l, (1.0 - af.x) * sz);
-    } else {
-        n = vec3<f32>(f.x, 1.0 - l, f.y);
-    }
-    return normalize(n);
-}
-
-fn rc_corner_irradiance_precomp(
-    px: u32, py: u32, pz: u32,
-    cos_weights: array<f32, 16>,
-) -> vec3<f32> {
-    let dim = RC_PROBE_DIM - 1u;
-    let cpx = min(px, dim); let cpy = min(py, dim); let cpz = min(pz, dim);
-    var irr  = vec3<f32>(0.0);
-    var wsum = 0.0;
-    var idx  = 0u;
-    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
-        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
-            let cos_w = cos_weights[idx];
-            if cos_w > 0.001 {
-                let atlas_x = i32(cpx * RC_DIR_DIM + ddx);
-                let atlas_y = i32((cpy * RC_PROBE_DIM + cpz) * RC_DIR_DIM + ddy);
-                irr  += textureLoad(rc_cascade0, vec2<i32>(atlas_x, atlas_y), 0).rgb * cos_w;
-                wsum += cos_w;
-            }
-            idx++;
-        }
-    }
-    return irr / max(wsum, 0.001);
-}
-
-fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    // No real HLFS cascade bound this frame (e.g. FXAA/simple/default
-    // pipelines) — rc_cascade0 is a 1x1 black dummy, so every one of the ~128
-    // texture loads below would just read zero. Skip the whole thing.
-    if globals.has_rc_gi == 0u {
-        return vec3<f32>(0.0);
-    }
-
-    let world_min  = globals.rc_world_min.xyz;
-    let world_max  = globals.rc_world_max.xyz;
-    let world_size = world_max - world_min;
-    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-
-    let t            = (world_pos - world_min) / world_size;
-    let fade_margin  = 0.05;
-    let fade         = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
-                     * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
-    let volume_weight = fade.x * fade.y * fade.z;
-    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
-
-    // Precompute per-direction cosine weights ONCE, shared across all 8 trilinear corners.
-    var cos_weights: array<f32, 16>;
-    var idx = 0u;
-    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
-        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
-            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
-            cos_weights[idx] = max(0.0, dot(normal, rc_oct_decode(dir_uv)));
-            idx++;
-        }
-    }
-
-    let cell_size = world_size / f32(RC_PROBE_DIM);
-    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
-    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
-    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
-    let frc       = fract(pf);
-
-    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
-    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
-    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
-    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
-    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
-    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
-    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
-    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
-
-    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
-    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
-    return mix(c0, c1, frc.x) * volume_weight;
-}
-
-/// Sample RC irradiance as a rough-specular reflection fallback.
-///
-/// For rough surfaces (roughness > 0.6), a single SSR ray or RT ray query
-/// cannot converge the wide GGX lobe. We re-use the RC probe grid's irradiance
-/// data as a broad directional colour wash, weighted by the reflection
-/// direction vs the probe's directional bins.
-///
-/// This is deliberately *not* a physically correct glossy evaluation — it is
-/// a plausible stand-in that keeps rough reflections from going black when
-/// SSR and RT both miss.
-fn sample_rc_specular(
-    world_pos: vec3<f32>,
-    R: vec3<f32>,
-    roughness: f32,
-    normal: vec3<f32>,
-) -> vec3<f32> {
-    if globals.has_rc_gi == 0u { return vec3<f32>(0.0); }
-
-    let world_min = globals.rc_world_min.xyz;
-    let world_max = globals.rc_world_max.xyz;
-    let world_size = world_max - world_min;
-    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-
-    // Weight the reflection direction by roughness — rougher = more diffuse.
-    let lookup_dir = normalize(mix(R, normal, roughness * 0.5));
-
-    let t = (world_pos - world_min) / world_size;
-    let fade_margin = 0.05;
-    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
-             * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
-    let volume_weight = fade.x * fade.y * fade.z;
-    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
-
-    // Compute cosine weights for the reflection direction against each probe bin.
-    var cos_weights: array<f32, 16>;
-    var idx = 0u;
-    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
-        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
-            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
-            cos_weights[idx] = max(0.0, dot(lookup_dir, rc_oct_decode(dir_uv)));
-            idx++;
-        }
-    }
-
-    let cell_size = world_size / f32(RC_PROBE_DIM);
-    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
-    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
-    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
-    let frc       = fract(pf);
-
-    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
-    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
-    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
-    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
-    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
-    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
-    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
-    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
-
-    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
-    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
-    return mix(c0, c1, frc.x) * volume_weight;
-}
-
 // ── Tonemapping & bloom ───────────────────────────────────────────────────────
 // Handled by PostProcessPass (helio-pass-postprocess). This pass writes raw HDR
 // linear light to pre_aa — no tonemapping or bloom here.
@@ -1193,7 +1063,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // the stored terrain visibility path instead.
     let voxel_lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let is_stored_voxel = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -2.0;
-    if globals.debug_mode == 32u {
+    // Foliage tags itself (-1, -1.5) for the same reason: a meadow's dense blades
+    // fill the kernel and turn whole fields black; blades carry their own
+    // height AO.
+    let is_foliage = voxel_lightmap_uv.x == -1.0 && voxel_lightmap_uv.y == -1.5;
+    // The voxel pass's debug colours (trace cost, levels) unlit.
+    if globals.debug_mode == 32u || globals.debug_mode == 34u || (globals.debug_mode == 35u && pix.x * 2 < i32(textureDimensions(gbuf_albedo).x)) {
         if is_stored_voxel {
             return vec4<f32>(albedo, 1.0);
         }
@@ -1218,7 +1093,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(1.0, 0.36, 0.08, 1.0);
     }
-    let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel);
+    let ssao_factor  = select(textureSample(screen_ao, screen_ao_samp, screen_uv).r, 1.0, is_stored_voxel || is_foliage);
     // Combined AO: material AO from G-buffer × screen-space AO.
     let ao_combined  = ao * ssao_factor;
 
@@ -1351,6 +1226,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
     let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
     let low_specular   = (surface_flags & SURFACE_FLAG_LOW_SPECULAR) != 0u;
+    let two_sided      = (surface_flags & SURFACE_FLAG_TWO_SIDED) != 0u;
 
     if globals.debug_mode == 15u {
         return vec4<f32>(sss_r.rgb, 1.0);
@@ -1380,7 +1256,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Per-surface work is displayed as a scalar heat map. Do not shade this
     // diagnostic with light intensity, N·L, or material response: those create
     // shape contrast that obscures the work being measured.
-    if globals.debug_mode == 28u || globals.debug_mode == 29u || globals.debug_mode == 34u {
+    if globals.debug_mode == 50u || globals.debug_mode == 51u || globals.debug_mode == 52u {
         let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
         let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
         let tile_idx = tile_y * globals.num_tiles_x + tile_x;
@@ -1407,7 +1283,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if light.shadow_index != 0xffffffffu && !is_vg && !in_portal { shadow_work += 1.0; }
         }
 
-        if globals.debug_mode == 28u {
+        if globals.debug_mode == 50u {
             return vec4<f32>(complexity_color(affecting_lights / 8.0), 1.0);
         }
 
@@ -1419,7 +1295,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         material_work += select(0.0, 1.8, is_anisotropic) + select(0.0, 1.2, has_subsurface);
         material_work += select(0.0, 0.4, has_lightmap) + select(0.0, 0.6, is_vg);
         let surface_work = 2.0 + material_work * 2.0 + affecting_lights * 1.6 + shadow_work * 1.1;
-        if globals.debug_mode == 34u {
+        if globals.debug_mode == 52u {
             // Show an absolute estimated time contribution per output pixel.
             // The pass timestamp is real GPU timing; surface_work distributes
             // that measured duration according to this pixel's known shader
@@ -1455,9 +1331,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // GPU-driven: iterate all visible lights (already culled on CPU by distance).
     // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
     // is handled separately — shadow maps do not occlude it (that is AO's job).
-    let voxel_visibility = textureLoad(directional_visibility, pix, 0);
+    let sun_seen = textureLoad(sun_visibility, pix, 0);
     if globals.debug_mode == 26u {
-        return vec4<f32>(vec3<f32>(clamp(voxel_visibility.x, 0.0, 1.0)), 1.0);
+        return vec4<f32>(vec3<f32>(clamp(sun_seen.x, 0.0, 1.0)), 1.0);
     }
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
@@ -1468,6 +1344,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         if in_portal {
             light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS);
         }
+        let local_words = 3u * (u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x));
         for (var i = 0u; i < light_pass_count; i++) {
             var light_idx = i;
             if !in_portal {
@@ -1491,7 +1368,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 let to_light = light.position_range.xyz - world_pos;
                 to_light_dir = to_light / length(to_light);
             }
-            if dot(N, to_light_dir) < -1e-4 { continue; }
+            // Two-sided foliage takes light from behind through itself
+            // (`SURFACE_FLAG_TWO_SIDED`), shadowed as its back face.
+            let back = dot(N, to_light_dir) < -1e-4;
+            if back && !two_sided { continue; }
+            let N_lit = select(N, -N, back);
             // VG geometry does not render into shadow maps, so shadow_factor
             // would incorrectly occlude VG pixels with unrelated regular geometry.
             // Skip shadow evaluation for VG surfaces. Must be a real `if`, not
@@ -1502,16 +1383,25 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             var sf = 1.0;
             var transmit = vec3<f32>(1.0);
             if !is_vg && !in_portal {
-                sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+                sf = shadow_factor(light_idx, world_pos, N_lit, in.clip_pos.xy, globals.frame);
                 if sf > 0.0 {
-                    transmit = light_transmittance(light_idx, world_pos, N);
+                    transmit = light_transmittance(light_idx, world_pos, N_lit);
                 }
             }
-            if !in_portal && light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
+            // The terrain's shadow of a local light (`local_visibility`).
+            if !in_portal && light.light_type != 0u && i < 32u {
+                sf *= terrain_light_visibility(local_words, i);
+            }
+            if !in_portal && light.light_type == 0u && dot(sun_seen.yzw, sun_seen.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
-                if dot(normalize(voxel_visibility.yzw), light_direction) > 0.99999 {
-                    sf *= clamp(voxel_visibility.x, 0.0, 1.0);
+                if dot(normalize(sun_seen.yzw), light_direction) > 0.99999 {
+                    sf *= clamp(sun_seen.x, 0.0, 1.0);
                 }
+            }
+            if back {
+                let incidence = light_incidence(light, world_pos);
+                Lo += transmit * sss_r.rgb / PI * incidence.radiance * max(-dot(N, incidence.L), 0.0) * sf;
+                continue;
             }
             let sss_color = sss_r.rgb;
             Lo += transmit * pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
@@ -1529,12 +1419,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         sss_transmission = sss_r.rgb * rim * 1.2;
     }
 
-    // ── RC indirect diffuse ───────────────────────────────────────────────────
-    let rc_irr   = sample_rc_irradiance(world_pos, N);
-    let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
-    let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
-    var diff_ind = kD_ibl * rc_irr * albedo;
-    
     // ── Baked lightmap indirect diffuse ───────────────────────────────────────
     // For static geometry: pre-computed multi-bounce GI from offline baking.
     //
@@ -1562,39 +1446,59 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // lighting (Lo above); ambient occlusion (ao from G-buffer ORM.r) handles
     // indirect-light occlusion instead.  This ensures shadowed areas still
     // receive fill light and are never pitch black.
-    //
-    // When RC GI is active it replaces the hemisphere fallback with physically-
-    // based global illumination.  When inactive the hemisphere ambient is used.
 
     // With an atmosphere the sky itself is the ambient light: the sky over
     // the surface (its altitude and sun angle), the lit ground below its
     // horizon included, cosine-convolved.
     var hemi: vec3<f32>;
     if atmosphere.planet.w > 0.5 {
-        hemi = atmosphere_local_irradiance((world_pos - eye) * 0.001, N) * albedo;
+        // The sky over the surface, by its altitude and sun angle, not the
+        // eye's.
+        hemi = atmosphere_sky_table_eval(atmosphere, (world_pos - eye) * 0.001, N, vec3<f32>(1.0)) * albedo;
     } else {
         let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
         let ground_color = sky_color * 0.15;
         let hemi_t       = N.y * 0.5 + 0.5;
         hemi             = mix(ground_color, sky_color, hemi_t) * albedo;
     }
-
-    // RC weight: 0 = no RC data, 1 = full RC coverage
-    let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    // Where the GI probes hold the point, their irradiance replaces the
+    // sky's: bounce light, and no sky where the world hides it (a portal
+    // pixel's probes are the host's: it keeps the sky).
+    let gi_word = u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x);
+    var gi_weight = 0.0;
+    var gi = vec3<f32>(0.0);
+    if !in_portal && arrayLength(&gi_irradiance) > 1u && gi_word < arrayLength(&gi_irradiance) {
+        let g = gi_irradiance[gi_word];
+        let ba = unpack2x16float(g.y);
+        gi = vec3<f32>(unpack2x16float(g.x), ba.x);
+        gi_weight = clamp(ba.y, 0.0, 1.0);
+        // What GI changes against the sky's ambient: green brighter, red
+        // darker (a stop a third of full), blue where no probe holds it.
+        if globals.debug_mode == 29u {
+            let l = vec3<f32>(0.2126, 0.7152, 0.0722);
+            let stops = log2(max(dot(gi * albedo, l), 1e-6) / max(dot(hemi, l), 1e-6)) * gi_weight;
+            return vec4<f32>(clamp(-stops / 3.0, 0.0, 1.0), clamp(stops / 3.0, 0.0, 1.0), 0.0, 1.0);
+        }
+        hemi = mix(hemi, gi * albedo, gi_weight);
+    }
+    if globals.debug_mode == 29u {
+        return vec4<f32>(0.0, 0.0, 0.3, 1.0);
+    }
+    // The probes' irradiance, or (36) the resolve's view of the probes.
+    if globals.debug_mode == 28u || globals.debug_mode == 36u {
+        return vec4<f32>(select(vec3<f32>(0.25, 0.0, 0.25), gi, gi_weight > 0.0), 1.0);
+    }
 
     // Baked lightmap weight: 1.0 for static objects with valid lightmap, 0.0 otherwise.
     let lm_weight      = select(0.0, 1.0, has_lightmap);
 
     if globals.debug_mode == 27u {
-        return vec4<f32>(0.0, rc_weight, lm_weight, 1.0);
+        return vec4<f32>(gi_weight, 0.0, lm_weight, 1.0);
     }
 
-    // Blend between hemisphere fallback, RC-based GI, and baked lightmap:
-    // Priority: lightmap > RC > hemisphere
-    // 1. Start with hemisphere (always-on fallback)
-    // 2. Blend in RC when available (runtime dynamic GI)
-    // 3. Blend in lightmap when available (pre-baked static GI, highest quality)
-    var ambient_final = mix(hemi, diff_ind, rc_weight);
+    // The sky's ambient or the GI probes' (`hemi`); the baked lightmap
+    // replaces it where there is one (below).
+    let ambient_final = hemi;
 
     // ── Combine ───────────────────────────────────────────────────────────────
     //
@@ -1606,7 +1510,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     //     for per-texel occlusion via shadow rays; applying screen-space AO on top
     //     would double-darken the result.
     //   • For un-lightmapped surfaces the normal dynamic path applies AO to the
-    //     hemisphere/RC ambient term as usual.
+    //     hemisphere/GI ambient term as usual.
     let lo_final      = Lo * (1.0 - lm_weight);          // suppress Lo for baked pixels
     let indirect_dyn  = ambient_final * ao_combined;  // AO on dynamic GI
     let indirect_bake = lightmap_indirect;            // no AO on lightmap
@@ -1664,11 +1568,14 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         || globals.debug_mode == 22u || globals.debug_mode == 23u
         || globals.debug_mode == 24u || globals.debug_mode == 25u
         || globals.debug_mode == 26u || globals.debug_mode == 27u
+        || globals.debug_mode == 28u || globals.debug_mode == 29u
+        || globals.debug_mode == 34u || globals.debug_mode == 35u
+        || globals.debug_mode == 36u
         || (globals.debug_mode >= 100u && globals.debug_mode < 128u)
         || globals.debug_mode == 20u || globals.debug_mode == 21u
-        || globals.debug_mode == 28u || globals.debug_mode == 29u
         || globals.debug_mode == 32u || globals.debug_mode == 33u
-        || globals.debug_mode == 34u {
+        || globals.debug_mode == 50u || globals.debug_mode == 51u
+        || globals.debug_mode == 52u {
         return vec4<f32>(0.0);
     }
 
@@ -1727,15 +1634,6 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     let planar_hit = textureLoad(planar_tex, pix, 0);
     if !in_portal && globals.enable_reflections != 0u && planar_hit.a > 0.0 {
         spec_ind = mix(spec_ind, planar_hit.rgb * F_ibl, planar_hit.a);
-    }
-
-    if globals.has_rc_gi > 0u && roughness > 0.6 {
-        let rc_spec = sample_rc_specular(world_pos, R, roughness, N);
-        spec_ind = mix(
-            spec_ind,
-            rc_spec,
-            smoothstep(0.6, 0.9, roughness) * 0.4,
-        );
     }
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);

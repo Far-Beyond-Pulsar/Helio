@@ -6,13 +6,22 @@
 //!   built-in one (ordered layer stacks, interpreted by [`landform`]).
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
-//! * `chunks` — chunk trees (docs/chunk-trees.md): GPU residency, drawing
-//!   and lighting, and the Helio pass.
+//! * [`features`] — procedural content (trees, rocks, buildings) generated
+//!   like the terrain (docs/features.md), from [`stamp`] models; [`flora`]
+//!   grows natural ones (trees, shrubs, boulders, craters), and a
+//!   [`feature_recipe`] describes a world's (what grows where, in metres)
+//!   for any voxel size and seed.
+//! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
+//!   residency, drawing and lighting, and the Helio pass.
 //! * `engine` — what hosts share with the pass (frames, picks) and the
 //!   terrain half of the shaders, checked against the CPU field.
 pub mod edit_store;
 pub mod edits;
+pub mod feature_recipe;
+pub mod features;
+pub mod flora;
 pub mod snapshot;
+pub mod stamp;
 pub mod grid;
 pub mod record;
 pub mod landform;
@@ -25,6 +34,8 @@ pub mod terrain;
 pub mod engine;
 #[cfg(feature = "engine")]
 pub mod chunks;
+#[cfg(feature = "engine")]
+pub mod meadow;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

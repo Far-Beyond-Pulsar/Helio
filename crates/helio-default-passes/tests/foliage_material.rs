@@ -36,7 +36,7 @@ struct Meadow {
 }
 
 fn meadow() -> Option<Meadow> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: foliage material");
         return None;

@@ -15,24 +15,16 @@ const M_DIRT: u32 = 2u;
 const M_STONE: u32 = 3u;
 const M_SAND: u32 = 4u;
 const M_SNOW: u32 = 5u;
-const M_WATER: u32 = 6u;
 const M_GRAVEL: u32 = 7u;
 const M_SANDSTONE: u32 = 8u;
 const M_DARK_STONE: u32 = 9u;
-const M_WOOD: u32 = 10u;
-const M_LEAVES: u32 = 11u;
 const M_CLAY: u32 = 12u;
-const M_BRICK: u32 = 13u;
-const M_PLANKS: u32 = 14u;
-const M_COBBLE: u32 = 15u;
 const M_REGOLITH: u32 = 16u;
 const M_MARE: u32 = 17u;
 const M_EJECTA: u32 = 18u;
 const M_BOULDER: u32 = 19u;
 const M_BASALT: u32 = 20u;
 const M_ANORTHOSITE: u32 = 21u;
-// Slots of the appearance table (`terrain::MATERIALS`).
-const MATERIAL_SLOTS: u32 = 32u;
 // Ground material flag: a single-voxel fleck that blends into grass once
 // its cell is about a pixel wide.
 const M_SPECK: u32 = 0x100u;

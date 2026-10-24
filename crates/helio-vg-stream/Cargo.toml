@@ -13,6 +13,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }
 
 [dev-dependencies]
+helio-core = { workspace = true }
 naga = { version = "30.0.0", features = ["wgsl-in"] }
 pollster = { workspace = true }
 helio-vg-build = { path = "../helio-vg-build" }

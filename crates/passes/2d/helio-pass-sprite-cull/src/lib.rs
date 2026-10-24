@@ -21,22 +21,17 @@
 //!    GPU-written visible count into a small uniform buffer and an indirect dispatch
 //!    arg buffer for step 3, so the sort's dispatch size tracks the actual
 //!    per-frame visible count instead of the pool's worst-case capacity.
-//! 3. 32 single-bit passes of a GPU LSD radix sort (`shaders/sprite_sort.wgsl`)
-//!    over the compacted list — see that shader's module doc comment for the
-//!    three-kernel (histogram / scan / scatter) design, and for why it's 32
-//!    one-bit passes rather than 4 eight-bit-digit passes (a real stability
-//!    bug in an earlier 8-bit version, caught by
-//!    `tests/gpu_sort_validation.rs`).
+//! 3. The sort (`helio_core::radix_sort`): a stable LSD radix sort of the
+//!    compacted list, 4-bit digits, eight passes.
 //!
-//! The CPU touches none of this per frame beyond ~97 tiny dispatches, none of
+//! The CPU touches none of this per frame beyond ~27 small dispatches, none of
 //! them sized from CPU-known data: the cull dispatch alone is fixed
-//! (`slot_capacity`, known up front), but the 32 sort passes' `cs_histogram`/
-//! `cs_scatter` dispatches are *indirect* (`dispatch_workgroups_indirect`),
+//! (`slot_capacity`, known up front), but the sort's dispatches are *indirect* (`dispatch_workgroups_indirect`),
 //! sized by `cs_prepare` from the cull pass's GPU-written visible count —
 //! not from `max_visible` (the pool-sized worst case). Without that,
 //! zooming a camera in to where only a few thousand sprites are visible
 //! would still dispatch enough workgroups to cover `max_visible` sprites on
-//! every one of the 32 sort passes, every frame — the fixed ceiling has to
+//! every sort pass, every frame — the fixed ceiling has to
 //! size the *buffers* (a real GPU allocation can't grow mid-frame), but the
 //! *dispatch* should track what's actually there. There is no per-instance
 //! CPU work in `prepare()`/`execute()` regardless of pool size either way.
@@ -76,28 +71,11 @@ struct CullUniforms {
     scene_mode: u32,
 }
 
-const SORT_BITS: usize = 32;
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct SortUniforms {
-    bit: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-}
-
 /// GPU-side compute pass: culls a growable sprite pool against a view rect
 /// and depth-sorts the survivors, entirely on the GPU. See the module doc
 /// comment for the full design.
 pub struct SpriteCullPass {
-    slot_capacity: u32,
     max_visible: u32,
-    /// Worst-case block count (`max_visible` sized) — only used to size the
-    /// `block_hist_buf` allocation. The *actual* per-frame block count used
-    /// for dispatch sizing lives in `frame_uniform_buf`, GPU-written fresh
-    /// every frame by `cs_prepare`.
-    max_blocks: u32,
 
     cull_pipeline: wgpu::ComputePipeline,
     cull_bgl: wgpu::BindGroupLayout,
@@ -127,31 +105,18 @@ pub struct SpriteCullPass {
     prepare_pipeline: wgpu::ComputePipeline,
     prepare_bind_group: wgpu::BindGroup,
 
-    hist_pipeline: wgpu::ComputePipeline,
-    scan_pipeline: wgpu::ComputePipeline,
-    scatter_pipeline: wgpu::ComputePipeline,
+    /// The depth sort (`helio_core::radix_sort`), bound to the visible
+    /// pairs.
+    sort: helio_core::radix_sort::RadixSort,
+    sort_binds: helio_core::radix_sort::RadixSortBinds,
 
-    /// `FrameUniform{count,num_blocks}`, GPU-written once per frame by
-    /// `cs_prepare` and read by every one of this frame's `SORT_BITS` sort
-    /// passes (bound as both storage, for `cs_prepare`'s write, and uniform,
-    /// for the histogram/scan/scatter kernels' reads).
-    frame_uniform_buf: wgpu::Buffer,
     /// `[num_blocks, 1, 1]`, GPU-written once per frame by `cs_prepare` — the
-    /// indirect dispatch args `cs_histogram`/`cs_scatter` dispatch against,
+    /// indirect dispatch args the sort dispatches against,
     /// so their dispatch size tracks the real per-frame visible count.
     dispatch_args_buf: wgpu::Buffer,
 
-    /// One bind group per bit pass — `bit` is baked in at construction, and
-    /// every buffer reference is fixed for the pass's lifetime, so nothing
-    /// here needs rebuilding per frame.
-    hist_bind_groups: [wgpu::BindGroup; SORT_BITS],
-    scatter_bind_groups: [wgpu::BindGroup; SORT_BITS],
-    scan_bind_group: wgpu::BindGroup,
-
-    /// Final draw-order buffer after `SORT_BITS` (even) bit passes — always
-    /// lands back in the "a" ping-pong buffer; see `radix_sort_indices`'s
-    /// CPU-side sibling in `helio-pass-sprite-batch` for the same parity
-    /// argument.
+    /// Final draw-order buffer: the sort's result lands back in the "a"
+    /// ping-pong buffer.
     pub draw_order_buf: Arc<wgpu::Buffer>,
     /// `DrawIndexedIndirectArgs`, `instance_count` GPU-written by `cs_cull`.
     /// Bind this to `SpriteBatchPass::use_gpu_culling`.
@@ -334,191 +299,11 @@ impl SpriteCullPass {
             ],
         });
 
-        let hist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Sprite Sort Histogram BGL"),
-            entries: &[
-                uniform_entry(0),
-                uniform_entry(1),
-                storage_entry(2, true),
-                storage_entry(3, false),
-            ],
-        });
-        let scan_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Sprite Sort Scan BGL"),
-            entries: &[uniform_entry(0), storage_entry(1, false)],
-        });
-        let scatter_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Sprite Sort Scatter BGL"),
-            entries: &[
-                uniform_entry(0),
-                uniform_entry(1),
-                storage_entry(2, true),
-                storage_entry(3, true),
-                storage_entry(4, false),
-                storage_entry(5, false),
-                storage_entry(6, true),
-            ],
-        });
-
-        let hist_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Sprite Sort Histogram PL"),
-            bind_group_layouts: &[Some(&hist_bgl)],
-            immediate_size: 0,
-        });
-        let scan_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Sprite Sort Scan PL"),
-            bind_group_layouts: &[Some(&scan_bgl)],
-            immediate_size: 0,
-        });
-        let scatter_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Sprite Sort Scatter PL"),
-            bind_group_layouts: &[Some(&scatter_bgl)],
-            immediate_size: 0,
-        });
-
-        let hist_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Sprite Sort Histogram Pipeline"),
-            layout: Some(&hist_pl),
-            module: &sort_shader,
-            entry_point: Some("cs_histogram"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let scan_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Sprite Sort Scan Pipeline"),
-            layout: Some(&scan_pl),
-            module: &sort_shader,
-            entry_point: Some("cs_scan"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let scatter_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Sprite Sort Scatter Pipeline"),
-            layout: Some(&scatter_pl),
-            module: &sort_shader,
-            entry_point: Some("cs_scatter"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // 2 buckets (0/1) per block per bit pass, not 256 — see the module
-        // doc comment on why this is a 1-bit-per-pass sort. Sized for the
-        // worst case (`max_blocks`); actual per-frame usage is bounded by
-        // `frame_uniform_buf.num_blocks` at dispatch time, not by reallocating
-        // this buffer.
-        let block_hist_buf =
-            create_u32_buffer(device, "Sprite Sort Block Histogram", max_blocks * 2);
-
-        // `bit` is compile-time-fixed given the pass index, so its uniform
-        // buffer is written once here and never touched again. `count`/
-        // `num_blocks` (GPU-computed, per-frame) live in `frame_uniform_buf`
-        // instead, refreshed once per frame by `cs_prepare`, shared by all
-        // `SORT_BITS` passes.
-        let pass_uniforms: [wgpu::Buffer; SORT_BITS] = std::array::from_fn(|i| {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Sprite Sort Pass Uniforms"),
-                size: std::mem::size_of::<SortUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let u = SortUniforms {
-                bit: i as u32,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            };
-            queue.write_buffer(&buf, 0, bytemuck::bytes_of(&u));
-            buf
-        });
-
-        // Ping-pong role per pass, mirroring the CPU radix sort's parity:
-        // pass 0 reads A writes B, pass 1 reads B writes A, and so on — so
-        // after `SORT_BITS` (even) passes the sorted result is back in A.
-        let hist_bind_groups: [wgpu::BindGroup; SORT_BITS] = std::array::from_fn(|i| {
-            let src_keys = if i % 2 == 0 { &keys_a } else { &keys_b };
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Sprite Sort Histogram BG"),
-                layout: &hist_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: pass_uniforms[i].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: frame_uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: src_keys.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: block_hist_buf.as_entire_binding(),
-                    },
-                ],
-            })
-        });
-        let scan_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Sprite Sort Scan BG"),
-            layout: &scan_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame_uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: block_hist_buf.as_entire_binding(),
-                },
-            ],
-        });
-        let scatter_bind_groups: [wgpu::BindGroup; SORT_BITS] = std::array::from_fn(|i| {
-            let (src_keys, src_indices, dst_keys, dst_indices) = if i % 2 == 0 {
-                (&keys_a, &*indices_a, &keys_b, &indices_b)
-            } else {
-                (&keys_b, &indices_b, &keys_a, &*indices_a)
-            };
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Sprite Sort Scatter BG"),
-                layout: &scatter_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: pass_uniforms[i].as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: frame_uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: src_keys.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: src_indices.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: dst_keys.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: dst_indices.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: block_hist_buf.as_entire_binding(),
-                    },
-                ],
-            })
-        });
+        let sort = helio_core::radix_sort::RadixSort::new(device);
+        let sort_binds = sort.bind(device, &frame_uniform_buf, [&keys_a, &keys_b], [&*indices_a, &indices_b], max_visible);
 
         Self {
-            slot_capacity,
             max_visible,
-            max_blocks,
             cull_pipeline,
             cull_bgl,
             cull_uniform_buf,
@@ -540,14 +325,9 @@ impl SpriteCullPass {
             live: true,
             prepare_pipeline,
             prepare_bind_group,
-            hist_pipeline,
-            scan_pipeline,
-            scatter_pipeline,
-            frame_uniform_buf,
+            sort,
+            sort_binds,
             dispatch_args_buf,
-            hist_bind_groups,
-            scatter_bind_groups,
-            scan_bind_group,
             draw_order_buf: indices_a,
             indirect_buf,
         }
@@ -719,7 +499,7 @@ impl RenderPass for SpriteCullPass {
 }
 
 impl SpriteCullPass {
-    /// Records the cull + prepare + 32-pass sort dispatch sequence. Shared
+    /// Records the cull, prepare and sort dispatches. Shared
     /// by the `RenderPass::execute()` trait impl and
     /// [`SpriteCullPass::run_once_for_testing`] — the graph-integrated path
     /// and the standalone test path must record identically, or a test pass
@@ -755,34 +535,12 @@ impl SpriteCullPass {
             pass.dispatch_workgroups(1, 1, 1);
         }
 
-        for i in 0..SORT_BITS {
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpriteSort Histogram"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.hist_pipeline);
-                pass.set_bind_group(0, &self.hist_bind_groups[i], &[]);
-                pass.dispatch_workgroups_indirect(&self.dispatch_args_buf, 0);
-            }
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpriteSort Scan"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.scan_pipeline);
-                pass.set_bind_group(0, &self.scan_bind_group, &[]);
-                pass.dispatch_workgroups(1, 1, 1);
-            }
-            {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("SpriteSort Scatter"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.scatter_pipeline);
-                pass.set_bind_group(0, &self.scatter_bind_groups[i], &[]);
-                pass.dispatch_workgroups_indirect(&self.dispatch_args_buf, 0);
-            }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("SpriteSort"),
+                timestamp_writes: None,
+            });
+            self.sort.record(&mut pass, &self.sort_binds, &self.dispatch_args_buf, 0);
         }
     }
 

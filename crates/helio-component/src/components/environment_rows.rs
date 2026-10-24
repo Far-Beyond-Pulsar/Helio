@@ -16,13 +16,13 @@
 //!
 //! | Row | Words | Pass row it becomes |
 //! |---|---|---|
-//! | [`GlobalFogSourceRow`] | 16: the medium | `helio_pass_volumetric_fog::GlobalFogComponent` (16) |
-//! | [`LocalFogSourceRow`] | 4 size + 20: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 20) |
+//! | [`GlobalFogSourceRow`] | 20: the medium | `helio_pass_volumetric_fog::GlobalFogComponent` (20) |
+//! | [`LocalFogSourceRow`] | 4 size + 24: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 24) |
 //! | [`PostProcessVolumeSourceRow`] | 4 size + 140: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 140) |
 //! | [`CameraPostProcessSourceRow`] | 136: the row | `helio_pass_postprocess::CameraPostProcessComponent` (136) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
-//! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
-//! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
+//! | [`FoliageSourceRow`] | 32 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (32), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
+//! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell + 16 clouds: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (44) |
 //! | [`DecalSourceRow`] | 4 size + 32: the row, its transform left to the join | `helio_pass_decal::DecalComponent` (32), packed into its leading rows |
 //! | [`GlobalWindSourceRow`] | 12: the wind row, marked global | `helio_pass_foliage_place`'s `FoliageWindComponent` (12), over the foliage components' own wind |
 //! | [`CoronaEmitterSourceRow`] | 60: the row, its transform and pool range left to the join (word 46: the requested range) | `helio_pass_corona::CoronaEmitterComponent` (60), packed into its leading rows |
@@ -168,8 +168,8 @@ impl DecalSourceRow {
 /// owner), Rayleigh and Mie scattering, Mie and ozone absorption (`media`),
 /// ground albedo and ozone width (`ground`), and planet and atmosphere
 /// radii, sun size and enabled flag (`shell`; `enabled` 0 when the authored
-/// component is disabled). The placement and enabled words are `u32`s, kept
-/// as bits.
+/// component is disabled), and the cloud layer (`clouds`). The placement and
+/// enabled words are `u32`s, kept as bits.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "atmosphere_sources")]
@@ -182,6 +182,8 @@ pub struct AtmosphereSourceRow {
     pub ground: [f32; 4],
     #[gpu]
     pub shell: [f32; 4],
+    #[gpu]
+    pub clouds: [f32; 16],
 }
 
 impl AtmosphereSourceRow {
@@ -198,6 +200,9 @@ impl AtmosphereSourceRow {
 pub struct GlobalFogSourceRow {
     #[gpu]
     pub medium: [f32; 16],
+    /// The medium's `planet` (its last four words).
+    #[gpu]
+    pub planet: [f32; 4],
 }
 
 /// A local fog volume: its local size (`xyz`, full extent before the owner's
@@ -210,6 +215,9 @@ pub struct LocalFogSourceRow {
     pub size: [f32; 4],
     #[gpu]
     pub medium: [f32; 16],
+    /// The medium's `planet` (its last four words).
+    #[gpu]
+    pub planet: [f32; 4],
     #[gpu]
     pub edge_fade: [f32; 4],
 }
@@ -294,15 +302,17 @@ impl WaterVolumeSourceRow {
 /// Foliage: the foliage type row (density, size, slope and altitude ranges,
 /// LOD distances and wind response in `type_params`; the interaction
 /// stiffness, material, density layer and kind/flags words in `type_ids`;
-/// the impostor id and padding in `type_tail`), its layer (half extent,
-/// infinite-extent flag, altitude min and max) and its wind row. A disabled
+/// the impostor id, colour and ground mask in `type_tail`; blades a tuft,
+/// lean, curve, fall, tip colour and patches in `type_tuft`), its layer
+/// (half extent, infinite-extent flag, altitude min and max) and its wind
+/// row. A disabled
 /// component derives a zero row, which the join skips (it places only rows
 /// with a density).
 ///
 /// The layer is a world-aligned square centred on the owner. The foliage
 /// passes grow every type in every layer and read one wind row: the first
 /// component that opts out of the global wind (its wind's `_pad[0]`, word
-/// 38 of this row, is 1), else the level's global wind, else the first
+/// 46 of this row, is 1), else the level's global wind, else the first
 /// component's own wind. So with several foliage components their types
 /// share their layers and one wind applies to all of them.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
@@ -315,6 +325,8 @@ pub struct FoliageSourceRow {
     pub type_ids: [u32; 4],
     #[gpu]
     pub type_tail: [u32; 4],
+    #[gpu]
+    pub type_tuft: [u32; 8],
     #[gpu]
     pub layer: [f32; 4],
     #[gpu]
@@ -366,9 +378,11 @@ impl LocalFogSourceRow {
     pub fn of(fog: &LocalFogVolumeComponent) -> Self {
         let mut medium = fog.medium.to_medium();
         medium.enabled = u32::from(fog.enabled);
+        let words: [f32; 20] = bytemuck::cast(medium);
         Self {
             size: [fog.size[0], fog.size[1], fog.size[2], 0.0],
-            medium: read(bytemuck::bytes_of(&medium)),
+            medium: read(bytemuck::cast_slice(&words[..16])),
+            planet: read(bytemuck::cast_slice(&words[16..])),
             edge_fade: [fog.edge_fade.max(0.0), 0.0, 0.0, 0.0],
         }
     }
@@ -573,13 +587,13 @@ mod tests {
 
     #[test]
     fn rows_have_the_documented_word_counts() {
-        assert_eq!(std::mem::size_of::<GlobalFogSourceRow>(), 16 * 4);
-        assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 24 * 4);
+        assert_eq!(std::mem::size_of::<GlobalFogSourceRow>(), 20 * 4);
+        assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 28 * 4);
         assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 144 * 4);
         assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 136 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
-        assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 40 * 4);
-        assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 28 * 4);
+        assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 48 * 4);
+        assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 44 * 4);
         assert_eq!(std::mem::size_of::<DecalSourceRow>(), 36 * 4);
         assert_eq!(std::mem::size_of::<CoronaEmitterSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<GlobalWindSourceRow>(), 12 * 4);
@@ -598,11 +612,11 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_sky::AtmosphereComponent>(),
-            28 * 4
+            44 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_foliage_place::components::FoliageTypeComponent>(),
-            24 * 4
+            32 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_foliage_place::components::FoliageWindComponent>(),
@@ -614,11 +628,11 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_volumetric_fog::GlobalFogComponent>(),
-            16 * 4
+            20 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_volumetric_fog::LocalFogVolumeComponent>(),
-            28 * 4
+            32 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_postprocess::PostProcessVolumeComponent>(),
@@ -713,10 +727,8 @@ mod tests {
         foliage.placement.layer_extent = 25.0;
         let row = FoliageSourceRow::of(&foliage);
         let foliage_type = super::super::foliage_component::runtime::gpu_type(&foliage);
-        assert_eq!(
-            &bytemuck::bytes_of(&row)[..96],
-            bytemuck::bytes_of(&foliage_type)
-        );
+        let type_bytes = bytemuck::bytes_of(&foliage_type);
+        assert_eq!(&bytemuck::bytes_of(&row)[..type_bytes.len()], type_bytes);
         assert_eq!(row.type_params[0], 12.0, "density first: the join's gate");
         assert_eq!(row.layer[0], 25.0);
         foliage.general.enabled = false;

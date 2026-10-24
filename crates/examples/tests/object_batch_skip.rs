@@ -15,7 +15,7 @@ const SIZE: u32 = 64;
 #[test]
 fn moving_an_object_after_idle_frames_updates_the_image() {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;

@@ -369,9 +369,8 @@ impl ApplicationHandler for App {
                 None => {
                     log::warn!("[XR] no headset — running desktop mirror");
                     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                        backends: wgpu::Backends::all(),
                         flags: wgpu::InstanceFlags::empty(),
-                        ..wgpu::InstanceDescriptor::new_without_display_handle()
+                        ..helio_core::wgpu_instance_descriptor()
                     });
                     let surface = instance.create_surface(window.clone()).expect("surface");
                     let adapter = pollster::block_on(instance.request_adapter(
@@ -420,7 +419,7 @@ impl ApplicationHandler for App {
                 }
             };
         config.enable_foliage = foliage_enabled;
-        config.foliage_blades_per_m2 = Some(blades_per_m2);
+        config.foliage_tufts_per_m2 = Some(blades_per_m2 / 8.0);
 
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
@@ -527,13 +526,15 @@ impl ApplicationHandler for App {
         );
 
         let mut grass = GpuFoliageType {
-            density: blades_per_m2,
+            // Tufts of eight blades or so: the density is in tufts.
+            density: blades_per_m2 / 8.0,
             height_range: [0.18, 0.5],
             width_range: [0.012, 0.03],
-            // Everything up to 35° of slope. Flat ground here, but this is the knob
-            // that keeps grass off cliff faces once real terrain is under it.
-            slope_range: [0.0, 35f32.to_radians()],
-            lod_distances: [8.0, 20.0, 45.0, 120.0],
+            // Everything up to 35° of slope (a band on its cosine). Flat ground here, but
+            // this is the knob that keeps grass off cliff faces once real terrain is
+            // under it.
+            slope_range: [35f32.to_radians().cos(), 1.0],
+            lod_distances: [8.0, 0.0, 0.0, 120.0],
             // Blades have no trunk, so the sway band is off; flutter carries the
             // body of the motion and jitter the tips.
             wind_response: [0.0, 0.35, 1.0],
@@ -548,8 +549,13 @@ impl ApplicationHandler for App {
             mesh_or_impostor_id: 0,
             base_color: 0,
             roughness_metallic: 0,
-            _pad: 0,
+            ground_mask: 0,
+            lean_range: [0.15, 0.8],
+            curve: 0.5,
+            fall_chance: 0.05,
+            ..GpuFoliageType::default()
         };
+        grass.set_blades_per_tuft([5, 12]);
         // The same surface as `grass_mat`, carried by the type row itself.
         grass.set_material(Some(FoliageMaterial {
             base_color: [0.28, 0.46, 0.14],
@@ -582,10 +588,7 @@ impl ApplicationHandler for App {
         let interactor_entity = scene_db.world.spawn();
         scene_db.world.insert(
             interactor_entity,
-            FoliageInteractorComponent {
-                position_radius: [0.0, 0.0, 0.0, 1.2],
-                velocity: [0.0; 4],
-            },
+            FoliageInteractorComponent::new(glam::DVec3::ZERO, 1.2, 1.0, glam::Vec3::ZERO, 1.0),
         );
 
         // ── Lighting ─────────────────────────────────────────────────────────
@@ -805,8 +808,8 @@ impl AppState {
             glam::Vec3::new(0.0, -50.0, 0.0)
         };
 
-        // Velocity is passed rather than differenced GPU-side so a fast pass leaves a
-        // continuous track instead of one splat per frame.
+        // Velocity is passed rather than differenced GPU-side: it draws the pressed track
+        // behind the marker (its wake).
         let velocity = if dt > 0.0 {
             (marker_pos - self.interactor_prev_pos) / dt
         } else {
@@ -819,13 +822,7 @@ impl AppState {
             .world
             .get_mut::<FoliageInteractorComponent>(self.interactor_entity)
         {
-            interactor.position_radius = [
-                marker_pos.x,
-                marker_pos.y,
-                marker_pos.z,
-                interactor.position_radius[3],
-            ];
-            interactor.velocity = [velocity.x, velocity.y, velocity.z, 0.0];
+            interactor.set_motion(marker_pos.as_dvec3(), velocity);
         }
     }
 

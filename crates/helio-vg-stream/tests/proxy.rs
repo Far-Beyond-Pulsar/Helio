@@ -5,7 +5,7 @@
 mod common;
 
 use helio_vg_build::{build_vgeo, BuildOptions, VgeoReader};
-use helio_vg_format::{PAGE_BYTES, VIS_TRI_BITS, VIS_TRI_MASK};
+use helio_vg_format::{ATTR_STRIDE, PAGE_BYTES, VIS_TRI_BITS, VIS_TRI_MASK};
 use helio_vg_stream::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,6 +99,114 @@ fn proxy_triangle_cap_skips_the_fine_levels() {
     assert!(proxy.skipped_levels > 0);
     assert!(proxy.lods.iter().all(|l| l.triangle_count() <= 3000));
     assert!(proxy.lods[0].error > 0.0, "the leaf level should have been skipped");
+}
+
+/// The trace proxy without UVs: the test assets' attributes are their
+/// positions, not the runtime's 16-byte records ([`ATTR_STRIDE`]).
+fn untextured_trace() -> ProxyOptions {
+    ProxyOptions { uvs: false, ..ProxyOptions::trace() }
+}
+
+/// f16 bits of `x` (normal numbers, truncated; zero as zero).
+fn f16(x: f32) -> u32 {
+    if x == 0.0 {
+        return 0;
+    }
+    let b = x.to_bits();
+    ((b >> 16) & 0x8000) | ((((b >> 23) & 0xff) - 112) << 10) | ((b >> 13) & 0x3ff)
+}
+
+/// The trace proxy's vertices keep their uv0 (decoded from the runtime's
+/// attribute records): a grid whose uv0 is its position's x and z keeps
+/// that pairing on every proxy vertex, coarse cut or not, on both sides of
+/// a UV seam (the uv jumps along the middle column).
+#[test]
+fn trace_proxy_vertices_keep_their_uvs() {
+    let mesh = common::grid(64);
+    let n = 64;
+    let mut positions = Vec::new();
+    let mut attributes = Vec::new();
+    let mut indices = Vec::new();
+    // Two halves sharing the middle column's positions but not its UVs:
+    // the right half's u starts again at 0.
+    for (half, first) in [(0u32, 0u32), (1, n / 2)] {
+        let base = (positions.len()) as u32;
+        for j in 0..=n {
+            for i in first..=first + n / 2 {
+                let p = mesh.positions[(j * (n + 1) + i) as usize];
+                positions.push(p);
+                let u = if half == 0 { p[0] } else { p[0] - 0.5 };
+                let mut record = [0u8; ATTR_STRIDE as usize];
+                record[8..12].copy_from_slice(&(f16(u) | (f16(p[2]) << 16)).to_le_bytes());
+                attributes.extend_from_slice(&record);
+            }
+        }
+        let at = |i: u32, j: u32| base + j * (n / 2 + 1) + i;
+        for j in 0..n {
+            for i in 0..n / 2 {
+                let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+                indices.extend([a, c, b, a, d, c]);
+            }
+        }
+    }
+    let input = helio_vg_build::MeshInput {
+        positions: &positions,
+        attributes: &attributes,
+        attribute_stride: ATTR_STRIDE as usize,
+        indices: &indices,
+        tri_material: &[],
+    };
+    let source = VgeoBytes::new(build_vgeo(&input, &BuildOptions::default()).unwrap()).unwrap();
+    for opts in [ProxyOptions::trace(), ProxyOptions { finest_relative_error: 0.08, ..ProxyOptions::trace() }] {
+        let proxy = build_proxy(&source, &opts, None).unwrap();
+        let lod = &proxy.lods[0];
+        assert_eq!(lod.uvs.len(), lod.positions.len());
+        let mut seam = 0;
+        for (p, uv) in lod.positions.iter().zip(&lod.uvs) {
+            let u = if (uv[0] - p[0]).abs() < 2e-3 { p[0] } else { p[0] - 0.5 };
+            assert!((uv[0] - u).abs() < 2e-3 && (uv[1] - p[2]).abs() < 2e-3, "vertex at {p:?} has uv {uv:?}");
+            seam += usize::from((p[0] - 0.5).abs() < 1e-4);
+        }
+        eprintln!("trace proxy at error {}: {} triangles, {} vertices, {seam} on the seam", lod.error, lod.triangle_count(), lod.positions.len());
+    }
+}
+
+/// The scene TLAS's proxy: one closed cut at 1 % of the bounding radius
+/// (the unit sphere: about 0.01), far fewer triangles than the source, its
+/// vertices on the surface within its error.
+#[test]
+fn trace_proxy_is_one_coarse_closed_cut_within_its_error() {
+    let (bytes, source_tris) = asset(5);
+    let source = VgeoBytes::new(bytes).unwrap();
+    let proxy = build_proxy(&source, &untextured_trace(), None).unwrap();
+    assert_eq!(proxy.lods.len(), 1);
+    let lod = &proxy.lods[0];
+    // 1 % of the radius, measured around the root cut's bounding box centre
+    // (a few percent over the sphere's own radius).
+    let bound = ProxyOptions::TRACE_RELATIVE_ERROR * proxy.bounds[3] * 1.05;
+    assert!(lod.error > 0.0 && lod.error <= bound, "error {} over {bound}", lod.error);
+    assert!(lod.triangle_count() * 4 < source_tris, "{} of {source_tris} triangles", lod.triangle_count());
+    assert!(lod.triangle_count() as u32 <= ProxyOptions::TRACE_MAX_TRIANGLES);
+    let open = edge_uses(lod).values().filter(|&&n| n != 2).count();
+    assert_eq!(open, 0, "{open} open or non-manifold edges");
+    let off = lod.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs()).fold(0.0, f32::max);
+    assert!(off <= 2.0 * lod.error + 1e-3, "a vertex {off} off the sphere (error {})", lod.error);
+}
+
+/// Over the triangle budget, the trace proxy takes the first coarser cut
+/// that fits instead.
+#[test]
+fn trace_proxy_coarsens_to_fit_its_triangle_budget() {
+    let (bytes, _) = asset(5);
+    let source = VgeoBytes::new(bytes).unwrap();
+    let fine = build_proxy(&source, &untextured_trace(), None).unwrap();
+    let budget = fine.lods[0].triangle_count() as u32 / 3;
+    let opts = ProxyOptions { max_triangles_per_lod: budget, ..untextured_trace() };
+    let proxy = build_proxy(&source, &opts, None).unwrap();
+    assert_eq!(proxy.lods.len(), 1);
+    assert!(proxy.skipped_levels > 0);
+    assert!(proxy.lods[0].triangle_count() as u32 <= budget);
+    assert!(proxy.lods[0].error > fine.lods[0].error);
 }
 
 #[test]

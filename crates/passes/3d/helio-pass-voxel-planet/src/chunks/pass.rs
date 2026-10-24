@@ -5,7 +5,7 @@
 
 use super::{residency, ChunkWorld, FrameTimings, ResidencyConfig, UpdateStats};
 use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec2, Vec3};
 use helio_core::Result as HelioResult;
 use helio_core::{
     DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
@@ -35,6 +35,19 @@ pub struct ChunkPass {
     budget_ms: Option<f64>,
     /// The last frame's CPU milliseconds: prepare, execute.
     cpu_ms: [f64; 2],
+    /// Voxel materials as the host's scene materials (`set_scene_materials`).
+    scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
+    /// Every hit walks its own sun ray (`set_steady_shadows`).
+    steady_shadows: bool,
+    /// The eye's world position this frame (`helio_pass_gi::eye`), where
+    /// the GI clipmap the terrain traces rays of is centred.
+    gi_eye: Option<DVec3>,
+    /// The last frame's projection jitter (NDC).
+    last_jitter: Vec2,
+    /// The terrain as the ground foliage grows on (`chunks::ground`): shared with a
+    /// foliage placement pass ([`Self::foliage_ground`]), its tiling and its answers.
+    planet_ground: std::sync::Arc<super::ground::PlanetGround>,
+    foliage_ground: std::sync::Arc<helio_pass_foliage_place::GroundLink>,
 }
 
 impl ChunkPass {
@@ -46,6 +59,8 @@ impl ChunkPass {
     /// With residency settings `config` (its pixel angle follows the
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
+        let planet_ground = std::sync::Arc::new(super::ground::PlanetGround::default());
+        let foliage_ground = std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(Box::new(planet_ground.clone())));
         Self {
             source,
             config,
@@ -61,7 +76,37 @@ impl ChunkPass {
             timings: Vec::new(),
             budget_ms: None,
             cpu_ms: [0.0; 2],
+            scene: None,
+            steady_shadows: false,
+            gi_eye: None,
+            last_jitter: Vec2::ZERO,
+            planet_ground,
+            foliage_ground,
         }
+    }
+
+    /// The terrain as the ground foliage grows on: give it to a foliage placement pass
+    /// (`FoliagePlacePass::set_ground`); this pass answers its queries and reports where
+    /// the terrain changed under it.
+    pub fn foliage_ground(&self) -> std::sync::Arc<helio_pass_foliage_place::GroundLink> {
+        self.foliage_ground.clone()
+    }
+
+    /// Voxel materials shown as the host's scene materials: `map` says which
+    /// scene material rows each voxel material's faces use, `source` reads
+    /// the frame's material table from the context (see
+    /// `helio_default_passes::voxel_scene_materials`). Devices without
+    /// texture binding arrays keep the appearance table's colours.
+    pub fn set_scene_materials(&mut self, map: super::scene::VoxelMaterialMap, source: super::scene::SceneMaterialSource) {
+        self.scene = Some((map, source));
+    }
+
+    /// Steady shadows: every hit walks its own sun ray and the sky rays hold
+    /// still, instead of samples that move each frame for the denoiser to
+    /// gather (about three times dearer; a reference for the denoised
+    /// shadows).
+    pub fn set_steady_shadows(&mut self, on: bool) {
+        self.steady_shadows = on;
     }
 
     /// The host's art settings; whether they changed.
@@ -127,7 +172,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
             self.settled(),
             self.kept_loaded,
             s.kept_chunks,
@@ -158,6 +203,7 @@ impl ChunkPass {
             s.cpu_ms,
             gpu.map(|t| t.draw),
             gpu.map(|t| t.shadow),
+            gpu.map(|t| t.denoise),
             gpu.map(|t| t.generate),
         )
     }
@@ -169,7 +215,17 @@ const READS: &[&str] = &[
     "gbuffer_sss",
     "gbuffer_extra",
     "gbuffer_velocity",
+    "material_textures",
+    "tile_light_lists",
+    "tile_light_counts",
+    helio_pass_gi::GI_FRAME,
+    helio_pass_gi::GI_RAYS,
+    helio_pass_gi::GI_SUN,
+    helio_pass_gi::GI_CLIPMAP,
+    ATMOSPHERE_FRAME,
 ];
+/// helio-pass-sky's frame of the atmosphere (its sun's disk).
+const ATMOSPHERE_FRAME: &str = "atmosphere_frame";
 const WRITES: &[&str] = &[
     "gbuffer",
     "gbuffer_lightmap_uv",
@@ -177,6 +233,12 @@ const WRITES: &[&str] = &[
     "gbuffer_extra",
     "gbuffer_velocity",
     "directional_visibility",
+    "local_visibility",
+    // helio-pass-tsr's STOCHASTIC_MASK.
+    "tsr_stochastic",
+    helio_pass_gi::GI_HITS,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
 ];
 
 /// GPU times kept for a host that does not take them.
@@ -204,6 +266,10 @@ impl RenderPass for ChunkPass {
         self.kept_loaded = previous.kept_loaded.take();
         // A graph rebuild must not revert the host's art settings.
         self.appearance = previous.appearance;
+        if self.scene.is_none() {
+            self.scene = previous.scene.take();
+        }
+        self.steady_shadows |= previous.steady_shadows;
         self.world.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
@@ -227,13 +293,24 @@ impl RenderPass for ChunkPass {
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let started = std::time::Instant::now();
+        self.gi_eye = Some(helio_pass_gi::eye(ctx));
         let result = self.prepare_frame(ctx);
         self.cpu_ms[0] = started.elapsed().as_secs_f64() * 1e3;
         result
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(view) = self.world.as_ref().and_then(ChunkWorld::stochastic_view) {
+            frame.write_texture_binding("tsr_stochastic", view, self.name());
+        }
         if let Some(view) = self.world.as_ref().and_then(ChunkWorld::sun_view) {
             frame.write_texture_binding("directional_visibility", view, self.name());
+        }
+        if let Some(buffer) = self.world.as_ref().and_then(ChunkWorld::local_visibility) {
+            frame.write_buffer_binding("local_visibility", buffer, self.name());
+        }
+        if let Some((maps, sun_frame)) = self.world.as_ref().and_then(ChunkWorld::sun_occlusion) {
+            frame.write_texture_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, maps, self.name());
+            frame.write_buffer_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME, sun_frame, self.name());
         }
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -251,11 +328,23 @@ impl RenderPass for ChunkPass {
     }
 
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
-        static VIEWS: &[DebugViewDescriptor] = &[DebugViewDescriptor {
-            name: "Voxel Trace Cost",
-            debug_mode: 32,
-            description: "Voxel surfaces shaded by primary-ray traversal work; red is cheaper, yellow and white are more expensive",
-        }];
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "Voxel Trace Cost",
+                debug_mode: 32,
+                description: "Voxel surfaces shaded by primary-ray traversal work; red is cheaper, yellow and white are more expensive",
+            },
+            DebugViewDescriptor {
+                name: "Voxel Levels",
+                debug_mode: 34,
+                description: "Voxel surfaces coloured by the octree level drawing them (level 0 finest)",
+            },
+            DebugViewDescriptor {
+                name: "Voxel Levels (Left Half)",
+                debug_mode: 35,
+                description: "Voxel levels over the left half of the view, shading on the right",
+            },
+        ];
         VIEWS
     }
 
@@ -312,7 +401,9 @@ impl ChunkPass {
             self.built_for = None;
             return Ok(());
         };
-        let recipe = crate::record::recipe_fingerprint(frame.planet.recipe());
+        // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too).
+        self.planet_ground.set_grid(*frame.planet.grid());
+        let recipe = frame.planet.recipe_fingerprint();
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe)
             || self
@@ -392,6 +483,8 @@ impl ChunkPass {
         // coordinates (rebased when the origin moves), the same way.
         let prev_view_proj =
             Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
+        let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
+        let jitter = [jitter, std::mem::replace(&mut self.last_jitter, jitter)];
         let now = std::time::Instant::now();
         let interval = self
             .last_eye
@@ -413,6 +506,21 @@ impl ChunkPass {
         };
         self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
+        // The scene's lights and their tile lists (light culling's), for
+        // the terrain's shadows of them.
+        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
+        let tile_lists = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists")).map(|b| (*b).clone());
+        let tile_counts = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")).map(|b| (*b).clone());
+        // The GI probes' rays, when a GI pass runs before this one.
+        let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
+        let clipmap = ctx.registry.get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
+        let gi = match (binding(helio_pass_gi::GI_FRAME), binding(helio_pass_gi::GI_RAYS), binding(helio_pass_gi::GI_HITS), binding(helio_pass_gi::GI_SUN), clipmap, self.gi_eye) {
+            (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(clipmap), Some(world_eye)) => {
+                world.follow_gi(clipmap, world_eye, frame.eye);
+                Some((frame_gi, rays, hits, sun))
+            }
+            _ => None,
+        };
         let mut cmds = ctx.graphics_cmds();
         let encoder = &mut cmds;
         // Generation keeps its pace per second at any frame rate: a frame
@@ -446,18 +554,46 @@ impl ChunkPass {
             ctx.frame_num,
             &config,
         );
+        if let Some((map, _)) = &self.scene {
+            world.set_material_map(map);
+        }
+        world.set_steady_shadows(self.steady_shadows);
+        // The atmosphere's sun disk sizes the shadows' penumbrae.
+        world.set_atmosphere_frame(ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME)).map(|b| (*b).clone()));
+        // The sun's occlusion by the terrain, for what else the sun lights
+        // (the GI probes' hits in this draw, volumetric fog): a level of its
+        // clipmap a frame.
+        world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
         world.draw(
             encoder,
             ctx.frame_num,
             frame.eye,
             view_proj,
             prev_view_proj,
+            jitter,
             near,
             frame.sun,
             [ctx.width, ctx.height],
             Some(ctx.depth),
+            match (&lights, &tile_lists, &tile_counts) {
+                (Some(lights), Some(tile_lists), Some(tile_counts)) => Some(super::SceneLights { lights, tile_lists, tile_counts, eye: at }),
+                _ => None,
+            }
+            .as_ref(),
+            gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
         );
-        world.publish(encoder, gbuffer, ctx.depth);
+        // Foliage's ground: where the drawn terrain changed, and this frame's
+        // questions (`chunks::ground`) answered against the cut just drawn.
+        self.foliage_ground.push_changes(world.take_ground_changes());
+        if let Some(question) = self.foliage_ground.take_question() {
+            let exchange = (binding(helio_pass_foliage_place::GROUND_QUERIES), binding(helio_pass_foliage_place::GROUND_HITS));
+            if let (Some(queries), Some(hits)) = exchange {
+                world.probe_ground(encoder, &queries, &hits, &question.tiles, &frame.planet, frame.eye, at);
+                self.foliage_ground.answer(question.batch);
+            }
+        }
+        let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
+        world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);
         if let Some(picks) = &frame.picks {
             world.copy_picks(encoder, picks);
         }

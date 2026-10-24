@@ -1,6 +1,7 @@
 //! Canonical editable voxel world (a planet or a plane): recipe, exact cell
 //! queries and ray casts.
 use crate::edit_store::{ColumnKey, EditStore, StoreUndo};
+use crate::features::{self, CompiledFeatures, FeatureEval, FeatureSet, PlacementCache};
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush, ALL_LAYERS};
 use crate::grid::{face_axes, Cell, Grid, Shape};
 use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
@@ -27,6 +28,8 @@ pub struct PlanetRecipe {
     pub plane_size_m: f64,
     pub voxel_size_m: f64,
     pub terrain: TerrainSource,
+    /// Procedural content standing on the terrain (`crate::features`).
+    pub features: FeatureSet,
 }
 
 impl Default for PlanetRecipe {
@@ -38,6 +41,7 @@ impl Default for PlanetRecipe {
             plane_size_m: 4_096.0,
             voxel_size_m: 0.1,
             terrain: TerrainSource::default(),
+            features: FeatureSet::default(),
         }
     }
 }
@@ -54,7 +58,7 @@ impl PlanetRecipe {
             _ => (0.0, self.plane_size_m),
         };
         let key = serde_json::json!([self.version, self.shape, radius, plane, self.voxel_size_m,
-            self.terrain.generator, self.terrain.version, self.terrain.seed, settings]);
+            self.terrain.generator, self.terrain.version, self.terrain.seed, settings, self.features]);
         let mut h = 0xcbf2_9ce4_8422_2325u64;
         for byte in key.to_string().bytes() {
             h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
@@ -102,7 +106,10 @@ pub fn bake_level(fb: &FaceBrush) -> u32 {
 /// brushes undo without rebuilding the world).
 const UNDO_SEALS: usize = 128;
 /// Baked column changes kept for renderers to catch up with.
-const CHANGES_KEPT: usize = 256;
+const CHANGES_KEPT: usize = 8192;
+/// ...and the columns they list, at most (about 12 MB): a decoration batch
+/// changes tens of thousands of columns.
+const CHANGES_COLUMNS_KEPT: usize = 1 << 20;
 
 /// A world's edits in three layers, applied to the terrain in this order
 /// (see `edit_store`):
@@ -145,16 +152,42 @@ struct SealUndo {
     store: StoreUndo,
     /// The large brushes before the seal.
     large: EditLog,
-    before: (usize, u64),
+    before: BakedState,
 }
 
-/// Baked columns a seal or its undo changed, between two baked states
-/// (sealed brush count, history hash).
+/// What the baked store holds: the brushes sealed and the history hash
+/// after them. The store is a function of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct BakedState {
+    pub sealed: usize,
+    pub hash: u64,
+}
+
+/// A baked column a change touched, and the heights (`bk`) of the bricks it
+/// held before the change or holds after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangedColumn {
+    pub key: ColumnKey,
+    pub bricks: [i32; 2],
+}
+
+/// Baked columns a change touched, between two baked states. A seal or its
+/// undo restates brushes renderers already follow (the world is the same);
+/// a batch sealed at once changes the world (`world`).
 #[derive(Clone)]
 pub struct BakedChange {
-    pub before: (usize, u64),
-    pub after: (usize, u64),
-    pub columns: Arc<[ColumnKey]>,
+    pub before: BakedState,
+    pub after: BakedState,
+    pub columns: Arc<[ChangedColumn]>,
+    pub world: bool,
+}
+
+/// The baked columns changed since a state: restated, and changed in the
+/// world (see [`BakedChange`]).
+#[derive(Clone, Debug, Default)]
+pub struct BakedChanges {
+    pub restated: Vec<ChangedColumn>,
+    pub world: Vec<ChangedColumn>,
 }
 
 impl Edits {
@@ -190,28 +223,35 @@ impl Edits {
         let r = index.checked_sub(self.sealed_count)?;
         (r < self.recent.len()).then(|| self.recent.resolved(r as u32).brush)
     }
-    /// The baked state: brushes sealed and the history hash after them.
-    /// The baked store is a function of it.
-    pub fn baked_state(&self) -> (usize, u64) {
-        (self.sealed_count, self.sealed_hash)
+    /// The baked state (see [`BakedState`]).
+    pub fn baked_state(&self) -> BakedState {
+        BakedState { sealed: self.sealed_count, hash: self.sealed_hash }
     }
     /// Baked columns changed since baked state `state`, or `None` when that
     /// state is not in the kept changes (long ago, or another history).
-    pub fn baked_changes_since(&self, state: (usize, u64)) -> Option<Vec<ColumnKey>> {
+    pub fn baked_changes_since(&self, state: BakedState) -> Option<BakedChanges> {
+        let mut out = BakedChanges::default();
         if state == self.baked_state() {
-            return Some(Vec::new());
+            return Some(out);
         }
         let start = self.changes.iter().rposition(|c| c.before == state)?;
-        Some(self.changes.range(start..).flat_map(|c| c.columns.iter().copied()).collect())
+        for change in self.changes.range(start..) {
+            let into = if change.world { &mut out.world } else { &mut out.restated };
+            into.extend(change.columns.iter().copied());
+        }
+        Some(out)
     }
     fn record(&mut self, brush: &Brush) {
         self.recent_hash.push(crate::edits::brush_hash(self.hash(), brush));
     }
-    fn changed(&mut self, before: (usize, u64), columns: impl Iterator<Item = ColumnKey>) {
+    fn changed(&mut self, before: BakedState, columns: Vec<ChangedColumn>, world: bool) {
         let after = self.baked_state();
-        self.changes.push_back(BakedChange { before, after, columns: columns.collect() });
-        if self.changes.len() > CHANGES_KEPT {
-            self.changes.pop_front();
+        self.changes.push_back(BakedChange { before, after, columns: columns.into(), world });
+        let mut kept: usize = self.changes.iter().map(|c| c.columns.len()).sum();
+        while self.changes.len() > 1 && (self.changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT) {
+            if let Some(old) = self.changes.pop_front() {
+                kept -= old.columns.len();
+            }
         }
     }
     /// Edits from their layers (a snapshot): `large` and `baked` hold the
@@ -241,6 +281,12 @@ impl Edits {
     }
 }
 
+/// The columns a recorded change of `store` replaced, with their bricks'
+/// heights before and after it.
+fn changed_columns(change: &StoreUndo, store: &EditStore) -> Vec<ChangedColumn> {
+    change.spans(store).into_iter().map(|(key, bricks)| ChangedColumn { key, bricks }).collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayHit {
     pub cell: Cell,
@@ -253,6 +299,10 @@ pub struct RayHit {
 
 pub struct Planet {
     recipe: PlanetRecipe,
+    /// `record::recipe_fingerprint` of the recipe, once: a recipe with
+    /// features serializes to hundreds of kilobytes (renderers compare it
+    /// every frame).
+    fingerprint: u64,
     grid: Grid,
     field: Arc<dyn TerrainField>,
     edits: Edits,
@@ -262,12 +312,15 @@ pub struct Planet {
     /// Lowest radius any remove brush reaches.
     edit_bottom: f64,
     heights: Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>,
+    features: Arc<CompiledFeatures>,
+    placements: Mutex<PlacementCache>,
 }
 
 impl Clone for Planet {
     fn clone(&self) -> Self {
         Self {
             recipe: self.recipe.clone(),
+            fingerprint: self.fingerprint,
             grid: self.grid,
             field: Arc::clone(&self.field),
             edits: self.edits.clone(),
@@ -275,6 +328,8 @@ impl Clone for Planet {
             edit_top: self.edit_top,
             edit_bottom: self.edit_bottom,
             heights: Mutex::new(Default::default()),
+            features: Arc::clone(&self.features),
+            placements: Mutex::new(Default::default()),
         }
     }
 }
@@ -294,7 +349,9 @@ impl Planet {
             shape => Grid::plane(shape, recipe.plane_size_m, recipe.voxel_size_m)?,
         };
         let field = terrain::build(&recipe.terrain, &grid)?;
+        let features = Arc::new(CompiledFeatures::new(&recipe.features, &grid, recipe.terrain.seed)?);
         Ok(Self {
+            fingerprint: crate::record::recipe_fingerprint(&recipe),
             recipe,
             grid,
             field,
@@ -303,10 +360,44 @@ impl Planet {
             edit_top: 0.0,
             edit_bottom: f64::INFINITY,
             heights: Mutex::new(Default::default()),
+            features,
+            placements: Mutex::new(Default::default()),
         })
     }
     pub fn recipe(&self) -> &PlanetRecipe {
         &self.recipe
+    }
+    /// The recipe's fingerprint (`record::recipe_fingerprint`).
+    pub fn recipe_fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+    /// The world's features compiled (`crate::features`).
+    pub fn features(&self) -> &CompiledFeatures {
+        &self.features
+    }
+    /// What the features make of level cell `(i, j, k)` (`features::apply`):
+    /// the near spawns' stamps over the far spawns' canopies.
+    pub fn features_at(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> Option<Option<u32>> {
+        if self.features.is_empty() {
+            return None;
+        }
+        let top = |f: u8, i: i32, j: i32| features::ground(&self.grid, &*self.field, f, i, j, 0, self.column_height(f, i, j, 0));
+        let near = {
+            let mut cache = self.placements.lock().expect("placements");
+            if cache.len() > 1 << 20 {
+                cache.clear();
+            }
+            FeatureEval::new(&self.features, &self.grid, &top, &mut cache).coarse_cell(face, level, i, j, k)
+        };
+        if near.is_some() {
+            return near;
+        }
+        let ground = features::ground(&self.grid, &*self.field, face, i, j, level, self.column_height(face, i, j, level));
+        self.features.far_cover(&self.grid, face, level, i, j, ground).and_then(|cover| CompiledFeatures::far_cell(level, k, cover))
+    }
+    /// Layers features stand over the ground at most.
+    fn features_above(&self) -> i32 {
+        if self.features.is_empty() { 0 } else { self.features.above }
     }
     pub fn grid(&self) -> &Grid {
         &self.grid
@@ -352,6 +443,48 @@ impl Planet {
         self.revision += 1;
         Ok(id)
     }
+
+    /// Bake `brushes` into the baked store in order (large ones over the
+    /// cells already baked, at their bake level and into the large layer):
+    /// what the store replaced.
+    fn bake(&mut self, brushes: &[Brush]) -> Result<StoreUndo, String> {
+        let resolved: Vec<Vec<FaceBrush>> = brushes.iter().map(|b| b.resolve(&self.grid)).collect::<Result<_, _>>()?;
+        let edits = &mut self.edits;
+        edits.baked.begin_record();
+        let mut changed = Vec::new();
+        for (brush, faces) in brushes.iter().zip(&resolved) {
+            if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
+                for fb in faces {
+                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
+                }
+            } else {
+                for fb in faces {
+                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
+                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb)));
+                }
+                edits.large.push(&self.grid, *brush).expect("resolved above");
+            }
+        }
+        for brush in brushes {
+            self.reach(brush);
+        }
+        let edits = &mut self.edits;
+        edits.baked.rebuild_coarse(changed, self.grid.levels());
+        Ok(edits.baked.end_record())
+    }
+
+    /// The edits' bounds grown over `brush`.
+    fn reach(&mut self, brush: &Brush) {
+        // A cube brush reaches sqrt(3) radii from its centre.
+        let reach = brush.radius * 1.7321 + brush.height + self.grid.voxel_size();
+        let centre = self.grid.radial(DVec3::from_array(brush.center));
+        match brush.op {
+            crate::edits::BrushOp::Add => self.edit_top = self.edit_top.max(centre + reach),
+            crate::edits::BrushOp::Remove => self.edit_bottom = self.edit_bottom.min(centre - reach),
+            _ => {}
+        }
+    }
+
     /// Undo the latest brush: a recent one, or one of the latest sealed ones
     /// (its seal is undone first); `None` past them
     /// ([`Edits::undoable`]).
@@ -371,35 +504,18 @@ impl Planet {
         let n = n.min(brushes.len());
         let before = self.edits.baked_state();
         let large = self.edits.large.clone();
-        let resolved: Vec<Vec<FaceBrush>> = brushes[..n].iter().map(|b| b.resolve(&self.grid)).collect::<Result<_, _>>()?;
+        let store = self.bake(&brushes[..n])?;
         let edits = &mut self.edits;
-        edits.baked.begin_record();
-        let mut changed = Vec::new();
-        for (brush, faces) in brushes[..n].iter().zip(&resolved) {
-            if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
-                for fb in faces {
-                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
-                }
-            } else {
-                for fb in faces {
-                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
-                    changed.extend(edits.baked.bake_at(&self.grid, fb, brush.op, bake_level(fb), false));
-                }
-                edits.large.push(&self.grid, *brush).expect("resolved above");
-            }
-        }
-        edits.baked.rebuild_coarse(changed, self.grid.levels());
-        let store = edits.baked.end_record();
         let hashes: Vec<u64> = edits.recent_hash.drain(..n).collect();
         edits.sealed_count += n;
         edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
         edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
-        let columns: Vec<ColumnKey> = store.columns().collect();
+        let columns = changed_columns(&store, &edits.baked);
         edits.undo_seals.push_back(SealUndo { brushes: brushes[..n].iter().copied().zip(hashes).collect(), store, large, before });
         if edits.undo_seals.len() > UNDO_SEALS {
             edits.undo_seals.pop_front();
         }
-        edits.changed(before, columns.into_iter());
+        edits.changed(before, columns, false);
         Ok(())
     }
 
@@ -409,14 +525,15 @@ impl Planet {
         let undo = self.edits.undo_seals.pop_back()?;
         let edits = &mut self.edits;
         let before = edits.baked_state();
-        let columns: Vec<ColumnKey> = undo.store.columns().collect();
+        let undone = undo.store.clone();
         edits.baked.restore(undo.store);
         edits.large = undo.large;
         let recent: Vec<Brush> = edits.recent.brushes().copied().collect();
         edits.recent = Edits::log(&self.grid, undo.brushes.iter().map(|(b, _)| *b).chain(recent)).expect("brushes resolved when applied");
         edits.recent_hash.splice(0..0, undo.brushes.iter().map(|(_, h)| *h));
-        (edits.sealed_count, edits.sealed_hash) = undo.before;
-        edits.changed(before, columns.into_iter());
+        (edits.sealed_count, edits.sealed_hash) = (undo.before.sealed, undo.before.hash);
+        let columns = changed_columns(&undone, &edits.baked);
+        edits.changed(before, columns, false);
         Some(())
     }
     /// Conservative bound on terrain surface height above the datum (m).
@@ -433,7 +550,7 @@ impl Planet {
     }
     /// Outer radius that bounds every solid cell (terrain and additions).
     pub fn outer_radius(&self) -> f64 {
-        (self.grid.radius() + self.max_terrain_height() + self.overhang_height() + self.grid.voxel_size() * 4.0).max(self.edit_top + self.grid.voxel_size())
+        (self.grid.radius() + self.max_terrain_height() + self.overhang_height() + f64::from(self.features_above() + 4) * self.grid.voxel_size()).max(self.edit_top + self.grid.voxel_size())
     }
     /// Largest rise (m) of generated overhangs over the heightfield.
     pub fn overhang_height(&self) -> f64 {
@@ -481,10 +598,11 @@ impl Planet {
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
         let height = self.column_height(face, i, j, level);
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
+        let (kind, material) = features::apply(self.features_at(level, face, i, j, k), kind, 0);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         let point = || self.grid.volume_point(face, i, j, k, level);
         let large = self.large_brushes(face, i, j, Some(k), level);
-        let (kind, material) = apply(large.into_iter(), center, point, kind, 0);
+        let (kind, material) = apply(large.into_iter(), center, point, kind, material);
         let (kind, material) = self.edits.baked.cell(face, level, i, j, k).apply(kind, material);
         apply(Self::face_brushes(&self.edits.recent, face, i, j, Some(k), level).into_iter(), center, point, kind, material)
     }
@@ -531,6 +649,9 @@ impl Planet {
         if let Some(kind) = decided(&c.large) {
             return kind;
         }
+        if let Some(v) = self.features_at(level, face, i, j, k) {
+            return u32::from(v.is_some());
+        }
         terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
     }
     /// Slope (eighths of a cell per cell) that classifies the materials of
@@ -543,12 +664,15 @@ impl Planet {
     pub fn material_slope(&self, face: u8, i: i32, j: i32) -> i32 {
         const LEVEL: u32 = 4;
         // Central differences two level-4 cells each way, in base layers
-        // (Q16 level-4 cells in the shader).
+        // (Q16 level-4 cells in the shader), and the gradient's length,
+        // rounded down exactly (`gradient_length` in the shader): the larger
+        // difference alone measured slopes across the axes short, and a
+        // material threshold on it traced squares on the face's grid.
         let block = |mi: i32, mj: i32| {
             let top = |x: i32, y: i32| terrain::top_cells(&self.grid, self.column_height(face, x, y, LEVEL), 0);
-            let di = (top(mi + 2, mj) - top(mi - 2, mj)).abs();
-            let dj = (top(mi, mj + 2) - top(mi, mj - 2)).abs();
-            (di.max(dj) << (16 - LEVEL)) / 32_768
+            let di = (top(mi + 2, mj) - top(mi - 2, mj)).unsigned_abs().min(46_340);
+            let dj = (top(mi, mj + 2) - top(mi, mj - 2)).unsigned_abs().min(46_340);
+            (((di * di + dj * dj).isqrt() as i32) << (16 - LEVEL)) / 32_768
         };
         let (ri, rj) = (i * 2 + 1 - 16, j * 2 + 1 - 16);
         let (ai, aj) = (ri >> 5, rj >> 5);
@@ -568,20 +692,30 @@ impl Planet {
         match kind {
             0 => material::AIR,
             _ if material != 0 => material,
-            _ => {
-                let slope = self.material_slope(cell.face, cell.i, cell.j);
-                // Materials vary in 3D (`shade` samples the cell's volume
-                // point): a cliff's voxels are not one column's colour.
-                let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
-                let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
-                // Depth counts from the generated top: overhangs and the
-                // rock around caves lie below it.
-                let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
-                let depth = (generated - 1 - cell.k).max(0);
-                let surface = self.field.surface(crate::terrain::Column { face: cell.face, i: cell.i, j: cell.j, level: 0 }, top_height) & 0xff;
-                self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
-            }
+            _ => self.terrain_material(cell),
         }
+    }
+    /// The terrain's own top over base column `(i, j)`: one over its highest
+    /// solid cell, caves and overhangs included, edits and features
+    /// ignored. A host deciding features from it decides a region the same
+    /// whenever it does.
+    pub fn terrain_top(&self, face: u8, i: i32, j: i32) -> i32 {
+        terrain::generated_top(&self.grid, &*self.field, face, i, j, 0, self.column_height(face, i, j, 0))
+    }
+    /// The material the terrain gives base cell `cell` were it solid there,
+    /// edits and features ignored.
+    pub fn terrain_material(&self, cell: Cell) -> u32 {
+        let slope = self.material_slope(cell.face, cell.i, cell.j);
+        // Materials vary in 3D (`shade` samples the cell's volume point): a
+        // cliff's voxels are not one column's colour.
+        let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
+        let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
+        // Depth counts from the generated top: overhangs and the rock
+        // around caves lie below it.
+        let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
+        let depth = (generated - 1 - cell.k).max(0);
+        let surface = self.field.surface(crate::terrain::Column { face: cell.face, i: cell.i, j: cell.j, level: 0 }, top_height) & 0xff;
+        self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
     }
     /// Exact base-grid ray cast. Stops at the first cell for which `stop`
     /// returns true given its kind. `max_distance` may be infinite; the ray
@@ -822,7 +956,7 @@ impl Planet {
         let c = column.as_ref().expect("filled above");
         let added = c.large.iter().chain(&c.recent).filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
         let baked = self.edits.baked.solid_top(face, 0, i, j).unwrap_or(i32::MIN);
-        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, c.height).max(added).max(baked);
+        let mut k = (terrain::generated_top(g, &*self.field, face, i, j, 0, c.height) + self.features_above()).max(added).max(baked);
         let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
         while k > floor && self.kind_in(&mut column, Cell::new(face, i, j, k - 1)) != 1 {
             k -= 1;
@@ -838,7 +972,7 @@ impl Planet {
         }
         let (cell, _) = self.grid.locate(eye);
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
-        let ground = (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0);
+        let ground = (f64::from(cell.k - top - self.features_above()) * self.grid.voxel_size() - self.overhang_height()).max(0.0);
         // Additions stand above the generated ground: a near plane a
         // quarter of the height over it clipped a wall built beside the eye.
         self.addition_clearance(eye, cell, ground)
@@ -911,11 +1045,16 @@ impl Planet {
         // The generated top: overhang lips and cave mouths included.
         let top = terrain::generated_top(g, &*self.field, cell.face, cell.i, cell.j, 0, self.column_height(cell.face, cell.i, cell.j, 0));
         let height = g.height(eye);
-        if cell.k >= top {
-            return height - f64::from(top) * g.voxel_size();
-        }
         let mut column = None;
         let solid = |column: &mut Option<RayColumn>, k: i32| self.kind_in(column, Cell::new(cell.face, cell.i, cell.j, k)) == 1;
+        if cell.k >= top {
+            // Over the terrain: features may stand on it.
+            let mut k = (top + self.features_above()).min(cell.k);
+            while k > top && !solid(&mut column, k - 1) {
+                k -= 1;
+            }
+            return height - f64::from(k) * g.voxel_size();
+        }
         if solid(&mut column, cell.k) {
             return height - f64::from(top) * g.voxel_size();
         }

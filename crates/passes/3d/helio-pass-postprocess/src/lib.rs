@@ -6,10 +6,11 @@
 //!
 //! Sub-stages (execution order in `execute()`):
 //!   1. `cs_exposure`/`cs_exposure_reduce`/`cs_exposure_adapt` — metered log luminance and eye adaptation (compute)
+//!   1b. `cs_local_exposure_grid`/`_blur`/`_curve` — bilateral grid of log luminance and a tone curve per cell, for local exposure (compute)
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
 //!   3b. `cs_bloom_upsample`    — progressive upsample-and-add, mip 3 → mip 0 (compute)
-//!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, grain (render)
+//!   4. `fs_uber`               — global and local exposure, bloom + lens composite, grade, tonemap, vignette, grain (render)
 //!
 //! Bind groups:
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
@@ -45,6 +46,10 @@ pub use lut_builder::LutBuilder;
 mod abi_tests;
 #[cfg(test)]
 mod exposure_tests;
+#[cfg(test)]
+mod local_exposure_tests;
+#[cfg(test)]
+mod tonemap_tests;
 
 const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
@@ -65,6 +70,69 @@ fn exposure_partial_buffer(device: &wgpu::Device, width: u32, height: u32) -> wg
         mapped_at_creation: false,
     })
 }
+/// Local exposure's bilateral grid: screen cells per column (rows follow the
+/// aspect ratio, so cells stay square at any resolution), luminance bins (1 EV
+/// each; `LE_BINS` in the shader) and the blur's workgroup size.
+const LE_GRID_ROWS: u32 = 32;
+const LE_BINS: u32 = 24;
+const WG_LE_BLUR: u32 = 8;
+
+/// The grid's screen cells for an analysed image of `width` x `height`.
+fn local_exposure_grid_dims(width: u32, height: u32) -> (u32, u32) {
+    let columns = (LE_GRID_ROWS as f32 * width.max(1) as f32 / height.max(1) as f32).round() as u32;
+    (columns.max(1), LE_GRID_ROWS)
+}
+
+/// Local exposure's bilateral grid: gathered into `raw` by
+/// `cs_local_exposure_grid`, blurred into `blurred` by `cs_local_exposure_blur`,
+/// made a tone curve per cell in `texture` by `cs_local_exposure_curve`, and
+/// sampled by `fs_uber`. Recreated with the analysed size.
+struct LocalExposureGrid {
+    cells: (u32, u32),
+    raw: wgpu::Buffer,
+    blurred: wgpu::Buffer,
+    _texture: wgpu::Texture,
+    storage_view: wgpu::TextureView,
+    sampled_view: wgpu::TextureView,
+}
+
+impl LocalExposureGrid {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let cells = local_exposure_grid_dims(width, height);
+        // (sum of EV, weight) a bin.
+        let grid = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: u64::from(cells.0 * cells.1 * LE_BINS) * 8,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let raw = grid("PostProcess Local Exposure Grid");
+        let blurred = grid("PostProcess Local Exposure Blurred Grid");
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PostProcess Local Exposure Curves"),
+            size: wgpu::Extent3d { width: cells.0, height: cells.1, depth_or_array_layers: LE_BINS },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let storage_view = texture.create_view(&Default::default());
+        let sampled_view = texture.create_view(&Default::default());
+        Self { cells, raw, blurred, _texture: texture, storage_view, sampled_view }
+    }
+
+    /// Workgroups of `cs_local_exposure_grid` (one a screen cell), then of
+    /// `cs_local_exposure_blur` and `cs_local_exposure_curve`.
+    fn workgroups(&self) -> [[u32; 3]; 3] {
+        let (x, y) = (self.cells.0.div_ceil(WG_LE_BLUR), self.cells.1.div_ceil(WG_LE_BLUR));
+        [[self.cells.0, self.cells.1, 1], [x, y, LE_BINS], [x, y, 1]]
+    }
+}
+
 /// Maximum active volumes blended per frame. SceneDB buffers can be larger:
 /// rows are addressed by sparse entity index, so shaders scan the full buffer
 /// before compacting into this fixed active-volume budget.
@@ -101,10 +169,17 @@ pub struct PostProcessPass {
     exposure_pipeline: wgpu::ComputePipeline,
     exposure_reduce_pipeline: wgpu::ComputePipeline,
     exposure_adapt_pipeline: wgpu::ComputePipeline,
+    local_exposure_grid_pipeline: wgpu::ComputePipeline,
+    local_exposure_blur_pipeline: wgpu::ComputePipeline,
+    local_exposure_curve_pipeline: wgpu::ComputePipeline,
+    local_exposure: LocalExposureGrid,
     bloom_extract_pipeline: wgpu::ComputePipeline,
     bloom_down_pipeline: wgpu::ComputePipeline,
     bloom_upsample_pipeline: wgpu::ComputePipeline,
-    uber_pipeline: wgpu::RenderPipeline,
+    /// The image's pipeline, and its debug-view variant (`DEBUG_VIEW`).
+    uber_pipelines: [wgpu::RenderPipeline; 2],
+    /// A renderer debug view is on: the scene colour is shown as it is.
+    debug_view: bool,
 
     // Separate BGLs for compute vs render
     compute_main_bgl: wgpu::BindGroupLayout,
@@ -168,7 +243,7 @@ pub struct PostProcessPass {
 
     uber_pl: wgpu::PipelineLayout,
 
-    // Current user shader snippet (the one baked into uber_pipeline).
+    // Current user shader snippet (the one baked into uber_pipelines).
     user_shader_snippet: Option<String>,
     // Pending snippet queued by set_user_shader — applied in prepare().
     pending_shader_snippet: Option<String>,
@@ -176,6 +251,50 @@ pub struct PostProcessPass {
     user_effect_entries: Vec<UserEffectEntry>,
     // Cached built shader source to avoid rebuilding identical configs.
     cached_shader_source: Option<String>,
+}
+
+/// The uber pipeline for `format`, and its debug-view variant: a renderer
+/// debug view (buffers, GI, voxel levels) shows the scene colour as the
+/// view wrote it, without the camera's exposure, grade or tone curve.
+fn uber_pipelines(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> [wgpu::RenderPipeline; 2] {
+    [false, true].map(|debug_view| {
+        helio_core::shader::create_render_pipeline(device, wgpu::RenderPipelineDescriptor {
+            label: Some(if debug_view { "PostProcess Uber (debug view)" } else { "PostProcess Uber" }),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_uber"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("DEBUG_VIEW", f64::from(u8::from(debug_view)))],
+                    ..Default::default()
+                },
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    })
 }
 
 impl PostProcessPass {
@@ -213,7 +332,8 @@ impl PostProcessPass {
         self.uber_timing_query.as_ref()
     }
 
-    /// Optional GPU timestamps around exposure and bloom compute work.
+    /// Optional GPU timestamps around the compute work: [0] start, [1] after
+    /// exposure, [2] after local exposure, [3] after bloom.
     pub fn enable_compute_timing(&mut self, device: &wgpu::Device) -> bool {
         if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
             return false;
@@ -221,7 +341,7 @@ impl PostProcessPass {
         self.compute_timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
             label: Some("Postprocess compute timings"),
             ty: wgpu::QueryType::Timestamp,
-            count: 3,
+            count: 4,
         }));
         true
     }
@@ -291,6 +411,7 @@ impl PostProcessPass {
         let (bloom_textures, bloom_sampled_views, bloom_storage_views) =
             Self::create_bloom_mips(device, width, height);
         let bloom_sums = BloomSum::chain(device, width, height);
+        let local_exposure = LocalExposureGrid::new(device, width, height);
 
         // ── Shared BGL entry helpers ────────────────────────────────────────
 
@@ -372,6 +493,18 @@ impl PostProcessPass {
                 sampled_tex_entry(12, cfv, false),
                 sampler_entry(13, cfv, false),
                 storage_ro_entry(14, cfv),
+                storage_buf_entry(23, cv),
+                storage_buf_entry(26, cv),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 24,
+                    visibility: cv,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -411,6 +544,17 @@ impl PostProcessPass {
                 // 3D LUT texture for colour grading
                 wgpu::BindGroupLayoutEntry {
                     binding: 19,
+                    visibility: fv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Local exposure's blurred bilateral grid.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 25,
                     visibility: fv,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -520,6 +664,22 @@ impl PostProcessPass {
         let exposure_pipeline = mk_compute("PostProcess Exposure", "cs_exposure", &exposure_pl);
         let exposure_reduce_pipeline = mk_compute("PostProcess Exposure Reduce", "cs_exposure_reduce", &exposure_pl);
         let exposure_adapt_pipeline = mk_compute("PostProcess Exposure Adapt", "cs_exposure_adapt", &exposure_pl);
+        // Zeroes its own bins: naga's zeroing would do it from one invocation.
+        let local_exposure_grid_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+            label: Some("PostProcess Local Exposure Grid"),
+            layout: Some(&exposure_pl),
+            module: &shader,
+            entry_point: Some("cs_local_exposure_grid"),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                zero_initialize_workgroup_memory: false,
+                ..Default::default()
+            },
+            cache: None,
+        });
+        let local_exposure_blur_pipeline =
+            mk_compute("PostProcess Local Exposure Blur", "cs_local_exposure_blur", &exposure_pl);
+        let local_exposure_curve_pipeline =
+            mk_compute("PostProcess Local Exposure Curve", "cs_local_exposure_curve", &exposure_pl);
         let bloom_extract_pipeline = mk_compute(
             "PostProcess Bloom Extract",
             "cs_bloom_down_extract",
@@ -529,34 +689,7 @@ impl PostProcessPass {
         let bloom_upsample_pipeline =
             mk_compute("PostProcess Bloom Upsample", "cs_bloom_upsample", &bloom_upsample_pl);
 
-        let uber_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("PostProcess Uber Pipeline"),
-            layout: Some(&render_pl),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_uber"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let uber_pipelines = uber_pipelines(&device, &render_pl, &shader, format);
 
         // ── Noise texture ──────────────────────────────────────────────────
         let noise_size = 64u32;
@@ -733,10 +866,15 @@ impl PostProcessPass {
             exposure_pipeline,
             exposure_reduce_pipeline,
             exposure_adapt_pipeline,
+            local_exposure_grid_pipeline,
+            local_exposure_blur_pipeline,
+            local_exposure_curve_pipeline,
+            local_exposure,
             bloom_extract_pipeline,
             bloom_down_pipeline,
             bloom_upsample_pipeline,
-            uber_pipeline,
+            uber_pipelines,
+            debug_view: false,
             compute_main_bgl,
             render_main_bgl,
             bloom_compute_bgl,
@@ -851,34 +989,7 @@ impl PostProcessPass {
             return; // identical — skip rebuild
         }
         let shader_mod = helio_core::shader::module(device, "PostProcess Shader", &source);
-        self.uber_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("PostProcess Uber"),
-            layout: Some(&self.uber_pl),
-            vertex: wgpu::VertexState {
-                module: &shader_mod,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_mod,
-                entry_point: Some("fs_uber"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        self.uber_pipelines = uber_pipelines(device, &self.uber_pl, &shader_mod, self.format);
         self.cached_shader_source = Some(source);
     }
 
@@ -1084,6 +1195,18 @@ impl PostProcessPass {
                     binding: 14,
                     resource: self.custom_params_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 23,
+                    resource: self.local_exposure.raw.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 26,
+                    resource: self.local_exposure.blurred.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::TextureView(&self.local_exposure.storage_view),
+                },
             ],
         }));
 
@@ -1170,6 +1293,10 @@ impl PostProcessPass {
                     binding: 19,
                     resource: wgpu::BindingResource::TextureView(lut_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 25,
+                    resource: wgpu::BindingResource::TextureView(&self.local_exposure.sampled_view),
+                },
             ],
         }));
     }
@@ -1186,6 +1313,10 @@ impl PostProcessPass {
 impl RenderPass for PostProcessPass {
     fn name(&self) -> &'static str {
         "PostProcess"
+    }
+
+    fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_view = mode != 0;
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -1265,6 +1396,7 @@ impl PostProcessPass {
             &self.bloom_sampled_views,
             &self.bloom_sums,
         );
+        self.local_exposure = LocalExposureGrid::new(device, width, height);
         self.compute_main_bg = None;
         self.render_main_bg = None;
         self.main_bg_key = None;
@@ -1437,6 +1569,29 @@ impl PostProcessPass {
             cmds.write_timestamp(query, 1);
         }
 
+        // 1b. Local exposure's bilateral grid, from this frame's input and
+        // exposure. The kernels return at once while the resolved settings
+        // leave it off (fs_uber then skips it too).
+        {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PostProcess Local Exposure"),
+                timestamp_writes: None,
+            });
+            cpass.set_bind_group(0, compute_bg, &[]);
+            let pipelines = [
+                &self.local_exposure_grid_pipeline,
+                &self.local_exposure_blur_pipeline,
+                &self.local_exposure_curve_pipeline,
+            ];
+            for (pipeline, [x, y, z]) in pipelines.into_iter().zip(self.local_exposure.workgroups()) {
+                cpass.set_pipeline(pipeline);
+                cpass.dispatch_workgroups(x, y, z);
+            }
+        }
+        if let Some(query) = &self.compute_timing_query {
+            cmds.write_timestamp(query, 2);
+        }
+
         // 2. Bloom, unless no settings source can enable it this frame: then
         // fs_uber never samples the mips, and they are rebuilt from scratch
         // on the first frame bloom may be on. User effects may sample the
@@ -1501,7 +1656,7 @@ impl PostProcessPass {
             cmds.write_timestamp(query, 0);
         }
         if let Some(query) = &self.compute_timing_query {
-            cmds.write_timestamp(query, 2);
+            cmds.write_timestamp(query, 3);
         }
         {
             let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1520,7 +1675,7 @@ impl PostProcessPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.uber_pipeline);
+            pass.set_pipeline(&self.uber_pipelines[usize::from(self.debug_view)]);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);
         }

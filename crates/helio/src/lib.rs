@@ -25,18 +25,19 @@ pub use helio_mats::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
-pub use helio_core::{MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use helio_core::{wgpu_instance_descriptor, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
     ray_queries_usable, recommended_instance_flags, required_experimental_features,
     required_wgpu_features, required_wgpu_limits, usable_adapter_features,
-    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GiConfig,
+    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex,
     GraphRebuilder,
     IntoGraph, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory,
     PipelineInfo, PipelineOrigin, RenderPipelineRegistry, RenderMode, Renderer,
-    RendererBuilder, RendererConfig, SceneDbHandle,
+    RendererBuilder, RendererConfig, SceneDbHandle, TsrSetting,
 };
+pub use helio_settings;
 pub use camera::Camera;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use renderer::{ReloadMode, ShaderReloadStatus};
@@ -59,7 +60,7 @@ pub use helio_pass_object_batch::{
 pub use helio_mats::GpuMaterial;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_pass_shadow_matrix::ShadowQuality;
-pub use helio_pass_sky::{SkyActor, VolumetricClouds};
+pub use helio_pass_sky::CloudLayer;
 
 /// Project a SceneDB world into the [`SceneGeometry`] a bake reads
 /// (Helio#256): every drawn object (`StaticObjectComponent` and the

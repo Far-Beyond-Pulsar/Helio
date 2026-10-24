@@ -23,16 +23,12 @@
 //!    (`num_blocks`) and `dispatch_args` (indirect dispatch size for every
 //!    later stage) — same technique as `helio-pass-sprite-cull`'s
 //!    `sprite_sort.wgsl::cs_prepare`.
-//! 3. `cs_histogram` / `cs_scan` / `cs_scatter` — 32-pass LSD radix sort of
-//!    `(key, index)` pairs, copied near-verbatim from `helio-pass-sprite-
-//!    cull`'s `sprite_sort.wgsl` (a proven, independently-tested, *stable*
-//!    sort -- see that file's module doc for why stability specifically
-//!    needed a Hillis-Steele rank instead of a per-bucket atomic counter).
-//!    Ends in `keys_a`/`indices_a` after 32 (even) passes.
+//! 3. `helio_core::radix_sort` — a stable LSD radix sort of `(key, index)`
+//!    pairs, 4-bit digits, eight passes; ends in `keys_a`/`indices_a`.
 //! 4. `cs_final_gather` — re-reads `static_objects[indices_a[i]]` in final
 //!    sorted order and writes `instances[i]`/`aabbs[i]`. (`keys_a`/
 //!    `indices_a` only ever carry the sort key + row index, not the full
-//!    ~236-byte row, to keep the 32-pass sort's per-element payload small.)
+//!    ~236-byte row, to keep the sort's per-element payload small.)
 //! 5. `cs_group_local_scan` / `cs_group_block_scan` / `cs_group_write` —
 //!    detect draw-call group boundaries (`sorted_keys_a[i] !=
 //!    sorted_keys_a[i-1]`) and turn them into *stable* (position-ordered,
@@ -248,134 +244,10 @@ fn cs_prepare() {
     dispatch_args[2] = 1u;
 }
 
-// ── Stage 3: radix sort (cs_histogram / cs_scan / cs_scatter) ──────────────
+// ── Stage 3: the sort ────────────────────────────────────────────────────────
 //
-// Copied near-verbatim from `helio-pass-sprite-cull`'s `sprite_sort.wgsl` --
-// see that file's module doc for the full stability rationale. Fully
-// generic over `(key, index)` pairs; nothing here is object-batch-specific.
-
-struct SortUniforms {
-    bit: u32,
-}
-
-@group(0) @binding(0) var<uniform> su_h: SortUniforms;
-@group(0) @binding(1) var<uniform> fu_h: FrameUniform;
-@group(0) @binding(2) var<storage, read> src_keys_h: array<u32>;
-@group(0) @binding(3) var<storage, read_write> block_hist_h: array<u32>;
-
-var<workgroup> hist_ones: atomic<u32>;
-var<workgroup> hist_total: atomic<u32>;
-
-@compute @workgroup_size(WG)
-fn cs_histogram(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wgid: vec3<u32>,
-) {
-    if lid.x == 0u {
-        atomicStore(&hist_ones, 0u);
-        atomicStore(&hist_total, 0u);
-    }
-    workgroupBarrier();
-
-    if gid.x < fu_h.count {
-        atomicAdd(&hist_total, 1u);
-        let bit = (src_keys_h[gid.x] >> su_h.bit) & 1u;
-        if bit == 1u {
-            atomicAdd(&hist_ones, 1u);
-        }
-    }
-    workgroupBarrier();
-
-    if lid.x == 0u {
-        let ones = atomicLoad(&hist_ones);
-        let total = atomicLoad(&hist_total);
-        block_hist_h[wgid.x * 2u + 0u] = total - ones;
-        block_hist_h[wgid.x * 2u + 1u] = ones;
-    }
-}
-
-@group(0) @binding(0) var<uniform> fu_s: FrameUniform;
-@group(0) @binding(1) var<storage, read_write> block_hist_s: array<u32>;
-
-@compute @workgroup_size(1)
-fn cs_scan() {
-    var total_zeros = 0u;
-    var total_ones = 0u;
-    for (var blk = 0u; blk < fu_s.num_blocks; blk++) {
-        total_zeros += block_hist_s[blk * 2u + 0u];
-        total_ones += block_hist_s[blk * 2u + 1u];
-    }
-    let base_zero = 0u;
-    let base_one = total_zeros;
-
-    var running_zero = base_zero;
-    var running_one = base_one;
-    for (var blk = 0u; blk < fu_s.num_blocks; blk++) {
-        let cz = block_hist_s[blk * 2u + 0u];
-        let co = block_hist_s[blk * 2u + 1u];
-        block_hist_s[blk * 2u + 0u] = running_zero;
-        block_hist_s[blk * 2u + 1u] = running_one;
-        running_zero += cz;
-        running_one += co;
-    }
-}
-
-@group(0) @binding(0) var<uniform> su_c: SortUniforms;
-@group(0) @binding(1) var<uniform> fu_c: FrameUniform;
-@group(0) @binding(2) var<storage, read> src_keys_c: array<u32>;
-@group(0) @binding(3) var<storage, read> src_indices_c: array<u32>;
-@group(0) @binding(4) var<storage, read_write> dst_keys_c: array<u32>;
-@group(0) @binding(5) var<storage, read_write> dst_indices_c: array<u32>;
-@group(0) @binding(6) var<storage, read> block_offsets_c: array<u32>;
-
-var<workgroup> scan_buf: array<u32, 256>;
-
-@compute @workgroup_size(WG)
-fn cs_scatter(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wgid: vec3<u32>,
-) {
-    let has_elem = gid.x < fu_c.count;
-    let key = select(0u, src_keys_c[gid.x], has_elem);
-    let bit = select(0u, (key >> su_c.bit) & 1u, has_elem);
-
-    scan_buf[lid.x] = bit;
-    workgroupBarrier();
-
-    var offset = 1u;
-    loop {
-        if offset >= WG {
-            break;
-        }
-        var v = 0u;
-        if lid.x >= offset {
-            v = scan_buf[lid.x - offset];
-        }
-        workgroupBarrier();
-        scan_buf[lid.x] += v;
-        workgroupBarrier();
-        offset = offset * 2u;
-    }
-    let inclusive_ones = scan_buf[lid.x];
-
-    if !has_elem {
-        return;
-    }
-
-    var local_pos: u32;
-    if bit == 1u {
-        local_pos = inclusive_ones - 1u;
-    } else {
-        local_pos = (lid.x + 1u - inclusive_ones) - 1u;
-    }
-
-    let base = block_offsets_c[wgid.x * 2u + bit];
-    let dst = base + local_pos;
-    dst_keys_c[dst] = key;
-    dst_indices_c[dst] = src_indices_c[gid.x];
-}
+// `helio_core::radix_sort` (its own shader), over `keys_a`/`indices_a` with
+// `keys_b`/`indices_b` as scratch, sized by `frame_uniform`/`dispatch_args`.
 
 // ── Stage 4: cs_final_gather ─────────────────────────────────────────────────
 

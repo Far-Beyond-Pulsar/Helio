@@ -1449,7 +1449,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
-            f.ray_frame.publish_with_transmission(f.scene.frame_count, acceleration.tlas(), acceleration.transmission());
+            f.ray_frame.publish(f.scene.frame_count, acceleration.frame());
             f.frame();
             mean(&f.read())
         };
@@ -1608,7 +1608,7 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
-            f.ray_frame.publish_with_transmission(f.scene.frame_count, acceleration.tlas(), acceleration.transmission());
+            f.ray_frame.publish(f.scene.frame_count, acceleration.frame());
             f.frame();
             mean(&f.read())
         };

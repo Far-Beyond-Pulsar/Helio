@@ -51,14 +51,14 @@ fn culled_rows(device: &wgpu::Device, queue: &wgpu::Queue, pass: &LightCullPass)
 #[test]
 fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
     let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        // The radiance-cascades ray-query pipeline is not needed here, and
-        // some software drivers cannot compile it.
+        // Ray queries are not needed here, and some software drivers cannot
+        // compile ray-query pipelines.
         required_features: helio::required_wgpu_features(
             adapter.features() - wgpu::Features::EXPERIMENTAL_RAY_QUERY,
         ),

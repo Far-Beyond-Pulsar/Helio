@@ -94,10 +94,6 @@ mod hlfs_benchmark;
 #[path = "../examples-wasm/sdf_demo.rs"]
 mod sdf_demo;
 
-#[cfg(feature = "rc_benchmark")]
-#[path = "../examples-wasm/rc_benchmark.rs"]
-mod rc_benchmark;
-
 #[cfg(feature = "load_fbx")]
 #[path = "../examples-wasm/load_fbx.rs"]
 mod load_fbx;
@@ -205,11 +201,6 @@ pub fn start() {
     #[cfg(feature = "sdf_demo")]
     {
         helio_wasm::launch::<sdf_demo::Demo>();
-        return;
-    }
-    #[cfg(feature = "rc_benchmark")]
-    {
-        helio_wasm::launch::<rc_benchmark::Demo>();
         return;
     }
     #[cfg(feature = "load_fbx")]
@@ -341,11 +332,6 @@ pub fn main() {
     #[cfg(feature = "sdf_demo")]
     {
         helio_wasm::launch::<sdf_demo::Demo>();
-        return;
-    }
-    #[cfg(feature = "rc_benchmark")]
-    {
-        helio_wasm::launch::<rc_benchmark::Demo>();
         return;
     }
     #[cfg(feature = "load_fbx")]

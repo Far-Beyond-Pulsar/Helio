@@ -39,7 +39,6 @@ const MOVED_KEY: &str = "scene_objects_moved";
 /// another renderer (virtual geometry), so the main view's frustum cull skips
 /// it. Shadows still see the row: the classic geometry is the shadow proxy.
 const CLASSIC_SUPPRESSED_KEY: &str = "classic_suppressed";
-const SORT_BITS: usize = 32;
 /// Byte offset of the one-workgroup-per-group dispatch size in
 /// `dispatch_args_groups` (see `cs_prepare_groups`).
 const GROUP_DISPATCH_OFFSET: u64 = 12;
@@ -65,12 +64,6 @@ struct BatchUniforms {
 struct FrameUniformGpu {
     count: u32,
     num_blocks: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct SortUniformsGpu {
-    bit: u32,
 }
 
 #[repr(C)]
@@ -280,9 +273,6 @@ struct MovedBinds {
 struct BindGroupLayouts {
     gather: wgpu::BindGroupLayout,
     prepare: wgpu::BindGroupLayout,
-    histogram: wgpu::BindGroupLayout,
-    scan: wgpu::BindGroupLayout,
-    scatter: wgpu::BindGroupLayout,
     final_gather: wgpu::BindGroupLayout,
     moved: wgpu::BindGroupLayout,
     moved_args: wgpu::BindGroupLayout,
@@ -301,9 +291,6 @@ struct BindGroupLayouts {
 struct Pipelines {
     gather: wgpu::ComputePipeline,
     prepare: wgpu::ComputePipeline,
-    histogram: wgpu::ComputePipeline,
-    scan: wgpu::ComputePipeline,
-    scatter: wgpu::ComputePipeline,
     final_gather: wgpu::ComputePipeline,
     moved_args: wgpu::ComputePipeline,
     final_gather_moved: wgpu::ComputePipeline,
@@ -329,7 +316,6 @@ struct ScratchBuffers {
     keys_b: wgpu::Buffer,
     indices_a: wgpu::Buffer,
     indices_b: wgpu::Buffer,
-    block_hist: wgpu::Buffer,
     instances_out: wgpu::Buffer,
     aabbs_out: wgpu::Buffer,
     local_group_rank: wgpu::Buffer,
@@ -375,7 +361,6 @@ impl ScratchBuffers {
             keys_b: create_storage_buffer(device, "ObjBatch KeysB", n * 4),
             indices_a: create_storage_buffer(device, "ObjBatch IndicesA", n * 4),
             indices_b: create_storage_buffer(device, "ObjBatch IndicesB", n * 4),
-            block_hist: create_storage_buffer(device, "ObjBatch BlockHist", blocks * 2 * 4),
             instances_out: create_storage_buffer(device, "ObjBatch Instances", n * INSTANCE_BYTES),
             aabbs_out: create_storage_buffer(device, "ObjBatch Aabbs", n * AABB_BYTES),
             local_group_rank: create_storage_buffer(device, "ObjBatch LocalGroupRank", n * 4),
@@ -438,7 +423,10 @@ impl ScratchBuffers {
 pub struct ObjectBatchPass {
     bgls: BindGroupLayouts,
     pipelines: Pipelines,
-    sort_pass_uniforms: [wgpu::Buffer; SORT_BITS],
+    /// The (key, row) sort (`helio_core::radix_sort`), bound to the scratch
+    /// pairs.
+    sort: helio_core::radix_sort::RadixSort,
+    sort_binds: Option<helio_core::radix_sort::RadixSortBinds>,
     batch_uniform: wgpu::Buffer,
     draw_calls_out: wgpu::Buffer,
     /// Same per-group data as `draw_calls_out`, reordered to `wgpu`'s
@@ -450,9 +438,6 @@ pub struct ObjectBatchPass {
 
     gather_bg: Option<wgpu::BindGroup>,
     prepare_bg: Option<wgpu::BindGroup>,
-    histogram_bgs: Option<[wgpu::BindGroup; SORT_BITS]>,
-    scan_bg: Option<wgpu::BindGroup>,
-    scatter_bgs: Option<[wgpu::BindGroup; SORT_BITS]>,
     final_gather_bg: Option<wgpu::BindGroup>,
     group_local_scan_bg: Option<wgpu::BindGroup>,
     group_block_scan_bg: Option<wgpu::BindGroup>,
@@ -546,31 +531,6 @@ impl ObjectBatchPass {
                     bgl_entry_storage(0, cs, true),
                     bgl_entry_storage(1, cs, false),
                     bgl_entry_storage(2, cs, false),
-                ],
-            }),
-            histogram: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ObjBatch Histogram BGL"),
-                entries: &[
-                    bgl_entry_uniform(0, cs),
-                    bgl_entry_uniform(1, cs),
-                    bgl_entry_storage(2, cs, true),
-                    bgl_entry_storage(3, cs, false),
-                ],
-            }),
-            scan: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ObjBatch Scan BGL"),
-                entries: &[bgl_entry_uniform(0, cs), bgl_entry_storage(1, cs, false)],
-            }),
-            scatter: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ObjBatch Scatter BGL"),
-                entries: &[
-                    bgl_entry_uniform(0, cs),
-                    bgl_entry_uniform(1, cs),
-                    bgl_entry_storage(2, cs, true),
-                    bgl_entry_storage(3, cs, true),
-                    bgl_entry_storage(4, cs, false),
-                    bgl_entry_storage(5, cs, false),
-                    bgl_entry_storage(6, cs, true),
                 ],
             }),
             final_gather: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -722,21 +682,6 @@ impl ObjectBatchPass {
                 &shader,
                 "cs_prepare",
             ),
-            histogram: make_compute_pipeline(
-                device,
-                "ObjBatch Histogram",
-                &bgls.histogram,
-                &shader,
-                "cs_histogram",
-            ),
-            scan: make_compute_pipeline(device, "ObjBatch Scan", &bgls.scan, &shader, "cs_scan"),
-            scatter: make_compute_pipeline(
-                device,
-                "ObjBatch Scatter",
-                &bgls.scatter,
-                &shader,
-                "cs_scatter",
-            ),
             final_gather: make_compute_pipeline(
                 device,
                 "ObjBatch FinalGather",
@@ -830,16 +775,6 @@ impl ObjectBatchPass {
             ),
         };
 
-        let sort_pass_uniforms: [wgpu::Buffer; SORT_BITS] = std::array::from_fn(|_| {
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("ObjBatch SortBit"),
-                size: std::mem::size_of::<SortUniformsGpu>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            buf
-        });
-
         let batch_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ObjBatch BatchUniforms"),
             size: std::mem::size_of::<BatchUniforms>() as u64,
@@ -865,7 +800,8 @@ impl ObjectBatchPass {
         Self {
             bgls,
             pipelines,
-            sort_pass_uniforms,
+            sort: helio_core::radix_sort::RadixSort::new(device),
+            sort_binds: None,
             batch_uniform,
             draw_calls_out,
             indirect_out,
@@ -873,9 +809,6 @@ impl ObjectBatchPass {
             scratch_capacity,
             gather_bg: None,
             prepare_bg: None,
-            histogram_bgs: None,
-            scan_bg: None,
-            scatter_bgs: None,
             final_gather_bg: None,
             group_local_scan_bg: None,
             group_block_scan_bg: None,
@@ -979,52 +912,15 @@ impl ObjectBatchPass {
             ],
         }));
 
-        // Radix sort: 32 bind groups per kernel, ping-ponging src/dst each
-        // bit -- identical structure to `helio-pass-sprite-cull`'s own
-        // `hist_bind_groups`/`scatter_bind_groups` construction.
-        self.histogram_bgs = Some(std::array::from_fn(|i| {
-            let src_keys = if i % 2 == 0 { &s.keys_a } else { &s.keys_b };
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ObjBatch Histogram BG"),
-                layout: &self.bgls.histogram,
-                entries: &[
-                    bg_entry(0, &self.sort_pass_uniforms[i]),
-                    bg_entry(1, &s.frame_uniform),
-                    bg_entry(2, src_keys),
-                    bg_entry(3, &s.block_hist),
-                ],
-            })
-        }));
+        self.sort_binds = Some(self.sort.bind(
+            device,
+            &s.frame_uniform,
+            [&s.keys_a, &s.keys_b],
+            [&s.indices_a, &s.indices_b],
+            self.scratch_capacity,
+        ));
 
-        self.scan_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ObjBatch Scan BG"),
-            layout: &self.bgls.scan,
-            entries: &[bg_entry(0, &s.frame_uniform), bg_entry(1, &s.block_hist)],
-        }));
-
-        self.scatter_bgs = Some(std::array::from_fn(|i| {
-            let (src_keys, src_indices, dst_keys, dst_indices) = if i % 2 == 0 {
-                (&s.keys_a, &s.indices_a, &s.keys_b, &s.indices_b)
-            } else {
-                (&s.keys_b, &s.indices_b, &s.keys_a, &s.indices_a)
-            };
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ObjBatch Scatter BG"),
-                layout: &self.bgls.scatter,
-                entries: &[
-                    bg_entry(0, &self.sort_pass_uniforms[i]),
-                    bg_entry(1, &s.frame_uniform),
-                    bg_entry(2, src_keys),
-                    bg_entry(3, src_indices),
-                    bg_entry(4, dst_keys),
-                    bg_entry(5, dst_indices),
-                    bg_entry(6, &s.block_hist),
-                ],
-            })
-        }));
-
-        // 32 (even) passes -- sorted result ends back in A, same as
-        // `helio-pass-sprite-cull`.
+        // The sort's eight (even) passes end back in A.
         self.final_gather_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ObjBatch FinalGather BG"),
             layout: &self.bgls.final_gather,
@@ -1267,38 +1163,13 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups(1, 1, 1);
         }
 
-        let hist_bgs = self.histogram_bgs.as_ref().unwrap();
-        let scatter_bgs = self.scatter_bgs.as_ref().unwrap();
-        for i in 0..SORT_BITS {
-            {
-                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjBatch Histogram"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipelines.histogram);
-                pass.set_bind_group(0, &hist_bgs[i], &[]);
-                pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
-            }
-            {
-                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjBatch Scan"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipelines.scan);
-                pass.set_bind_group(0, self.scan_bg.as_ref().unwrap(), &[]);
-                pass.dispatch_workgroups(1, 1, 1);
-            }
-            {
-                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("ObjBatch Scatter"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipelines.scatter);
-                pass.set_bind_group(0, &scatter_bgs[i], &[]);
-                pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
-            }
+        {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("ObjBatch Sort"),
+                timestamp_writes: None,
+            });
+            self.sort.record(&mut pass, self.sort_binds.as_ref().unwrap(), &self.scratch.dispatch_args, 0);
         }
-
         {
             let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch FinalGather"),
@@ -1516,13 +1387,6 @@ impl ObjectBatchPass {
                 max_ranges: self.scratch_capacity,
             }),
         );
-        for (i, buf) in self.sort_pass_uniforms.iter().enumerate() {
-            queue.write_buffer(
-                buf,
-                0,
-                bytemuck::bytes_of(&SortUniformsGpu { bit: i as u32 }),
-            );
-        }
         // `RangeBlockUniform` reuses `dispatch_args_groups[0]` directly (the
         // dual-bind trick) -- nothing to write here.
 
@@ -1825,13 +1689,6 @@ impl RenderPass for ObjectBatchPass {
                 max_ranges: self.scratch_capacity,
             }),
         );
-        for (i, buf) in self.sort_pass_uniforms.iter().enumerate() {
-            ctx.write_buffer(
-                buf,
-                0,
-                bytemuck::bytes_of(&SortUniformsGpu { bit: i as u32 }),
-            );
-        }
 
         // The tables read back (counts, ranges) come from the sort and the
         // grouping, so a run that only moved objects has nothing new to copy,

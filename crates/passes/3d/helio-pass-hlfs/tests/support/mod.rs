@@ -33,7 +33,7 @@ impl Fixture {
         Self::new_with_ray_queries(width, height, true).await
     }
     async fn new_with_ray_queries(width: u32, height: u32, rt: bool) -> Self {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        let mut descriptor = helio_core::wgpu_instance_descriptor().with_env();
         if rt {
             descriptor.backends = wgpu::Backends::VULKAN;
         }
@@ -260,7 +260,7 @@ impl Fixture {
         self.scene.flush();
         if self.publish_ray_frame {
             self.ray_frame
-                .publish_with_transmission(self.scene.frame_count, self.scene.tlas_manager.tlas(), self.transmission.as_ref());
+                .publish(self.scene.frame_count, helio_core::RayFrame { tlas: self.scene.tlas_manager.tlas(), transmission: self.transmission.as_ref(), instances: None, proxies: None });
         }
         let mut resources = helio_core::ResourceRegistry::empty();
         resources.write(

@@ -45,6 +45,7 @@ two_million_verified.sqlite-wal
 __pycache__/
 *.pyc
 /state
+/target-agent
 /crates/examples/assets/vg_stress/cache
 /crates/examples/assets/vg_stress/meshes
 /crates/examples/assets/vg_stress/source

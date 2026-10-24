@@ -157,9 +157,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -600,13 +599,8 @@ impl AppState {
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Some(acceleration) = &mut self.acceleration {
-            acceleration
-                .prepare(&self.scene_db.world)
-                .expect("cathedral RT geometry");
-            renderer.set_ray_tracing_frame_with_transmission(
-                acceleration.tlas(),
-                acceleration.transmission(),
-            );
+            acceleration.prepare(&self.scene_db.world).expect("cathedral RT geometry");
+            renderer.set_ray_tracing_frame(acceleration.frame());
         }
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);

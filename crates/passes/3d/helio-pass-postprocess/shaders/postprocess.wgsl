@@ -13,6 +13,9 @@
 //
 // Entry points:
 //   cs_exposure/reduce       — compute: sampled log-luminance reduction
+//   cs_local_exposure_grid   — compute: bilateral grid of log luminance
+//   cs_local_exposure_blur   — compute: blur the grid in position and luminance
+//   cs_local_exposure_curve  — compute: a monotonic tone curve per grid cell
 //   cs_volume_blend          — compute: blend active post-process volumes → output
 //   cs_bloom_down_extract    — compute: extract brights from HDR → bloom mip 0
 //   cs_bloom_down            — compute: 2x downsample from bloom_src → bloom_dst
@@ -22,7 +25,7 @@
 //
 // Effect order (uber pass):
 //   INJECTION_POINT_0  — user effects (pre-blend)
-//   1. Exposure scale
+//   1. Exposure scale (global, then local)
 //   2. Bloom composite
 //   3. Color grading
 //   4. White balance
@@ -45,6 +48,10 @@ const WG_EXPOSURE_Y: u32 = 16u;
 // DEFAULT_AUTO_REGISTER_CAPACITY`) -- see helio-pass-postprocess's own
 // `MAX_PP_VOLUMES` doc for why the two must never drift apart.
 const MAX_PP_VOLUMES: u32 = 64u;
+
+// A renderer debug view is on: show the scene colour as the view wrote it
+// (no exposure, bloom, grade or tone curve). Set per pipeline.
+override DEBUG_VIEW: bool = false;
 
 // ── GpuPostProcessUniforms ─────────────────────────────────────────────────────
 // Matches CPU-side layout in libhelio/src/postprocess.rs
@@ -84,11 +91,11 @@ struct GpuPostProcessUniforms {
     _pad_vignette:          f32,
     vignette_color:         vec3<f32>,
     vignette_enabled:       u32,
-    // Reserved: was post-process chromatic aberration (now the lens's).
-    _reserved_ca0:          f32,
-    _reserved_ca1:          f32,
-    _reserved_ca2:          f32,
-    _reserved_ca3:          f32,
+    // Local exposure (offset 192; the bytes of the removed chromatic aberration).
+    local_exposure_highlight_contrast: f32,
+    local_exposure_shadow_contrast:    f32,
+    local_exposure_detail_strength:    f32,
+    _pad_local_exposure:               f32,
     grain_intensity:        f32,
     grain_response:         f32,
     grain_size:             f32,
@@ -239,6 +246,14 @@ struct WorldOrigin { hi: vec4<f32>, lo: vec4<f32> }
 // already composited into hdr_input by FogCompositePass. Bound to a 1x1 black
 // fallback when no lens pass is in the graph.
 @group(0) @binding(17) var                     lens_input:   texture_2d<f32>;
+// Local exposure's bilateral grid: (sum of EV, weight) per screen cell and
+// luminance bin as gathered (cs_local_exposure_grid) and blurred
+// (cs_local_exposure_blur), then each cell's tone curve as a gain in EV per
+// bin (cs_local_exposure_curve writes le_grid_out; fs_uber samples le_grid).
+@group(0) @binding(23) var<storage, read_write> le_grid_raw: array<vec2<f32>>;
+@group(0) @binding(26) var<storage, read_write> le_grid_blurred: array<vec2<f32>>;
+@group(0) @binding(24) var                     le_grid_out:  texture_storage_3d<rgba16float, write>;
+@group(0) @binding(25) var                     le_grid:      texture_3d<f32>;
 @group(0) @binding(18) var                     velocity_tex: texture_2d<f32>;
 @group(0) @binding(19) var                     lut_tex:      texture_3d<f32>;
 
@@ -370,6 +385,9 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     if overridden(mask, 81u) { r.lens_light_intensity = base.lens_light_intensity + (vol.lens_light_intensity - base.lens_light_intensity) * t; }
     if overridden(mask, 82u) { r.lens_field_margin = base.lens_field_margin + (vol.lens_field_margin - base.lens_field_margin) * t; }
     if overridden(mask, 83u) { r.lens_response_time = base.lens_response_time + (vol.lens_response_time - base.lens_response_time) * t; }
+    if overridden(mask, 84u) { r.local_exposure_highlight_contrast = base.local_exposure_highlight_contrast + (vol.local_exposure_highlight_contrast - base.local_exposure_highlight_contrast) * t; }
+    if overridden(mask, 85u) { r.local_exposure_shadow_contrast = base.local_exposure_shadow_contrast + (vol.local_exposure_shadow_contrast - base.local_exposure_shadow_contrast) * t; }
+    if overridden(mask, 86u) { r.local_exposure_detail_strength = base.local_exposure_detail_strength + (vol.local_exposure_detail_strength - base.local_exposure_detail_strength) * t; }
     return r;
 }
 fn volume_weight(pos: vec3<f32>, v: GpuPostProcessVolume) -> f32 {
@@ -601,6 +619,188 @@ fn exposure_scale() -> f32 {
     return exp2(ev);
 }
 
+// ── Local exposure: an edge-aware local mean EV per pixel ─────────────────────
+//
+// A bilateral grid (Chen, Paris and Durand, "Real-time Edge-Aware Image
+// Processing with the Bilateral Grid", 2007) over screen position and log2
+// luminance. `cs_local_exposure_grid` gathers a 16x16 lattice of bilinear taps
+// per screen cell into the cell's luminance bins (each tap split between its
+// two nearest bins), and `cs_local_exposure_blur` blurs the grid in position
+// and luminance: each bin holds the mean EV of the nearby pixels about as
+// bright as it. Pixels across a strong edge (a canopy against the sky) sit in
+// other bins, so neither side lifts or darkens the other: no halos.
+//
+// EVs are relative to the pivot, the scene luminance the frame's exposure
+// brings to middle grey at the tone curve's input (with auto exposure, the
+// adapted mean). Each bin's mean is scaled toward it by the shadow or
+// highlight contrast, and the bin's difference from that mean by the detail
+// strength: a tone curve per cell (`cs_local_exposure_curve`). Taken pixel by
+// pixel, the mean jumps between regions across a penumbra (pixels a little
+// darker than sunlight average with the shade), so a brighter pixel could
+// come out darker: a dark rim along soft shadow edges. Each cell's curve is
+// therefore made non-decreasing (with a minimum slope) by weighted isotonic
+// regression: well-populated bins keep their values, the sparse bins between
+// regions are pooled. fs_uber reads the curve at the pixel's position and
+// luminance; interpolating non-decreasing curves keeps them non-decreasing.
+// Nothing is carried between frames: a still image stays still.
+
+const LE_BINS: u32 = 24u;
+const LE_EV_MIN: f32 = -13.0; // bin 0's centre
+const LE_EV_MAX: f32 = 10.0;  // the last bin's centre
+const LE_EV_PER_BIN: f32 = 1.0;
+const LE_TAPS: u32 = 16u;     // per axis, per screen cell
+const LE_FIXED: f32 = 4096.0; // a tap's weight in the integer accumulators
+// Below this blurred weight a bin has too few pixels to average, and its
+// mean falls back toward its own EV.
+const LE_MIN_WEIGHT: f32 = 0.02;
+// The least slope of a cell's tone curve (output EV per input EV): penumbrae
+// keep some contrast where regions are pooled.
+const LE_MIN_SLOPE: f32 = 0.2;
+
+var<workgroup> le_weight: array<atomic<u32>, 24>;
+var<workgroup> le_sum: array<atomic<i32>, 24>;
+
+fn local_exposure_active() -> bool {
+    return postprocess.local_exposure_highlight_contrast != 1.0
+        || postprocess.local_exposure_shadow_contrast != 1.0
+        || postprocess.local_exposure_detail_strength != 1.0;
+}
+
+// log2 of the scene luminance the tone curve receives as middle grey.
+fn local_exposure_pivot() -> f32 {
+    var scale = exposure_scale();
+    if postprocess.tonemap_operator != 5u {
+        scale *= postprocess.tonemap_exposure / postprocess.tonemap_white_point;
+    }
+    return log2(0.18) - log2(max(scale, 1e-30));
+}
+
+// A colour's EV from the pivot, within the grid's range (black and NaN at
+// its bottom).
+fn local_exposure_ev(color: vec3<f32>, pivot: f32) -> f32 {
+    let l = luminance(color);
+    return clamp(log2(select(1e-30, l, l > 1e-30)) - pivot, LE_EV_MIN, LE_EV_MAX);
+}
+
+@compute @workgroup_size(16, 16)
+fn cs_local_exposure_grid(@builtin(local_invocation_id) lid: vec3<u32>,
+                          @builtin(local_invocation_index) lidx: u32,
+                          @builtin(workgroup_id) cell: vec3<u32>,
+                          @builtin(num_workgroups) grid: vec3<u32>) {
+    if !local_exposure_active() { return; }
+    if lidx < LE_BINS {
+        atomicStore(&le_weight[lidx], 0u);
+        atomicStore(&le_sum[lidx], 0);
+    }
+    workgroupBarrier();
+    // A bilinear tap averages 2x2 pixels: at 1080p the lattice covers the cell.
+    let uv = (vec2<f32>(cell.xy) + (vec2<f32>(lid.xy) + 0.5) / f32(LE_TAPS)) / vec2<f32>(grid.xy);
+    let ev = local_exposure_ev(textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb, local_exposure_pivot());
+    let z = (ev - LE_EV_MIN) / LE_EV_PER_BIN;
+    let low = min(u32(z), LE_BINS - 1u);
+    let high = min(low + 1u, LE_BINS - 1u);
+    let w_high = u32((z - f32(low)) * LE_FIXED + 0.5);
+    let w_low = u32(LE_FIXED) - w_high;
+    atomicAdd(&le_weight[low], w_low);
+    atomicAdd(&le_sum[low], i32(round(ev * f32(w_low))));
+    atomicAdd(&le_weight[high], w_high);
+    atomicAdd(&le_sum[high], i32(round(ev * f32(w_high))));
+    workgroupBarrier();
+    if lidx < LE_BINS {
+        // A cell's weights sum to 1.
+        let norm = 1.0 / (LE_FIXED * f32(LE_TAPS * LE_TAPS));
+        le_grid_raw[(cell.y * grid.x + cell.x) * LE_BINS + lidx] =
+            vec2<f32>(f32(atomicLoad(&le_sum[lidx])), f32(atomicLoad(&le_weight[lidx]))) * norm;
+    }
+}
+
+// Binomial weights: 1 4 6 4 1 across cells, 1 2 1 across bins. The range
+// kernel (tap split, this blur, the trilinear read) spans about ±1 EV (sigma)
+// and ends at ±3 EV, so regions further apart in brightness never mix.
+fn le_binomial4(d: i32) -> f32 {
+    return select(select(1.0, 4.0, abs(d) == 1), 6.0, d == 0);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_local_exposure_blur(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(le_grid_out);
+    if any(gid >= dims) || !local_exposure_active() { return; }
+    let at = vec3<i32>(gid);
+    let size = vec3<i32>(dims);
+    var sum = vec2<f32>(0.0);
+    for (var dz = -1; dz <= 1; dz++) {
+        let z = at.z + dz;
+        if z < 0 || z >= size.z { continue; }
+        let wz = f32(2 - abs(dz));
+        for (var dy = -2; dy <= 2; dy++) {
+            let y = at.y + dy;
+            if y < 0 || y >= size.y { continue; }
+            let wyz = wz * le_binomial4(dy);
+            for (var dx = -2; dx <= 2; dx++) {
+                let x = at.x + dx;
+                if x < 0 || x >= size.x { continue; }
+                sum += le_grid_raw[(u32(y) * dims.x + u32(x)) * LE_BINS + u32(z)] * (wyz * le_binomial4(dx));
+            }
+        }
+    }
+    // Over the full kernel's weight (16 x 16 x 4): cells off the screen add
+    // nothing, and the curve divides the weight out.
+    le_grid_blurred[(gid.y * dims.x + gid.x) * LE_BINS + gid.z] = sum / 1024.0;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_local_exposure_curve(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = textureDimensions(le_grid_out);
+    if any(gid.xy >= dims.xy) || !local_exposure_active() { return; }
+    let first = (gid.y * dims.x + gid.x) * LE_BINS;
+    // Pool-adjacent-violators over (output - LE_MIN_SLOPE * input): blocks of
+    // bins, each at the weighted mean of its bins, merged while they descend.
+    var value: array<f32, 24>;
+    var weight: array<f32, 24>;
+    var count: array<u32, 24>;
+    var blocks = 0u;
+    for (var z = 0u; z < LE_BINS; z++) {
+        let ev = LE_EV_MIN + f32(z) * LE_EV_PER_BIN;
+        let bin = le_grid_blurred[first + z];
+        let mean = mix(ev, bin.x / max(bin.y, 1e-6), saturate(bin.y / LE_MIN_WEIGHT));
+        let contrast = select(postprocess.local_exposure_shadow_contrast,
+            postprocess.local_exposure_highlight_contrast, mean > 0.0);
+        let out = ev + mean * (contrast - 1.0) + (postprocess.local_exposure_detail_strength - 1.0) * (ev - mean);
+        value[blocks] = out - LE_MIN_SLOPE * ev;
+        weight[blocks] = bin.y + 1e-4;
+        count[blocks] = 1u;
+        blocks++;
+        while blocks > 1u && value[blocks - 2u] > value[blocks - 1u] {
+            let a = blocks - 2u;
+            let b = blocks - 1u;
+            let w = weight[a] + weight[b];
+            value[a] = (value[a] * weight[a] + value[b] * weight[b]) / w;
+            weight[a] = w;
+            count[a] += count[b];
+            blocks--;
+        }
+    }
+    var z = 0u;
+    for (var block = 0u; block < blocks; block++) {
+        for (var k = 0u; k < count[block]; k++) {
+            let ev = LE_EV_MIN + f32(z) * LE_EV_PER_BIN;
+            // The gain in EV: the curve's output less its input.
+            let gain = value[block] + (LE_MIN_SLOPE - 1.0) * ev;
+            textureStore(le_grid_out, vec3<u32>(gid.xy, z), vec4<f32>(gain, 0.0, 0.0, 0.0));
+            z++;
+        }
+    }
+}
+
+// Local exposure's multiplier for the pre-exposure colour at `uv`: its
+// cell's tone curve, interpolated in position and luminance.
+fn local_exposure_scale(color: vec3<f32>, uv: vec2<f32>) -> f32 {
+    if !local_exposure_active() { return 1.0; }
+    let ev = local_exposure_ev(color, local_exposure_pivot());
+    let z = ((ev - LE_EV_MIN) / LE_EV_PER_BIN + 0.5) / f32(LE_BINS);
+    return exp2(textureSampleLevel(le_grid, linear_samp, vec3<f32>(uv, z), 0.0).x);
+}
+
 // ── cs_bloom_down_extract: extract brights from HDR → mip 0 ───────────────────
 
 @compute @workgroup_size(8, 8)
@@ -732,6 +932,66 @@ fn tonemap_lottes(x: vec3<f32>) -> vec3<f32> {
     return saturate(lottes_curve(x, a, b, c, d));
 }
 
+// AgX: scene-linear Rec.709 into its inset working space, log2 encoded over
+// [AGX_MIN_EV, AGX_MAX_EV] around middle grey, through its sigmoid (a
+// polynomial fit), back out and to display-linear (the sigmoid's output is
+// display encoded, gamma 2.2).
+const AGX_MIN_EV: f32 = -12.47393;
+const AGX_MAX_EV: f32 = 4.026069;
+
+fn agx_sigmoid(x: vec3<f32>) -> vec3<f32> {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
+fn agx_curve(x: vec3<f32>, punchy: bool) -> vec3<f32> {
+    let inset = mat3x3<f32>(
+        vec3<f32>(0.842479062253094, 0.0423282422610123, 0.0423756549057051),
+        vec3<f32>(0.0784335999999992, 0.878468636469772, 0.0784336),
+        vec3<f32>(0.0792237451477643, 0.0791661274605434, 0.879142973793104),
+    );
+    let outset = mat3x3<f32>(
+        vec3<f32>(1.19687900512017, -0.0528968517574562, -0.0529716355144438),
+        vec3<f32>(-0.0980208811401368, 1.15190312990417, -0.0980434501171241),
+        vec3<f32>(-0.0990297440797205, -0.0989611768448433, 1.15107367264116),
+    );
+    let encoded = clamp(log2(max(inset * x, vec3<f32>(1e-10))), vec3<f32>(AGX_MIN_EV), vec3<f32>(AGX_MAX_EV));
+    var v = agx_sigmoid((encoded - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV));
+    if punchy {
+        // The punchy look: power 1.35, saturation 1.4 (Rec.709 luma).
+        v = pow(saturate(v), vec3<f32>(1.35));
+        let luma = dot(v, vec3<f32>(0.2126, 0.7152, 0.0722));
+        v = vec3<f32>(luma) + 1.4 * (v - vec3<f32>(luma));
+    }
+    let display = outset * v;
+    return pow(saturate(display), vec3<f32>(2.2));
+}
+
+// Scene luminance (at the curve's input) below which AgX punchy keeps a
+// colour's hue and saturation: one EV under middle grey.
+const AGX_PUNCHY_CHROMA_LUMINANCE: f32 = 0.09;
+
+fn tonemap_agx(x: vec3<f32>, punchy: bool) -> vec3<f32> {
+    let mapped = agx_curve(x, punchy);
+    // AgX's toe separates a dark colour's channels more the darker it is,
+    // and the punchy look (a power and a saturation boost per channel)
+    // multiplies that: grass in shade lost its yellow to pure green, and
+    // with it the variation between its tiles. Below the reference
+    // luminance, punchy takes the hue and saturation the same colour has at
+    // the reference, at its own luminance: a darker colour is darker, not
+    // purer. A smooth maximum of the two luminances joins the two without a
+    // kink; from four times the reference up nothing changes.
+    let y = dot(x, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if !punchy || !(y > 1e-10) || y >= 4.0 * AGX_PUNCHY_CHROMA_LUMINANCE { return mapped; }
+    let k = y / AGX_PUNCHY_CHROMA_LUMINANCE;
+    let reference = agx_curve(x * (pow(1.0 + k * k * k * k, 0.25) / k), true);
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let reference_luma = dot(reference, luma);
+    if !(reference_luma > 0.0) { return mapped; }
+    return saturate(reference * (dot(mapped, luma) / reference_luma));
+}
+
 fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
     let op = postprocess.tonemap_operator;
     if op == 5u { return color; } // None — skip
@@ -742,6 +1002,8 @@ fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
     if op == 2u { return tonemap_reinhard(c); }
     if op == 3u { return tonemap_uncharted2(c); }
     if op == 4u { return tonemap_lottes(c); }
+    if op == 6u { return tonemap_agx(c, false); }
+    if op == 7u { return tonemap_agx(c, true); }
     return c; // fallback: pass through
 }
 
@@ -950,12 +1212,16 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // extraction below all see scattered light.
     let source = textureSampleLevel(hdr_input, linear_samp, uv, 0.0);
     var color = source.rgb;
+    if DEBUG_VIEW {
+        return source;
+    }
 
     //%P0
 
-    // 1. Exposure — one scene-linear multiplier for image, bloom and lens.
+    // 1. Exposure — one scene-linear multiplier for image, bloom and lens;
+    // the image also takes its local exposure.
     let exposure = exposure_scale();
-    color *= exposure;
+    color *= exposure * local_exposure_scale(color, uv);
 
     // 2. Bloom composite. Bloom was extracted from pre-exposure radiance, so it
     // takes the same exposure as the image it came from.

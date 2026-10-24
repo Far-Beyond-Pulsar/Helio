@@ -17,7 +17,7 @@ fn gpu() -> Option<Gpu> {
     // Creating devices from many tests at once stalls some drivers; take turns.
     static DEVICE_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _device_creation = DEVICE_CREATION.lock().unwrap_or_else(|p| p.into_inner());
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let has_bc = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

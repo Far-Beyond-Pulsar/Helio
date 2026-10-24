@@ -23,6 +23,21 @@ struct AtmosphereParams {
     top_radius: f32,
     sun_angular_radius: f32,
     enabled: u32,
+    // The cloud layer (`CloudLayer`): band above the surface (km),
+    // coverage, form, extinction (per km), weather / billow / wisp sizes
+    // (km), wind (world m/s), albedo, erosion.
+    cloud_bottom: f32,
+    cloud_top: f32,
+    cloud_coverage: f32,
+    cloud_type: f32,
+    cloud_extinction: f32,
+    cloud_weather_scale: f32,
+    cloud_shape_scale: f32,
+    cloud_detail_scale: f32,
+    cloud_wind: vec3<f32>,
+    clouds_enabled: u32,
+    cloud_albedo: vec3<f32>,
+    cloud_erosion: f32,
 }
 
 // Per frame, resolved on the GPU (`resolve`).
@@ -43,6 +58,20 @@ struct AtmosphereFrame {
     // Seen from the eye; surfaces take their own sky from the sky table
     // (`atmosphere_sky_table`).
     irradiance: array<vec4<f32>, 9>,
+    // Where the wind has carried the clouds: offsets of the weather (at its
+    // scale and at the climate's, CLOUD_CLIMATE times larger), billow and
+    // wisp noise in their own texture coordinates (`resolve` integrates the
+    // wind each frame, wrapped to the noise's period); w unused.
+    cloud_weather_offset: vec4<f32>,
+    cloud_climate_offset: vec4<f32>,
+    cloud_shape_offset: vec4<f32>,
+    cloud_detail_offset: vec4<f32>,
+}
+
+// Whether the frame draws clouds.
+fn atmosphere_has_clouds(frame: AtmosphereFrame) -> bool {
+    return frame.planet.w > 0.5 && frame.params.clouds_enabled != 0u && frame.params.cloud_coverage > 0.0
+        && frame.params.cloud_extinction > 0.0 && frame.params.cloud_top > frame.params.cloud_bottom;
 }
 
 // The sky's irradiance / pi (unit sun) on a surface anywhere in the
@@ -61,6 +90,10 @@ const TRANSMITTANCE_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
 const MULTI_SCATTERING_SIZE: f32 = 32.0;
 const SKY_VIEW_SIZE: vec2<f32> = vec2<f32>(192.0, 108.0);
 const AERIAL_SLICES: f32 = 32.0;
+// The climate (the weather's large-scale modulation: fronts and clear
+// regions hundreds of kilometres across on Earth) is this many times larger
+// than the weather.
+const CLOUD_CLIMATE: f32 = 12.0;
 
 struct Medium {
     rayleigh: vec3<f32>,

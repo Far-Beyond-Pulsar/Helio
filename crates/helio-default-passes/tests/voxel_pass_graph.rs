@@ -37,7 +37,7 @@ impl helio_core::RenderPass for FinalResourceConsumer {
 #[test]
 fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: voxel default graph");
             return;
@@ -158,6 +158,27 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             assert!(!renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "a settled still view asked for frame {still}");
         }
 
+        // Every debug view the graph advertises (the editor's menu) has a
+        // mode of its own and draws without validation errors.
+        let views = renderer.available_debug_views();
+        let mut modes: Vec<u32> = views.iter().map(|v| v.debug_mode).collect();
+        modes.sort_unstable();
+        let unique = modes.len();
+        modes.dedup();
+        assert_eq!(modes.len(), unique, "debug modes shared: {:?}", views.iter().map(|v| (v.debug_mode, v.name)).collect::<Vec<_>>());
+        for v in &views {
+            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            renderer.set_debug_mode(v.debug_mode);
+            for _ in 0..2 {
+                renderer.render(&camera, &view).unwrap();
+            }
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let error = validation.pop().await;
+            assert!(error.is_none(), "debug view {} ({}): {error:?}", v.debug_mode, v.name);
+        }
+        renderer.set_debug_mode(0);
+        eprintln!("DEBUG_VIEWS {}", views.iter().map(|v| format!("{}={}", v.debug_mode, v.name)).collect::<Vec<_>>().join(", "));
+
         // Removing the source drops the planet's chunks.
         *source.lock().unwrap() = None;
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -207,7 +228,7 @@ struct Editor {
 }
 
 fn editor(width: u32, height: u32) -> Option<Editor> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: editor overlays");
         return None;

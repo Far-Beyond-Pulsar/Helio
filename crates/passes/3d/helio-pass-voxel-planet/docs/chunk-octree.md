@@ -1,595 +1,514 @@
-# Chunk octree: 3D residency, drawing and refinement
+# Chunk octree: the voxel terrain renderer
 
-Status: decided 2026-10-15, replacing the tile quadtree of `chunk-trees.md`
-(phase 2). The chunk format (64³ cells as a 64-tree), generation kernels,
-the in-chunk walk, exact cells, lighting and edits' integer maths stay.
+The terrain is drawn from **chunk trees**: 64³-cell chunks generated on the
+GPU from the terrain contract, kept in an octree per cube face whose cut
+rays decide, and rasterized as boxes that rays enter only inside one chunk.
+Code: `src/chunks/` (`mod.rs`: `ChunkWorld`; `classify.rs`, `residency.rs`,
+`drawn.rs`, `pass.rs`, `scene.rs`), `shaders/chunk_generate.wgsl`,
+`shaders/chunk_draw.wgsl`, `shaders/chunk_table.wgsl`.
 
-## Why
-
-The terrain is volumetric (caves, overhangs, whole-planet destruction), but
-residency was a quadtree of 64×64-column tiles with a stack of chunk layers
-each:
-
-- A tile refined its whole stack as one: a cliff, a cave 800 m down or a
-  dug shaft refined with the surface above it, and an eye in a cave refined
-  the ground far over its head.
-- A tile held one surface band. Layers under it were assumed rock (`BELOW`)
-  until a ray reached them, then the whole volume was generated: caves
-  popped open. One solid gap per tile (`Gap`); a second kept a chunk per
-  layer. Floating rock, hollow worlds or stacked caves did not fit.
-- Refinement was by distance only, all around the eye: occluded ground and
-  ground behind the camera cost nearly what visible ground did (one level
-  coarser), and tiles were evicted 2 s after their last visit, so turning
-  back generated them again.
-
-## The structure
+## Nodes and chunks
 
 - A **node** is a chunk: `(face, level, cx, cy, cz)`, 64³ cells of its
-  level. Its 8 children are `(level - 1, 2cx + a, 2cy + b, 2cz + c)` (cells
-  halve in all three axes, so layers nest).
+  level (6.4 m at level 0 and 0.1 m voxels). Its 8 children are
+  `(level - 1, 2cx + a, 2cy + b, 2cz + c)`: cells halve in all three axes,
+  so layers nest. Planes use one face; an infinite plane is a face 2^27
+  reference cells across.
 - A **footprint** `(face, level, cx, cy)` is the 64×64 columns over a stack
-  of nodes. It stays the unit of column generation (heights, surface words,
-  volume extent: `tile_columns_main`) and of classification: its measured
-  ranges and its edits decide what each node in it is.
+  of nodes: the unit of column generation (heights, surface words, volume
+  extents) and of classification.
 - **Roots** are every node of the coarsest level from the planet's centre
-  (or a plane's lowest layer) to the ceiling.
-- A node is one of:
-  - **Mixed**: may hold a surface; generated into a slot.
-  - **Empty** or **Solid**: uniform from its footprint's ranges and edits;
-    drawn without data (air to cross, rock to hit).
-  - **Buried**: within the field's volume (caves may lie there) but under
-    the surface band and away from the eye; drawn as rock until a ray hits
-    it, then generated (it was the `BELOW` path of a whole tile).
+  (a plane's lowest ground) to the ceiling, and as deep and high as the
+  edits reach. Residency does not depend on where the eye started.
 
-## Residency: a cut of the octree
+A chunk's contents are a **64-tree**: a root over 4³ mid nodes of 16³
+cells, mid nodes over 4³ leaves of 4³ cells, a leaf a 64-bit occupancy
+mask. Bit `x + 4 y + 16 z` of a mask is child or cell `(x, y, z)`. Children
+are packed and addressed by popcount rank; full children are flagged in a
+second mask and store nothing. Leaves live in pages of 64 (up to 64 pages a
+chunk) off a free stack on the GPU, so freed storage serves any chunk; an
+evicted chunk's pages go back (`evict`).
 
-The planner (worker thread) visits the octree from the roots each plan:
+Per stored leaf, two material bytes (its **pair**: the surface material,
+shown by cells under air, and the subsurface material, shown by the
+others) and its ground slope (two bytes, by angle). A full leaf is
+implicit (drawn with its mid's material) unless a column tops in it or its
+pair would draw cells wrong. Per-voxel materials are under
+[Materials](#materials).
 
-- A Mixed node is refined while its cells project larger than `lod_pixels`
-  from the eye or the prefetch eye (3D distance to its band's box), with
-  the `coarsen` hysteresis, motion allowance and the horizon test as
-  before. Empty, Solid and Buried nodes are never refined.
+Each chunk has an **affine frame**: world = origin + M cell, the grid
+mapping's central differences across the chunk about its columns' mean
+top. Origins are f64 on the CPU, uploaded as a high and a low f32 and
+rebased to the eye on the GPU, so every position is small at any planet
+size. Generation also fits a plane to the chunk's column tops (least
+squares, lifted over every top, plus a sixty-fourth of a cell;
+`ChunkMeta::top`): its raster box is tilted to that plane, so a ray over a
+slope is seeded at the chunk it hits. A plane rising past the chunk's cube
+would reach into the chunk above; such a chunk keeps the flat top of its
+occupied layers, so boxes never overlap.
+
+### Exact cells
+
+Across a chunk the sphere curves `512 x cell / radius` of a cell from the
+frame. From the level where that passes a twentieth of a cell
+(`chunks::exact_level`: 13 on an Earth at 0.1 m voxels, 820 m cells; none
+on planes) chunks and air are walked in the grid's own cells: on a face a
+cell's sides are planes through the planet's centre and spheres about it,
+so a ray's stretch in a box of cells is four half-lines and two quadratics
+(`box_span`; leaving one, only the sides ahead: `box_exit`). Rays are
+watertight across chunks and faces from orbit, shading reads the grid's
+axes at the hit (`cell_frame`), and an exact chunk's raster box grows by
+how far its cells reach past its frame's (`reach_past`).
+
+The exact code costs registers in every walk compiled with it. Kernels for
+hits finer than the exact levels (sun and sky samples) use `walk_fine`,
+generated from the same source without it (`walk_templates`); their `_far`
+variants take the exact hits; primary rays walk both.
+
+## Classification
+
+A node is one of (`classify::Kind`):
+
+- **Mixed**: a surface may cross it; generated into a chunk slot.
+- **Empty** or **Solid**: uniform; drawn without data (air to cross, rock
+  to hit).
+- **Buried**: within the field's volume (caves may lie there) but under
+  the surface band; drawn as rock until a ray hits it or it holds the eye,
+  then generated like a Mixed node.
+
+`EditView::classify` decides a footprint's nodes from its ranges (the
+field's volume and surface band, measured on the GPU or estimated from the
+parent's quarter of columns over it, widened by a parent cell; the
+parent's whole ranges while it is estimated too) and the edits over it: the field's
+surface band and every edit's are Mixed (merged where fewer than two
+chunks apart), the rest of the field's volume Buried, the rest uniform.
+Outside every band a node lies wholly inside or outside each brush:
+`EditView::kind` takes the last brush that adds or removes at its middle,
+else the field (rock under its volume, air over it).
+
+A node answers for its descendants, whose ground its own band-limited
+cells may not show:
+
+- **Rounding.** Coarse cells round their tops down. The field's band is
+  widened by `DESCENT` (2) cells, and a Mixed node whose chunk comes back
+  empty is still refined (drawn as air).
+- **Caves.** `terrain_extent` is empty where a level cannot show a cave;
+  the Buried band reaches `TerrainField::volume_bounds` under the surface
+  at every level (`EditView::volume_depth`).
+- **Small edits.** A brush under half a cell is inactive at a level, and
+  coarse baked bricks are built by majority (a 4 m shaft vanishes in 6.4 m
+  cells). Brushes classify at any size; `BrickIndex` marks every brick's
+  node and all its ancestors.
+- **Brush bands.** A box's band is its heights; a ball's, the heights of
+  its sphere's lower and upper caps over the footprint
+  (`EditView::surface_bands`), so a large blast asks for the layers its
+  surface crosses, not its whole height.
+
+## Residency
+
+`residency::Planner` runs on a worker thread (`Worker`) and visits the
+octree from the roots each plan. `ChunkWorld::update` sends it the eye,
+velocity, view and what happened since (`Event`) and takes the latest plan
+without waiting: its drawn set and requests as differences from the last.
+
+- **Refinement.** A Mixed node is refined while its cells project larger
+  than `lod_pixels` from the eye or from where it will be in
+  `prefetch_seconds` (3D distance to its band's box), until they fall under
+  `coarsen` of that. Allowances raise the target: `offscreen_pixels` out of
+  view (past the view cone widened by `view_guard`), `unseen_pixels` where
+  no ray met it for `seen_frames`, up to `motion_max` where the eye's
+  motion sweeps the image. On a sphere, nodes below the horizon over the
+  lowest ground are drawn as they are; a plane stops at `max_distance`.
+  Empty, Solid and Buried nodes are never refined.
 - **A band switches as one.** A node's band is its footprint's contiguous
-  Mixed layers; every test (distance, view, rays, horizon, readiness) is
-  the band's, so the surface band of a footprint is at one level, as a
-  tile's column was. A coarse cell's ground, rounded, may lie one level
-  finer under the node above or below it: nodes of one band refined apart
-  left the surface between them (holes through a fade's dither, seen in
-  descents). Separate bands (caves, digs) still switch apart.
-- **Rays decide where detail goes.** The trace samples one pixel an 8×8
-  block each frame (jittered over 64 frames) and reports the node at the
-  level its hit wants (cells of a pixel, two levels of margin). The
-  planner marks that node and its ancestors seen. A node not seen within
-  `seen_frames` refines only to `unseen_pixels` times `lod_pixels`
-  (occluded ground, ground behind the camera): a level coarser. Hits on
-  Buried nodes request their generation.
-- A refined node is drawn as its children once every Mixed child is
-  generated; until then it is drawn itself. Children are classified from
-  the parent footprint's measured ranges, widened by a parent cell (as
-  child ranges were); a footprint measured later reclassifies its nodes.
-- **Eviction is by pressure, least recently visited first.** Generated
-  nodes stay resident until chunk slots or leaf pages run short; then the
-  nodes the plan has not visited the longest go. Revisits cost nothing.
-
-## Drawing: one table entry per node of the cut
-
-The GPU chunk table holds, for every node of the cut and every ancestor of
-one, `(face | level << 8, cx, cy, cz) -> (slot, state, kind, content)`:
-
-- `state` as before (`choice`): shown, look finer, or fading with its
-  start frame.
-- `kind`: mixed, empty, solid, buried.
-- `content`: the node's occupied box in its own cells (6 bytes): a mixed
-  chunk's occupied layers over its whole footprint; an ancestor's, the
-  union of its children's, rounded out. It generalizes the old column tops
-  (a max pyramid of heights) to 3D.
-
-`place_at` finds the node holding a point (coarser while none, finer
-through refined ancestors), then:
-
-- a shown Mixed node: its slot;
-- Solid or Buried: a hit where the ray enters (Buried reports itself);
-- Empty, or outside an ancestor's content box: air, grown to the largest
-  slab of the coarsest ancestor whose content box the point is outside of
-  (above, below or beside it), so rays cross open air and dug halls in a
-  few steps as they did over column tops.
+  Mixed layers, and every test (distance, view, rays, horizon, readiness)
+  is the band's: a coarse cell's ground, rounded, may lie in the node above
+  or below. Separate bands (caves, digs) switch apart.
+- **Rays decide where detail goes.** Ray reports mark the node a hit wants
+  and its ancestors seen (see [Ray reports](#ray-reports)). Rays only keep
+  nodes from refining: coarsening a refined node no ray met oscillated at
+  occlusion edges. Reports are not structural events, so they never keep a
+  plan from settling.
+- **Readiness.** A refined node is drawn as its children once every Mixed
+  child is generated; until then it is drawn itself, so nothing is ever
+  missing. Children are classified from the parent footprint's ranges; a
+  footprint measured later reclassifies its nodes. Buried nodes never hold
+  a parent back.
+- **Buried nodes** are generated when they hold the eye (`near_cells`) or
+  a ray met them.
+- **Eviction.** Generated nodes no plan has visited for `release_frames`
+  (600 by default, `HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`) are released,
+  `MAX_RELEASE` a plan, least recently visited first, so residency follows
+  the cut, not the eye's history. When chunk slots or leaf pages run short,
+  the least recently visited go first (never one visited in the last
+  `IDLE_FRAMES`: it may still be fading out). Bookkeeping of nodes not
+  generated is dropped after `keep_frames`.
+- **Settled.** A plan counts only for the eye and view it was made for, and
+  only once it saw a sweep of ray reports of the cut as it ended up: after
+  residency last changed and the last fade ended (what a finer node
+  uncovers shows once its fade ends), past the reports in flight then
+  (`REPORT_FRAMES`, 8). Hosts render until then.
 
 ## Generation
 
-A frame's batch groups the wanted nodes by footprint, then a chunk job per
-node. A footprint's columns (heights, surface words, volume extents) and
-lean halos stay on the GPU in a **footprint pool** (2048 slots, 70 KB each,
-reused least recently first, never one the batch uses): they depend only on
-the terrain, so a footprint is computed once while it stays in use,
-whichever of its nodes are generated when, edits included. The batch
-lists the footprints it computes first (the column kernels run over them;
-their two-rate nodes are per-batch scratch), then those it reads from the
-pool. Results read back as before: computed footprints' ranges (reclassify
-their nodes), chunk occupancy (empty chunks free their slot).
+`ChunkWorld::update` generates a frame's batch within a GPU budget
+(`ResidencyConfig::generate_ms`, 3 ms; `ChunkPass` lets it grow into what
+the last frame left of `frame_ms`, up to three times) against the measured
+cost of a footprint's columns and of a chunk (`GenCost`), at most
+`footprints_per_frame` footprints. Nodes edits changed go first (coarsest,
+then drawn ones nearest first), then the plan's requests, a footprint's
+nodes together; kept chunks come back by copy.
 
-Edits mark the nodes their bands cross at every level: drawn and visited
-ones regenerate (urgent, as before); cached ones not in the cut are
-evicted (they regenerate if wanted again).
+A footprint's columns depend only on the terrain, so they stay on the GPU
+in the **footprint pool** (2048 slots, about 75 KB each, least recently
+used reused, never one the batch uses): a footprint is computed once while
+it stays in use, whichever of its nodes are generated when. The batch
+lists the footprints it computes first, then those it reads from the pool.
 
-## What goes
+Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):
 
-`Gap`, `BELOW`/`ROCK` via gaps, the `Reach` buffer and deep tiles,
-`layers_needed`'s surface band, tile-level `Layers`/bands and their
-regeneration on measurement, `COLUMN`/`GAP` table entries, column tops,
-age eviction of generated tiles, the tile quadtree planner and its tests.
+1. `pack_main`, `evict`: edited chunks being evicted are packed (see
+   [Edits](#edits)); evicted chunks' leaf and detail pages go back on the
+   free stacks.
+2. `tile_nodes_main`: the two-rate field's nodes of each computed footprint
+   ([`two-rate-field.md`](two-rate-field.md)).
+3. `tile_slope_nodes_main`, `tile_columns_main`, `tile_slope_heights_main`,
+   `tile_slopes_main`: each column's height, surface word and volume
+   extent, and the footprint's measured ranges by quarter (each a child
+   footprint's: a coarse footprint's whole range spans all its children's
+   relief); for levels 0 to 3 the
+   level-4 heights and block slopes materials read
+   (`Planet::material_slope`), kept with the columns in the pool.
+4. `tile_halo_main`: the lean lattice's heights past the footprint's
+   edges, once a footprint.
+5. `tile_features_main`: the footprint's feature placements
+   ([`features.md`](features.md)), its ranges raised over them.
+6. `chunk_columns_main`: each column's 64 cells in a chunk as a 64-bit mask
+   (bit z: layer `64 cz + z`): the heightfield, volume terms and lean,
+   features, then the edits in order (large brushes, baked cells, recent
+   brushes), and the materials of its cells. A workgroup (8x8 columns)
+   culls the feature placements over it and their parts together, a lane
+   a square or part, so each column tests only those that can meet it.
+7. `chunk_cells_main` (chunks with per-voxel materials, below): a lane a
+   column, its exposed cells' materials; `chunk_build_main`: the chunk's
+   64-tree, leaf pairs and slopes, detail pages, top plane and frame
+   height, into leaf pages off the free stack.
+8. `restore_main`: kept chunks copied back in.
 
-## Gates
+Results come back a frame later without waiting (a readback ring):
+measured footprint ranges reclassify their nodes, empty chunks free their
+slot, and each chunk's occupied layers and mean top give its frame.
 
-Measured with `voxel_flight`'s stress flights in the editor's world
-(`HELIO_VOXEL_FLIGHT_SEED=75 HELIO_VOXEL_STRESS_AT=0,1,0
-HELIO_VOXEL_FLIGHT_SUN_ELEVATION=32`, 2560×1440, real time) and the
-refinement gate (`CHUNKGATE`: 8×8 blocks of a flown frame that differ from
-the settled view past two settled captures' noise):
+## Edits
 
-- the gate's mean and worst share fall in cruise, descent and glide;
-- level switches over 3 px fall;
-- `mountain_slope` hold primary and sun/sky times within noise of the
-  quadtree's (the walk's loop must not grow);
-- `tests/chunks.rs` passes; no lost rays (`HELIO_VOXEL_CHUNKS_COUNT`).
+A `ChunkWorld` follows a published planet's edits by difference
+(`ChunkWorld::sync_edits`), by the history's hash:
 
-## Results (2026-10-15)
+- Brushes that came or went mark the nodes their bands cross at every
+  level they apply at: drawn and visited ones regenerate (urgent), cached
+  ones not in the cut are evicted. A small dig shows the frame it is made;
+  a blast's far and hidden nodes follow over the next frames, their nearest
+  generated ancestor drawn meanwhile.
+- Changed baked columns regenerate the nodes over them within the budget.
+- Sync is incremental: while seals only append to the large layer the
+  view keeps its faces and index; an edit rebuilds the recent brushes'
+  index, diffs the lists past their common start and writes the brush
+  buffer's tail in place. An unrelated history rebuilds the world.
+- The render thread finds the brushes over a footprint through a
+  `BrushIndex` (a loose grid per face, brushes kept apart by the levels
+  they apply at, so a coarse footprint skips those baked cells hold). A
+  chunk job lists its brush refs and a table of the baked bricks under it;
+  baked bricks stay on the GPU across batches (`BrickCache`, 64 MB by
+  default), so a regenerated chunk sends its table, not its bricks.
 
-Built as designed, with the invariants below found on the way. `tests/chunks.rs`
-(19 GPU tests: ground, face edges, caves, deep caves, overhangs, planes,
-brushes, a 600 m shaft, a 3 km crater, a hollowed core, an underground hall,
-18 000 block edits, sealed edits, orbit coverage, picks) match CPU ray casts
-exactly; the graph tests pass.
+**Kept chunks.** An edited chunk (generated under brushes or baked bricks)
+the plan evicts is packed on the GPU before its pages go back
+(`pack_main`: meta, mids, leaves, materials, normals and detail pages,
+about 12 KB), read back with the frame's results (64 a frame) and kept on
+the CPU (`Capacity::kept_bytes`, 256 MB by default, least recently used
+dropped), with its footprint's measured ranges. A kept node the plan
+wants again is restored by copy (`restore_main`): no footprint, terrain
+program or brushes; the planner is given the footprint's measurement
+again (one whose nodes are all restored is never measured, and the
+estimate from its parent classifies it otherwise). An edit over a kept
+node drops it.
 
-### Invariants: a node answers for its descendants
+Saves keep them too: `ChunkWorld::keep_resident` packs the resident
+edited chunks, `kept_chunks` takes them, and `KeptChunks::to_bytes` writes
+a header (a fingerprint of the generation shaders, terrain constants and
+world, and the history's length and hash) and the chunks deflated.
+`ChunkWorld::load_kept` keeps them before a new world's first update, for
+exactly that history; others are refused. Hosts reach this through
+`PlanetFrame::kept` and its export (`KeptExport`), and save them beside the
+edit snapshot (Pulsar's `VoxelKeptChunks`).
 
-A coarse node's own cells are a band-limited sample; classifying it by them
-alone hid what finer levels hold, and the cut never refined to it:
+## Materials
 
-- **Rounding.** Coarse cells round their tops down: ground 10 m over the
-  datum lies in layer -1 from level 16 to 5 and in layer 0 at level 4. The
-  field's band is widened by `DESCENT` (2) cells, and a Mixed node whose
-  chunk comes back empty is still refined (drawn as air).
-- **Caves.** `terrain_extent` is empty where a level cannot show a cave.
-  The Buried band reaches `TerrainField::volume_bounds` under the surface at
-  every level.
-- **Small edits.** A brush under half a cell is inactive at a level, and
-  coarse baked bricks are built by majority (a 4 m shaft vanishes at 6.4 m
-  cells). Brushes classify at any size; `BrickIndex` marks every brick's
-  node and all its ancestors.
-- **Buried nodes never hold a parent back.** They are rock until generated:
-  only those holding the eye (`near_cells`) or met by rays are generated.
-  A four-chunk radius generated hundreds of invisible chunks a level.
-- **Only Mixed children gate a switch.** A refined node that drew a
-  missing child as air flashed holes through the fade's dither.
-- **Rays only keep nodes from refining.** Coarsening a refined node no ray
-  met oscillated at occlusion edges: its coarser cells poked out, were met,
-  and refined it again. Ray reports are not structural events: they come
-  every frame, and counting them kept the world from settling.
-- **Settled waits for the rays to sweep the view.** A block's report
-  samples one of its 64 pixels a frame, so a plan settled before 64 frames
-  of reports since the last change may yet refine where a pixel not
-  sampled meets a node its distance does not ask for (seen: a still view
-  settled at frame 59, then asked for 8 chunks). Hosts render about 64
-  frames past the last change before going idle.
-- **The lookup** climbs past bare ancestors over the hidden fine side of a
-  switch, and looks above an ancestor it climbed to for a coarser node
-  fading in (only while something fades: sun and sky walks call it
-  constantly).
-
-### Measured against the tile quadtree
-
-Editor world (seed 75, pole, 32 degree sun), 2560x1440, fixed-step flights
-(`HELIO_VOXEL_STRESS_STEP=1`: every run sees the same eyes), interleaved;
-`mountain_slope` hold at 1920x1080:
-
-| | quadtree | octree |
-|---|---|---|
-| Descent gate mean / worst | 0.03 / 0.13 % | 0.03 / 0.08 % |
-| Cruise gate mean / worst | 0.99 / 3.77 % | 1.02 / 4.02 % |
-| Glide gate | 0 | 0 |
-| Cruise frame interval p50 | 19.0 ms | 21.3 ms |
-| Cruise generation | 89 k tiles, 3.13 s GPU | 128 k chunks, 3.31 s GPU |
-| Hold primary | 2.85 ms | 2.84 ms |
-| Hold sun and sky | 1.58 ms | 1.72 ms |
-
-Visible refinement is at parity in all three flights; the structure is now
-volumetric (caves, shafts and halls refine where the eye is; no gap or band
-limits; eviction by pressure). It costs 0.14 ms of sun and sky (the
-lookup's probes) and about 0.8 ms of update CPU (classification per node).
-Rays saved little in these flights: open terrain is visible, and refined
-nodes stay refined. Per chunk, a footprint's columns are recomputed for
-each batch that wants one of its nodes (16-20 us of a chunk's 26).
-
-### The footprint pool (2026-10-15)
-
-Fixed-step flights against the octree before it (interleaved):
-
-| | before | pool |
-|---|---|---|
-| Cruise: us a chunk (footprint columns) | 27.1 (18.1) | 21.8 (13.1) |
-| Descent | 30.0 (21.7) | 21.9 (14.3) |
-| Glide | 26.6 (19.8) | 18.7 (12.5) |
-| Cruise gate mean | 1.06 % | 0.98 % |
-
-About a fifth of the footprints a flight wants come from the pool: most are
-new ground. The rest of a footprint's cost is its first computation.
-
-An intermittent corrupt capture (a sample in a few fixed-step descents
-whose 8x8 and 4x8 pixel blocks, scattered over about a sixth of the frame,
-show the background's haze) is not the octree's: main's chunk trees show
-it too. The voxel publish runs for every pixel and finds a hit for every
-pixel, yet after the frame those blocks of every G-buffer target and of
-depth still hold the G-buffer pass's earlier clear, so lighting takes them
-for sky. Only NVIDIA's Vulkan driver shows it (616.64, RTX 3060): D3D12
-never does, Khronos synchronization validation finds no hazard, and no
-barrier, fence, single command buffer or recording-cache setting changes
-it. It needs the frame to be recorded while the GPU still runs the frame
-before, with generation in it; waiting for the GPU before the voxel pass
-records removes it (at +44% frame time). The gate's outliers above 5% are
-that. See [Known driver issue](#known-driver-issue) below.
-
-### Known driver issue
-
-Lost G-buffer writes on NVIDIA Vulkan, 2026-10-16. Measured with captures
-every 0.25 s (65 a descent; a descent shows it about one time in two):
-
-| Change | Descents with lost blocks |
-|---|---|
-| None (Vulkan) | about 55 % |
-| D3D12 | 0 of 6 |
-| GPU idle before each frame is recorded | 0 of 6 |
-| GPU idle before the voxel pass records | 0 of 8 (frame p50 18 to 26 ms) |
-| GPU idle before submit (recorded while busy) | hit |
-| Recording cache off; serial `finish`; one command buffer | hit |
-| Frame fences (colour output; every stage) | hit |
-| G-buffer cleared by a draw, or by the publish's own pass | hit (blocks hold that clear) |
-| G-buffer not cleared, publish writes every pixel | 0 of 8 |
-| Generation inputs in persistent buffers | hit |
-| Tile ranges reset on the GPU instead of by queue writes | 2 of 7 |
-
-A forum report with the same profile (same driver, Ampere, writes lost
-intermittently, fixed only by waiting for the GPU, barriers no help,
-validation clean): https://forums.developer.nvidia.com/t/382912.
-
-Reported to NVIDIA on 2026-10-16 as bug **6939141**, with repro steps from
-this repository and an affected frame emailed to NVSDKIssues. Next: try a
-newer driver, a standalone repro if NVIDIA asks for one, and a cheap
-mitigation.
-
-### Per-voxel materials (2026-10-16)
-
-A leaf (4³ cells) draws two materials: its surface's (a vote of the top
-materials of its columns whose top cell is in it), shown by cells under
-air, and its subsurface's (soil or rock by the depth of its centre). Where
-edits set materials (add or paint, including baked cells), each cell now
-keeps its own:
-
-- A chunk job whose brushes or baked bricks set any material gets a
-  `cell_materials` slot (128 a batch, `DETAIL_JOBS`; a job past them waits
-  for the next batch; since 2026-10-19 every job of `DETAIL_LEVELS` does).
-  `chunk_columns_main` writes each solid cell's edited material there (0:
-  the terrain's).
-- `chunk_build_main` gives every leaf page holding a leaf with such cells a
-  **detail page** (`detail_pages[leaf page]`, 4 KiB: a byte a cell, 16 words
-  a leaf by its place in the page), off a free stack (16384 pages by
-  default, `HELIO_VOXEL_DETAIL_PAGES`); eviction returns them. Such leaves
-  are never implicit (full under their mid's material). Out of pages, the
-  chunk keeps its leaves' pairs (flag 16; `UpdateStats::out_of_details`).
-- Drawing reads the cell's byte first (0: the leaf's pair), at the hit
-  and in the top face's jittered material sample; `slot_details` skips the
-  lookup in chunks without detail pages. `PickHit::material` reports what
-  is drawn.
-
-The format holds any cell's material; natural leaves use it too since
-[Natural per-voxel materials](#natural-per-voxel-materials-2026-10-19).
-
-The render thread finds the brushes over a footprint through a
-`BrushIndex` (a loose grid per face, each brush in the smallest level where
-it spans at most two buckets a side) instead of scanning every brush per
-chunk.
-
-Measured:
-
-- `edited_cells_draw_their_own_materials`: a wall of single-cell blocks in
-  eight materials and a checkerboard of painted ground cells. All 16306
-  pixels on edited cells draw the edit's material (5 detail pages). With
-  the lookup disabled, 14610 of them do not.
-- Natural ground against `Planet::material`
-  (`natural_cells_against_the_leaf_rule`, ignored: a report). 906k level-0
-  pixels at eight spots picked for relief and mixed top materials, from
-  1.7 m and 6 m, and with a pit dug in front:
-  - 40.5 % of pixels draw another material than the canonical one; flat
-    grassland 0 %.
-  - Most of that is not the leaf rule. The generation kernel evaluates
-    `ground_material` at the column's domain point; `Planet::material` at
-    the cell's volume point. The snowline's wander and the rock patches
-    are noise of that point, and on a mountain 2 km up the two points'
-    noise is unrelated: 38.8 % of pixels differ between the canonical
-    material and the same rule at the column's point. Whole views flip
-    (snow drawn as stone, dark stone as grass).
-  - Drawn against the rule at the column's point (the leaf rule and the
-    kernel's slope estimate together): 10.7 % of pixels, up to 22 % on
-    steep slopes and in pit walls.
-  - Fixed since: see [The material contract](#the-material-contract-2026-10-16).
-- Cost on natural ground (no detail pages), interleaved against the
-  octree before it:
-  - `mountain_slope` hold: primary rays 2.861 ms both (four rounds each).
-    Without the `slot_details` flag, the lookup at every hit cost +0.9 %
-    (2.859 to 2.885 ms).
-  - Cruise flight: chunk columns 5.6 to 5.5 us a chunk, chunk builds 2.8 to
-    2.9, draw p50 3.79 to 3.80 ms; gate mean 1.00 to 1.03 %.
-
-### The material contract (2026-10-16)
-
-`Planet::material` is the canonical material of a base cell (picks, a dig's
-yield, gameplay). The generation kernel now evaluates `ground_material` with
-the same inputs for the cells it stands for:
+`Planet::material` is the canonical material of a base cell (picks, a
+dig's yield, gameplay). Generation evaluates `ground_material` with the
+same inputs:
 
 - **Point.** Each evaluation (a column's top cell, its soil and rock
-  samples) uses its cell's volume point, not the column's domain point.
+  samples) uses its cell's volume point.
 - **Slope.** `Planet::material_slope`: level-4 heights two cells each way,
-  block slopes interpolated in 32nds, one scale whatever level draws it.
-  For each computed footprint of levels 0 to 3, three dispatches evaluate
-  the level-4 heights its blocks read (10x10 at level 0, 38x38 at level
-  3): a ring of shared nodes for the macro octaves (3x3 to 5x5), the
-  heights 64 a workgroup, then the block slopes, kept with its columns in
-  the footprint pool (4.6 KB a slot).
-  A column of level L reads the base column at its centre. Coarser levels'
-  cells span many base columns and keep the gradient over 64 base cells in
-  their tile.
+  the gradient's length (an exact integer root on both sides), block
+  slopes interpolated in 32nds, one scale at whatever level draws it.
+  For levels 0 to 3 a column reads the base column at its centre; coarser
+  cells span many base columns and keep the gradient over 64 base cells.
+  (The larger of the two differences measured diagonal slopes short:
+  slope thresholds traced squares on the face's grid, the Moon's rock
+  specks ending at straight edges on crater walls.)
 - **Surface word.** Its byte, as the CPU masks it.
 
-Measured:
+Leaves draw their pair. Chunks of `DETAIL_LEVELS` (levels 0 and 1) take a
+`cell_materials` slot (`DETAIL_JOBS` a batch; a job past them waits for the
+next batch): `chunk_columns_main` writes each solid cell's edited material
+and the column's natural top; `chunk_cells_main` gives each exposed cell
+without one its natural material and clears the cells the leaf's pair
+draws as they are, a lane a column (a lane a leaf column, as the build
+has them, left most of its 256 lanes waiting on a few steep ones);
+`chunk_build_main` gives every leaf page holding a leaf with cells left a
+**detail page** (4 KiB: a byte a cell), off the stack of pages given
+back, else past those ever taken up to the pool's capacity. Drawing reads
+the cell's byte first (0: the pair); `slot_details` skips the lookup in
+chunks without detail pages. Out of pages, a chunk keeps its pairs
+(`UpdateStats::out_of_details`) and the world doubles the pool (8192 pages
+at first, `Capacity::detail_pages` at most: 262144, 1 GiB, by default),
+copying its pages and stack, then builds the starved chunks again. What a
+view needs grows with the level 0-1 surface it shows: at 1600x900 a
+meadow takes ~1.3k pages, the Moon's speckled regolith ~18k, inside an
+Earth wood ~29k, an Earth mountain's snow and rock ~81k (its pages ~80%
+full of leaves that need them).
+Coarser chunks keep their pairs, and with nothing to correct them a pair
+is what a leaf draws: its surface is one of its columns' tops, the one of
+least hash (`vote_top`), not their majority. Over many leaves each
+material then covers the share of the columns it tops, which is what the
+finer levels' cells average to: a majority dropped every minority
+material (the Moon's ejecta and rock specks, an edit's few blocks) at
+every coarse level, so the ground changed colour where a detail level
+met a coarser one. At detail levels the pair only decides which
+cells need a byte of their own, so it stays the majority (fewest bytes).
+A leaf's subsurface byte (what its cells under others draw: risers above
+a lower neighbour show their column's surface, deeper cells soil or rock)
+is read off its most exposed column, the one with the lowest terrain top
+around it (`exposed_column`): read off its first column, a steep slope's
+leaves drew their risers in an uphill corner's soil or rock, so far
+forests' canopies on mountainsides showed the terrain as vertical
+streaks.
 
-- `uniform_leaves_draw_canonical_materials` (a gate): the top faces of
-  leaves whose 16 columns all top in them with one material draw
-  `Planet::material` exactly. 31710 pixels at three varied spots, none
-  wrong; 779 wrong with the kernel before.
-- The natural-cells report again, the same 906k pixels: 9.35 % wrong
-  (40.5 % before). By what decides the drawn material:
-  - Top faces of uniform leaves: 0 of 190908.
-  - Other cells under air (a leaf's surface vote over mixed columns, side
-    faces): 8.8 % of 627729.
-  - Cells under ground (pit walls: a leaf's one subsurface byte, by its
-    centre's depth): 33.5 % of 87379. The commonest: dirt drawn as dark
-    stone (soil a cell deep drawn as rock), gravel as stone.
-  That is the leaf rule alone, what natural per-voxel leaves would recover.
-- Cost, cruise flights interleaved against the commit before:
-  - Generation 19.8 to 20.5 us a chunk before, 22.4 to 22.8 after; the
-    footprint columns 11.5 to 11.7 before, 13.6 to 13.9 after (+2 us,
-    +10 % of generation).
-  - All of it is levels 1 to 3's lattices: with level 0's alone, 11.6.
-  - One workgroup a footprint, its lattice in workgroup memory, cost
-    15.8 us (a level-3 lattice is 23 heights a lane in series); spread
-    over workgroups, 13.6.
-  - `mountain_slope` hold: primary rays 2.866 to 2.863 ms (drawing is
-    unchanged).
+## The drawn cut
 
-### Dug walls (2026-10-16)
+`drawn.rs` keeps the cut and the GPU chunk table up to date by the nodes
+that change; only a frame's changed entries are uploaded, and
+`chunk_table.wgsl` scatters them. The table holds every drawn node and
+every ancestor of one, `(face | level << 8, cx, cy, cz) -> (slot, state,
+kind, content)`:
 
-A leaf's subsurface byte follows its centre's depth, so the cells of a
-dug wall drew rock where they are soil a cell deep (a third of a pit's
-wall pixels). Every chunk under edits now gets a `cell_materials` slot (128
-a batch, 272 KiB each), whatever the edits set:
+- `state`: shown, an ancestor (look finer), or fading with its start frame
+  (`drawn::choice`).
+- `kind` (`KIND_*`): mixed, solid, buried, or an ancestor not drawn itself.
+- `content`: the box of its cells anything non-empty may occupy (a Mixed
+  chunk's occupied layers over its footprint, a Solid or Buried node's
+  whole box, an ancestor's the union of its children's). Empty nodes have
+  no entry: a refined ancestor whose child has none is air there.
 
-- `chunk_columns_main` writes each cell's edit material, then the column's
-  natural top: over the chunk where the volume puts solid cells there
-  (scanned as `terrain::generated_top` does), else its highest natural
-  cell's.
-- `chunk_build_main` (`leaf_column_cells`), leaf by leaf with its pair: each
-  exposed solid cell (air on a side in the chunk's masks, or at the
-  chunk's faces) without an edit material gets `Planet::material`'s
-  natural one (`ground_material` at its volume point, depth from that
-  top). A cell its pair draws as it is (the surface under air, the
-  subsurface under ground) is cleared, except in a leaf that would be
-  implicit (drawn with its mid's material). Leaves with cells left get
-  detail pages as before.
+**Fades.** A switch between levels draws both sides for `FADE_FRAMES` (16)
+frames, and each pixel shows one by a dither in [0, 1024) that moves each
+frame, so TSR blends them. The fade's progress comes from the frame, so a
+fade costs nothing while it runs. Incoming nodes show where the dither is
+under the progress, outgoing ones where it is not: every point is shown
+once. A plan that changes a switch under way ends it at once.
 
-`dug_walls_draw_canonical_materials` (a gate): pits 5 m across at three
-varied spots; all 57050 pixels of their walls and floors draw
-`Planet::material` (about a third wrong before). A pit took about 170
-detail pages (0.7 MB). Before both fixes: 117 pixels where the volume
-carved the column's top cell (the natural top over the chunk), 66 in full
-leaves cleared against their own pair while drawn with their mid's.
+## Drawing
 
-The natural-cells report, the same 906k pixels: 3.56 % wrong (9.35 %
-before). Under ground (the pits' walls): 0 of 87379. Top faces of uniform
-leaves: 0 of 190908. Other cells under air: 5.1 % of 627729 (8.8 %: the
-chunks a pit's edit covers now draw their surface cells exactly too).
-What is left is unedited leaves' surface vote over mixed columns; the
-commonest, dirt drawn as dark stone (3.1 % of pixels).
+`ChunkWorld::draw`, after `update`:
 
-Only levels 0 and 1 (`DETAIL_LEVELS`) get these: at every level, ten digs
-8 m across filled a test world's 2048 detail pages; at two, 368. Coarser
-leaves keep their pairs (an edit's top materials vote in them). Out of
-pages, a chunk keeps its pairs (`out_of_details`): 100 large digs around
-the eye fill 2048, a game's world holds 16384.
+0. **Cull** (`cull_bin`, `cull_offsets`, `cull_scatter`): the drawn chunks
+   in view, against the frustum by their bounding spheres, binned by
+   distance with those holding the eye first, into two indirect draws.
+1. **Seed** (raster): every visible chunk draws its box (under its tilted
+   top); a fragment writes only the box's index. Boxes do not overlap, so
+   with the depth test on box faces each pixel keeps the nearest box its
+   ray enters and hidden boxes never run. Boxes holding the eye draw their
+   back faces.
+2. **Trace** (compute): each pixel's ray walks the cut from its seed box
+   (`walk`). Inside a chunk, an integer DDA through the 64-tree: an empty
+   child crossed in one step, a full one a hit where the ray enters. Past a
+   chunk, `place_at` finds the drawn node over the point (coarser while
+   none, finer through refined ancestors and switches this pixel does not
+   show): a shown chunk; Solid or Buried, a hit where the ray enters
+   (Buried reports itself); Empty, or outside an ancestor's content box,
+   air grown to the largest slab of the coarsest ancestor whose content the
+   point is outside of, so open air and dug halls cross in a few steps.
+   Across a cube face's edge the walk continues on the face beyond
+   (`across_edge`: equal-angle faces meet cell for cell on the edge). Over
+   the ceiling (`Planet::outer_radius` and 16 m) and rising, a ray meets
+   nothing more and ends: the sky.
+3. **Sun shadows**: walks toward the sun from a quarter of the hits (one a
+   2x2 block, the pixel moving each frame), a hundredth of a cell off their
+   face, each towards a point of the sun's disk (the atmosphere's angular
+   radius, else Earth's 0.27 degrees; a pixel's own R2 sequence over the
+   frames), so a penumbra widens with the occluder's distance. Every hit takes the sample of its block or a neighbouring one that
+   walked within four of its cells; the rest (silhouettes) are listed and
+   walk in an indirect dispatch of their own. Mesh pixels nearer than the
+   terrain hit, or with only sky behind (the scene's depth before the
+   chunks publish), walk from the mesh point (`mesh_walk`), so terrain
+   shadows fall on meshes. The denoiser (7) turns the samples into
+   Helio's `directional_visibility`; its deferred lighting applies it.
+   `set_steady_shadows` walks every hit instead, 32 rays over the disk
+   (the denoiser passes the walks' own on: the reference for its error).
+   Meshes in front of the terrain walk towards the disk's centre.
+4. **Local lights' shadows**: the terrain shadows Helio's point and spot
+   lights the same way (meshes cast into the lights' shadow maps). With a
+   frame's lights (`SceneLights`: the scene's lights, light culling's tile
+   lists), a hit of each 2x2 block walks to every shadowed light of its
+   tile's list that reaches it, the walk ending at the light
+   (`local_sample`); each hit takes its block's or a neighbour's word
+   within reach, else walks its own; mesh pixels in front of the terrain
+   walk from the mesh point. Bit i of a pixel's word (`local_seen`) is
+   the tile's light i (the first 32); the denoiser (7) turns them into
+   Helio's `local_visibility`, by which deferred lighting scales each
+   light.
+5. **Sky visibility**: four cosine-weighted rays about the planet's up
+   from one hit a 4x4 block, 48 cells long, turned each frame; each hit
+   takes its block's or a neighbour's sample.
+6. **Ray reports** (`feedback`), then **publish** (below).
+7. **Denoising** (`temporal`, `filter_first`, `filter_second`,
+   `resolve`; `local_gate`, `local_temporal`, `local_filter`; cf.
+   NVIDIA's SIGMA). Each term (sun, sky, each local light) accumulates
+   along the hits' motion: the last frame's history at the hit's point
+   reprojected (`prev_view_proj`, its jitter replaced by this frame's).
+   A still camera (the projections differ by their jitter alone, to their
+   rounding: `DrawParams::rays`) reads the texel it lands on; a moving one
+   reads sharp (Catmull-Rom less its corners) over the texels of the same
+   surface (view depth within its slope, normal within 37 degrees),
+   bilinear where some are not, none past a disocclusion. A pixel's own
+   sample (its walk, once a sample block's cycle) weighs 1, a neighbour's
+   lent one 0.05, so the history keeps to the pixel's own shadow. A long
+   history (32 frames for the sun, 64 for the sky, 16 for a light) and a
+   short one (a cycle: 4, 8, 4) are kept; the sun's and the lights' are
+   clamped to the range of this frame's samples in the 9x9 pixels around,
+   so a moved sun or light, or an edit, shows at once where the samples
+   agree; where the short history leaves the long one (beside a moved
+   shadow's edge), the long one restarts from it. Two 3x3 à-trous passes
+   (steps 1 and 2; one for lights) then filter the terms of pixels not yet
+   settled, weighing neighbours by their distance off the pixel's plane,
+   their normal and how far their value lies in the term's standard
+   deviations (its mean's variance: the binary sun's m(1 - m), the sky's
+   moments, over the frames accumulated; a fresh history's widened);
+   settled ones pass as they are. `resolve` reads the result where this
+   frame's jitter put each pixel's sample (TSR takes a pixel's value as of
+   that point; read at its centre, TSR would blur it by the jitter's
+   spread). A pixel tracks the four lights of least scene index that reach
+   it, each an entry of its history; `local_visibility` is three words a
+   pixel: those lights' tile slots, their visibility (a byte each), the
+   other slots' bits. Without a point or spot light in the scene the
+   lights' passes do not run (`local_gate`'s indirect dispatch). Meshes in
+   front of the terrain and the sky pass their own walks on. The
+   denoiser's data are storage buffers (wgpu bounds-checks an image load
+   with two size queries) and its tiled kernels skip workgroup memory's
+   zeroing. Cost at 1920x1080 on an RTX 3060: 1.15 ms (the sampled walks:
+   3.4 ms; every hit walking: about three times those).
 
-### Edits against history (2026-10-16)
+Steps near surfaces dominate: a step heatmap (debug mode 32; with
+trace counters, `Capacity::counters`, also counted) is hot on
+silhouettes and ridges, where rays skim pixel-sized cells.
 
-What one more edit costs a running world after `n` edits
-(`edit_cost_against_history`, ignored: a report; ground view, 10 edits
-each, CPU of `sync_edits` and of the frame that regenerates, GPU waits
-included):
+### Ray reports
 
-| History | small digs (0.4 m: baked) sync / frame | large digs (8 m: analytic) sync / frame |
-|---|---|---|
-| 0 | 0.24 / 3.3 ms | 0.28 / 3.9 ms |
-| 100 | 0.24 / 3.1 ms | 0.29 / 2.8 ms |
-| 1000 | 0.26 / 4.7 ms | 0.48 / 4.2 ms |
-| 10000 | 0.28 / 3.5 ms | 3.16 / 13.1 ms |
+A pixel of each 2x2 a frame (all four over `REPORT_SWEEP`, 4 frames)
+names the node its hit's level wants there: cells of a pixel, two levels
+of margin, the hit's own node at least. A workgroup appends the distinct
+nodes of its 32x32 pixels to one list, up to a node per 8x8 pixels in all
+(the old readback's size). Rays that met Buried nodes report them too.
+Reports come back without waiting; the planner marks the nodes and their
+ancestors seen and generates the Buried ones.
 
-Small brushes are sealed into the baked store and cost what they leave.
-Brushes over `BAKE_RADIUS_HALF` (3.2 m) stay analytic forever: every edit
-re-hashes, re-indexes and re-uploads them all (`sync_edits`), and every
-chunk under them evaluates each in its column kernel. Explosions are
-large brushes, so a long game slows every edit and every chunk.
+A view's whole set is thus known a few frames after it shows. One pixel
+of each 8x8 block a frame (a 64-frame sweep, before 2026-10-22) left bands
+that a turn or a finer node's fade uncovered unmet for up to 64 frames, a
+round each, and settling waited a whole sweep after the last change:
+voxel_craft's second pose asked for chunks 30 to 100 frames after the
+turn. The reports cost 0.03 ms at 1080p (every pixel each frame cost
+0.17 ms: two bounds-checked texture loads and the node's arithmetic a
+pixel). A fixed number of nodes per tile dropped the same ones every frame
+where tiles held more (toward the horizon): the list has no per-tile cap.
 
-**Edits on data**, in steps, each with its gate:
+### Publish
 
-1. **Large brushes into data** (done, below). Gate: the table's 10000
-   large digs at the cost of 100.
-2. **Edited chunks kept** (done, below). Edited level-0 chunks are read back,
-   compressed and kept on the CPU (and in the save), so evicting one costs
-   a copy, not a regeneration from the history; parents re-derived by
-   downsampling.
-3. **Incremental sync** (done with step 1).
+The publish pass writes Helio's gbuffer and depth: material colour
+(`material_albedo`: per-voxel pigment and the materials' patches, clumps
+and blades from the appearance table, sampled at the cell centre's domain
+point; where cells are a pixel or less, each face's material taken at a
+point jittered up to a leaf across it each frame, so TSR averages the
+leaves' materials into their mixture), corner occlusion from the cells
+around the air in front of the face (across chunks by the chunk table)
+times sky visibility, crisp edges
+while a cell spans several pixels, and the shading normal. A natural step
+(air above) may be lit partly with the slope's normal (`detail.w`, step
+softness) and its sun ray passes its own steps. Helio's deferred lighting,
+atmosphere and TSR do the rest.
 
-### Large brushes into data (2026-10-16)
+It writes only the hits no mesh covers, as the shading pass found them
+against the meshes' depth (a covered hit's normal is zero), and writes the
+depth without testing it. One decision, not two: on NVIDIA's Vulkan driver
+the publish's own depth test once read a depth surface that a copy read
+correctly the moment before, let every hit through and left the depth
+garbage for whole runs (black grass on Earth, 2026-10-22).
 
-Where the cost went at 10000 large digs: `sync_edits` 3.8 ms (hashing
-both brush lists 1.2-2.2, a new 480 KB brush buffer 1.4, the list, index
-and view rebuilt 1); the regenerated chunks 4.35 ms of GPU (700 us each,
-coarse ones evaluating up to a thousand brushes a column).
+With a host's scene materials (`scene.rs`, `shaders/scene_materials.wgsl`,
+devices with texture binding arrays), each voxel material's top, side and
+bottom faces use Helio material rows and textures instead of the flat
+appearance colours.
 
-- **Large brushes bake at their bake level** (`planet::bake_level`: the
-  first level whose cells a brush spans at most 32 of, level 2 for a dig
-  8 m across). Sealing applies one over the baked base cells (as before)
-  and bakes it at that level (`EditStore::bake_at`); coarser levels follow
-  by majority, and a coarse cell whose children are mostly unchanged keeps
-  its own edit. Below its bake level a large brush stays analytic. Every
-  cell still reads `recent(baked(large(terrain)))` in the brushes' order:
-  at the bake level, cell for cell as the analytic brush read
-  (`sealed_large_brushes_read_the_same_at_their_bake_level`). Snapshots
-  are version 3; older ones bake their large brushes on load, under the
-  cells baked after them (what analytic-first applied read).
-- **Brushes are indexed by the levels they apply at** (`BrushIndex` parts:
-  below their size's, and a large brush below its bake level), so a coarse
-  footprint's query skips the baked ones.
-- **Incremental sync.** The view keeps the large layer's faces and index
-  while seals only append to it (the large log's prefix hash); an edit
-  rebuilds the recent brushes' index alone, diffs the lists past their
-  common start, and writes the brush buffer's tail in place; a seal
-  extends the brick index by its columns.
-- **A brick cache.** Baked bricks stay on the GPU across batches
-  (`BrickCache`, 64 MB by default, least recently used reused): a
-  regenerated chunk sends its table, not its bricks again (a seal's
-  regenerated chunks sent 5.5 MB a frame, an edit's 0.5 MB); a brick of one
-  edit is its table entry. Runs of new bricks go in one write each.
+## Costs
 
-One more edit after `n` large digs 8 m across (ground view; the frame's
-wall time is too noisy in this harness, which waits for the GPU every
-frame and lets it downclock):
+1080p, RTX 3060, `mountain_slope` hold (2026-10-19): primary 3.06 ms, sun
+shadows and sky 1.72 ms. Generation in the cruise stress flight: about
+15.5 us a chunk (footprint columns most of it, chunk builds 3.5 us, chunk
+columns 1.9 us). Settled test views take 3,000 to 10,000 detail pages.
 
-| History | sync | update CPU | generation GPU |
-|---|---|---|---|
-| 100 | 0.34 ms | 0.30 ms | 0.20 ms |
-| 10000, before | 3.8 ms | 0.96 ms | 4.35 ms |
-| 10000 | 0.51 ms | 0.48 ms | 0.37 ms |
+Gates (`tests/chunks.rs`): drawn hits match CPU ray casts (ground, face
+edges, caves 800 m deep, overhangs, planes, brushes, a 600 m shaft, a 3 km
+crater, a hollowed core, an underground hall, 18 000 block edits, sealed
+edits, features); `uniform_leaves_draw_canonical_materials`,
+`dug_walls_draw_canonical_materials` and
+`edited_cells_draw_their_own_materials` draw `Planet::material` exactly;
+`edited_chunks_come_back_by_copy`,
+`edited_chunks_released_by_age_come_back_by_copy` and
+`a_loaded_world_restores_its_edited_chunks` restore edited chunks with no
+generation; `terrain_shadows_fall_on_meshes_in_front_of_it`. Reports,
+ignored by default: `natural_cells_against_the_leaf_rule` (0 of 906k
+pixels wrong), `edit_cost_against_history`, `feature_generation_cost`.
 
-What is left grows with the baked data under a heavily dug region (10000
-digs 8 m across lower 720 m of ground by some 40 m), not with the history.
+## Known driver issue
 
-### Edited chunks kept (2026-10-16)
+NVIDIA's Vulkan driver (616.64, RTX 3060) intermittently loses G-buffer
+writes: after a frame, scattered 8x8 and 4x8 pixel blocks of every
+G-buffer target and of depth still hold the G-buffer pass's clear, so
+lighting takes them for sky (about one fixed-step descent in two, captured
+every 0.25 s). The publish runs and finds a hit for every pixel. D3D12
+never shows it; synchronization validation is clean; barriers, fences, a
+single command buffer and the recording cache change nothing. It needs the
+frame recorded while the GPU still runs the frame before, with generation
+in it; waiting for the GPU before the voxel pass records removes it (at
++44 % frame time), as does not clearing the G-buffer when the publish
+writes every pixel. Reported as NVIDIA bug 6939141; a forum report with
+the same profile: https://forums.developer.nvidia.com/t/382912.
 
-An edited chunk (generated under brushes or baked bricks) the plan evicts
-is packed on the GPU before its pages go back (`pack_main`): its meta,
-mids, mid leaves and materials, then each leaf page's leaves, materials
-and normals, then its detail pages, 12 KB on average. The 64-tree is the
-compression: a chunk's leaves are a few hundred of its 4096 columns' 64
-cells. Packs come back with the frame's results (64 a frame at most, in
-2 MB) and are kept on the CPU (`Capacity::kept_bytes`, 256 MB by default,
-least recently used dropped). An edited chunk that comes out empty is kept
-as such (no pack).
+## Open work
 
-A kept node the plan wants again is restored, not generated
-(`restore_main`, after the builds): new leaf and detail pages off the free
-stacks, its words copied in, its result written as a build's. It needs no
-footprint, no terrain program and no brushes. An empty one is reported
-empty at once (the plan, a few frames behind its results, asked for dug
-chunks it had just found empty, and each was generated again from the
-field and every brush over it). An edit over a kept node (a brush that came
-or went over it, a seal's baked columns under it) drops it, and a node
-generated again drops what was kept of it.
-
-`edited_chunks_come_back_by_copy` (a gate): a site under 2000 digs 8 m
-across, settled, left for a far view (a world of 9000 chunk slots evicts
-it), seen again:
-
-| | edited chunks on return: restored / generated | generation GPU on return | pixels as before |
-|---|---|---|---|
-| keeping nothing | 0 / 534 | 308 ms | all |
-| kept (2.4 MB) | 1041 / 0 | 58 ms | all |
-
-Then a brick mound added over the restored chunks draws exactly (against
-CPU ray casts), and left and seen again, the chunks it changed come back
-with it (940 restored, exact).
-
-### Kept chunks in the save (2026-10-16)
-
-Before saving, `ChunkWorld::keep_resident` packs the resident edited
-chunks too (as packs fit a frame; `keeping` counts those left), and
-`kept_chunks` takes every kept chunk (sharing the packs: cheap on the
-render thread). `KeptChunks::to_bytes` (on the saving thread) writes a
-header (the fingerprint of the generation shaders, terrain constants and
-world, so other generation code never loads them, and the history's
-length and hash), then the chunks deflated; `KeptChunks::from_bytes`
-reads them back and `ChunkWorld::load_kept` keeps them before the world's
-first update, for exactly that history.
-
-They are saved beside the edit snapshot, not in it: a host folds only its
-oldest edits into a snapshot (Pulsar lists its newest 4096), and the
-chunks are of every edit. Pulsar's `VoxelEditJournal` keeps them
-(`VoxelKeptChunks`: the bytes and the journal length and hash they are
-for), saved as `kept` with the level and dropped by any change of the
-edits.
-
-Hosts reach this through the pass: a `PlanetFrame`'s `kept` chunks go into
-the world built for its planet (`ChunkPass::kept_loaded` says how many, or
-why they were refused), and its `export` (`KeptExport`) asks for them: the
-pass packs the resident edited chunks over the next frames (asking for
-frames meanwhile) and answers with the planet shown and its kept chunks.
-
-`a_loaded_world_restores_its_edited_chunks` (a gate): the dug site saved
-(313 chunks, 316 KiB besides the snapshot's 260; 3.3 MiB undeflated) and
-loaded into a new world: 1172 edited chunks restored and none generated
-(313 without them), 90 ms of generation GPU against 234, every pixel as
-the saved world drew it. Kept chunks of another history, or damaged, are
-refused.
-
-### Natural per-voxel materials (2026-10-19)
-
-Every chunk of `DETAIL_LEVELS` (0 and 1) now takes a `cell_materials` slot,
-natural or edited. Its leaves whose cells their pair would draw wrong get
-detail pages, the same as dug walls, so mixed natural leaves (dirt beside
-dark stone, gravel in stone, a snow line through a leaf) draw each cell's
-canonical material. Only chunks under edits are kept across eviction
-(`Resident::edited` is separate from the slot).
-
-What keeps it cheap:
-- `leaf_column_cells` runs once per leaf column and reads each of its 16
-  columns once for all 16 leaves (it was once per leaf: ~590k redundant
-  reads a chunk).
-- A column's exposed cells are one 64-bit mask (air over, under or beside
-  them). In a natural chunk, a heightfield column (no volume terms) is
-  solid up to its top, so the chunk's faces count as exposed only where
-  they are: its top, a lower neighbour; past the footprint's sides, a
-  column like it. Counting every face cell as exposed (as edited chunks
-  still do) evaluated thousands of buried cells a chunk.
-- A natural top takes the material `chunk_columns_main` gave its
-  column's top (the same evaluation).
-- A natural chunk's columns write only their natural tops; its leaves
-  store only the nonzero cell words, the build's copy into detail pages
-  reads the ones it marked and zero for the rest.
-
-Measured:
-- `natural_cells_against_the_leaf_rule`, the same 906k pixels: **0 wrong**
-  (3.56 % before: mixed natural leaves' surface vote, dirt drawn as dark
-  stone).
-- Detail pages a test view takes: 3,000 to 10,000 (16,384 by default, and
-  in `TEST_CAPACITY`); a 1196x729 flight view, 1,339.
-- Generation, Helio's cruise stress (interleaved against the commit
-  before): 15.5-15.7 us a chunk against 14.3-14.4 (chunk builds 3.4-3.6
-  against 2.2-2.3, chunk columns 1.9 against 1.8). The first version took
-  37.5 us. Frames p50 6.4-6.5 ms against 6.0-6.2, p95 10.1-10.4 against
-  9.9-10.4; coarse share and worst pixels unchanged.
-
-### Next
-
-- Occlusion-limited refinement where it pays (valleys, caves, cities).
-  Measured 2026-10-19 in the editor (voxel_planet.level, 3 m and 40 m
-  views): refining nothing until rays meet it changed nothing (22.3k
-  against 22.7k resident, 15.2k against 15.4k drawn); the open views have
-  little hidden ground, and `unseen_pixels` (2) covers it. Measure again
-  on views that hide much (a valley floor, a cave, a city).
+- Occlusion-limited refinement where much is hidden (valley floors,
+  caves, cities): on the editor's open views, refining nothing until rays
+  meet it changed nothing (`unseen_pixels` 2 covers them).
 - A footprint's first computation: progressive (parent-seeded) synthesis.
+
+## References
+
+Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,
+*GigaVoxels* (2009); Careil, Billeter and Eisemann, *Interactive Editing of
+Large Sparse Voxel DAGs* (HashDAG, 2020); Fang et al., *Aokana: a GPU-driven
+voxel rendering framework for open world games* (2025); Teardown's renderer
+(Gustafsson, 2020-22); sparse 64-tree tracing (dubiousconst282, 2024);
+Karis, *Nanite* (2021) for the screen-space cut; *Filtered Appearance for
+Voxels* (HPG 2023); Distant Horizons for LOD crossfades.

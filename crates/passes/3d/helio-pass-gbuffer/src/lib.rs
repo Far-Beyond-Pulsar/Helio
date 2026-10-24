@@ -71,8 +71,6 @@ pub struct GBufferGlobals {
     pub light_count: u32,
     pub ambient_intensity: f32,
     pub ambient_color: [f32; 4],
-    pub rc_world_min: [f32; 4],
-    pub rc_world_max: [f32; 4],
     pub csm_splits: [f32; 4],
     pub debug_mode: u32,
     pub screen_width: f32,
@@ -716,11 +714,8 @@ impl RenderPass for GBufferPass {
             self.coordinate_prev_stale = false;
         }
         // Read per-scene values from the frame registry so the GBuffer globals match
-        // what the renderer configured (ambient light, GI bounds, etc.).
-        let rc_volume = ctx
-            .registry
-            .get(helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME);
-        let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
+        // what the renderer configured (ambient light).
+        let (ambient_color, ambient_intensity) =
             if let Some(ref environment) = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment()).as_ref() {
                 (
                     [
@@ -730,22 +725,10 @@ impl RenderPass for GBufferPass {
                         1.0,
                     ],
                     environment.ambient_intensity,
-                    [
-                        rc_volume.map(|v| v.world_min[0]).unwrap_or(-100.0),
-                        rc_volume.map(|v| v.world_min[1]).unwrap_or(-100.0),
-                        rc_volume.map(|v| v.world_min[2]).unwrap_or(-100.0),
-                        0.0,
-                    ],
-                    [
-                        rc_volume.map(|v| v.world_max[0]).unwrap_or(100.0),
-                        rc_volume.map(|v| v.world_max[1]).unwrap_or(100.0),
-                        rc_volume.map(|v| v.world_max[2]).unwrap_or(100.0),
-                        0.0,
-                    ],
                 )
             } else {
                 // Fallback for headless / test usage without a full renderer.
-                ([0.1, 0.1, 0.15, 1.0], 0.1, [-100.0_f32; 4], [100.0_f32; 4])
+                ([0.1, 0.1, 0.15, 1.0], 0.1)
             };
 
         // Upload per-frame globals (O(1) — fixed-size struct).
@@ -758,8 +741,6 @@ impl RenderPass for GBufferPass {
                 .map_or(0, |lights| lights.row_capacity()),
             ambient_intensity,
             ambient_color,
-            rc_world_min,
-            rc_world_max,
             csm_splits: self.csm_splits,
             debug_mode: self.debug_mode,
             screen_width: ctx.width as f32,

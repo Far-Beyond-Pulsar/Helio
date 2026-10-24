@@ -57,12 +57,16 @@ The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this pre
 
 The frontend owns `helio_default_passes::ray_tracing::SceneDbRayTracing`; this
 crate reads no World. After flushing the World's GPU mirror,
-call `acceleration.prepare(&world)` and publish its TLAS with
-`renderer.set_ray_tracing_frame(Some(tlas))` before each render. The renderer
-provides it through `RenderEnvironment`; publication expires after that frame.
+call `acceleration.prepare(&world)` and publish its TLAS and rows with
+`renderer.set_ray_tracing_frame(acceleration.frame())` before each render. The
+renderer provides the TLAS through `RenderEnvironment`; publication expires
+after that frame.
 The helper supports opaque, indexed, world-space `StaticObjectComponent` casters,
 including off-screen objects. Material and mesh generations are validated.
-Masked/custom materials and known unsupported geometry buffers are rejected.
+Masked/custom materials and known unsupported geometry buffers are rejected
+(`SceneDbRayTracing::partial` leaves them out instead, for consumers such as
+the GI probes that tolerate a missing caster; ray-traced shadows should not use
+it).
 Other geometry producers require an explicit acceleration projection.
 
 The current helper scans objects and hashes each referenced mesh once per frame

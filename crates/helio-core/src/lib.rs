@@ -380,7 +380,7 @@
 /// compiled out there: `SsrPass` and `PlanarReflectionPass` are left out of the
 /// graph, and `DeferredLightPass` tells its shader to skip both composites and
 /// the reflection-capture cube array. Everything else in deferred lighting —
-/// direct light, ambient, RC GI — is untouched.
+/// direct light, ambient, GI — is untouched.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const REFLECTIONS_SUPPORTED: bool = false;
 /// See the macOS/iOS variant above.
@@ -401,8 +401,10 @@ pub mod frame_demands;
 mod frame_inputs;
 pub mod frame_storage;
 pub mod graph;
+pub mod instance;
 pub mod movability;
 pub mod profiling;
+pub mod radix_sort;
 pub mod registry;
 pub mod render_environment;
 pub mod resource_keys;
@@ -462,12 +464,15 @@ pub use render_environment::RenderEnvironment;
 
 // Re-export managers
 pub use crate::acceleration::{
-    AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, TlasInstanceInput, TlasManager,
+    AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, RayFrame, RayInstance, RayProxies,
+    TlasInstanceInput, TlasManager, RAY_INSTANCES, RAY_INSTANCE_MASKED, RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED,
+    RAY_PROXY_INDICES, RAY_PROXY_VERTEX_BYTES, RAY_PROXY_VERTICES,
 };
 // Re-export core types
 pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
+pub use instance::wgpu_instance_descriptor;
 pub use error::{Error, Result};
 pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};

@@ -22,8 +22,6 @@ struct GpuGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 

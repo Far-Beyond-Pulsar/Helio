@@ -39,6 +39,9 @@ fn live_light(k: u32) -> u32 { return live_lights[k+1u]; }
 @group(1) @binding(7) var lightmap_sampler: sampler;
 @group(1) @binding(8) var pre_aa_texture: texture_2d<f32>;
 @group(1) @binding(9) var gbuf_velocity: texture_2d<f32>;
+// The GI probes' irradiance / pi at each pixel (rgb, half floats) and how
+// much the probes hold it (the fourth half); a single pair without them.
+@group(1) @binding(10) var<storage, read> gi_irradiance: array<vec2<u32>>;
 
 const PI: f32 = 3.14159265359;
 const INVALID_LIGHT: u32 = 0xffffffffu;

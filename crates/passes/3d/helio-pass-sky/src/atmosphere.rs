@@ -23,8 +23,14 @@
 //! - `atmosphere_transmittance`, `atmosphere_sky_view`,
 //!   `atmosphere_aerial` (textures).
 //!
+//! The row's cloud fields describe its clouds ([`CloudLayer`], the
+//! [`crate::clouds`] module): the pass builds their noise and, each frame,
+//! their shadow along the sun (`cloud_shadow_map`, `cloud_shadow_frame`).
+//!
 //! [`AtmosphereCompositePass`] runs after opaque lighting: the sky and the
-//! sun's disk where no geometry is, aerial perspective where it is.
+//! sun's disk where no geometry is, aerial perspective where it is, and the
+//! clouds ([`crate::clouds::CloudTracePass`]) in front of whichever lies
+//! behind them.
 //!
 //! Positions stay exact in camera-relative frames: the planet centre is
 //! rebased by the frame's world origin, split into an f32 and its
@@ -36,6 +42,11 @@ use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as
 use pulsar_scenedb::gpu::BufferKey;
 use pulsar_scenedb_derive::SceneStore;
 
+use crate::clouds::{
+    CloudVolumes, ATMOSPHERE_CLOUDS, ATMOSPHERE_CLOUD_DEPTH, ATMOSPHERE_CLOUD_DETAIL, ATMOSPHERE_CLOUD_SHAPE,
+    ATMOSPHERE_CLOUD_WEATHER, CLOUD_SHADOW_FRAME, CLOUD_SHADOW_MAP,
+};
+
 /// Graph key of the per-frame atmosphere buffer (`AtmosphereFrame`).
 pub const ATMOSPHERE_FRAME: &str = "atmosphere_frame";
 pub const ATMOSPHERE_TRANSMITTANCE: &str = "atmosphere_transmittance";
@@ -45,7 +56,7 @@ pub const ATMOSPHERE_AERIAL: &str = "atmosphere_aerial";
 /// Bytes of `AtmosphereFrame`. The buffer is usable as a uniform as well as
 /// storage: consumers already at the per-stage storage-buffer limit (the
 /// deferred lighting pass) bind it as a uniform.
-pub const ATMOSPHERE_FRAME_BYTES: u64 = 320;
+pub const ATMOSPHERE_FRAME_BYTES: u64 = 448;
 /// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
 /// `atmosphere_common.wgsl`): the sky over a surface anywhere in the air,
 /// by its altitude and sun angle. Usable as a uniform.
@@ -63,6 +74,15 @@ pub const ATMOSPHERE_MARKER: &str = "//!use atmosphere";
 /// `atmosphere_frame` opts in with [`ATMOSPHERE_MARKER`].
 pub const ATMOSPHERE_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(ATMOSPHERE_MARKER, "shaders/atmosphere_common.wgsl");
+
+/// Marker opting a shader into [`ATMOSPHERE_SKY_TABLE_SNIPPET`].
+pub const ATMOSPHERE_SKY_TABLE_MARKER: &str = "//!use atmosphere_sky_table";
+
+/// The sky over a surface anywhere in the atmosphere from the published
+/// sky table (`atmosphere_sky_table_eval`); with [`ATMOSPHERE_SNIPPET`],
+/// for a shader binding the table as `atmosphere_sky_table`.
+pub const ATMOSPHERE_SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(ATMOSPHERE_SKY_TABLE_MARKER, "shaders/atmosphere_sky_table.wgsl");
 
 /// Where an atmosphere's planet is.
 pub mod placement {
@@ -123,9 +143,47 @@ pub struct AtmosphereComponent {
     /// Non-zero to use this atmosphere.
     #[gpu]
     pub enabled: u32,
+    /// Bottom of the cloud layer above the surface (km).
+    #[gpu]
+    pub cloud_bottom: f32,
+    /// Top of the cloud layer above the surface (km).
+    #[gpu]
+    pub cloud_top: f32,
+    /// Share of the sky the clouds cover: 0 clear, 1 overcast.
+    #[gpu]
+    pub cloud_coverage: f32,
+    /// The clouds' form: 0 flat stratus low in the layer, 1 cumulus
+    /// towering through it.
+    #[gpu]
+    pub cloud_type: f32,
+    /// Extinction inside a cloud at full density (per km).
+    #[gpu]
+    pub cloud_extinction: f32,
+    /// Size of the weather: where clouds gather and where the sky is
+    /// clear (km).
+    #[gpu]
+    pub cloud_weather_scale: f32,
+    /// Size of the clouds' billows (km).
+    #[gpu]
+    pub cloud_shape_scale: f32,
+    /// Size of the wisps that erode their edges (km).
+    #[gpu]
+    pub cloud_detail_scale: f32,
+    /// Wind carrying the clouds (world m/s).
+    #[gpu]
+    pub cloud_wind: [f32; 3],
+    /// Non-zero to draw the clouds.
+    #[gpu]
+    pub clouds_enabled: u32,
+    /// Share of the light a cloud scatters rather than absorbs, per channel.
+    #[gpu]
+    pub cloud_albedo: [f32; 3],
+    /// How far the detail erodes the clouds' edges (0..1).
+    #[gpu]
+    pub cloud_erosion: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<AtmosphereComponent>() == 112);
+const _: () = assert!(std::mem::size_of::<AtmosphereComponent>() == 176);
 
 impl Default for AtmosphereComponent {
     fn default() -> Self {
@@ -154,7 +212,40 @@ impl AtmosphereComponent {
             top_radius: 6460.0,
             sun_angular_radius: 0.004675,
             enabled: 1,
+            ..Self::clear()
         }
+    }
+
+    /// The cloud fields of a sky without clouds ([`CloudLayer::cumulus`]'s
+    /// shape, disabled); every other field zero.
+    fn clear() -> Self {
+        let mut row = Self::zeroed();
+        CloudLayer::cumulus().write(&mut row);
+        row.clouds_enabled = 0;
+        row
+    }
+
+    /// This atmosphere with `clouds` (enabled).
+    pub fn with_clouds(mut self, clouds: CloudLayer) -> Self {
+        clouds.write(&mut self);
+        self
+    }
+
+    /// The cloud layer this row describes, if it draws one.
+    pub fn clouds(&self) -> Option<CloudLayer> {
+        (self.clouds_enabled != 0).then(|| CloudLayer {
+            bottom_km: self.cloud_bottom,
+            top_km: self.cloud_top,
+            coverage: self.cloud_coverage,
+            kind: self.cloud_type,
+            extinction: self.cloud_extinction,
+            weather_km: self.cloud_weather_scale,
+            shape_km: self.cloud_shape_scale,
+            detail_km: self.cloud_detail_scale,
+            wind: self.cloud_wind,
+            albedo: self.cloud_albedo,
+            erosion: self.cloud_erosion,
+        })
     }
 
     /// A thin, dusty Martian atmosphere: butterscotch by day, blue around
@@ -188,6 +279,78 @@ impl AtmosphereComponent {
     }
 }
 
+/// A layer of clouds in the atmosphere (the cloud fields of
+/// [`AtmosphereComponent`]): a band of altitudes over the planet's surface
+/// where clouds form, gathered by the weather, shaped by billows and eroded
+/// into wisps, carried by the wind.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CloudLayer {
+    /// The band, above the surface (km).
+    pub bottom_km: f32,
+    pub top_km: f32,
+    /// Share of the sky covered: 0 clear, 1 overcast.
+    pub coverage: f32,
+    /// Form: 0 stratus, 1 cumulus.
+    pub kind: f32,
+    /// Extinction inside a cloud at full density (per km).
+    pub extinction: f32,
+    /// Sizes of the weather, of the billows and of the wisps (km).
+    pub weather_km: f32,
+    pub shape_km: f32,
+    pub detail_km: f32,
+    /// World m/s.
+    pub wind: [f32; 3],
+    /// Single-scattering albedo per channel.
+    pub albedo: [f32; 3],
+    /// How far the wisps erode the edges (0..1).
+    pub erosion: f32,
+}
+
+impl Default for CloudLayer {
+    fn default() -> Self {
+        Self::cumulus()
+    }
+}
+
+impl CloudLayer {
+    /// Fair-weather cumulus: scattered heaps between 1.5 and 4 km.
+    pub fn cumulus() -> Self {
+        Self {
+            bottom_km: 1.5,
+            top_km: 4.0,
+            coverage: 0.45,
+            kind: 0.85,
+            extinction: 40.0,
+            weather_km: 24.0,
+            shape_km: 6.0,
+            detail_km: 0.8,
+            wind: [8.0, 0.0, 3.0],
+            albedo: [0.99; 3],
+            erosion: 0.45,
+        }
+    }
+
+    /// A low, flat, grey deck.
+    pub fn overcast() -> Self {
+        Self { bottom_km: 1.0, top_km: 2.2, coverage: 0.95, kind: 0.2, extinction: 30.0, ..Self::cumulus() }
+    }
+
+    fn write(&self, row: &mut AtmosphereComponent) {
+        row.cloud_bottom = self.bottom_km.max(0.0);
+        row.cloud_top = self.top_km.max(self.bottom_km + 0.01);
+        row.cloud_coverage = self.coverage.clamp(0.0, 1.0);
+        row.cloud_type = self.kind.clamp(0.0, 1.0);
+        row.cloud_extinction = self.extinction.max(0.0);
+        row.cloud_weather_scale = self.weather_km.max(0.01);
+        row.cloud_shape_scale = self.shape_km.max(0.01);
+        row.cloud_detail_scale = self.detail_km.max(0.001);
+        row.cloud_wind = self.wind;
+        row.clouds_enabled = 1;
+        row.cloud_albedo = self.albedo.map(|a| a.clamp(0.0, 1.0));
+        row.cloud_erosion = self.erosion.clamp(0.0, 1.0);
+    }
+}
+
 const TRANSMITTANCE: [u32; 2] = [256, 64];
 const MULTI_SCATTERING: u32 = 32;
 const SKY_VIEW: [u32; 2] = [192, 108];
@@ -198,6 +361,8 @@ const AERIAL: u32 = 32;
 struct ResolveUniform {
     origin_hi: [f32; 4],
     origin_lo: [f32; 4],
+    /// x: the frame clock's advance (s).
+    clock: [f32; 4],
 }
 
 fn lut(device: &wgpu::Device, label: &str, size: [u32; 3], dimension: wgpu::TextureDimension) -> wgpu::TextureView {
@@ -286,6 +451,7 @@ pub struct AtmospherePass {
     /// illuminance, eye) read back and printed each frame (diagnostics).
     trace: Option<Vec<(u64, wgpu::Buffer)>>,
     frame_index: u64,
+    clouds: CloudVolumes,
 }
 
 impl AtmospherePass {
@@ -411,6 +577,7 @@ impl AtmospherePass {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
+        let clouds = CloudVolumes::new(device, &frame);
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Atmosphere resolve"),
             size: std::mem::size_of::<ResolveUniform>() as u64,
@@ -456,6 +623,7 @@ impl AtmospherePass {
             params_tables: None,
             trace: std::env::var_os("HELIO_ATMOSPHERE_TRACE").map(|_| Vec::new()),
             frame_index: 0,
+            clouds,
         }
     }
 
@@ -476,7 +644,19 @@ impl RenderPass for AtmospherePass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[ATMOSPHERE_FRAME, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_TRANSMITTANCE, ATMOSPHERE_MULTI_SCATTERING, ATMOSPHERE_SKY_VIEW, ATMOSPHERE_AERIAL]
+        &[
+            ATMOSPHERE_FRAME,
+            ATMOSPHERE_SKY_TABLE,
+            ATMOSPHERE_TRANSMITTANCE,
+            ATMOSPHERE_MULTI_SCATTERING,
+            ATMOSPHERE_SKY_VIEW,
+            ATMOSPHERE_AERIAL,
+            CLOUD_SHADOW_MAP,
+            CLOUD_SHADOW_FRAME,
+            ATMOSPHERE_CLOUD_WEATHER,
+            ATMOSPHERE_CLOUD_SHAPE,
+            ATMOSPHERE_CLOUD_DETAIL,
+        ]
     }
 
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
@@ -495,8 +675,10 @@ impl RenderPass for AtmospherePass {
         self.rows.update(ctx.device, ctx.queue, rows);
         let active = rows.is_some_and(|handle| self.rows.maybe_live(handle));
         if !active && self.active {
-            // Consumers read "no atmosphere" from the frame.
+            // Consumers read "no atmosphere" from the frame, and no clouds'
+            // shadow.
             ctx.write_buffer(&self.frame, 0, &[0u8; 16]);
+            ctx.write_buffer(self.clouds.shadow_frame(), 0, &[0u8; 16]);
         }
         if !active {
             self.params_tables = None;
@@ -505,7 +687,11 @@ impl RenderPass for AtmospherePass {
         let origin = ctx.world_origin.unwrap_or_default();
         let hi = origin.as_vec3();
         let lo = (origin - hi.as_dvec3()).as_vec3();
-        let uniform = ResolveUniform { origin_hi: hi.extend(0.0).to_array(), origin_lo: lo.extend(0.0).to_array() };
+        let uniform = ResolveUniform {
+            origin_hi: hi.extend(0.0).to_array(),
+            origin_lo: lo.extend(0.0).to_array(),
+            clock: [ctx.time_delta, 0.0, 0.0, 0.0],
+        };
         ctx.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
         Ok(())
     }
@@ -554,6 +740,7 @@ impl RenderPass for AtmospherePass {
             pass.set_bind_group(1, kernel.group.as_ref(), &[]);
             pass.dispatch_workgroups(kernel.groups[0], kernel.groups[1], kernel.groups[2]);
         }
+        self.clouds.record(&mut pass);
         drop(pass);
         self.frame_index += 1;
         if let Some(trace) = &mut self.trace {
@@ -600,6 +787,7 @@ impl RenderPass for AtmospherePass {
         }
         let active: bool = self.active;
         frame.write(ResourceKey::new("atmosphere_active"), active, "Atmosphere");
+        self.clouds.publish(frame);
     }
 }
 
@@ -611,8 +799,11 @@ pub struct AtmosphereCompositePass {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     group: Option<wgpu::BindGroup>,
-    key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 5])>,
+    key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 7])>,
     active: bool,
+    /// A 1x1 zero texture: no clouds (no opacity, no light), bound while no
+    /// cloud pass publishes any.
+    no_clouds: wgpu::TextureView,
 }
 
 impl AtmosphereCompositePass {
@@ -650,6 +841,18 @@ impl AtmosphereCompositePass {
                     count: None,
                 },
                 sampled_texture(7, fragment, wgpu::TextureViewDimension::D2),
+                sampled_texture(8, fragment, wgpu::TextureViewDimension::D2),
+                // The clouds' depths: Rg32Float, loaded.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: fragment,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -701,7 +904,19 @@ impl AtmosphereCompositePass {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        Self { pipeline, layout, sampler, group: None, key: None, active: false }
+        let no_clouds = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("No clouds"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        Self { pipeline, layout, sampler, group: None, key: None, active: false, no_clouds }
     }
 }
 
@@ -711,7 +926,17 @@ impl RenderPass for AtmosphereCompositePass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "depth", ATMOSPHERE_FRAME, ATMOSPHERE_TRANSMITTANCE, ATMOSPHERE_MULTI_SCATTERING, ATMOSPHERE_SKY_VIEW, ATMOSPHERE_AERIAL]
+        &[
+            "pre_aa",
+            "depth",
+            ATMOSPHERE_FRAME,
+            ATMOSPHERE_TRANSMITTANCE,
+            ATMOSPHERE_MULTI_SCATTERING,
+            ATMOSPHERE_SKY_VIEW,
+            ATMOSPHERE_AERIAL,
+            ATMOSPHERE_CLOUDS,
+            ATMOSPHERE_CLOUD_DEPTH,
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -770,7 +995,21 @@ impl RenderPass for AtmosphereCompositePass {
         ) else {
             return Ok(());
         };
-        let key = (ctx.camera.clone(), frame.clone(), [ctx.depth.clone(), transmittance.clone(), multi_scattering.clone(), sky_view.clone(), aerial.clone()]);
+        let clouds = registry.texture_binding(ATMOSPHERE_CLOUDS).unwrap_or(&self.no_clouds);
+        let cloud_depth = registry.texture_binding(ATMOSPHERE_CLOUD_DEPTH).unwrap_or(&self.no_clouds);
+        let key = (
+            ctx.camera.clone(),
+            frame.clone(),
+            [
+                ctx.depth.clone(),
+                transmittance.clone(),
+                multi_scattering.clone(),
+                sky_view.clone(),
+                aerial.clone(),
+                clouds.clone(),
+                cloud_depth.clone(),
+            ],
+        );
         if self.key.as_ref() != Some(&key) {
             self.group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Atmosphere composite"),
@@ -784,6 +1023,8 @@ impl RenderPass for AtmosphereCompositePass {
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(ctx.depth) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(multi_scattering) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(clouds) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(cloud_depth) },
                 ],
             }));
             self.key = Some(key);

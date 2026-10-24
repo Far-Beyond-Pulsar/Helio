@@ -17,6 +17,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
+use helio_mats::texture_mips::{mip_chain, TexelKind};
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, point_light,
@@ -36,50 +37,14 @@ use std::sync::{Arc, RwLock};
 
 const BRICK_TEX_SIZE: u32 = 512;
 
-struct RgbaImage {
-    size: u32,
-    mips: Vec<Vec<u8>>,
-}
-
 fn hash2(x: u32, y: u32) -> f32 {
     let mut h = x.wrapping_mul(374761393) ^ y.wrapping_mul(668265263);
     h = (h ^ (h >> 13)).wrapping_mul(1274126177);
     ((h ^ (h >> 16)) & 0xffff) as f32 / 65535.0
 }
 
-fn box_downsample(src: &[u8], size: u32) -> Vec<u8> {
-    let half = size / 2;
-    let mut out = vec![0u8; (half * half * 4) as usize];
-    for y in 0..half {
-        for x in 0..half {
-            for c in 0..4 {
-                let mut sum = 0u32;
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    sum += src[(((y * 2 + dy) * size + x * 2 + dx) * 4 + c) as usize] as u32;
-                }
-                out[((y * half + x) * 4 + c) as usize] = ((sum + 2) / 4) as u8;
-            }
-        }
-    }
-    out
-}
-
-fn build_mips(base: Vec<u8>) -> RgbaImage {
-    let mut mips = vec![base];
-    let mut size = BRICK_TEX_SIZE;
-    while size > 1 {
-        let next = box_downsample(mips.last().unwrap(), size);
-        mips.push(next);
-        size /= 2;
-    }
-    RgbaImage {
-        size: BRICK_TEX_SIZE,
-        mips,
-    }
-}
-
 /// Procedural running-bond brick pattern: (sRGB albedo, tangent-space GL normal map).
-fn generate_brick_textures() -> (RgbaImage, RgbaImage) {
+fn generate_brick_textures() -> (Vec<u8>, Vec<u8>) {
     let n = BRICK_TEX_SIZE as i32;
     let rows = 8;
     let per_row = 4;
@@ -137,31 +102,35 @@ fn generate_brick_textures() -> (RgbaImage, RgbaImage) {
             normal[i + 3] = 255;
         }
     }
-    (build_mips(albedo), build_mips(normal))
+    (albedo, normal)
 }
 
+/// Uploads a `BRICK_TEX_SIZE`-square RGBA8 texture with a full mip chain
+/// filtered as `texels` says (`helio_mats::texture_mips`).
 fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     store: &mut pulsar_scenedb::gpu::TextureStore,
-    image: &RgbaImage,
-    srgb: bool,
+    rgba: &[u8],
+    texels: TexelKind,
 ) -> u32 {
-    let slot = store
-        .register(
+    let chain = mip_chain(rgba, BRICK_TEX_SIZE, BRICK_TEX_SIZE, texels);
+    let mips: Vec<&[u8]> = chain.iter().map(|level| level.texels.as_slice()).collect();
+    store
+        .register_mips(
             device,
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("procedural brick"),
                 size: wgpu::Extent3d {
-                    width: image.size,
-                    height: image.size,
+                    width: BRICK_TEX_SIZE,
+                    height: BRICK_TEX_SIZE,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: image.mips.len() as u32,
+                mip_level_count: mips.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: if srgb {
+                format: if texels.is_srgb() {
                     wgpu::TextureFormat::Rgba8UnormSrgb
                 } else {
                     wgpu::TextureFormat::Rgba8Unorm
@@ -169,33 +138,9 @@ fn upload_texture(
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             },
-            &image.mips[0],
+            &mips,
         )
-        .expect("register brick texture");
-    let texture = store.texture(slot).expect("registered texture");
-    for (level, data) in image.mips.iter().enumerate().skip(1) {
-        let size = (image.size >> level).max(1);
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: level as u32,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size * 4),
-                rows_per_image: Some(size),
-            },
-            wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
-    slot
+        .expect("register brick texture")
 }
 
 fn main() {
@@ -253,9 +198,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance
             .create_surface(window.clone())
@@ -315,8 +259,8 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut texture_store = pulsar_scenedb::gpu::TextureStore::new(2);
         let (brick_albedo, brick_normal) = generate_brick_textures();
-        let brick_base = upload_texture(&device, &queue, &mut texture_store, &brick_albedo, true);
-        let brick_nrm = upload_texture(&device, &queue, &mut texture_store, &brick_normal, false);
+        let brick_base = upload_texture(&device, &queue, &mut texture_store, &brick_albedo, TexelKind::Colour);
+        let brick_nrm = upload_texture(&device, &queue, &mut texture_store, &brick_normal, TexelKind::Normal);
         let scene_handle = scene_db_handle(&scene_db)
             .with_texture_store(Arc::new(RwLock::new(texture_store)))
             .unwrap();

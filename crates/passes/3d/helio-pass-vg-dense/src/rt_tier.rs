@@ -142,6 +142,7 @@ impl RtTier {
             levels: cfg.proxy.levels,
             ratio: cfg.proxy.ratio,
             max_triangles_per_lod: cfg.proxy.max_triangles_per_lod.min(device.limits().max_blas_primitive_count),
+            ..ProxyOptions::default()
         };
         Ok(Self {
             blas: BlasManager::new(dev.clone()),

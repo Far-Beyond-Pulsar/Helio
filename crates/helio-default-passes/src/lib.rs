@@ -7,7 +7,9 @@ pub mod pipelines;
 pub mod environment_join;
 pub mod portal_projection;
 pub mod hierarchy_resolve;
+pub mod ray_proxies;
 pub mod ray_tracing;
+mod texture_means;
 pub mod scene_join;
 pub mod virtual_geometry;
 pub use virtual_geometry::{virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass};
@@ -49,7 +51,8 @@ use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
-use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass};
+use helio_pass_gi::{GiConfig, GiMeshTracePass, GiPass, GiResolvePass};
+use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
 
 use background::BackgroundPass;
 use helio_pass_ssr::SsrPass;
@@ -180,6 +183,10 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<IndirectDispatchPass>()
         .independent::<BackgroundPass>()
         .independent::<AtmospherePass>()
+        .independent::<GiPass>()
+        .independent::<GiMeshTracePass>()
+        .independent::<GiResolvePass>()
+        .independent::<CloudTracePass>()
         .independent::<AtmosphereCompositePass>()
         .independent::<LightCullPass>()
         .independent::<DecalPass>()
@@ -378,6 +385,44 @@ fn add_common_early_passes(
     perf_overlay_shared
 }
 
+/// World-space GI (helio-pass-gi), the update and its tracers: the voxel
+/// terrain (`voxel_passes`, added here), if any, and the scene's meshes on
+/// a device with ray queries (against the frame's TLAS, when the frontend
+/// publishes one). Without voxel terrain the probes are finer (rooms,
+/// pillars, furniture) and update only on frames with a TLAS. Returns
+/// whether there is GI: the resolve then goes after the G-buffer is
+/// complete, before deferred lighting.
+fn add_gi_tracers(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    iw: u32,
+    ih: u32,
+    config: &RendererConfig,
+    voxel_passes: &[VoxelPassFactory],
+) -> bool {
+    let voxel = !voxel_passes.is_empty();
+    let mesh_rays = GiMeshTracePass::new(device);
+    let gi = voxel || mesh_rays.is_some();
+    if gi {
+        let finest_spacing = config.gi_probe_spacing.map_or(if voxel { helio_pass_gi::DEFAULT_FINEST_SPACING } else { 0.5 }, f64::from);
+        graph.add_pass(Box::new(GiPass::new(device, GiConfig { finest_spacing, needs_tlas: !voxel })));
+    }
+    for factory in voxel_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
+    if let Some(mesh_rays) = mesh_rays {
+        graph.add_pass(Box::new(mesh_rays));
+    }
+    gi
+}
+
+/// The clouds' trace, once the depth is complete and before deferred
+/// lighting, which takes the sun's visibility under the clouds from it.
+fn add_cloud_trace(graph: &mut RenderGraph, device: &Arc<wgpu::Device>) {
+    graph.add_pass(Box::new(CloudTracePass::new(device)));
+}
+
 fn add_geometry_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -395,20 +440,12 @@ fn add_geometry_passes(
     // FoliageGBufferPass exists to join. Nothing renders wrong either way, which is
     // exactly why this is worth a comment — the cost is a silent tile store/reload.
     let foliage_buffers = config.enable_foliage.then(|| {
-        let place_pass = FoliagePlacePass::new_with_density(
-            device,
-            FoliageQuality::default(),
-            config.foliage_blades_per_m2,
-        );
-        let handles = (
-            Arc::clone(&place_pass.blade_arena),
-            Arc::clone(&place_pass.tile_table),
-            Arc::clone(&place_pass.visible_blades),
-            Arc::clone(&place_pass.foliage_indirect),
-            place_pass.blades_per_tile(),
-        );
+        let (place_pass, boxes, draw) = foliage_passes(device, &config);
         graph.add_pass(Box::new(place_pass));
-        handles
+        // Blocky foliage expanded into boxes, before the G-buffer: between the two raster
+        // passes it would break their fusion.
+        graph.add_pass(Box::new(boxes));
+        draw
     });
 
     graph.add_pass(Box::new(GBufferPass::new(device)));
@@ -452,17 +489,8 @@ fn add_geometry_passes(
     // run of exact-attachment-match passes); VG shading writes the G-buffer through
     // storage textures, so nothing about it participates in render-pass fusion and
     // foliage keeps its slot directly after the classic passes.
-    if let Some((blade_arena, tile_table, visible_blades, foliage_indirect, blades_per_tile)) =
-        foliage_buffers
-    {
-        graph.add_pass(Box::new(FoliageGBufferPass::new(
-            device,
-            blade_arena,
-            tile_table,
-            visible_blades,
-            foliage_indirect,
-            blades_per_tile,
-        )));
+    if let Some(draw) = foliage_buffers {
+        graph.add_pass(Box::new(draw));
     }
 
     // Virtual geometry draws its clusters after everything classic, so its
@@ -499,9 +527,15 @@ fn add_late_passes(
     h: u32,
     _scene_db: helio::SceneDbHandle,
 ) {
+    // The clouds, where a graph has not traced them before its lighting
+    // (`add_cloud_trace`).
+    if graph.find_pass::<CloudTracePass>().is_none() {
+        graph.add_pass(Box::new(CloudTracePass::new(device)));
+    }
     // The atmosphere over everything lit: the sky where nothing was drawn,
-    // aerial perspective over geometry. Before the overlays (billboards,
-    // coronas, debug draw), which are not seen through the air.
+    // aerial perspective over geometry, the clouds in front of both. Before
+    // the overlays (billboards, coronas, debug draw), which are not seen
+    // through the air.
     graph.add_pass(Box::new(AtmosphereCompositePass::new(device, config.surface_format)));
     let lights_buf = scene_buffer_or_dummy(
         &_scene_db,
@@ -639,6 +673,39 @@ fn add_final_passes(
             config.height,
         )));
     }
+}
+
+/// The foliage passes `config` asks for: placement, the boxes expansion (between
+/// placement and the G-buffer) and the G-buffer draw (after it), which share the
+/// placement's buffers.
+pub(crate) fn foliage_passes(
+    device: &wgpu::Device,
+    config: &RendererConfig,
+) -> (FoliagePlacePass, helio_pass_foliage_gbuffer::FoliageBoxesPass, FoliageGBufferPass) {
+    let defaults = helio_pass_foliage_place::FoliageRange::default();
+    let place = FoliagePlacePass::new_with(
+        device,
+        config.foliage_quality,
+        helio_pass_foliage_place::FoliageRange {
+            range: config.foliage_range.unwrap_or(config.foliage_quality.range()),
+            tufts_per_m2: config.foliage_tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
+            blades_per_tuft: config.foliage_blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
+            ..defaults
+        },
+    );
+    let mut draw = FoliageGBufferPass::new(
+        device,
+        Arc::clone(&place.blade_arena),
+        Arc::clone(&place.tile_table),
+        Arc::clone(&place.tile_frames),
+        Arc::clone(&place.visible_blades),
+        Arc::clone(&place.foliage_indirect),
+        Arc::clone(&place.bands_buffer),
+        Arc::clone(&place.interactors),
+    );
+    draw.quality = config.foliage_quality;
+    let boxes = draw.boxes_pass(device);
+    (place, boxes, draw)
 }
 
 /// Build the default deferred graph from the shared renderer construction ABI.
@@ -1043,14 +1110,15 @@ fn build_default_graph_internal_with_lens_user(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
-    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
-    // output, and it only cost a probe-atlas trace every frame.
-
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
-    for factory in &voxel_passes {
-        graph.add_pass(factory(device, queue, iw, ih));
+    let voxel = !voxel_passes.is_empty();
+    let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &voxel_passes);
+    // Foliage grows on the voxel terrain when there is one: its pass answers the
+    // placement's ground queries (`helio_pass_voxel_planet::chunks::ground`).
+    let voxel_ground = graph.find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>().map(|p| p.foliage_ground());
+    if let (Some(ground), Some(place)) = (voxel_ground, graph.find_pass_mut::<FoliagePlacePass>()) {
+        place.set_ground(ground);
     }
 
     // Decal pass — projects decals into the G-buffer after it's been written.
@@ -1085,6 +1153,10 @@ fn build_default_graph_internal_with_lens_user(
         )));
     }
 
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
+    add_cloud_trace(&mut graph, device);
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -1118,16 +1190,15 @@ fn build_default_graph_internal_with_lens_user(
     // When TSR is active it provides superior temporal anti-aliasing, so FXAA
     // would only add blur on top of an already-sharp image.  Gate FXAA behind
     // the TSR flag so the two don't compete.
+    // The voxel terrain's sun samples rotate over blocks of pixels: where its
+    // cells are a pixel or two wide, TSR integrates them (`tsr_stochastic`).
     let aa = match config.tsr_quality {
-        Some(quality) => SceneAa::Tsr(TsrPass::new(
-            device,
-            iw,
-            ih,
-            config.width,
-            config.height,
-            config.surface_format,
-            quality,
-        )),
+        Some(quality) => {
+            // The G-buffer passes write motion vectors: moving objects reproject with themselves.
+            let tsr = TsrPass::new(device, iw, ih, config.width, config.height, config.surface_format, quality)
+                .with_motion_vectors();
+            SceneAa::Tsr(if voxel { tsr.with_stochastic_mask() } else { tsr })
+        }
         None => SceneAa::Fxaa,
     };
     // Transparent pass — alpha-blended geometry (simple fixed shader).
@@ -1296,11 +1367,8 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
-    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
-    // output, and it only cost a probe-atlas trace every frame.
-
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
@@ -1320,6 +1388,10 @@ fn build_fxaa_graph_internal(
         )));
     }
 
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
+    add_cloud_trace(&mut graph, device);
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -1356,7 +1428,7 @@ fn build_fxaa_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )),
+        ).with_motion_vectors()),
         None => SceneAa::None,
     };
     let resolved = add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, None, aa, iw, ih, None);
@@ -1440,9 +1512,14 @@ fn build_hlfs_graph_internal(
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, iw, ih)));
+    // The probes' irradiance, the lighting's indirect diffuse.
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
     let lighting_format = HlfsPass::preferred_output_format(device);
@@ -1489,7 +1566,7 @@ fn build_hlfs_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        ).with_transparency_reactivity()),
+        ).with_transparency_reactivity().with_motion_vectors()),
         None => SceneAa::None,
     };
     let resolved =
@@ -1683,9 +1760,14 @@ fn build_fxaa_hlfs_graph_internal(
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    let gi = add_gi_tracers(&mut graph, device, queue, w, h, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
     graph.add_pass(Box::new(DecalPass::new(device, queue, camera_buf, w, h)));
+    // The probes' irradiance, the lighting's indirect diffuse.
+    if gi {
+        graph.add_pass(Box::new(GiResolvePass::new(device)));
+    }
 
     // Lighting stays in linear HDR until the post-process pass tonemaps it.
     let lighting_format = HlfsPass::preferred_output_format(device);
@@ -1970,10 +2052,6 @@ fn build_forward_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
-    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
-    // output, and it only cost a probe-atlas trace every frame.
-
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
     add_forward_geometry_passes(&mut graph, device, camera_buf, &lighting_config, &perf, true);
 
@@ -2042,4 +2120,23 @@ fn build_forward_graph_internal(
     graph.set_graph_data(rebuilder);
 
     graph
+}
+
+/// Reads the frame's scene materials (Helio's material rows and descriptor-
+/// indexed texture table) for `ChunkPass::set_scene_materials`, so voxel
+/// terrain is textured by the same `MaterialComponent`s as meshes.
+pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneMaterialSource {
+    use helio_pass_voxel_planet::chunks::scene::SceneMaterialInputs;
+    Box::new(|ctx| {
+        let textures = ctx
+            .registry
+            .read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "VoxelPlanet")?;
+        let materials = ctx.scene_buffers.get(pulsar_scenedb::gpu::BufferKey::of("materials"))?;
+        Some(SceneMaterialInputs {
+            materials: &materials.buffer,
+            texture_views: textures.texture_views,
+            samplers: textures.samplers,
+            version: (textures.version, materials.epoch as u64),
+        })
+    })
 }

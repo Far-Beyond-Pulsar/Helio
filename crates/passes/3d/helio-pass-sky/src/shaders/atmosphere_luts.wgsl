@@ -19,6 +19,9 @@ struct Resolve {
     // and its remainder so planet centres far from it stay exact.
     origin_hi: vec4<f32>,
     origin_lo: vec4<f32>,
+    // x: how far the frame clock advanced (s), which the wind carries the
+    // clouds over.
+    clock: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> resolve_input: Resolve;
@@ -89,6 +92,13 @@ fn resolve() {
     frame.sun_illuminance = vec4<f32>(illuminance, range);
     frame.eye = vec4<f32>(eye, 0.0);
     frame.params = params;
+    // The wind carries the clouds' noise; each offset wraps to its noise's
+    // period, so it never loses precision however long the clock runs.
+    let drift = params.cloud_wind * (resolve_input.clock.x * 0.001);
+    frame.cloud_weather_offset = vec4<f32>(fract(frame.cloud_weather_offset.xyz - drift / max(params.cloud_weather_scale, 1e-3)), 0.0);
+    frame.cloud_climate_offset = vec4<f32>(fract(frame.cloud_climate_offset.xyz - drift / max(params.cloud_weather_scale * CLOUD_CLIMATE, 1e-3)), 0.0);
+    frame.cloud_shape_offset = vec4<f32>(fract(frame.cloud_shape_offset.xyz - drift / max(params.cloud_shape_scale, 1e-3)), 0.0);
+    frame.cloud_detail_offset = vec4<f32>(fract(frame.cloud_detail_offset.xyz - drift / max(params.cloud_detail_scale, 1e-3)), 0.0);
 }
 
 fn atmosphere_active() -> bool {

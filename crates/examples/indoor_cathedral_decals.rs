@@ -201,9 +201,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -725,7 +724,7 @@ impl ApplicationHandler for App {
             _chandelier_rings,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
+            cam_yaw: 0.0,
             cam_pitch: -0.05,
             keys: HashSet::new(),
             cursor_grabbed: false,

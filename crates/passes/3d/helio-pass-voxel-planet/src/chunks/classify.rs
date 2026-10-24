@@ -111,10 +111,16 @@ impl Ranges {
         let half = |(lo, hi): (i32, i32)| (lo.saturating_mul(2) - 2, hi.saturating_mul(2) + 2);
         Self { volume: half(self.volume), surface: half(self.surface) }
     }
+
+    /// The ranges holding all of `parts` (none if none is).
+    pub fn hull(parts: &[Option<Ranges>]) -> Option<Self> {
+        let join = |a: (i32, i32), b: (i32, i32)| (a.0.min(b.0), a.1.max(b.1));
+        parts.iter().flatten().copied().reduce(|a, b| Self { volume: join(a.volume, b.volume), surface: join(a.surface, b.surface) })
+    }
 }
 
 /// A footprint's nodes by layer: Mixed in `mixed` (chunk layers,
-/// inclusive), Buried in `buried`, else uniform (`EditView::uniform_solid`).
+/// inclusive), Buried in `buried`, else uniform ([`EditView::kind`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Class {
     pub mixed: Vec<(i32, i32)>,

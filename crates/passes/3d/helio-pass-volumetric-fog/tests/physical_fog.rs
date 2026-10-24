@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 fn gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
     pollster::block_on(async {
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&Default::default())
             .await
@@ -116,11 +116,17 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
     result[25] = vec4<f32>(ray_box(vec3<f32>(3,0,0),vec3<f32>(0,0,-1),vec3<f32>(-1,-1,-12),vec3<f32>(1,1,-8),100.0),0,0);
     var height: FogUniforms;
     height.fog_density = 0.1; height.fog_mode = 1u; height.fog_height_falloff = 0.5;
-    result[26] = vec4<f32>(global_optical_depth(height,vec3<f32>(0,-10,0),vec3<f32>(0,1,0),20.0),
-        global_optical_depth(height,vec3<f32>(0,10,0),vec3<f32>(0,-1,0),20.0),
-        global_optical_depth(height,vec3<f32>(0,2,0),vec3<f32>(1,0,0),20.0),0.0);
+    result[26] = vec4<f32>(global_optical_depth(height,FLAT,vec3<f32>(0,-10,0),vec3<f32>(0,1,0),20.0),
+        global_optical_depth(height,FLAT,vec3<f32>(0,10,0),vec3<f32>(0,-1,0),20.0),
+        global_optical_depth(height,FLAT,vec3<f32>(0,2,0),vec3<f32>(1,0,0),20.0),0.0);
+    // The same profile over a planet, on its side: heights along +X there.
+    let planet = vec4<f32>(0.0, -1000.0, 0.0, 1000.0);
+    result[28] = vec4<f32>(global_optical_depth(height,planet,vec3<f32>(990,-1000,0),vec3<f32>(1,0,0),20.0),
+        global_optical_depth(height,planet,vec3<f32>(1010,-1000,0),vec3<f32>(-1,0,0),20.0),
+        global_optical_depth(height,planet,vec3<f32>(1002,-1000,0),vec3<f32>(0,0,1),20.0),
+        density_at(vec3<f32>(1002,-1000,0),height,planet));
     height.fog_height_falloff = 0.0;
-    result[27] = vec4<f32>(global_optical_depth(height,vec3<f32>(0,-10,0),vec3<f32>(0,1,0),20.0));
+    result[27] = vec4<f32>(global_optical_depth(height,FLAT,vec3<f32>(0,-10,0),vec3<f32>(0,1,0),20.0));
 }
 "#
     );
@@ -182,6 +188,11 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
     near(values[105], values[104], 1e-6);
     near(values[106], 2.0 * (-1f32).exp(), 1e-6);
     near(values[108], 2.0, 1e-6);
+    // Over a planet: altitude above its surface, up away from its centre.
+    for i in 0..3 {
+        near(values[112 + i], values[104 + i], 1e-5);
+    }
+    near(values[115], 0.1 * (-1f32).exp(), 1e-6);
 }
 
 struct Scene {
@@ -545,8 +556,8 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         &vec![0; std::mem::size_of::<helio_pass_postprocess::GpuPostProcessVolume>()],
         storage,
     );
-    let global = buffer(&device, &[0; 64], storage);
-    let local = buffer(&device, &[0; 112], storage);
+    let global = buffer(&device, &[0; std::mem::size_of::<GlobalFogComponent>()], storage);
+    let local = buffer(&device, &[0; std::mem::size_of::<LocalFogVolumeComponent>()], storage);
     let output = buffer(&device, &[0; 96], storage | wgpu::BufferUsages::COPY_SRC);
     let mut entries: Vec<_> = [
         (0, &scene.camera),
@@ -593,6 +604,26 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
     // The glass lookup loads texels, so the probe binds no sampler for it.
     entries.push(wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(&view) });
     entries.push(wgpu::BindGroupEntry { binding: 21, resource: wgpu::BindingResource::TextureView(&glass_view) });
+    // No terrain's sun occlusion: an empty map, a frame of no levels.
+    let no_occlusion = device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: helio_pass_shadow_matrix::SUN_OCCLUSION_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+    let no_frame = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES, usage: wgpu::BufferUsages::UNIFORM, mapped_at_creation: false });
+    entries.push(wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&no_occlusion) });
+    entries.push(wgpu::BindGroupEntry { binding: 23, resource: no_frame.as_entire_binding() });
+    // No clouds' shadow.
+    let (no_clouds, no_cloud_frame) = helio_pass_sky::clouds::cloud_shadow_fallback(&device);
+    entries.push(wgpu::BindGroupEntry { binding: 24, resource: wgpu::BindingResource::TextureView(&no_clouds) });
+    entries.push(wgpu::BindGroupEntry { binding: 25, resource: no_cloud_frame.as_entire_binding() });
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &probe.get_bind_group_layout(0),

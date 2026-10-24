@@ -6,9 +6,9 @@ use helio_pass_gbuffer::GBufferGlobals;
 // ── Size and alignment ────────────────────────────────────────────────────────
 
 #[test]
-fn gbuffer_globals_size_is_96() {
+fn gbuffer_globals_size_is_64() {
     // 4+4+4+4 = 16, four [f32;4] = 64, four u32 padding = 16 → 96 bytes
-    assert_eq!(std::mem::size_of::<GBufferGlobals>(), 96);
+    assert_eq!(std::mem::size_of::<GBufferGlobals>(), 64);
 }
 
 #[test]
@@ -44,23 +44,13 @@ fn ambient_color_field_offset_is_16() {
 }
 
 #[test]
-fn rc_world_min_field_offset_is_32() {
-    assert_eq!(std::mem::offset_of!(GBufferGlobals, rc_world_min), 32);
+fn csm_splits_field_offset_is_32() {
+    assert_eq!(std::mem::offset_of!(GBufferGlobals, csm_splits), 32);
 }
 
 #[test]
-fn rc_world_max_field_offset_is_48() {
-    assert_eq!(std::mem::offset_of!(GBufferGlobals, rc_world_max), 48);
-}
-
-#[test]
-fn csm_splits_field_offset_is_64() {
-    assert_eq!(std::mem::offset_of!(GBufferGlobals, csm_splits), 64);
-}
-
-#[test]
-fn debug_mode_field_offset_is_80() {
-    assert_eq!(std::mem::offset_of!(GBufferGlobals, debug_mode), 80);
+fn debug_mode_field_offset_is_48() {
+    assert_eq!(std::mem::offset_of!(GBufferGlobals, debug_mode), 48);
 }
 
 // ── bytemuck: Zeroable ────────────────────────────────────────────────────────
@@ -79,8 +69,6 @@ fn zeroable_produces_zeroed_scalar_fields() {
 fn zeroable_produces_zeroed_array_fields() {
     let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
     assert_eq!(g.ambient_color, [0.0; 4]);
-    assert_eq!(g.rc_world_min, [0.0; 4]);
-    assert_eq!(g.rc_world_max, [0.0; 4]);
     assert_eq!(g.csm_splits, [0.0; 4]);
 }
 
@@ -97,9 +85,9 @@ fn zeroed_bytes_are_all_zero() {
 // ── bytemuck: Pod roundtrip ───────────────────────────────────────────────────
 
 #[test]
-fn pod_bytes_of_length_is_96() {
+fn pod_bytes_of_length_is_64() {
     let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
-    assert_eq!(bytemuck::bytes_of(&g).len(), 96);
+    assert_eq!(bytemuck::bytes_of(&g).len(), 64);
 }
 
 #[test]
@@ -157,18 +145,6 @@ fn ambient_color_has_four_components() {
 fn csm_splits_has_four_cascades() {
     let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
     assert_eq!(g.csm_splits.len(), 4);
-}
-
-#[test]
-fn rc_world_min_has_four_components() {
-    let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
-    assert_eq!(g.rc_world_min.len(), 4);
-}
-
-#[test]
-fn rc_world_max_has_four_components() {
-    let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
-    assert_eq!(g.rc_world_max.len(), 4);
 }
 
 // ── Copy / Clone ──────────────────────────────────────────────────────────────

@@ -73,10 +73,10 @@ use crate::scene_join::{
     TRANSFORM_ROW_BYTES,
 };
 
-/// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (16 words).
-pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 16 * 4;
-/// `LocalFogSourceRow`: local size vec4, medium (16), edge fade vec4.
-pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 24 * 4;
+/// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (20 words).
+pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 20 * 4;
+/// `LocalFogSourceRow`: local size vec4, medium (20), edge fade vec4.
+pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 28 * 4;
 /// `PostProcessVolumeSourceRow`: local size vec4, then the pass row after
 /// its bounds (140 words).
 pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 144 * 4;
@@ -87,13 +87,15 @@ pub const CAMERA_LENS_SOURCE_ROW_BYTES: u64 = std::mem::size_of::<helio_pass_len
 /// `WaterVolumeSourceRow`: local size (`w`: surface height above the
 /// owner), then the water volume row after its bounds (56 words).
 pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
-/// `FoliageSourceRow`: the foliage type row (24 words; its density first),
+/// `FoliageSourceRow`: the foliage type row (32 words; its density first),
 /// the layer (half extent, infinite flag, altitude min and max) and the
 /// wind row (12 words).
-pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 40 * 4;
+pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 48 * 4;
+/// Words of a foliage type row (`helio_pass_foliage_place::GpuFoliageType`).
+const FOLIAGE_TYPE_WORDS: u32 = (std::mem::size_of::<helio_pass_foliage_place::GpuFoliageType>() / 4) as u32;
 /// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
 /// row, its centre in the owner's space.
-pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 28 * 4;
+pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 44 * 4;
 /// `DecalSourceRow`: local size vec4, then the `helio_pass_decal`
 /// `DecalComponent` row (32 words) with its transform left to the join.
 pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
@@ -139,9 +141,9 @@ pub const WIND_SOURCE_ROW_BYTES: u64 = 12 * 4;
 pub const WATER_WIND_STRENGTH_PER_SPEED: f32 = 0.5;
 /// The wind row's `_pad[0]`: 1 in a global wind's row.
 const GLOBAL_WIND_MARK_WORD: u32 = 10;
-/// A foliage source row's wind `_pad[0]` (28 + 10): 1 when the component
+/// A foliage source row's wind `_pad[0]` (36 + 10): 1 when the component
 /// opts out of the global wind.
-const FOLIAGE_OWN_WIND_WORD: u32 = 38;
+const FOLIAGE_OWN_WIND_WORD: u32 = FOLIAGE_TYPE_WORDS + 4 + 10;
 /// Foliage types the join publishes. Placement draws each candidate's type
 /// from the live leading rows, so the table's capacity costs only a short
 /// per-workgroup scan.
@@ -514,14 +516,14 @@ impl EnvironmentJoin {
                 "Environment Join Global Fog",
                 GLOBAL_FOG_KEY,
                 Source::GlobalFog,
-                16,
+                20,
                 GATE_HIDDEN,
             ),
             Spec::new(
                 "Environment Join Local Fog",
                 LOCAL_FOG_KEY,
                 Source::LocalFog,
-                28,
+                32,
                 volume,
             ),
             Spec::new(
@@ -573,11 +575,11 @@ impl EnvironmentJoin {
                 "Environment Join Foliage Types",
                 FOLIAGE_TYPES_KEY,
                 Source::Foliage,
-                24,
+                FOLIAGE_TYPE_WORDS,
                 GATE_HIDDEN,
             )
             .packed(MAX_FOLIAGE_TYPES)
-            .slice(0, 24)
+            .slice(0, FOLIAGE_TYPE_WORDS)
             .gated_on(0),
             Spec::new(
                 "Environment Join Foliage Layers",
@@ -587,12 +589,12 @@ impl EnvironmentJoin {
                 GATE_HIDDEN | LAYER,
             )
             .packed(MAX_FOLIAGE_LAYERS)
-            .slice(24, 0)
+            .slice(FOLIAGE_TYPE_WORDS, 0)
             .gated_on(0),
             // The foliage passes read one wind row: the first foliage
             // component's own wind, under the level's global wind, under
             // the first foliage component that opts out of the global wind
-            // (its wind's `_pad[0]`, source word 38).
+            // (its wind's `_pad[0]`, source word 46).
             Spec::new(
                 "Environment Join Foliage Wind",
                 FOLIAGE_WIND_KEY,
@@ -601,7 +603,7 @@ impl EnvironmentJoin {
                 GATE_HIDDEN,
             )
             .packed(1)
-            .slice(28, 12)
+            .slice(FOLIAGE_TYPE_WORDS + 4, 12)
             .gated_on(0)
             .over(
                 Spec::new(
@@ -621,14 +623,14 @@ impl EnvironmentJoin {
                     12,
                     GATE_HIDDEN,
                 )
-                .slice(28, 12)
+                .slice(FOLIAGE_TYPE_WORDS + 4, 12)
                 .gated_on(FOLIAGE_OWN_WIND_WORD),
             ),
             Spec::new(
                 "Environment Join Atmospheres",
                 ATMOSPHERES_KEY,
                 Source::Atmospheres,
-                28,
+                44,
                 CENTERED,
             ),
             // The pass walks a fixed number of rows.

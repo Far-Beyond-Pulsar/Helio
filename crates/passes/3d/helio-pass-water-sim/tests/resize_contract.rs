@@ -98,7 +98,7 @@ impl RenderPass for PreAaDepthConsumer {
 #[test]
 fn cached_water_output_is_reacquired_after_graph_resize() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: water resize contract");
             return;

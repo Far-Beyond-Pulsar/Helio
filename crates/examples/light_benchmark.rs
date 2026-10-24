@@ -1,7 +1,7 @@
 //! Light Benchmark — helio v3
 //!
 //! 150 simultaneous point lights (10×15 grid) over a warehouse floor.
-//! Tests v3 deferred + radiance-cascade GI with high light count.
+//! Tests v3 deferred lighting with a high light count.
 //!
 //! Controls:
 //!   WASD / Space / Shift — fly
@@ -137,9 +137,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

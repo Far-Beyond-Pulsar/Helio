@@ -89,7 +89,7 @@ impl SceneInput for TestSceneInput {
 /// callers can skip gracefully -- matches
 /// `helio-core/tests/render_graph_resize_contract.rs`'s `request_test_adapter`.
 pub async fn request_test_device(label: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let mut adapter = None;
     for force_fallback_adapter in [false, true] {
         if let Ok(found) = instance

@@ -14,16 +14,14 @@ struct GBufferGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 
 // ── GBufferGlobals layout tests ───────────────────────────────────────────────
 
 #[test]
-fn gbuffer_globals_size_is_80() {
-    assert_eq!(mem::size_of::<GBufferGlobals>(), 80);
+fn gbuffer_globals_size_is_48() {
+    assert_eq!(mem::size_of::<GBufferGlobals>(), 48);
 }
 
 #[test]
@@ -33,14 +31,14 @@ fn gbuffer_globals_scalar_header_16_bytes() {
 }
 
 #[test]
-fn gbuffer_globals_vec4_section_64_bytes() {
-    // ambient_color + rc_world_min + rc_world_max + csm_splits = 4 × 16 = 64
-    assert_eq!(4 * 4 * mem::size_of::<f32>(), 64usize);
+fn gbuffer_globals_vec4_section_32_bytes() {
+    // ambient_color + csm_splits = 2 × 16 = 32
+    assert_eq!(2 * 4 * mem::size_of::<f32>(), 32usize);
 }
 
 #[test]
-fn gbuffer_globals_total_16_plus_64() {
-    assert_eq!(16 + 64, 80usize);
+fn gbuffer_globals_total_16_plus_32() {
+    assert_eq!(16 + 32, 48usize);
 }
 
 #[test]
@@ -61,8 +59,6 @@ fn gbuffer_globals_can_be_zero_initialised() {
         light_count: 0,
         ambient_intensity: 0.0,
         ambient_color: [0.0; 4],
-        rc_world_min: [0.0; 4],
-        rc_world_max: [0.0; 4],
         csm_splits: [0.0; 4],
     };
     assert_eq!(g.frame, 0u32);
@@ -214,8 +210,6 @@ fn gbuffer_globals_csm_splits_can_hold_four_cascade_depths() {
         light_count: 1,
         ambient_intensity: 0.1,
         ambient_color: [0.1, 0.1, 0.1, 1.0],
-        rc_world_min: [-100.0, -10.0, -100.0, 0.0],
-        rc_world_max: [100.0, 50.0, 100.0, 0.0],
         csm_splits: [10.0, 30.0, 70.0, 200.0],
     };
     assert!(g.csm_splits[0] < g.csm_splits[1]);

@@ -6,7 +6,7 @@ use helio_core::Profiler;
 #[test]
 fn whole_frame_timestamp_spans_both_encoders_and_nested_scopes() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let features =
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;

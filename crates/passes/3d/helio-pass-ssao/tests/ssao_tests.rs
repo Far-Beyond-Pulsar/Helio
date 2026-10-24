@@ -27,8 +27,6 @@ struct GpuGlobals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],
-    rc_world_min: [f32; 4],
-    rc_world_max: [f32; 4],
     csm_splits: [f32; 4],
 }
 
@@ -80,8 +78,8 @@ fn ssao_camera_uniform_total_256_plus_16() {
 }
 
 #[test]
-fn gpu_globals_size_is_80() {
-    assert_eq!(mem::size_of::<GpuGlobals>(), 80);
+fn gpu_globals_size_is_48() {
+    assert_eq!(mem::size_of::<GpuGlobals>(), 48);
 }
 
 #[test]
@@ -91,10 +89,10 @@ fn gpu_globals_scalar_header_is_16_bytes() {
 }
 
 #[test]
-fn gpu_globals_four_vec4_fields() {
-    // ambient_color + rc_world_min + rc_world_max + csm_splits = 4 × 16 = 64 bytes
-    let vec4_section = 4 * 16usize;
-    assert_eq!(vec4_section, 64);
+fn gpu_globals_two_vec4_fields() {
+    // ambient_color + csm_splits = 2 × 16 = 32 bytes
+    let vec4_section = 2 * 16usize;
+    assert_eq!(vec4_section, 32);
 }
 
 #[test]

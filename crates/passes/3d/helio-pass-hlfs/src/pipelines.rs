@@ -427,6 +427,8 @@ impl Pipelines {
             multisampled: false,
         };
         gbuffer_entries[7].ty = wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering);
+        // The GI probes' irradiance at each pixel (`gi_irradiance`).
+        gbuffer_entries.push(entry(10, storage(true), all));
         let gbuffer_bgl = bgl(device, "HLFS GBuffer layout", &gbuffer_entries);
         let depth_bgl = bgl(
             device,

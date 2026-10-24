@@ -756,7 +756,7 @@ mod shared_upload_tests {
         static DEVICE_CREATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _device_creation = DEVICE_CREATION.lock().unwrap_or_else(|p| p.into_inner());
         let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         // Ask for block compression where the adapter has it, as the editor does.
         let required_features = adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;

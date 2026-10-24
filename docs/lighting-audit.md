@@ -7,6 +7,8 @@ RTX 3060, 1440p output with TSR (internal ~1.6-2.2 Mpx), terrain GPU <= 6 ms.
 Cost figures are estimates for that target, not measurements. Paths are relative to the Helio repo
 unless prefixed `Pulsar:`. Line references are as of the audit and have since drifted.
 
+**Radiance cascades (2026-10-22):** the 3D radiance cascades and every consumer of them were deleted; world-space GI is helio-pass-gi's probe clipmap. Items below that mention RC are historical.
+
 **Status (2026-10-15).** Done: #1 (per-surface sky irradiance table, `atmosphere_sky_table`),
 #8 (grading in log space and after the tone map, Bradford white balance), the metering half of #3
 (64-bin histogram without sky or space; no EV100, physical camera or pre-exposure yet) and the
@@ -59,7 +61,7 @@ aerial RGB transmittance, LUT caching, multi-body atmospheres, night sky) is P2 
 - Sun: Pulsar's directional `intensity` is passed through as lux whatever the unit selector says
   (`crates/helio-component/src/components/light_component/mapping.rs:81-95`). The shipped level uses
   **3.0** (`Pulsar:assets/examples/voxel_planet.level`, `voxel_sun.intensity = 3.0`, unit label
-  "Lumens"); `voxel_flight` also uses 3.0 (`crates/helio-default-passes/examples/voxel_flight.rs:146`).
+  "Lumens"); `voxel_flight` also uses 3.0 (`crates/helio-default-passes/examples/voxel_flight/worlds.rs`).
   The atmosphere treats it as top-of-atmosphere illuminance (`atmosphere_luts.wgsl:58-70`), and sky
   radiance, aerial in-scatter and the SH ambient all scale with it, so sun and sky are mutually
   consistent.
@@ -291,7 +293,7 @@ Make the **planet body the single source of truth** and derive rendering rows fr
 ### 5.1 BRDF and lights
 
 - Cook-Torrance GGX + Schlick-GGX (k = (r+1)^2/8) + Schlick Fresnel + Lambert
-  (`crates/helio/shaders/pbr_eval.wgsl:12-66`, `deferred_lighting.wgsl:870-911`). Correct UE4-style
+  (`crates/helio-mats/shaders/pbr_eval.wgsl:12-66`, `deferred_lighting.wgsl:870-911`). Correct UE4-style
   baseline (Karis 2013).
 - AAA gaps (P2): height-correlated Smith (Heitz 2014; Frostbite), multi-scatter energy compensation
   (Kulla & Conty 2017 / Fdez-Aguera 2019) - small for F0 0.03 terrain, visible on rough metals;
@@ -412,8 +414,8 @@ fallback (`helio-pass-deferred-light/src/lib.rs:1023-1028`); nothing captures th
 2. **Unresolved relief (P1).** Slope normals for sub-pixel steps exist (`hit_face`), but the lost
    micro-relief is not turned into roughness or micro-shadowing, so the terminator and low-sun terrain
    look flat and too bright at distance (and differ from near terrain). The generator knows its octave
-   table: sigma^2 = sum of unresolved octaves' slope variance (as `docs/research-aaa-planet-terrain.md:300-320`
-   already derives); add it to alpha^2 and apply a Smith-G micro-shadowing factor to the diffuse term
+   table: sigma^2 = sum over unresolved octaves k of (m_k c A_k / lambda_k)^2 (m_k the local amplitude
+   modulation: region masks, erosion fade; c the noise's RMS-slope constant); add it to alpha^2 and apply a Smith-G micro-shadowing factor to the diffuse term
    (LEAN/LEADR, Dupuy et al. 2013; Bruneton & Neyret 2010 for the geometry-to-BRDF hand-off).
 3. **Albedo prefiltering (P2).** Noise contributions fade with footprint (good) but toward `t = 0.52`
    through a piecewise palette mapping, so the far colour is f(E[t]) rather than E[f(t)]; precompute the

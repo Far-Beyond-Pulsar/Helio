@@ -4,24 +4,12 @@
 //! A record is 56 bytes, little-endian: kind, shape, operation, material,
 //! centre, radius, box height, then its position in its list and a
 //! checksum, so a corrupted or reordered record is an error rather than a
-//! silently different planet. Version 1 records (48 bytes, before boxes had
-//! a height) still read.
+//! silently different planet.
 
 use crate::edits::{Brush, BrushOp, BrushShape};
 use crate::planet::PlanetRecipe;
 
 pub const RECORD_BYTES: usize = 56;
-/// Version 1 records: no box height.
-pub const RECORD_BYTES_V1: usize = 48;
-
-/// Record size of format `version`.
-pub(crate) fn record_bytes(version: u16) -> Option<usize> {
-    match version {
-        1 => Some(RECORD_BYTES_V1),
-        2 => Some(RECORD_BYTES),
-        _ => None,
-    }
-}
 
 const KIND_BRUSH: u8 = 1;
 
@@ -63,23 +51,25 @@ pub fn encode(seq: u32, brush: &Brush) -> [u8; RECORD_BYTES] {
     out
 }
 
-/// Decode record `index` of either format (by its size); the reason when it
-/// is not a valid brush record at that position.
+/// Decode record `index`; the reason when it is not a valid brush record at
+/// that position.
 pub(crate) fn decode(index: usize, r: &[u8]) -> Result<Brush, &'static str> {
+    if r.len() != RECORD_BYTES {
+        return Err("record size");
+    }
     let u32_at = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
     let f64_at = |at: usize| f64::from_le_bytes(r[at..at + 8].try_into().unwrap());
-    // Sequence and checksum close the record; version 2 adds the height.
-    let tail = r.len() - 8;
-    if u32_at(tail + 4) != fnv32(&r[..tail + 4]) {
+    // Sequence and checksum close the record.
+    if u32_at(52) != fnv32(&r[..52]) {
         return Err("checksum");
     }
-    if u32_at(tail) as usize != index {
+    if u32_at(48) as usize != index {
         return Err("sequence");
     }
     if r[0] != KIND_BRUSH {
         return Err("record kind");
     }
-    let height = if r.len() == RECORD_BYTES { f64_at(40) } else { 0.0 };
+    let height = f64_at(40);
     let shape = match r[1] {
         0 => BrushShape::Sphere,
         1 => BrushShape::Cube,
@@ -119,16 +109,5 @@ mod tests {
         assert_eq!(decode(5, &record), Err("sequence"));
         record[9] ^= 1;
         assert_eq!(decode(4, &record), Err("checksum"));
-    }
-
-    #[test]
-    fn version_1_records_still_read() {
-        // A version 1 record: no height, sequence and checksum at 40.
-        let mut v1 = [0u8; RECORD_BYTES_V1];
-        v1[..40].copy_from_slice(&encode(0, &brush())[..40]);
-        v1[40..44].copy_from_slice(&0u32.to_le_bytes());
-        let sum = fnv32(&v1[..44]);
-        v1[44..48].copy_from_slice(&sum.to_le_bytes());
-        assert_eq!(decode(0, &v1), Ok(Brush { height: 0.0, ..brush() }));
     }
 }

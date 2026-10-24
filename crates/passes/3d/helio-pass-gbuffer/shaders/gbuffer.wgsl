@@ -1,4 +1,5 @@
 enable wgpu_binding_array;
+//!use specular_aa
 
 //! G-buffer write pass (GPU-driven).
 //!
@@ -7,7 +8,8 @@ enable wgpu_binding_array;
 //!   target 1 – normal    (Rgba16Float)
 //!   target 2 – orm       (Rgba8Unorm)
 //!   target 3 – emissive  (Rgba16Float)
-//!   target 7 – velocity  (Rg16Float)  — screen-space motion in pixels/frame
+//!   target 7 – velocity  (Rgba16Float) — screen-space motion in pixels/frame
+//!                                          (helio-pass-tsr MOTION_VECTORS)
 //!
 //! Resolved F0 is packed into unused alpha channels:
 //!   normal.a   = F0.r
@@ -31,8 +33,6 @@ struct Globals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: vec4<f32>,
-    rc_world_min: vec4<f32>,
-    rc_world_max: vec4<f32>,
     csm_splits: vec4<f32>,
     debug_mode: u32,
     screen_width: f32,
@@ -168,6 +168,9 @@ struct VertexOutput {
     @location(5) @interpolate(flat) material_id:    u32,
     @location(6) lightmap_uv:        vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
     @location(7) prev_clip_position: vec4<f32>,  // Previous frame clip-space position (velocity)
+    // 1 when the instance moves by itself (its transform, skin or coordinate
+    // space changed since last frame), else 0.
+    @location(8) @interpolate(flat) moving: u32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -268,6 +271,11 @@ fn vs_main(v: Vertex, @location(15) slot: u32, @builtin(vertex_index) vertex_ind
     out.tex_coords         = v.tex_coords;
     out.material_id        = inst.material_id;
     out.prev_clip_position = prev_clip;
+    let moved = any(inst.prev_model[0] != inst.transform[0]) || any(inst.prev_model[1] != inst.transform[1])
+        || any(inst.prev_model[2] != inst.transform[2]) || any(inst.prev_model[3] != inst.transform[3])
+        || any(space_prev[0] != space[0]) || any(space_prev[1] != space[1])
+        || any(space_prev[2] != space[2]) || any(space_prev[3] != space[3]);
+    out.moving = select(0u, 1u, moved || inst.bone_palette_count > 0u);
     
     // Compute lightmap UV from atlas region.
     //
@@ -318,7 +326,7 @@ struct GBufferOutput {
     @location(4) lightmap_uv: vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
-    @location(7) velocity:    vec4<f32>,  // motion.xy, view-depth residual.z, validity.w
+    @location(7) velocity:    vec4<f32>,  // motion.xy, view-depth residual.z, flags.w (compute_velocity)
 }
 
 // ── Surface data passed to GBuffer packing ──────────────────────────────────
@@ -400,10 +408,14 @@ fn default_pbr_surface(material: GpuMaterial, material_tex: MaterialTextureData,
     let N_geom = normalize(input.world_normal);
 
     var N: vec3<f32>;
+    // The normal map's mean normal length (1: no spread, or no map).
+    var normal_spread = 1.0;
     if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
         let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
         let B = cross(N_geom, T) * input.bitangent_sign;
-        var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
+        let normal_sample = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0));
+        normal_spread = normal_sample.a;
+        var norm_ts = normal_sample.rgb * 2.0 - 1.0;
         norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);
         N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
     } else {
@@ -415,7 +427,7 @@ fn default_pbr_surface(material: GpuMaterial, material_tex: MaterialTextureData,
     let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
 
     var ao: f32 = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
-    var roughness: f32 = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
+    var roughness: f32 = clamp(specular_aa_roughness(material.roughness_metallic.x * orm_sample.g, normal_spread, material_tex.params.x, N_geom), 0.045, 1.0);
     var metallic: f32 = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
     var specular_f0: vec3<f32> = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
     var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
@@ -494,7 +506,10 @@ fn compute_velocity(input: VertexOutput) -> vec4<f32> {
     }
     // Store only the small reconstruction error in FP16, not the large view
     // depth itself. This preserves contact-scale precision at long distances.
-    return vec4<f32>(input.clip_position.xy-prev_pixel,residual,valid);
+    // w: 2 when the residual is valid, plus 1 when the instance moves by
+    // itself (helio-pass-tsr MOTION_VECTORS: static geometry leaves its
+    // camera motion to TSR, which derives it from depth at full precision).
+    return vec4<f32>(input.clip_position.xy-prev_pixel,residual,valid+f32(input.moving));
 }
 
 // Basic SceneDB materials carry texture-store indices directly. An explicit

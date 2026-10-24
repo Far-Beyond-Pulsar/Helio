@@ -1,4 +1,4 @@
-// Chunk trees (docs/chunk-trees.md): generation.
+// Chunk octree (docs/chunk-octree.md): generation.
 //
 // A tile is the 64x64 columns of one level under a stack of chunks; a chunk
 // is 64^3 cells of one level, stored as a 64-tree: a root over 4^3 mid
@@ -9,14 +9,19 @@
 //
 // 1. `tile_columns`: each column's height, surface word and volume extent,
 //    and the footprint's range of layers that may hold a surface, into its
-//    slot of the footprint pool (only for footprints not already there).
+//    slot of the footprint pool (only for footprints not already there);
+//    its far forms' canopies over them; `tile_features`: its features'
+//    placements there, its range raised over them.
 // 2. `chunk_columns`: each column's 64 cells in a chunk as a 64-bit mask
-//    (bit z: layer `64 cz + z`), with volume terms and brushes, and the
-//    material of its highest solid cell.
-// 3. `chunk_build`: the chunk's 64-tree from its column masks, its leaves
-//    in a block of a size class (16 << class leaves) taken from that
-//    class's free blocks or the pool's end.
-// 4. `evict`: evicted chunks' blocks back to their class's free blocks.
+//    (bit z: layer `64 cz + z`), with volume terms, features and brushes,
+//    and the material of its highest solid cell.
+// 3. `chunk_cells` (chunks with per-voxel materials): each column's exposed
+//    cells' materials, where their leaves' pairs would draw them wrong;
+//    `chunk_build`: the chunk's 64-tree from its column masks, its leaves
+//    in pages of 64 (`LEAF_PAGES` a chunk at most) taken off the free
+//    pages' stack.
+// 4. `evict`: evicted chunks' pages (and their detail pages) back on their
+//    free stacks.
 
 const TILE_COLUMNS: u32 = 4096u;
 // Height of a tile column past the face's edge.
@@ -83,7 +88,12 @@ const LEAF_PAGES: u32 = 64u;
 
 @group(0) @binding(2) var<storage, read> tile_jobs: array<TileJob>;
 @group(0) @binding(3) var<storage, read_write> tile_columns: array<vec4<i32>>;
+// Each computed footprint's measured layers, by quarter (32x32 columns:
+// x then y, each a child footprint's), four words a quarter: the volume's
+// lowest and highest, the surface's lowest and highest (level cells); the
+// batch's computed count last.
 @group(0) @binding(4) var<storage, read_write> tile_ranges: array<atomic<i32>>;
+const RANGE_WORDS: u32 = 16u;
 @group(0) @binding(5) var<storage, read> chunk_jobs: array<ChunkJob>;
 @group(0) @binding(6) var<storage, read_write> column_masks: array<vec2<u32>>;
 @group(0) @binding(7) var<storage, read> brushes: array<FaceBrush>;
@@ -112,13 +122,18 @@ const LEAF_PAGES: u32 = 64u;
 // materials"). A chunk job under edits writes each solid cell's edited
 // material (0: none set) into its slot of `cell_materials`: CELL_WORDS a
 // column, cell z in byte z & 3 of word z >> 2, then the column's natural
-// top. `chunk_build_main` gives each exposed cell without one its natural
-// material (`Planet::material`), clears the cells their leaf's pair draws
-// as they are, and gives every leaf page holding a leaf with cells left a
-// detail page (`detail_pages`, by leaf page; NONE: none) of `DETAIL_WORDS`
-// words: 16 a leaf, by the leaf's place in its page, word x + 4 y its
-// column's four cells (byte z). Other leaves read zero there. Pages come off the stack `detail_free` (`detail_alloc`: the
-// free count, the overflow flag) and go back when the chunk is evicted.
+// top, then its leaves with cells left (bit lz). `chunk_cells_main` gives
+// each exposed cell without one its natural material (`Planet::material`)
+// and clears the cells their leaf's pair draws as they are;
+// `chunk_build_main` gives every leaf page holding a leaf with cells left
+// a detail page (`detail_pages`, by leaf page; NONE: none) of
+// `DETAIL_WORDS` words: 16 a leaf, by the leaf's place in its page, word
+// x + 4 y its column's four cells (byte z). Other leaves read zero there.
+// Pages come off the stack `detail_free` of pages given back, else past
+// the pages ever taken, up to the capacity (`detail_alloc`: the stack's
+// count, the overflow flag, the pages ever taken, the capacity), and go
+// back on the stack when the chunk is evicted. The world grows the pool
+// (and raises the capacity) when it overflows.
 @group(0) @binding(28) var<storage, read_write> cell_materials: array<u32>;
 @group(0) @binding(29) var<storage, read_write> detail_pages: array<u32>;
 @group(0) @binding(30) var<storage, read_write> detail_cells: array<u32>;
@@ -145,10 +160,10 @@ fn slope_origin(job: TileJob) -> vec2<i32> {
     return vec2<i32>((4 * job.cx) << job.level, (4 * job.cy) << job.level) - 1;
 }
 const DETAIL_WORDS: u32 = 1024u;
-const CELL_WORDS: u32 = 17u;
+const CELL_WORDS: u32 = 18u;
 
-// A detail page off the free stack (NONE: none free; the overflow flag is
-// set).
+// A detail page off the free stack, else a page never taken below the
+// capacity (NONE: none free; the overflow flag is set).
 fn take_detail() -> u32 {
     var free = atomicLoad(&detail_alloc[0]);
     for (var tries = 0u; tries < 4096u; tries++) {
@@ -156,6 +171,14 @@ fn take_detail() -> u32 {
         let r = atomicCompareExchangeWeak(&detail_alloc[0], free, free - 1);
         if r.exchanged { return detail_free[u32(free - 1)]; }
         free = r.old_value;
+    }
+    let capacity = atomicLoad(&detail_alloc[3]);
+    var fresh = atomicLoad(&detail_alloc[2]);
+    for (var tries = 0u; tries < 4096u; tries++) {
+        if fresh >= capacity { break; }
+        let r = atomicCompareExchangeWeak(&detail_alloc[2], fresh, fresh + 1);
+        if r.exchanged { return u32(fresh); }
+        fresh = r.old_value;
     }
     atomicStore(&detail_alloc[1], 1);
     return NONE;
@@ -256,7 +279,7 @@ fn tile_slope_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_in
     let job = tile_jobs[wg.x];
     if job.level >= MATERIAL_SLOPE_LEVEL { return; }
     let lattice = slope_lattice_of(job);
-    generation_lattice_nodes(wg.x, job.face, lattice.origin, lattice.nodes, MATERIAL_SLOPE_LEVEL, li);
+    generation_grid_nodes(LATTICE_AT + wg.x * TILE_NODES * TILE_NODES, TILE_NODES, job.face, lattice.origin, lattice.nodes, MATERIAL_SLOPE_LEVEL, li);
 }
 
 @compute @workgroup_size(64)
@@ -267,7 +290,7 @@ fn tile_slope_heights_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_
     let n = i32(wg.x * 64u + li);
     if n >= lattice.side * lattice.side { return; }
     let c = lattice.first + vec2<i32>(n % lattice.side, n / lattice.side);
-    slope_lattice[wg.y * SLOPE_LATTICE + u32(n)] = div_floor(generation_lattice_column(wg.y, lattice.origin, job.face, c.x, c.y, MATERIAL_SLOPE_LEVEL, false).x, world.grid.y);
+    slope_lattice[wg.y * SLOPE_LATTICE + u32(n)] = div_floor(generation_grid_column(LATTICE_AT + wg.y * TILE_NODES * TILE_NODES, TILE_NODES, lattice.origin, job.face, c.x, c.y, MATERIAL_SLOPE_LEVEL, false).x, world.grid.y);
 }
 
 @compute @workgroup_size(64)
@@ -282,7 +305,24 @@ fn tile_slopes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let b = vec2<i32>(n % blocks, n / blocks) + 2;
     let di = abs(slope_lattice[at + u32(b.y * side + b.x + 2)] - slope_lattice[at + u32(b.y * side + b.x - 2)]);
     let dj = abs(slope_lattice[at + u32((b.y + 2) * side + b.x)] - slope_lattice[at + u32((b.y - 2) * side + b.x)]);
-    tile_slopes[job.slot * SLOPE_STRIDE + u32(n)] = (max(di, dj) << (16u - MATERIAL_SLOPE_LEVEL)) / 32768;
+    tile_slopes[job.slot * SLOPE_STRIDE + u32(n)] = (gradient_length(di, dj) << (16u - MATERIAL_SLOPE_LEVEL)) / 32768;
+}
+
+// The length of a gradient's differences `di`, `dj` (base layers, each
+// held to 46340 so their squares sum in a u32), rounded down exactly, as
+// `Planet::material_slope` takes it. (The larger difference alone measured
+// slopes across the axes short, by up to 29% on a diagonal: a material
+// threshold on it traced squares on the face's grid, the Moon's rock specks
+// stopping at the straight edges of a crater wall's level ground.)
+fn gradient_length(di: i32, dj: i32) -> i32 {
+    let a = u32(min(abs(di), 46340));
+    let b = u32(min(abs(dj), 46340));
+    let x = a * a + b * b;
+    // f32's root is within a step of the exact one below 2^32.
+    var r = min(u32(sqrt(f32(x))), 65535u);
+    for (var n = 0u; n < 2u && r * r > x; n++) { r -= 1u; }
+    for (var n = 0u; n < 2u && r < 65535u && (r + 1u) * (r + 1u) <= x; n++) { r += 1u; }
+    return i32(r);
 }
 
 // The material slope of level column (i, j) of footprint `job` (below
@@ -332,9 +372,21 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         // Coarse levels keep the mean of the ridges they cannot resolve
         // (the display field), so they sit where finer levels' terrain sits.
         let field = generation_tile_column(wg.y, job.face, i, j, job.level, job.level >= 1u);
-        let extent = terrain_extent(domain_point(job.face, i, j, job.level), job.level);
+        let p = domain_point(job.face, i, j, job.level);
+        let extent = terrain_extent(p, job.level);
         let top = div_floor(field.x, world.grid.y) >> job.level;
-        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
+        // The far form over the column (`far_spawn`), once a footprint: its
+        // spawn kept over the surface word, the volume's range raised over
+        // its canopy.
+        var far = 0u;
+        if features[0] > 0u {
+            far = far_spawn(job, i, j, p, top, field.x, u32(field.y));
+            if far != 0u {
+                let canopy = column_far(vec4<i32>(field.x, i32(far << 8u), 0, 0));
+                atomicMax(&w_range[1], ((canopy.z - 1) >> job.level) + 1);
+            }
+        }
+        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y | i32(far << 8u), extent.x, extent.y);
         // The cell under the top holds the surface; the volume may change
         // cells across its extent. Ranges: the volume's, the surface's.
         atomicMin(&w_range[0], top - 1 - extent.x);
@@ -345,11 +397,13 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
     }
     workgroupBarrier();
+    // The quarter its 8x8 columns lie in.
+    let at = wg.y * RANGE_WORDS + (((wg.x & 7u) >> 2u) | ((wg.x >> 5u) << 1u)) * 4u;
     if li == 0u {
-        atomicMin(&tile_ranges[wg.y * 4u], atomicLoad(&w_range[0]));
-        atomicMax(&tile_ranges[wg.y * 4u + 1u], atomicLoad(&w_range[1]));
-        atomicMin(&tile_ranges[wg.y * 4u + 2u], atomicLoad(&w_range[2]));
-        atomicMax(&tile_ranges[wg.y * 4u + 3u], atomicLoad(&w_range[3]));
+        atomicMin(&tile_ranges[at], atomicLoad(&w_range[0]));
+        atomicMax(&tile_ranges[at + 1u], atomicLoad(&w_range[1]));
+        atomicMin(&tile_ranges[at + 2u], atomicLoad(&w_range[2]));
+        atomicMax(&tile_ranges[at + 3u], atomicLoad(&w_range[3]));
     }
 }
 
@@ -521,6 +575,8 @@ fn edited_material(material: u32, job: ChunkJob, column: u32, li: u32, p: vec3<i
 // whether some column of it leans (`terrain::lean_height`).
 var<workgroup> w_lean: array<i32, 64>;
 var<workgroup> w_leaning: atomic<u32>;
+// Whether the chunk is air throughout (`chunk_columns_main`).
+var<workgroup> w_air: u32;
 
 // Bilinear height of the lean lattice at `xy` (Q8 level cells from node
 // (0, 0)), nodes 0..8 per axis (`terrain::lattice_bilinear`).
@@ -610,13 +666,36 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let j = tile.cy * 64 + i32(y);
     let column = tile_columns[tile.slot * TILE_COLUMNS + y * 64u + x];
     let at = wg.y * TILE_COLUMNS + y * 64u + x;
+    // A chunk over the volume its footprint measured in this batch
+    // (`tile_ranges`: the field's, its features' and far canopies' cells),
+    // under no edits, holds no cell: air throughout, as past the face's
+    // edge. (Chunks are asked for before their footprints are measured.)
+    if li == 0u {
+        let computed = u32(atomicLoad(&tile_ranges[arrayLength(&tile_ranges) - 1u]));
+        var high = atomicLoad(&tile_ranges[job.tile * RANGE_WORDS + 1u]);
+        for (var q = 1u; q < 4u; q++) { high = max(high, atomicLoad(&tile_ranges[job.tile * RANGE_WORDS + q * 4u + 1u])); }
+        w_air = u32(job.tile < computed && job.brush_count == 0u && job.baked == NONE && job.cz * 64 >= high);
+    }
+    if workgroupUniformLoad(&w_air) != 0u {
+        column_masks[at] = vec2<u32>(0u);
+        column_materials[at] = M_AIR;
+        if job.detail != NONE {
+            for (var w = 0u; w < 16u; w++) { cell_materials[(job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS + w] = 0u; }
+        }
+        return;
+    }
     // A leaning surface (overhangs) reads the field on a global lattice:
     // nodes every `spacing` cells from `div_floor(8 ci - reach, spacing)`,
     // shared by the brick column's lanes, each reading one.
     let lean = terrain_lean(level);
     let leaning = column.x != OUTSIDE && lean.x != 0 && column.w > 0;
     let node = vec2<i32>(div_floor((i >> 3u) * 8 - lean.x, max(lean.y, 1)), div_floor((j >> 3u) * 8 - lean.x, max(lean.y, 1)));
-    if li == 0u { atomicStore(&w_leaning, 0u); }
+    if li == 0u {
+        atomicStore(&w_leaning, 0u);
+        atomicStore(&w_feature_bits[0], 0u);
+        atomicStore(&w_feature_bits[1], 0u);
+        atomicStore(&w_feature_parts, 0u);
+    }
     workgroupBarrier();
     if leaning { atomicStore(&w_leaning, 1u); }
     workgroupBarrier();
@@ -634,6 +713,18 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         }
     }
     workgroupBarrier();
+    let height = column.x;
+    let top = div_floor(height, world.grid.y) >> level;
+    let k0 = job.cz * 64;
+    let p = domain_point(face, i, j, level);
+    // Features over the terrain, under the edits (`Planet::sample_kind`):
+    // the far forms' canopies, the near stamps over them. Every lane takes
+    // part (the workgroup culls the placements together).
+    var fc: FeatureColumn;
+    if features[0] > 0u {
+        let brick = vec2<i32>(tile.cx * 64 + i32((wg.x & 7u) * 8u), tile.cy * 64 + i32((wg.x >> 3u) * 8u));
+        fc = feature_column(tile, brick, li, column.x != OUTSIDE, i, j, k0, column);
+    }
     if column.x == OUTSIDE {
         column_masks[at] = vec2<u32>(0u);
         column_materials[at] = M_AIR;
@@ -642,17 +733,13 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         }
         return;
     }
-    let height = column.x;
-    let top = div_floor(height, world.grid.y) >> level;
-    let k0 = job.cz * 64;
     var mask = set_bits(vec2<u32>(0u), 0, top - k0, true);
-    let p = domain_point(face, i, j, level);
     // Under edits, the natural top when the volume puts solid cells over
     // the chunk (`terrain::generated_top`: the first air over the highest).
     var above_top = OUTSIDE;
     if column.z > 0 || column.w > 0 {
         // Volume terms: the cells the program changes within its extent,
-        // stepping over rock caves cannot reach (`terrain_clearance`).
+        // stepping over rock caves cannot reach (`cave_clearance`).
         let k_lo = max(top - column.z, k0);
         let k_hi = min(top + column.w, k0 + 64);
         let band_lo = select(top, top - column.w, column.w > 0);
@@ -666,6 +753,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         // depth) keep the surface's bits, set above, out of the lean's band:
         // the scan steps to the next cell either may change.
         let caves = cave_window(volume, height, level);
+        // A cell's caves' noises feed both its clearance and its density,
+        // their lattice corners hashed once a lattice cell.
+        var lattice = cave_lattice();
         var scan = k_lo;
         loop {
             if scan >= k_hi { break; }
@@ -677,8 +767,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
                 scan = select(k_hi, caves.x, scan < caves.x);
                 continue;
             }
+            let noises = cave_noise(volume_point_half(p, (scan << (level + 1u)) + half), level, &lattice);
             if scan < band_lo {
-                let clear = terrain_clearance(volume_point_half(p, (scan << (level + 1u)) + half), level, step);
+                let clear = cave_clearance(noises, level, step);
                 if clear > 0 {
                     scan = min(scan + clear + 1, band_lo);
                     continue;
@@ -686,7 +777,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             }
             var lean_h = height;
             if leaning { lean_h = lean_height(volume.overhang, i, j, scan, level, height, lean.y, node); }
-            let solid = terrain_density_with(volume, volume_point_half(p, (scan << (level + 1u)) + half), level, top, height, lean_h, scan) > 0;
+            let solid = terrain_density_with(volume, noises, level, top, height, lean_h, scan) > 0;
             mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
             scan += 1;
         }
@@ -694,7 +785,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             for (var s = top + column.w - 1; s >= k0 + 64; s--) {
                 var lean_h = height;
                 if leaning { lean_h = lean_height(volume.overhang, i, j, s, level, height, lean.y, node); }
-                if terrain_density_with(volume, volume_point_half(p, (s << (level + 1u)) + half), level, top, height, lean_h, s) > 0 {
+                if terrain_density_with(volume, cave_noise(volume_point_half(p, (s << (level + 1u)) + half), level, &lattice), level, top, height, lean_h, s) > 0 {
                     above_top = s + 1;
                     break;
                 }
@@ -705,6 +796,14 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // cells, the recent brushes.
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     let natural = mask;
+    if features[0] > 0u {
+        mask = (mask & ~fc.air) | fc.solid;
+        if (fc.solid.x | fc.solid.y | fc.air.x | fc.air.y) != 0u {
+            let c = y * 64u + x;
+            atomicOr(&job_features[wg.y * FEATURE_JOB_WORDS + (c >> 5u)], 1u << (c & 31u));
+        }
+    }
+    let featured = fc.solid | fc.air;
     mask = apply_brushes(mask, job, 0u, job.large, p, ch, level, k0);
     mask = apply_baked(mask, job, wg.x, li);
     mask = apply_brushes(mask, job, job.large, job.brush_count, p, ch, level, k0);
@@ -730,18 +829,33 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         // surface word's byte, as `Planet::material` evaluates it.
         let cell_half = 1 << level;
         let surface_word = u32(column.y) & 0xffu;
-        let ground = ground_material(volume_point_half(p, (k << (level + 1u)) + cell_half), surface_word, height, depth, slope, k << level);
-        let terrain_material = ground & M_ID;
+        let rules = ground_rules(surface_word, height, slope);
+        let ground = column_ground_material(rules, volume_point_half(p, (k << (level + 1u)) + cell_half), surface_word, height, depth, slope, k << level);
+        // A feature's cell takes its stamp's material; the terrain's top
+        // under a far form shows it (a forest's colour where its canopy is
+        // thinner than half a cell).
+        var terrain_material = ground & M_ID;
+        var speckled = (ground & M_SPECK) != 0u;
+        var own = 0u;
+        if bit_at(featured, u32(high)) {
+            own = feature_material(fc, u32(high));
+        } else if fc.far != 0u && !moved {
+            own = fc.far;
+        }
+        if own != 0u {
+            terrain_material = own;
+            speckled = false;
+        }
         let surface = edited_material(terrain_material, job, wg.x, li, p, ch, level, k, k0);
-        let speck = select(0u, 0x80u, (ground & M_SPECK) != 0u && surface == terrain_material);
+        let speck = select(0u, 0x80u, speckled && surface == terrain_material);
         // Under it: soil a cell below the terrain's top, rock below the
         // soil depth; an edited top's material throughout.
         var soil = surface;
         var rock = surface;
         if surface == terrain_material {
-            soil = ground_material(volume_point_half(p, ((top - 2) << (level + 1u)) + cell_half), surface_word, height, 1 << level, slope, (top - 2) << level) & M_ID;
+            soil = column_ground_material(rules, volume_point_half(p, ((top - 2) << (level + 1u)) + cell_half), surface_word, height, 1 << level, slope, (top - 2) << level) & M_ID;
             let deep = (terrain.header.z >> level) + 1;
-            rock = ground_material(volume_point_half(p, ((top - 1 - deep) << (level + 1u)) + cell_half), surface_word, height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
+            rock = column_ground_material(rules, volume_point_half(p, ((top - 1 - deep) << (level + 1u)) + cell_half), surface_word, height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
         }
         let lowest = min(top, min(min(t.x, t.y), min(t.z, t.w)));
         material = (surface & 0x7fu) | speck | ((soil & 0xffu) << 8u) | ((rock & 0xffu) << 16u) | (u32(clamp(lowest - k0 + 128, 0, 255)) << 24u);
@@ -753,13 +867,17 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // heightfield's.
     if job.detail != NONE {
         let cells = (job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS;
-        // A natural chunk's cells set none (`leaf_column_cells` starts its
-        // words from zero).
-        for (var w = 0u; w < 16u && (job.brush_count > 0u || job.baked != NONE); w++) {
+        // A natural column's cells set none (`column_cells` starts its
+        // words from zero); a feature's take its stamp's material.
+        let featured_column = (featured.x | featured.y) != 0u;
+        for (var w = 0u; w < 16u && (job.brush_count > 0u || job.baked != NONE || featured_column); w++) {
             var word = 0u;
             for (var b = 0u; b < 4u; b++) {
                 let z = w * 4u + b;
-                if bit_at(mask, z) { word |= edited_material(0u, job, wg.x, li, p, ch, level, k0 + i32(z), k0) << (b * 8u); }
+                if !bit_at(mask, z) { continue; }
+                var own = 0u;
+                if bit_at(featured, z) { own = feature_material(fc, z); }
+                word |= edited_material(own, job, wg.x, li, p, ch, level, k0 + i32(z), k0) << (b * 8u);
             }
             cell_materials[cells + w] = word;
         }
@@ -777,7 +895,8 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
 // The materials' slope of column (x, y) of footprint `tile`:
 // `Planet::material_slope` (one scale, level-4 relief, whatever level draws
 // it) below MATERIAL_SLOPE_LEVEL. A coarser column spans many base columns:
-// the gradient over 64 base cells (in the tile; eighths of a cell per cell).
+// the gradient's length over 64 base cells (in the tile; eighths of a cell
+// per cell).
 fn column_slope(tile: TileJob, x: u32, y: u32) -> i32 {
     if tile.level < MATERIAL_SLOPE_LEVEL {
         return material_slope(tile, tile.cx * 64 + i32(x), tile.cy * 64 + i32(y));
@@ -790,7 +909,7 @@ fn column_slope(tile: TileJob, x: u32, y: u32) -> i32 {
     let yb = max(i32(y) - n, 0);
     let gx = f32(tile_top(tile.slot, xa, i32(y), level) - tile_top(tile.slot, xb, i32(y), level)) / f32(max(xa - xb, 1));
     let gy = f32(tile_top(tile.slot, i32(x), ya, level) - tile_top(tile.slot, i32(x), yb, level)) / f32(max(ya - yb, 1));
-    return i32(round(max(abs(gx), abs(gy)) * 8.0));
+    return i32(round(length(vec2<f32>(gx, gy)) * 8.0));
 }
 
 // The top (level cells) of column (x, y) of the footprint in pool slot `slot`.
@@ -802,9 +921,10 @@ fn tile_top(slot: u32, x: i32, y: i32, level: u32) -> i32 {
 // A leaf's two material bytes from its columns' materials
 // (`chunk_columns_main`): the surface, the top material of a column whose
 // top cell is in the leaf (`has_top`, `top`), else the subsurface's; the
-// subsurface, by its first column at the leaf's centre (layer `lz` of a
-// chunk of `level`): above the lowest terrain top around it (a natural
-// riser) its surface, within the soil depth under it soil, else rock.
+// subsurface, by the column whose risers it holds (`exposed_column`) at
+// the leaf's centre (layer `lz` of a chunk of `level`): above the lowest
+// terrain top around it (a natural riser) its surface, within the soil
+// depth under it soil, else rock.
 fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -> u32 {
     let below = (i32(column >> 24u) - 128) - 1 - i32(lz * 4u + 2u);
     var sub = select((column >> 16u) & 0xffu, (column >> 8u) & 0xffu, (below << level) < terrain.header.z);
@@ -812,108 +932,209 @@ fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -
     return select(sub, top & 0x7fu, has_top != 0u) | (sub << 8u);
 }
 
-// The leaves of leaf column (lx, ly) of chunk job `n` (`job`, footprint
-// `tile`) in `occupied` (bit lz), their material pairs `leaf_pairs`: each exposed
-// solid cell's material (its edit's, else `Planet::material`'s natural
-// one), cleared where its leaf's pair draws it (the surface's under air,
-// the subsurface's under ground; both at the chunk's top layer; never in a
-// leaf that would be implicit, bit lz of `implicit`, drawn with its mid's
-// material), written back to the job's `cell_materials`. The leaves with
-// any cell left (bit lz). Each column is read once for all its leaves. A
-// natural chunk's words are written only where cells are left, and marked
-// in `written` (bit 16 lz + c, column c of the leaf column): the rest are
-// zero without being stored.
+// Of two columns with cells in a leaf (`chunk_columns_main`'s words; 0:
+// none yet), the one whose subsurface the leaf draws: of the lowest terrain
+// top around it, the first of those. Its cells the leaf holds are the
+// likeliest to be exposed (a riser over a lower neighbour), and those are
+// the leaf's cells under others that show. (The first column the leaf met
+// drew a slope's risers in an uphill corner's soil or rock: a forest's far
+// canopy streaked with the terrain under it.)
+fn exposed_column(held: u32, column: u32) -> u32 {
+    return select(held, column, held == 0u || (column >> 24u) < (held >> 24u));
+}
+
+// One column's top material voting for the surface of the leaf its top
+// cell is in (`chunk_build_main`): the leaf's top material and votes after
+// it. With per-cell materials (`detailed`: a chunk of `DETAIL_LEVELS`) the
+// pair only decides which cells need a byte of their own: a majority vote
+// of all but single-voxel specks, which a leaf of 4x4 columns would spread,
+// leaves the fewest. Without, the pair is what the leaf draws: one of its
+// columns' tops, the one of least `pick` (a hash of the column), so over
+// many leaves each material covers the share of the columns it tops, as
+// the finer levels' cells average to. A majority drew the ground's
+// minority materials (lunar ejecta and rock, specks) at no coarse level:
+// the ground changed colour where a detail level met a coarser one.
+fn vote_top(top: u32, votes: u32, column_material: u32, detailed: bool, pick: u32) -> vec2<u32> {
+    if !detailed {
+        let key = pick | 1u;
+        if votes == 0u || key < votes { return vec2<u32>(column_material, key); }
+        return vec2<u32>(top, votes);
+    }
+    if (column_material & 0x80u) != 0u {
+        // A speck: the surface only while nothing else votes.
+        return vec2<u32>(select(top, column_material, votes == 0u), votes);
+    }
+    if votes == 0u { return vec2<u32>(column_material, 1u); }
+    if (top & 0x7fu) == (column_material & 0x7fu) { return vec2<u32>(top, votes + 1u); }
+    return vec2<u32>(top, votes - 1u);
+}
+
+// Column (cx, cy) of chunk job `n` (`job`, footprint `tile`), its leaf
+// column's leaves in `occupied` (bit lz), their material pairs at
+// `w_cells_pairs[pairs + lz]`: each exposed solid cell's material (its
+// edit's, else `Planet::material`'s natural one), cleared where its leaf's
+// pair draws it (the surface's under air, the subsurface's under ground;
+// both at the chunk's top layer; never in a leaf that would be implicit,
+// bit lz of `implicit`, drawn with its mid's material), written back to
+// the job's `cell_materials`. The leaves with any of its cells left (bit
+// lz). A natural column's words are written only where cells are left: the
+// rest are zero without being stored.
 //
-// In a chunk no edits are over, a heightfield column (no volume terms) is
-// solid up to its top, so its cells on the chunk's faces are exposed only
+// In a chunk no edits are over, a heightfield column (no volume terms and
+// no features) is solid up to its top, so its cells on the chunk's faces are exposed only
 // where they are: under air at its top, beside a lower column (past the
 // footprint's sides, a column like it); other columns and edited chunks
 // count the chunk's faces as air. A natural top takes the material
 // `chunk_columns_main` gave its column's top: the same evaluation.
-fn leaf_column_cells(job: ChunkJob, n: u32, tile: TileJob, lx: u32, ly: u32, leaf_pairs: array<u32, 16>, occupied: u32, implicit: u32, written: ptr<function, array<u32, 8>>) -> u32 {
-    // Indexed by a variable: a local copy (a value argument cannot be).
-    var pairs = leaf_pairs;
-    let natural = job.brush_count == 0u && job.baked == NONE;
+fn column_cells(job: ChunkJob, n: u32, tile: TileJob, cx: u32, cy: u32, pairs: u32, occupied: u32, implicit: u32) -> u32 {
+    let natural_job = job.brush_count == 0u && job.baked == NONE;
+    // A column features changed stores its cells as an edited one.
+    let natural = natural_job && !column_featured(n, cx, cy);
+    let m = column_masks[n * TILE_COLUMNS + cy * 64u + cx];
+    let cells = (job.detail * TILE_COLUMNS + cy * 64u + cx) * CELL_WORDS;
+    if m.x == 0u && m.y == 0u {
+        return 0u;
+    }
+    let natural_top = bitcast<i32>(cell_materials[cells + 16u]);
+    let high = select(firstLeadingBit(m.x), 32u + firstLeadingBit(m.y), m.y != 0u);
+    let top_material = column_materials[n * TILE_COLUMNS + cy * 64u + cx] & 0x7fu;
+    let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
+    let exact = natural && column.z == 0 && column.w == 0;
+    // The columns beside it (past the chunk's sides: air, or for an
+    // exact column one like it).
+    let outside = select(vec2<u32>(0u), m, exact);
+    var west = outside;
+    var east = outside;
+    var south = outside;
+    var north = outside;
+    if cx > 0u { west = column_masks[n * TILE_COLUMNS + cy * 64u + cx - 1u]; }
+    if cx < 63u { east = column_masks[n * TILE_COLUMNS + cy * 64u + cx + 1u]; }
+    if cy > 0u { south = column_masks[n * TILE_COLUMNS + (cy - 1u) * 64u + cx]; }
+    if cy < 63u { north = column_masks[n * TILE_COLUMNS + (cy + 1u) * 64u + cx]; }
+    // Its exposed cells: air over, under or beside them (the chunk's
+    // top and bottom faces as above).
+    let top_open = !exact || job.cz * 64 + 63 == natural_top - 1;
+    let above = vec2<u32>((m.x >> 1u) | (m.y << 31u), (m.y >> 1u) | select(0x80000000u, 0u, top_open));
+    let below = vec2<u32>((m.x << 1u) | select(0u, 1u, exact), (m.y << 1u) | (m.x >> 31u));
+    let exposed = m & (~above | ~below | ~west | ~east | ~south | ~north);
+    // The column's domain point, material slope and rules, once it has a
+    // cell to evaluate.
+    var p = vec3<i32>(0);
+    var slope = 0;
+    var rules = 0u;
+    var located = false;
     var left = 0u;
-    for (var c = 0u; c < 16u; c++) {
-        let cx = lx * 4u + (c & 3u);
-        let cy = ly * 4u + (c >> 2u);
-        let m = column_masks[n * TILE_COLUMNS + cy * 64u + cx];
-        let cells = (job.detail * TILE_COLUMNS + cy * 64u + cx) * CELL_WORDS;
-        if m.x == 0u && m.y == 0u {
+    for (var lz = 0u; lz < 16u; lz++) {
+        if ((occupied >> lz) & 1u) == 0u {
             continue;
         }
-        let natural_top = bitcast<i32>(cell_materials[cells + 16u]);
-        let high = select(firstLeadingBit(m.x), 32u + firstLeadingBit(m.y), m.y != 0u);
-        let top_material = column_materials[n * TILE_COLUMNS + cy * 64u + cx] & 0x7fu;
-        let column = tile_columns[tile.slot * TILE_COLUMNS + cy * 64u + cx];
-        let exact = natural && column.z == 0 && column.w == 0;
-        // The columns beside it (past the chunk's sides: air, or for an
-        // exact column one like it).
-        let outside = select(vec2<u32>(0u), m, exact);
-        var west = outside;
-        var east = outside;
-        var south = outside;
-        var north = outside;
-        if cx > 0u { west = column_masks[n * TILE_COLUMNS + cy * 64u + cx - 1u]; }
-        if cx < 63u { east = column_masks[n * TILE_COLUMNS + cy * 64u + cx + 1u]; }
-        if cy > 0u { south = column_masks[n * TILE_COLUMNS + (cy - 1u) * 64u + cx]; }
-        if cy < 63u { north = column_masks[n * TILE_COLUMNS + (cy + 1u) * 64u + cx]; }
-        // Its exposed cells: air over, under or beside them (the chunk's
-        // top and bottom faces as above).
-        let top_open = !exact || job.cz * 64 + 63 == natural_top - 1;
-        let above = vec2<u32>((m.x >> 1u) | (m.y << 31u), (m.y >> 1u) | select(0x80000000u, 0u, top_open));
-        let below = vec2<u32>((m.x << 1u) | select(0u, 1u, exact), (m.y << 1u) | (m.x >> 31u));
-        let exposed = m & (~above | ~below | ~west | ~east | ~south | ~north);
-        for (var lz = 0u; lz < 16u; lz++) {
-            if ((occupied >> lz) & 1u) == 0u {
-                continue;
-            }
-            // A natural leaf's cells are none but its exposed ones.
-            let cells_in = select(m, exposed, natural);
-            if ((select(cells_in.x, cells_in.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
-                continue;
-            }
-            let surface = pairs[lz] & 0xffu;
-            let sub = (pairs[lz] >> 8u) & 0xffu;
-            let full = ((implicit >> lz) & 1u) != 0u;
-            // Edits' materials as the columns wrote them (none: a natural
-            // chunk's columns write only their natural tops).
-            var word = 0u;
-            if !natural { word = cell_materials[cells + lz]; }
-            for (var b = 0u; b < 4u; b++) {
-                let z = lz * 4u + b;
-                var own = (word >> (b * 8u)) & 0xffu;
-                if !bit_at(m, z) {
-                    continue;
-                }
-                let under_air = z < 63u && !bit_at(m, z + 1u);
-                let k = job.cz * 64 + i32(z);
-                let open = bit_at(exposed, z);
-                if own == 0u && open && natural && z == high && k == natural_top - 1 {
-                    own = top_material;
-                } else if own == 0u && open {
-                    let level = tile.level;
-                    let i = tile.cx * 64 + i32(cx);
-                    let j = tile.cy * 64 + i32(cy);
-                    let depth = max(natural_top - 1 - k, 0) << level;
-                    let q = volume_point_half(domain_point(tile.face, i, j, level), (k << (level + 1u)) + (1 << level));
-                    own = ground_material(q, u32(column.y) & 0xffu, column.x, depth, column_slope(tile, cx, cy), k << level) & M_ID;
-                }
-                let drawn = !full && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
-                if own == 0u || drawn {
-                    own = 0u;
-                }
-                word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
-            }
-            if !natural || word != 0u { cell_materials[cells + lz] = word; }
-            if word != 0u {
-                left |= 1u << lz;
-                (*written)[lz >> 1u] |= 1u << ((lz & 1u) * 16u + c);
-            }
+        // A natural leaf's cells are none but its exposed ones.
+        let cells_in = select(m, exposed, natural);
+        if ((select(cells_in.x, cells_in.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u) == 0u {
+            continue;
         }
+        let pair = w_cells_pairs[pairs + lz];
+        let surface = pair & 0xffu;
+        let sub = (pair >> 8u) & 0xffu;
+        let full = ((implicit >> lz) & 1u) != 0u;
+        // Edits' materials as the columns wrote them (none: a natural
+        // chunk's columns write only their natural tops).
+        var word = 0u;
+        if !natural { word = cell_materials[cells + lz]; }
+        for (var b = 0u; b < 4u; b++) {
+            let z = lz * 4u + b;
+            var own = (word >> (b * 8u)) & 0xffu;
+            if !bit_at(m, z) {
+                continue;
+            }
+            let under_air = z < 63u && !bit_at(m, z + 1u);
+            let k = job.cz * 64 + i32(z);
+            let open = bit_at(exposed, z);
+            if own == 0u && open && natural && z == high && k == natural_top - 1 {
+                own = top_material;
+            } else if own == 0u && open {
+                let level = tile.level;
+                if !located {
+                    p = domain_point(tile.face, tile.cx * 64 + i32(cx), tile.cy * 64 + i32(cy), level);
+                    slope = column_slope(tile, cx, cy);
+                    rules = ground_rules(u32(column.y) & 0xffu, column.x, slope);
+                    located = true;
+                }
+                let depth = max(natural_top - 1 - k, 0) << level;
+                let q = volume_point_half(p, (k << (level + 1u)) + (1 << level));
+                own = column_ground_material(rules, q, u32(column.y) & 0xffu, column.x, depth, slope, k << level) & M_ID;
+            }
+            let drawn = !full && ((z == 63u && own == surface && own == sub) || (z < 63u && own == select(sub, surface, under_air)));
+            if own == 0u || drawn {
+                own = 0u;
+            }
+            word = (word & ~(0xffu << (b * 8u))) | (own << (b * 8u));
+        }
+        if !natural || word != 0u { cell_materials[cells + lz] = word; }
+        if word != 0u { left |= 1u << lz; }
     }
     return left;
+}
+
+// The brick column's columns (masks, materials) and its four leaf
+// columns' (2x2 of 4x4 columns) leaf pairs (16 a leaf column) and leaves
+// (occupied in bits 0..16, implicit in bits 16..32).
+var<workgroup> w_cells_mask: array<vec2<u32>, 64>;
+var<workgroup> w_cells_material: array<u32, 64>;
+var<workgroup> w_cells_pairs: array<u32, 64>;
+var<workgroup> w_cells_leaves: array<atomic<u32>, 4>;
+
+// Each detail job's exposed cells' materials (`column_cells`), a lane a
+// column, a workgroup a brick column (as `chunk_columns_main`): dispatch
+// (64, chunks), before `chunk_build_main`, which reads each column's leaves
+// with cells left (word 17 of its `cell_materials`). A lane a leaf of the
+// brick column's leaf columns first finds the leaves' pairs, occupancy and
+// implicit leaves as `chunk_build_main` does.
+@compute @workgroup_size(64)
+fn chunk_cells_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = chunk_jobs[wg.y];
+    if job.detail == NONE { return; }
+    let tile = tile_jobs[job.tile];
+    let x = (wg.x & 7u) * 8u + (li & 7u);
+    let y = (wg.x >> 3u) * 8u + (li >> 3u);
+    let m = column_masks[wg.y * TILE_COLUMNS + y * 64u + x];
+    w_cells_mask[li] = m;
+    w_cells_material[li] = column_materials[wg.y * TILE_COLUMNS + y * 64u + x];
+    if li < 4u { atomicStore(&w_cells_leaves[li], 0u); }
+    workgroupBarrier();
+    // Leaf lz of leaf column lc: its columns in `chunk_build_main`'s order.
+    let lc = li >> 4u;
+    let lz = li & 15u;
+    var first = 0u;
+    var top = 0u;
+    var votes = 0u;
+    var topped = false;
+    var occupied = false;
+    var full = true;
+    for (var c = 0u; c < 16u; c++) {
+        let b = ((lc >> 1u) * 4u + (c >> 2u)) * 8u + (lc & 1u) * 4u + (c & 3u);
+        let cm = w_cells_mask[b];
+        let nib = (select(cm.x, cm.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
+        full = full && nib == 15u;
+        if cm.x == 0u && cm.y == 0u { continue; }
+        let material = w_cells_material[b];
+        let high = select(firstLeadingBit(cm.x), 32u + firstLeadingBit(cm.y), cm.y != 0u);
+        if (high >> 2u) == lz {
+            topped = true;
+            let v = vote_top(top, votes, material, true, 0u);
+            top = v.x;
+            votes = v.y;
+        }
+        if nib != 0u { first = exposed_column(first, material); }
+        occupied = occupied || nib != 0u;
+    }
+    w_cells_pairs[li] = select(0u, leaf_materials_of(first, top, u32(topped), lz, tile.level), occupied);
+    atomicOr(&w_cells_leaves[lc], (u32(occupied) << lz) | (u32(full && !topped) << (lz + 16u)));
+    workgroupBarrier();
+    let own = ((y & 7u) >> 2u) * 2u + ((x & 7u) >> 2u);
+    let leaves = atomicLoad(&w_cells_leaves[own]);
+    let left = column_cells(job, wg.y, tile, x, y, own * 16u, leaves & 0xffffu, leaves >> 16u);
+    cell_materials[(job.detail * TILE_COLUMNS + y * 64u + x) * CELL_WORDS + 17u] = left;
 }
 
 var<workgroup> w_occ: array<atomic<u32>, 128>;
@@ -969,10 +1190,10 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let ly = t >> 4u;
     // 16 leaves along z, built from this leaf column's 4x4 cell columns.
     var leaf: array<vec2<u32>, 16>;
-    // Each leaf's materials: its first column with cells in it's, and for
-    // its surface the most common top material of the columns whose top
-    // cell is in it (a majority vote of all but single-voxel specks, which
-    // a leaf of 4x4 columns would spread; `topped` where there are any).
+    // Each leaf's materials: its column of cells in it the most exposed's
+    // (`exposed_column`), and for its surface the top material of the
+    // columns whose top cell is in it (`vote_top`; `topped` where there are
+    // any).
     var leaf_material: array<u32, 16>;
     var leaf_top: array<u32, 16>;
     var votes: array<u32, 16>;
@@ -982,6 +1203,8 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     // Each column's top (one past its highest solid cell; 0: none).
     var tops: array<i32, 16>;
     var fit: array<i32, 9>;
+    let tile = tile_jobs[job.tile];
+    let detailed = job.detail != NONE;
     for (var c = 0u; c < 16u; c++) {
         let cx = lx * 4u + (c & 3u);
         let cy = ly * 4u + (c >> 2u);
@@ -1006,20 +1229,13 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         fit[8] += y * z;
         let top_leaf = u32(high) >> 2u;
         topped |= 1u << top_leaf;
-        if (column_material & 0x80u) != 0u {
-            // A speck: the surface only while nothing else votes.
-            if votes[top_leaf] == 0u { leaf_top[top_leaf] = column_material; }
-        } else if votes[top_leaf] == 0u {
-            leaf_top[top_leaf] = column_material;
-            votes[top_leaf] = 1u;
-        } else if (leaf_top[top_leaf] & 0x7fu) == (column_material & 0x7fu) {
-            votes[top_leaf] += 1u;
-        } else {
-            votes[top_leaf] -= 1u;
-        }
+        let pick = hash3(tile.cx * 64 + i32(cx), tile.cy * 64 + i32(cy), i32(tile.level | (tile.face << 8u)), 0x7f4a7c15u);
+        let vote = vote_top(leaf_top[top_leaf], votes[top_leaf], column_material, detailed, pick);
+        leaf_top[top_leaf] = vote.x;
+        votes[top_leaf] = vote.y;
         for (var lz = 0u; lz < 16u; lz++) {
             let nib = (select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
-            if nib != 0u && leaf_material[lz] == 0u { leaf_material[lz] = column_material; }
+            if nib != 0u { leaf_material[lz] = exposed_column(leaf_material[lz], column_material); }
             leaf[lz].x |= ((nib & 1u) << c) | (((nib >> 1u) & 1u) << (c + 16u));
             leaf[lz].y |= (((nib >> 2u) & 1u) << c) | (((nib >> 3u) & 1u) << (c + 16u));
         }
@@ -1030,7 +1246,6 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     // The heightfield's slope over this leaf column: its exact heights a
     // column past each side (central differences, one-sided at the tile's
     // edge), where every column's top here is the heightfield's.
-    let tile = tile_jobs[job.tile];
     let cell_mm = f32(world.grid.y << tile.level);
     let base = job.cz * 64;
     var natural = true;
@@ -1063,7 +1278,6 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             ground = encode_slope(g.x) | (encode_slope(g.y) << 8u);
         }
     }
-    var pairs: array<u32, 16>;
     var occupied = 0u;
     var full = 0u;
     for (var lz = 0u; lz < 16u; lz++) {
@@ -1071,7 +1285,6 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
         if leaf[lz].x != 0u || leaf[lz].y != 0u {
             let pair = leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile.level);
-            pairs[lz] = pair;
             occupied |= 1u << lz;
             atomicOr(&w_occ[m * 2u + (l >> 5u)], 1u << (l & 31u));
             atomicMax(&w_mid_material[m], pair);
@@ -1079,11 +1292,12 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u { full |= 1u << lz; }
     }
     // Leaves (bit lz) holding cells their pair would draw wrong
-    // (`leaf_column_cells`, at `DETAIL_LEVELS`).
+    // (`chunk_cells_main`, at `DETAIL_LEVELS`).
     var edited = 0u;
-    var written: array<u32, 8>;
-    if job.detail != NONE && occupied != 0u {
-        edited = leaf_column_cells(job, wg.x, tile, lx, ly, pairs, occupied, full, &written);
+    if job.detail != NONE {
+        for (var c = 0u; c < 16u; c++) {
+            edited |= cell_materials[(job.detail * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)) * CELL_WORDS + 17u];
+        }
     }
     // A full leaf is implicit (its mid's material) unless a column tops in
     // it (then it is the surface and keeps its own materials: not in
@@ -1245,14 +1459,12 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             // Its cells' edited materials, column by column.
             let detail = w_detail[order >> 6u];
             if ((edited >> lz) & 1u) != 0u && detail != NONE {
-                // A natural chunk stored only its cells' nonzero words.
-                let natural = job.brush_count == 0u && job.baked == NONE;
+                // A column's word is nonzero where it has cells left (a
+                // natural column stored only those).
                 for (var c = 0u; c < 16u; c++) {
-                    let column = (lx * 4u + (c & 3u)) + (ly * 4u + (c >> 2u)) * 64u;
+                    let at = (job.detail * TILE_COLUMNS + (lx * 4u + (c & 3u)) + (ly * 4u + (c >> 2u)) * 64u) * CELL_WORDS;
                     var cells = 0u;
-                    if !natural || ((written[lz >> 1u] >> ((lz & 1u) * 16u + c)) & 1u) != 0u {
-                        cells = cell_materials[(job.detail * TILE_COLUMNS + column) * CELL_WORDS + lz];
-                    }
+                    if ((cell_materials[at + 17u] >> lz) & 1u) != 0u { cells = cell_materials[at + lz]; }
                     detail_cells[detail * DETAIL_WORDS + (order & 63u) * 16u + c] = cells;
                 }
             }
@@ -1451,4 +1663,835 @@ fn restore_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
             detail_cells[w_restore_detail[p] * DETAIL_WORDS + w % DETAIL_WORDS] = restore_data[details_at + w_restore_index[p] * DETAIL_WORDS + w % DETAIL_WORDS];
         }
     }
+}
+
+// Features (`features.rs`, docs/features.md): stamps that spawns place, a
+// function of the terrain. `features` holds the set
+// (`CompiledFeatures::gpu_words`). Each footprint of a near level keeps its
+// near spawns' placements in its pool slot of `tile_placements` (the set's
+// stride of squares), square by square (`tile_features_main`), and chunk
+// columns rasterize them (`feature_column`) over the terrain, under the
+// edits.
+@group(0) @binding(36) var<storage, read> features: array<u32>;
+// A square's raw candidate: x = 1 | di << 1 | dj << 11 | its stamp's index
+// in its spawn << 21 | excluded << 28 | turn << 29 | mirror << 31 (0:
+// none), y = its anchor layer (di, dj: the anchor's column in the square;
+// excluded: an earlier spawn's raw candidate meets its footprint, so it is
+// not placed).
+@group(0) @binding(37) var<storage, read_write> tile_placements: array<vec2<u32>>;
+// Per chunk job, a bit per column (`FEATURE_JOB_WORDS` words) whose cells
+// features changed: their cells' materials are stored as edited ones are.
+@group(0) @binding(38) var<storage, read_write> job_features: array<atomic<u32>>;
+// Candidate blocks (`chunks::candidates`): spawns' raw candidates by blocks
+// of 8x8 squares (a square's word pair at `BLOCK_WORDS` words a pool slot),
+// each evaluated once while the pool keeps it; then the batch's block jobs
+// (`BlockJob`), each job's node quads (count, origins) and reads (a quad
+// a candidate's ground read, `BLOCK_READS` a job), and each computed
+// footprint's blocks (`tile_block_word`). Offsets: `FEATURE_*_AT`.
+@group(0) @binding(39) var<storage, read_write> feature_blocks: array<u32>;
+const FEATURE_JOB_WORDS: u32 = 128u;
+
+const MAX_SPAWNS: u32 = 32u;
+const NEAR_LEVELS: u32 = 10u;
+const NO_RELIEF: i32 = 0x7fffffff;
+
+fn spawn_word(s: u32, w: u32) -> u32 {
+    return features[features[1] + 24u * s + w];
+}
+
+// Whether ground at layer `ground` of a base column (its domain point `p`)
+// lies within spawn `s`'s heights as they wander there
+// (`CompiledSpawn::grows_at`).
+fn spawn_grows_at(s: u32, p: vec3<i32>, ground: i32) -> bool {
+    var g = ground;
+    let shift = spawn_word(s, 20u);
+    if shift > 0u {
+        g += scale_q16(noise(p, shift, spawn_word(s, 5u) ^ 0x7a3de1f1u), bitcast<i32>(spawn_word(s, 19u)));
+    }
+    return g >= bitcast<i32>(spawn_word(s, 8u)) && g <= bitcast<i32>(spawn_word(s, 9u));
+}
+
+fn stamp_word(t: u32, w: u32) -> u32 {
+    return features[features[2] + 16u * t + w];
+}
+
+// Spawns whose placements a footprint of `level` keeps
+// (`CompiledFeatures::near`).
+fn feature_near(level: u32) -> u32 {
+    if level >= NEAR_LEVELS { return 0u; }
+    return features[features[3] + level * 4u * (1u + MAX_SPAWNS)];
+}
+
+// Whether spawn `s` draws as its stamps at `level`
+// (`CompiledFeatures::drawn`).
+fn feature_drawn(level: u32, s: u32) -> bool {
+    if level >= NEAR_LEVELS { return false; }
+    return ((features[features[3] + level * 4u * (1u + MAX_SPAWNS) + 1u] >> s) & 1u) != 0u;
+}
+
+// Spawn `s`'s squares in a footprint of `level`: offset, side, margin
+// (`features::SquareGrid`).
+fn feature_grid(level: u32, s: u32) -> vec3<i32> {
+    let at = features[3] + 4u * ((1u + MAX_SPAWNS) * level + 1u + s);
+    return vec3<i32>(i32(features[at]), i32(features[at + 1u]), i32(features[at + 2u]));
+}
+
+// Whether a spawn's surface mask (`spawn_word` 6, 7) takes `material`
+// (an empty mask takes any).
+fn spawn_surface(s: u32, material: u32) -> bool {
+    let surfaces = vec2<u32>(spawn_word(s, 6u), spawn_word(s, 7u));
+    if (surfaces.x | surfaces.y) == 0u { return true; }
+    return material < 64u && ((select(surfaces.x, surfaces.y, material >= 32u) >> (material & 31u)) & 1u) != 0u;
+}
+
+struct Placed {
+    valid: bool,
+    excluded: bool,
+    stamp: u32,
+    anchor: vec3<i32>,
+    turn: u32,
+    mirror: bool,
+    // The stamp's reach (columns each way from the anchor).
+    reach: i32,
+}
+
+// Spawn `s`'s placement on square `g` from footprint `tile`'s candidates.
+fn tile_placement(tile: TileJob, s: u32, g: vec2<i32>) -> Placed {
+    var p = tile_candidate(tile, s, g);
+    p.valid = p.valid && !p.excluded;
+    return p;
+}
+
+// Spawn `s`'s squares in footprint `tile`: the first, and the index of
+// square `g` among them (-1: none of them).
+fn tile_square(tile: TileJob, s: u32, g: vec2<i32>) -> i32 {
+    let grid = feature_grid(tile.level, s);
+    let sp = i32(spawn_word(s, 0u));
+    let first = vec2<i32>(div_floor((tile.cx * 64 << tile.level) - grid.z, sp), div_floor((tile.cy * 64 << tile.level) - grid.z, sp));
+    let n = g - first;
+    if any(n < vec2<i32>(0)) || any(n >= vec2<i32>(grid.y)) { return -1; }
+    return n.y * grid.y + n.x;
+}
+
+// Spawn `s`'s raw candidate on square `g` from footprint `tile`'s.
+fn tile_candidate(tile: TileJob, s: u32, g: vec2<i32>) -> Placed {
+    let n = tile_square(tile, s, g);
+    if n < 0 { return Placed(); }
+    return placed_of(s, g, tile_placements[tile.slot * features[4] + u32(i32(feature_grid(tile.level, s).x) + n)]);
+}
+
+// Spawn `s`'s candidate on square `g` from its word pair `e`.
+fn placed_of(s: u32, g: vec2<i32>, e: vec2<u32>) -> Placed {
+    var p: Placed;
+    let sp = i32(spawn_word(s, 0u));
+    if e.x == 0u { return p; }
+    p.valid = true;
+    p.excluded = ((e.x >> 28u) & 1u) != 0u;
+    p.stamp = features[spawn_word(s, 12u) + ((e.x >> 21u) & 0x7fu)];
+    p.anchor = vec3<i32>(g.x * sp + i32((e.x >> 1u) & 1023u), bitcast<i32>(e.y), g.y * sp + i32((e.x >> 11u) & 1023u));
+    p.turn = (e.x >> 29u) & 3u;
+    p.mirror = (e.x >> 31u) == 1u;
+    p.reach = i32(stamp_word(p.stamp, 3u));
+    return p;
+}
+
+// Spawn `s`'s squares whose placements may reach base columns [lo, hi]
+// (inclusive): first and last square.
+fn reaching_squares(s: u32, lo: vec2<i32>, hi: vec2<i32>) -> vec4<i32> {
+    let sp = i32(spawn_word(s, 0u));
+    let r = i32(spawn_word(s, 1u));
+    return vec4<i32>(div_floor(lo.x - r, sp), div_floor(lo.y - r, sp), div_floor(hi.x + r, sp), div_floor(hi.y + r, sp));
+}
+
+// Whether placement `p`'s footprint meets base columns [lo, hi] (inclusive).
+fn placed_meets(p: Placed, lo: vec2<i32>, hi: vec2<i32>) -> bool {
+    return p.valid && all(p.anchor.xz - p.reach <= hi) && all(p.anchor.xz + p.reach >= lo);
+}
+
+// World offset `d` (x, layer, z) from a placement's anchor in its stamp's
+// frame (`Placement::local`).
+fn placed_local(p: Placed, d: vec3<i32>) -> vec3<i32> {
+    var x = d.x;
+    var z = d.z;
+    for (var t = 0u; t < p.turn; t++) {
+        let x0 = x;
+        x = z;
+        z = -x0;
+    }
+    if p.mirror { x = -x; }
+    return vec3<i32>(x, d.y, z);
+}
+
+// A stamp's part (`stamp::CompiledPart`, its 20 words): box or capsule
+// (flat ended or round),
+// material (0 air), the cells it may hold (inclusive), the segment's ends
+// and radii or the box's corners (sixteenths of a cell), its edge's
+// roughness, the share of its cells kept (of 256) and its seed.
+struct Part {
+    capsule: bool,
+    flat: bool,
+    material: u32,
+    lo: vec3<i32>,
+    hi: vec3<i32>,
+    a: vec3<i32>,
+    b: vec3<i32>,
+    radius: vec2<i32>,
+    rough: i32,
+    keep: u32,
+    seed: u32,
+    lump: i32,
+    lump_shift: u32,
+}
+
+// Part `n` of stamp `t`.
+fn stamp_part(t: u32, n: u32) -> Part {
+    let at = stamp_word(t, 8u) + 20u * n;
+    var q: Part;
+    q.capsule = (features[at] & 1u) != 0u;
+    q.flat = (features[at] & 2u) != 0u;
+    q.material = features[at] >> 8u;
+    q.lo = vec3<i32>(bitcast<i32>(features[at + 1u]), bitcast<i32>(features[at + 2u]), bitcast<i32>(features[at + 3u]));
+    q.hi = vec3<i32>(bitcast<i32>(features[at + 4u]), bitcast<i32>(features[at + 5u]), bitcast<i32>(features[at + 6u]));
+    q.a = vec3<i32>(bitcast<i32>(features[at + 7u]), bitcast<i32>(features[at + 8u]), bitcast<i32>(features[at + 9u]));
+    q.b = vec3<i32>(bitcast<i32>(features[at + 10u]), bitcast<i32>(features[at + 11u]), bitcast<i32>(features[at + 12u]));
+    q.radius = vec2<i32>(i32(features[at + 13u] & 0xffffu), i32(features[at + 13u] >> 16u));
+    q.rough = i32(features[at + 14u] & 0xffffu);
+    q.keep = features[at + 14u] >> 16u;
+    q.seed = features[at + 15u];
+    q.lump = bitcast<i32>(features[at + 16u]);
+    q.lump_shift = features[at + 17u];
+    return q;
+}
+
+// How far along a segment of squared length `length` its closest point to
+// a point lies (of 256), the point's offset dotted with the segment being
+// `dot` (`stamp::along`).
+fn part_along(dot: i32, length: i32) -> i32 {
+    if length <= 0 { return 0; }
+    let d = clamp(dot, 0, length);
+    let shift = u32(max(32 - i32(countLeadingZeros(u32(length))) - 22, 0));
+    return ((d >> shift) * 256) / max(length >> shift, 1);
+}
+
+// Whether part `q` holds point `p` (sixteenths of a cell): base cell
+// `cell` when `base` (sparse and rough by hash), else a coarse cell's
+// centre (smooth, held where the part keeps half its cells)
+// (`CompiledPart::holds`).
+fn part_holds(q: Part, p: vec3<i32>, base: bool, cell: vec3<i32>) -> bool {
+    var h = 0u;
+    if base {
+        h = hash3(cell.x, cell.y, cell.z, q.seed);
+        if (h & 255u) >= q.keep { return false; }
+    } else if q.keep < 128u {
+        return false;
+    }
+    if !q.capsule { return all(p >= q.a) && all(p < q.b); }
+    let d = q.b - q.a;
+    let w = p - q.a;
+    let length = dot(d, d);
+    let along_d = dot(w, d);
+    if q.flat && (along_d < 0 || along_d > length) { return false; }
+    let t = part_along(along_d, length);
+    let e = w - d * t / 256;
+    var r = q.radius.x + (q.radius.y - q.radius.x) * t / 256;
+    if base { r -= q.rough * i32((h >> 8u) & 255u) / 256; }
+    if q.lump > 0 {
+        let s = 4u + q.lump_shift;
+        let l = hash3(p.x >> s, p.y >> s, p.z >> s, q.seed ^ 0x6c756d70u);
+        r -= q.lump * i32(l & 255u) / 256;
+    }
+    return r > 0 && dot(e, e) <= r * r;
+}
+
+// A part's cell code for `feature_set`: 1 air, 2 + m material m.
+fn part_code(q: Part) -> u32 {
+    return select(1u, 2u + q.material, q.material != 0u);
+}
+
+// The far form over level column `(i, j)` of footprint `tile`
+// (`CompiledFeatures::far_cover`: spawns not drawn at its level), whose
+// height is `height` (its top cell `top - 1` at domain point `p`, surface
+// word `surface`): its spawn + 1 (0: none). `tile_columns_main` keeps it
+// over the column's surface word (bits 8 to 13) for the chunks over it
+// (`column_far`).
+fn far_spawn(tile: TileJob, i: i32, j: i32, p: vec3<i32>, top: i32, height: i32, surface: u32) -> u32 {
+    let level = tile.level;
+    if level == 0u { return 0u; }
+    let ground = div_floor(height, world.grid.y);
+    var material = NONE;
+    // The middle base column's domain point, which every spawn's fields
+    // read (once a column).
+    let mid = 1 << (level - 1u);
+    let base = domain_point(tile.face, (i << level) + mid, (j << level) + mid, 0u);
+    for (var s = 0u; s < features[0]; s++) {
+        let far = spawn_word(s, 14u);
+        if feature_drawn(level, s) || far == 0u || !spawn_grows_at(s, base, ground) { continue; }
+        // The column holds canopy with the spawn's coverage for odds.
+        if (hash3(i, j, i32((level << 3u) | tile.face), spawn_word(s, 5u) ^ 0xfa7f0e55u) >> 16u) >= spawn_word(s, 18u) { continue; }
+        if (spawn_word(s, 6u) | spawn_word(s, 7u)) != 0u {
+            if material == NONE {
+                let q = volume_point_half(p, ((top - 1) << (level + 1u)) + (1 << level));
+                material = ground_material(q, surface, height, 0, 0, (top - 1) << level) & M_ID;
+            }
+            if !spawn_surface(s, material) { continue; }
+        }
+        let shift = spawn_word(s, 3u);
+        if shift > 0u {
+            let threshold = bitcast<i32>(spawn_word(s, 4u));
+            var grows = threshold < 0;
+            if level < spawn_word(s, 16u) {
+                grows = noise(base, shift, spawn_word(s, 5u) ^ 0x632be5abu) > threshold;
+            }
+            if !grows { continue; }
+        }
+        return s + 1u;
+    }
+    return 0u;
+}
+
+// The far form over a footprint's column (`tile_columns` word `column`):
+// its material (0: none) and canopy layers [y, z).
+fn column_far(column: vec4<i32>) -> vec3<i32> {
+    let s = (u32(column.y) >> 8u) & 63u;
+    if s == 0u { return vec3<i32>(0); }
+    let ground = div_floor(column.x, world.grid.y);
+    return vec3<i32>(i32(spawn_word(s - 1u, 14u)), ground, ground + i32(spawn_word(s - 1u, 15u)));
+}
+
+// Whether a far form's canopy `cover` fills half of cell `k` of `level`.
+fn far_cell(level: u32, k: i32, cover: vec3<i32>) -> bool {
+    let a = max(k << level, cover.y);
+    let b = min((k + 1) << level, cover.z);
+    return cover.x != 0 && 2 * (b - a) >= (1 << level);
+}
+
+// What features make of a chunk column's 64 cells (from layer `k0`): the
+// cells they make solid and air, each cell's material (a byte, cell z in
+// byte z & 3 of word z >> 2; 0 none) and the far form's material over the
+// column (0: none).
+struct FeatureColumn {
+    solid: vec2<u32>,
+    air: vec2<u32>,
+    materials: array<u32, 16>,
+    far: u32,
+}
+
+fn feature_set(c: ptr<function, FeatureColumn>, z: i32, v: u32) {
+    let solid = v >= 2u;
+    (*c).solid = set_bits((*c).solid, z, z + 1, solid);
+    (*c).air = set_bits((*c).air, z, z + 1, !solid);
+    let m = select(0u, v - 2u, solid);
+    let w = u32(z) >> 2u;
+    let shift = (u32(z) & 3u) * 8u;
+    (*c).materials[w] = ((*c).materials[w] & ~(0xffu << shift)) | (m << shift);
+}
+
+// Part `q` of placement `pl` over a column (its box `clo`, `chi` in the
+// stamp's frame) set in its cells from layer `k0`.
+fn feature_part(c: ptr<function, FeatureColumn>, q: Part, pl: Placed, clo: vec3<i32>, chi: vec3<i32>, k0: i32, level: u32) {
+    if q.lo.x > chi.x || q.hi.x < clo.x || q.lo.z > chi.z || q.hi.z < clo.z { return; }
+    let code = part_code(q);
+    let span = 1 << level;
+    var first = max((pl.anchor.y + q.lo.y) >> level, k0);
+    var last = min(((pl.anchor.y + q.hi.y) >> level) + 1, k0 + 64);
+    if q.capsule && !q.flat && all(q.a == q.b) {
+        // A ball (a leaf mass): the cells it may hold over the column lie
+        // within its radius of its centre (`part_holds`' points: the
+        // column's centre, sixteenths), a cell or two to spare.
+        let h = vec2<i32>((clo.x + chi.x + 1) * 8, (clo.z + chi.z + 1) * 8) - q.a.xz;
+        let room = q.radius.x * q.radius.x - h.x * h.x - h.y * h.y;
+        if room < 0 { return; }
+        let dy = i32(sqrt(f32(room))) + 2;
+        first = max(first, ((div_floor(q.a.y - dy - 8 * span, 16) + pl.anchor.y) >> level) - 1);
+        last = min(last, ((div_floor(q.a.y + dy - 8 * span, 16) + pl.anchor.y) >> level) + 2);
+    }
+    for (var k = first; k < last; k++) {
+        let y = (k << level) - pl.anchor.y;
+        var held: bool;
+        if level == 0u {
+            let cell = vec3<i32>(clo.x, y, clo.z);
+            held = part_holds(q, cell * 16 + 8, true, cell);
+        } else {
+            held = part_holds(q, vec3<i32>(clo.x + chi.x + 1, 2 * y + span, clo.z + chi.z + 1) * 8, false, vec3<i32>(0));
+        }
+        if held { feature_set(c, k - k0, code); }
+    }
+}
+
+// The near placements over a brick column (`chunk_columns_main`'s
+// workgroup) and their parts, culled by the workgroup together in their
+// order: a round tests 64 squares (every near spawn's squares over the
+// brick column, one spawn after another), a lane each, then the parts of
+// the placements it kept, flattened likewise (a placement's after the
+// last's), 64 a round. Each round's lanes' bits come back as a mask every
+// lane reads alike, with its kept placements' parts counted
+// (`feature_round`). A round's placements and parts wait in `w_feature_*`
+// while their parts are culled and drawn.
+var<workgroup> w_feature_bits: array<atomic<u32>, 2>;
+var<workgroup> w_feature_parts: atomic<u32>;
+var<workgroup> w_feature_mask: vec4<u32>;
+// A square round's placements: anchor and reach, turn | mirror << 2, stamp,
+// its parts.
+var<workgroup> w_feature_anchor: array<vec4<i32>, 64>;
+var<workgroup> w_feature_turn: array<u32, 64>;
+var<workgroup> w_feature_stamp: array<u32, 64>;
+var<workgroup> w_feature_count: array<u32, 64>;
+// A part round's parts: its placement's lane | its index in its stamp << 6.
+var<workgroup> w_feature_part: array<u32, 64>;
+
+// The round's lanes whose `bit` is set (bit `li`), as a uniform mask, and
+// the sum of their `parts`.
+fn feature_round(li: u32, bit: bool, parts: u32) -> vec3<u32> {
+    if bit {
+        atomicOr(&w_feature_bits[li >> 5u], 1u << (li & 31u));
+        atomicAdd(&w_feature_parts, parts);
+    }
+    workgroupBarrier();
+    if li == 0u {
+        w_feature_mask = vec4<u32>(atomicLoad(&w_feature_bits[0]), atomicLoad(&w_feature_bits[1]), atomicLoad(&w_feature_parts), 0u);
+        atomicStore(&w_feature_bits[0], 0u);
+        atomicStore(&w_feature_bits[1], 0u);
+        atomicStore(&w_feature_parts, 0u);
+    }
+    return workgroupUniformLoad(&w_feature_mask).xyz;
+}
+
+// The lowest bit of a nonzero 64-bit mask.
+fn lowest_bit(m: vec2<u32>) -> u32 {
+    return select(32u + firstTrailingBit(m.y), firstTrailingBit(m.x), m.x != 0u);
+}
+
+// A 64-bit mask without bit `b`.
+fn without_bit(m: vec2<u32>, b: u32) -> vec2<u32> {
+    return m & ~select(vec2<u32>(0u, 1u << (b & 31u)), vec2<u32>(1u << b, 0u), b < 32u);
+}
+
+// The placement a square round kept in lane `b`.
+fn round_placement(b: u32) -> Placed {
+    let anchor = w_feature_anchor[b];
+    let turn = w_feature_turn[b];
+    return Placed(true, false, w_feature_stamp[b], anchor.xyz, turn & 3u, turn >= 4u, anchor.w);
+}
+
+// Level column `(i, j)` of footprint `tile` from layer `k0` (its
+// `tile_columns` word `column`): the far forms' canopies, the near spawns'
+// stamps over them (a base cell the last placement holding it; a coarse
+// cell their sums). Every lane of the workgroup calls it (lane `li`, brick
+// column `brick`'s first column); a lane not `inside` the face evaluates
+// nothing.
+fn feature_column(tile: TileJob, brick: vec2<i32>, li: u32, inside: bool, i: i32, j: i32, k0: i32, column: vec4<i32>) -> FeatureColumn {
+    var c: FeatureColumn;
+    let level = tile.level;
+    if inside {
+        let cover = column_far(column);
+        c.far = u32(cover.x);
+        if cover.x != 0 {
+            for (var k = max(cover.y >> level, k0); k < min(((cover.z - 1) >> level) + 1, k0 + 64); k++) {
+                if far_cell(level, k, cover) { feature_set(&c, k - k0, 2u + u32(cover.x)); }
+            }
+        }
+    }
+    let lo = vec2<i32>(i, j) << vec2<u32>(level);
+    let hi = lo + (1 << level) - 1;
+    let brick_lo = brick << vec2<u32>(level);
+    let brick_hi = brick_lo + (8 << level) - 1;
+    // Each placement over the column in order, its parts in order, each
+    // over the cells before: a base cell takes the last holding its centre,
+    // a coarse cell the last holding its box's centre (`stamp::cell_of`,
+    // `coarse_of`). A part reads the cells its box spans. The workgroup
+    // lists the placements meeting the brick column and the chunk's layers
+    // and their parts meeting its box and layers, in the same order: those
+    // a column meets are among them.
+    let near = feature_near(level);
+    var squares = 0;
+    for (var s = 0u; s < near; s++) {
+        if !feature_drawn(level, s) { continue; }
+        let g = reaching_squares(s, brick_lo, brick_hi);
+        squares += (g.z - g.x + 1) * (g.w - g.y + 1);
+    }
+    for (var first_square = 0; first_square < squares; first_square += 64) {
+        // (Every lane is done with the last round's placements.)
+        if first_square > 0 { workgroupBarrier(); }
+        var n = first_square + i32(li);
+        var meets = false;
+        var parts = 0u;
+        if n < squares {
+            // Its spawn and square.
+            var s = 0u;
+            var g = vec4<i32>(0);
+            loop {
+                if feature_drawn(level, s) {
+                    g = reaching_squares(s, brick_lo, brick_hi);
+                    let m = (g.z - g.x + 1) * (g.w - g.y + 1);
+                    if n < m { break; }
+                    n -= m;
+                }
+                s++;
+            }
+            let side = g.z - g.x + 1;
+            let pl = tile_placement(tile, s, g.xy + vec2<i32>(n % side, n / side));
+            meets = placed_meets(pl, brick_lo, brick_hi);
+            if meets {
+                // Its stamp's box (its parts' union) within the chunk's
+                // layers.
+                let below = pl.anchor.y + bitcast<i32>(stamp_word(pl.stamp, 1u));
+                let above = ((below + i32(stamp_word(pl.stamp, 5u)) - 1) >> level) + 1;
+                meets = (below >> level) < k0 + 64 && above > k0;
+            }
+            if meets {
+                parts = stamp_word(pl.stamp, 7u);
+                w_feature_anchor[li] = vec4<i32>(pl.anchor, pl.reach);
+                w_feature_turn[li] = pl.turn | (u32(pl.mirror) << 2u);
+                w_feature_stamp[li] = pl.stamp;
+                w_feature_count[li] = parts;
+            }
+        }
+        let placed = feature_round(li, meets, parts);
+        for (var first_part = 0u; first_part < placed.z; first_part += 64u) {
+            // (Every lane is done with the last round's parts.)
+            if first_part > 0u { workgroupBarrier(); }
+            let m = first_part + li;
+            var held = false;
+            if m < placed.z {
+                // Its placement: the kept lanes' parts one after another.
+                var rest = placed.xy;
+                var b = lowest_bit(rest);
+                var index = m;
+                while index >= w_feature_count[b] {
+                    index -= w_feature_count[b];
+                    rest = without_bit(rest, b);
+                    b = lowest_bit(rest);
+                }
+                let pl = round_placement(b);
+                // The brick column's box in the stamp's frame (x, z), and
+                // the part's cell bounds (`stamp_part`'s lo, hi).
+                let ba = placed_local(pl, vec3<i32>(brick_lo.x, 0, brick_lo.y) - pl.anchor);
+                let bb = placed_local(pl, vec3<i32>(brick_hi.x, 0, brick_hi.y) - pl.anchor);
+                let blo = min(ba, bb);
+                let bhi = max(ba, bb);
+                let at = stamp_word(pl.stamp, 8u) + 20u * index;
+                let plo = vec3<i32>(bitcast<i32>(features[at + 1u]), bitcast<i32>(features[at + 2u]), bitcast<i32>(features[at + 3u]));
+                let phi = vec3<i32>(bitcast<i32>(features[at + 4u]), bitcast<i32>(features[at + 5u]), bitcast<i32>(features[at + 6u]));
+                let first = max((pl.anchor.y + plo.y) >> level, k0);
+                let last = min(((pl.anchor.y + phi.y) >> level) + 1, k0 + 64);
+                held = first < last && !(plo.x > bhi.x || phi.x < blo.x || plo.z > bhi.z || phi.z < blo.z);
+                w_feature_part[li] = b | (index << 6u);
+            }
+            var kept = feature_round(li, held, 0u).xy;
+            // The kept parts in order, each lane drawing those over its
+            // column (its box in the stamp's frame, once a placement).
+            var current = 64u;
+            var pl: Placed;
+            var mine = false;
+            var clo = vec3<i32>(0);
+            var chi = vec3<i32>(0);
+            while (kept.x | kept.y) != 0u {
+                let h = lowest_bit(kept);
+                kept = without_bit(kept, h);
+                let part = w_feature_part[h];
+                if (part & 63u) != current {
+                    current = part & 63u;
+                    pl = round_placement(current);
+                    mine = inside && placed_meets(pl, lo, hi);
+                    let ca = placed_local(pl, vec3<i32>(lo.x, 0, lo.y) - pl.anchor);
+                    let cb = placed_local(pl, vec3<i32>(hi.x, 0, hi.y) - pl.anchor);
+                    clo = min(ca, cb);
+                    chi = max(ca, cb);
+                }
+                if mine {
+                    feature_part(&c, stamp_part(pl.stamp, part >> 6u), pl, clo, chi, k0, level);
+                }
+            }
+        }
+    }
+    return c;
+}
+
+// A feature column's material of cell `z` (0: none).
+fn feature_material(c: FeatureColumn, z: u32) -> u32 {
+    var words = c.materials;
+    return (words[z >> 2u] >> ((z & 3u) * 8u)) & 0xffu;
+}
+
+// A candidate block job (`chunks::candidates`): spawn `spawn`'s squares
+// `block * 8` to `block * 8 + 7` each way on face `face`, into pool slot
+// `slot` of `feature_blocks`.
+struct BlockJob {
+    face: u32,
+    spawn: u32,
+    block: vec2<i32>,
+    slot: u32,
+}
+
+fn block_job(n: u32) -> BlockJob {
+    let at = FEATURE_JOBS_AT + 4u * n;
+    let block = vec2<i32>(bitcast<i32>(feature_blocks[at + 1u]), bitcast<i32>(feature_blocks[at + 2u]));
+    return BlockJob(feature_blocks[at] & 7u, feature_blocks[at] >> 3u, block, feature_blocks[at + 3u]);
+}
+
+// Lane `li`'s square of block job `job` (row by row).
+fn block_square(job: BlockJob, li: u32) -> vec2<i32> {
+    return job.block * 8 + vec2<i32>(i32(li & 7u), i32(li >> 3u));
+}
+
+// Spawn `s`'s candidate anchor on square `g` of `face`, where its rules
+// that read no terrain pass (density, the footprint on the face, the
+// field): its column and the reach of its footprint's corners the relief
+// rule reads (0: none); w 0 when it does not grow.
+fn candidate_anchor(face: u32, s: u32, g: vec2<i32>) -> vec4<i32> {
+    let a = candidate_square(face, s, g);
+    if a.w == 0 || (spawn_word(s, 3u) > 0u && !candidate_field(s, domain_point(face, a.x, a.y, 0u))) { return vec4<i32>(0); }
+    return a;
+}
+
+// Whether spawn `s`'s field lets a candidate grow at domain point `p` (a
+// base column's).
+fn candidate_field(s: u32, p: vec3<i32>) -> bool {
+    let shift = spawn_word(s, 3u);
+    return shift == 0u || noise(p, shift, spawn_word(s, 5u) ^ 0x632be5abu) > bitcast<i32>(spawn_word(s, 4u));
+}
+
+// `candidate_anchor` but for the field.
+fn candidate_square(face: u32, s: u32, g: vec2<i32>) -> vec4<i32> {
+    let f = i32(face);
+    let sp = i32(spawn_word(s, 0u));
+    let reach = i32(spawn_word(s, 1u));
+    let inset = i32(spawn_word(s, 17u));
+    let seed = spawn_word(s, 5u);
+    if (hash3(g.x, g.y, f, seed) >> 16u) >= spawn_word(s, 2u) { return vec4<i32>(0); }
+    // The anchor in the square's middle, its footprint on the face.
+    let slack = u32(sp - 2 * inset);
+    let i = g.x * sp + inset + i32(hash3(g.x, g.y, f, seed ^ 0x9e3779b9u) % slack);
+    let j = g.y * sp + inset + i32(hash3(g.x, g.y, f, seed ^ 0x85ebca6bu) % slack);
+    let n = world.grid.z;
+    if i < reach || j < reach || i >= n - reach || j >= n - reach { return vec4<i32>(0); }
+    var d = 0;
+    if bitcast<i32>(spawn_word(s, 10u)) < NO_RELIEF {
+        let stamp = features[spawn_word(s, 12u) + hash3(g.x, g.y, f, seed ^ 0xc2b2ae35u) % spawn_word(s, 13u)];
+        d = max(i32(stamp_word(stamp, 3u)), 1);
+    }
+    return vec4<i32>(i, j, d, 1);
+}
+
+// The column a candidate's ground read `c` is (0 its anchor, 1-4 its
+// footprint's corners).
+fn candidate_read(a: vec4<i32>, c: u32) -> vec2<i32> {
+    if c == 0u { return a.xy; }
+    return a.xy + vec2<i32>(select(-a.z, a.z, ((c - 1u) & 1u) != 0u), select(-a.z, a.z, c >= 3u));
+}
+
+// The terrain's level-0 column `(i, j)` (height, surface word): read `r`
+// of block job `job` (the node quad its nodes are in).
+fn feature_ground(job: u32, r: u32, face: u32, i: i32, j: i32) -> vec2<i32> {
+    let quad = job * BLOCK_READS + feature_blocks[FEATURE_READS_AT + job * BLOCK_READS + r];
+    let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    return generation_grid_column(FEATURE_LATTICE_AT + 4u * quad, 2u, first, face, i, j, 0u, false);
+}
+
+// Spawn `s`'s raw candidate on square `g` of `face` (`CompiledFeatures::
+// candidate`): its word pair, or none. Heights are the terrain's at base
+// columns, from block job `job`'s node quads (its square's reads from
+// `reads`).
+fn feature_candidate(job: u32, reads: u32, face: u32, s: u32, g: vec2<i32>) -> vec2<u32> {
+    let none = vec2<u32>(0u);
+    let f = i32(face);
+    let sp = i32(spawn_word(s, 0u));
+    let seed = spawn_word(s, 5u);
+    let anchor = candidate_square(face, s, g);
+    if anchor.w == 0 { return none; }
+    let i = anchor.x;
+    let j = anchor.y;
+    // Its column's domain point, which its field, heights and rules read.
+    let p = domain_point(face, i, j, 0u);
+    if !candidate_field(s, p) { return none; }
+    let column = feature_ground(job, reads, face, i, j);
+    let ground = div_floor(column.x, world.grid.y);
+    if !spawn_grows_at(s, p, ground) { return none; }
+    if (spawn_word(s, 6u) | spawn_word(s, 7u)) != 0u {
+        // The terrain's rules at its top cell on level ground.
+        let q = volume_point_half(p, ((ground - 1) << 1u) + 1);
+        if !spawn_surface(s, ground_material(q, u32(column.y) & 0xffu, column.x, 0, 0, ground - 1) & M_ID) { return none; }
+    }
+    let v = hash3(g.x, g.y, f, seed ^ 0xc2b2ae35u);
+    let index = v % spawn_word(s, 13u);
+    let max_relief = bitcast<i32>(spawn_word(s, 10u));
+    if max_relief < NO_RELIEF {
+        // Its anchor's and its footprint's corners' grounds.
+        var lo = ground;
+        var hi = ground;
+        for (var c = 1u; c < 5u; c++) {
+            let at = candidate_read(anchor, c);
+            let h = div_floor(feature_ground(job, reads + c, face, at.x, at.y).x, world.grid.y);
+            lo = min(lo, h);
+            hi = max(hi, h);
+        }
+        if hi - lo > max_relief { return none; }
+    }
+    let k = ground - bitcast<i32>(spawn_word(s, 11u));
+    return vec2<u32>(1u | (u32(i - g.x * sp) << 1u) | (u32(j - g.y * sp) << 11u) | (index << 21u) | (((v >> 8u) & 3u) << 29u) | (((v >> 10u) & 1u) << 31u), bitcast<u32>(k));
+}
+
+// A block job's node quads: a table of the quads its candidates' reads
+// fall in (keys their quad's coordinates, low bits: a block spans far
+// fewer quads; 0 free), each entry's quad in the job's list, its origin,
+// and each read's entry.
+const BLOCK_TABLE: u32 = 512u;
+var<workgroup> w_block_keys: array<atomic<u32>, BLOCK_TABLE>;
+var<workgroup> w_block_dense: array<u32, BLOCK_TABLE>;
+var<workgroup> w_block_origin: array<vec2<i32>, BLOCK_TABLE>;
+var<workgroup> w_block_reads: array<u32, BLOCK_READS>;
+var<workgroup> w_block_count: atomic<u32>;
+
+// The table entry of the node quad column `(i, j)` blends, kept.
+fn block_need(i: i32, j: i32) -> u32 {
+    let q = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    let key = 0x80000000u | ((u32(q.y >> 4u) & 0x7fffu) << 16u) | (u32(q.x >> 4u) & 0xffffu);
+    var e = (key * 0x9e3779b1u) >> 23u;
+    for (var n = 0u; n < BLOCK_TABLE; n++) {
+        let held = atomicCompareExchangeWeak(&w_block_keys[e], 0u, key);
+        if held.exchanged {
+            w_block_origin[e] = q;
+            return e;
+        }
+        if held.old_value == key { return e; }
+        // A spurious failure retries the entry; another key moves on.
+        if held.old_value != 0u { e = (e + 1u) % BLOCK_TABLE; }
+    }
+    return e;
+}
+
+// Block jobs' node quads (a workgroup a job): the quads its squares'
+// candidates read (anchors whose rules that read no terrain pass, their
+// footprints' corners), listed once each, and each read's quad.
+@compute @workgroup_size(64)
+fn feature_block_quads_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = block_job(wg.x);
+    for (var e = li; e < BLOCK_TABLE; e += 64u) { atomicStore(&w_block_keys[e], 0u); }
+    if li == 0u { atomicStore(&w_block_count, 0u); }
+    workgroupBarrier();
+    let a = candidate_anchor(job.face, job.spawn, block_square(job, li));
+    let reads = select(0u, select(1u, 5u, a.z > 0), a.w != 0);
+    for (var c = 0u; c < reads; c++) {
+        let at = candidate_read(a, c);
+        w_block_reads[li * 5u + c] = block_need(at.x, at.y);
+    }
+    workgroupBarrier();
+    for (var e = li; e < BLOCK_TABLE; e += 64u) {
+        if atomicLoad(&w_block_keys[e]) != 0u {
+            let d = atomicAdd(&w_block_count, 1u);
+            w_block_dense[e] = d;
+            let at = FEATURE_QUADS_AT + 2u * (wg.x * BLOCK_READS + d);
+            feature_blocks[at] = bitcast<u32>(w_block_origin[e].x);
+            feature_blocks[at + 1u] = bitcast<u32>(w_block_origin[e].y);
+        }
+    }
+    workgroupBarrier();
+    for (var c = 0u; c < reads; c++) {
+        feature_blocks[FEATURE_READS_AT + wg.x * BLOCK_READS + li * 5u + c] = w_block_dense[w_block_reads[li * 5u + c]];
+    }
+    if li == 0u { feature_blocks[FEATURE_COUNTS_AT + wg.x] = atomicLoad(&w_block_count); }
+}
+
+// The block jobs' node quads' nodes (`wg.y` a job; a lane a node), each
+// quad's four at node slots from `FEATURE_LATTICE_AT + 4 q`.
+@compute @workgroup_size(64)
+fn feature_block_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let n = wg.x * 64u + li;
+    if n >= 4u * feature_blocks[FEATURE_COUNTS_AT + wg.y] { return; }
+    let q = wg.y * BLOCK_READS + (n >> 2u);
+    let origin = vec2<i32>(bitcast<i32>(feature_blocks[FEATURE_QUADS_AT + 2u * q]), bitcast<i32>(feature_blocks[FEATURE_QUADS_AT + 2u * q + 1u]));
+    generation_grid_nodes(FEATURE_LATTICE_AT + 4u * q, 2u, block_job(wg.y).face, origin, 2u, 0u, n & 3u);
+}
+
+// The block jobs' raw candidates (a workgroup a job, a lane a square) into
+// their pool slots.
+@compute @workgroup_size(64)
+fn feature_block_candidates_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = block_job(wg.x);
+    let word = feature_candidate(wg.x, li * 5u, job.face, job.spawn, block_square(job, li));
+    let at = job.slot * BLOCK_WORDS + 2u * li;
+    feature_blocks[at] = word.x;
+    feature_blocks[at + 1u] = word.y;
+}
+
+// Spawn `s`'s raw candidate word pair on square `g` of computed footprint
+// `t` (one of its squares, `tile_square`): from the block holding it, as
+// the footprint's block table places it (per spawn: its first block, the
+// blocks a row, where its slots start).
+fn tile_block_word(t: u32, s: u32, g: vec2<i32>) -> vec2<u32> {
+    let at = FEATURE_TILES_AT + 4u * (t * MAX_SPAWNS + s);
+    let b = (g >> vec2<u32>(3u)) - vec2<i32>(bitcast<i32>(feature_blocks[at]), bitcast<i32>(feature_blocks[at + 1u]));
+    let slot = feature_blocks[FEATURE_SLOTS_AT + feature_blocks[at + 3u] + u32(b.y) * feature_blocks[at + 2u] + u32(b.x)];
+    let w = slot * BLOCK_WORDS + 2u * u32((g.y & 7) * 8 + (g.x & 7));
+    return vec2<u32>(feature_blocks[w], feature_blocks[w + 1u]);
+}
+
+// Spawn `s`'s raw candidate on square `g` for computed footprint `t`
+// (none past its squares).
+fn tile_block_candidate(t: u32, job: TileJob, s: u32, g: vec2<i32>) -> Placed {
+    if tile_square(job, s, g) < 0 { return Placed(); }
+    return placed_of(s, g, tile_block_word(t, s, g));
+}
+
+// Each computed footprint's near spawns' candidates (`wg.y` a footprint, a
+// lane a square) into its pool slot: their raw candidates from the blocks,
+// excluded where it reaches the footprint and an earlier spawn's raw
+// candidate meets its footprint, else placed (the footprint's ranges
+// raised over it). (`tile_columns_main` raised them over its far forms'
+// canopies.)
+@compute @workgroup_size(64)
+fn tile_features_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let t = wg.y;
+    let job = tile_jobs[t];
+    let near = feature_near(job.level);
+    let n = wg.x * 64u + li;
+    // The square's spawn (squares go spawn by spawn).
+    var s = 0u;
+    var grid = vec3<i32>(0);
+    for (; s < near; s++) {
+        grid = feature_grid(job.level, s);
+        if n < u32(grid.x + grid.y * grid.y) { break; }
+    }
+    if s >= near { return; }
+    let local = i32(n) - grid.x;
+    let sp = i32(spawn_word(s, 0u));
+    let first = vec2<i32>(job.cx * 64, job.cy * 64) << vec2<u32>(job.level);
+    let g = vec2<i32>(div_floor(first.x - grid.z, sp), div_floor(first.y - grid.z, sp)) + vec2<i32>(local % grid.y, local / grid.y);
+    var word = tile_block_word(t, s, g);
+    let p = placed_of(s, g, word);
+    let last = first + (64 << job.level) - 1;
+    if placed_meets(p, first, last) {
+        let flo = p.anchor.xz - p.reach;
+        let fhi = p.anchor.xz + p.reach;
+        var excluded = false;
+        for (var e = 0u; e < s && !excluded; e++) {
+            let ge = reaching_squares(e, flo, fhi);
+            for (var gy = ge.y; gy <= ge.w && !excluded; gy++) {
+                for (var gx = ge.x; gx <= ge.z && !excluded; gx++) {
+                    excluded = placed_meets(tile_block_candidate(t, job, e, vec2<i32>(gx, gy)), flo, fhi);
+                }
+            }
+        }
+        if excluded {
+            word.x |= 1u << 28u;
+        } else {
+            let lo = p.anchor.y + bitcast<i32>(stamp_word(p.stamp, 1u));
+            let hi = ((lo + i32(stamp_word(p.stamp, 5u)) - 1) >> job.level) + 1;
+            // Each quarter it reaches.
+            for (var q = 0u; q < 4u; q++) {
+                let quarter = first + (vec2<i32>(i32(q & 1u), i32(q >> 1u)) << vec2<u32>(job.level + 5u));
+                if !placed_meets(p, quarter, quarter + (32 << job.level) - 1) { continue; }
+                atomicMin(&tile_ranges[t * RANGE_WORDS + q * 4u], lo >> job.level);
+                atomicMax(&tile_ranges[t * RANGE_WORDS + q * 4u + 1u], hi);
+                atomicMin(&tile_ranges[t * RANGE_WORDS + q * 4u + 2u], lo >> job.level);
+            }
+        }
+    }
+    tile_placements[job.slot * features[4] + n] = word;
+}
+
+// Whether features changed cells of column `(x, y)` of chunk job `n`.
+fn column_featured(n: u32, x: u32, y: u32) -> bool {
+    let c = y * 64u + x;
+    return ((atomicLoad(&job_features[n * FEATURE_JOB_WORDS + (c >> 5u)]) >> (c & 31u)) & 1u) != 0u;
 }

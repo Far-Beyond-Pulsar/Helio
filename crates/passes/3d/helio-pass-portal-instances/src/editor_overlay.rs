@@ -350,7 +350,7 @@ impl RenderPass for PortalEditorOverlayPass {
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         static VIEWS: &[DebugViewDescriptor] = &[DebugViewDescriptor {
             name: "Portal Diagnostics",
-            debug_mode: 35,
+            debug_mode: 53,
             description: "Portal link labels, checker overlays, and pairing diagnostics",
         }];
         VIEWS

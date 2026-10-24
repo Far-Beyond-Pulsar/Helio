@@ -80,6 +80,10 @@ fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
 const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
 const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
 const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
+// Two-sided foliage: light from behind the surface passes through it,
+// tinted by gbuf_sss.rgb (the transmitted share of the light, by colour;
+// what lies between the light and the surface is the light's visibility).
+const SURFACE_FLAG_TWO_SIDED: u32 = 1u << 3u;
 
 // Highest mip index in the pre-filtered reflection chain (roughness 1.0 maps here).
 const ENV_MAX_LOD: f32 = 8.0;

@@ -20,10 +20,7 @@ pub fn warm_up_cathedral(
     for _ in 0..4 {
         crate::v3_demo_common::flush_scene_db(scene_db, queue);
         if let Some(acceleration) = acceleration {
-            renderer.set_ray_tracing_frame_with_transmission(
-                acceleration.tlas(),
-                acceleration.transmission(),
-            );
+            renderer.set_ray_tracing_frame(acceleration.frame());
         }
         renderer
             .render(camera, target)
@@ -144,7 +141,7 @@ pub fn run_scene_animated(
         t
     });
     pollster::block_on(async {
-        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        let mut instance_desc = helio_core::wgpu_instance_descriptor().with_env();
         if std::env::var_os("HLFS_VULKAN_DEBUG_MARKERS").is_some() {
             instance_desc.flags |= wgpu::InstanceFlags::DEBUG;
         }
@@ -166,9 +163,10 @@ pub fn run_scene_animated(
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let (width, height) = match std::env::var("HLFS_RESOLUTION").as_deref() {
+            Ok("1080p") => (1920, 1080),
             Ok("1440p") => (2560, 1440),
             Ok("4k") => (3840, 2160),
-            Ok(other) => panic!("unsupported HLFS_RESOLUTION: {other}; use 1440p or 4k"),
+            Ok(other) => panic!("unsupported HLFS_RESOLUTION: {other}; use 1080p, 1440p or 4k"),
             Err(_) => (640, 360),
         };
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -204,13 +202,19 @@ pub fn run_scene_animated(
         if ray_traced {
             enable_ray_shadows(&mut scene_db.world);
         }
-        let mut acceleration = helio_default_passes::ray_tracing::SceneDbRayTracing::new(
-            device.clone(),
-            queue.clone(),
-        );
-        let mut scene_handle = crate::v3_demo_common::scene_db_handle(&scene_db);
-        let architectural_store =
-            architectural_materials::load(&device, &queue, &mut scene_db.world);
+        // Ray-traced shadows need every caster; without them the scene's
+        // meshes are still published for the GI probes to trace, partially
+        // (`HELIO_SCENE_RAYS=off`: none, for A/B).
+        let scene_rays = ray_traced
+            || (device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+                && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"));
+        let mut acceleration = if ray_traced {
+            helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
+        } else {
+            helio_default_passes::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone())
+        };
+        let mut scene_handle=crate::v3_demo_common::scene_db_handle(&scene_db);
+        let architectural_store = architectural_materials::load(&device, &queue, &mut scene_db.world);
         let has_architectural_textures = architectural_store.is_some();
         if let Some(store) = architectural_store {
             scene_handle = scene_handle.with_texture_store(store).unwrap();
@@ -282,7 +286,7 @@ pub fn run_scene_animated(
         renderer.set_frame_delta_override(Some(1.0 / 60.0));
         // These capture scenes author geometry once. Keep the prepared BLAS
         // and TLAS while the camera moves; only per-frame lights change.
-        if ray_traced {
+        if scene_rays {
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             acceleration
                 .prepare(&scene_db.world)
@@ -357,18 +361,10 @@ pub fn run_scene_animated(
                 );
         }
         if name.starts_with("cathedral") {
-            let camera = view_override(width as f32 / height as f32).unwrap_or_else(|| {
-                camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32)
-            });
-            warm_up_cathedral(
-                &scene_db,
-                &mut renderer,
-                ray_traced.then_some(&acceleration),
-                &device,
-                &queue,
-                &camera,
-                &view,
-            );
+            let camera = view_override(width as f32 / height as f32)
+                .unwrap_or_else(|| camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32));
+            warm_up_cathedral(&scene_db, &mut renderer,
+                scene_rays.then_some(&acceleration), &device, &queue, &camera, &view);
         }
         let mut frame_times = Vec::new();
         let graph_timings = std::env::var_os("HLFS_GRAPH_TIMINGS").is_some();
@@ -444,6 +440,17 @@ pub fn run_scene_animated(
             (query, resolve, read)
         });
         let mut tsr_timing_csv = String::from("frame,resolve_ms,copies_ms,blit_ms,tsr_ms\n");
+        // HLFS_NO_LOCAL_EXPOSURE: post-process defaults without local exposure.
+        if std::env::var_os("HLFS_NO_LOCAL_EXPOSURE").is_some() {
+            let blend = renderer
+                .find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+                .expect("post-process resolver");
+            let mut settings = blend.defaults().clone();
+            settings.local_exposure_highlight_contrast = 1.0;
+            settings.local_exposure_shadow_contrast = 1.0;
+            settings.local_exposure_detail_strength = 1.0;
+            blend.set_defaults(&queue, &settings);
+        }
         let postprocess_timing = std::env::var_os("HLFS_POSTPROCESS_TIMINGS").map(|_| {
             let pass = renderer
                 .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
@@ -468,32 +475,23 @@ pub fn run_scene_animated(
             (query, resolve, read)
         });
         let mut postprocess_timing_csv = String::from("frame,uber_ms\n");
-        let postprocess_compute_timing =
-            std::env::var_os("HLFS_POSTPROCESS_COMPUTE_TIMINGS").map(|_| {
-                let pass = renderer
-                    .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
-                    .expect("postprocess pass");
-                assert!(
-                    pass.enable_compute_timing(&device),
-                    "GPU timestamps unavailable"
-                );
-                let query = pass.compute_timing_query().unwrap().clone();
-                let resolve = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Postprocess compute timestamps"),
-                    size: 24,
-                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                });
-                let read = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Postprocess compute timing readback"),
-                    size: 24,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                (query, resolve, read)
+        let postprocess_compute_timing = std::env::var_os("HLFS_POSTPROCESS_COMPUTE_TIMINGS").map(|_| {
+            let pass = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>().expect("postprocess pass");
+            assert!(pass.enable_compute_timing(&device), "GPU timestamps unavailable");
+            let query = pass.compute_timing_query().unwrap().clone();
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Postprocess compute timestamps"), size: 32,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
             });
-        let mut postprocess_compute_timing_csv =
-            String::from("frame,exposure_ms,bloom_ms,postprocess_compute_ms\n");
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Postprocess compute timing readback"), size: 32,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            (query, resolve, read)
+        });
+        let mut postprocess_compute_timing_csv = String::from("frame,exposure_ms,local_exposure_ms,bloom_ms,postprocess_compute_ms\n");
         let transparent_timing = std::env::var_os("HLFS_TRANSPARENT_TIMINGS").map(|_| {
             let pass = renderer
                 .find_pass_mut::<helio_pass_transparent::TransparentPass>()
@@ -556,14 +554,9 @@ pub fn run_scene_animated(
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             let after_flush = std::time::Instant::now();
-            if ray_traced {
-                acceleration
-                    .prepare(&scene_db.world)
-                    .expect("animated capture geometry");
-                renderer.set_ray_tracing_frame_with_transmission(
-                    acceleration.tlas(),
-                    acceleration.transmission(),
-                );
+            if scene_rays {
+                acceleration.prepare(&scene_db.world).expect("animated capture geometry");
+                renderer.set_ray_tracing_frame(acceleration.frame());
             }
             let after_rt = std::time::Instant::now();
             renderer.render(&camera, &view).expect("cathedral frame");
@@ -799,8 +792,8 @@ pub fn run_scene_animated(
             }
             if let Some((query, resolve, read)) = &postprocess_compute_timing {
                 let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.resolve_query_set(query, 0..3, resolve, 0);
-                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 24);
+                encoder.resolve_query_set(query, 0..4, resolve, 0);
+                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 32);
                 queue.submit([encoder.finish()]);
                 let (tx, rx) = std::sync::mpsc::channel();
                 read.slice(..)
@@ -809,14 +802,9 @@ pub fn run_scene_animated(
                 rx.recv().unwrap().unwrap();
                 let bytes = read.slice(..).get_mapped_range().unwrap();
                 let ticks: &[u64] = bytemuck::cast_slice(&bytes);
-                let exposure =
-                    (ticks[1] - ticks[0]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
-                let bloom =
-                    (ticks[2] - ticks[1]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
-                postprocess_compute_timing_csv.push_str(&format!(
-                    "{frame},{exposure},{bloom},{}\n",
-                    exposure + bloom
-                ));
+                let ms = |a: usize, b: usize| (ticks[b] - ticks[a]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                let (exposure, local, bloom) = (ms(0, 1), ms(1, 2), ms(2, 3));
+                postprocess_compute_timing_csv.push_str(&format!("{frame},{exposure},{local},{bloom},{}\n", exposure + local + bloom));
                 drop(bytes);
                 read.unmap();
             }

@@ -8,9 +8,7 @@
 //!
 //! No sky atmosphere — the scene relies entirely on the interplay of the
 //! chandelier warm-white lights, the cool-coloured stained-glass fills, and
-//! a very dim stone-cold ambient to create a moody sacred atmosphere. The
-//! radiance cascades GI system bounces chandelier light deep into the side
-//! aisles and onto the vaulted ceiling.
+//! a very dim stone-cold ambient to create a moody sacred atmosphere.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -32,7 +30,7 @@ use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
     scene_db_handle, spawn_indoor_cathedral_sky, spawn_light, spawn_material, spawn_mesh,
-    spawn_object, update_light,
+    spawn_object, update_light, SceneRays, SurfaceCapture,
 };
 
 use std::io::{self, BufRead};
@@ -155,6 +153,9 @@ struct AppState {
     chandelier_light_ids: Vec<Entity>,
     candle_light_ids: Vec<Entity>,
     start_time: std::time::Instant,
+    /// The scene's meshes for ray queries (the GI probes trace them).
+    rays: SceneRays,
+    capture: SurfaceCapture,
 }
 
 impl App {
@@ -180,9 +181,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..helio_core::wgpu_instance_descriptor()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -206,6 +206,7 @@ impl ApplicationHandler for App {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
+        let capture = SurfaceCapture::from_env();
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -217,7 +218,7 @@ impl ApplicationHandler for App {
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: capture.usage(),
                 format,
                 width: size.width,
                 height: size.height,
@@ -570,6 +571,10 @@ impl ApplicationHandler for App {
             .collect();
 
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
+        // `HELIO_DEBUG_MODE=<mode>`: one of the renderer's debug views.
+        if let Some(mode) = std::env::var("HELIO_DEBUG_MODE").ok().and_then(|v| v.parse().ok()) {
+            renderer.set_debug_mode(mode);
+        }
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // Bake static/stationary lights so they're excluded from the real-time
@@ -601,6 +606,7 @@ impl ApplicationHandler for App {
             });
         }
 
+        let rays = SceneRays::new(&device, &queue);
         self.state = Some(AppState {
             window,
             surface,
@@ -632,7 +638,7 @@ impl ApplicationHandler for App {
             _chandelier_rings,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
-            cam_yaw: std::f32::consts::PI,
+            cam_yaw: 0.0,
             cam_pitch: -0.05,
             keys: HashSet::new(),
             cursor_grabbed: false,
@@ -643,6 +649,8 @@ impl ApplicationHandler for App {
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
+            rays,
+            capture,
         });
     }
 
@@ -773,7 +781,7 @@ impl ApplicationHandler for App {
                 state.surface.configure(
                     &state.device,
                     &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage: state.capture.usage(),
                         format: state.surface_format,
                         width: s.width,
                         height: s.height,
@@ -905,6 +913,7 @@ impl AppState {
         // (confirmed via ObjectBatchPass reporting instance_count=0/
         // draw_count=0 even with valid StaticObjectComponent rows present).
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
+        self.rays.publish(&self.scene_db.world, &mut renderer);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
@@ -915,6 +924,9 @@ impl AppState {
 
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
+        }
+        if self.capture.frame(&self.device, &self.queue, &output.texture) {
+            std::process::exit(0);
         }
         self.queue.present(output);
     }

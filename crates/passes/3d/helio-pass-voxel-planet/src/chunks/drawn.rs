@@ -4,9 +4,10 @@
 //!
 //! The table holds an entry for every drawn node and every ancestor of
 //! one, key `(face | level << 8, cx, cy, cz)`, value `(slot, state, kind |
-//! lo << 8, hi)`: the node's chunk slot (-1: none), whether a pixel shows
-//! it (`choice`), what it holds (`KIND_*`; an ancestor's is its drawn
-//! self's if it is drawn too, else `KIND_ANCESTOR`) and its content: the
+//! under | lo << 8, hi)`: the node's chunk slot (-1: none), whether a pixel
+//! shows it (`choice`), what it holds (`KIND_*`; an ancestor's is its drawn
+//! self's if it is drawn too, else `KIND_ANCESTOR`), whether a strict
+//! ancestor is drawn (`UNDER_DRAWN`) and its content: the
 //! box of its cells anything non-empty may occupy, `x | y << 7 | z << 14`
 //! for its low and high corners ([lo, hi); lo > hi: nothing). A drawn
 //! Mixed chunk's content is its occupied layers over its footprint, a
@@ -54,6 +55,11 @@ pub const KIND_MIXED: i32 = 0;
 pub const KIND_SOLID: i32 = 1;
 pub const KIND_BURIED: i32 = 2;
 pub const KIND_ANCESTOR: i32 = 3;
+/// A bit of an entry's kind word: a strict ancestor of the node is drawn
+/// (during a switch, a coarse node fading over its finer side). Only then
+/// can a search climbing from an ancestor entry meet a node shown over it
+/// (`place_at`), so the draw climbs only then.
+pub const UNDER_DRAWN: i32 = 16;
 
 /// Frames a switch between levels fades over.
 pub const FADE_FRAMES: u64 = 16;
@@ -413,6 +419,7 @@ impl DrawnSet {
                 self.remove(c.slot);
             }
             self.touched.push(key);
+            self.touch_below(key);
         }
     }
 
@@ -424,6 +431,22 @@ impl DrawnSet {
         }
         self.drawn.insert(key, drawn);
         self.touched.push(key);
+        self.touch_below(key);
+    }
+
+    /// Touch the entries under `key` (whether a strict ancestor is drawn,
+    /// `UNDER_DRAWN`, changed for them): through entries, as each entry's
+    /// parent has one.
+    fn touch_below(&mut self, key: NodeKey) {
+        let mut down = vec![key];
+        while let Some(d) = down.pop() {
+            for (_, c) in children(d) {
+                if self.entries.contains_key(&c) {
+                    self.touched.push(c);
+                    down.push(c);
+                }
+            }
+        }
     }
 
     /// Recompute the touched entries, finest first, and their ancestors
@@ -443,9 +466,10 @@ impl DrawnSet {
                     (d, b) => {
                         let content = d.map_or(Content::NOTHING, |d| d.content()).union(b.unwrap_or(Content::NOTHING));
                         let (lo, hi) = content.packed();
+                        let under = if self.ancestors(key).any(|a| self.drawn.contains_key(&a)) { UNDER_DRAWN } else { 0 };
                         let value = match d {
-                            Some(d) => [d.chunk.map_or(-1, |c| c.slot as i32), self.state_of(key), d.kind_code() | (lo << 8), hi],
-                            None => [-1, 0, KIND_ANCESTOR | (lo << 8), hi],
+                            Some(d) => [d.chunk.map_or(-1, |c| c.slot as i32), self.state_of(key), d.kind_code() | under | (lo << 8), hi],
+                            None => [-1, 0, KIND_ANCESTOR | under | (lo << 8), hi],
                         };
                         Some(Entry { content, value })
                     }
@@ -594,6 +618,7 @@ mod tests {
     fn search(set: &DrawnSet, p: [i32; 3], from: u32, r: i32, frame: u64) -> Option<Option<NodeKey>> {
         let at = |l: u32| node(l, p[0] >> l, p[1] >> l, p[2] >> l);
         let state = |l: u32| set.find(at(l).table_key()).map(|v| v[1]);
+        let under = |l: u32| set.find(at(l).table_key()).is_some_and(|v| v[2] & UNDER_DRAWN != 0);
         let mut level = from;
         // Up to an entry.
         while state(level).is_none() {
@@ -603,8 +628,9 @@ mod tests {
             level += 1;
         }
         // An ancestor found climbing: a coarser node fading in over it may
-        // show here (its finer side has no node over this point).
-        if state(level) == Some(0) {
+        // show here (its finer side has no node over this point), when one
+        // over it is drawn.
+        if state(level) == Some(0) && under(level) {
             for l in level + 1..=set.top_level {
                 match state(l) {
                     Some(0) => continue,
@@ -668,6 +694,11 @@ mod tests {
                         // Nodes shown over p by their state.
                         let shown: Vec<NodeKey> = set.drawn.keys().filter(|k| (0..3).all(|a| [p[0], p[1], p[2]][a] >> k.level == [k.cx, k.cy, k.cz][a]) && choice(set.find(k.table_key()).unwrap()[1], r, frame) == 1).copied().collect();
                         assert!(shown.len() <= 1, "round {round}: {shown:?}");
+                        // Each entry knows whether a strict ancestor is drawn.
+                        for key in set.entries.keys() {
+                            let under = set.find(key.table_key()).unwrap()[2] & UNDER_DRAWN != 0;
+                            assert_eq!(under, set.ancestors(*key).any(|a| set.drawn.contains_key(&a)), "round {round} {key:?}");
+                        }
                         for from in 0..=3 {
                             let chain: Vec<_> = (0..=3u32).map(|l| { let k = node(l, p[0] >> l, p[1] >> l, p[2] >> l); (l, set.find(k.table_key()).map(|v| (v[1], choice(v[1], r, frame))), set.fades.get(&k).map(|f| (f.start, f.incoming, f.coarse)), set.drawn.get(&k).map(|d| d.kind)) }).collect();
                             assert_eq!(search(&set, p, from, r, frame), Some(shown.first().copied()), "round {round} frame {frame} r {r} at {p:?} from {from}: {chain:?}");

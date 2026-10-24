@@ -31,6 +31,9 @@ struct VertexOutput {
     material_id:       u32,
     lightmap_uv:       vec2<f32>,
     prev_clip_position: vec4<f32>,
+    // Moves by itself this frame (`compute_velocity`: the classic stage's
+    // rule, its transform or its coordinate space changed).
+    moving:            u32,
 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
@@ -70,6 +73,10 @@ struct VertexOutput {
 // derivatives, so the sampling call is rewritten to `textureSampleGrad`.
 var<private> vg_duv_dx: vec2<f32>;
 var<private> vg_duv_dy: vec2<f32>;
+// The same for the geometric normal (`specular_aa.wgsl`'s `dpdx(n)` /
+// `dpdy(n)`, rewritten to these: its turn across the pixel).
+var<private> vg_dn_dx: vec3<f32>;
+var<private> vg_dn_dy: vec3<f32>;
 
 fn vg_slot_grad(slot: MaterialTextureSlot, d: vec2<f32>) -> vec2<f32> {
     // The linear part of `select_uv` (scale, rotation); the offset drops out.
@@ -162,12 +169,20 @@ fn vg_shade(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     input.clip_position = vec4<f32>(centre, textureLoad(resolved_depth, ipx, 0).x, 1.0);
     input.world_position = w0 * b.x + w1 * b.y + w2 * b.z;
     input.world_normal = normalize(normal_mat * (a0.normal * b.x + a1.normal * b.y + a2.normal * b.z));
+    let n_c = normalize(normal_mat * (a0.normal * bc.x + a1.normal * bc.y + a2.normal * bc.z));
+    vg_dn_dx = normalize(normal_mat * (a0.normal * bx.x + a1.normal * bx.y + a2.normal * bx.z)) - n_c;
+    vg_dn_dy = normalize(normal_mat * (a0.normal * by.x + a1.normal * by.y + a2.normal * by.z)) - n_c;
     input.world_tangent = normalize(model_mat3 * (a0.tangent * b.x + a1.tangent * b.y + a2.tangent * b.z));
     input.bitangent_sign = a0.bitangent_sign;
     input.tex_coords = a0.uv0 * b.x + a1.uv0 * b.y + a2.uv0 * b.z;
     input.material_id = static_objects[row_word + VGS_OBJ_MATERIAL_SLOT];
     input.lightmap_uv = vec2<f32>(-1.0, -1.0);
     input.prev_clip_position = pc0 * b.x + pc1 * b.y + pc2 * b.z;
+    let moved = any(prev_model[0] != transform[0]) || any(prev_model[1] != transform[1])
+        || any(prev_model[2] != transform[2]) || any(prev_model[3] != transform[3])
+        || any(space_prev[0] != space[0]) || any(space_prev[1] != space[1])
+        || any(space_prev[2] != space[2]) || any(space_prev[3] != space[3]);
+    input.moving = select(0u, 1u, moved);
 
     let material = materials[input.material_id];
     let material_tex = material_texture_data(material, input.material_id);

@@ -677,7 +677,7 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "pre_aa", "render_environment", "ray_transmission", "static_shadow_atlas", "shadow_transmittance"]
+        &["gbuffer", "pre_aa", "render_environment", "ray_transmission", "static_shadow_atlas", "shadow_transmittance", helio_pass_gi::GI_IRRADIANCE]
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let output: &'a wgpu::TextureView =
@@ -903,6 +903,7 @@ impl RenderPass for HlfsPass {
                 .registry
                 .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("baked_lightmap_sampler"))
                 .unwrap_or(&f.linear_sampler),
+            gi_irradiance: ctx.registry.buffer_binding(helio_pass_gi::GI_IRRADIANCE).unwrap_or(&f.empty_gi),
         };
         self.external.update(
             ctx.device,

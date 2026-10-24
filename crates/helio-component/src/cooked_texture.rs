@@ -23,8 +23,9 @@
 //! linear light. A roughness, occlusion or normal map holds numbers, not light:
 //! decoding it as sRGB bends every value, and averaging it as light darkens it.
 //! [`TextureUse`] names which one a texture is, and it picks the GPU format's
-//! colour space and the mip filter. A normal map's mips are also renormalised,
-//! because the average of two unit vectors is shorter than one.
+//! colour space and the mip filter ([`helio_mats::texture_mips`]). A normal
+//! map's mips keep the length of their mean normal in alpha, which shaders
+//! turn into roughness (specular anti-aliasing).
 //!
 //! # Container
 //!
@@ -35,6 +36,7 @@
 //! checks every length against what the format and dimensions require, so a
 //! damaged or outdated file is refused instead of uploaded.
 
+use helio_mats::texture_mips::{mip_chain, TexelKind};
 use intel_tex_2::{bc7, RgbaSurface};
 
 const MAGIC: [u8; 4] = *b"PTX2";
@@ -42,7 +44,7 @@ const HEADER_LEN: usize = 24;
 
 /// The version of what [`cook`] produces. Part of the derived-data key: bump
 /// it when a change here alters the bytes for the same input.
-pub const COOK_VERSION: u32 = 2;
+pub const COOK_VERSION: u32 = 3;
 
 /// How a cooked texture's texels are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -100,8 +102,9 @@ pub enum TextureUse {
     /// Numbers in the channels: roughness, metallic, occlusion, opacity.
     /// Stored linear, mips averaged as plain numbers.
     Data,
-    /// A tangent-space normal map. Stored linear; each mip level is
-    /// renormalised after averaging.
+    /// A tangent-space normal map. Stored linear; each mip level's
+    /// direction is made unit again, and its alpha holds the mean normal's
+    /// length.
     Normal,
 }
 
@@ -135,7 +138,16 @@ impl TextureUse {
 
     /// Whether the GPU should decode the texels as sRGB on read.
     pub fn is_srgb(self) -> bool {
-        self == TextureUse::Color
+        self.texels().is_srgb()
+    }
+
+    /// How this use's mips are filtered.
+    pub fn texels(self) -> TexelKind {
+        match self {
+            TextureUse::Color => TexelKind::Colour,
+            TextureUse::Data => TexelKind::Data,
+            TextureUse::Normal => TexelKind::Normal,
+        }
     }
 
     /// The use that wins when one texture feeds several: colour keeps the
@@ -160,10 +172,7 @@ pub fn wgpu_format(format: CookFormat, usage: TextureUse) -> wgpu::TextureFormat
     }
 }
 
-/// The number of levels in a full mip chain for a `width` x `height` image.
-pub fn mip_level_count(width: u32, height: u32) -> u32 {
-    32 - width.max(height).max(1).leading_zeros()
-}
+pub use helio_mats::texture_mips::mip_level_count;
 
 /// Level `level`'s extent in texels.
 fn level_extent(width: u32, height: u32, level: u32) -> (u32, u32) {
@@ -325,135 +334,6 @@ impl CookedTexture {
     }
 }
 
-/// `srgb8 -> linear` for each byte value.
-fn srgb_to_linear_table() -> [f32; 256] {
-    let mut table = [0.0; 256];
-    for (value, entry) in table.iter_mut().enumerate() {
-        let c = value as f32 / 255.0;
-        *entry = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-    }
-    table
-}
-
-/// Linear `[0, 1]` to an sRGB byte, through a table fine enough that the
-/// quantisation sits under one output step.
-struct LinearToSrgb(Vec<u8>);
-
-impl LinearToSrgb {
-    const STEPS: usize = 16384;
-
-    fn new() -> Self {
-        Self(
-            (0..=Self::STEPS)
-                .map(|i| {
-                    let l = i as f32 / Self::STEPS as f32;
-                    let c = if l <= 0.003_130_8 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
-                    (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8
-                })
-                .collect(),
-        )
-    }
-
-    fn encode(&self, linear: f32) -> u8 {
-        self.0[(linear.clamp(0.0, 1.0) * Self::STEPS as f32 + 0.5) as usize]
-    }
-}
-
-/// How one mip level is made from the one above.
-struct Filter {
-    usage: TextureUse,
-    to_linear: [f32; 256],
-    to_srgb: LinearToSrgb,
-}
-
-impl Filter {
-    fn new(usage: TextureUse) -> Self {
-        Self {
-            usage,
-            to_linear: srgb_to_linear_table(),
-            to_srgb: LinearToSrgb::new(),
-        }
-    }
-
-    /// The next level: each texel is the average of a 2 x 2 box.
-    ///
-    /// - colour: the average is taken in linear light (alpha is stored linear
-    ///   and averaged as is);
-    /// - data: the channels are numbers, so they are averaged as numbers;
-    /// - normal: the three channels are a vector in `[-1, 1]`; the average of
-    ///   the four is renormalised, because the average of unit vectors is
-    ///   shorter than one and would flatten the surface with distance.
-    ///
-    /// An odd source edge reuses its last row or column.
-    fn downsample(&self, source: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
-        let (new_width, new_height) = ((width / 2).max(1), (height / 2).max(1));
-        let mut out = Vec::with_capacity(new_width as usize * new_height as usize * 4);
-        for y in 0..new_height {
-            let (y0, y1) = ((2 * y).min(height - 1), (2 * y + 1).min(height - 1));
-            for x in 0..new_width {
-                let (x0, x1) = ((2 * x).min(width - 1), (2 * x + 1).min(width - 1));
-                let taps = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)];
-                let texel = |tx: u32, ty: u32| -> &[u8] {
-                    let at = (ty as usize * width as usize + tx as usize) * 4;
-                    &source[at..at + 4]
-                };
-                match self.usage {
-                    TextureUse::Color => {
-                        let mut sum = [0.0f32; 4];
-                        for (tx, ty) in taps {
-                            let t = texel(tx, ty);
-                            for channel in 0..3 {
-                                sum[channel] += self.to_linear[t[channel] as usize];
-                            }
-                            sum[3] += f32::from(t[3]) / 255.0;
-                        }
-                        for channel in 0..3 {
-                            out.push(self.to_srgb.encode(sum[channel] * 0.25));
-                        }
-                        out.push((sum[3] * 0.25 * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
-                    }
-                    TextureUse::Data => {
-                        let mut sum = [0u32; 4];
-                        for (tx, ty) in taps {
-                            let t = texel(tx, ty);
-                            for channel in 0..4 {
-                                sum[channel] += u32::from(t[channel]);
-                            }
-                        }
-                        for channel in 0..4 {
-                            out.push(((sum[channel] + 2) / 4) as u8);
-                        }
-                    }
-                    TextureUse::Normal => {
-                        let mut sum = [0.0f32; 3];
-                        let mut alpha = 0u32;
-                        for (tx, ty) in taps {
-                            let t = texel(tx, ty);
-                            for channel in 0..3 {
-                                sum[channel] += f32::from(t[channel]) / 255.0 * 2.0 - 1.0;
-                            }
-                            alpha += u32::from(t[3]);
-                        }
-                        let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
-                        // Four vectors that cancel leave nothing to normalise:
-                        // fall back to straight up.
-                        let unit = if length > 1.0e-4 {
-                            [sum[0] / length, sum[1] / length, sum[2] / length]
-                        } else {
-                            [0.0, 0.0, 1.0]
-                        };
-                        for component in unit {
-                            out.push(((component * 0.5 + 0.5) * 255.0 + 0.5).clamp(0.0, 255.0) as u8);
-                        }
-                        out.push(((alpha + 2) / 4) as u8);
-                    }
-                }
-            }
-        }
-        (new_width, new_height, out)
-    }
-}
-
 /// `rgba` (`width` x `height`) padded to a multiple of 4 in both directions by
 /// repeating its last row and column, so a partial block encodes cleanly.
 fn pad_to_blocks(rgba: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) {
@@ -510,20 +390,15 @@ pub fn cook_as(
     if format == CookFormat::Bc7 && (width % 4 != 0 || height % 4 != 0) {
         return Err("BC7 needs a width and height divisible by 4".into());
     }
-    let filter = Filter::new(usage);
-    let opaque = rgba.chunks_exact(4).all(|texel| texel[3] == 255);
-
-    let mut sources: Vec<(u32, u32, Vec<u8>)> = vec![(width, height, rgba.to_vec())];
-    while sources.len() < mip_level_count(width, height) as usize {
-        let (w, h, last) = sources.last().expect("at least the base level");
-        let next = filter.downsample(last, *w, *h);
-        sources.push(next);
-    }
-    let levels = sources
+    let levels = mip_chain(rgba, width, height, usage.texels())
         .into_iter()
-        .map(|(w, h, data)| match format {
-            CookFormat::Rgba8 => data,
-            CookFormat::Bc7 => compress_bc7(&data, w, h, opaque),
+        .map(|level| match format {
+            CookFormat::Rgba8 => level.texels,
+            CookFormat::Bc7 => {
+                // A normal map's mips are opaque only where its normals agree.
+                let opaque = level.texels.chunks_exact(4).all(|texel| texel[3] == 255);
+                compress_bc7(&level.texels, level.width, level.height, opaque)
+            }
         })
         .collect();
     Ok(CookedTexture::from_levels(format, usage, width, height, levels))
@@ -579,56 +454,20 @@ mod tests {
         assert!(bc7.byte_size_without_top_mips(1) < bc7.byte_size());
     }
 
-    fn checker_2x2() -> Vec<u8> {
-        let mut checker = Vec::new();
-        for i in 0..4 {
-            checker.extend_from_slice(if i % 2 == 0 { &[0, 0, 0, 255] } else { &[255, 255, 255, 255] });
+    #[test]
+    fn levels_are_the_shared_mip_chain_filtered_as_their_use() {
+        // A normal map whose texels lean four ways: its mips carry the
+        // spread in alpha, and colour, data and normal filter differently.
+        let texels: Vec<u8> = (0..64).flat_map(|i| [[230, 128, 230, 255], [25, 128, 230, 255]][i % 2]).collect();
+        for usage in TextureUse::ALL {
+            let cooked = cook_as(&texels, 8, 8, CookFormat::Rgba8, usage).unwrap();
+            let chain = mip_chain(&texels, 8, 8, usage.texels());
+            for level in 0..cooked.mip_count() {
+                assert_eq!(cooked.mip(level), chain[level as usize].texels.as_slice(), "{usage:?} level {level}");
+            }
         }
-        checker
-    }
-
-    #[test]
-    fn colour_is_averaged_in_linear_light() {
-        // Half black, half white texels: the average is half the *light*, which
-        // is about 188 as an sRGB byte, not 127.
-        let cooked = cook(&checker_2x2(), 2, 2, CookFormat::Rgba8).unwrap();
-        let top = cooked.mip(1);
-        assert!((186..=190).contains(&top[0]), "linear-light average, got {}", top[0]);
-        assert_eq!(top[3], 255);
-    }
-
-    #[test]
-    fn data_is_averaged_as_plain_numbers() {
-        // A roughness map: half 0, half 255 averages to 128, not to a light value.
-        let cooked = cook_as(&checker_2x2(), 2, 2, CookFormat::Rgba8, TextureUse::Data).unwrap();
-        let top = cooked.mip(1);
-        assert!((127..=128).contains(&top[0]), "plain average, got {}", top[0]);
-        assert_eq!(cooked.usage, TextureUse::Data);
-    }
-
-    #[test]
-    fn normals_stay_unit_length_down_the_chain() {
-        // Four texels tilted four ways around straight up. Their plain average is
-        // shorter than one; the renormalised mip is a unit vector again.
-        let tilt = |x: f32, y: f32| {
-            let z = (1.0 - x * x - y * y).sqrt();
-            [
-                ((x * 0.5 + 0.5) * 255.0 + 0.5) as u8,
-                ((y * 0.5 + 0.5) * 255.0 + 0.5) as u8,
-                ((z * 0.5 + 0.5) * 255.0 + 0.5) as u8,
-                255,
-            ]
-        };
-        let mut texels = Vec::new();
-        for (x, y) in [(0.6, 0.0), (-0.6, 0.0), (0.0, 0.6), (0.0, -0.6)] {
-            texels.extend_from_slice(&tilt(x, y));
-        }
-        let cooked = cook_as(&texels, 2, 2, CookFormat::Rgba8, TextureUse::Normal).unwrap();
-        let top = cooked.mip(1);
-        let v: Vec<f32> = top[..3].iter().map(|&b| f32::from(b) / 255.0 * 2.0 - 1.0).collect();
-        let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        assert!((length - 1.0).abs() < 0.02, "renormalised, length {length}");
-        assert!(v[2] > 0.95, "the tilts cancel, leaving straight up: {v:?}");
+        let normal = cook_as(&texels, 8, 8, CookFormat::Rgba8, TextureUse::Normal).unwrap();
+        assert!(normal.mip(1)[3] < 200, "spread kept in alpha: {}", normal.mip(1)[3]);
     }
 
     #[test]

@@ -17,12 +17,11 @@
 // `wind.time_prev_time.x` itself. That looks like a parameter begging to be
 // deleted. It is not.
 //
-// Callers evaluate the whole model TWICE per vertex:
+// Callers evaluate the whole model for two times per vertex:
 //
-//     let p_now  = world + helio_wind_offset(wind, ..., wind.time_prev_time.x);
-//     let p_prev = world + helio_wind_offset(wind, ..., wind.time_prev_time.y);
-//     out.clip_position      = camera.view_proj      * vec4(p_now,  1.0);
-//     out.prev_clip_position = camera.prev_view_proj * vec4(p_prev, 1.0);
+//     let w = helio_wind_offset_pair(wind, ..., t, t - dt);
+//     out.clip_position      = camera.view_proj      * vec4(world + w.now,  1.0);
+//     out.prev_clip_position = camera.prev_view_proj * vec4(world + w.prev, 1.0);
 //
 // The second evaluation is what fills the G-buffer velocity target for animated
 // vegetation. Fold `time` back into the function and there is no way to ask for
@@ -248,208 +247,92 @@ fn helio_wind_gust(wind: Wind, world_pos: vec3<f32>, time: f32) -> f32 {
     return 1.0 + amplitude * envelope;
 }
 
-// ── Band 2: trunk / stem sway ───────────────────────────────────────────────
+// ── Bands 2-4 (sway, flutter, jitter), composed ────────────────────────────
 
-/// Low-frequency, large-amplitude sway of a whole instance.
-///
-/// The phase comes from a world-space noise sampled at `instance_origin` — the
-/// plant's root — and NOT at the shaded vertex. That distinction is the entire
-/// reason this function takes an origin rather than a position:
-///
-/// * Sampled at the origin, every vertex of one plant shares a phase (the plant
-///   moves as one object) and neighbouring plants, being close in world space,
-///   share *nearly* the same phase, so a meadow leans in coherent waves.
-/// * Sampled per vertex, each vertex — and each plant — gets an independent
-///   phase. That is what makes procedural wind read as "boiling": a field of
-///   vegetation with no correlation length, shimmering rather than blowing. It
-///   is the single most common failure of hand-rolled foliage wind, and it is
-///   not fixable downstream by reducing amplitude, only by restoring coherence.
-///
-/// `height_frac` is the vertex's normalised height along the stem, 0 at the root
-/// and 1 at the tip. Amplitude scales with its *square*, the first mode shape of
-/// a cantilever beam: a linear ramp bends the stem into a straight leaning line,
-/// whereas the square gives the curve real plants have and, more practically,
-/// keeps the base of the blade from visibly shearing out of the ground.
-///
-/// `gain` is `GpuFoliageType::wind_response.x`. `time` — see the file header.
-fn helio_wind_sway(
-    wind: Wind,
-    instance_origin: vec3<f32>,
-    time: f32,
-    height_frac: f32,
-    gain: f32,
-) -> vec3<f32> {
-    let dir = wind.direction_speed.xyz;
-    let speed = wind.direction_speed.w;
-    if gain <= 0.0 || speed <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-
-    let phase = helio_wind_noise(instance_origin.xz * HELIO_WIND_SWAY_COHERENCE) * HELIO_WIND_TAU;
-    let freq = HELIO_WIND_SWAY_HZ * helio_wind_tempo(speed);
-    let t = HELIO_WIND_TAU * freq * time + phase;
-
-    // Fundamental plus an incommensurate second mode. The 2.17 is deliberately
-    // not 2.0: an exact harmonic makes the motion strictly periodic at the
-    // fundamental, and the eye picks a one-second loop out of a field instantly.
-    let bend = sin(t) * 0.75 + sin(t * 2.17 + 1.3) * 0.25;
-    let sideways = sin(t * 0.63 + phase * 1.7) * HELIO_WIND_SWAY_LATERAL;
-
-    let amplitude = gain
-        * height_frac
-        * height_frac
-        * speed
-        * HELIO_WIND_SWAY_METRES_PER_MPS
-        * helio_wind_gust(wind, instance_origin, time);
-
-    return (dir * bend + helio_wind_side_axis(dir) * sideways) * amplitude;
+/// The wind's offset of a point (`world_pos`, `height_frac` up its plant rooted at
+/// `instance_origin`, of `seed`) now (`time_now`) and a frame ago (`time_prev`), the pair
+/// a vertex needs for its motion vector: what does not depend on time (the sway's phase,
+/// the flutter's along the stem, the jitter's per plant) is worked out once for both.
+/// Three bands, scaled by `response` (sway, flutter, jitter): the whole plant swaying
+/// with gusts, tips more; a ripple along the stem; a per-plant shiver.
+struct HelioWindPair {
+    now: vec3<f32>,
+    prev: vec3<f32>,
 }
 
-// ── Band 3: branch flutter ──────────────────────────────────────────────────
-
-/// Mid-frequency flutter, phase driven by distance along the stem.
-///
-/// Two spatial terms make the phase, and both matter:
-///
-/// * Distance from the root to this vertex, so the displacement travels *up* the
-///   stem as a wave instead of translating the whole branch rigidly. This is the
-///   band that turns a swaying stick into a whipping branch.
-/// * Distance travelled downwind (`dot(instance_origin, dir)`), so two adjacent
-///   plants are not in lockstep. A pure along-stem phase would put every plant in
-///   the world at flutter phase 0 at its own root and the field would pulse as
-///   one. Using the downwind projection rather than a per-instance hash keeps the
-///   decorrelation *continuous* — it is literally a wave crossing the canopy —
-///   where a hash would reintroduce the incoherence `helio_wind_sway` works to
-///   avoid.
-///
-/// Amplitude is linear in `height_frac`, not squared: flutter is a local
-/// oscillation of the limb rather than a bend of the whole stem, so it should
-/// still be present partway up.
-///
-/// `gain` is `GpuFoliageType::wind_response.y`. `time` — see the file header.
-fn helio_wind_flutter(
-    wind: Wind,
-    world_pos: vec3<f32>,
-    instance_origin: vec3<f32>,
-    time: f32,
-    height_frac: f32,
-    gain: f32,
-) -> vec3<f32> {
-    let dir = wind.direction_speed.xyz;
-    let speed = wind.direction_speed.w;
-    if gain <= 0.0 || speed <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-
-    let stem_dist = length(world_pos - instance_origin);
-    let phase = dot(instance_origin, dir) * HELIO_WIND_FLUTTER_DOWNWIND
-        + stem_dist * HELIO_WIND_FLUTTER_ALONG_STEM;
-    let t = HELIO_WIND_TAU * HELIO_WIND_FLUTTER_HZ * helio_wind_tempo(speed) * time + phase;
-
-    // Lateral dominates; the vertical component is what stops the flutter from
-    // looking like it is confined to a plane.
-    let side = helio_wind_side_axis(dir);
-    let up = vec3<f32>(0.0, 1.0, 0.0);
-    let amplitude = gain * height_frac * speed * HELIO_WIND_FLUTTER_METRES_PER_MPS;
-
-    return (side * sin(t) + up * (cos(t * 1.37) * 0.35)) * amplitude;
-}
-
-// ── Band 4: leaf jitter ─────────────────────────────────────────────────────
-
-/// High-frequency, low-amplitude jitter, phase from a stable per-leaf seed.
-///
-/// `seed` is `GpuBladeInstance::packed_tint_seed`'s hash (or a per-leaf seed for
-/// mesh foliage). It must be derived from the tile hash and the placement lane —
-/// never from frame state — or the jitter re-randomises every frame, which both
-/// destroys the motion vectors and makes the vegetation crawl.
-///
-/// This is the one band where per-instance independence is *wanted*: individual
-/// leaves genuinely do flick independently, the amplitude is small enough
-/// (millimetres per m/s) that no coherent silhouette depends on it, and the
-/// frequency is high enough that a correlation length would not be perceptible
-/// anyway. Contrast `helio_wind_sway`, where independence is the bug.
-///
-/// `gain` is `GpuFoliageType::wind_response.z`. `time` — see the file header.
-fn helio_wind_jitter(
-    wind: Wind,
-    seed: u32,
-    time: f32,
-    height_frac: f32,
-    gain: f32,
-) -> vec3<f32> {
-    let speed = wind.direction_speed.w;
-    if gain <= 0.0 || speed <= 0.0 {
-        return vec3<f32>(0.0);
-    }
-
-    // Three decorrelated phases from one seed. The constants are the golden-ratio
-    // and xxHash mixing words; any well-separated pair works, they exist only so
-    // the three axes do not share a phase and collapse the jitter onto a diagonal.
-    let px = helio_wind_hash_unorm(seed) * HELIO_WIND_TAU;
-    let py = helio_wind_hash_unorm(seed ^ 0x9e3779b9u) * HELIO_WIND_TAU;
-    let pz = helio_wind_hash_unorm(seed ^ 0x85ebca6bu) * HELIO_WIND_TAU;
-
-    let w = HELIO_WIND_TAU * HELIO_WIND_JITTER_HZ * helio_wind_tempo(speed) * time;
-    let amplitude = gain * height_frac * speed * HELIO_WIND_JITTER_METRES_PER_MPS;
-
-    return vec3<f32>(
-        sin(w + px),
-        sin(w * 0.83 + py) * 0.5,
-        sin(w * 1.19 + pz),
-    ) * amplitude;
-}
-
-// ── Composition ─────────────────────────────────────────────────────────────
-
-/// World-space displacement for one foliage vertex — the function foliage
-/// shaders actually call.
-///
-/// * `world_pos` — the undisplaced vertex, world space.
-/// * `instance_origin` — the plant's root, world space. Sway phase is sampled
-///   here, not at `world_pos`; see `helio_wind_sway` for why that is the
-///   difference between a field that blows and a field that boils.
-/// * `height_frac` — normalised height along the blade/branch, 0 at the root,
-///   1 at the tip. Every band scales with it, so the root is pinned exactly
-///   (offset is identically zero at 0) and the tip moves most. A blade whose
-///   root moves detaches from the terrain and reveals the ground plane under it.
-/// * `seed` — stable per-instance/per-leaf hash seed.
-/// * `response` — `GpuFoliageType::wind_response`: `[trunk, branch, leaf]` band
-///   gains. A grass blade is roughly `[0, 0.3, 1]`; a tree trunk `[1, 0.6, 0.2]`.
-/// * `time` — `wind.time_prev_time.x` for the current position,
-///   `wind.time_prev_time.y` for the previous one. **This parameter is the whole
-///   reason foliage gets correct motion vectors; see the file header before
-///   "simplifying" it away.**
-fn helio_wind_offset(
+fn helio_wind_offset_pair(
     wind: Wind,
     world_pos: vec3<f32>,
     instance_origin: vec3<f32>,
     height_frac: f32,
     seed: u32,
     response: vec3<f32>,
-    time: f32,
-) -> vec3<f32> {
-    // Clamped rather than trusted: `height_frac` usually arrives from a packed
-    // u8 or a divide by a per-type height, and an out-of-range value would be
-    // squared into a large sway amplitude and throw the vertex across the scene.
+    time_now: f32,
+    time_prev: f32,
+) -> HelioWindPair {
+    var out = HelioWindPair(vec3<f32>(0.0), vec3<f32>(0.0));
+    let dir = wind.direction_speed.xyz;
+    let speed = wind.direction_speed.w;
+    if speed <= 0.0 {
+        return out;
+    }
+    // Clamped rather than trusted: `height_frac` usually arrives from a packed u8 or a
+    // divide by a per-type height, and an out-of-range value would be squared into a
+    // large sway amplitude and throw the vertex across the scene.
     let h = clamp(height_frac, 0.0, 1.0);
+    let side = helio_wind_side_axis(dir);
+    let tempo = helio_wind_tempo(speed);
+    let times = vec2<f32>(time_now, time_prev);
 
-    var offset = helio_wind_sway(wind, instance_origin, time, h, response.x);
-    offset += helio_wind_flutter(wind, world_pos, instance_origin, time, h, response.y);
-    offset += helio_wind_jitter(wind, seed, time, h, response.z);
-
-    // Arc-length correction. The bands above displace horizontally without
-    // shortening the stem, so a strongly bent blade would be *longer* than it is
-    // and its tip would climb as it leans. Dropping the tip by the sagitta of the
-    // arc keeps the distance from the root roughly constant, which is what stops
-    // grass from visibly growing in a gust.
+    // Sway: a phase from the plant's place (~16 m coherence patches, so neighbours move
+    // together and a meadow neither boils nor hinges as one), a fundamental plus an
+    // incommensurate second mode (2.17, not 2: no one-second loop), some sideways, the
+    // gusts at each time.
+    if response.x > 0.0 {
+        let phase = helio_wind_noise(instance_origin.xz * HELIO_WIND_SWAY_COHERENCE) * HELIO_WIND_TAU;
+        let amplitude = response.x * h * h * speed * HELIO_WIND_SWAY_METRES_PER_MPS;
+        for (var i = 0u; i < 2u; i++) {
+            let t = HELIO_WIND_TAU * HELIO_WIND_SWAY_HZ * tempo * times[i] + phase;
+            let bend = sin(t) * 0.75 + sin(t * 2.17 + 1.3) * 0.25;
+            let sideways = sin(t * 0.63 + phase * 1.7) * HELIO_WIND_SWAY_LATERAL;
+            let sway = (dir * bend + side * sideways) * amplitude * helio_wind_gust(wind, instance_origin, times[i]);
+            if i == 0u { out.now += sway; } else { out.prev += sway; }
+        }
+    }
+    // Flutter: a ripple travelling downwind and up the stem.
     let stem_len = length(world_pos - instance_origin);
-    if stem_len > 1e-4 {
-        // Clamped so a displacement exceeding the stem length saturates at "fully
-        // flattened" instead of taking sqrt of a negative.
-        let reach = min(length(offset.xz), stem_len);
-        offset.y -= stem_len - sqrt(max(stem_len * stem_len - reach * reach, 0.0));
+    if response.y > 0.0 {
+        let phase = dot(instance_origin, dir) * HELIO_WIND_FLUTTER_DOWNWIND + stem_len * HELIO_WIND_FLUTTER_ALONG_STEM;
+        let amplitude = response.y * h * speed * HELIO_WIND_FLUTTER_METRES_PER_MPS;
+        for (var i = 0u; i < 2u; i++) {
+            let t = HELIO_WIND_TAU * HELIO_WIND_FLUTTER_HZ * tempo * times[i] + phase;
+            let flutter = (side * sin(t) + vec3<f32>(0.0, 1.0, 0.0) * (cos(t * 1.37) * 0.35)) * amplitude;
+            if i == 0u { out.now += flutter; } else { out.prev += flutter; }
+        }
+    }
+    // Jitter: three decorrelated phases from the plant's seed, so the axes do not share
+    // a phase and collapse the shiver onto a diagonal.
+    if response.z > 0.0 {
+        let px = helio_wind_hash_unorm(seed) * HELIO_WIND_TAU;
+        let py = helio_wind_hash_unorm(seed ^ 0x9e3779b9u) * HELIO_WIND_TAU;
+        let pz = helio_wind_hash_unorm(seed ^ 0x85ebca6bu) * HELIO_WIND_TAU;
+        let amplitude = response.z * h * speed * HELIO_WIND_JITTER_METRES_PER_MPS;
+        for (var i = 0u; i < 2u; i++) {
+            let w = HELIO_WIND_TAU * HELIO_WIND_JITTER_HZ * tempo * times[i];
+            let jitter = vec3<f32>(sin(w + px), sin(w * 0.83 + py) * 0.5, sin(w * 1.19 + pz)) * amplitude;
+            if i == 0u { out.now += jitter; } else { out.prev += jitter; }
+        }
     }
 
-    return offset;
+    // Arc-length correction. The bands displace horizontally without shortening the
+    // stem, so a strongly bent blade would be longer than it is and its tip would climb
+    // as it leans; dropping the tip by the arc's sagitta keeps its distance from the root
+    // (clamped: a displacement past the stem's length is fully flattened).
+    if stem_len > 1e-4 {
+        let reach_now = min(length(out.now.xz), stem_len);
+        let reach_prev = min(length(out.prev.xz), stem_len);
+        out.now.y -= stem_len - sqrt(max(stem_len * stem_len - reach_now * reach_now, 0.0));
+        out.prev.y -= stem_len - sqrt(max(stem_len * stem_len - reach_prev * reach_prev, 0.0));
+    }
+    return out;
 }

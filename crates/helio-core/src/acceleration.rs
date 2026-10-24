@@ -557,10 +557,20 @@ impl TlasManager {
             })
         });
 
-        for i in 0..count as usize {
-            let input = &instances[i];
+        // Only the slots whose instance or mask changed are rewritten: a
+        // moving object costs its own slot, not the whole scene's. A new
+        // TLAS (`last_instances` empty) or replaced BLASes rewrite them all.
+        let blas_changed = self.last_blas_revision != Some(blas_manager.revision());
+        let mask = |masks: &[u8], i: usize| masks.get(i).copied().unwrap_or(0xFF);
+        for (i, input) in instances.iter().enumerate() {
+            let unchanged = !blas_changed
+                && self.last_instances.get(i) == Some(input)
+                && mask(&self.last_masks, i) == mask(masks, i);
+            if unchanged {
+                continue;
+            }
             if let Some(blas) = blas_manager.get_blas(input.mesh_id) {
-                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, masks.get(i).copied().unwrap_or(0xFF)));
+                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, mask(masks, i)));
             }
         }
         for i in count as usize..self.populated_slots {
@@ -589,39 +599,123 @@ pub struct TlasInstanceInput {
     pub transform: [f32; 12],
 }
 
+/// The surface of a TLAS instance, for shading ray hits without a G-buffer
+/// (`ray_instances` rows, indexed by TLAS instance index): where its
+/// triangles are in the scene's mesh pools and its material's colours.
+/// Triangle `p` of the instance is pool indices `first_index + 3p ..`
+/// (mesh-local), plus `base_vertex`, into `builtin_mesh_vertex`
+/// (`PackedVertex`). Hits are shaded without sampling textures:
+/// `base_color` is the material's factor times its base colour texture's
+/// mean (as the projection measured it). An instance with a nonzero
+/// `transmission` is a thin sheet (glass) its BLAS marks non-opaque: rays
+/// pass it, tinted.
+///
+/// An instance flagged [`RAY_INSTANCE_MASKED`] is a cut-out (an
+/// alpha-tested material, row `material` of the scene's `materials`): its
+/// BLAS is non-opaque too, and a ray query decides each candidate triangle
+/// by the material's alpha at the hit's UV (`PackedVertex::tex_coords0`),
+/// as the raster's alpha test does.
+///
+/// An instance flagged [`RAY_INSTANCE_PROXY`] is traced through a proxy of
+/// its geometry (a coarse cut of a virtual-geometry asset): its triangles are
+/// in the frame's proxy pool ([`RayProxies`]) instead, positions and UVs
+/// only, and a hit's normal is its triangle's face (the winding says
+/// outside).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RayInstance {
+    pub first_index: u32,
+    pub base_vertex: u32,
+    /// `RAY_INSTANCE_*` bits.
+    pub flags: u32,
+    /// The material's row in the scene's `materials` (and its texture
+    /// metadata's row).
+    pub material: u32,
+    /// Linear RGB base colour: the material's factor times its base colour
+    /// texture's mean.
+    pub base_color: [f32; 4],
+    /// The radiance it gives off (RGB: colour times strength).
+    pub emissive: [f32; 4],
+    /// The linear RGB share of light it lets through (zero: opaque).
+    pub transmission: [f32; 4],
+}
+
+/// [`RayInstance::flags`]: the instance's triangles are in the frame's proxy
+/// pool ([`RayProxies`]), not the scene's mesh pools.
+pub const RAY_INSTANCE_PROXY: u32 = 1;
+/// [`RayInstance::flags`]: an alpha-tested cut-out (see [`RayInstance`]).
+pub const RAY_INSTANCE_MASKED: u32 = 2;
+/// [`RayInstance::flags`]: both faces are its outside (a double-sided
+/// material): a ray meeting its back has met a surface, not an inside.
+pub const RAY_INSTANCE_TWO_SIDED: u32 = 4;
+
+/// Graph key of the `RayInstance` rows of the frame's TLAS.
+pub const RAY_INSTANCES: &str = "ray_instances";
+/// Graph key of the proxy pool's vertices ([`RayProxies::vertices`]).
+pub const RAY_PROXY_VERTICES: &str = "ray_proxy_vertices";
+/// Graph key of the proxy pool's indices ([`RayProxies::indices`]).
+pub const RAY_PROXY_INDICES: &str = "ray_proxy_indices";
+
+/// The triangles of the instances flagged [`RAY_INSTANCE_PROXY`]: packed
+/// vertices of [`RAY_PROXY_VERTEX_BYTES`] (a `Float32x3` position, then a
+/// `Float32x2` UV) and mesh-local `u32` indices, addressed as the mesh pools
+/// are (`first_index + 3p`, plus `base_vertex`).
+#[derive(Clone, Copy)]
+pub struct RayProxies<'a> {
+    pub vertices: &'a wgpu::Buffer,
+    pub indices: &'a wgpu::Buffer,
+}
+
+/// Bytes of a [`RayProxies`] vertex: position, then UV.
+pub const RAY_PROXY_VERTEX_BYTES: u64 = 20;
+
+/// One frame's ray-tracing input, built by a frontend projection: the TLAS
+/// and the rows that follow its instance order.
+#[derive(Clone, Copy, Default)]
+pub struct RayFrame<'a> {
+    pub tlas: Option<&'a wgpu::Tlas>,
+    /// Thin-sheet transmission. Storage starts with a `[u32; 4]` header:
+    /// flags, row count, zero, zero. Flag bit 0 means BLAS triangle opacity
+    /// matches the rows (zero RGB opaque, all other rows non-opaque). With
+    /// flags=0 the shader overrides BLAS opacity. Rows are `[f32; 4]`: finite
+    /// linear RGB in [0, 1], then zero padding. Opaque instances use RGB zero.
+    pub transmission: Option<&'a wgpu::Buffer>,
+    /// [`RayInstance`] rows, a row an instance.
+    pub instances: Option<&'a wgpu::Buffer>,
+    /// The proxy pool, when any instance is flagged [`RAY_INSTANCE_PROXY`].
+    pub proxies: Option<RayProxies<'a>>,
+}
+
 /// Frontend-published acceleration input valid for exactly one render frame.
-/// Owns a cheap TLAS handle clone; the frontend retains its BLAS cache.
+/// Owns cheap handle clones; the frontend retains its BLAS cache.
 #[derive(Default)]
 pub struct FrameAcceleration {
     frame: Option<(u64, wgpu::Tlas)>,
     transmission: Option<wgpu::Buffer>,
+    instances: Option<wgpu::Buffer>,
+    proxies: Option<(wgpu::Buffer, wgpu::Buffer)>,
 }
 impl FrameAcceleration {
-    pub fn publish(&mut self, frame: u64, tlas: Option<&wgpu::Tlas>) {
-        self.transmission = None;
-        self.frame = tlas.map(|tlas| (frame, tlas.clone()));
-    }
-    /// Storage starts with a `[u32; 4]` header: flags, row count, zero, zero.
-    /// Flag bit 0 means BLAS triangle opacity matches the rows (zero RGB opaque,
-    /// all other rows non-opaque). With flags=0 the shader overrides BLAS opacity.
-    /// Rows are `[f32; 4]`: finite linear RGB in [0, 1], then zero padding.
-    /// Opaque instances use RGB zero.
-    /// Transmission rows are indexed by TLAS instance index and must be built
-    /// from the same authoritative instance ordering as the acceleration data.
-    /// An opaque-only publication explicitly discards any older material rows.
-    pub fn publish_with_transmission(
-        &mut self,
-        frame: u64,
-        tlas: Option<&wgpu::Tlas>,
-        transmission: Option<&wgpu::Buffer>,
-    ) {
-        self.publish(frame, tlas);
-        if self.frame.is_some() {
-            self.transmission = transmission.cloned();
-        }
+    /// Publishes `rays` for frame `frame`. Rows are indexed by TLAS instance
+    /// index and must be built from the same authoritative instance ordering
+    /// as the acceleration data; a publication without them discards any
+    /// older rows, and rows without a TLAS are not published.
+    pub fn publish(&mut self, frame: u64, rays: RayFrame<'_>) {
+        self.frame = rays.tlas.map(|tlas| (frame, tlas.clone()));
+        let with_tlas = |buffer: Option<&wgpu::Buffer>| rays.tlas.and(buffer).cloned();
+        self.transmission = with_tlas(rays.transmission);
+        self.instances = with_tlas(rays.instances);
+        self.proxies = rays.tlas.and(rays.proxies).map(|p| (p.vertices.clone(), p.indices.clone()));
     }
     pub fn transmission(&self, frame: u64) -> Option<&wgpu::Buffer> {
         self.tlas(frame).and(self.transmission.as_ref())
+    }
+    pub fn instances(&self, frame: u64) -> Option<&wgpu::Buffer> {
+        self.tlas(frame).and(self.instances.as_ref())
+    }
+    /// The proxy pool's vertices and indices.
+    pub fn proxies(&self, frame: u64) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
+        self.tlas(frame).and(self.proxies.as_ref()).map(|(p, i)| (p, i))
     }
     pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
         self.frame

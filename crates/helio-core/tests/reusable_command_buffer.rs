@@ -34,7 +34,7 @@ fn read_u32(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> u
 #[test]
 fn reusable_command_buffers_resubmit_and_interleave_with_queue_writes() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Ok(adapter) = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -132,7 +132,7 @@ fn reusable_command_buffers_resubmit_and_interleave_with_queue_writes() {
 fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+            helio_core::wgpu_instance_descriptor().with_env(),
         );
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: render replay stress");

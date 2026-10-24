@@ -3,7 +3,7 @@ use std::sync::Arc;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 
 async fn create_pass() -> Option<OcclusionCullPass> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
     let mut adapter = None;
     for force_fallback_adapter in [false, true] {
         if let Ok(candidate) = instance

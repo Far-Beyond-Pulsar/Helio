@@ -845,7 +845,7 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         pollster::block_on(async {
-            let instance = wgpu::Instance::default();
+            let instance = wgpu::Instance::new(crate::wgpu_instance_descriptor());
             let adapter = instance.request_adapter(&Default::default()).await.ok()?;
             adapter.request_device(&Default::default()).await.ok()
         })

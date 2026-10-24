@@ -152,10 +152,6 @@ name = "light_benchmark"
 path = "light_benchmark.rs"
 
 [[bin]]
-name = "rc_benchmark"
-path = "rc_benchmark.rs"
-
-[[bin]]
 name = "load_fbx"
 path = "load_fbx.rs"
 
@@ -293,6 +289,7 @@ helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
+helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
 helio-default-passes = { path = "../helio-default-passes" }
@@ -316,11 +313,11 @@ egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 pollster = { workspace = true }
 rusqlite = { workspace = true }
+serde_json = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }
 half = "2"
 rayon = "1"
 serde = { workspace = true }
-serde_json = { workspace = true }
 ureq = { version = "2.12", optional = true, default-features = false, features = ["tls"] }
 flate2 = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -361,6 +358,10 @@ path = "monumental_arch_hlfs.rs"
 name = "technology_gallery_hlfs"
 path = "technology_gallery_hlfs.rs"
 
+# Voxel Craft: a Minecraft-style sandbox on a voxel planet (folder-based example).
+[[bin]]
+name = "voxel_craft"
+path = "voxel_craft/main.rs"
 [[bin]]
 name = "lens_showcase"
 path = "lens_showcase.rs"

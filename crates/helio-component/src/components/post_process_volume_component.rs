@@ -37,6 +37,10 @@ pub enum TonemapOperator {
     Reinhard,
     Uncharted2,
     Lottes,
+    /// Hue-preserving filmic curve: bright saturated colours roll to white.
+    Agx,
+    /// AgX with its punchy look: more contrast and saturation.
+    AgxPunchy,
 }
 impl Default for TonemapOperator {
     fn default() -> Self {
@@ -84,6 +88,7 @@ impl Default for HdrOutputMode {
 #[category("Color Grading", category_color = "#2FA88A")]
 #[category("White Balance", category_color = "#2FA88A")]
 #[category("Tonemap", category_color = "#2FA88A")]
+#[category("Local Exposure", category_color = "#D1A73F")]
 #[category("Vignette", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
@@ -148,8 +153,9 @@ impl Default for PostProcessVolumeComponent {
 /// Per-group override switches, packed into `PostProcessProperty` bits.
 ///
 /// Groups that predate override masks default on, so existing volumes keep
-/// replacing them exactly as before. Lens flare defaults off: a volume placed
-/// for grading or fog must not silently switch off the camera's lens.
+/// replacing them exactly as before. Lens flare and local exposure default
+/// off: a volume placed for grading or fog must not silently replace the
+/// camera's lens or local exposure.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[serde(default)]
 #[category("Overrides", category_color = "#8F8F8F")]
@@ -163,6 +169,8 @@ pub struct PostProcessOverrides {
     pub override_color_grading: bool,
     #[property(category = "Overrides")]
     pub override_tonemap: bool,
+    #[property(category = "Overrides")]
+    pub override_local_exposure: bool,
     #[property(category = "Overrides")]
     pub override_vignette: bool,
     #[property(category = "Overrides")]
@@ -185,6 +193,7 @@ impl Default for PostProcessOverrides {
             override_bloom: true,
             override_color_grading: true,
             override_tonemap: true,
+            override_local_exposure: false,
             override_vignette: true,
             override_film_grain: true,
             override_motion_blur: true,
@@ -198,7 +207,7 @@ impl Default for PostProcessOverrides {
 impl PostProcessOverrides {
     pub fn mask(&self) -> [u32; 4] {
         use helio_pass_postprocess::PostProcessProperty as P;
-        let groups: [(bool, &[usize]); 10] = [
+        let groups: [(bool, &[usize]); 11] = [
             (
                 self.override_exposure,
                 &[
@@ -252,6 +261,14 @@ impl PostProcessOverrides {
                     P::TONEMAP_OPERATOR,
                     P::TONEMAP_EXPOSURE,
                     P::TONEMAP_WHITE_POINT,
+                ],
+            ),
+            (
+                self.override_local_exposure,
+                &[
+                    P::LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST,
+                    P::LOCAL_EXPOSURE_SHADOW_CONTRAST,
+                    P::LOCAL_EXPOSURE_DETAIL_STRENGTH,
                 ],
             ),
             (
@@ -349,6 +366,7 @@ impl PostProcessOverrides {
 #[category("Color Grading", category_color = "#2FA88A")]
 #[category("White Balance", category_color = "#2FA88A")]
 #[category("Tonemap", category_color = "#2FA88A")]
+#[category("Local Exposure", category_color = "#D1A73F")]
 #[category("Vignette", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
@@ -416,6 +434,21 @@ pub struct PostProcessSettingsProps {
     pub tonemap_exposure: f32,
     #[property(min = 0.0, max = 20.0, step = 0.05, category = "Tonemap")]
     pub tonemap_white_point: f32,
+
+    // ── Local Exposure ──────────────────────────────────────────────────
+    // Edge-aware local tone mapping: each region's mean brightness moves
+    // toward middle grey (shade reads without fill lights, bright areas keep
+    // their exposure), without halos at silhouettes. 1 leaves a side as it is.
+    /// Contrast kept by regions brighter than middle grey (1 = unchanged).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Local Exposure")]
+    pub local_exposure_highlight_contrast: f32,
+    /// Contrast kept by regions darker than middle grey (1 = unchanged,
+    /// lower lifts shade further).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Local Exposure")]
+    pub local_exposure_shadow_contrast: f32,
+    /// Contrast within a region (1 = kept, above 1 sharpened).
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Local Exposure")]
+    pub local_exposure_detail_strength: f32,
 
     // ── Vignette ────────────────────────────────────────────────────────
     #[property(category = "Vignette")]
@@ -540,9 +573,12 @@ impl Default for PostProcessSettingsProps {
             white_balance_enabled: false,
             white_temp: 6500.0,
             white_tint: 0.0,
-            tonemap_operator: TonemapOperator::None,
+            tonemap_operator: TonemapOperator::AgxPunchy,
             tonemap_exposure: 1.0,
             tonemap_white_point: 1.0,
+            local_exposure_highlight_contrast: helio_pass_postprocess::LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST,
+            local_exposure_shadow_contrast: helio_pass_postprocess::LOCAL_EXPOSURE_SHADOW_CONTRAST,
+            local_exposure_detail_strength: helio_pass_postprocess::LOCAL_EXPOSURE_DETAIL_STRENGTH,
             vignette_enabled: false,
             vignette_intensity: 0.0,
             vignette_smoothness: 0.5,
@@ -619,9 +655,14 @@ impl PostProcessSettingsProps {
                 TonemapOperator::Reinhard => HelioTonemapOperator::Reinhard,
                 TonemapOperator::Uncharted2 => HelioTonemapOperator::Uncharted2,
                 TonemapOperator::Lottes => HelioTonemapOperator::Lottes,
+                TonemapOperator::Agx => HelioTonemapOperator::Agx,
+                TonemapOperator::AgxPunchy => HelioTonemapOperator::AgxPunchy,
             },
             tonemap_exposure: self.tonemap_exposure,
             tonemap_white_point: self.tonemap_white_point,
+            local_exposure_highlight_contrast: self.local_exposure_highlight_contrast,
+            local_exposure_shadow_contrast: self.local_exposure_shadow_contrast,
+            local_exposure_detail_strength: self.local_exposure_detail_strength,
             vignette_intensity: self.vignette_intensity,
             vignette_smoothness: self.vignette_smoothness,
             vignette_roundness: self.vignette_roundness,
@@ -698,3 +739,19 @@ impl PostProcessVolumeComponent {
 
 #[register_world_component]
 impl PostProcessVolumeComponent {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An authored component left at its defaults renders the engine's
+    /// defaults: the editor and every host start from the same look Helio's
+    /// own renderer does.
+    #[test]
+    fn default_props_are_the_engines_defaults() {
+        assert_eq!(
+            format!("{:?}", PostProcessSettingsProps::default().to_settings()),
+            format!("{:?}", PostProcessSettings::default()),
+        );
+    }
+}

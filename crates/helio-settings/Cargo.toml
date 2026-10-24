@@ -1,0 +1,9 @@
+[package]
+name = "helio-settings"
+version = "0.1.0"
+edition = "2021"
+workspace = "../../"
+description = "Helio's tunable settings, described for hosts (editor UIs, config files) without the renderer"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

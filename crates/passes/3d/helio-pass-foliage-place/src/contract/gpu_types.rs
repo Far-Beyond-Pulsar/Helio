@@ -18,118 +18,104 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use super::packing::{
-    f16_bits_to_f32, f32_to_f16_bits, pack_unorm16, pack_unorm8, pack_yaw, unpack_unorm16,
-    unpack_unorm8, unpack_yaw,
-};
+use super::packing::{f16_bits_to_f32, f32_to_f16_bits, pack_unorm16, pack_unorm8, unpack_unorm16, unpack_unorm8};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Blade instance
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// One placed blade of grass. Exactly 16 bytes.
+/// One placed blade of a tuft, or (in the far bands) a whole tuft. Exactly 16 bytes.
 ///
 /// 16 bytes is not an arbitrary target: the blade arena is the single largest foliage
-/// allocation and its default budget is 24 MiB, which buys 1.5 M blades at this size.
-/// Every byte added here costs 1.5 MiB of the budget and a proportional slice of the
+/// allocation. Every byte added here costs a proportional slice of the arena and of the
 /// placement pass's write bandwidth, which is the dominant cost when the camera moves
 /// fast enough to refill the ring perimeter. If a field genuinely will not fit, add a
-/// parallel sparse buffer indexed by blade id rather than widening this record — most
-/// blades will not need it and the arena should not pay for the ones that do.
+/// parallel sparse buffer indexed by blade id rather than widening this record.
 ///
-/// Everything is packed, and nothing here is a world-space value. Positions are
-/// tile-local so a blade's encoding does not depend on where in the world its tile sits,
-/// which is what lets placement be a pure function of `(tile_coord, lane, generation)`
-/// and therefore reproducible across GPUs — see [`crate::blade_seed`].
+/// A placement candidate is a *tuft*: in the near bands it is written as one record per
+/// blade (`blade` 0..`blades`, the rest identical), in the far bands as one record for
+/// the tuft (`blade` 0), drawn as one shape. Each blade's own shape (direction, lean,
+/// height, whether it lies over) is a function of the record's seed, its index and its
+/// type, so nothing else needs storing.
+///
+/// Positions are tile-local so a blade's encoding does not depend on where in the world
+/// its tile sits, which is what lets placement be a pure function of
+/// `(tile_coord, lane, generation)` and therefore reproducible across GPUs — see
+/// [`crate::blade_seed`].
 ///
 /// # Layout (16 bytes, 4-byte aligned)
 /// ```text
-///  0..4   packed_pos:         u32  X unorm16 (bits 0..16) | Z unorm16 (bits 16..32)
-///  4..8   packed_height_yaw:  u32  height offset f16 (bits 0..16) | yaw turn16 (bits 16..32)
-///  8..12  packed_scale_type:  u32  height u8 | width u8 | type id u8 | variant u8
-/// 12..16  packed_tint_seed:   u32  tint.x u8 | tint.y u8 | seed u16 (bits 16..32)
+///  0..4   packed_pos:          u32  U unorm16 (bits 0..16) | V unorm16 (bits 16..32)
+///  4..8   packed_height_tuft:  u32  height offset f16 (bits 0..16) | blade u4 | blades u4 | rank u8
+///  8..12  packed_scale_type:   u32  height u8 | aux u8 | type id u8 | variant u8
+/// 12..16  packed_colour_seed:  u32  ground colour rgb565 (bits 0..16, 0: none) | seed u16
 /// ```
 #[repr(C)]
 // `PartialEq`/`Eq` are part of the determinism contract, not a convenience: the placement
 // tests assert that re-placing a tile yields a byte-identical blade list, and comparing
-// packed records directly is what makes that assertion mean "identical", rather than
-// "identical after whatever tolerance a float comparison would introduce".
+// packed records directly is what makes that assertion mean "identical".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuBladeInstance {
-    /// Tile-local XZ as two 16-bit unorms over the tile extent
-    /// ([`crate::FOLIAGE_TILE_SIZE_METERS`]).
+    /// The tuft's tile-local position as two 16-bit unorms over the tile's axes.
     ///
-    /// 16 bits over an 8 m tile is 0.12 mm — far finer than needed visually, but the
-    /// precision is spent on making the *stratified* candidate grid land exactly where
-    /// the CPU reference says it does. A coarser encoding would let two candidates
-    /// quantise onto the same position and produce z-fighting blades that only appear
-    /// at certain camera angles.
+    /// 16 bits over a 128 m far tile is 2 mm; the precision is spent on making candidates
+    /// land exactly where they were asked (on a voxel's cube grid, at the point the ground
+    /// answered for).
     pub packed_pos: u32,
 
-    /// Terrain height offset in metres as f16 (bits 0..16) | yaw as a 16-bit turn
-    /// (bits 16..32).
+    /// Ground height offset in metres as f16 (bits 0..16) | the blade's index in its tuft
+    /// (bits 16..20) | the tuft's blade count (bits 20..24) | the tuft's rank (bits
+    /// 24..32, unorm8).
     ///
-    /// The height offset is relative to the tile's `bounds_center_y`, not absolute
-    /// world Y — f16 has ~3 decimal digits, which is centimetre precision at 100 m and
-    /// useless at planetary altitudes. Keeping it tile-relative is what makes f16 safe
-    /// here; storing absolute Y would visibly quantise grass into terraces far from the
-    /// origin.
-    ///
-    /// In WGSL: `unpack2x16float(packed_height_yaw).x` for the height, and
-    /// `f32(packed_height_yaw >> 16u) * (TAU / 65536.0)` for the yaw. Do **not** use
-    /// `unpack2x16float` for the yaw half — it is not a float.
-    pub packed_height_yaw: u32,
+    /// The height offset is relative to the tile's `bounds_center`, not absolute: f16 has
+    /// ~3 decimal digits, centimetres at 100 m. The rank decides the distance at which the
+    /// tuft drops out as the bands thin with distance (`foliage_keep`): whole tufts go,
+    /// lowest-ranked last.
+    pub packed_height_tuft: u32,
 
-    /// Height scale u8 (bits 0..8) | width scale u8 (bits 8..16) | type id u8
-    /// (bits 16..24) | variant u8 (bits 24..32).
+    /// Height scale u8 (bits 0..8, the tuft's lerp into the type's `height_range`) | aux
+    /// u8 (bits 8..16: the tuft's turn, in 256ths) | type id u8 (bits 16..24) | variant u8
+    /// (bits 24..32).
     ///
-    /// Scales are unorm lerp factors into the type's `height_range` / `width_range`,
-    /// not metres, so a designer retuning a foliage type's size does not invalidate
-    /// resident tiles — only the descriptor changes and the arena stays valid. Storing
-    /// metres here would mean every density or size edit forces a full ring re-place.
-    ///
-    /// The type id being 8 bits caps a scene at 256 distinct foliage types. That ceiling
-    /// is deliberate: the descriptor array is read by every blade lane, and 256 × 64 B
-    /// = 16 KiB, which fits comfortably in L1 on every tier. Raising it means moving the
-    /// descriptor array out of the hot path first.
+    /// Scales are lerp factors, not metres, so retuning a type's sizes does not invalidate
+    /// resident tiles. The 8-bit type id caps a scene at 256 foliage types.
     pub packed_scale_type: u32,
 
-    /// Tint X u8 (bits 0..8) | tint Y u8 (bits 8..16) | stable per-blade seed u16
-    /// (bits 16..32).
+    /// The ground's colour under the tuft as RGB565 (bits 0..16; `0`: the ground gave
+    /// none) | stable per-tuft seed u16 (bits 16..32).
     ///
-    /// The seed is the low half of [`crate::blade_seed`] and is the single most
-    /// load-bearing value in this struct. Dithered LOD cross-fades, wind phase offset
-    /// and per-blade variation all key off it, so it must be derived from
-    /// `(tile_coord, lane, generation)` and **never** from frame index, time or a
-    /// counter. A seed that changes between frames turns the stochastic cross-fade into
-    /// full-screen static that TAA cannot resolve, and makes every blade's wind phase
-    /// jump every frame.
-    pub packed_tint_seed: u32,
+    /// The seed is the low half of [`crate::blade_seed`] and keys every per-blade choice,
+    /// the wind phase and the dithered fades, so it must come from
+    /// `(tile_coord, lane, generation)` and **never** from frame index or time.
+    pub packed_colour_seed: u32,
 }
 
+/// The most blades one tuft holds: its count is 4 bits.
+pub const FOLIAGE_MAX_TUFT_BLADES: u32 = 15;
+
 /// Unpacked, human-scale view of a [`GpuBladeInstance`].
-///
-/// This is the type the CPU reference placement implementation works in, and the type
-/// the round-trip tests compare. It intentionally has no GPU representation — anything
-/// that needs to reach a shader goes through [`pack_blade`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BladeParams {
-    /// Tile-local position in `0.0..=1.0` over the tile extent, `[x, z]`.
+    /// Tile-local position of the tuft in `0.0..=1.0` over the tile's axes, `[u, v]`.
     pub tile_uv: [f32; 2],
-    /// Height offset in metres from the tile's `bounds_center_y`.
+    /// Height offset in metres from the tile's `bounds_center`.
     pub height_offset: f32,
-    /// Yaw in radians. Wrapped, not clamped, on encode.
-    pub yaw: f32,
-    /// Lerp factor in `0.0..=1.0` into the foliage type's `height_range`.
+    /// This blade's index in its tuft (0 for a far tuft record).
+    pub blade: u8,
+    /// Blades in the tuft, `1..=FOLIAGE_MAX_TUFT_BLADES`.
+    pub blades: u8,
+    /// The tuft's rank, `0.0..=1.0` (unorm8): the order tufts drop out in with distance.
+    pub rank: f32,
+    /// Lerp factor in `0.0..=1.0` into the foliage type's `height_range` (the tuft's).
     pub height_scale: f32,
-    /// Lerp factor in `0.0..=1.0` into the foliage type's `width_range`.
-    pub width_scale: f32,
+    /// The tuft's turn, in 256ths.
+    pub aux: u8,
     /// Index into the foliage type descriptor array.
     pub type_id: u8,
-    /// Free-form variant selector consumed by the material (atlas slice, mesh variant).
+    /// Variant selector consumed by the material.
     pub variant: u8,
-    /// Two-channel tint weight in `0.0..=1.0`, applied by the foliage material.
-    pub tint: [f32; 2],
+    /// The ground's linear colour under the tuft (RGB565), or `None`.
+    pub colour: Option<[f32; 3]>,
     /// Low 16 bits of [`crate::blade_seed`].
     pub seed: u16,
 }
@@ -139,18 +125,20 @@ impl Default for BladeParams {
         Self {
             tile_uv: [0.0, 0.0],
             height_offset: 0.0,
-            yaw: 0.0,
+            blade: 0,
+            blades: 1,
+            rank: 0.0,
             height_scale: 1.0,
-            width_scale: 1.0,
+            aux: 0,
             type_id: 0,
             variant: 0,
-            tint: [0.0, 0.0],
+            colour: None,
             seed: 0,
         }
     }
 }
 
-/// Pack tile-local XZ into `packed_pos`. X occupies the low half.
+/// Pack tile-local UV into `packed_pos`. U occupies the low half.
 #[inline]
 pub fn pack_blade_pos(u: f32, v: f32) -> u32 {
     (pack_unorm16(u) as u32) | ((pack_unorm16(v) as u32) << 16)
@@ -165,100 +153,99 @@ pub fn unpack_blade_pos(packed: u32) -> [f32; 2] {
     ]
 }
 
-/// Pack the f16 height offset (low half) and the 16-bit yaw turn (high half).
+/// Pack the f16 height offset, the blade's index and count in its tuft and the rank.
 #[inline]
-pub fn pack_blade_height_yaw(height_offset: f32, yaw: f32) -> u32 {
-    (f32_to_f16_bits(height_offset) as u32) | ((pack_yaw(yaw) as u32) << 16)
+pub fn pack_blade_height_tuft(height_offset: f32, blade: u8, blades: u8, rank: f32) -> u32 {
+    (f32_to_f16_bits(height_offset) as u32)
+        | ((u32::from(blade) & 15) << 16)
+        | ((u32::from(blades) & 15) << 20)
+        | ((pack_unorm8(rank) as u32) << 24)
 }
 
-/// Inverse of [`pack_blade_height_yaw`], returning `(height_offset, yaw_radians)`.
+/// Inverse of [`pack_blade_height_tuft`]: `(height_offset, blade, blades, rank)`.
 #[inline]
-pub fn unpack_blade_height_yaw(packed: u32) -> (f32, f32) {
+pub fn unpack_blade_height_tuft(packed: u32) -> (f32, u8, u8, f32) {
     (
         f16_bits_to_f32((packed & 0xffff) as u16),
-        unpack_yaw((packed >> 16) as u16),
+        ((packed >> 16) & 15) as u8,
+        ((packed >> 20) & 15) as u8,
+        unpack_unorm8((packed >> 24) as u8),
     )
 }
 
-/// Pack the two unorm scales and the two 8-bit identifiers, low byte first.
+/// Pack the height scale, the aux byte and the two 8-bit identifiers, low byte first.
 #[inline]
-pub fn pack_blade_scale_type(height_scale: f32, width_scale: f32, type_id: u8, variant: u8) -> u32 {
+pub fn pack_blade_scale_type(height_scale: f32, aux: u8, type_id: u8, variant: u8) -> u32 {
     (pack_unorm8(height_scale) as u32)
-        | ((pack_unorm8(width_scale) as u32) << 8)
+        | ((aux as u32) << 8)
         | ((type_id as u32) << 16)
         | ((variant as u32) << 24)
 }
 
-/// Inverse of [`pack_blade_scale_type`], returning
-/// `(height_scale, width_scale, type_id, variant)`.
+/// Inverse of [`pack_blade_scale_type`]: `(height_scale, aux, type_id, variant)`.
 #[inline]
-pub fn unpack_blade_scale_type(packed: u32) -> (f32, f32, u8, u8) {
+pub fn unpack_blade_scale_type(packed: u32) -> (f32, u8, u8, u8) {
     (
         unpack_unorm8((packed & 0xff) as u8),
-        unpack_unorm8(((packed >> 8) & 0xff) as u8),
+        ((packed >> 8) & 0xff) as u8,
         ((packed >> 16) & 0xff) as u8,
         ((packed >> 24) & 0xff) as u8,
     )
 }
 
-/// Pack the two tint channels (low byte first) and the 16-bit seed (high half).
+/// A linear colour as RGB565, never 0 (0 is "no colour": a black ground packs as 0x0001).
 #[inline]
-pub fn pack_blade_tint_seed(tint_x: f32, tint_y: f32, seed: u16) -> u32 {
-    (pack_unorm8(tint_x) as u32) | ((pack_unorm8(tint_y) as u32) << 8) | ((seed as u32) << 16)
+pub fn pack_rgb565(colour: [f32; 3]) -> u16 {
+    let q = |v: f32, max: f32| (v.clamp(0.0, 1.0) * max + 0.5) as u16;
+    let packed = q(colour[0], 31.0) | (q(colour[1], 63.0) << 5) | (q(colour[2], 31.0) << 11);
+    packed.max(1)
 }
 
-/// Inverse of [`pack_blade_tint_seed`], returning `(tint_x, tint_y, seed)`.
+/// Inverse of [`pack_rgb565`] (`None` for 0).
 #[inline]
-pub fn unpack_blade_tint_seed(packed: u32) -> (f32, f32, u16) {
-    (
-        unpack_unorm8((packed & 0xff) as u8),
-        unpack_unorm8(((packed >> 8) & 0xff) as u8),
-        (packed >> 16) as u16,
-    )
+pub fn unpack_rgb565(packed: u16) -> Option<[f32; 3]> {
+    (packed != 0).then(|| {
+        [
+            f32::from(packed & 31) / 31.0,
+            f32::from((packed >> 5) & 63) / 63.0,
+            f32::from(packed >> 11) / 31.0,
+        ]
+    })
 }
 
-/// Encode a blade for the GPU arena.
-///
-/// This is the CPU mirror of the tail of the placement shader. It is lossy by design —
-/// see [`unpack_blade`] for the tolerances a round-trip comparison must allow.
+/// Pack the ground colour (low half) and the 16-bit seed (high half).
+#[inline]
+pub fn pack_blade_colour_seed(colour: Option<[f32; 3]>, seed: u16) -> u32 {
+    u32::from(colour.map_or(0, pack_rgb565)) | ((seed as u32) << 16)
+}
+
+/// Inverse of [`pack_blade_colour_seed`]: `(colour, seed)`.
+#[inline]
+pub fn unpack_blade_colour_seed(packed: u32) -> (Option<[f32; 3]>, u16) {
+    (unpack_rgb565((packed & 0xffff) as u16), (packed >> 16) as u16)
+}
+
+/// Encode a blade for the GPU arena: the CPU mirror of the tail of the placement shader.
 pub fn pack_blade(params: BladeParams) -> GpuBladeInstance {
     GpuBladeInstance {
         packed_pos: pack_blade_pos(params.tile_uv[0], params.tile_uv[1]),
-        packed_height_yaw: pack_blade_height_yaw(params.height_offset, params.yaw),
-        packed_scale_type: pack_blade_scale_type(
-            params.height_scale,
-            params.width_scale,
-            params.type_id,
-            params.variant,
-        ),
-        packed_tint_seed: pack_blade_tint_seed(params.tint[0], params.tint[1], params.seed),
+        packed_height_tuft: pack_blade_height_tuft(params.height_offset, params.blade, params.blades, params.rank),
+        packed_scale_type: pack_blade_scale_type(params.height_scale, params.aux, params.type_id, params.variant),
+        packed_colour_seed: pack_blade_colour_seed(params.colour, params.seed),
     }
 }
 
 /// Decode a blade from the GPU arena.
 ///
-/// `unpack_blade(pack_blade(p))` is not bit-identical to `p`: positions and tints
-/// quantise to unorm, height to f16 and yaw to 1/65536 of a turn. It *is* idempotent
-/// from the second application onward, which is the property the round-trip tests
-/// assert — a decode/encode cycle that drifted would let a tile that survives an evict
-/// and re-place look different from one that did not.
+/// `unpack_blade(pack_blade(p))` is not bit-identical to `p`: positions quantise to
+/// unorm16, height to f16, rank and scale to unorm8 and the colour to RGB565. It *is*
+/// idempotent from the second application onward.
 pub fn unpack_blade(instance: &GpuBladeInstance) -> BladeParams {
     let tile_uv = unpack_blade_pos(instance.packed_pos);
-    let (height_offset, yaw) = unpack_blade_height_yaw(instance.packed_height_yaw);
-    let (height_scale, width_scale, type_id, variant) =
-        unpack_blade_scale_type(instance.packed_scale_type);
-    let (tint_x, tint_y, seed) = unpack_blade_tint_seed(instance.packed_tint_seed);
-    BladeParams {
-        tile_uv,
-        height_offset,
-        yaw,
-        height_scale,
-        width_scale,
-        type_id,
-        variant,
-        tint: [tint_x, tint_y],
-        seed,
-    }
+    let (height_offset, blade, blades, rank) = unpack_blade_height_tuft(instance.packed_height_tuft);
+    let (height_scale, aux, type_id, variant) = unpack_blade_scale_type(instance.packed_scale_type);
+    let (colour, seed) = unpack_blade_colour_seed(instance.packed_colour_seed);
+    BladeParams { tile_uv, height_offset, blade, blades, rank, height_scale, aux, type_id, variant, colour, seed }
 }
 
 impl GpuBladeInstance {
@@ -274,10 +261,10 @@ impl GpuBladeInstance {
         ((self.packed_scale_type >> 24) & 0xff) as u8
     }
 
-    /// Stable per-blade hash seed. See [`GpuBladeInstance::packed_tint_seed`].
+    /// Stable per-tuft hash seed. See [`GpuBladeInstance::packed_colour_seed`].
     #[inline]
     pub fn seed(&self) -> u16 {
-        (self.packed_tint_seed >> 16) as u16
+        (self.packed_colour_seed >> 16) as u16
     }
 }
 
@@ -337,19 +324,19 @@ impl TileState {
 
 /// Header for one slot in the resident tile ring. Exactly 32 bytes.
 ///
-/// The world is a grid of [`crate::FOLIAGE_TILE_SIZE_METERS`] tiles and a ring of them
-/// around the camera is kept resident; this is the record the residency manager, the
-/// placement dispatch and the tile cull all share. At the default ring capacity of
-/// [`crate::DEFAULT_TILE_RING_CAPACITY`] the whole table is 128 KiB, small enough that
-/// the tile cull can read it linearly without a acceleration structure.
+/// Each band ([`crate::GpuFoliageBand`]) keeps a ring of its tiles around the eye; this
+/// is the record the residency manager, the placement dispatch and the tile cull share.
+/// The bands' slots ([`crate::GpuFoliageBands::slots`]) are a few hundred, so the tile
+/// cull reads the table linearly without an acceleration structure. `tile_coord` is in
+/// the band's own tiles.
 ///
 /// # Layout (32 bytes, 4-byte aligned)
 /// ```text
 ///  0..8   tile_coord:      vec2<i32>   world tile grid coordinate (WGSL vec2 is safe here)
 ///  8..12  blade_offset:    u32
 /// 12..16  blade_count:     u32
-/// 16..20  bounds_center_y: f32
-/// 20..24  bounds_half_y:   f32
+/// 16..20  bounds_center: f32
+/// 20..24  bounds_half:   f32
 /// 24..28  state:           u32         TileState
 /// 28..32  generation:      u32
 /// ```
@@ -370,14 +357,14 @@ pub struct GpuFoliageTile {
 
     /// Centre of the tile's vertical extent, taken from the terrain capture. XZ come
     /// from `tile_coord` and are not stored.
-    pub bounds_center_y: f32,
+    pub bounds_center: f32,
 
     /// Half-extent of the tile's vertical span. The tile cull dilates this by the
     /// type's max height plus its WPO extent before the frustum and Hi-Z tests — see
     /// the plan's §6.2. Under-dilating here is the classic wind-culling bug: blades
     /// blow outside the tile bounds and the tile is culled while its geometry is still
     /// on screen.
-    pub bounds_half_y: f32,
+    pub bounds_half: f32,
 
     /// [`TileState`] as a `u32`. Access through [`GpuFoliageTile::state`].
     pub state: u32,
@@ -399,8 +386,8 @@ impl GpuFoliageTile {
         tile_coord: [0, 0],
         blade_offset: 0,
         blade_count: 0,
-        bounds_center_y: 0.0,
-        bounds_half_y: 0.0,
+        bounds_center: 0.0,
+        bounds_half: 0.0,
         state: TileState::Free as u32,
         generation: 0,
     };
@@ -450,6 +437,13 @@ pub enum FoliageKind {
     /// A virtual-geometry mesh, culled and LOD-selected by the existing meshlet path.
     /// `mesh_or_impostor_id` is a `VirtualMeshId` for this kind.
     Mesh = 2,
+    /// Voxel worlds' grass: a stack of cubes (edge `width_range[0]`, as many as the
+    /// height rounds to, at most [`crate::FOLIAGE_STACK_CUBES`]) upright on one grid,
+    /// no yaw. Placement stands each on a cube's centre (no two share one) and shapes
+    /// tufts: stacks lean out of their tuft in whole-cube steps, tallest at its centre.
+    /// Wind moves each cube whole. Drawn as boxes, the faces turned to the eye
+    /// (`FoliageBoxesPass` expands them, the draw places nine corners a box).
+    Block = 3,
 }
 
 impl FoliageKind {
@@ -464,6 +458,7 @@ impl FoliageKind {
             0 => Some(FoliageKind::Blade),
             1 => Some(FoliageKind::Card),
             2 => Some(FoliageKind::Mesh),
+            3 => Some(FoliageKind::Block),
             _ => None,
         }
     }
@@ -494,11 +489,19 @@ pub const FOLIAGE_FLAG_CASTS_SHADOW: u32 = 1 << 9;
 /// rigid — skip a texture fetch per vertex by leaving this clear.
 pub const FOLIAGE_FLAG_RECEIVES_INTERACTION: u32 = 1 << 10;
 
+/// Take the ground's colour (its [`crate::GpuGroundHit::colour`] under the tuft) times
+/// twice `base_color` (0.5 grey: the ground's own colour; brighter is lighter): grass the
+/// colour of the turf it grows from, so past the last blades the ground already reads as
+/// the meadow.
+pub const FOLIAGE_FLAG_GROUND_COLOUR: u32 = 1 << 11;
+
 /// Every flag bit currently defined. Bits outside this mask and outside
 /// [`FOLIAGE_KIND_MASK`] are reserved and must be written as zero, so that a future
 /// build can tell "this flag was not set" from "this build predates the flag".
-pub const FOLIAGE_FLAG_MASK: u32 =
-    FOLIAGE_FLAG_TWO_SIDED | FOLIAGE_FLAG_CASTS_SHADOW | FOLIAGE_FLAG_RECEIVES_INTERACTION;
+pub const FOLIAGE_FLAG_MASK: u32 = FOLIAGE_FLAG_TWO_SIDED
+    | FOLIAGE_FLAG_CASTS_SHADOW
+    | FOLIAGE_FLAG_RECEIVES_INTERACTION
+    | FOLIAGE_FLAG_GROUND_COLOUR;
 
 /// Combine a [`FoliageKind`] and a set of `FOLIAGE_FLAG_*` bits into `kind_and_flags`.
 ///
@@ -509,7 +512,7 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
     (kind as u32) | (flags & !FOLIAGE_KIND_MASK)
 }
 
-/// Foliage type descriptor shared by placement and rasterisation. Exactly 96 bytes.
+/// Foliage type descriptor shared by placement and rasterisation. Exactly 128 bytes.
 ///
 /// One entry per *authored type* — not per instance. A scene has tens of foliage types,
 /// so the whole table is a few kilobytes and stays permanently hot in L1 no matter how
@@ -518,14 +521,15 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// is stored in its natural form and nothing needs decoding on either side of the
 /// CPU/GPU boundary.
 ///
-/// # Why 96 and not 64
+/// # Why 128 (and earlier 96, not 64)
 ///
 /// The plan's §4.3 heads this struct "64 bytes", but its own field list sums to **84** —
 /// the header was simply wrong, and the fields are what matter. Rounding up to 96 left
 /// 12 bytes of tail padding, which was **deliberate and meant to be spent**: §4.3 is a
 /// first draft of what a foliage type needs, and this table will grow. The authored
-/// material ([`FoliageMaterial`]) spent eight of them; four remain in
-/// [`GpuFoliageType::_pad`]. When they run out, grow to 128 rather than packing more.
+/// material ([`FoliageMaterial`]) spent eight of them and the ground mask
+/// ([`GpuFoliageType::ground_mask`]) the last four; the tufts (how blades gather, lean,
+/// curve and fall, their tips' colour and the type's patches) grew it to 128.
 ///
 /// The earlier draft of this type hit 64 bytes by storing `height_range`, `width_range`,
 /// `slope_range` and `lod_distances` as `f16` pairs. That bought about two kilobytes —
@@ -563,7 +567,7 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// crashes: trees render with a random material, foliage kinds resolve to the wrong
 /// pipeline, and the cause is twelve bytes of padding rules in a language spec.
 ///
-/// # Layout (96 bytes, 4-byte aligned)
+/// # Layout (128 bytes, 4-byte aligned)
 /// ```text
 ///  0..4   density:               f32
 ///  4..12  height_range:          f32 × 2    scalars in WGSL (offset 4 is not vec2-aligned)
@@ -579,7 +583,14 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// 80..84  mesh_or_impostor_id:   u32
 /// 84..88  base_color:            u32        RGBA8 unorm, 0 = no authored material
 /// 88..92  roughness_metallic:    u32        unorm16 × 2, roughness in the low half
-/// 92..96  _pad:                  u32        reserved headroom, spend before widening
+/// 92..96  ground_mask:           u32        ground ids it grows on (bit per id; 0: any)
+///  96..100 blades_per_tuft:      u32        min (low 16 bits) and max blades a tuft
+/// 100..108 lean_range:           f32 × 2    scalars in WGSL (offset 100): lean at the tuft's centre, rim
+/// 108..112 curve:                f32        extra lean towards the tip
+/// 112..116 fall_chance:          f32        share of blades lying over
+/// 116..120 tip_color:            u32        RGBA8 unorm tip colour (flowers), 0 = none
+/// 120..124 patch_scale:          f32        metres across the type's bare and dense patches, 0 = none
+/// 124..128 patch_strength:       f32        0 uniform .. 1 fully bare between patches
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -608,11 +619,9 @@ pub struct GpuFoliageType {
     /// range that carries planetary magnitudes and must stay full `f32`.
     pub altitude_range: [f32; 2],
 
-    /// The four LOD transition distances: L0→L1, L1→L2, L2→L3, and L3→terrain-shading.
-    ///
-    /// The fourth entry is the point past which no geometry is drawn at all and the
-    /// terrain material takes over. It is a transition, not a cull distance — see
-    /// [`crate::FOLIAGE_LOD_NONE`].
+    /// LOD distances: `[0]` the near band's L0 → L1 boundary (full blades to coarser
+    /// ones, switched a tuft at a time), `[1]` and `[2]` unused (the bands decide L2 and L3), `[3]`
+    /// the type's reach: where it fades out (0: as far as the foliage goes).
     pub lod_distances: [f32; 4],
 
     /// Wind band gains: trunk, branch, leaf.
@@ -650,15 +659,37 @@ pub struct GpuFoliageType {
     /// `unpack2x16unorm`). Read only when [`GpuFoliageType::base_color`] is non-zero.
     pub roughness_metallic: u32,
 
-    /// Reserved headroom. **Must be written as zero.**
-    ///
-    /// This padding exists to be spent. §4.3 is a first draft of what a foliage type
-    /// needs — `wpo_extent`, a cull-distance override and an impostor transition band are
-    /// all plausible next fields — and a spare slot means the next one lands without
-    /// touching the size assert, the WGSL struct's tail, or anything that reads this
-    /// table. Zeroing it is what makes that safe: a future build can then tell "this
-    /// field was left at its default" from "this data predates the field".
-    pub _pad: u32,
+    /// The ground ids this type grows on, a bit per id below 32 (the ground's
+    /// [`crate::GpuGroundHit::ground`]: a terrain material, a biome); **0: any ground**.
+    /// A heightfield's ground is id 0.
+    pub ground_mask: u32,
+
+    /// Blades a tuft gathers: the minimum in the low 16 bits, the maximum in the high
+    /// ([`GpuFoliageType::set_blades_per_tuft`]). A placement candidate is a tuft; `1..1`
+    /// is a lone blade.
+    pub blades_per_tuft: u32,
+
+    /// How far a tuft's blades lean out from its centre, as run over rise: at the centre
+    /// blade, then at the rim. Smooth blades tilt by it; blocky ones step sideways a cube
+    /// per `1 / lean` cubes up.
+    pub lean_range: [f32; 2],
+
+    /// Extra lean at the tip over the base (the blade bends more as it rises).
+    pub curve: f32,
+
+    /// Share of blades lying over (`0..=1`): low, leaning far out.
+    pub fall_chance: f32,
+
+    /// The top of each blade's colour, RGBA8 unorm as `base_color` (flower heads); `0`:
+    /// the blade's own colour throughout.
+    pub tip_color: u32,
+
+    /// Metres across the type's bare and dense patches (value noise over the ground);
+    /// `0`: no patches.
+    pub patch_scale: f32,
+
+    /// How far patches thin the type: `0` none, `1` bare between them.
+    pub patch_strength: f32,
 }
 
 /// A foliage type's authored surface: linear base colour, roughness and metallic.
@@ -741,7 +772,7 @@ impl GpuFoliageType {
         self.slope_range = range;
     }
 
-    /// LOD transition distances, in the order [`crate::select_blade_lod`] wants.
+    /// LOD distances: the near band's L0 → L1 boundary, two unused, the type's reach.
     #[inline]
     pub fn lod_distances(&self) -> [f32; 4] {
         self.lod_distances
@@ -789,6 +820,31 @@ impl GpuFoliageType {
     pub fn set_material(&mut self, material: Option<FoliageMaterial>) {
         [self.base_color, self.roughness_metallic] = material.map_or([0; 2], |m| m.pack());
     }
+
+    /// `[min, max]` blades a tuft gathers.
+    #[inline]
+    pub fn blades_per_tuft(&self) -> [u32; 2] {
+        let min = (self.blades_per_tuft & 0xffff).max(1);
+        [min, (self.blades_per_tuft >> 16).max(min)]
+    }
+
+    /// Set the blades a tuft gathers, `min..=max` (each at least 1, at most
+    /// [`crate::FOLIAGE_MAX_TUFT_BLADES`]).
+    #[inline]
+    pub fn set_blades_per_tuft(&mut self, [min, max]: [u32; 2]) {
+        let min = min.clamp(1, crate::FOLIAGE_MAX_TUFT_BLADES);
+        let max = max.clamp(min, crate::FOLIAGE_MAX_TUFT_BLADES);
+        self.blades_per_tuft = min | (max << 16);
+    }
+
+    /// Set the tips' colour (linear RGB); `None`: blades keep their colour to the tip.
+    #[inline]
+    pub fn set_tip_color(&mut self, color: Option<[f32; 3]>) {
+        self.tip_color = color.map_or(0, |c| {
+            let [r, g, b] = c.map(|v| u32::from(pack_unorm8(v)));
+            r | g << 8 | b << 16 | 0xff << 24
+        });
+    }
 }
 
 impl Default for GpuFoliageType {
@@ -815,7 +871,15 @@ impl Default for GpuFoliageType {
             mesh_or_impostor_id: 0,
             base_color: 0,
             roughness_metallic: 0,
-            _pad: 0,
+            ground_mask: 0,
+            // A lone upright blade, no patches: what a type meant before tufts.
+            blades_per_tuft: 1 | (1 << 16),
+            lean_range: [0.0, 0.0],
+            curve: 0.0,
+            fall_chance: 0.0,
+            tip_color: 0,
+            patch_scale: 0.0,
+            patch_strength: 0.0,
         }
     }
 }
@@ -864,8 +928,8 @@ const _: () = {
         "GpuFoliageTile must be exactly 32 bytes"
     );
     assert!(
-        std::mem::size_of::<GpuFoliageType>() == 96,
-        "GpuFoliageType must be exactly 96 bytes"
+        std::mem::size_of::<GpuFoliageType>() == 128,
+        "GpuFoliageType must be exactly 128 bytes"
     );
     assert!(
         std::mem::size_of::<GpuFoliageLayer>() == 32,
@@ -881,7 +945,7 @@ mod tests {
     fn gpu_foliage_layouts_are_stable() {
         assert_eq!(std::mem::size_of::<GpuBladeInstance>(), 16);
         assert_eq!(std::mem::size_of::<GpuFoliageTile>(), 32);
-        assert_eq!(std::mem::size_of::<GpuFoliageType>(), 96);
+        assert_eq!(std::mem::size_of::<GpuFoliageType>(), 128);
         assert_eq!(std::mem::size_of::<GpuFoliageLayer>(), 32);
         assert_eq!(std::mem::align_of::<GpuBladeInstance>(), 4);
         assert_eq!(std::mem::align_of::<GpuFoliageTile>(), 4);
@@ -929,11 +993,15 @@ mod tests {
             offset_of(&value.roughness_metallic as *const u32 as *const u8),
             88
         );
-        assert_eq!(offset_of(&value._pad as *const u32 as *const u8), 92);
-
-        // 4 bytes of deliberate tail headroom. If this shrinks to zero, grow the struct
-        // to 128 rather than packing more.
-        assert_eq!(std::mem::size_of::<GpuFoliageType>() - 92, 4);
+        assert_eq!(offset_of(&value.ground_mask as *const u32 as *const u8), 92);
+        assert_eq!(offset_of(&value.blades_per_tuft as *const u32 as *const u8), 96);
+        assert_eq!(offset_of(value.lean_range.as_ptr() as *const u8), 100);
+        assert_eq!(offset_of(&value.curve as *const f32 as *const u8), 108);
+        assert_eq!(offset_of(&value.fall_chance as *const f32 as *const u8), 112);
+        assert_eq!(offset_of(&value.tip_color as *const u32 as *const u8), 116);
+        assert_eq!(offset_of(&value.patch_scale as *const f32 as *const u8), 120);
+        assert_eq!(offset_of(&value.patch_strength as *const f32 as *const u8), 124);
+        assert_eq!(std::mem::size_of::<GpuFoliageType>(), 128);
     }
 
     #[test]
@@ -963,6 +1031,7 @@ mod tests {
             offset_of(value.width_range.as_ptr() as *const u8),
             offset_of(value.slope_range.as_ptr() as *const u8),
             offset_of(value.altitude_range.as_ptr() as *const u8),
+            offset_of(value.lean_range.as_ptr() as *const u8),
         ] {
             assert_ne!(
                 offset % 8,
@@ -1044,80 +1113,65 @@ mod tests {
     #[test]
     fn blade_field_packers_do_not_bleed_into_each_other() {
         // Saturate one field at a time and assert the others stay clean. This is the
-        // test that catches a shifted mask, which otherwise shows up as grass whose
-        // tint changes when you edit its variant id.
-        assert_eq!(pack_blade_scale_type(0.0, 0.0, 0xff, 0x00), 0x00ff_0000);
-        assert_eq!(pack_blade_scale_type(0.0, 0.0, 0x00, 0xff), 0xff00_0000);
-        assert_eq!(pack_blade_scale_type(1.0, 0.0, 0x00, 0x00), 0x0000_00ff);
-        assert_eq!(pack_blade_scale_type(0.0, 1.0, 0x00, 0x00), 0x0000_ff00);
-        assert_eq!(pack_blade_tint_seed(0.0, 0.0, 0xffff), 0xffff_0000);
-        assert_eq!(pack_blade_tint_seed(1.0, 0.0, 0x0000), 0x0000_00ff);
-        assert_eq!(pack_blade_tint_seed(0.0, 1.0, 0x0000), 0x0000_ff00);
+        // test that catches a shifted mask.
+        assert_eq!(pack_blade_scale_type(0.0, 0, 0xff, 0x00), 0x00ff_0000);
+        assert_eq!(pack_blade_scale_type(0.0, 0, 0x00, 0xff), 0xff00_0000);
+        assert_eq!(pack_blade_scale_type(1.0, 0, 0x00, 0x00), 0x0000_00ff);
+        assert_eq!(pack_blade_scale_type(0.0, 0xff, 0x00, 0x00), 0x0000_ff00);
+        assert_eq!(pack_blade_height_tuft(0.0, 15, 0, 0.0), 0x000f_0000);
+        assert_eq!(pack_blade_height_tuft(0.0, 0, 15, 0.0), 0x00f0_0000);
+        assert_eq!(pack_blade_height_tuft(0.0, 0, 0, 1.0), 0xff00_0000);
+        assert_eq!(pack_blade_colour_seed(None, 0xffff), 0xffff_0000);
+        assert_eq!(pack_blade_colour_seed(Some([1.0; 3]), 0) , 0x0000_ffff);
+        // A black ground is still a colour.
+        assert_eq!(pack_blade_colour_seed(Some([0.0; 3]), 0), 1);
     }
 
     #[test]
     fn blade_round_trips_within_quantisation_tolerance() {
-        // Boundary values first: both endpoints of every unorm field, a wrapped yaw,
-        // and the extreme identifiers.
         let cases = [
             BladeParams::default(),
             BladeParams {
-                tile_uv: [0.0, 0.0],
-                height_offset: 0.0,
-                yaw: 0.0,
-                height_scale: 0.0,
-                width_scale: 0.0,
-                type_id: 0,
-                variant: 0,
-                tint: [0.0, 0.0],
-                seed: 0,
-            },
-            BladeParams {
                 tile_uv: [1.0, 1.0],
                 height_offset: -12.5,
-                yaw: std::f32::consts::TAU - 1.0e-3,
+                blade: 14,
+                blades: 15,
+                rank: 1.0,
                 height_scale: 1.0,
-                width_scale: 1.0,
+                aux: 255,
                 type_id: 255,
                 variant: 255,
-                tint: [1.0, 1.0],
+                colour: Some([1.0, 0.5, 0.0]),
                 seed: u16::MAX,
             },
             BladeParams {
                 tile_uv: [0.5, 0.25],
                 height_offset: 3.75,
-                yaw: 1.0,
+                blade: 3,
+                blades: 9,
+                rank: 0.3,
                 height_scale: 0.5,
-                width_scale: 0.125,
+                aux: 77,
                 type_id: 7,
                 variant: 3,
-                tint: [0.25, 0.75],
+                colour: Some([0.2, 0.4, 0.1]),
                 seed: 0xbeef,
             },
         ];
 
         for original in cases {
             let decoded = unpack_blade(&pack_blade(original));
-            assert!(
-                (decoded.tile_uv[0] - original.tile_uv[0]).abs() <= 1.0 / 65535.0,
-                "tile_uv.x drifted: {decoded:?} vs {original:?}"
-            );
+            assert!((decoded.tile_uv[0] - original.tile_uv[0]).abs() <= 1.0 / 65535.0, "{decoded:?} vs {original:?}");
             assert!((decoded.tile_uv[1] - original.tile_uv[1]).abs() <= 1.0 / 65535.0);
-            assert!(
-                (decoded.height_offset - original.height_offset).abs()
-                    <= original.height_offset.abs() * 1.0e-3 + 1.0e-6
-            );
-            let yaw_delta = (decoded.yaw - original.yaw).abs();
-            let wrapped_delta = yaw_delta.min((std::f32::consts::TAU - yaw_delta).abs());
-            assert!(
-                wrapped_delta <= std::f32::consts::TAU / 65536.0,
-                "yaw drifted by {wrapped_delta}"
-            );
+            assert!((decoded.height_offset - original.height_offset).abs() <= original.height_offset.abs() * 1.0e-3 + 1.0e-6);
             assert!((decoded.height_scale - original.height_scale).abs() <= 1.0 / 255.0);
-            assert!((decoded.width_scale - original.width_scale).abs() <= 1.0 / 255.0);
-            assert!((decoded.tint[0] - original.tint[0]).abs() <= 1.0 / 255.0);
-            assert!((decoded.tint[1] - original.tint[1]).abs() <= 1.0 / 255.0);
-            // Identifiers and the seed are exact — nothing about them is approximate.
+            assert!((decoded.rank - original.rank).abs() <= 1.0 / 255.0);
+            match (decoded.colour, original.colour) {
+                (Some(d), Some(o)) => assert!(d.iter().zip(o).all(|(d, o)| (d - o).abs() <= 1.0 / 31.0)),
+                (d, o) => assert_eq!(d.is_some(), o.is_some()),
+            }
+            // Identifiers and the seed are exact.
+            assert_eq!((decoded.blade, decoded.blades, decoded.aux), (original.blade, original.blades, original.aux));
             assert_eq!(decoded.type_id, original.type_id);
             assert_eq!(decoded.variant, original.variant);
             assert_eq!(decoded.seed, original.seed);
@@ -1126,27 +1180,25 @@ mod tests {
 
     #[test]
     fn blade_repack_is_idempotent_after_the_first_pass() {
-        // An evict/re-place cycle must not drift a blade. Anything that quantises on
-        // every encode instead of only the first would fail here.
+        // An evict/re-place cycle must not drift a blade.
         for i in 0..512u32 {
             let t = i as f32 / 511.0;
             let original = BladeParams {
                 tile_uv: [t, 1.0 - t],
                 height_offset: t * 20.0 - 10.0,
-                yaw: t * std::f32::consts::TAU * 3.0,
+                blade: (i % 15) as u8,
+                blades: (i % 15 + 1) as u8,
+                rank: t,
                 height_scale: t,
-                width_scale: 1.0 - t,
+                aux: (i * 3) as u8,
                 type_id: (i & 0xff) as u8,
                 variant: ((i >> 3) & 0xff) as u8,
-                tint: [t, t * 0.5],
+                colour: (i % 3 != 0).then_some([t, 1.0 - t, t * 0.5]),
                 seed: (i * 7919) as u16,
             };
             let first = pack_blade(original);
             let second = pack_blade(unpack_blade(&first));
-            assert_eq!(first.packed_pos, second.packed_pos);
-            assert_eq!(first.packed_height_yaw, second.packed_height_yaw);
-            assert_eq!(first.packed_scale_type, second.packed_scale_type);
-            assert_eq!(first.packed_tint_seed, second.packed_tint_seed);
+            assert_eq!(first, second);
         }
     }
 
@@ -1154,13 +1206,13 @@ mod tests {
     fn blade_accessors_agree_with_the_unpacked_view() {
         let params = BladeParams {
             type_id: 42,
-            variant: 200,
+            variant: 2,
             seed: 0x1234,
             ..BladeParams::default()
         };
         let instance = pack_blade(params);
         assert_eq!(instance.type_id(), 42);
-        assert_eq!(instance.variant(), 200);
+        assert_eq!(instance.variant(), 2);
         assert_eq!(instance.seed(), 0x1234);
         let decoded = unpack_blade(&instance);
         assert_eq!(decoded.type_id, instance.type_id());
@@ -1226,10 +1278,10 @@ mod tests {
             Some(FoliageKind::Card)
         );
 
-        for kind in [FoliageKind::Blade, FoliageKind::Card, FoliageKind::Mesh] {
+        for kind in [FoliageKind::Blade, FoliageKind::Card, FoliageKind::Mesh, FoliageKind::Block] {
             assert_eq!(FoliageKind::from_u32(kind.as_u32()), Some(kind));
         }
-        assert_eq!(FoliageKind::from_u32(3), None);
+        assert_eq!(FoliageKind::from_u32(4), None);
         assert_eq!(FoliageKind::from_u32(u32::MAX), None);
     }
 

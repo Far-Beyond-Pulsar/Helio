@@ -124,7 +124,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -135,7 +135,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -496,7 +496,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.0",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -1047,7 +1047,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1105,6 +1105,7 @@ dependencies = [
  "helio-pass-vg-cull",
  "helio-pass-vg-raster",
  "helio-pass-volumetric-fog",
+ "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "helio-vg-build",
  "helio-vg-format",
@@ -1572,11 +1573,11 @@ dependencies = [
  "helio-pass-portal-cull",
  "helio-pass-portal-instances",
  "helio-pass-postprocess",
- "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-tsr",
  "helio-pass-volumetric-fog",
+ "helio-settings",
  "helio-vg-format",
  "helio-vg-stream",
  "helio-xr",
@@ -1672,7 +1673,9 @@ dependencies = [
  "helio-default-passes",
  "helio-mats",
  "helio-pass-foliage-place",
+ "helio-pass-gi",
  "helio-pass-hiz",
+ "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-volumetric-fog",
  "helio-pass-voxel-planet",
@@ -1691,6 +1694,7 @@ name = "helio-default-passes"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "env_logger",
  "glam 0.33.5",
  "helio",
  "helio-core",
@@ -1708,6 +1712,7 @@ dependencies = [
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
+ "helio-pass-gi",
  "helio-pass-hiz",
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
@@ -1739,6 +1744,7 @@ dependencies = [
  "helio-pass-volumetric-fog",
  "helio-pass-voxel-planet",
  "helio-pass-water-sim",
+ "helio-vg-build",
  "helio-vg-format",
  "helio-vg-stream",
  "image",
@@ -1858,7 +1864,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-mats",
- "helio-pass-radiance-cascades",
+ "helio-pass-gi",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "pulsar_reflection",
@@ -1954,7 +1960,6 @@ dependencies = [
  "glam 0.33.5",
  "helio-core",
  "helio-mats",
- "helio-pass-radiance-cascades",
  "helio-pass-shadow-matrix",
  "image",
  "log",
@@ -1963,6 +1968,20 @@ dependencies = [
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
  "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-gi"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.5",
+ "helio-core",
+ "helio-mats",
+ "helio-pass-shadow-matrix",
+ "helio-pass-sky",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -1989,6 +2008,7 @@ dependencies = [
  "helio-mats",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
+ "helio-pass-gi",
  "helio-pass-object-batch",
  "helio-pass-shadow-matrix",
  "image",
@@ -2126,18 +2146,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-radiance-cascades"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-pass-sky",
- "naga",
- "pollster 0.4.0",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-radiance-cascades-2d"
 version = "0.1.0"
 dependencies = [
@@ -2223,6 +2231,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "naga",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -2320,6 +2329,8 @@ name = "helio-pass-tsr"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
+ "half",
  "helio-core",
  "pollster 0.4.0",
  "wgpu",
@@ -2430,6 +2441,7 @@ dependencies = [
  "helio-core",
  "helio-pass-postprocess",
  "helio-pass-shadow-matrix",
+ "helio-pass-sky",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -2445,6 +2457,11 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
+ "helio-pass-foliage-place",
+ "helio-pass-gi",
+ "helio-pass-shadow-matrix",
+ "helio-settings",
  "image",
  "miniz_oxide",
  "naga",
@@ -2489,6 +2506,10 @@ dependencies = [
 [[package]]
 name = "helio-passes"
 version = "0.0.0"
+
+[[package]]
+name = "helio-settings"
+version = "0.1.0"
 
 [[package]]
 name = "helio-snapshot"
@@ -2536,6 +2557,7 @@ name = "helio-vg-stream"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "helio-core",
  "helio-vg-build",
  "helio-vg-format",
  "log",
@@ -3279,7 +3301,7 @@ dependencies = [
 [[package]]
 name = "naga"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -3304,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "naga-types"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -4339,7 +4361,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=8b5b1144c4ef80411592985fcd9767134ee03941#8b5b1144c4ef80411592985fcd9767134ee03941"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=017252c3c84331a29e53eaa627185597954a3241#017252c3c84331a29e53eaa627185597954a3241"
 dependencies = [
  "ahash",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling?rev=12424a5f75166332f9f1d2741281f6fc4847b44d)",
@@ -4355,7 +4377,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=8b5b1144c4ef80411592985fcd9767134ee03941#8b5b1144c4ef80411592985fcd9767134ee03941"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=017252c3c84331a29e53eaa627185597954a3241#017252c3c84331a29e53eaa627185597954a3241"
 dependencies = [
  "proc-macro2",
  "pulsar_reflection_codegen",
@@ -4731,7 +4753,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5803,7 +5825,7 @@ dependencies = [
 [[package]]
 name = "wgpu"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.1",
@@ -5832,7 +5854,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "arrayvec",
  "bit-set",
@@ -5865,7 +5887,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-apple"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "wgpu-hal",
 ]
@@ -5873,7 +5895,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-emscripten"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "wgpu-hal",
 ]
@@ -5881,7 +5903,7 @@ dependencies = [
 [[package]]
 name = "wgpu-core-deps-windows-linux-android"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "wgpu-hal",
 ]
@@ -5889,7 +5911,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -5945,7 +5967,7 @@ dependencies = [
 [[package]]
 name = "wgpu-naga-bridge"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "naga",
  "wgpu-types",
@@ -5954,7 +5976,7 @@ dependencies = [
 [[package]]
 name = "wgpu-types"
 version = "30.0.1"
-source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#1bac7e303fb4fe6a2532a98ba0526c35ce193d2f"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?branch=helio%2Fv30.0.1-reusable-command-buffers#57068206074cd8a6af5551032d8d60a8db3b2637"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -6007,7 +6029,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

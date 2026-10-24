@@ -1,6 +1,5 @@
 use crate::material::MAX_TEXTURES;
 use helio_mats::BINDLESS_MATERIAL_FEATURES;
-pub use helio_pass_radiance_cascades::GiConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -83,7 +82,7 @@ pub fn recommended_instance_flags() -> wgpu::InstanceFlags {
 ///
 /// Software Vulkan (lavapipe / llvmpipe, and CPU adapters in general)
 /// reports `EXPERIMENTAL_RAY_QUERY`, but its shader compiler crashes building
-/// the radiance-cascades ray-query pipeline and the device is lost
+/// ray-query pipelines and the device is lost
 /// (Pulsar-Native#840). Without the feature the default graph uses its
 /// non-ray-traced fallbacks.
 pub fn usable_adapter_features(adapter: &wgpu::Adapter) -> wgpu::Features {
@@ -263,6 +262,10 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
 pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
+    /// The output's format. The graph writes display-linear colour: for SDR
+    /// output give an `*Srgb` format (it encodes on write, and so does every
+    /// pass drawn after post-processing); a plain UNORM target stores the
+    /// linear values, two stops dark in the mid-tones when shown as sRGB.
     pub surface_format: wgpu::TextureFormat,
     /// Colour the default graphs' `Background` pass writes into `pre_aa` before any geometry.
     ///
@@ -270,7 +273,6 @@ pub struct RendererConfig {
     /// FXAA, fog-composite and post-process passes, so `[0.0; 4]` leaves the scene background
     /// transparent for a compositor (GPUI's `paint_surface` blends the dma-buf with alpha).
     pub background_color: [f32; 4],
-    pub gi_config: GiConfig,
     pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
@@ -299,15 +301,22 @@ pub struct RendererConfig {
     /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
     /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
     pub enable_foliage: bool,
-    /// Foliage density budget in blades per square metre, or `None` for the quality
-    /// preset default.
+    /// Densest foliage ground in tufts per square metre, or `None` for the default (8).
+    /// Sizes the bands' candidate grids at graph-build time: a type's `density` (tufts a
+    /// square metre) above this is thinned to it.
+    pub foliage_tufts_per_m2: Option<f32>,
+    /// Blades a tuft averages, or `None` for the default (8): sizes the near band's
+    /// slabs (a record per blade).
+    pub foliage_blades_per_tuft: Option<f32>,
+    /// Foliage quality preset: the default range, the density multiplier, the near LOD
+    /// distance's scale and the cull granularity. Default [`FoliageQuality::Medium`].
     ///
-    /// Sizes the blade arena at graph-build time: `blades_per_tile = density * 64`, times
-    /// the ring's tile count, times 16 bytes. Density is a ceiling set by allocation, so
-    /// raising it here is the only way to get denser grass — raising the quality preset
-    /// does not, because a wider ring grows the tile count as its square and the per-tile
-    /// slab barely moves. Range and density are separate axes.
-    pub foliage_blades_per_m2: Option<f32>,
+    /// [`FoliageQuality::Medium`]: helio_pass_foliage_place::FoliageQuality::Medium
+    pub foliage_quality: helio_pass_foliage_place::FoliageQuality,
+    /// Metres foliage reaches, or `None` for the quality preset's. Bands of tiles
+    /// (`helio_pass_foliage_place::plan_bands`) carry it out there at a cost that grows
+    /// with the number of bands, one per doubling of the range.
+    pub foliage_range: Option<f32>,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -367,6 +376,11 @@ pub struct RendererConfig {
     /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
     pub enable_portals: bool,
 
+    /// The world-space GI probes' finest spacing (metres; each coarser
+    /// level doubles it). `None` (default): the graph's choice, 1 m over
+    /// voxel terrain and 0.5 m in mesh scenes, whose rooms, pillars and
+    /// furniture are a few metres apart.
+    pub gi_probe_spacing: Option<f32>,
     /// Opaque id of the virtual-geometry runtime (`helio_vg_stream::VgRuntime::handle_id`)
     /// the default deferred graph builds its virtual-geometry passes for, or
     /// `None` (the default) for classic rendering only. The passes are added
@@ -382,7 +396,6 @@ impl RendererConfig {
             height: height.max(1),
             surface_format,
             background_color: [0.0, 0.0, 0.0, 1.0],
-            gi_config: GiConfig::default(),
             shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
@@ -392,7 +405,10 @@ impl RendererConfig {
             shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
             enable_foliage: true,
-            foliage_blades_per_m2: None,
+            foliage_tufts_per_m2: None,
+            foliage_blades_per_tuft: None,
+            foliage_quality: helio_pass_foliage_place::FoliageQuality::Medium,
+            foliage_range: None,
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,
@@ -400,6 +416,7 @@ impl RendererConfig {
             render_mode: RenderMode::Deferred,
             enable_xr: false,
             enable_portals: true,
+            gi_probe_spacing: None,
             virtual_geometry: None,
         }
     }
@@ -430,6 +447,12 @@ impl RendererConfig {
         self
     }
 
+    /// The GI probes' finest spacing (metres; [`Self::gi_probe_spacing`]).
+    pub fn with_gi_probe_spacing(mut self, metres: f32) -> Self {
+        self.gi_probe_spacing = Some(metres);
+        self
+    }
+
     /// Enable/disable the screen-space reflection pass.
     pub fn with_ssr(mut self, enabled: bool) -> Self {
         self.enable_ssr = enabled;
@@ -439,11 +462,6 @@ impl RendererConfig {
     /// Enable/disable the planar reflection pass.
     pub fn with_planar_reflections(mut self, enabled: bool) -> Self {
         self.enable_planar_reflections = enabled;
-        self
-    }
-
-    pub fn with_gi_config(mut self, gi_config: GiConfig) -> Self {
-        self.gi_config = gi_config;
         self
     }
 

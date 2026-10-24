@@ -25,6 +25,21 @@ pub const PBR_MARKER: &str = "//!use pbr_eval";
 pub const PBR_EVAL_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(PBR_MARKER, "../shaders/pbr_eval.wgsl");
 
+/// Specular anti-aliasing (`normal_map_roughness`, `geometric_roughness`,
+/// `specular_aa_roughness`): roughness widened by the normals a pixel
+/// covers, read from normal maps whose mips keep their spread
+/// ([`crate::texture_mips`]).
+pub const SPECULAR_AA: &str = include_str!("../shaders/specular_aa.wgsl");
+
+/// Marker opting a shader into [`SPECULAR_AA`]. Must appear in the source.
+pub const SPECULAR_AA_MARKER: &str = "//!use specular_aa";
+
+/// [`helio_core::shader::ShaderSnippet`] for [`SPECULAR_AA`]: every material
+/// shader built from a Radiant template gets it
+/// ([`crate::RadiantTemplate::build_shader_source`]).
+pub const SPECULAR_AA_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(SPECULAR_AA_MARKER, "../shaders/specular_aa.wgsl");
+
 /// Replace native material binding arrays with baseline-WebGPU bindings.
 ///
 /// Browser WebGPU does not expose wgpu's `binding_array` WGSL extension. The

@@ -1,8 +1,8 @@
 # Two-rate field: large octaves at nodes
 
-Status: 2026-10-14. Generation throughput work for fast descents
-(`chunk-trees.md`: no visible refinement needs tiles generated within a
-few frames of being wanted).
+Generation throughput for fast descents: no visible refinement needs
+footprints generated within a few frames of being wanted
+([`chunk-octree.md`](chunk-octree.md)).
 
 ## Why
 
@@ -11,9 +11,7 @@ generate (GENBENCH, `HELIO_VOXEL_GEN_BENCH`). Gradients took 48% of that,
 erosion 29%, ridges 23%. Most of it goes to octaves whose wavelength is
 hundreds of columns: continents, mountain-range regions, the large
 ridges and warps. Every column evaluated them, though they change by a
-fraction of a cell between neighbours. Skipping them measured the
-ceiling: tile columns 27.95 → 12.1 µs, a whole tile 40.6 → 23.7 µs.
-
+fraction of a cell between neighbours. 
 ## Definition
 
 At a column of level `L` (reference level `L + level_offset`), an octave
@@ -87,12 +85,10 @@ Each level also has a mask of the node words it reads. The CPU
 (`landform::parts`) and the GPU (`landform_column`) run the same ops from
 the same constants (`TerrainConstants::plan_*`).
 
-Before this, every column walked the whole table: about 50 octaves, each
-with its resolved, macro and region checks, plus a pass to find each
-layer's last region octave. That cost about a sixth of a column's GPU
-time. Steering is recomputed only after `OP_STEER` ops. It is a pure
-function of the continents' and mountains' accumulators, so the values
-are unchanged.
+A column runs only its level's ops, not the whole table (about 50
+octaves, each with its resolved, macro and region checks). Steering is
+recomputed only after `OP_STEER` ops: it is a pure function of the
+continents' and mountains' accumulators.
 
 ## GPU
 
@@ -109,20 +105,14 @@ GENBENCH):
    heights past the tile's edges that `chunk_columns_main` reads. Columns
    within the ring read the tile's nodes; farther ones evaluate their own
    four into function arrays and leave the blend in a scratch node.
-   `chunk_columns_main` no longer runs the field at all; it used to run it
-   for the halo once per chunk.
+   `chunk_columns_main` does not run the field.
 
 WGSL clears every private variable an entry point can reach at each
-invocation. Module-scope node arrays reachable from the hot kernels cost
-them 2–3.5× before being moved to function scope and to the halo pass.
+invocation, so node arrays live in function scope and in the halo pass:
+module-scope arrays reachable from the hot kernels cost them 2–3.5×.
 
 `field_height` and `generation_column` (verification, timing) evaluate
 their four nodes per column.
-
-An earlier attempt used a 3D lattice in domain space with the nodes in
-workgroup memory. It was bit-identical but twice as slow: 12.5 KB of
-workgroup memory per group collapsed occupancy, and its tile box needed up
-to 10³ nodes.
 
 ## Fixed-point products
 
@@ -143,7 +133,3 @@ layers, µs per tile (chunk stages per tile at ~1.4 chunks a tile):
 | single-rate field | 28 | 6.6 / chunk | 41–43 |
 | two-rate, face lattice, halo pass | 28 (nodes 1.3, columns 23.6, halos 3.3) | 5.0 / chunk | 38–40 |
 | + compiled column programs | 23 (nodes 1.4, columns 19, halos 2.8) | 4.8 / chunk | 32–34 |
-
-The "skip every macro octave" measurement that motivated this work
-(12 µs a tile) also zeroed mountain region masks, so the region rule
-dropped every mountain ridge. It was not a reachable ceiling.

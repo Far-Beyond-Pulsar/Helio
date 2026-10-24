@@ -1,4 +1,6 @@
 //!use helio_prelude
+//!use sun_occlusion
+//!use cloud_shadow
 //
 // Volumetric fog — froxel grid (Hillaire, "Physically Based and Unified Volumetric
 // Rendering in Frostbite", SIGGRAPH 2015).
@@ -119,6 +121,14 @@ const NO_SHADOW: u32 = 4294967295u;
 @group(0) @binding(20) var               static_shadow_atlas: texture_depth_2d_array;
 /// Translucent casters (stained glass): rgb = 1 - T, a = 1 - nearest pane depth.
 @group(0) @binding(21) var               shadow_transmittance: texture_2d_array<f32>;
+// The sun's occlusion by terrain outside the shadow maps (voxel terrain:
+// `sun_occlusion`), its levels 0 when none is published.
+@group(0) @binding(22) var               sun_occlusion_maps: texture_2d_array<f32>;
+@group(0) @binding(23) var<uniform>      sun_occlusion_frame: SunOcclusionFrame;
+// The clouds' shadow along the sun (helio-pass-sky's `cloud_shadow`), its
+// frame zero when no clouds are published.
+@group(0) @binding(24) var               cloud_shadow_map: texture_2d<f32>;
+@group(0) @binding(25) var<uniform>      cloud_shadow_frame: CloudShadowFrame;
 /// Previous frame's scattering grid, for temporal reprojection.
 @group(0) @binding(7) var                scatter_history: texture_3d<f32>;
 @group(0) @binding(8) var                linear_samp:     sampler;
@@ -144,6 +154,8 @@ struct WorldMedium {
     height: f32, anisotropy: f32, _pad: vec2<f32>,
     albedo: vec3<f32>, _pad_albedo: f32,
     emission: vec3<f32>, _pad_emission: f32,
+    // Heights above a planet: centre (world m), radius (m); radius 0: along Y.
+    planet: vec4<f32>,
 }
 struct LocalMedium {
     bounds_min: vec4<f32>, bounds_max: vec4<f32>, medium: WorldMedium,
@@ -350,6 +362,7 @@ fn medium_hash_of(seed: u32, m: WorldMedium) -> u32 {
     var h = hash_word(hash_word(seed, m.enabled), m.mode);
     h = hash_vector(h, vec4<f32>(m.extinction, m.height_falloff, m.height, m.anisotropy));
     h = hash_vector(h, vec4<f32>(m.albedo, 0.0));
+    h = hash_vector(h, m.planet);
     return hash_vector(h, vec4<f32>(m.emission, 0.0));
 }
 
@@ -535,13 +548,29 @@ fn cs_cull(@builtin(global_invocation_id) tile: vec3<u32>) {
 
 // ── Density ─────────────────────────────────────────────────────────────────
 
-fn density_at(p: vec3<f32>, config: FogUniforms) -> f32 {
+// No planet: heights along world Y (the post-process media).
+const FLAT: vec4<f32> = vec4<f32>(0.0);
+
+// Height of world point `p`: its altitude over `planet` (centre, radius), or
+// its Y without one.
+fn medium_height(p: vec3<f32>, planet: vec4<f32>) -> f32 {
+    if planet.w > 0.0 { return length(p - planet.xyz) - planet.w; }
+    return p.y;
+}
+
+// Up at world point `p`: away from `planet`'s centre, or +Y without one.
+fn medium_up(p: vec3<f32>, planet: vec4<f32>) -> vec3<f32> {
+    if planet.w > 0.0 { return normalize(p - planet.xyz); }
+    return vec3<f32>(0.0, 1.0, 0.0);
+}
+
+fn density_at(p: vec3<f32>, config: FogUniforms, planet: vec4<f32>) -> f32 {
     var density = max(config.fog_density, 0.0);
     if config.fog_mode != FOG_MODE_UNIFORM {
         // Full density at or below fog_height, decaying exponentially above it.
         // max(h, 0) rather than h: without the clamp a point far below the base
         // gets exp(+large) and the grid fills with an opaque wall.
-        let h = p.y - config.fog_height;
+        let h = medium_height(p, planet) - config.fog_height;
         density *= exp(-max(h, 0.0) * max(config.fog_height_falloff, 0.0));
     }
     if config.fog_mode == 2u {
@@ -608,7 +637,7 @@ fn add_world_medium(accum: Medium, m: WorldMedium, p: vec3<f32>, shape: f32) -> 
     var result = accum;
     var config = world_config(m);
     config.fog_density = 1.0;
-    let profile = density_at(p, config) * shape;
+    let profile = density_at(p, config, m.planet) * shape;
     let d = finite_clamp(m.extinction, 0.0, 10000.0) * profile;
     let scattering = clamp(m.albedo, vec3<f32>(0), vec3<f32>(1)) * d;
     result.extinction += d;
@@ -626,7 +655,7 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
     let p = frame_p + fog_globals.world_origin.xyz;
     var m: Medium;
     if fog.fog_enabled != 0u && view_depth >= fog.fog_start_distance {
-        m.extinction = density_at(p, fog);
+        m.extinction = density_at(p, fog, FLAT);
         if fog.fog_mode == 2u { m.smoke = m.extinction; }
         m.albedo = clamp(fog.fog_color, vec3<f32>(0.0), vec3<f32>(1.0)) * m.extinction;
         m.emissive = fog.fog_emissive * m.extinction;
@@ -649,7 +678,7 @@ fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
             let q = (2.0 * p - v.bounds_min.xyz - v.bounds_max.xyz) / (v.bounds_max.xyz - v.bounds_min.xyz);
             shape *= 1.0 - smoothstep(0.35, 1.0, dot(q, q));
         }
-        let d = density_at(p, v.medium) * clamp(v.blend_weight, 0.0, 1.0) * shape;
+        let d = density_at(p, v.medium, FLAT) * clamp(v.blend_weight, 0.0, 1.0) * shape;
         // Overlapping media add extinction/scattering, not camera-weighted screen effects.
         m.extinction += d;
         if v.medium.fog_mode == 2u { m.smoke += d; }
@@ -689,14 +718,18 @@ fn ray_box(p: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>, distance:
     return vec2<f32>(interval.x, max(interval.x, interval.y));
 }
 
-fn global_optical_depth(config: FogUniforms, p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
+fn global_optical_depth(config: FogUniforms, planet: vec4<f32>, p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
     if config.fog_mode == 0u { return max(config.fog_density, 0.0) * distance; }
     if config.fog_mode != 2u {
         // Integrate the exponential height profile analytically. Order the
-        // endpoints by height so the exponent never grows or overflows.
-        let slope = abs(dir.y);
-        if slope < 1e-8 { return density_at(p, config) * distance; }
-        let low = min(p.y, p.y + dir.y * distance);
+        // endpoints by height so the exponent never grows or overflows. Over
+        // a planet, in the plane tangent at `p` (light segments are far
+        // shorter than the planet's radius).
+        let rise = dot(dir, medium_up(p, planet));
+        let slope = abs(rise);
+        if slope < 1e-8 { return density_at(p, config, planet) * distance; }
+        let height = medium_height(p, planet);
+        let low = min(height, height + rise * distance);
         let below = clamp((config.fog_height - low) / slope, 0.0, distance);
         let falloff = max(config.fog_height_falloff, 0.0);
         let start = exp(-max(low + below * slope - config.fog_height, 0.0) * falloff);
@@ -706,7 +739,7 @@ fn global_optical_depth(config: FogUniforms, p: vec3<f32>, dir: vec3<f32>, dista
     let step = distance / f32(count);
     var tau = 0.0;
     for (var i = 0u; i < count; i++) {
-        tau += density_at(p + dir * ((f32(i) + 0.5) * step), config) * step;
+        tau += density_at(p + dir * ((f32(i) + 0.5) * step), config, planet) * step;
     }
     return tau;
 }
@@ -714,10 +747,10 @@ fn global_optical_depth(config: FogUniforms, p: vec3<f32>, dir: vec3<f32>, dista
 fn medium_transmittance(frame_p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
     let p = frame_p + fog_globals.world_origin.xyz;
     var tau = 0.0;
-    if fog.fog_enabled != 0u { tau += global_optical_depth(fog, p, dir, distance); }
+    if fog.fog_enabled != 0u { tau += global_optical_depth(fog, FLAT, p, dir, distance); }
     for (var i = 0u; i < global_count(); i++) {
         let m = global_media[global_index(i)];
-        if world_medium_active(m) { tau += global_optical_depth(world_config(m), p, dir, distance); }
+        if world_medium_active(m) { tau += global_optical_depth(world_config(m), m.planet, p, dir, distance); }
     }
     let count = max(media_list.light_samples, 1u);
     for (var i = 0u; i < local_count(); i++) {
@@ -728,12 +761,12 @@ fn medium_transmittance(frame_p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f3
         if length <= 0.0 { continue; }
         let config = world_config(v.medium);
         if v.edge_fade <= 0.0 {
-            tau += global_optical_depth(config, p + dir * segment.x, dir, length);
+            tau += global_optical_depth(config, v.medium.planet, p + dir * segment.x, dir, length);
         } else {
             let step = length / f32(count);
             for (var j = 0u; j < count; j++) {
                 let q = p + dir * (segment.x + (f32(j) + 0.5) * step);
-                tau += density_at(q, config) * local_shape(q, v) * step;
+                tau += density_at(q, config, v.medium.planet) * local_shape(q, v) * step;
             }
         }
     }
@@ -750,7 +783,7 @@ fn medium_transmittance(frame_p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f3
                 let relative = (2.0 * q - v.bounds_min.xyz - v.bounds_max.xyz) / (v.bounds_max.xyz - v.bounds_min.xyz);
                 shape *= 1.0 - smoothstep(0.35, 1.0, dot(relative, relative));
             }
-            tau += density_at(q, v.medium) * clamp(v.blend_weight, 0.0, 1.0) * shape * step;
+            tau += density_at(q, v.medium, FLAT) * clamp(v.blend_weight, 0.0, 1.0) * shape * step;
         }
     }
     return exp(-min(tau, 80.0));
@@ -804,12 +837,24 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
     return select(4u, 5u, dir.z < 0.0);
 }
 
-/// Fraction of `light_idx` reaching `p`. 1.0 = fully lit.
+/// Fraction of `light_idx` reaching `p`. 1.0 = fully lit: its shadow maps,
+/// and for the sun the terrain's occlusion (shafts through canopies and past
+/// ridges of terrain the shadow maps do not hold) and the clouds' shadow.
+fn shaft_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
+    var lit = shadow_map_visibility(light_idx, p0);
+    if lights[light_idx].light_type == LIGHT_DIRECTIONAL {
+        let from_camera = p0 - cameras[0].position_near.xyz;
+        lit *= sun_occlusion(from_camera) * cloud_shadow(from_camera);
+    }
+    return lit;
+}
+
+/// Fraction of `light_idx` reaching `p` past its shadow maps' casters.
 ///
 /// One comparison tap, not the PCF/PCSS kernel deferred lighting uses. That is
 /// affordable because it runs once per froxel rather than once per pixel per
 /// step, and the temporal blend averages the result across frames.
-fn shaft_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
+fn shadow_map_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
     if textureDimensions(shadow_atlas).x <= 1u { return vec3<f32>(1.0); }
     let light = lights[light_idx];
     if light.shadow_index == NO_SHADOW { return vec3<f32>(1.0); }

@@ -339,6 +339,7 @@ fn portal_shader_source(material_binding: helio_mats::MaterialBindingConfig) -> 
         "PortalInstance Shader",
         helio_core::include_wgsl!("../shaders/gbuffer_portal.wgsl"),
     );
+    let source = Cow::Owned(helio_core::shader::resolve_with(&source, &[helio_mats::SPECULAR_AA_SNIPPET]).into_owned());
     if material_binding.uses_binding_arrays() {
         source
     } else {
@@ -797,8 +798,8 @@ mod tests {
             max_textures: 256,
         });
 
-        assert!(matches!(source, std::borrow::Cow::Borrowed(_)));
         assert!(source.contains("enable wgpu_binding_array;"));
+        assert!(source.contains("fn specular_aa_roughness"), "specular anti-aliasing spliced in");
         assert!(source.contains("binding_array<texture_2d<f32>, 256>"));
     }
 }

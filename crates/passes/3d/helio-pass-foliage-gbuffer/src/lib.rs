@@ -30,7 +30,7 @@
 //!
 //! # The 8-target pipeline with masked writes
 //!
-//! Grass writes neither `lightmap_uv`, `sss` nor `extra`, and the obvious optimisation —
+//! Grass writes neither `sss` nor `extra`, and the obvious optimisation —
 //! a 5-target pipeline — is invalid. A pipeline's fragment targets must match the render
 //! pass's colour attachments in count and format (`RenderPassContext::check_compatible`
 //! compares the lists element-wise), so a 5-target pipeline needs its own render pass,
@@ -39,11 +39,18 @@
 //! tile-based GPU, far more than the lever was ever going to save.
 //!
 //! So: all eight targets, identical formats to `GBufferPass`'s, and
-//! [`wgpu::ColorWrites::empty()`] on the three grass does not write, with those
+//! [`wgpu::ColorWrites::empty()`] on the two grass does not write, with those
 //! `@location`s omitted from the fragment shader. **The empty write mask is mandatory,
 //! not cosmetic** — a declared fragment target with no shader output has an undefined
-//! value, so without the mask those three G-buffer channels are filled with garbage
-//! wherever grass covers a pixel, and the deferred pass reads them everywhere.
+//! value, so without the mask those G-buffer channels are filled with garbage wherever
+//! grass covers a pixel, and the deferred pass reads them everywhere.
+//!
+//! `lightmap_uv` *is* written: `(-1, -1.5)`, foliage's tag. Negative x is "no
+//! lightmap" (its clear value `(0, 0)` reads as a lightmap at the atlas's corner, and
+//! the deferred pass lit grass by that empty texel alone: black); y -1.5 (clear of the
+//! voxel pass's -2 and of portal chains, below -2.5) keeps screen-space AO off grass,
+//! whose dense blades overwhelm the kernel (black fields) and which carries its own
+//! height AO.
 //!
 //! # Zero overhead when absent
 //!
@@ -75,7 +82,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_pass_foliage_place::{FoliageQuality, GpuFoliageType, DEFAULT_SCALE_IN_BAND};
+use helio_pass_foliage_place::{FoliageQuality, GpuFoliageType};
 use pulsar_scenedb::gpu::BufferKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -88,36 +95,6 @@ use pulsar_scenedb::gpu::BufferKey;
 /// The four LOD commands live at byte offsets 0, 16, 32 and 48.
 pub const DRAW_INDIRECT_STRIDE: u64 = 16;
 
-/// Recover the tile slot that owns a blade, from its flat arena index.
-///
-/// # Why the consumer has to do this at all
-///
-/// A `visible_blades[]` entry is a flat index into `blade_arena`. A blade's packed
-/// position, though, is **tile-local** — that is what makes placement a pure function of
-/// `(tile_coord, lane, generation)` and therefore reproducible across GPUs — so
-/// reconstructing a world position needs the blade's *tile*, which the index alone does
-/// not name.
-///
-/// `FoliagePlacePass` makes that recoverable by partitioning the arena into equal
-/// fixed-size slabs, one per tile ring slot, and publishing the slab size as
-/// `FoliagePlacePass::blades_per_tile`. The division is then exact and O(1) — the
-/// alternative, searching a 4096-entry tile table for the slab containing an index, is
-/// not something a vertex shader can do once per vertex.
-///
-/// The `max(1)` is not decoration: a zero slab size would be a division by zero in the
-/// vertex stage, whose result is implementation-defined, and the symptom would be every
-/// blade in the world reading tile slot garbage. One blade drawn at the wrong tile is
-/// recoverable; an undefined index into the tile table is not.
-#[inline]
-pub const fn tile_slot_of_blade(blade_index: u32, blades_per_tile: u32) -> u32 {
-    blade_index
-        / if blades_per_tile == 0 {
-            1
-        } else {
-            blades_per_tile
-        }
-}
-
 // ── Packed `visible_blades[]` entry ─────────────────────────────────────────────
 //
 // The live encoding. A `visible_blades[]` entry is **not** a flat arena index: it is the
@@ -127,7 +104,7 @@ pub const fn tile_slot_of_blade(blade_index: u32, blades_per_tile: u32) -> u32 {
 //
 // Packing rather than a flat index because the consumer needs the *tile* regardless — a
 // blade's stored position is tile-local, so reconstructing a world position requires the
-// tile's origin and `bounds_center_y`. Handing the slot over directly saves a division
+// tile's origin and `bounds_center`. Handing the slot over directly saves a division
 // per vertex in the hottest shader in the foliage path. `tile_slot_of_blade` above is the
 // flat-index alternative, kept only for callers holding a raw arena index.
 //
@@ -201,12 +178,13 @@ pub const GBUFFER_TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float, // 7 velocity (depth residual reserved)
 ];
 
-/// The three targets grass does not write, which therefore carry
+
+/// The two targets grass does not write, which therefore carry
 /// [`wgpu::ColorWrites::empty()`].
 ///
 /// See the crate docs: this is the corrected §12 perf lever, and the mask is what makes
 /// it *correct* rather than merely cheap.
-pub const UNWRITTEN_TARGET_INDICES: [usize; 3] = [4, 5, 6];
+pub const UNWRITTEN_TARGET_INDICES: [usize; 2] = [5, 6];
 
 /// The pipeline's fragment target list.
 ///
@@ -217,10 +195,9 @@ pub fn color_target_states() -> [Option<wgpu::ColorTargetState>; 8] {
     std::array::from_fn(|index| {
         Some(wgpu::ColorTargetState {
             format: GBUFFER_TARGET_FORMATS[index],
-            // No blending. The cross-fade is a stochastic alpha *test* resolved by TAA,
-            // not a blend: blending grass into the G-buffer would write a half-weight
+            // No blending: blending grass into the G-buffer would write a half-weight
             // normal and a half-weight depth, which is not a surface any deferred
-            // lighting model can interpret.
+            // lighting model can interpret. LODs switch whole tufts instead.
             blend: None,
             write_mask: if UNWRITTEN_TARGET_INDICES.contains(&index) {
                 wgpu::ColorWrites::empty()
@@ -234,10 +211,6 @@ pub fn color_target_states() -> [Option<wgpu::ColorTargetState>; 8] {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Uniforms
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/// `globals.flags` bit: the bound interaction view is the real field, not the 1×1
-/// placeholder this pass creates in its constructor.
-pub const FLAG_INTERACTION_VALID: u32 = 1;
 
 /// Tint each blade by its LOD instead of shading it, so LOD band boundaries are visible.
 ///
@@ -264,7 +237,7 @@ fn debug_lod_enabled() -> bool {
 }
 
 /// Per-frame foliage globals. Mirrors `FoliageGlobals` in `foliage_gbuffer.wgsl`
-/// (64 bytes).
+/// (48 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct FoliageGlobals {
@@ -272,41 +245,30 @@ pub struct FoliageGlobals {
     /// load-bearing rather than informational — a stale size scales every foliage motion
     /// vector and TAA rejects them as outliers.
     pub screen_size: [f32; 2],
-    /// Frame index; the temporal axis of the cross-fade dither.
+    /// Frame index.
     pub frame: u32,
     /// `FLAG_*` bits.
     pub flags: u32,
     /// xy = the wind clock: the frame clock `t` and the previous frame's `t - dt`
     /// (`PrepareContext::time`, `time_delta`; host-driven, so wind stops with a frozen
-    /// or paused clock), z unused (the camera position comes from the camera uniform),
-    /// **w = resident ring radius in metres** — the input to the scale-in factor.
-    ///
-    /// A `vec4` rather than a bare `f32`, because that is what the WGSL side declares and
-    /// WGSL gives a `vec4<f32>` 16-byte alignment. This field is where an earlier version
-    /// of this struct went wrong: it had four consecutive scalars here
-    /// (`ring_radius`, `blades_per_tile`, `lod_quality_scale`, `scale_in_band`) against
-    /// the shader's single `vec4`, so `clock_ring.w` read back whatever was in
-    /// `scale_in_band` — a couple of metres — and every blade's `scale_in` evaluated to
-    /// zero. Zero scale-in means zero height, so all 236 000 blades rendered as
-    /// degenerate strips: no error, no warning, just bare ground.
-    pub clock_ring: [f32; 4],
-    /// xy = interaction field world-XZ origin, z = extent in metres, w = `1/extent`.
-    pub interaction_field: [f32; 4],
+    /// or paused clock), zw unused. A `vec4` because WGSL aligns one to 16 bytes: a run
+    /// of scalars here against the shader's `vec4` once fed every blade a zero height.
+    pub clock: [f32; 4],
     /// `FoliageQuality::lod_distance_scale`, already sanitised here so the shader does
     /// not have to repeat `select_blade_lod`'s defensive branch on it.
     pub lod_quality_scale: f32,
-    /// Ring-entry scale-in band width in metres.
-    pub scale_in_band: f32,
-    /// Width of the stochastic LOD cross-fade band in metres.
+    /// Width of the band (metres) the near tufts switch from L0 to L1 across.
     pub lod_fade_band: f32,
-    /// Global multiplier on the interaction bend.
+    /// Global multiplier on how far interactors press foliage over.
     pub interaction_strength: f32,
+    /// Elements per `visible_blades` region (a LOD's): `cs_boxes` reads every region.
+    pub region_stride: u32,
 }
 
 const _: () = {
     assert!(
-        std::mem::size_of::<FoliageGlobals>() == 64,
-        "FoliageGlobals must be 64 bytes and match `struct FoliageGlobals` in \
+        std::mem::size_of::<FoliageGlobals>() == 48,
+        "FoliageGlobals must be 48 bytes and match `struct FoliageGlobals` in \
          foliage_gbuffer.wgsl field for field; a mismatch here does not fail to compile, \
          it silently feeds the vertex shader the wrong numbers"
     );
@@ -412,53 +374,22 @@ pub fn decide_frame(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LOD cross-fade — CPU mirror
+// L0/L1 switch — CPU mirror
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Upper distance bound of LOD `level`, with the same non-decreasing repair
-/// [`helio_pass_foliage_place::select_blade_lod`] applies.
-///
-/// The repair matters: a mis-authored ladder like `[8, 45, 20, 120]` must degrade to an
-/// empty L2 rather than let a band be skipped, or the scene pops straight from a
-/// 3-segment blade to a clump card with no fade between them.
-pub fn lod_threshold(lod_distances: [f32; 4], level: u32, quality_scale: f32) -> f32 {
-    let scale = if quality_scale.is_finite() && quality_scale > 0.0 {
-        quality_scale
-    } else {
-        1.0
-    };
-    let mut threshold = 0.0f32;
-    for entry in lod_distances.iter().take(level.min(3) as usize + 1) {
-        let scaled = entry * scale;
-        if scaled > threshold {
-            threshold = scaled;
-        }
+/// Whether a near-band tuft of hash `unit` (in `[0, 1)`) draws at `level` at `distance`
+/// (CPU mirror of the shader's switch): over `band` metres under the type's L0 distance
+/// `boundary` the share of tufts at L1 grows from none to all, each tuft whole at exactly
+/// one of L0 and L1 (never two see-through halves). Levels past L1 are whole tufts that
+/// the bands fade, not this.
+pub fn lod_draws(level: u32, distance: f32, boundary: f32, band: f32, unit: f32) -> bool {
+    let t = ((distance - (boundary - band)) / band.max(1.0e-6)).clamp(0.0, 1.0);
+    let f = if band > 0.0 { t * t * (3.0 - 2.0 * t) } else if distance < boundary { 0.0 } else { 1.0 };
+    match level {
+        0 => unit < 1.0 - f,
+        1 => unit >= 1.0 - f,
+        _ => true,
     }
-    threshold
-}
-
-/// Fraction of blades at `level` that survive the stochastic dither at `distance`.
-///
-/// CPU mirror of `foliage_cross_fade` in the shader. Symmetric by construction: at any
-/// LOD threshold the near level's weight is `f` and the far level's is `1 - f`, so the
-/// two sum to exactly one blade's worth of coverage everywhere in the band. That is what
-/// makes the dither resolve to constant density instead of a thinning or doubling ring,
-/// and it is what `tests/lod.rs` asserts.
-pub fn cross_fade_alpha(
-    level: u32,
-    distance: f32,
-    lod_distances: [f32; 4],
-    quality_scale: f32,
-    band: f32,
-) -> f32 {
-    let upper = lod_threshold(lod_distances, level, quality_scale);
-    let mut alpha = helio_pass_foliage_place::lod_fade_alpha(distance, upper - band, upper);
-    if level > 0 {
-        let lower = lod_threshold(lod_distances, level - 1, quality_scale);
-        alpha = alpha
-            .min(1.0 - helio_pass_foliage_place::lod_fade_alpha(distance, lower - band, lower));
-    }
-    alpha
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -472,16 +403,24 @@ pub fn cross_fade_alpha(
 /// pass is built first and its `Arc<wgpu::Buffer>` fields are cloned into the consumer.
 pub struct FoliageGBufferPass {
     pipeline: wgpu::RenderPipeline,
+    /// Blocky foliage: the boxes `FoliageBoxesPass` expands, nine corners each.
+    box_pipeline: wgpu::RenderPipeline,
     bind_group_layout_0: wgpu::BindGroupLayout,
 
     // ── Producer-owned buffers (the pinned contract) ─────────────────────────
     blade_arena: Arc<wgpu::Buffer>,
     tile_table: Arc<wgpu::Buffer>,
+    /// `GpuTileFrame[]`, each slot's frame (origin, axes, up) in render space.
+    tile_frames: Arc<wgpu::Buffer>,
     visible_blades: Arc<wgpu::Buffer>,
     foliage_indirect: Arc<wgpu::Buffer>,
 
     // ── Pass-owned buffers ───────────────────────────────────────────────────
-    globals_buf: wgpu::Buffer,
+    globals_buf: Arc<wgpu::Buffer>,
+    /// `FoliageBox[]` and the boxes' count and draw arguments (`BoxState`), shared
+    /// with [`FoliageBoxesPass`].
+    boxes: Arc<wgpu::Buffer>,
+    box_state: Arc<wgpu::Buffer>,
     /// Valid only when the SceneDB columns have not been registered yet. Authored
     /// foliage never enters either placeholder; the bind group resolves the mirror's
     /// `foliage_wind`/`foliage_types` buffers directly each frame.
@@ -490,24 +429,18 @@ pub struct FoliageGBufferPass {
     lod_buf: wgpu::Buffer,
     lod_uniforms_written: bool,
 
-    // ── Interaction placeholder ──────────────────────────────────────────────
-    /// TEMPORARY: `FoliageInteractionPass` is phase 3 and does not exist yet, so
-    /// `frame.foliage_interaction` is normally unwritten. The bind group layout still
-    /// needs a texture and a sampler, so the pass owns a 1×1 stand-in. It is never
-    /// sampled: `FLAG_INTERACTION_VALID` stays clear and the shader returns a zero bend
-    /// before touching it. Delete this together with the flag once phase 3 lands.
-    placeholder_view: wgpu::TextureView,
-    placeholder_sampler: wgpu::Sampler,
+    /// `FoliagePlacePass::interactors`: this frame's interactors in render space.
+    interactors: Arc<wgpu::Buffer>,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(wgpu::Buffer, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer)>,
+    bind_group_0_key: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
+    /// The band table (`FoliagePlacePass::bands_buffer`): where each slot's tufts draw
+    /// and how they thin.
+    bands: Arc<wgpu::Buffer>,
     bind_group_1: wgpu::BindGroup,
 
     /// Elements per `visible_blades` region. See [`visible_region_offset`].
     region_stride: u32,
-    /// `FoliagePlacePass::blades_per_tile` — the fixed arena slab size that makes
-    /// [`tile_slot_of_blade`] an exact division.
-    blades_per_tile: u32,
 
     decision: FoliageFrameDecision,
     uploaded_generation: Option<u64>,
@@ -517,23 +450,15 @@ pub struct FoliageGBufferPass {
 
     /// Quality preset. Drives the ring radius and the LOD ladder scale, and must match
     /// what `FoliagePlacePass` was configured with — the two independently apply the
-    /// same scale, and a mismatch shears the cross-fade.
+    /// same scale, and a mismatch shears the switch.
     pub quality: FoliageQuality,
-    /// Width of the stochastic cross-fade band in metres.
-    ///
-    /// Four metres against the default `[8, 20, 45, 120]` ladder: wide enough that the
-    /// dissolve is below the perceptual threshold at walking speed, narrow enough that
-    /// the doubled draw cost inside the band stays a few percent of the ring.
+    /// Width of the band (metres) the near tufts switch from L0 to L1 across, a tuft at a
+    /// time ([`lod_draws`]): wide enough that tufts change one by one, narrow enough
+    /// that the doubled cull output inside it stays small.
     pub lod_fade_band: f32,
-    /// Global multiplier on the interaction bend.
+    /// Global multiplier on how far interactors (`FoliageInteractorComponent` rows) press
+    /// foliage over.
     pub interaction_strength: f32,
-    /// TEMPORARY: world-XZ origin and extent of the interaction field, `[x, z, extent]`.
-    /// Set by phase 3's `FoliageInteractionPass` once it publishes a field; ignored
-    /// while `FLAG_INTERACTION_VALID` is clear.
-    interaction_field: [f32; 3],
-    /// Whether [`FoliageGBufferPass::set_interaction_field`] has ever been called.
-    /// Gates `FLAG_INTERACTION_VALID` alongside the published view — see `prepare`.
-    interaction_field_published: bool,
 }
 
 impl FoliageGBufferPass {
@@ -545,17 +470,18 @@ impl FoliageGBufferPass {
     /// * `visible_blades` — flat `blade_arena` indices in four equal contiguous regions;
     ///   see [`visible_region_offset`] for the region layout.
     /// * `foliage_indirect` — four `DrawIndirectArgs` at byte offsets 0/16/32/48.
-    /// * `blades_per_tile` — `FoliagePlacePass::blades_per_tile`, the arena slab size.
-    ///   Not derivable from the buffers: it is the one piece of the producer's layout a
-    ///   consumer cannot see, and without it a blade index cannot be resolved to the
-    ///   tile whose origin its position is relative to. See [`tile_slot_of_blade`].
+    /// * `bands` — `FoliagePlacePass::bands_buffer`, the band table (a uniform).
+    /// * `interactors` — `FoliagePlacePass::interactors`, the frame's interactors.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &wgpu::Device,
         blade_arena: Arc<wgpu::Buffer>,
         tile_table: Arc<wgpu::Buffer>,
+        tile_frames: Arc<wgpu::Buffer>,
         visible_blades: Arc<wgpu::Buffer>,
         foliage_indirect: Arc<wgpu::Buffer>,
-        blades_per_tile: u32,
+        bands: Arc<wgpu::Buffer>,
+        interactors: Arc<wgpu::Buffer>,
     ) -> Self {
         // ── Region stride ─────────────────────────────────────────────────────
         // Derived from the buffer the producer sized, so there is no third place for
@@ -565,12 +491,24 @@ impl FoliageGBufferPass {
         let region_stride = ((visible_blades.size() / (LOD_COUNT as u64 * 4)) as u32).max(1);
 
         // ── Buffers ───────────────────────────────────────────────────────────
-        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        let boxes = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("FoliageGBuffer/Boxes"),
+            size: MAX_FOLIAGE_BOXES * BOX_BYTES,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        }));
+        let box_state = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("FoliageGBuffer/BoxState"),
+            size: BOX_STATE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        let globals_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FoliageGBuffer/Globals"),
             size: std::mem::size_of::<FoliageGlobals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
+        }));
         let placeholder_wind = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FoliageGBuffer/WindPlaceholder"),
             size: std::mem::size_of::<helio_pass_foliage_place::GpuWind>() as u64,
@@ -590,110 +528,14 @@ impl FoliageGBufferPass {
             mapped_at_creation: false,
         });
 
-        // ── Interaction placeholder (temporary; see the field's docs) ─────────
-        let placeholder = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("FoliageGBuffer/InteractionPlaceholder"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            // COPY_DST alongside TEXTURE_BINDING so wgpu can zero-initialise it. It is
-            // never sampled — the flag gates that — but an unclearable texture in a bind
-            // group is a validation problem waiting for the one build that does sample it.
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let placeholder_view = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
-        let placeholder_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("FoliageGBuffer/InteractionSampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
 
         // ── Bind group layouts ────────────────────────────────────────────────
         //
         // Everything here is VERTEX-visible except `globals`, which the fragment stage
         // also reads for the screen size and the dither's frame index. Blade geometry,
         // wind, LOD selection and the interaction bend are all vertex-stage work; the
-        // fragment stage only shades and dithers.
-        let storage = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let bind_group_layout_0 =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("FoliageGBuffer BGL 0"),
-                entries: &[
-                    // Camera is a read-only storage array; `view_index` selects the
-                    // eye in a future single-pass stereo path (mono reads index 0).
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    storage(3), // foliage_types
-                    storage(4), // blade_arena
-                    storage(5), // tile_table
-                    storage(6), // visible_blades
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 7,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 8,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+        // fragment stage only shades.
+        let bind_group_layout_0 = layout_0(device, "FoliageGBuffer BGL 0", true);
 
         let bind_group_layout_1 =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -733,7 +575,7 @@ impl FoliageGBufferPass {
             device,
             "FoliageGBuffer Shader",
             helio_core::include_wgsl!("../shaders/foliage_gbuffer.wgsl"),
-            &[helio_pass_foliage_place::WIND_SNIPPET],
+            &[helio_pass_foliage_place::WIND_SNIPPET, helio_pass_foliage_place::COMMON_SNIPPET],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("FoliageGBuffer PL"),
@@ -741,12 +583,12 @@ impl FoliageGBufferPass {
             immediate_size: 0,
         });
         let targets = color_target_states();
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("FoliageGBuffer Pipeline"),
+        let raster = |label: &str, entry: &str| helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(entry),
                 compilation_options: Default::default(),
                 // No vertex buffer. Every attribute is derived from `vertex_index` and
                 // the packed instance record — see `geometry`.
@@ -770,52 +612,48 @@ impl FoliageGBufferPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                // Grass is opaque geometry and must occlude what is behind it. The
-                // stochastic cross-fade is a discard, not a blend, so a surviving
-                // fragment is fully opaque and writing depth is correct.
+                // Grass is opaque geometry and must occlude what is behind it.
                 depth_write_enabled: Some(true),
                 depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            // Single-sampled, like every other Helio raster pass. This is also why the
-            // cross-fade cannot use alpha-to-coverage: WebGPU rejects
-            // `alphaToCoverageEnabled` when `count == 1`.
+            // Single-sampled, like every other Helio raster pass.
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
         });
+        let pipeline = raster("FoliageGBuffer Pipeline", "vs_main");
+        let box_pipeline = raster("FoliageGBuffer Box Pipeline", "vs_box");
 
         Self {
             pipeline,
+            box_pipeline,
             bind_group_layout_0,
             blade_arena,
             tile_table,
+            tile_frames,
             visible_blades,
             foliage_indirect,
             globals_buf,
+            boxes,
+            box_state,
             placeholder_wind,
             placeholder_type,
             lod_buf,
             lod_uniforms_written: false,
-            placeholder_view,
-            placeholder_sampler,
+            interactors,
             bind_group_0: None,
             bind_group_0_key: None,
+            bands,
             bind_group_1,
             region_stride,
-            // Clamped once here rather than defended at every use: a zero slab size is a
-            // wiring mistake, and one blade per tile is a bounded, visible failure —
-            // whereas a division by zero in the vertex stage is implementation-defined.
-            blades_per_tile: blades_per_tile.max(1),
             decision: decide_frame(None, None),
             uploaded_generation: None,
             type_liveness: helio_pass_foliage_place::foliage_type_liveness(),
             quality: FoliageQuality::default(),
             lod_fade_band: 4.0,
             interaction_strength: 1.0,
-            interaction_field: [0.0, 0.0, 64.0],
-            interaction_field_published: false,
         }
     }
 
@@ -832,16 +670,6 @@ impl FoliageGBufferPass {
         self.decision
     }
 
-    /// TEMPORARY: publish the interaction field's world placement.
-    ///
-    /// Phase 3's `FoliageInteractionPass` owns the snapped, camera-relative field and is
-    /// the only thing that can know this. Until it exists nothing calls this and the
-    /// bend is skipped entirely.
-    pub fn set_interaction_field(&mut self, origin_xz: [f32; 2], extent_meters: f32) {
-        self.interaction_field = [origin_xz[0], origin_xz[1], extent_meters.max(1.0e-3)];
-        self.interaction_field_published = true;
-    }
-
     /// The per-LOD constants, in the order they are written into `lod_buf`.
     ///
     /// Public so the LOD ladder's vertex counts can be asserted against
@@ -850,29 +678,15 @@ impl FoliageGBufferPass {
         region_stride: u32,
         cluster_granularity: u32,
     ) -> [FoliageLodUniform; LOD_COUNT] {
-        // The clump card's width is a *coverage* quantity, not a style choice, so it is
-        // derived rather than hardcoded. The producer emits one L3 card per cluster, so
-        // that card stands in for `cluster_granularity` blades and must cover their
-        // footprint: area scales with the square of width, hence `sqrt(N)`.
-        //
-        // A fixed constant cannot be right here, because the cluster size is a quality
-        // setting — 16 blades on Medium and above, 64 on Low, needing 4x and 8x
-        // respectively. The previous hardcoded 2.5 covered about six blades' worth in
-        // both cases, which is what produced a hard step down in density at the L2→L3
-        // boundary and a far ring visibly thinner than the band in front of it.
-        let clump_width = (cluster_granularity.max(1) as f32).sqrt();
+        let _ = cluster_granularity;
         std::array::from_fn(|lod| FoliageLodUniform {
             lod: lod as u32,
             segments: LOD_SEGMENTS[lod],
             vertex_count: LOD_VERTEX_COUNTS[lod],
             region_base: visible_region_offset(lod as u32, region_stride),
-            width_scale: if lod == CLUMP_LOD {
-                clump_width
-            } else {
-                LOD_WIDTH_SCALE[lod]
-            },
-            height_scale: LOD_HEIGHT_SCALE[lod],
-            is_card: LOD_IS_CARD[lod] as u32,
+            width_scale: 1.0,
+            height_scale: 1.0,
+            is_card: (lod == 2) as u32,
             _pad: 0,
         })
     }
@@ -888,12 +702,7 @@ impl RenderPass for FoliageGBufferPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        // The plan's §10 also lists `foliage_interaction`. It is deliberately absent
-        // until phase 3: `RenderGraph::validate_dependencies` rejects a read that no
-        // prior pass writes, and `FoliageInteractionPass` does not exist yet, so
-        // declaring it now would make any graph containing this pass fail to build.
-        // Add it in the same commit that adds the pass that writes it.
-        &["gbuffer", "foliage_draws"]
+        &["gbuffer", "foliage_draws", "foliage_boxes"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -1047,31 +856,15 @@ impl RenderPass for FoliageGBufferPass {
         }
 
         // ── Globals ───────────────────────────────────────────────────────────
-        // Three conditions, all required. The field placement is the one that is easy to
-        // forget: a published view with no published origin would bend every blade in
-        // the world against a 64 m field sitting at the world origin, which looks like a
-        // wind bug rather than a wiring bug.
-        let interaction_valid = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("foliage_interaction")).is_some()
-            && ctx.registry.get::<&wgpu::Sampler>(helio_core::ResourceKey::new("foliage_interaction_sampler")).is_some()
-            && self.interaction_field_published;
-        let extent = self.interaction_field[2].max(1.0e-3);
         let globals = FoliageGlobals {
             screen_size: [ctx.width as f32, ctx.height as f32],
             frame: ctx.frame_num as u32,
-            flags: if interaction_valid {
-                FLAG_INTERACTION_VALID
-            } else {
-                0
-            } | if debug_lod_enabled() {
-                FLAG_DEBUG_LOD
-            } else {
-                0
-            },
-            clock_ring: [
+            flags: if debug_lod_enabled() { FLAG_DEBUG_LOD } else { 0 },
+            clock: [
                 ctx.time,
                 ctx.time - ctx.time_delta,
                 0.0,
-                self.quality.ring_radius(),
+                0.0,
             ],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.
@@ -1083,15 +876,9 @@ impl RenderPass for FoliageGBufferPass {
                     1.0
                 }
             },
-            scale_in_band: DEFAULT_SCALE_IN_BAND,
             lod_fade_band: self.lod_fade_band.max(0.0),
-            interaction_strength: self.interaction_strength,
-            interaction_field: [
-                self.interaction_field[0],
-                self.interaction_field[1],
-                extent,
-                1.0 / extent,
-            ],
+            region_stride: self.region_stride,
+            interaction_strength: self.interaction_strength.max(0.0),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1100,10 +887,11 @@ impl RenderPass for FoliageGBufferPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
             log::debug!(
-                "[foliage][raster] frame={} enabled={} render_pass_open={}",
+                "[foliage][raster] frame={} enabled={} render_pass_open={} interactors={}",
                 ctx.frame_num,
                 self.decision.enabled,
                 ctx.render_cmds().is_some(),
+                self.interactors.size(),
             );
         }
         if !self.decision.enabled {
@@ -1119,23 +907,15 @@ impl RenderPass for FoliageGBufferPass {
 
         // ── Bind group 0 ──────────────────────────────────────────────────────
         //
-        // Rebuilt when the camera buffer reallocates or the interaction view changes.
-        // The producer's four buffers are `Arc`s owned by this pass, so they cannot move
-        // underneath it and are not part of the key.
+        // Rebuilt when the camera buffer or a SceneDB column reallocates. The producer's
+        // buffers are `Arc`s owned by this pass, so they cannot move underneath it and
+        // are not part of the key.
         //
-        // Built inside a block that ends before the assignment: the interaction view is
-        // borrowed either out of `ctx.registry` or out of `self`, and holding that
-        // borrow across `self.bind_group_0 = ...` would not compile. The created bind
-        // group owns its references, so nothing escapes the block.
+        // Built inside a block that ends before the assignment: the scene's buffers are
+        // borrowed out of `ctx` or `self`, and holding that borrow across
+        // `self.bind_group_0 = ...` would not compile. The created bind group owns its
+        // references, so nothing escapes the block.
         let (key, rebuilt) = {
-            let interaction_view = ctx
-                .registry
-                .get(helio_core::ResourceKey::new("foliage_interaction"))
-                .unwrap_or(&self.placeholder_view);
-            let interaction_sampler = ctx
-                .registry
-                .get(helio_core::ResourceKey::new("foliage_interaction_sampler"))
-                .unwrap_or(&self.placeholder_sampler);
             let wind_buffer = ctx
                 .scene_buffers
                 .get(BufferKey::of("foliage_wind"))
@@ -1146,13 +926,7 @@ impl RenderPass for FoliageGBufferPass {
                 .get(BufferKey::of("foliage_types"))
                 .map(|h| &h.buffer)
                 .unwrap_or(&self.placeholder_type);
-            let key = (
-                ctx.camera.clone(),
-                interaction_view.clone(),
-                interaction_sampler.clone(),
-                wind_buffer.clone(),
-                type_buffer.clone(),
-            );
+            let key = (ctx.camera.clone(), wind_buffer.clone(), type_buffer.clone());
             let rebuilt = if self.bind_group_0_key.as_ref() != Some(&key) {
                 log::debug!("FoliageGBuffer: rebuilding bind group 0");
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1187,14 +961,13 @@ impl RenderPass for FoliageGBufferPass {
                             binding: 6,
                             resource: self.visible_blades.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.interactors.as_entire_binding() },
                         wgpu::BindGroupEntry {
-                            binding: 7,
-                            resource: wgpu::BindingResource::TextureView(interaction_view),
+                            binding: 9,
+                            resource: self.tile_frames.as_entire_binding(),
                         },
-                        wgpu::BindGroupEntry {
-                            binding: 8,
-                            resource: wgpu::BindingResource::Sampler(interaction_sampler),
-                        },
+                        wgpu::BindGroupEntry { binding: 10, resource: self.bands.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 11, resource: self.boxes.as_entire_binding() },
                     ],
                 }))
             } else {
@@ -1214,6 +987,224 @@ impl RenderPass for FoliageGBufferPass {
             pass.set_bind_group(1, &self.bind_group_1, &[lod * LOD_UNIFORM_STRIDE]);
             pass.draw_indirect(&self.foliage_indirect, lod as u64 * DRAW_INDIRECT_STRIDE);
         }
+        // Blocky foliage: the boxes `FoliageBoxesPass` expanded this frame.
+        pass.set_pipeline(&self.box_pipeline);
+        pass.set_bind_group(1, &self.bind_group_1, &[0]);
+        pass.draw_indirect(&self.box_state, BOX_DRAW_OFFSET);
+        Ok(())
+    }
+}
+
+/// Boxes blocky foliage expands to at most a frame (`FoliageBox`, 64 bytes each):
+/// beyond them, shapes are not drawn (counted in `BoxState::overflow`).
+pub const MAX_FOLIAGE_BOXES: u64 = 1 << 19;
+const BOX_BYTES: u64 = 64;
+/// `BoxState`: the count, the overflow, two spare words, then the box draw's
+/// `DrawIndirectArgs` at [`BOX_DRAW_OFFSET`].
+const BOX_STATE_BYTES: u64 = 32;
+const BOX_DRAW_OFFSET: u64 = 16;
+/// Workgroups of `cs_boxes`, whose threads stride over every visible record.
+const BOX_GROUPS: u32 = 1024;
+
+fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+}
+
+/// Group 0 of the foliage shader: the camera, globals, wind, types, records, tiles, the
+/// visible list, interactors, frames and bands, and (the draw's) the expanded boxes.
+fn layout_0(device: &wgpu::Device, label: &str, boxes: bool) -> wgpu::BindGroupLayout {
+    let stages = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
+    let buffer = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: stages,
+        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    };
+    let storage = wgpu::BufferBindingType::Storage { read_only: true };
+    let mut entries = vec![
+        // Camera is a read-only storage array; `view_index` selects the eye in a future
+        // single-pass stereo path (mono reads index 0).
+        buffer(0, storage),
+        buffer(1, wgpu::BufferBindingType::Uniform),
+        buffer(2, storage),  // wind
+        buffer(3, storage),  // foliage_types
+        buffer(4, storage),  // blade_arena
+        buffer(5, storage),  // tile_table
+        buffer(6, storage),  // visible_blades
+        buffer(7, storage),  // foliage_interactors
+        buffer(9, storage),  // tile_frames
+        buffer(10, wgpu::BufferBindingType::Uniform), // bands
+    ];
+    if boxes {
+        entries.push(buffer(11, storage));
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
+}
+
+impl FoliageGBufferPass {
+    /// The compute pass that expands this pass's blocky foliage into boxes each frame:
+    /// add it to the graph after `FoliagePlacePass` and before `GBufferPass` (between the
+    /// two raster passes it would break their fusion).
+    pub fn boxes_pass(&self, device: &wgpu::Device) -> FoliageBoxesPass {
+        FoliageBoxesPass::new(
+            device,
+            Arc::clone(&self.globals_buf),
+            [&self.blade_arena, &self.tile_table, &self.tile_frames, &self.visible_blades, &self.foliage_indirect, &self.bands, &self.interactors].map(Arc::clone),
+            Arc::clone(&self.boxes),
+            Arc::clone(&self.box_state),
+        )
+    }
+}
+
+/// Expands each frame's visible blocky foliage into boxes (`cs_boxes`): everything a box
+/// shares — its record, blade and staircase, the wind and interactors at its centre — is
+/// worked out once a box here instead of once a vertex in the draw, which places nine
+/// corners a box (`vs_box`). Made by [`FoliageGBufferPass::boxes_pass`].
+pub struct FoliageBoxesPass {
+    expand: wgpu::ComputePipeline,
+    finish: wgpu::ComputePipeline,
+    layout_0: wgpu::BindGroupLayout,
+    empty_group: wgpu::BindGroup,
+    group_2: wgpu::BindGroup,
+    group_0: Option<((wgpu::Buffer, wgpu::Buffer, wgpu::Buffer), wgpu::BindGroup)>,
+    globals: Arc<wgpu::Buffer>,
+    /// Blade arena, tile table, tile frames, visible list, the cull's draws, bands and
+    /// interactors (`FoliagePlacePass`'s).
+    producer: [Arc<wgpu::Buffer>; 7],
+    box_state: Arc<wgpu::Buffer>,
+    placeholder_wind: wgpu::Buffer,
+    placeholder_type: wgpu::Buffer,
+    active: bool,
+}
+
+impl FoliageBoxesPass {
+    fn new(device: &wgpu::Device, globals: Arc<wgpu::Buffer>, producer: [Arc<wgpu::Buffer>; 7], boxes: Arc<wgpu::Buffer>, box_state: Arc<wgpu::Buffer>) -> Self {
+        let layout_0 = layout_0(device, "FoliageBoxes BGL 0", false);
+        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("FoliageBoxes BGL 1"), entries: &[] });
+        let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        };
+        let layout_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("FoliageBoxes BGL 2"),
+            entries: &[storage(0, false), storage(1, false), storage(2, true)],
+        });
+        let shader = helio_core::shader::module_with(
+            device,
+            "FoliageBoxes Shader",
+            helio_core::include_wgsl!("../shaders/foliage_gbuffer.wgsl"),
+            &[helio_pass_foliage_place::WIND_SNIPPET, helio_pass_foliage_place::COMMON_SNIPPET],
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("FoliageBoxes PL"),
+            bind_group_layouts: &[Some(&layout_0), Some(&empty_layout), Some(&layout_2)],
+            immediate_size: 0,
+        });
+        let pipeline = |label: &str, entry: &str| {
+            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                module: &shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let empty_group = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("FoliageBoxes BG 1"), layout: &empty_layout, entries: &[] });
+        let group_2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("FoliageBoxes BG 2"),
+            layout: &layout_2,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: boxes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: box_state.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: producer[4].as_entire_binding() },
+            ],
+        });
+        let placeholder = |label: &str, size: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        Self {
+            expand: pipeline("FoliageBoxes Expand", "cs_boxes"),
+            finish: pipeline("FoliageBoxes Finish", "cs_boxes_finish"),
+            layout_0,
+            empty_group,
+            group_2,
+            group_0: None,
+            globals,
+            producer,
+            box_state,
+            placeholder_wind: placeholder("FoliageBoxes/WindPlaceholder", std::mem::size_of::<helio_pass_foliage_place::GpuWind>() as u64),
+            placeholder_type: placeholder("FoliageBoxes/TypesPlaceholder", std::mem::size_of::<GpuFoliageType>() as u64),
+            active: false,
+        }
+    }
+}
+
+impl RenderPass for FoliageBoxesPass {
+    fn name(&self) -> &'static str {
+        "FoliageBoxes"
+    }
+
+    fn reads(&self) -> &'static [&'static str] {
+        &["foliage_draws"]
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["foliage_boxes"]
+    }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a helio_core::ResourceRegistry<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // As the draw: no type rows or no wind, no foliage.
+        self.active = ctx.scene_buffers.get(BufferKey::of("foliage_types")).is_some() && ctx.scene_buffers.get(BufferKey::of("foliage_wind")).is_some();
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if !self.active {
+            return Ok(());
+        }
+        let wind = ctx.scene_buffers.get(BufferKey::of("foliage_wind")).map(|h| &h.buffer).unwrap_or(&self.placeholder_wind);
+        let types = ctx.scene_buffers.get(BufferKey::of("foliage_types")).map(|h| &h.buffer).unwrap_or(&self.placeholder_type);
+        let key = (ctx.camera.clone(), wind.clone(), types.clone());
+        if self.group_0.as_ref().is_none_or(|(k, _)| *k != key) {
+            let [blades, tiles, frames, visible, _, bands, interactors] = &self.producer;
+            let group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("FoliageBoxes BG 0"),
+                layout: &self.layout_0,
+                entries: &[
+                    entry(0, ctx.camera),
+                    entry(1, &self.globals),
+                    entry(2, wind),
+                    entry(3, types),
+                    entry(4, blades),
+                    entry(5, tiles),
+                    entry(6, visible),
+                    entry(7, interactors),
+                    entry(9, frames),
+                    entry(10, bands),
+                ],
+            });
+            self.group_0 = Some((key, group));
+        }
+        let mut encoder = ctx.graphics_cmds();
+        encoder.clear_buffer(&self.box_state, 0, Some(BOX_DRAW_OFFSET));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Foliage Boxes"), timestamp_writes: None });
+        pass.set_bind_group(0, &self.group_0.as_ref().unwrap().1, &[]);
+        pass.set_bind_group(1, &self.empty_group, &[]);
+        pass.set_bind_group(2, &self.group_2, &[]);
+        pass.set_pipeline(&self.expand);
+        pass.dispatch_workgroups(BOX_GROUPS, 1, 1);
+        pass.set_pipeline(&self.finish);
+        pass.dispatch_workgroups(1, 1, 1);
         Ok(())
     }
 }

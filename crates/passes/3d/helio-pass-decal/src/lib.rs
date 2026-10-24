@@ -623,6 +623,9 @@ mod tests {
     }
 
     async fn compile_on_available_backends() -> usize {
+        // Every backend, GL included, on purpose: this is the only device-creating
+        // test in its binary, so no device creation races its GL threads' exit
+        // (see `helio_core::wgpu_instance_descriptor`).
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()

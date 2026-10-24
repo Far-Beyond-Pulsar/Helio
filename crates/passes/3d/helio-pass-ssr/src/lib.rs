@@ -9,9 +9,7 @@
 //! **RT path** (EXPERIMENTAL_RAY_QUERY available): The Hi-Z march is augmented
 //! with hardware ray queries from the TLAS. When the Hi-Z march finds no hit or
 //! returns low confidence, a ray query is issued against the scene TLAS. The two
-//! results are blended by confidence. Additionally, when radiance cascade data
-//! is available (`rc_cascades`), the shader can fall back to RC-based irradiance
-//! for rough surfaces where SSR + RT lack enough samples.
+//! results are blended by confidence.
 //!
 //! Writes Rgba16Float at half internal resolution: RGB = colour, A = hit
 //! confidence. The composite pass reconstructs it onto the full-resolution
@@ -27,21 +25,20 @@ use helio_core::{PassContext, RenderPass, Result as HelioResult};
 pub struct SsrPass {
     // Default (Hi-Z only) pipeline
     default_pipeline: wgpu::ComputePipeline,
-    // RT pipeline (Hi-Z + ray query + RC fallback)
+    // RT pipeline (Hi-Z + ray query)
     rt_pipeline: Option<wgpu::ComputePipeline>,
 
     bgl_1: wgpu::BindGroupLayout,
-    // Optional BGL2 for RT resources (TLAS + RC texture)
+    // Optional BGL2 for RT resources (TLAS, ray transmission)
     bgl_2: Option<wgpu::BindGroupLayout>,
 
     bg_0: wgpu::BindGroup,
     bg_1: Option<wgpu::BindGroup>,
     bg_1_key: Option<[wgpu::TextureView; 6]>,
     bg_2: Option<wgpu::BindGroup>,
-    bg_2_key: Option<(wgpu::Tlas, Option<wgpu::TextureView>, wgpu::Buffer)>,
+    bg_2_key: Option<(wgpu::Tlas, wgpu::Buffer)>,
 
     linear_sampler: wgpu::Sampler,
-    rc_fallback: wgpu::TextureView,
     transmission_fallback: wgpu::Buffer,
     use_rt: bool,
 
@@ -71,25 +68,6 @@ impl SsrPass {
         let use_rt = device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-
-        // A missing irradiance cascade must not reinterpret the scene image as
-        // directional probe data. The shader rejects this 1x1 sentinel.
-        let rc_fallback = device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("SSR absent irradiance cascade"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            })
-            .create_view(&Default::default());
 
         // Zero-initialized header disables transmission when metadata is absent.
         let transmission_fallback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -126,7 +104,7 @@ impl SsrPass {
             ],
         });
 
-        // Optional BGL2: TLAS + RC cascade texture (for RT path)
+        // Optional BGL2: TLAS and ray transmission (for RT path)
         let bgl_2 = use_rt.then(|| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("SSR BGL2 (RT)"),
@@ -139,9 +117,6 @@ impl SsrPass {
                         },
                         count: None,
                     },
-                    // RC cascade texture for reflection fallback (optional).
-                    // Bound as unfiltered float to match Rgba16Float storage format.
-                    texture_unfiltered_entry(1),
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -218,7 +193,6 @@ impl SsrPass {
             bg_2: None,
             bg_2_key: None,
             linear_sampler,
-            rc_fallback,
             transmission_fallback,
             use_rt,
             width: width.div_ceil(2),
@@ -350,18 +324,13 @@ impl RenderPass for SsrPass {
             let tlas = environment.and_then(|value| value.tlas);
 
             if let Some(tlas_binding) = tlas {
-                let rc_view: Option<&wgpu::TextureView> =
-                    ctx.registry.get(helio_core::ResourceKey::new("rc_view"));
-
                 let transmission = ctx
                     .registry
                     .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
                     .unwrap_or(&self.transmission_fallback);
-                let rt_key = (tlas_binding.clone(), rc_view.cloned(), transmission.clone());
+                let rt_key = (tlas_binding.clone(), transmission.clone());
 
                 if self.bg_2_key.as_ref() != Some(&rt_key) {
-                    let rc_tex = rc_view.unwrap_or(&self.rc_fallback);
-
                     self.bg_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("SSR BG2 (RT)"),
                         layout: self.bgl_2.as_ref().unwrap(),
@@ -369,10 +338,6 @@ impl RenderPass for SsrPass {
                             wgpu::BindGroupEntry {
                                 binding: 0,
                                 resource: tlas_binding.as_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(rc_tex),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,

@@ -11,52 +11,34 @@
 //!
 //! # Writing a generator
 //!
-//! The WGSL program defines
+//! The WGSL program defines its constants, its materials and a two-rate
+//! column (`docs/two-rate-field.md`): its largest octaves evaluated at
+//! nodes, the columns of a level whose indices are multiples of 16 on their
+//! face, and blended. A column reads the bilinear blend of its four nodes'
+//! words through the engine's `generation_node_word(slot)`,
+//! `floor(sum w_c v_c / 256)` with weights `(16 - di)(16 - dj)`,
+//! `di (16 - dj)`, `(16 - di) dj`, `di dj`, the high and low bytes of each
+//! word summed apart (so every word blends exactly, wrapping). Generation
+//! evaluates each tile's nodes once; a program without large octaves says
+//! `terrain_has_nodes` false.
 //!
 //! ```wgsl
 //! struct TerrainConstants { /* the bytes of TerrainProgram::constants */ }
-//! fn terrain_height(p: vec3<i32>, level: u32) -> i32
 //! fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32
-//! ```
-//!
-//! and optionally a surface word per column cell, computed once when the
-//! column is generated and stored with it (8 bits): whatever the materials
-//! need besides height (biome, sediment, crater age), so shading never
-//! runs the generator per pixel.
-//!
-//! ```wgsl
-//! fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32
-//! ```
-//!
-//! A program whose height and surface word share their work (or that is
-//! large) may also define both at once for generation, which then calls it
-//! at a single site (shader compilers inline every call, so each call site
-//! of a large program costs compile time; `display` asks for the program's
-//! coarse display variant, if it has one, and may be ignored):
-//!
-//! ```wgsl
-//! fn terrain_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> // (height, surface word)
-//! ```
-//!
-//! A program may instead evaluate its largest octaves at nodes and blend
-//! them (the two-rate field, `docs/two-rate-field.md`): the columns of a
-//! level whose indices are multiples of 16 on their face. A column reads
-//! the bilinear blend of its four nodes' words through the engine's
-//! `generation_node_word(slot)`, `floor(sum w_c v_c / 256)` with weights
-//! `(16 - di)(16 - dj)`, `di (16 - dj)`, `(16 - di) dj`, `di dj`, the high
-//! and low bytes of each word summed apart (so every word blends exactly,
-//! wrapping). Generation evaluates each tile's nodes once.
-//!
-//! ```wgsl
-//! const TERRAIN_NODE_WORDS: u32 = /* words a node carries */;
+//! const TERRAIN_NODE_WORDS: u32 = /* words a node carries, at least 1 */;
 //! fn terrain_has_nodes(level: u32) -> bool
 //! fn terrain_node(p: vec3<i32>, level: u32) // a node at domain point p
 //! fn terrain_node_word(slot: u32) -> i32 // of the node just evaluated
+//! // (height, surface word); `display`: the program's coarse display
+//! // variant, if it has one (may be ignored).
 //! fn terrain_column_nodes(p: vec3<i32>, level: u32, display: bool) -> vec2<i32>
 //! ```
 //!
-//! in place of `terrain_height` and `terrain_column`; the engine has the
-//! column's nodes ready when `terrain_has_nodes`.
+//! The engine has the column's nodes ready when `terrain_has_nodes`. The
+//! surface word (8 bits, stored with each column cell) is whatever the
+//! materials need besides height (biome, sediment, crater age), so shading
+//! never runs the generator per pixel; a program may also define it alone
+//! for shading (`terrain_surface`, 0 without).
 //!
 //! Its CPU field must blend the same way ([`TerrainField::height`] is by
 //! [`Column`] for this).
@@ -66,14 +48,18 @@
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
 //! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32
-//! fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 // optional
+//! fn cave_noise(q: vec3<i32>, level: u32, lattice: ptr<function, CaveLattice>) -> vec3<i32>
+//! fn cave_clearance(n: vec3<i32>, level: u32, step: f32) -> i32
 //! ```
 //!
-//! `terrain_clearance` is a conservative count of level cells along a lane,
-//! from the cell at volume point `q` (the point moving `step` units per
-//! cell), in which the volume cannot change a cell below the heightfield's
-//! lean band (caves cannot carve there); generation steps over them. Without
-//! it every cell of the extent is evaluated.
+//! `cave_clearance` is a conservative count of level cells along a lane,
+//! from a cell whose caves' noises are `n` (`cave_noise` at the cell centre
+//! `q`, the point moving `step` units per cell), in which the volume cannot
+//! change a cell below the heightfield's lean band (caves cannot carve
+//! there); generation steps over them. `cave_noise` keeps its lattice
+//! cells' corners in `lattice` (`cave_lattice()` at first), so a lane's
+//! cells hash each lattice cell once, and its noises are the ones the
+//! cell's density reads.
 //!
 //! and, to lean its surface (overhangs that are a continuous deformation of
 //! the heightfield: nothing floats),
@@ -184,7 +170,8 @@ pub struct TerrainProgram {
     /// compiled once per key, so a settings change that only changes
     /// `constants` never recompiles shaders.
     pub key: Cow<'static, str>,
-    /// Defines `TerrainConstants`, `terrain_height` and `ground_material`.
+    /// Defines `TerrainConstants`, `ground_material` and the two-rate column
+    /// (see the module doc).
     pub wgsl: Cow<'static, str>,
     /// Bytes of the `TerrainConstants` uniform (WGSL uniform layout, at
     /// most [`MAX_CONSTANT_BYTES`]).
@@ -294,11 +281,21 @@ pub struct MaterialAppearance {
     pub fleck: Option<(u8, f32)>,
     /// Material a filtered single-voxel speck of this one blends into.
     pub speck_host: Option<u8>,
+    /// The share of light on one side of a cell of this material that
+    /// leaves the other, tinted by its colour (foliage lets some through;
+    /// 0: opaque). Such a material is two-sided foliage: the sun from
+    /// behind lights it through itself and the cells past it, and global
+    /// illumination lights the shade under canopies with it.
+    pub transmission: f32,
+    /// Light the material gives off: its colour times this (scene-linear;
+    /// 0: none). It glows, and global illumination lights its
+    /// surroundings with it.
+    pub emission: f32,
 }
 
 impl Default for MaterialAppearance {
     fn default() -> Self {
-        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None }
+        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None, transmission: 0.0, emission: 0.0 }
     }
 }
 
@@ -362,6 +359,9 @@ impl Default for TerrainAppearance {
         materials[MARE as usize].patches = Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
         materials[BOULDER as usize].patches = Some([unit([130, 128, 123]), unit([112, 110, 106]), unit([90, 89, 86])]);
         materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
+        // A cell of leaves (a cluster with gaps) passes about two thirds of
+        // the light on it.
+        materials[LEAVES as usize].transmission = 0.65;
         // Voxels a pixel wide or more are lit by their own faces: slopes read
         // as their steps (no step softness).
         Self { materials, detail: [0.3, 0.4, 0.08, 0.0] }

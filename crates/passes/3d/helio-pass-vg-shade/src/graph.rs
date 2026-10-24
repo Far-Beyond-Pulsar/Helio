@@ -232,8 +232,6 @@ impl RenderPass for VgShadePass {
                 .map_or(0, |lights| lights.row_capacity()),
             ambient_intensity,
             ambient_color,
-            rc_world_min: [-100.0, -100.0, -100.0, 0.0],
-            rc_world_max: [100.0, 100.0, 100.0, 0.0],
             csm_splits: helio_pass_shadow_matrix_splits(),
             debug_mode: self.debug_mode,
             screen_width: ctx.width as f32,

@@ -481,13 +481,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     let radius = half_extents.length().max(0.01);
 
     // ── 3. Initialise headless GPU ────────────────────────────────────────────
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::PRIMARY,
-        flags: wgpu::InstanceFlags::default(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        backend_options: wgpu::BackendOptions::default(),
-        display: None,
-    });
+    let instance = wgpu::Instance::new(helio::wgpu_instance_descriptor());
 
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -938,13 +932,7 @@ impl SnapshotBatch {
     }
 
     async fn new_async(config: SnapshotConfig) -> Result<Self, SnapshotError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            flags: wgpu::InstanceFlags::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            backend_options: wgpu::BackendOptions::default(),
-            display: None,
-        });
+        let instance = wgpu::Instance::new(helio::wgpu_instance_descriptor());
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
