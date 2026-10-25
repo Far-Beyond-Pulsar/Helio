@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::{
-    create_wgpu_device, create_wgpu_instance, Result, XrInput, XrInstance, XrSession, XrSwapchain,
+    Result, XrInput, XrInstance, XrSession, XrSwapchain, create_wgpu_device, create_wgpu_instance,
 };
 
 /// The OpenXR runtime, graphics device, session, input actions, and eye
@@ -138,6 +138,28 @@ impl XrRuntime {
         width: u32,
         height: u32,
     ) -> (wgpu::TextureFormat, wgpu::CompositeAlphaMode) {
+        let (format, alpha_mode, _) = self.configure_mirror_surface_with_usage(
+            surface,
+            width,
+            height,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        (format, alpha_mode)
+    }
+
+    /// Configure the mirror with app-requested usages, limited to those the
+    /// platform surface supports. Render attachment remains required.
+    pub fn configure_mirror_surface_with_usage(
+        &self,
+        surface: &wgpu::Surface<'_>,
+        width: u32,
+        height: u32,
+        requested_usage: wgpu::TextureUsages,
+    ) -> (
+        wgpu::TextureFormat,
+        wgpu::CompositeAlphaMode,
+        wgpu::TextureUsages,
+    ) {
         let caps = surface.get_capabilities(&self.adapter);
         let format = caps
             .formats
@@ -146,10 +168,15 @@ impl XrRuntime {
             .copied()
             .unwrap_or(caps.formats[0]);
         let alpha_mode = caps.alpha_modes[0];
+        let usage = requested_usage & caps.usages;
+        assert!(
+            usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT),
+            "mirror surface does not support render attachment usage"
+        );
         surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage,
                 format,
                 color_space: wgpu::SurfaceColorSpace::Auto,
                 width: width.max(1),
@@ -160,6 +187,6 @@ impl XrRuntime {
                 desired_maximum_frame_latency: 2,
             },
         );
-        (format, alpha_mode)
+        (format, alpha_mode, usage)
     }
 }

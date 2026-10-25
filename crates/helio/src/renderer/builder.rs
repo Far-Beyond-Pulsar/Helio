@@ -123,6 +123,22 @@ impl RendererBuilder {
         self
     }
 
+    /// Build this application renderer on Helio's automatically selected
+    /// desktop or XR device. Use this before any app-owned GPU resources are
+    /// created so the SceneDB mirror and renderer share the context device.
+    /// Applications that need controller actions can call
+    /// [`HelioGraphicsContext::build_renderer`] directly and retain its input
+    /// handle; render-only apps can use this compact path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn build_with_graphics_context(
+        self,
+        graphics: &mut crate::HelioGraphicsContext<'_>,
+    ) -> helio_core::Result<Renderer> {
+        let config = self.config.clone();
+        let (renderer, _input) = graphics.build_renderer(self, config)?;
+        Ok(renderer)
+    }
+
     /// Build the render graph from anything that implements [`IntoGraph`]: a
     /// built-in pipeline, a render-graph asset or a plain function.
     pub fn with_graph(self, pipeline: impl IntoGraph + 'static) -> Self {

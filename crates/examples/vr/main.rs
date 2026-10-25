@@ -6,11 +6,9 @@
 //! In XR mode, two small emissive cubes are parented to the controller grip
 //! poses every frame, so they follow the player's hands exactly.
 //!
-//! When a headset is present, the Vulkan instance and device are created
-//! *through* OpenXR (`xrCreateVulkanInstanceKHR` / `xrCreateVulkanDeviceKHR`)
-//! via `helio_xr::create_wgpu_instance` / `create_wgpu_device` so the runtime's
-//! required extensions are enabled and the HMD's GPU is used. Helio mirrors the
-//! stereo pair into the app's normal window while it drives the headset.
+//! `HelioGraphicsContext` owns optional OpenXR discovery, Vulkan device
+//! selection, frame pacing, stereo rendering, and the desktop mirror. The
+//! example only reads controller input for its hand markers and locomotion.
 //!
 //! Controls:
 //!   WASD / Space / Shift — fly (desktop mirror mode)
@@ -36,8 +34,8 @@ use std::time::Instant;
 
 use glam::{Mat4, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    RenderMode, Renderer, RendererBuilder, RendererConfig,
+    Camera, HelioGraphicsConfig, HelioGraphicsContext, HelioXrInput, RenderMode, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_passes::build_forward_opaque_graph_with_context;
 use input::FreeCam;
@@ -50,25 +48,6 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
-
-// ── OpenXR state (native only) ───────────────────────────────────────────────
-
-#[cfg(not(target_arch = "wasm32"))]
-type XrBundle = helio::XrRuntime;
-
-/// Bring up the full OpenXR stack: OpenXR instance → wgpu Vulkan instance →
-/// wgpu device → session → swapchain. Any failure degrades to `None`, which
-/// switches the demo to desktop mirror mode.
-#[cfg(not(target_arch = "wasm32"))]
-fn try_init_xr() -> Option<XrBundle> {
-    match XrBundle::start_helio("helio_vr_demo", wgpu::TextureFormat::Rgba8UnormSrgb) {
-        Ok(runtime) => Some(runtime),
-        Err(e) => {
-            log::warn!("[XR] OpenXR init failed ({e}); running in desktop mirror mode instead");
-            None
-        }
-    }
-}
 
 // ── FPS counter ──────────────────────────────────────────────────────────────
 
@@ -112,9 +91,7 @@ impl App {
 
 struct AppState {
     window: Arc<Window>,
-    surface: Option<wgpu::Surface<'static>>,
-    surface_format: wgpu::TextureFormat,
-    alpha_mode: wgpu::CompositeAlphaMode,
+    graphics: HelioGraphicsContext<'static>,
     device: Arc<wgpu::Device>,
     renderer: Renderer,
     scene_db: SceneDb,
@@ -122,7 +99,7 @@ struct AppState {
     /// True when a live OpenXR session is installed in the renderer.
     xr_active: bool,
     #[cfg(not(target_arch = "wasm32"))]
-    xr_input: Option<(helio_xr::XrInput, helio_xr::XrSessionHandle)>,
+    xr_input: Option<HelioXrInput>,
     /// Player locomotion, applied as the XR stage transform. Position is the stage
     /// origin in world space; yaw is snap/smooth turn about it.
     player_position: Vec3,
@@ -149,10 +126,10 @@ impl AppState {
         /// player drifts continuously while standing still.
         const DEADZONE: f32 = 0.15;
 
-        let Some((input, session)) = &self.xr_input else {
+        let Some(input) = &self.xr_input else {
             return;
         };
-        let Ok(controls) = input.sync(session) else {
+        let Ok(controls) = input.controller_state() else {
             return;
         };
 
@@ -174,7 +151,8 @@ impl AppState {
         let right = Vec3::new(cos, 0.0, -sin);
         self.player_position += (forward * move_stick.y + right * move_stick.x) * MOVE_SPEED * dt;
 
-        self.renderer.set_xr_stage_transform(
+        input.set_locomotion_transform(
+            &mut self.renderer,
             glam::Mat4::from_translation(self.player_position)
                 * glam::Mat4::from_rotation_y(self.player_yaw),
         );
@@ -189,15 +167,12 @@ impl AppState {
         // past the palm instead of being hidden inside the physical controller.
         const HAND_OFFSET: Vec3 = Vec3::new(0.0, 0.03, -0.12);
 
-        let Some(time) = self.renderer.xr_last_display_time() else {
-            return;
-        };
         let world_from_stage =
             Mat4::from_translation(self.player_position) * Mat4::from_rotation_y(self.player_yaw);
-        let Some((input, session)) = &mut self.xr_input else {
+        let Some(input) = &mut self.xr_input else {
             return;
         };
-        let Ok(poses) = input.grip_pose_matrices(session, time, &world_from_stage) else {
+        let Ok(Some(poses)) = input.grip_poses(&self.renderer, &world_from_stage) else {
             return;
         };
         for (i, pose) in poses.into_iter().enumerate() {
@@ -211,26 +186,6 @@ impl AppState {
                 );
             }
         }
-    }
-}
-
-impl AppState {
-    fn configure_surface(&self, width: u32, height: u32) {
-        let Some(surface) = &self.surface else { return };
-        surface.configure(
-            &self.device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: self.surface_format,
-                color_space: wgpu::SurfaceColorSpace::Auto,
-                width: width.max(1),
-                height: height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: self.alpha_mode,
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-            },
-        );
     }
 }
 
@@ -250,92 +205,23 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        // Try OpenXR before creating wgpu: a headset session requires the
-        // Vulkan instance/device to be created through OpenXR.
-        #[cfg(not(target_arch = "wasm32"))]
-        let xr_bundle = try_init_xr();
-        #[cfg(target_arch = "wasm32")]
-        let xr_bundle: Option<XrBundle> = None;
-
-        // ── Device / queue / surface / config ────────────────────────────────
-        #[cfg(not(target_arch = "wasm32"))]
-        let xr_owned = xr_bundle;
-        #[cfg(target_arch = "wasm32")]
-        let xr_owned: Option<XrBundle> = xr_bundle;
-
-        let (device, queue, surface, surface_format, alpha_mode, config, xr_owned) = match xr_owned
-        {
-            Some(bundle) => {
-                let config = RendererConfig::for_xr(&bundle, RenderMode::ForwardOpaque);
-                // PC mirror surface: the OpenXR-created device presents both eye
-                // buffers side-by-side into this window.
-                let mirror_surface = bundle
-                    .create_mirror_surface(window.clone())
-                    .expect("Failed to create mirror surface");
-                let mirror_size = window.inner_size();
-                let (mirror_format, mirror_alpha) = bundle.configure_mirror_surface(
-                    &mirror_surface,
-                    mirror_size.width,
-                    mirror_size.height,
-                );
-                (
-                    bundle.device.clone(),
-                    bundle.queue.clone(),
-                    Some(mirror_surface),
-                    mirror_format,
-                    mirror_alpha,
-                    config,
-                    Some(bundle),
-                )
-            }
-            None => {
-                log::warn!("[XR] no headset — running desktop mirror (forward opaque)");
-                let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-                    flags: wgpu::InstanceFlags::empty(),
-                    ..helio_core::wgpu_instance_descriptor()
-                });
-                let surface = instance
-                    .create_surface(window.clone())
-                    .expect("Failed to create surface");
-                let adapter =
-                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::HighPerformance,
-                        compatible_surface: Some(&surface),
-                        force_fallback_adapter: false,
-                        apply_limit_buckets: false,
-                    }))
-                    .expect("Failed to find adapter");
-                let (device, queue) =
-                    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                        label: Some("Main Device"),
-                        required_features: required_wgpu_features(adapter.features()),
-                        required_limits: required_wgpu_limits(adapter.limits()),
-                        experimental_features: required_experimental_features(adapter.features()),
-                        ..Default::default()
-                    }))
-                    .expect("Failed to create device");
-                let caps = surface.get_capabilities(&adapter);
-                let surface_format = caps
-                    .formats
-                    .iter()
-                    .find(|f| f.is_srgb())
-                    .copied()
-                    .unwrap_or(caps.formats[0]);
-                let alpha_mode = caps.alpha_modes[0];
-                let size = window.inner_size();
-                let config = RendererConfig::new(size.width, size.height, surface_format)
-                    .with_render_mode(RenderMode::ForwardOpaque);
-                (
-                    Arc::new(device),
-                    Arc::new(queue),
-                    Some(surface),
-                    surface_format,
-                    alpha_mode,
-                    config,
-                    None,
-                )
-            }
-        };
+        let size = window.inner_size();
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width,
+            size.height,
+            HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Helio VR Demo".into(),
+                ..Default::default()
+            },
+        ))
+        .expect("graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let format = graphics.surface_config.format;
+        let config = RendererConfig::new(size.width, size.height, format)
+            .with_render_mode(RenderMode::ForwardOpaque);
         let device_arc = Arc::clone(&device);
         device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
             let _ = &device_arc;
@@ -343,54 +229,20 @@ impl ApplicationHandler for App {
         }));
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(|mut ctx| {
                 ctx.owns_device = false;
                 build_forward_opaque_graph_with_context(ctx)
-            }))
-            .build(
-                device.clone(),
-                queue.clone(),
-                config.width,
-                config.height,
-                config.surface_format,
-            );
+            }));
+        let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         renderer.set_editor_mode(true);
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut xr_input = None;
-        #[cfg(not(target_arch = "wasm32"))]
-        let xr_active = if let Some(bundle) = xr_owned {
-            let template = Camera::perspective_look_at(
-                Vec3::new(0.0, 1.6, 0.0),
-                Vec3::new(0.0, 1.6, -1.0),
-                glam::Vec3::Y,
-                std::f32::consts::FRAC_PI_4,
-                1.0,
-                0.05,
-                200.0,
-            );
-            renderer.set_xr_camera(template);
-            renderer.set_xr_mirror_format(surface_format);
-            let session_handle = bundle.session.session.clone();
-            let input = renderer
-                .install_xr_runtime(bundle)
-                .expect("XR runtime must use the renderer's device");
-            xr_input = Some((input, session_handle));
-            true
-        } else {
-            false
-        };
-        #[cfg(target_arch = "wasm32")]
-        let xr_active = false;
+        let xr_active = graphics.is_xr();
 
         let animated = scene::build(&mut scene_db.world, &mut renderer);
 
         let state = AppState {
             window,
-            surface,
-            surface_format,
-            alpha_mode,
+            graphics,
             device,
             renderer,
             scene_db,
@@ -405,10 +257,6 @@ impl ApplicationHandler for App {
             last_frame: Instant::now(),
             fps: FpsCounter::new(),
         };
-        state.configure_surface(
-            state.window.inner_size().width,
-            state.window.inner_size().height,
-        );
         self.state = Some(state);
     }
 
@@ -422,7 +270,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                state.configure_surface(size.width, size.height);
+                state
+                    .graphics
+                    .resize(&mut state.renderer, size.width, size.height);
                 // In XR mode the graph resolution is fixed by the headset's eye
                 // buffer; resizing the mirror window must not rebuild the graph
                 // at the window's resolution (that destroys resources cached in
@@ -503,7 +353,7 @@ impl ApplicationHandler for App {
                     state.update_hands();
                     // Upload this frame's SceneDB writes to the GPU mirror (Helio#266).
                     v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
-                    if let Some(surface) = state.surface.as_ref() {
+                    {
                         let camera = Camera::perspective_look_at(
                             Vec3::new(0.0, 1.6, 0.0),
                             Vec3::new(0.0, 1.6, -1.0),
@@ -513,7 +363,7 @@ impl ApplicationHandler for App {
                             0.05,
                             200.0,
                         );
-                        if let Err(e) = state.renderer.render_window_frame(&camera, surface) {
+                        if let Err(e) = state.graphics.render_frame(&mut state.renderer, &camera) {
                             log::error!("[XR] render error: {e:?}");
                         }
                     }
@@ -536,13 +386,9 @@ impl ApplicationHandler for App {
                 let aspect = size.width as f32 / size.height.max(1) as f32;
                 let camera = state.input.camera(aspect);
 
-                let Some(surface) = &state.surface else {
-                    state.window.request_redraw();
-                    return;
-                };
                 // Upload this frame's SceneDB writes to the GPU mirror (Helio#266).
                 v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
-                if let Err(e) = state.renderer.render_window_frame(&camera, surface) {
+                if let Err(e) = state.graphics.render_frame(&mut state.renderer, &camera) {
                     log::error!("Render error: {e:?}");
                 }
                 state.fps.tick();

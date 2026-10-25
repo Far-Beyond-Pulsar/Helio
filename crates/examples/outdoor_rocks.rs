@@ -185,63 +185,31 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
 
-        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("failed to create surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("no adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("no device");
-
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-        let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::AutoNoVsync,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-                color_space: wgpu::SurfaceColorSpace::Auto,
+        let mut graphics = pollster::block_on(helio::HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            helio::HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Outdoor Rocks".into(),
+                ..Default::default()
             },
-        );
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let format = graphics.surface_config.format;
+        let surface_format = format;
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(
-                device.clone(),
-                queue.clone(),
-                config.width,
-                config.height,
-                config.surface_format,
-            );
+            .build_with_graphics_context(&mut graphics)
+            .expect("Helio renderer");
+        let surface = graphics.surface;
         renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]);
         renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
 
@@ -659,21 +627,13 @@ impl ApplicationHandler for App {
 
                 // ── Render ────────────────────────────────────────────────
                 let t_render_start = Instant::now();
-                let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(texture)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-                    _ => return,
-                };
-                let view = output
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                if let Err(e) = state.renderer.render(&camera, &view) {
-                    log::error!("render error: {e:?}");
+
+                if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
+                    log::error!("Render error: {:?}", e);
                 }
                 let t_render_ms = t_render_start.elapsed().as_secs_f64() * 1000.0;
 
                 let t_present_start = Instant::now();
-                state.queue.present(output);
                 let t_present_ms = t_present_start.elapsed().as_secs_f64() * 1000.0;
 
                 // ── Profiling accumulate + print every 100 frames ─────────

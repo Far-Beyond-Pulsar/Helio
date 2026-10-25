@@ -237,6 +237,11 @@ pub struct PassContext<'a> {
     /// detect the change cheaply instead of comparing matrices.
     pub camera_generation: u64,
 
+    /// World position of the frame's coordinate origin for camera-relative
+    /// frames (`SceneInput::world_origin`). Passes that consume world-space
+    /// data subtract it.
+    pub world_origin: Option<glam::DVec3>,
+
     /// Type-erased SceneDB GPU columns supplied by the frontend. The sole
     /// scene-data seam: `helio-core` has zero knowledge of any specific
     /// scene-object type past this point -- a pass resolves its own

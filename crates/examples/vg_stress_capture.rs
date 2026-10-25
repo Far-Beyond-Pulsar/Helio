@@ -1254,7 +1254,10 @@ impl Capture {
             post.set_on(&mut s.scene_db.world, shot.post);
         }
         if shot.ray_tracing {
-            eprintln!("[Capture] {}: ray_tracing requested but not implemented in this example; rendering rasterised", shot.name);
+            eprintln!(
+                "[Capture] {}: ray_tracing requested but not implemented in this example; rendering rasterised",
+                shot.name
+            );
         }
         // Resolution.
         if size != (s.renderer.output_width(), s.renderer.output_height()) {

@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use crate::{
-    plan_bands, FoliageQuality, FoliageRange, GpuBladeInstance, GpuFoliageBands, GpuFoliageLayer,
-    GpuFoliageTile, GpuFoliageType, GpuGroundArgs, GpuGroundHit, GpuGroundQuery, GpuTileFrame,
-    GroundLink, PlaneGround, TileState, FOLIAGE_BAND_TILES, FOLIAGE_MAX_INTERACTORS,
-    FOLIAGE_TILE_SIZE_METERS, GROUND_ARGS, GROUND_HITS, GROUND_QUERIES,
+    FOLIAGE_BAND_TILES, FOLIAGE_MAX_INTERACTORS, FOLIAGE_TILE_SIZE_METERS, FoliageQuality,
+    FoliageRange, GROUND_ARGS, GROUND_HITS, GROUND_QUERIES, GpuBladeInstance, GpuFoliageBands,
+    GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, GpuGroundArgs, GpuGroundHit, GpuGroundQuery,
+    GpuTileFrame, GroundLink, PlaneGround, TileState, plan_bands,
 };
 use glam::DVec3;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -984,9 +984,16 @@ impl FoliagePlacePass {
             log::debug!(
                 "[foliage] ground {} chart {:?} resident {:?} batch {} answered {:?} queued_tiles={} \
                  placed={} visible L0={} L1={} L2={} L3={} visible_overflow={} placement_overflow={}",
-                if self.ground.is_external() { "elsewhere" } else { "built in" },
+                if self.ground.is_external() {
+                    "elsewhere"
+                } else {
+                    "built in"
+                },
                 self.chart,
-                self.rings.iter().map(TileRing::resident_count).collect::<Vec<_>>(),
+                self.rings
+                    .iter()
+                    .map(TileRing::resident_count)
+                    .collect::<Vec<_>>(),
                 self.batch,
                 self.ground.answered(),
                 self.queued_tile_count,
@@ -1066,7 +1073,9 @@ impl RenderPass for FoliagePlacePass {
             .map(|h| (h.buffer.size() / LAYER_BYTES) as u32)
             .unwrap_or(0);
         if layer_count > MAX_FOLIAGE_LAYERS {
-            log::warn!("{layer_count} foliage layers published but the layer table holds {MAX_FOLIAGE_LAYERS}; clamping");
+            log::warn!(
+                "{layer_count} foliage layers published but the layer table holds {MAX_FOLIAGE_LAYERS}; clamping"
+            );
             layer_count = MAX_FOLIAGE_LAYERS;
         }
 
@@ -1332,8 +1341,8 @@ impl RenderPass for FoliagePlacePass {
         }
 
         let hiz_view = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("hiz"))
+            .resource_pool
+            .get_view_2d("hiz")
             .unwrap_or(&self.placeholder_hiz);
         let hiz_sampler = ctx
             .registry

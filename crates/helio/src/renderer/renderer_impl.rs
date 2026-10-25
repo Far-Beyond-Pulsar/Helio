@@ -328,13 +328,45 @@ impl Renderer {
         left: &helio_core::GpuCameraUniforms,
         right: &helio_core::GpuCameraUniforms,
     ) {
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[*left, *right]),
-        );
-        self.camera_data = *left;
+        // Preserve temporal reprojection independently for each eye. The XR
+        // path submits eyes sequentially, but both eyes belong to the same
+        // headset frame; `xr_view_to_camera` initializes prev_view_proj to the
+        // current matrix, which would make every frame behave like a camera
+        // cut and leave stale history behind during head motion.
+        let mut left = *left;
+        let mut right = *right;
+        for camera in [&mut left, &mut right] {
+            let view_id = camera.jitter_frame[3].to_bits();
+            let current = glam::Mat4::from_cols_array(&camera.view_proj);
+            let previous = self
+                .prev_view_proj_by_view
+                .get(&view_id)
+                .copied()
+                .unwrap_or(current);
+            let previous = match (self.previous_world_origin, self.world_origin) {
+                (Some(previous_origin), Some(current_origin)) => {
+                    helio_core::temporal::rebase_previous_projection(
+                        previous,
+                        current_origin - previous_origin,
+                    )
+                }
+                (None, None) => previous,
+                // A coordinate-space transition invalidates temporal
+                // reprojection; seed this eye's history from its current view.
+                _ => current,
+            };
+            camera.prev_view_proj = previous.to_cols_array();
+            self.prev_view_proj_by_view.insert(view_id, current);
+        }
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[left, right]));
+        self.camera_data = left;
         self.prev_view_proj = glam::Mat4::from_cols_array(&left.view_proj);
+        // The XR renderer invokes this once per eye. Keep the previous origin
+        // stable until both eye matrices have been rebased against it.
+        if right.jitter_frame[3].to_bits() == 2 {
+            self.previous_world_origin = self.world_origin;
+        }
         // A tracked headset moves every frame; treat each stereo upload as a
         // new view, and make the next mono frame compare afresh.
         self.camera_identity = None;
@@ -836,6 +868,13 @@ impl Renderer {
         self.xr.as_ref().map(|session| session.last_display_time)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn xr_session_focused(&self) -> bool {
+        self.xr
+            .as_ref()
+            .is_some_and(helio_xr::session::XrSession::is_focused)
+    }
+
     /// Current OpenXR headset refresh rate in Hz, if the active runtime can
     /// report or infer it. `None` in desktop mode or before enough XR timing
     /// data has arrived.
@@ -851,7 +890,10 @@ impl Renderer {
     /// query [`Self::xr_display_refresh_rate_hz`] on subsequent frames to see
     /// which rate the runtime actually adopted.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn request_xr_display_refresh_rate_hz(&self, requested_hz: f32) -> helio_xr::Result<bool> {
+    pub(crate) fn request_xr_display_refresh_rate_hz(
+        &self,
+        requested_hz: f32,
+    ) -> helio_xr::Result<bool> {
         match self.xr.as_ref() {
             Some(session) => session.request_display_refresh_rate_hz(requested_hz),
             None => Ok(false),

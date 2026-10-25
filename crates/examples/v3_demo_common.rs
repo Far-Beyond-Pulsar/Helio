@@ -335,6 +335,22 @@ pub fn build_default_renderer(
         )
 }
 
+/// Build the standard renderer on Helio's XR-aware device and attach the
+/// OpenXR frame loop when `vr_support` found a runtime.
+pub fn build_default_renderer_with_context(
+    scene_db: &pulsar_scenedb::SceneDb,
+    graphics: &mut helio::HelioGraphicsContext<'_>,
+    config: RendererConfig,
+) -> Renderer {
+    let builder = RendererBuilder::new(config, scene_db_handle(scene_db)).with_pass_build_context(
+        Box::new(helio_default_passes::build_default_graph_external_with_context),
+    );
+    graphics
+        .build_renderer(builder, config)
+        .expect("Helio renderer")
+        .0
+}
+
 pub fn make_material(
     base_color: [f32; 4],
     roughness: f32,

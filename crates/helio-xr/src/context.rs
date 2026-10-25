@@ -15,9 +15,9 @@
 
 use ash::vk::{self, Handle as _};
 use wgpu::{
-    hal::{api::Vulkan, Api},
     Adapter, Device, DeviceDescriptor, ExperimentalFeatures, Features, Instance, InstanceFlags,
     MemoryBudgetThresholds, MemoryHints, Queue, Trace,
+    hal::{Api, api::Vulkan},
 };
 
 use crate::{Result, XrError};

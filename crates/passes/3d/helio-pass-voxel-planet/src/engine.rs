@@ -19,9 +19,11 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float,
 ];
 
-/// One published view of the planet. `eye` is the planet-centred camera
-/// position. The pass traces relative to this precise eye internally; the
-/// host's shared camera and scene geometry can remain in world space.
+/// One published view of the planet. `eye` is the host's planet-centred
+/// camera sample, used for residency. When the renderer supplies a world
+/// origin, ChunkPass traces from the active camera's absolute eye instead
+/// (including predicted stereo poses). Otherwise this is also the trace eye
+/// for hosts supplying an already eye-relative camera.
 #[derive(Clone)]
 pub struct PlanetFrame {
     pub eye: DVec3,

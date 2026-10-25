@@ -337,7 +337,13 @@ mod tests {
                 let start = range.unwrap_or(0).min(body.len());
                 let part = &body[start..];
                 let head = if range.is_some() {
-                    format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n", part.len(), start, body.len() - 1, body.len())
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                        part.len(),
+                        start,
+                        body.len() - 1,
+                        body.len()
+                    )
                 } else {
                     format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

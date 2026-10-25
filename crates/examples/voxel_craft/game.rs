@@ -141,27 +141,17 @@ impl Game {
         // frame's predicted display time, rather than reusing last frame's hands.
         #[cfg(not(target_arch = "wasm32"))]
         let xr_input = if self.gfx.vr_active() {
-            match self.gfx.begin_vr() {
-                Ok(crate::xr::Begin::Frame(input)) => {
-                    if !input.focused {
+            match self.gfx.xr_frame_input() {
+                Ok(input) => {
+                    if input.as_ref().is_none_or(|input| !input.focused) {
                         self.input.release_all();
                     }
-                    Some(input)
-                }
-                Ok(crate::xr::Begin::Idle) => {
-                    self.rig.reset();
-                    self.input.release_all();
-                    self.last_frame = Instant::now();
-                    return;
-                }
-                Ok(crate::xr::Begin::Exit) => {
-                    self.quit = true;
-                    return;
+                    input
                 }
                 Err(error) => {
-                    log::error!("[XR] frame: {error}");
-                    self.quit = true;
-                    return;
+                    log::error!("[XR] input: {error}");
+                    self.input.release_all();
+                    None
                 }
             }
         } else {

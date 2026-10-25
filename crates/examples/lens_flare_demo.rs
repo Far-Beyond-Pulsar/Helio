@@ -13,7 +13,8 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight,
-    LightType, Renderer, RendererBuilder, RendererConfig,
+    HelioGraphicsConfig, HelioGraphicsContext, LightType, Renderer, RendererBuilder,
+    RendererConfig,
 };
 use helio_default_passes::build_default_graph_external_with_context;
 use v3_demo_common::{
@@ -87,28 +88,21 @@ impl ApplicationHandler for App {
                 .expect("window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
-
+        let size = window.inner_size();
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Lens Flare Demo".into(),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let adapter = graphics.adapter.clone();
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
@@ -117,31 +111,7 @@ impl ApplicationHandler for App {
             "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
             info.backend, info.name, info.driver
         );
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-                color_space: wgpu::SurfaceColorSpace::Auto,
-            },
-        );
+        let format = graphics.surface_config.format;
 
         let (scene_db, renderer) = build_scene(
             device.clone(),
@@ -149,7 +119,9 @@ impl ApplicationHandler for App {
             size.width,
             size.height,
             format,
+            Some(&mut graphics),
         );
+        let surface = graphics.surface;
 
         self.state = Some(AppState {
             window,
@@ -255,19 +227,10 @@ impl ApplicationHandler for App {
                 let size = state.window.inner_size();
                 let camera = state.camera(size.width, size.height);
 
-                let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(texture)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-                    _ => return,
-                };
-                let view = output
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
                 v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
-                if let Err(e) = state.renderer.render(&camera, &view) {
-                    log::error!("render error: {:?}", e);
+                if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
+                    log::error!("Render error: {:?}", e);
                 }
-                state.queue.present(output);
             }
 
             _ => {}
@@ -362,13 +325,20 @@ fn build_scene(
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+    graphics: Option<&mut HelioGraphicsContext<'_>>,
 ) -> (pulsar_scenedb::SceneDb, Renderer) {
     let config = RendererConfig::new(width, height, format);
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     let graph_scene_db = scene_db_handle(&scene_db);
-    let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-        .build(device.clone(), queue.clone(), width, height, format);
+    let builder = RendererBuilder::new(config, graph_scene_db.clone())
+        .with_pass_build_context(Box::new(build_default_graph_external_with_context));
+    let mut renderer = if let Some(graphics) = graphics {
+        builder
+            .build_with_graphics_context(graphics)
+            .expect("Helio renderer")
+    } else {
+        builder.build(device.clone(), queue.clone(), width, height, format)
+    };
 
     // ── Scene objects ──────────────────────────────────────────────────────
     let mat_wall = spawn_material(
@@ -576,7 +546,7 @@ fn probe() {
     let (device, queue) = (Arc::new(device), Arc::new(queue));
     let (width, height, format) = (1280u32, 720u32, wgpu::TextureFormat::Rgba8UnormSrgb);
     let (scene_db, mut renderer) =
-        build_scene(device.clone(), queue.clone(), width, height, format);
+        build_scene(device.clone(), queue.clone(), width, height, format, None);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Lens probe target"),
         size: wgpu::Extent3d {

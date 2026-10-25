@@ -69,6 +69,11 @@ pub struct XrSession {
 }
 
 impl XrSession {
+    /// Whether application input should currently be accepted from the user.
+    pub fn is_focused(&self) -> bool {
+        self.session_state == openxr::SessionState::FOCUSED
+    }
+
     /// Create a session bound to the Vulkan handles owned by `device`.
     ///
     /// `device` must have been created through OpenXR (see [`crate::context`]);
@@ -166,7 +171,9 @@ impl XrSession {
                             match self.session.begin(self.view_config) {
                                 Ok(_) => {
                                     self.session_begun = true;
-                                    log::info!("[XR] session begun (waiting for SYNCHRONIZED/VISIBLE/FOCUSED)");
+                                    log::info!(
+                                        "[XR] session begun (waiting for SYNCHRONIZED/VISIBLE/FOCUSED)"
+                                    );
                                 }
                                 Err(e) => {
                                     log::error!("[XR] session begin failed: {e}");
@@ -262,7 +269,9 @@ impl XrSession {
             .any(|rate| rate.is_finite() && (rate - requested_hz).abs() < 0.5);
         if supported {
             self.session.request_display_refresh_rate(requested_hz)?;
-            log::info!("[XR] requested headset refresh rate: {requested_hz:.1} Hz (current {current_hz:.1} Hz)");
+            log::info!(
+                "[XR] requested headset refresh rate: {requested_hz:.1} Hz (current {current_hz:.1} Hz)"
+            );
         }
         Ok(supported)
     }

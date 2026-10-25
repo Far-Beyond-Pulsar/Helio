@@ -522,17 +522,15 @@ impl ChunkPass {
         } else {
             0
         };
-        // Chunks are drawn relative to the eye. The frame's coordinates may
-        // put the camera off their origin (a host's camera-relative frames
-        // keep an origin while the camera moves within a cell of it): its
-        // view-projection, moved by the camera's position, is the eye's.
+        // The tracer starts every perspective ray at zero. Its matrices must
+        // therefore be eye-relative, and its absolute ray origin must be the
+        // SAME eye as the renderer camera (including OpenXR's predicted pose
+        // and each eye's offset). PlanetFrame.eye can be an older input sample;
+        // it remains useful for residency, but cannot anchor the traced view.
         let at = Vec3::from_slice(&camera.position_near[..3]);
-        let view_proj = Mat4::from_cols_array(&camera.view_proj) * Mat4::from_translation(at);
+        let (trace_eye, view_proj, prev_view_proj) =
+            trace_camera(camera, ctx.world_origin, frame.eye);
         let proj = Mat4::from_cols_array(&camera.proj);
-        // The last frame's, which the renderer keeps in this frame's
-        // coordinates (rebased when the origin moves), the same way.
-        let prev_view_proj =
-            Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
         let jitter = [
             jitter,
@@ -586,7 +584,7 @@ impl ChunkPass {
             self.gi_eye,
         ) {
             (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(clipmap), Some(world_eye)) => {
-                world.follow_gi(clipmap, world_eye, frame.eye);
+                world.follow_gi(clipmap, world_eye, trace_eye);
                 Some((frame_gi, rays, hits, sun))
             }
             _ => None,
@@ -637,11 +635,11 @@ impl ChunkPass {
         // The sun's occlusion by the terrain, for what else the sun lights
         // (the GI probes' hits in this draw, volumetric fog): a level of its
         // clipmap a frame.
-        world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
+        world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
         world.draw_for_eye(
             encoder,
             ctx.frame_num,
-            frame.eye,
+            trace_eye,
             view_proj,
             prev_view_proj,
             jitter,
@@ -685,7 +683,7 @@ impl ChunkPass {
                     &hits,
                     &question.tiles,
                     &frame.planet,
-                    frame.eye,
+                    trace_eye,
                     at,
                 );
                 self.foliage_ground.answer(question.batch);
@@ -700,6 +698,27 @@ impl ChunkPass {
     }
 }
 
+/// The voxel shader unprojects a direction from zero (`pixel_ray`), unlike
+/// mesh projection which accepts geometry relative to any origin. Pair that
+/// eye-relative matrix with the active camera's absolute position. Hosts which
+/// supply an already eye-relative camera without a world origin retain their
+/// explicit planet-space eye.
+fn trace_camera(
+    camera: &helio_core::GpuCameraUniforms,
+    world_origin: Option<DVec3>,
+    planet_eye: DVec3,
+) -> (DVec3, Mat4, Mat4) {
+    let at = Vec3::from_slice(&camera.position_near[..3]);
+    let eye = world_origin.map_or(planet_eye, |origin| origin + at.as_dvec3());
+    let from_eye = Mat4::from_translation(at);
+    (
+        eye,
+        Mat4::from_cols_array(&camera.view_proj) * from_eye,
+        // Previous VP is rebased into the CURRENT frame coordinates by Helio.
+        Mat4::from_cols_array(&camera.prev_view_proj) * from_eye,
+    )
+}
+
 /// XR frusta are asymmetric: include the offset on each axis so chunks at the
 /// wider edge of either eye are not rejected by the residency cone.
 fn frustum_cos_half(proj: Mat4) -> f64 {
@@ -711,6 +730,101 @@ fn frustum_cos_half(proj: Mat4) -> f64 {
 #[cfg(test)]
 mod stereo_tests {
     use super::*;
+
+    #[test]
+    fn voxel_rays_and_mesh_projection_agree_for_moving_stereo_eyes() {
+        let origin = DVec3::new(6_371_200.0, -1024.0, 2048.0);
+        let old_head = Vec3::new(7.0, 2.0, -3.0);
+        // Keep the app's earlier input pose unchanged while rendering newer
+        // translated/rotated eyes, as OpenXR's predicted display poses do.
+        let stale_planet_eye = origin + old_head.as_dvec3();
+        let landmarks = [
+            Vec3::new(8.0, 1.0, -10.0),
+            Vec3::new(4.0, 4.0, -12.0),
+            Vec3::new(10.0, -1.0, -20.0),
+        ];
+        for motion in [Vec3::ZERO, Vec3::new(0.3, -0.6, 0.2)] {
+            for yaw in [0.0, 0.6, -0.4] {
+                let orientation = glam::Quat::from_rotation_y(yaw)
+                    * glam::Quat::from_rotation_x(-0.2)
+                    * glam::Quat::from_rotation_z(0.15);
+                for side in [-1.0, 1.0] {
+                    let at = old_head + motion + orientation * Vec3::X * (side * 0.032);
+                    let pose = Mat4::from_rotation_translation(orientation, at);
+                    let mut proj = helio_core::depth::perspective(1.4, 1.1, 0.05);
+                    proj.z_axis.x = side * 0.15;
+                    let view = pose.inverse();
+                    let camera = helio_core::GpuCameraUniforms::new(
+                        view,
+                        proj,
+                        at,
+                        0.05,
+                        1000.0,
+                        0,
+                        [0.0; 2],
+                        proj * view,
+                    );
+                    let (eye, vp, _) = trace_camera(&camera, Some(origin), stale_planet_eye);
+                    assert!(eye.distance(origin + at.as_dvec3()) < 1e-9);
+                    let rays = super::super::ray_plane(vp, [128, 128]);
+                    for point in landmarks {
+                        // Rasterized foliage sees this fixed world landmark.
+                        let ndc = (proj * view).project_point3(point);
+                        let expected = (point - at).normalize();
+                        // Mirror chunk_draw.wgsl::pixel_ray: it unprojects a
+                        // POINT and normalizes it, assuming the eye is zero.
+                        let ray = vp
+                            .inverse()
+                            .project_point3(Vec3::new(ndc.x, ndc.y, 0.5))
+                            .normalize();
+                        assert!(
+                            ray.distance(expected) < 2e-4,
+                            "shader ray drift: {ray:?} != {expected:?}"
+                        );
+                        let pixel =
+                            Vec2::new((ndc.x + 1.0) * 64.0 - 0.5, (1.0 - ndc.y) * 64.0 - 0.5);
+                        let plane_ray = (Vec3::from_slice(&rays[0])
+                            + Vec3::from_slice(&rays[1]) * pixel.x
+                            + Vec3::from_slice(&rays[2]) * pixel.y)
+                            .normalize();
+                        assert!(plane_ray.distance(expected) < 5e-4, "ray plane drift");
+                        let world_point = origin + point.as_dvec3();
+                        let distance = world_point.distance(eye);
+                        assert!((eye + ray.as_dvec3() * distance).distance(world_point) < 0.005);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn voxel_previous_projection_uses_current_eye_after_origin_rebase() {
+        let origin = DVec3::new(6_371_200.0, 0.0, 0.0);
+        let old_origin = origin - DVec3::new(128.0, 0.0, 0.0);
+        let at = Vec3::new(0.1, 1.4, 0.0);
+        let old_at = Vec3::new(127.9, 1.8, 0.1);
+        let proj = helio_core::depth::perspective(1.4, 1.1, 0.05);
+        let old_vp = proj * Mat4::from_translation(-old_at);
+        let rebased_previous = old_vp * Mat4::from_translation((origin - old_origin).as_vec3());
+        let camera = helio_core::GpuCameraUniforms::new(
+            Mat4::from_translation(-at),
+            proj,
+            at,
+            0.05,
+            1000.0,
+            0,
+            [0.0; 2],
+            rebased_previous,
+        );
+        let (eye, _, previous) = trace_camera(&camera, Some(origin), origin);
+        let landmark = origin + DVec3::new(1.0, 2.0, -8.0);
+        let expected = old_vp.project_point3((landmark - old_origin).as_vec3());
+        let actual = previous.project_point3((landmark - eye).as_vec3());
+        assert!(actual.distance(expected) < 1e-5);
+
+        // Hosts with no origin explicitly supply a high-precision planet eye.
+        assert_eq!(trace_camera(&camera, None, landmark).0, landmark);
+    }
 
     #[test]
     fn residency_cone_contains_all_asymmetric_frustum_corners() {

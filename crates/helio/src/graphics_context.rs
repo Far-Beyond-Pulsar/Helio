@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use crate::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
-    usable_adapter_features, Camera, Renderer, RendererBuilder, RendererConfig,
+    Camera, Renderer, RendererBuilder, RendererConfig, required_experimental_features,
+    required_wgpu_features, required_wgpu_limits, usable_adapter_features,
 };
 
 /// Controls Helio's optional automatic XR discovery during graphics startup.
@@ -20,6 +20,9 @@ pub struct HelioGraphicsConfig {
     pub application_name: String,
     /// Present-mode preference for the app's ordinary PC window.
     pub present_mode: wgpu::PresentMode,
+    /// Requested usages for the ordinary PC window surface. Helio intersects
+    /// these with the surface's supported usages before configuration.
+    pub surface_usage: wgpu::TextureUsages,
     /// Adapter power preference for desktop fallback.
     pub power_preference: wgpu::PowerPreference,
 }
@@ -30,6 +33,7 @@ impl Default for HelioGraphicsConfig {
             vr_support: true,
             application_name: "Helio Application".into(),
             present_mode: wgpu::PresentMode::Fifo,
+            surface_usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             power_preference: wgpu::PowerPreference::HighPerformance,
         }
     }
@@ -50,10 +54,51 @@ pub struct HelioXrInput {
     session: helio_xr::XrSessionHandle,
 }
 
+/// Controller actions and tracked poses sampled alongside the renderer's
+/// most recently predicted OpenXR display frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HelioXrFrameState {
+    pub focused: bool,
+    pub controllers: helio_xr::ControllerState,
+    pub tracking: Option<helio_xr::TrackingState>,
+    pub display_refresh_rate_hz: Option<f32>,
+}
+
 impl HelioXrInput {
+    /// Sync controller actions and locate head/hand poses against the last
+    /// display time prepared by Helio's renderer.
+    pub fn frame_state(
+        &mut self,
+        renderer: &Renderer,
+        world_from_stage: &glam::Mat4,
+    ) -> helio_xr::Result<HelioXrFrameState> {
+        let controllers = self.input.sync(&self.session)?;
+        let tracking = if let Some(display_time) = renderer.xr_last_display_time() {
+            Some(
+                self.input
+                    .tracking_state(&self.session, display_time, world_from_stage)?,
+            )
+        } else {
+            None
+        };
+        Ok(HelioXrFrameState {
+            focused: renderer.xr_session_focused(),
+            controllers,
+            tracking,
+            display_refresh_rate_hz: renderer.xr_display_refresh_rate_hz(),
+        })
+    }
+
     /// Read the current standard Helio controller actions.
     pub fn controller_state(&self) -> helio_xr::Result<helio_xr::ControllerState> {
         self.input.sync(&self.session)
+    }
+
+    /// Apply app-owned locomotion to the XR stage. Tracking remains in the
+    /// runtime's stage space; this rigid transform moves the player through
+    /// the application world without moving scene objects.
+    pub fn set_locomotion_transform(&self, renderer: &mut Renderer, world_from_stage: glam::Mat4) {
+        renderer.set_xr_stage_transform(world_from_stage);
     }
 
     /// Locate tracked grip poses at the renderer's most recently predicted XR
@@ -111,15 +156,16 @@ impl<'window> HelioGraphicsContext<'window> {
                             "OpenXR started but the PC mirror surface could not be created: {error}"
                         ))
                     })?;
-                    let (format, alpha_mode) = runtime.configure_mirror_surface(
+                    let (format, alpha_mode, usage) = runtime.configure_mirror_surface_with_usage(
                         &surface,
                         width.max(1),
                         height.max(1),
+                        config.surface_usage,
                     );
                     let caps = surface.get_capabilities(&runtime.adapter);
                     let present_mode = preferred_present_mode(&caps, config.present_mode);
                     let surface_config = wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage,
                         format,
                         color_space: wgpu::SurfaceColorSpace::Auto,
                         width: width.max(1),
@@ -190,8 +236,14 @@ impl<'window> HelioGraphicsContext<'window> {
             .find(|format| format.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
+        let usage = config.surface_usage & caps.usages;
+        if !usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "window surface does not support render attachment usage".into(),
+            ));
+        }
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: width.max(1),
@@ -223,6 +275,15 @@ impl<'window> HelioGraphicsContext<'window> {
         self.mode == HelioGraphicsMode::Xr
     }
 
+    /// Renderer target extent and format selected for this context.
+    pub fn render_target(&self) -> (u32, u32, wgpu::TextureFormat) {
+        self.xr_render_target.unwrap_or((
+            self.surface_config.width,
+            self.surface_config.height,
+            self.surface_config.format,
+        ))
+    }
+
     /// Build the renderer on the device selected by this context and attach
     /// XR automatically when available. The optional input/session pair is the
     /// only XR-specific value apps need when implementing controller behavior.
@@ -233,6 +294,7 @@ impl<'window> HelioGraphicsContext<'window> {
         builder: RendererBuilder,
         mut config: RendererConfig,
     ) -> helio_core::Result<(Renderer, Option<HelioXrInput>)> {
+        config.enable_xr = self.is_xr();
         if let Some((width, height, format)) = self.xr_render_target {
             config.width = width;
             config.height = height;
@@ -271,6 +333,9 @@ impl<'window> HelioGraphicsContext<'window> {
     /// Unified app frame entry point: desktop render/present or headset render
     /// plus Helio's PC-side stereo mirror.
     pub fn render_frame(&self, renderer: &mut Renderer, camera: &Camera) -> helio_core::Result<()> {
+        if self.is_xr() {
+            renderer.set_xr_camera(camera.clone());
+        }
         renderer.render_window_frame(camera, &self.surface)
     }
 
