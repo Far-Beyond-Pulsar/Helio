@@ -237,6 +237,7 @@ impl Renderer {
             graph_config: config,
             coordinate_spaces: Vec::new(),
             portal_projection_counts: None,
+            xr_mode: false,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,

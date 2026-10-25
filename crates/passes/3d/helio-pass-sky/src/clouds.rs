@@ -430,6 +430,7 @@ pub struct CloudTracePass {
     frame: u64,
     /// Whether the last output is a history for this frame.
     history: bool,
+    xr_mode: bool,
     active: bool,
 }
 
@@ -541,6 +542,7 @@ impl CloudTracePass {
             reconstruct_groups: None,
             frame: 0,
             history: false,
+            xr_mode: false,
             active: false,
         }
     }
@@ -557,6 +559,13 @@ impl CloudTracePass {
 }
 
 impl RenderPass for CloudTracePass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+        if self.xr_mode {
+            self.history = false;
+        }
+    }
+
     fn name(&self) -> &'static str {
         "CloudTrace"
     }
@@ -607,6 +616,11 @@ impl RenderPass for CloudTracePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let registry = ctx.registry;
+        if self.xr_mode {
+            self.active = false;
+            self.history = false;
+            return Ok(());
+        }
         self.active = registry.get::<bool>(ResourceKey::new("atmosphere_active")).unwrap_or(false);
         let resources = (
             registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)),

@@ -109,6 +109,8 @@ pub struct Renderer {
     /// Growable SceneDB buffers are capacity-sized, so passes must not infer
     /// active rows from their allocation size.
     pub(crate) portal_projection_counts: Option<(u32, u32)>,
+    /// Whether the current renderer output is an XR eye view.
+    pub(crate) xr_mode: bool,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
     pub(crate) debug_mode: u32,
@@ -602,8 +604,19 @@ impl Renderer {
             projection_counts: self
                 .portal_projection_counts
                 .map(|(view_count, chain_count)| [view_count, chain_count]),
+            xr_mode: self.xr_mode,
         };
         self.graph.set_frame_inputs(&inputs);
+    }
+
+    /// Select the renderer's XR quality path. Hosts that submit eye views
+    /// through `render()` rather than `render_xr()` should enable this once
+    /// their XR session starts and disable it when the session ends.
+    pub fn set_xr_mode(&mut self, enabled: bool) {
+        if self.xr_mode != enabled {
+            self.xr_mode = enabled;
+            self.apply_coordinate_spaces();
+        }
     }
 
     /// Access the gbuffer template registry (preserved across graph rebuilds).
@@ -767,6 +780,7 @@ impl Renderer {
         session: Option<helio_xr::session::XrSession>,
         swapchain: Option<helio_xr::swapchain::XrSwapchain>,
     ) {
+        self.set_xr_mode(session.is_some());
         self.xr_instance = instance;
         self.xr = session;
         self.xr_swapchain = swapchain;
@@ -779,6 +793,31 @@ impl Renderer {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn xr_last_display_time(&self) -> Option<helio_xr::Time> {
         self.xr.as_ref().map(|session| session.last_display_time)
+    }
+
+    /// Current OpenXR headset refresh rate in Hz, if the active runtime can
+    /// report or infer it. `None` in desktop mode or before enough XR timing
+    /// data has arrived.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn xr_display_refresh_rate_hz(&self) -> Option<f32> {
+        self.xr
+            .as_ref()
+            .and_then(helio_xr::session::XrSession::display_refresh_rate_hz)
+    }
+
+    /// Ask the OpenXR runtime for an exact supported headset display rate.
+    /// The request is optional and may be declined;
+    /// query [`Self::xr_display_refresh_rate_hz`] on subsequent frames to see
+    /// which rate the runtime actually adopted.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request_xr_display_refresh_rate_hz(
+        &self,
+        requested_hz: f32,
+    ) -> helio_xr::Result<bool> {
+        match self.xr.as_ref() {
+            Some(session) => session.request_display_refresh_rate_hz(requested_hz),
+            None => Ok(false),
+        }
     }
 
     /// Set the camera template used for XR frames (postprocess settings,

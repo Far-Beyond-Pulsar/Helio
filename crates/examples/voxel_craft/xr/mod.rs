@@ -32,6 +32,7 @@ pub struct Runtime {
     session: XrSession,
     _instance: XrInstance,
     pending: Option<Pending>,
+    refresh_rate_request_attempted: bool,
 }
 
 /// Same Vulkan-through-OpenXR bootstrap as foliage. Failure is a desktop fallback.
@@ -129,6 +130,7 @@ fn init(window: Arc<Window>) -> Result<(Gpu, Runtime)> {
             session,
             _instance: instance,
             pending: None,
+            refresh_rate_request_attempted: false,
         },
     ))
 }
@@ -153,6 +155,22 @@ impl Runtime {
             return Ok(Begin::Idle);
         }
         let frame = self.session.wait_frame()?;
+        if !self.refresh_rate_request_attempted {
+            if let Some(current_hz) = self.session.display_refresh_rate_hz() {
+                self.refresh_rate_request_attempted = true;
+                if (current_hz - 90.0).abs() >= 0.5 {
+                    match self.session.request_display_refresh_rate_hz(90.0) {
+                        Ok(true) => {}
+                        Ok(false) => log::warn!(
+                            "[XR] headset is at {current_hz:.1} Hz and its runtime does not offer a 90 Hz mode"
+                        ),
+                        Err(error) => log::warn!("[XR] could not request a 90 Hz headset mode: {error}"),
+                    }
+                } else {
+                    self.refresh_rate_request_attempted = true;
+                }
+            }
+        }
         self.session.begin_frame()?;
         self.pending = Some(Pending {
             time: frame.predicted_display_time,
@@ -232,19 +250,18 @@ impl Runtime {
             }
             Ok(())
         })();
-        // wgpu cannot signal the compositor's Vulkan synchronization objects.
-        // Complete the submitted work before returning its external images.
-        let completed = device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| XrError::Platform(format!("GPU completion: {e}")));
+        // Do not block the CPU for full GPU completion here. Helio's standard
+        // `Renderer::render_xr` path submits the eye work and releases the same
+        // OpenXR image without a device-wide wait; Vulkan queue ordering keeps
+        // this frame's rendering ahead of later work on the bound XR queue.
         let released = self.swapchain.present();
-        let views = if result.is_ok() && completed.is_ok() && released.is_ok() {
+        let views = if result.is_ok() && released.is_ok() {
             frame.views.as_slice()
         } else {
             &[]
         };
         let ended = self.session.end_frame(frame.time, &self.swapchain, views);
-        result.and(completed.map(|_| ())).and(released).and(ended)
+        result.and(released).and(ended)
     }
 
     fn abort(&mut self) -> Result<()> {

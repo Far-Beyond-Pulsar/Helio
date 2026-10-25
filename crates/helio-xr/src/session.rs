@@ -62,6 +62,10 @@ pub struct XrSession {
     /// at the same time the eye views were located, keeping hand-attached
     /// objects glued to the controllers.
     pub last_display_time: openxr::Time,
+    /// Best known physical display cadence. Prefer XR_FB_display_refresh_rate;
+    /// otherwise this is inferred from successive predicted display times.
+    display_refresh_rate_hz: Option<f32>,
+    last_refresh_sample_time: Option<openxr::Time>,
 }
 
 impl XrSession {
@@ -134,6 +138,8 @@ impl XrSession {
             should_render: false,
             session_begun: false,
             last_display_time: openxr::Time::from_nanos(0),
+            display_refresh_rate_hz: None,
+            last_refresh_sample_time: None,
         })
     }
 
@@ -214,7 +220,98 @@ impl XrSession {
         let state = self.frame_waiter.wait()?;
         self.should_render = state.should_render;
         self.last_display_time = state.predicted_display_time;
+        self.update_display_refresh_rate(state.predicted_display_time);
         Ok(state)
+    }
+
+    /// Current headset refresh rate in Hz, when the runtime reports enough
+    /// information to determine it. The FB extension is authoritative and
+    /// follows runtime refresh changes; predicted-display-time intervals are
+    /// the portable OpenXR fallback.
+    pub fn display_refresh_rate_hz(&self) -> Option<f32> {
+        self.display_refresh_rate_hz
+    }
+
+    /// Ask the runtime for an exact supported headset refresh rate. Returns
+    /// `false` when the optional extension or requested mode is unavailable.
+    pub fn request_display_refresh_rate_hz(&self, requested_hz: f32) -> Result<bool> {
+        if !requested_hz.is_finite() || !(30.0..=240.0).contains(&requested_hz) {
+            return Err(crate::XrError::Platform(format!(
+                "invalid requested display refresh rate: {requested_hz} Hz"
+            )));
+        }
+        if self
+            .session
+            .instance()
+            .exts()
+            .fb_display_refresh_rate
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        let current_hz = self.session.get_display_refresh_rate()?;
+        if current_hz.is_finite() && (current_hz - requested_hz).abs() < 0.5 {
+            return Ok(true);
+        }
+
+        let supported = self
+            .session
+            .enumerate_display_refresh_rates()?
+            .into_iter()
+            .any(|rate| rate.is_finite() && (rate - requested_hz).abs() < 0.5);
+        if supported {
+            self.session.request_display_refresh_rate(requested_hz)?;
+            log::info!("[XR] requested headset refresh rate: {requested_hz:.1} Hz (current {current_hz:.1} Hz)");
+        }
+        Ok(supported)
+    }
+
+    fn update_display_refresh_rate(&mut self, display_time: openxr::Time) {
+        let extension_enabled = self
+            .session
+            .instance()
+            .exts()
+            .fb_display_refresh_rate
+            .is_some();
+        let previous_rate = self.display_refresh_rate_hz;
+        let mut runtime_rate = None;
+        if extension_enabled {
+            if let Ok(rate) = self.session.get_display_refresh_rate() {
+                if rate.is_finite() && (30.0..=240.0).contains(&rate) {
+                    runtime_rate = Some(rate);
+                }
+            }
+        }
+
+        // Some runtimes do not expose XR_FB_display_refresh_rate. Their
+        // predicted display timestamps still follow the headset's cadence.
+        let inferred_rate = if runtime_rate.is_none() {
+            if let Some(previous) = self.last_refresh_sample_time {
+                let interval_ns = (display_time.as_nanos() - previous.as_nanos()) as f64;
+                if interval_ns > 0.0 {
+                    let rate = (1_000_000_000.0 / interval_ns) as f32;
+                    if rate.is_finite() && (30.0..=240.0).contains(&rate) {
+                        Some(rate)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.display_refresh_rate_hz = runtime_rate.or(inferred_rate);
+        self.last_refresh_sample_time = Some(display_time);
+        if let Some(rate) = self.display_refresh_rate_hz {
+            if previous_rate.is_none_or(|previous| (previous - rate).abs() >= 0.5) {
+                log::info!("[XR] headset display refresh rate: {rate:.1} Hz");
+            }
+        }
     }
 
     /// Begin GPU work for the current frame.
