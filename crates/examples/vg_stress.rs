@@ -21,8 +21,7 @@ mod vg_stress_data {
 }
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
-    RendererBuilder, RendererConfig,
+    Camera, HelioGraphicsConfig, HelioGraphicsContext, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_core::{
     BufferHandle, BufferKey, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
@@ -552,28 +551,24 @@ impl ApplicationHandler for App {
                 .expect("window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
-
+        let mut size = window.inner_size();
+        if let Some(options) = &capture_options {
+            size = winit::dpi::PhysicalSize::new(options.size.0, options.size.1);
+        }
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            HelioGraphicsConfig {
+                vr_support: capture_options.is_none(),
+                application_name: "Helio VG Museum".into(),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let adapter = graphics.adapter.clone();
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
@@ -582,41 +577,11 @@ impl ApplicationHandler for App {
             "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
             info.backend, info.name, info.driver
         );
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
-        let mut size = window.inner_size();
         let format = if capture_options.is_some() {
             wgpu::TextureFormat::Rgba8UnormSrgb
         } else {
-            format
+            graphics.surface_config.format
         };
-        if let Some(o) = &capture_options {
-            size = winit::dpi::PhysicalSize::new(o.size.0, o.size.1);
-        }
-        if capture_options.is_none() {
-            surface.configure(
-                &device,
-                &wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format,
-                    width: size.width,
-                    height: size.height,
-                    present_mode: wgpu::PresentMode::Fifo,
-                    alpha_mode: caps.alpha_modes[0],
-                    view_formats: vec![],
-                    desired_maximum_frame_latency: 2,
-                    color_space: wgpu::SurfaceColorSpace::Auto,
-                },
-            );
-        }
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let runtime = VgRuntime::default();
@@ -649,7 +614,9 @@ impl ApplicationHandler for App {
             "[Museum] Tier 3 dense tiles {} (VG_STRESS_TIER3=1 enables)",
             if tier3 { "ON" } else { "off" }
         );
-        println!("[Museum] VG error tolerance tau = {tau} px (VG_STRESS_TAU; - and = keys change it live)");
+        println!(
+            "[Museum] VG error tolerance tau = {tau} px (VG_STRESS_TAU; - and = keys change it live)"
+        );
         let museum_config = vg_stress_prep::catalog::Config::from_env_and_args();
         let mut layout = vg_stress_data::layout::museum_layout_with(
             &vg_stress_data::dims::Dims::load(),
@@ -749,16 +716,22 @@ impl ApplicationHandler for App {
         }
         let derivation =
             SceneVgDerivation::new(&device, runtime.clone(), targets.clone(), vg_supported);
-        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .with_scene_derivation(Box::new(derivation))
-            .build(
+            .with_scene_derivation(Box::new(derivation));
+        let mut renderer = if capture_options.is_none() {
+            builder
+                .build_with_graphics_context(&mut graphics)
+                .expect("Helio renderer")
+        } else {
+            builder.build(
                 device.clone(),
                 queue.clone(),
                 size.width,
                 size.height,
                 format,
-            );
+            )
+        };
         renderer.set_material_sampler(&material_sampler());
         renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
         renderer.set_clear_color([0.018, 0.022, 0.035, 1.0]);
@@ -810,6 +783,7 @@ impl ApplicationHandler for App {
         );
         let rays =
             v3_demo_common::SceneRays::new(&device, &queue).with_virtual_geometry(runtime.clone());
+        let surface = graphics.surface;
         self.state = Some(AppState {
             window,
             surface,
@@ -1135,9 +1109,19 @@ impl AppState {
                     )
                 })
                 .unwrap_or_default();
-            eprintln!("[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {} | {}",
-                self.started.elapsed().as_secs_f32(), self.frames, self.loader.is_some(), percentile(50), percentile(99),
-                self.frame_samples.last().copied().unwrap_or(0.0), timing.total_gpu_ms, timing.gpu_lag_frames, top.join(" "), pool);
+            eprintln!(
+                "[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {} | {}",
+                self.started.elapsed().as_secs_f32(),
+                self.frames,
+                self.loader.is_some(),
+                percentile(50),
+                percentile(99),
+                self.frame_samples.last().copied().unwrap_or(0.0),
+                timing.total_gpu_ms,
+                timing.gpu_lag_frames,
+                top.join(" "),
+                pool
+            );
             self.frame_samples.clear();
         }
         let vg_triangles = self
@@ -1523,20 +1507,14 @@ impl AppState {
             250.0,
         );
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return,
-        };
-        let view = output.texture.create_view(&Default::default());
-
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         self.rays.publish(&self.scene_db.world, &mut self.renderer);
-        if let Err(e) = self.renderer.render(&camera, &view) {
+        if let Err(e) = if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
+            log::error!("Render: {:?}", e);
+        } {
             log::error!("Render: {:?}", e);
             self.render_errors += 1;
         }
-        self.queue.present(output);
         self.frames += 1;
         if self.last_title.elapsed() >= std::time::Duration::from_millis(250) {
             self.update_title();

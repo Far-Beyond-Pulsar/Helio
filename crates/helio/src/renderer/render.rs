@@ -24,6 +24,7 @@ impl Renderer {
         surface: &wgpu::Surface<'_>,
     ) -> HelioResult<()> {
         if self.xr.is_some() {
+            self.set_xr_camera(camera.clone());
             return self.render_xr_to_surface(Some(surface));
         }
 
@@ -84,6 +85,15 @@ impl Renderer {
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         helio_core::cpu_scope!("Helio::Renderer::render");
+        // Treat the caller's ordinary output texture as the PC mirror when
+        // this renderer was created by HelioGraphicsContext with XR active.
+        // The application keeps its usual one-camera/one-output frame call;
+        // Helio owns stereo submission and the mirror composition.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.xr.is_some() {
+            self.set_xr_camera(camera.clone());
+            return self.render_xr(Some(target));
+        }
         // Drive wgpu's callback and deferred-destruction queues every frame
         // when Helio owns the device. On a device shared with the host
         // (`owns_device = false`) don't: polling takes wgpu's device-wide
@@ -603,15 +613,15 @@ impl Renderer {
     }
 
     /// OpenXR frame: poll session events, wait/begin the compositor frame,
-    /// locate the per-eye views, upload the stereo camera into the scene's
-    /// `array<Camera, 2>` buffer, render both eyes in a single multiview pass
-    /// into the acquired swapchain image, then present and end the frame.
+    /// locate the per-eye views, then render each eye in order through the
+    /// standard renderer into its corresponding swapchain layer. This keeps
+    /// the existing non-XR pass behavior and eye submission order intact.
     ///
     /// # Prerequisites
     /// - A session/swapchain installed via [`Renderer::set_xr_session`] and a
-    ///   graph built with `config.enable_xr == true` (two-layer array targets,
-    ///   `multiview_mask = 0b11`). Without the former this errors; without the
-    ///   latter the multiview render passes will fail validation.
+    ///   renderer configured with `config.enable_xr == true`. The OpenXR
+    ///   swapchain is layered, while the graph runs one eye at a time using the
+    ///   same single-layer attachments as the desktop path.
     /// - The headset's stage origin is mapped 1:1 onto the engine world origin
     ///   (`world_from_stage` is identity). Scene content should be authored
     ///   around the world origin at head height.
@@ -619,12 +629,21 @@ impl Renderer {
     /// When the session is idle/not visible or the compositor says not to
     /// render, this returns `Ok(())` without doing any GPU work.
     ///
-    /// Note on per-eye data: shaders currently sample `cameras[0]` (left eye),
-    /// so both layers render the same camera. The two-eye camera buffer and the
-    /// multiview mask infrastructure are in place; wiring `view_index` through
-    /// the shaders is a follow-up (stereo depth requires it).
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
+        self.render_xr_inner(mirror, None).map(|_| ())
+    }
+
+    /// Shared XR frame implementation. For a window surface, acquire its
+    /// image only after OpenXR has paced the frame; holding a swapchain image
+    /// across `xrWaitFrame` can make the desktop mirror miss its present
+    /// deadline even while headset rendering remains healthy.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render_xr_inner(
+        &mut self,
+        mirror_target: Option<&wgpu::TextureView>,
+        mirror_surface: Option<&wgpu::Surface<'_>>,
+    ) -> HelioResult<Option<wgpu::SurfaceTexture>> {
         if self.graph.requires_ray_tracing() {
             return Err(helio_core::Error::InvalidPassConfig(
                 "HLFS RT stereo support is not implemented".into(),
@@ -667,7 +686,7 @@ impl Renderer {
                 }
             }
             if exit {
-                return Ok(());
+                return Ok(None);
             }
             if !session.session_begun {
                 // xrBeginSession not yet accepted; keep polling events.
@@ -679,7 +698,7 @@ impl Renderer {
                     );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
-                return Ok(());
+                return Ok(None);
             }
             let frame_state = session.wait_frame().map_err(xr_error)?;
             session.begin_frame().map_err(xr_error)?;
@@ -715,7 +734,7 @@ impl Renderer {
                     self.xr.as_ref().map(|s| s.session_state)
                 );
             }
-            return Ok(());
+            return Ok(None);
         }
         self.xr_idle_skips = 0;
 
@@ -815,9 +834,27 @@ impl Renderer {
             self.submit_frame(&representative, &layer_view, false)?;
         }
 
-        // ── 5. Optional PC mirror: draw both eye layers side-by-side into the
-        // ──    provided mirror surface view (must happen before the swapchain
-        // ──    image is released back to OpenXR).
+        // ── 5. Optional PC mirror: render both eyes before acquiring the
+        // ──    short-lived window image, then composite before releasing the
+        // ──    headset swapchain image back to OpenXR.
+        let mirror_output = mirror_surface.and_then(|surface| match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+            _ => {
+                log::debug!("XR mirror surface did not provide a frame; presenting headset only");
+                None
+            }
+        });
+        if let Some(output) = &mirror_output {
+            let size = output.texture.size();
+            self.xr_mirror_size = [size.width, size.height];
+        }
+        let mirror_surface_view = mirror_output.as_ref().map(|texture| {
+            texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+        let mirror = mirror_target.or(mirror_surface_view.as_ref());
         if let Some(mirror_view) = mirror {
             self.blit_xr_to_mirror(image_index, mirror_view)?;
         }
@@ -846,7 +883,7 @@ impl Renderer {
                 .end_frame(display_time, swapchain, &located.views)
                 .map_err(xr_error)?;
         }
-        Ok(())
+        Ok(mirror_output)
     }
 
     /// A fallback camera template used when no `xr_camera` was provided.
@@ -859,25 +896,7 @@ impl Renderer {
         &mut self,
         mirror_surface: Option<&wgpu::Surface<'_>>,
     ) -> HelioResult<()> {
-        let output = mirror_surface.and_then(|surface| match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
-            _ => {
-                log::debug!("XR mirror surface did not provide a frame; presenting headset only");
-                None
-            }
-        });
-        if let Some(output) = &output {
-            let size = output.texture.size();
-            self.xr_mirror_size = [size.width, size.height];
-        }
-        let mirror_view = output.as_ref().map(|texture| {
-            texture
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        });
-
-        self.render_xr(mirror_view.as_ref())?;
+        let output = self.render_xr_inner(None, mirror_surface)?;
         if let Some(output) = output {
             self.queue.present(output);
         }

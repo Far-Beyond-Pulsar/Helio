@@ -25,8 +25,8 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::ResourceRegistry;
+use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Marker opting a shader into [`HIZ`]. Must appear in the source.
@@ -528,8 +528,14 @@ impl RenderPass for HiZBuildPass {
             for mip in 0..mip_count {
                 mip_views.push(hiz_texture.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("HiZ Mip View"),
+                    // XR promotes graph textures to two-layer arrays for
+                    // multiview attachments. HiZ is a 2D compute pyramid, so
+                    // explicitly bind the left-eye layer as a 2D view.
+                    dimension: Some(wgpu::TextureViewDimension::D2),
                     base_mip_level: mip,
                     mip_level_count: Some(1),
+                    base_array_layer: 0,
+                    array_layer_count: Some(1),
                     ..Default::default()
                 }));
             }
@@ -577,8 +583,13 @@ impl RenderPass for HiZBuildPass {
             for mip in 0..mip_count {
                 views.push(tex.create_view(&wgpu::TextureViewDescriptor {
                     label: Some("HiZ Nearest Mip View"),
+                    // See `hiz` above: the HiZ compute pipeline uses 2D
+                    // bindings even when the renderer's graph is multiview.
+                    dimension: Some(wgpu::TextureViewDimension::D2),
                     base_mip_level: mip,
                     mip_level_count: Some(1),
+                    base_array_layer: 0,
+                    array_layer_count: Some(1),
                     ..Default::default()
                 }));
             }

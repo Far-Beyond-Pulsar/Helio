@@ -1329,7 +1329,11 @@ mod tests {
         assert!(l.statues.len() > 60, "{}", l.statues.len());
         assert!(trees > 100_000_000, "{trees}");
         assert!(kit > 100_000, "{kit}");
-        eprintln!("default: trees {} statues {} tris kit {kit} statues {statues} trees {trees} total {total}", l.tree_count(), l.statues.len());
+        eprintln!(
+            "default: trees {} statues {} tris kit {kit} statues {statues} trees {trees} total {total}",
+            l.tree_count(),
+            l.statues.len()
+        );
     }
 
     #[test]

@@ -146,8 +146,10 @@ impl UnitCache {
             // Nothing suggests these recordings come back.
             self.variants.clear();
         }
-        let encoded_compute = encode_stream(device, &compute, "Helio Cached Compute Unit");
-        let encoded_graphics = encode_stream(device, &graphics, "Helio Cached Graphics Unit");
+        let compute_label = format!("Helio Cached Compute Unit ({})", self.label);
+        let graphics_label = format!("Helio Cached Graphics Unit ({})", self.label);
+        let encoded_compute = encode_stream(device, &compute, &compute_label);
+        let encoded_graphics = encode_stream(device, &graphics, &graphics_label);
         let once = [&encoded_compute, &encoded_graphics]
             .into_iter()
             .find_map(|encoded| match encoded {
@@ -310,11 +312,7 @@ pub(crate) enum Encoded {
 
 /// Encodes a recorded stream into a reusable command buffer, or a normal one
 /// when that is not possible. `None` for an empty stream.
-pub(crate) fn encode_stream(
-    device: &wgpu::Device,
-    cmds: &[Cmd],
-    label: &'static str,
-) -> Option<Encoded> {
+pub(crate) fn encode_stream(device: &wgpu::Device, cmds: &[Cmd], label: &str) -> Option<Encoded> {
     if cmds.is_empty() {
         return None;
     }

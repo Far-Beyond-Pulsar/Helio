@@ -16,8 +16,7 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
-    RendererBuilder, RendererConfig,
+    Camera, HelioGraphicsConfig, HelioGraphicsContext, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
@@ -87,49 +86,22 @@ impl ApplicationHandler for App {
                 .expect("create window"),
         );
 
-        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("create surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: true,
-        }))
-        .expect("no adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("no device");
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                color_space: wgpu::SurfaceColorSpace::Auto,
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Planar Reflection Demo".into(),
+                ..Default::default()
             },
-        );
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let adapter = graphics.adapter.clone();
+        let surface_format = graphics.surface_config.format;
 
         let mut renderer_config = RendererConfig::new(size.width, size.height, surface_format);
         // HELIO_DEBUG_MODE=30 -> SSR confidence, 31 -> SSR colour. See the debug
@@ -294,13 +266,9 @@ impl ApplicationHandler for App {
         // ── Build renderer ─────────────────────────────────────────────────
         let mut renderer = RendererBuilder::new(renderer_config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(
-                device.clone(),
-                queue.clone(),
-                size.width,
-                size.height,
-                surface_format,
-            );
+            .build_with_graphics_context(&mut graphics)
+            .expect("Helio renderer");
+        let surface = graphics.surface;
 
         renderer.set_ambient([0.15, 0.18, 0.25], 1.0);
 
@@ -482,23 +450,12 @@ impl ApplicationHandler for App {
                 );
 
                 // ---- Render ----
-                let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(t) => t,
-                    wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-                    _ => {
-                        log::warn!("surface acquire failed");
-                        return;
-                    }
-                };
-                let view = output.texture.create_view(&Default::default());
-
                 // Upload this frame's SceneDB writes to the GPU mirror; without it they
                 // are never visible to the renderer (Helio#266).
                 v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
-                if let Err(e) = state.renderer.render(&camera, &view) {
+                if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
                     log::error!("Render: {:?}", e);
                 }
-                state.renderer.queue().present(output);
             }
             _ => {}
         }

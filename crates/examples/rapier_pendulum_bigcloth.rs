@@ -107,58 +107,32 @@ impl ApplicationHandler for App {
                 )
                 .expect("window"),
         );
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU] {:?}", e)));
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let caps = surface.get_capabilities(&adapter);
-        let fmt = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: fmt,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 1,
-                color_space: wgpu::SurfaceColorSpace::Auto,
+        let mut graphics = pollster::block_on(helio::HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            helio::HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Rapier Pendulum Bigcloth".into(),
+                ..Default::default()
             },
-        );
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let format = graphics.surface_config.format;
+        let surface_format = format;
+        let fmt = format;
 
         let config = RendererConfig::new(size.width, size.height, fmt);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), size.width, size.height, fmt);
+            .build_with_graphics_context(&mut graphics)
+            .expect("Helio renderer");
+        let surface = graphics.surface;
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
         let floor_mat = spawn_material(
@@ -581,21 +555,10 @@ impl AppState {
             self.sync_transforms_from_physics();
         }
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return,
-        };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
-        if let Err(e) = self.renderer.render(&camera, &view) {
+        if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render error: {:?}", e);
         }
-        self.queue.present(output);
-
         self.frame_count += 1;
         self.time_render_end = Some(std::time::Instant::now());
 

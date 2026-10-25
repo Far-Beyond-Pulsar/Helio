@@ -103,13 +103,13 @@ fn scene_buffer_or_dummy(
 
 /// Create a new graph, honouring the caller's device ownership.
 ///
-/// When `config.enable_xr` the graph is put into OpenXR multiview mode:
-/// every pool texture is allocated as a 2-layer array and the executor forces
-/// `multiview_mask = 0b11` on all render passes. Note that the graph's internal
-/// resolution stays `config.internal_width()/internal_height()` — in XR mode
-/// the application is expected to size `RendererConfig` to the eye resolution
-/// reported by the OpenXR runtime (via `XrSession::width`/`height`), since the
-/// graph does not talk to the runtime itself.
+/// OpenXR uses Helio's sequential eye rendering path. The graph remains
+/// single-layer so each eye's D2 swapchain-layer view can be attached to every
+/// pass alongside ordinary single-layer auxiliary targets. The graph's
+/// internal resolution stays `config.internal_width()/internal_height()` — in
+/// XR mode the application is expected to size `RendererConfig` to the eye
+/// resolution reported by the OpenXR runtime, since the graph does not talk to
+/// the runtime itself.
 fn new_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
@@ -121,7 +121,12 @@ fn new_graph(
     } else {
         RenderGraph::new_with_external_device(device, queue)
     };
-    graph.with_xr_mode(config.enable_xr);
+    // `Renderer::render_xr` submits one D2 swapchain-layer view per eye. The
+    // eye camera changes between submissions, so graph targets must be D2 as
+    // well. Enabling the graph's two-layer multiview allocator here mixes
+    // D2Array G-buffer attachments with the renderer's single-layer depth
+    // attachment and fails wgpu validation in GBuffer.
+    graph.with_xr_mode(false);
     // The host (e.g. the editor launching several game copies) names a shared
     // file so the driver pipeline cache is compiled once, not per process.
     if let Some(path) = std::env::var_os("PULSAR_PIPELINE_CACHE") {

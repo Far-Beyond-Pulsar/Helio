@@ -1126,7 +1126,10 @@ fn run(
          VG_STRESS_COOK_MEM_GB overrides), {threads} cook threads, {workers} files at once, one 10M+ triangle file at a time",
         work.len(),
         budget as f64 / (1u64 << 30) as f64,
-        available.map_or("unknown".to_string(), |a| format!("{:.1} GiB", a as f64 / (1u64 << 30) as f64)),
+        available.map_or("unknown".to_string(), |a| format!(
+            "{:.1} GiB",
+            a as f64 / (1u64 << 30) as f64
+        )),
     );
     let gate = cook::CookGate::new(budget);
     cook::run_jobs(

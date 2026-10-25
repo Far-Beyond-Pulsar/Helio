@@ -22,7 +22,8 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig,
-    Camera, HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
+    Camera, HelioAction, HelioCommandBridge, HelioGraphicsConfig, HelioGraphicsContext, Renderer,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
@@ -180,56 +181,27 @@ impl ApplicationHandler for App {
                 .expect("window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
+        let capture = SurfaceCapture::from_env();
+        let size = window.inner_size();
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Indoor Cathedral".into(),
+                surface_usage: capture.usage(),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let adapter = graphics.adapter.clone();
+        let format = graphics.surface_config.format;
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let capture = SurfaceCapture::from_env();
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
-        let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: capture.usage(),
-                format,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-                color_space: wgpu::SurfaceColorSpace::Auto,
-            },
-        );
-
         let config = RendererConfig::new(size.width, size.height, format)
             .with_shadow_quality(helio::ShadowQuality::Ultra);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
@@ -237,13 +209,9 @@ impl ApplicationHandler for App {
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
             .with_editor_mode(true)
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .build(
-                device.clone(),
-                queue.clone(),
-                size.width,
-                size.height,
-                format,
-            );
+            .build_with_graphics_context(&mut graphics)
+            .expect("Helio renderer");
+        let surface = graphics.surface;
 
         let mat = spawn_material(
             &mut scene_db.world,
@@ -918,22 +886,26 @@ impl AppState {
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         self.rays.publish(&self.scene_db.world, &mut renderer);
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return,
-        };
-        let view = output.texture.create_view(&Default::default());
-
-        if let Err(e) = renderer.render(&camera, &view) {
-            log::error!("Render: {:?}", e);
+        if std::env::var_os("HELIO_CAPTURE").is_some() {
+            let output = match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+                _ => return,
+            };
+            if let Err(e) =
+                renderer.render(&camera, &output.texture.create_view(&Default::default()))
+            {
+                log::error!("Render error: {e:?}");
+            }
+            if self
+                .capture
+                .frame(&self.device, &self.queue, &output.texture)
+            {
+                std::process::exit(0);
+            }
+            self.queue.present(output);
+        } else if let Err(e) = renderer.render_window_frame(&camera, &self.surface) {
+            log::error!("Render error: {e:?}");
         }
-        if self
-            .capture
-            .frame(&self.device, &self.queue, &output.texture)
-        {
-            std::process::exit(0);
-        }
-        self.queue.present(output);
     }
 }
