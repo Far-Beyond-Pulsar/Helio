@@ -486,6 +486,10 @@ impl Gfx {
             let device = self.device.clone();
             let queue = self.queue.clone();
             let result = xr.draw(&device, &queue, vr.world_from_stage, origin, mirror.as_ref().map(|v| (v, self.size)), |eye_index, camera, target| {
+                let mut camera = camera.clone();
+                // Stable identity lets camera-dependent temporal effects keep
+                // independent left/right reprojection state across frames.
+                camera.view_id = eye_index as u32 + 1;
                 if let Some(frame) = self.source.lock().unwrap().as_mut() {
                     frame.eye = origin + camera.position.as_dvec3();
                 }
@@ -496,7 +500,7 @@ impl Gfx {
                 self.renderer.set_frame_delta_override(Some((view.dt * 0.5).max(1.0e-6)));
                 self.renderer.set_frame_clock_delta(Some(if eye_index == 0 { weather_delta } else { 0.0 }));
                 self.rays.publish(&self.scene.world, &mut self.renderer);
-                self.renderer.render(camera, target)?;
+                self.renderer.render(&camera, target)?;
                 if let Some(timings) = &mut self.timings {
                     let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
                     let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());

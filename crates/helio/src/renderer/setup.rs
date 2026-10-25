@@ -227,6 +227,7 @@ impl Renderer {
             frame_count: 0,
             ray_frame: Default::default(),
             prev_view_proj: glam::Mat4::IDENTITY,
+            prev_view_proj_by_view: Default::default(),
             previous_world_origin: None,
             scene_derivations: Vec::new(),
             world_origin: None,

@@ -1793,11 +1793,14 @@ pub struct Targets {
     history: [wgpu::Buffer; 2],
     history_short: [wgpu::Buffer; 2],
     geometry: [wgpu::Buffer; 2],
+    right_history: Option<[wgpu::Buffer; 2]>,
+    right_history_short: Option<[wgpu::Buffer; 2]>,
+    right_geometry: Option<[wgpu::Buffer; 2]>,
     /// The filters' sun and sky and their variance (halves), in turn: the
     /// history's, the first pass's, the second's.
     filtered: [wgpu::Buffer; 2],
     /// Frames denoised into these targets.
-    denoised: u64,
+    denoised: [u64; 2],
     /// A sun sample a 2x2 block: flags, distance, slope (Rgba32Uint).
     sun_samples: wgpu::Texture,
     /// A sky visibility sample a 4x4 block: visibility, distance
@@ -1815,6 +1818,7 @@ pub struct Targets {
 pub struct LocalTargets {
     pub visibility: wgpu::Buffer,
     history: [wgpu::Buffer; 2],
+    right_history: Option<[wgpu::Buffer; 2]>,
     /// The local lights' passes' indirect dispatch, and whether the scene
     /// had local lights this frame and the last (`local_gate`).
     dispatch: wgpu::Buffer,
@@ -1826,7 +1830,14 @@ impl LocalTargets {
         let buffer = |label: &str, bytes: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: pixels * bytes, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
         let history = [buffer("chunk local light history", 16), buffer("chunk local light history", 16)];
         let dispatch = device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local light dispatch"), size: 20, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT, mapped_at_creation: false });
-        Self { visibility: buffer("chunk local lights", 12), history, dispatch }
+        Self { visibility: buffer("chunk local lights", 12), history, right_history: None, dispatch }
+    }
+
+    fn ensure_right_history(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+        if self.right_history.is_some() { return; }
+        let pixels = u64::from(size[0]) * u64::from(size[1]);
+        let buffer = |label: &str| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: pixels * 16, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        self.right_history = Some([buffer("chunk local light history right"), buffer("chunk local light history right")]);
     }
 }
 
@@ -1873,8 +1884,11 @@ impl Targets {
             history: pair("chunk shadow history"),
             history_short: pair("chunk shadow short history"),
             geometry: pair("chunk shadow history hits"),
+            right_history: None,
+            right_history_short: None,
+            right_geometry: None,
             filtered: pair("chunk shadow filtered"),
-            denoised: 0,
+            denoised: [0; 2],
             local_samples: device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk local light samples"), size: u64::from(size[0].div_ceil(2)) * u64::from(size[1].div_ceil(2)) * 8, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false }),
             normal: texture("chunk normal", wgpu::TextureFormat::Rgba16Float, s),
             sun_samples: device.create_texture(&wgpu::TextureDescriptor {
@@ -1910,6 +1924,19 @@ impl Targets {
                 mapped_at_creation: false,
             }),
         }
+    }
+
+    fn ensure_right_history(&mut self, device: &wgpu::Device) {
+        if self.right_history.is_some() { return; }
+        let pixels = u64::from(self.size[0]) * u64::from(self.size[1]);
+        let pair = |label: &str| std::array::from_fn(|_| device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size: pixels * 8,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        self.right_history = Some(pair("chunk shadow history right"));
+        self.right_history_short = Some(pair("chunk shadow short history right"));
+        self.right_geometry = Some(pair("chunk shadow history hits right"));
     }
 }
 
@@ -4539,6 +4566,10 @@ impl ChunkWorld {
     /// ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, jitter: [Vec2; 2], near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>) {
+        self.draw_for_eye(encoder, frame, eye, view_proj, prev_view_proj, jitter, near, sun, size, scene_depth, lights, gi, 0);
+    }
+
+    fn draw_for_eye(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, frame: u64, eye: DVec3, view_proj: Mat4, prev_view_proj: Mat4, jitter: [Vec2; 2], near: f32, sun: Vec3, size: [u32; 2], scene_depth: Option<&wgpu::TextureView>, lights: Option<&SceneLights<'_>>, gi: Option<&GiRays<'_>>, eye_index: usize) {
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
         }
@@ -4551,7 +4582,14 @@ impl ChunkWorld {
         if lights.is_some() && targets.local.is_none() {
             targets.local = Some(LocalTargets::new(&self.device, size));
         }
-        targets.denoised += 1;
+        let eye_index = eye_index.min(1);
+        if eye_index == 1 {
+            targets.ensure_right_history(&self.device);
+            if let Some(local) = &mut targets.local {
+                local.ensure_right_history(&self.device, size);
+            }
+        }
+        targets.denoised[eye_index] += 1;
         if self.timing_now.is_none() {
             self.claim_timing(frame);
         }
@@ -4675,7 +4713,7 @@ impl ChunkWorld {
                 pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
             }
             drop(pass);
-            self.denoise(encoder, &group, size, lights, timing);
+            self.denoise(encoder, &group, size, lights, eye_index, timing);
         }
         // Ray reports, back without waiting (a frame's copy when a slot is
         // free): the nodes the sampled hits want, and the Buried nodes rays
@@ -4887,12 +4925,22 @@ impl ChunkWorld {
     /// 4c. The shadows' denoiser (`chunk_draw.wgsl`): the sun's and the
     /// sky's history and two filter passes into `directional_visibility`
     /// and the gbuffer's sky; with lights, theirs into `local_visibility`.
-    fn denoise(&self, encoder: &mut helio_core::CommandRecorder<'_>, group: &wgpu::BindGroup, size: [u32; 2], lights: Option<&SceneLights<'_>>, timing: Option<(&wgpu::QuerySet, &wgpu::Buffer, u32)>) {
+    fn denoise(&self, encoder: &mut helio_core::CommandRecorder<'_>, group: &wgpu::BindGroup, size: [u32; 2], lights: Option<&SceneLights<'_>>, eye_index: usize, timing: Option<(&wgpu::QuerySet, &wgpu::Buffer, u32)>) {
         let targets = self.targets.as_ref().unwrap();
-        let (now, last) = ((targets.denoised & 1) as usize, (!targets.denoised & 1) as usize);
+        let eye_index = eye_index.min(1);
+        let (now, last) = ((targets.denoised[eye_index] & 1) as usize, (!targets.denoised[eye_index] & 1) as usize);
         let (distance, visibility, normal, sun_walked) = (view(&targets.distance), view(&targets.visibility), view(&targets.normal), &targets.sun_walked);
-        let (history, history_last, geometry, geometry_last) = (&targets.history[now], &targets.history[last], &targets.geometry[now], &targets.geometry[last]);
-        let (short, short_last) = (&targets.history_short[now], &targets.history_short[last]);
+        let (history_pair, geometry_pair, short_pair) = if eye_index == 1 {
+            (
+                targets.right_history.as_ref().unwrap(),
+                targets.right_geometry.as_ref().unwrap(),
+                targets.right_history_short.as_ref().unwrap(),
+            )
+        } else {
+            (&targets.history, &targets.geometry, &targets.history_short)
+        };
+        let (history, history_last, geometry, geometry_last) = (&history_pair[now], &history_pair[last], &geometry_pair[now], &geometry_pair[last]);
+        let (short, short_last) = (&short_pair[now], &short_pair[last]);
         let filtered = &targets.filtered;
         let temporal = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk shadow history"),
@@ -4960,8 +5008,8 @@ impl ChunkWorld {
                     entry(31, lights.lights),
                     entry(32, lights.tile_lists),
                     entry(33, lights.tile_counts),
-                    entry(51, &local.history[last]),
-                    entry(52, &local.history[now]),
+                    entry(51, if eye_index == 1 { &local.right_history.as_ref().unwrap()[last] } else { &local.history[last] }),
+                    entry(52, if eye_index == 1 { &local.right_history.as_ref().unwrap()[now] } else { &local.history[now] }),
                     entry(53, &local.visibility),
                     entry(57, &local.dispatch),
                 ],
@@ -4978,7 +5026,7 @@ impl ChunkWorld {
             let filter = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk local light filter"),
                 layout: &self.local_denoise_layout[1],
-                entries: &[view_entry(4, &distance), entry(47, geometry), entry(52, &local.history[now]), entry(53, &local.visibility)],
+                entries: &[view_entry(4, &distance), entry(47, geometry), entry(52, if eye_index == 1 { &local.right_history.as_ref().unwrap()[now] } else { &local.history[now] }), entry(53, &local.visibility)],
             });
             for (pipeline, bind) in [(&self.local_temporal, &history), (&self.local_filter, &filter)] {
                 pass.set_pipeline(pipeline);

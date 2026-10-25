@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -70,6 +71,10 @@ pub struct Renderer {
     pub(crate) frame_count: u64,
     pub(crate) ray_frame: helio_core::FrameAcceleration,
     pub(crate) prev_view_proj: glam::Mat4,
+    /// Previous projection per stable camera/view id. Stereo callers submit
+    /// eyes sequentially, so a single matrix would make each eye reproject
+    /// from the other eye's camera.
+    pub(crate) prev_view_proj_by_view: HashMap<u32, glam::Mat4>,
     /// World origin used to express the previous local camera projection.
     pub(crate) previous_world_origin: Option<glam::DVec3>,
     /// GPU work deriving drawable scene buffers from the frontend's authored
@@ -258,12 +263,23 @@ impl Renderer {
     }
 
     pub(crate) fn upload_camera(&mut self, camera: &Camera) {
+        let prev_view_proj = self
+            .prev_view_proj_by_view
+            .get(&camera.view_id)
+            .copied()
+            .unwrap_or_else(|| {
+                if camera.view_id == 0 {
+                    self.prev_view_proj
+                } else {
+                    camera.proj * camera.view
+                }
+            });
         let previous_projection = match (self.previous_world_origin, self.world_origin) {
             (Some(previous), Some(current)) => helio_core::temporal::rebase_previous_projection(
-                self.prev_view_proj,
+                prev_view_proj,
                 current - previous,
             ),
-            (None, None) => self.prev_view_proj,
+            (None, None) => prev_view_proj,
             // Switching coordinate spaces invalidates the old projection.
             _ => camera.proj * camera.view,
         };
@@ -280,6 +296,8 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
+        self.prev_view_proj_by_view
+            .insert(camera.view_id, self.prev_view_proj);
         self.previous_world_origin = self.world_origin;
         self.camera_data = uniforms;
     }

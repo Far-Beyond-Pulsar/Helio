@@ -27,7 +27,7 @@ pub struct ChunkPass {
     /// How the frame's kept chunks went into the last world built: how
     /// many, or why they were refused.
     kept_loaded: Option<Result<usize, String>>,
-    last_eye: Option<(DVec3, std::time::Instant)>,
+    last_eye: [Option<(DVec3, std::time::Instant)>; 2],
     /// Stereo draws can share a head-centred residency viewpoint while tracing
     /// from each actual eye. Inter-eye distance must not become movement velocity.
     residency_eye: Option<DVec3>,
@@ -46,7 +46,8 @@ pub struct ChunkPass {
     /// the GI clipmap the terrain traces rays of is centred.
     gi_eye: Option<DVec3>,
     /// The last frame's projection jitter (NDC).
-    last_jitter: Vec2,
+    last_jitter: [Vec2; 2],
+    xr_mode: bool,
     /// The terrain as the ground foliage grows on (`chunks::ground`): shared with a
     /// foliage placement pass ([`Self::foliage_ground`]), its tiling and its answers.
     planet_ground: std::sync::Arc<super::ground::PlanetGround>,
@@ -74,7 +75,7 @@ impl ChunkPass {
             shown: None,
             exporting: false,
             kept_loaded: None,
-            last_eye: None,
+            last_eye: [None; 2],
             residency_eye: None,
             stats: UpdateStats::default(),
             timings: Vec::new(),
@@ -83,7 +84,8 @@ impl ChunkPass {
             scene: None,
             steady_shadows: false,
             gi_eye: None,
-            last_jitter: Vec2::ZERO,
+            last_jitter: [Vec2::ZERO; 2],
+            xr_mode: false,
             planet_ground,
             foliage_ground,
         }
@@ -255,6 +257,10 @@ const WRITES: &[&str] = &[
 const KEEP_TIMINGS: usize = 256;
 
 impl RenderPass for ChunkPass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+    }
+
     fn name(&self) -> &'static str {
         "VoxelChunks"
     }
@@ -432,7 +438,7 @@ impl ChunkPass {
             self.kept_loaded = frame.kept.as_ref().map(|kept| world.load_kept(&frame.planet, kept));
             self.world = Some(world);
             self.built_for = Some(recipe);
-            self.last_eye = None;
+            self.last_eye = [None; 2];
             self.exporting = false;
         }
         // A save's export: the resident edited chunks packed (over the
@@ -483,6 +489,7 @@ impl ChunkPass {
             view!("gbuffer_velocity"),
         ];
         let camera = ctx.camera_data;
+        let eye_index = if self.xr_mode && camera.jitter_frame[3].to_bits() == 2 { 1 } else { 0 };
         // Chunks are drawn relative to the eye. The frame's coordinates may
         // put the camera off their origin (a host's camera-relative frames
         // keep an origin while the camera moves within a cell of it): its
@@ -495,17 +502,17 @@ impl ChunkPass {
         let prev_view_proj =
             Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
-        let jitter = [jitter, std::mem::replace(&mut self.last_jitter, jitter)];
+        let jitter = [jitter, std::mem::replace(&mut self.last_jitter[eye_index], jitter)];
         let now = std::time::Instant::now();
         let residency_eye = self.residency_eye.unwrap_or(frame.eye);
         let interval = self
-            .last_eye
+            .last_eye[eye_index]
             .map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
-        let velocity = match (self.last_eye, interval) {
+        let velocity = match (self.last_eye[eye_index], interval) {
             (Some((eye, _)), Some(dt)) => (residency_eye - eye) / dt,
             _ => DVec3::ZERO,
         };
-        self.last_eye = Some((residency_eye, now));
+        self.last_eye[eye_index] = Some((residency_eye, now));
         // In view: the cone around the camera's forward reaching the
         // frustum's corners. A pixel's angle sets the cut's detail.
         let tan_y = 1.0 / f64::from(proj.y_axis.y);
@@ -575,7 +582,7 @@ impl ChunkPass {
         // (the GI probes' hits in this draw, volumetric fog): a level of its
         // clipmap a frame.
         world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
-        world.draw(
+        world.draw_for_eye(
             encoder,
             ctx.frame_num,
             frame.eye,
@@ -592,6 +599,7 @@ impl ChunkPass {
             }
             .as_ref(),
             gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
+            eye_index,
         );
         // Foliage's ground: where the drawn terrain changed, and this frame's
         // questions (`chunks::ground`) answered against the cut just drawn.
