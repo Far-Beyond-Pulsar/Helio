@@ -55,9 +55,6 @@ pub use helio_pass_tsr::TsrQuality;
 pub use helio_settings;
 /// Ids, names and keys of the virtual-geometry debug views.
 pub use helio_vg_format::debug_view as vg_debug_view;
-/// Reusable OpenXR runtime bootstrap (native targets only).
-#[cfg(not(target_arch = "wasm32"))]
-pub use helio_xr::XrRuntime;
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{

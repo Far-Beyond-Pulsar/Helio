@@ -64,16 +64,18 @@ Call `graphics.resize(&mut renderer, width, height)` when the app window changes
 size. This updates the renderer resolution in desktop mode and keeps the eye
 render size fixed to the runtime in XR mode.
 
-## Existing externally managed graphics devices
+## Migration from the legacy API
 
-Apps that already own device creation can keep using `XrRuntime::start_helio`,
-`RendererConfig::for_xr`, and `Renderer::install_xr_runtime`. The high-level
-`vr_support` option cannot replace a device after creation, so the shared
-graphics context must be selected before creating GPU-backed scene data.
+Helio no longer exports `XrRuntime` or exposes renderer methods for injecting
+XR sessions, configuring XR cameras, or submitting XR frames. The legacy
+`RendererConfig::for_xr` and `with_xr_mode` helpers are removed. Applications
+must create `HelioGraphicsContext` before GPU-backed scene data and use
+`build_renderer`, `render_frame`, and `resize`. `HelioXrInput` is the supported
+application-facing XR surface for controller input.
 
 ## Scope
 
 This API is native-only because OpenXR's Vulkan session is native-only. Wasm
 apps continue using their existing WebGPU setup. `RendererConfig::enable_xr`
-is a low-level render-graph multiview option; it is separate from headset
-discovery and is not needed by the context's dual-pass stereo path.
+is an internal render-graph option; applications should let the graphics
+context configure it.

@@ -627,7 +627,7 @@ impl Renderer {
     /// Select the renderer's XR quality path. Hosts that submit eye views
     /// through `render()` rather than `render_xr()` should enable this once
     /// their XR session starts and disable it when the session ends.
-    pub fn set_xr_mode(&mut self, enabled: bool) {
+    pub(crate) fn set_xr_mode(&mut self, enabled: bool) {
         if self.xr_mode != enabled {
             self.xr_mode = enabled;
             self.apply_coordinate_spaces();
@@ -788,7 +788,7 @@ impl Renderer {
     /// The swapchain must have been created from `session` and both must belong
     /// to the same `wgpu::Device` the renderer was built with.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_xr_session(
+    pub(crate) fn set_xr_session(
         &mut self,
         instance: Option<helio_xr::instance::XrInstance>,
         session: Option<helio_xr::session::XrSession>,
@@ -805,7 +805,7 @@ impl Renderer {
     /// construct `RendererConfig` from `runtime.eye_extent()` and the XR
     /// swapchain format before creating the renderer.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn install_xr_runtime(
+    pub(crate) fn install_xr_runtime(
         &mut self,
         runtime: helio_xr::XrRuntime,
     ) -> helio_core::Result<helio_xr::XrInput> {
@@ -832,7 +832,7 @@ impl Renderer {
     /// same instant the eye views were located. `None` in desktop mode or
     /// before the first XR frame has been waited on.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn xr_last_display_time(&self) -> Option<helio_xr::Time> {
+    pub(crate) fn xr_last_display_time(&self) -> Option<helio_xr::Time> {
         self.xr.as_ref().map(|session| session.last_display_time)
     }
 
@@ -840,7 +840,7 @@ impl Renderer {
     /// report or infer it. `None` in desktop mode or before enough XR timing
     /// data has arrived.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn xr_display_refresh_rate_hz(&self) -> Option<f32> {
+    pub(crate) fn xr_display_refresh_rate_hz(&self) -> Option<f32> {
         self.xr
             .as_ref()
             .and_then(helio_xr::session::XrSession::display_refresh_rate_hz)
@@ -851,7 +851,7 @@ impl Renderer {
     /// query [`Self::xr_display_refresh_rate_hz`] on subsequent frames to see
     /// which rate the runtime actually adopted.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn request_xr_display_refresh_rate_hz(&self, requested_hz: f32) -> helio_xr::Result<bool> {
+    pub(crate) fn request_xr_display_refresh_rate_hz(&self, requested_hz: f32) -> helio_xr::Result<bool> {
         match self.xr.as_ref() {
             Some(session) => session.request_display_refresh_rate_hz(requested_hz),
             None => Ok(false),
@@ -863,7 +863,7 @@ impl Renderer {
     /// matrices are overridden by the headset pose each frame; only the
     /// post-processing settings and clip distances are read back.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_xr_camera(&mut self, camera: Camera) {
+    pub(crate) fn set_xr_camera(&mut self, camera: Camera) {
         self.xr_camera = Some(camera);
     }
 
@@ -871,7 +871,7 @@ impl Renderer {
     /// capabilities) so the XR mirror blit pipeline's color target matches.
     /// Usually `Bgra8UnormSrgb` on Windows.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn set_xr_mirror_format(&mut self, format: wgpu::TextureFormat) {
+    pub(crate) fn set_xr_mirror_format(&mut self, format: wgpu::TextureFormat) {
         if self.xr_mirror_format != Some(format) {
             self.xr_mirror_format = Some(format);
             self.xr_mirror = None;
@@ -879,7 +879,7 @@ impl Renderer {
     }
 
     /// Whether the renderer was built with the OpenXR multiview path enabled.
-    pub fn xr_enabled(&self) -> bool {
+    pub(crate) fn xr_enabled(&self) -> bool {
         self.enable_xr
     }
 

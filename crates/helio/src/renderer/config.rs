@@ -491,31 +491,6 @@ impl RendererConfig {
         self
     }
 
-    /// Construct the renderer configuration for an [`XrRuntime`](helio_xr::XrRuntime).
-    /// The graph uses the runtime's per-eye extent and swapchain format, with
-    /// render scaling disabled so the submitted image exactly matches the eye
-    /// target. Helio currently renders eyes sequentially through the ordinary
-    /// graph, so this intentionally leaves graph multiview disabled.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn for_xr(runtime: &helio_xr::XrRuntime, render_mode: RenderMode) -> Self {
-        let (width, height) = runtime.eye_extent();
-        Self::new(width, height, runtime.swapchain.format)
-            .with_render_mode(render_mode)
-            .with_render_scale(1.0)
-    }
-
-    /// Enable/disable the OpenXR (multiview) render path.
-    ///
-    /// When `true` the graph allocates its internal targets as 2-layer arrays
-    /// and every render pass uses `multiview_mask = 0b11`, so both eye layers
-    /// are written in a single pass. The demo should pair this with
-    /// [`RenderMode::ForwardOpaque`] and set width/height to the XR eye
-    /// resolution reported by the runtime.
-    pub fn with_xr_mode(mut self, active: bool) -> Self {
-        self.enable_xr = active;
-        self
-    }
-
     pub fn with_hdr_output_mode(mut self, mode: helio_pass_postprocess::HdrOutputMode) -> Self {
         self.hdr_output_mode = mode;
         self
