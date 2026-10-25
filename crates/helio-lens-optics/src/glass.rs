@@ -66,7 +66,11 @@ impl Glass {
     pub fn abbe(&self) -> Option<f64> {
         let nd = self.nd()?;
         let dn = self.index_at(F_LINE_NM)? - self.index_at(C_LINE_NM)?;
-        Some(if dn.abs() < 1e-15 { f64::INFINITY } else { (nd - 1.0) / dn })
+        Some(if dn.abs() < 1e-15 {
+            f64::INFINITY
+        } else {
+            (nd - 1.0) / dn
+        })
     }
 }
 

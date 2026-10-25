@@ -4,8 +4,7 @@ use wgpu::util::DeviceExt;
 #[test]
 fn key_selection_depends_on_active_lights_not_sparse_allocation() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -26,9 +25,7 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
         });
         let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("production light compaction"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/compact_lights.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_lights.wgsl").into()),
         });
         let compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("production light compaction"),
@@ -227,8 +224,9 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 rx.recv().unwrap().unwrap();
                 rx.recv().unwrap().unwrap();
-                let live_count =
-                    bytemuck::cast_slice::<u8, u32>(&live_read.slice(..).get_mapped_range().unwrap())[0];
+                let live_count = bytemuck::cast_slice::<u8, u32>(
+                    &live_read.slice(..).get_mapped_range().unwrap(),
+                )[0];
                 live_read.unmap();
                 // Pulsar-Native#838: the list holds live rows only, however
                 // sparse the allocation.
@@ -242,8 +240,11 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                 let key = words[5];
                 assert_eq!(key,expected,"count={count} capacity={capacity} sun={sun} dominant={dominant} invalid_sun={invalid_sun} flags={flags}");
                 let active_count = count - usize::from(sun && invalid_sun);
-                assert_eq!(f32::from_bits(words[1]), active_count as f32,
-                    "active emitter count must ignore sparse allocation and invalid lights");
+                assert_eq!(
+                    f32::from_bits(words[1]),
+                    active_count as f32,
+                    "active emitter count must ignore sparse allocation and invalid lights"
+                );
                 drop(bytes);
                 read.unmap();
             }

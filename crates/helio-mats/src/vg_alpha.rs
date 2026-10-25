@@ -101,7 +101,10 @@ pub fn bindings_wgsl(binding: MaterialBindingConfig, group: u32, first: u32) -> 
                     "        case {i}u: {{ return textureSampleGrad(vga_texture_{i}, vga_sampler_{i}, uv, dx, dy); }}"
                 );
             }
-            let _ = writeln!(s, "        default: {{ return vec4<f32>(1.0); }}\n    }}\n}}");
+            let _ = writeln!(
+                s,
+                "        default: {{ return vec4<f32>(1.0); }}\n    }}\n}}"
+            );
             let _ = writeln!(s, "fn vga_sample_level(i: u32, uv: vec2<f32>, lod: f32) -> vec4<f32> {{\n    switch i {{");
             for i in 0..n {
                 let _ = writeln!(
@@ -109,15 +112,24 @@ pub fn bindings_wgsl(binding: MaterialBindingConfig, group: u32, first: u32) -> 
                     "        case {i}u: {{ return textureSampleLevel(vga_texture_{i}, vga_sampler_{i}, uv, lod); }}"
                 );
             }
-            let _ = writeln!(s, "        default: {{ return vec4<f32>(1.0); }}\n    }}\n}}");
-            let _ = writeln!(s, "fn vga_tex_size(i: u32) -> vec2<f32> {{\n    switch i {{");
+            let _ = writeln!(
+                s,
+                "        default: {{ return vec4<f32>(1.0); }}\n    }}\n}}"
+            );
+            let _ = writeln!(
+                s,
+                "fn vga_tex_size(i: u32) -> vec2<f32> {{\n    switch i {{"
+            );
             for i in 0..n {
                 let _ = writeln!(
                     s,
                     "        case {i}u: {{ return vec2<f32>(textureDimensions(vga_texture_{i}, 0)); }}"
                 );
             }
-            let _ = writeln!(s, "        default: {{ return vec2<f32>(1.0); }}\n    }}\n}}");
+            let _ = writeln!(
+                s,
+                "        default: {{ return vec2<f32>(1.0); }}\n    }}\n}}"
+            );
         }
     }
     s
@@ -142,7 +154,10 @@ pub fn layout_entries(
     first: u32,
     visibility: wgpu::ShaderStages,
 ) -> Vec<wgpu::BindGroupLayoutEntry> {
-    let mut entries = vec![storage_entry(first, visibility), storage_entry(first + 1, visibility)];
+    let mut entries = vec![
+        storage_entry(first, visibility),
+        storage_entry(first + 1, visibility),
+    ];
     binding.append_layout_entries(&mut entries, first + 2, visibility);
     entries
 }
@@ -155,10 +170,21 @@ pub fn bind_entries<'a>(
     textures: MaterialTextureBindings<'a>,
 ) -> Vec<wgpu::BindGroupEntry<'a>> {
     let mut entries = vec![
-        wgpu::BindGroupEntry { binding: first, resource: materials.as_entire_binding() },
-        wgpu::BindGroupEntry { binding: first + 1, resource: textures.material_textures.as_entire_binding() },
+        wgpu::BindGroupEntry {
+            binding: first,
+            resource: materials.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: first + 1,
+            resource: textures.material_textures.as_entire_binding(),
+        },
     ];
-    binding.append_bind_group_entries(&mut entries, first + 2, textures.texture_views, textures.samplers);
+    binding.append_bind_group_entries(
+        &mut entries,
+        first + 2,
+        textures.texture_views,
+        textures.samplers,
+    );
     entries
 }
 
@@ -175,17 +201,30 @@ mod tests {
             bindings_wgsl(binding, 0, 0),
             WGSL
         );
-        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let module = naga::front::wgsl::parse_str(&src)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
     }
 
     #[test]
     fn both_binding_modes_validate() {
-        validate(MaterialBindingConfig { mode: MaterialBindingMode::BindingArray, max_textures: 256 });
-        validate(MaterialBindingConfig { mode: MaterialBindingMode::Expanded, max_textures: 16 });
-        validate(MaterialBindingConfig { mode: MaterialBindingMode::Expanded, max_textures: 3 });
+        validate(MaterialBindingConfig {
+            mode: MaterialBindingMode::BindingArray,
+            max_textures: 256,
+        });
+        validate(MaterialBindingConfig {
+            mode: MaterialBindingMode::Expanded,
+            max_textures: 16,
+        });
+        validate(MaterialBindingConfig {
+            mode: MaterialBindingMode::Expanded,
+            max_textures: 3,
+        });
     }
 
     /// The same measurement on the real tree leaf/twig alpha maps of the
@@ -193,7 +232,8 @@ mod tests {
     /// Run with `--nocapture` for the table quoted in the plan.
     #[test]
     fn real_tree_alpha_coverage_by_mip() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/assets/vg_stress/trees");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../examples/assets/vg_stress/trees");
         let mut measured = 0;
         for (tree, file) in [
             ("fir_tree_01", "fir_tree_01_twig_alpha_2k.png"),
@@ -201,7 +241,9 @@ mod tests {
             ("tree_small_02", "tree_small_02_leaves_alpha_2k.png"),
         ] {
             let path = root.join(tree).join("textures").join(file);
-            let Ok(img) = image::open(&path) else { continue };
+            let Ok(img) = image::open(&path) else {
+                continue;
+            };
             let gray = img.to_luma8();
             let (w, h) = (gray.width() as usize, gray.height() as usize);
             let mut level: Vec<f32> = gray.pixels().map(|p| p.0[0] as f32 / 255.0).collect();
@@ -217,7 +259,11 @@ mod tests {
                     for x in 0..nw {
                         let (x0, y0) = ((2 * x).min(lw - 1), (2 * y).min(lh - 1));
                         let (x1, y1) = ((2 * x + 1).min(lw - 1), (2 * y + 1).min(lh - 1));
-                        next[y * nw + x] = (level[y0 * lw + x0] + level[y0 * lw + x1] + level[y1 * lw + x0] + level[y1 * lw + x1]) / 4.0;
+                        next[y * nw + x] = (level[y0 * lw + x0]
+                            + level[y0 * lw + x1]
+                            + level[y1 * lw + x0]
+                            + level[y1 * lw + x1])
+                            / 4.0;
                     }
                 }
                 level = next;
@@ -267,9 +313,15 @@ mod tests {
             cur = next;
             size = m;
             let c = coverage(&cur);
-            assert!(c <= last + 1e-6, "coverage must not grow with mip {level}: {c} > {last}");
+            assert!(
+                c <= last + 1e-6,
+                "coverage must not grow with mip {level}: {c} > {last}"
+            );
             last = c;
         }
-        assert!(last < base * 0.5, "mip 4 keeps {last} of {base}: thin masks lose coverage");
+        assert!(
+            last < base * 0.5,
+            "mip 4 keeps {last} of {base}: thin masks lose coverage"
+        );
     }
 }

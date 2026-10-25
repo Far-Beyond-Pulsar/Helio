@@ -93,7 +93,8 @@ impl RadiantShaderCache {
         label: &str,
     ) -> &wgpu::ShaderModule {
         if !self.modules.contains_key(&key) {
-            let source = template.build_shader_source_on(base, graph_wgsl, material_binding.max_textures);
+            let source =
+                template.build_shader_source_on(base, graph_wgsl, material_binding.max_textures);
             let source = if material_binding.uses_binding_arrays() {
                 source
             } else {

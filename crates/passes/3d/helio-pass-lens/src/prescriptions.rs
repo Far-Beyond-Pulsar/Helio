@@ -85,7 +85,11 @@ fn bracket(xs: &[f32], x: f32) -> (usize, usize, f32) {
     }
     let upper = xs.partition_point(|&v| v <= x).min(last);
     let lower = upper - 1;
-    (lower, upper, (x - xs[lower]) / (xs[upper] - xs[lower]).max(f32::MIN_POSITIVE))
+    (
+        lower,
+        upper,
+        (x - xs[lower]) / (xs[upper] - xs[lower]).max(f32::MIN_POSITIVE),
+    )
 }
 
 /// The PSF table's `[rms_tangential, rms_sagittal, centroid_shift, edge]` (mm)
@@ -128,9 +132,15 @@ fn split_spot(rms_r: f32, rms_t: f32, centroid: f32, edge: f32) -> [f32; 4] {
     let length = edge.max(0.0);
     // A spot of rounding-error size has no tail, whatever the ratio of its
     // centroid to its edge.
-    let share = if length > PSF_EPSILON_MM { (4.0 * centroid.abs() / length).min(0.9) } else { 0.0 };
+    let share = if length > PSF_EPSILON_MM {
+        (4.0 * centroid.abs() / length).min(0.9)
+    } else {
+        0.0
+    };
     let c = share * length / 4.0;
-    let core = ((rms_r * rms_r - share * length * length / 6.0 + c * c) / (1.0 - share)).max(0.0).sqrt();
+    let core = ((rms_r * rms_r - share * length * length / 6.0 + c * c) / (1.0 - share))
+        .max(0.0)
+        .sqrt();
     [core, rms_t, share.copysign(centroid), length]
 }
 
@@ -154,13 +164,23 @@ pub(crate) fn pack(bakes: &[&LensBake]) -> Vec<u32> {
         let mid = ray.n_field / 2;
         let y = ray.sensor_half_diagonal_mm * mid as f32 / (ray.n_field - 1).max(1) as f32;
         let tan = ray.tan_theta(0, mid);
-        let efl = if tan > 0.0 { y / (tan * (1.0 + ray.distortion(0, mid))) } else { 0.0 };
-        let efl = if efl.is_finite() && efl > 0.0 { efl } else { 50.0 };
+        let efl = if tan > 0.0 {
+            y / (tan * (1.0 + ray.distortion(0, mid)))
+        } else {
+            0.0
+        };
+        let efl = if efl.is_finite() && efl > 0.0 {
+            efl
+        } else {
+            50.0
+        };
         let focal_m = efl * 1.0e-3;
 
         let chromatic = (1..ray.n_field).any(|i| {
             let reference = ray.tan_theta(0, i).max(f32::MIN_POSITIVE);
-            (1..ray.n_wave).any(|w| (ray.tan_theta(w, i) - ray.tan_theta(0, i)).abs() / reference > CHROMATIC_EPSILON)
+            (1..ray.n_wave).any(|w| {
+                (ray.tan_theta(w, i) - ray.tan_theta(0, i)).abs() / reference > CHROMATIC_EPSILON
+            })
         });
 
         // Axial focus per channel: the bake's best-focus shifts weighted with
@@ -179,7 +199,11 @@ pub(crate) fn pack(bakes: &[&LensBake]) -> Vec<u32> {
             }
         }
         let loca = [0, 1, 2].map(|c| {
-            if total[c] > 0.0 && channel[c].is_finite() { -channel[c] / total[c] * 1.0e-3 / (focal_m * focal_m) } else { 0.0 }
+            if total[c] > 0.0 && channel[c].is_finite() {
+                -channel[c] / total[c] * 1.0e-3 / (focal_m * focal_m)
+            } else {
+                0.0
+            }
         });
 
         // One record per analysis field, from the point spread at that
@@ -206,7 +230,14 @@ pub(crate) fn pack(bakes: &[&LensBake]) -> Vec<u32> {
             flags |= FLAG_PSF;
         }
         put(word::EFL, efl.to_bits());
-        put(word::F_MIN, vig.f_numbers.first().copied().unwrap_or(fp.f_number).to_bits());
+        put(
+            word::F_MIN,
+            vig.f_numbers
+                .first()
+                .copied()
+                .unwrap_or(fp.f_number)
+                .to_bits(),
+        );
         put(word::HALF_DIAGONAL, ray.sensor_half_diagonal_mm.to_bits());
         put(word::FLAGS, flags);
         put(word::FOOTPRINT_RESOLUTION, fp.resolution as u32);
@@ -230,7 +261,11 @@ pub(crate) fn pack(bakes: &[&LensBake]) -> Vec<u32> {
         table(&mut words, word::RAY_WAVELENGTHS, &ray.wavelengths_nm);
         // Plane 0 of the ray map is `tan_theta`; the distortion plane follows
         // from it and the effective focal length.
-        table(&mut words, word::RAY_TAN, &ray.data[..ray.n_wave * ray.n_field]);
+        table(
+            &mut words,
+            word::RAY_TAN,
+            &ray.data[..ray.n_wave * ray.n_field],
+        );
         table(&mut words, word::VIG_F_NUMBER_LIST, &vig.f_numbers);
         table(&mut words, word::VIG_DATA, &vig.data);
         table(&mut words, word::FOOTPRINT_FIELD_LIST, &fp.field_r);
@@ -266,34 +301,49 @@ impl PrescriptionBank {
             contents: bytemuck::cast_slice(&words),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let header = |layer: usize, slot: usize| f32::from_bits(words[words[1 + layer] as usize + slot]);
+        let header =
+            |layer: usize, slot: usize| f32::from_bits(words[words[1 + layer] as usize + slot]);
         Self {
             buffer,
             efl_mm: (0..bakes.len()).map(|l| header(l, word::EFL)).collect(),
             f_min: (0..bakes.len()).map(|l| header(l, word::F_MIN)).collect(),
-            rays: (0..bakes.len()).map(|l| PrescriptionRays::from_words(&words, l)).collect(),
+            rays: (0..bakes.len())
+                .map(|l| PrescriptionRays::from_words(&words, l))
+                .collect(),
         }
     }
 
     /// The storage buffer for [`PRESCRIPTIONS`].
-    pub fn buffer(&self) -> &wgpu::Buffer { &self.buffer }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
 
     /// Layers in the bank.
-    pub fn len(&self) -> usize { self.efl_mm.len() }
+    pub fn len(&self) -> usize {
+        self.efl_mm.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.efl_mm.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.efl_mm.is_empty()
+    }
 
     /// Effective focal length of `layer` in millimetres: what a full-frame
     /// element sets the view's focal length to, so a camera should render with
     /// the field of view of this focal length on the lens's sensor.
-    pub fn efl_mm(&self, layer: usize) -> f32 { self.efl_mm[layer] }
+    pub fn efl_mm(&self, layer: usize) -> f32 {
+        self.efl_mm[layer]
+    }
 
     /// The widest aperture `layer` was baked at: a full-frame element keeps the
     /// view's f-number at or above it.
-    pub fn min_f_number(&self, layer: usize) -> f32 { self.f_min[layer] }
+    pub fn min_f_number(&self, layer: usize) -> f32 {
+        self.f_min[layer]
+    }
 
     /// The CPU copy of the layers' ray maps, for [`crate::ray_map::RayMap::with_rays`].
-    pub fn rays(&self) -> &[PrescriptionRays] { &self.rays }
+    pub fn rays(&self) -> &[PrescriptionRays] {
+        &self.rays
+    }
 }
 
 /// The ray map of one bank layer, kept on the CPU: what `lens.wgsl`'s `rx_map`
@@ -321,7 +371,10 @@ impl PrescriptionRays {
         let f = |slot: usize| f32::from_bits(words[h + slot]);
         let table = |slot: usize, len: usize| {
             let at = words[h + slot] as usize;
-            words[at..at + len].iter().map(|&w| f32::from_bits(w)).collect::<Vec<_>>()
+            words[at..at + len]
+                .iter()
+                .map(|&w| f32::from_bits(w))
+                .collect::<Vec<_>>()
         };
         let n_field = words[h + word::RAY_FIELDS] as usize;
         let n_wave = words[h + word::RAY_WAVES] as usize;
@@ -336,11 +389,15 @@ impl PrescriptionRays {
     }
 
     /// Effective focal length (mm), see [`PrescriptionBank::efl_mm`].
-    pub fn efl_mm(&self) -> f32 { self.efl_mm }
+    pub fn efl_mm(&self) -> f32 {
+        self.efl_mm
+    }
 
     /// The widest aperture the layer was baked at, see
     /// [`PrescriptionBank::min_f_number`].
-    pub fn min_f_number(&self) -> f32 { self.f_min }
+    pub fn min_f_number(&self) -> f32 {
+        self.f_min
+    }
 
     /// `rx_bracket`: the lower index and the fraction to the next entry of an
     /// ascending list, clamped to the ends.
@@ -355,7 +412,10 @@ impl PrescriptionRays {
         if n < 2 {
             return (0, 0.0);
         }
-        (lower, ((x - list[lower]) / (list[lower + 1] - list[lower]).max(1.0e-6)).clamp(0.0, 1.0))
+        (
+            lower,
+            ((x - list[lower]) / (list[lower + 1] - list[lower]).max(1.0e-6)).clamp(0.0, 1.0),
+        )
     }
 
     /// `rx_tan`: `tan(theta)` of the scene ray the normalised sensor radius `r`
@@ -394,5 +454,7 @@ impl PrescriptionRays {
 /// The CPU ray maps of `bakes`, one per layer, as a bank of them would hold.
 pub fn pack_rays(bakes: &[&LensBake]) -> Vec<PrescriptionRays> {
     let words = pack(bakes);
-    (0..bakes.len()).map(|layer| PrescriptionRays::from_words(&words, layer)).collect()
+    (0..bakes.len())
+        .map(|layer| PrescriptionRays::from_words(&words, layer))
+        .collect()
 }

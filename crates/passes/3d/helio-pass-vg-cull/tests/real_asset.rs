@@ -52,7 +52,10 @@ fn build_torus(nu: u32, nv: u32) -> Vec<u8> {
             indices: &idx,
             tri_material: &mats,
         },
-        &BuildOptions { content_id: [7, 9], resident_levels: 2 },
+        &BuildOptions {
+            content_id: [7, 9],
+            resident_levels: 2,
+        },
     )
     .expect("build")
 }
@@ -64,22 +67,36 @@ fn built_mesh_distance_lod_reduces_triangles_without_holes() {
     let parents = parents_map(&r);
     let slots: Vec<_> = (0..r.header.asset.page_count).map(Some).collect();
     let lookup = |p: u32, local: u32| r.page(p).unwrap().cluster(local).unwrap();
-    let asset = RefAsset { root_node: r.header.asset.root_node, nodes: &r.nodes,
-        group_refs: &r.group_refs, page_slot: &slots, cluster: &lookup };
+    let asset = RefAsset {
+        root_node: r.header.asset.root_node,
+        nodes: &r.nodes,
+        group_refs: &r.group_refs,
+        page_slot: &slots,
+        cluster: &lookup,
+    };
     let mut counts = Vec::new();
     for distance in [2.5, 6.0, 12.0, 24.0, 48.0, 96.0] {
         let selected = select_clusters(&asset, &view(distance), 1.0, &instance(1.0, 0));
         assert!(selected.requested_pages.is_empty());
-        let drawn: HashSet<_> = selected.drawn.iter().map(|&s|
-            (cluster_slot_page(s), cluster_slot_local(s))).collect();
+        let drawn: HashSet<_> = selected
+            .drawn
+            .iter()
+            .map(|&s| (cluster_slot_page(s), cluster_slot_local(s)))
+            .collect();
         check_one_per_path(&r, &parents, &drawn, &format!("distance={distance}"));
-        let triangles: u32 = drawn.iter().map(|&(p, l)| lookup(p, l).counts_material & 0xff).sum();
+        let triangles: u32 = drawn
+            .iter()
+            .map(|&(p, l)| lookup(p, l).counts_material & 0xff)
+            .sum();
         assert!(triangles > 0);
         counts.push(triangles);
     }
     eprintln!("Built torus, 1px error, distances 2.5..96m: {counts:?}");
     assert!(counts.windows(2).all(|w| w[1] <= w[0]), "{counts:?}");
-    assert!(counts.last().unwrap() * 4 < counts[0], "far mesh must simplify: {counts:?}");
+    assert!(
+        counts.last().unwrap() * 4 < counts[0],
+        "far mesh must simplify: {counts:?}"
+    );
 }
 
 fn view(dist: f32) -> RefView {
@@ -90,12 +107,19 @@ fn instance(scale: f32, flags: u32) -> RefInstance {
     RefInstance::translated_scaled(
         [0.0; 3],
         scale,
-        GpuVgInstance { asset_slot: 0, flags: INST_ENABLED | flags, lod_error_scale: 1.0, object_row: 0 },
+        GpuVgInstance {
+            asset_slot: 0,
+            flags: INST_ENABLED | flags,
+            lod_error_scale: 1.0,
+            object_row: 0,
+        },
     )
 }
 
 fn lcg(s: &mut u64) -> u64 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *s = s
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *s >> 33
 }
 
@@ -117,7 +141,12 @@ fn parents_map(r: &VgeoReader) -> HashMap<(u32, u32), Vec<(u32, u32)>> {
 }
 
 /// Every leaf-to-root path must contain exactly `1` drawn cluster.
-fn check_one_per_path(r: &VgeoReader, parents: &HashMap<(u32, u32), Vec<(u32, u32)>>, drawn: &HashSet<(u32, u32)>, what: &str) {
+fn check_one_per_path(
+    r: &VgeoReader,
+    parents: &HashMap<(u32, u32), Vec<(u32, u32)>>,
+    drawn: &HashSet<(u32, u32)>,
+    what: &str,
+) {
     // (min, max) drawn count over all paths from a cluster up to a root.
     let mut memo: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
     fn go(
@@ -149,7 +178,11 @@ fn check_one_per_path(r: &VgeoReader, parents: &HashMap<(u32, u32), Vec<(u32, u3
     for p in 0..r.header.asset.page_count {
         for (i, c) in r.page(p).unwrap().clusters().unwrap().iter().enumerate() {
             if c.flags & GpuCluster::FLAG_LEAF != 0 {
-                assert_eq!(go((p, i as u32), parents, drawn, &mut memo), (1, 1), "{what}: leaf ({p},{i}) path count");
+                assert_eq!(
+                    go((p, i as u32), parents, drawn, &mut memo),
+                    (1, 1),
+                    "{what}: leaf ({p},{i}) path count"
+                );
             }
         }
     }
@@ -163,7 +196,11 @@ struct Pool<'a> {
 
 impl Pool<'_> {
     fn cluster(&self, slot: u32, local: u32) -> GpuCluster {
-        self.r.page(self.slot_page[&slot]).unwrap().cluster(local).unwrap()
+        self.r
+            .page(self.slot_page[&slot])
+            .unwrap()
+            .cluster(local)
+            .unwrap()
     }
 }
 
@@ -176,7 +213,11 @@ fn run_cuts(
 ) -> (usize, usize) {
     let pool = Pool {
         r,
-        slot_page: page_slot.iter().enumerate().filter_map(|(p, s)| s.map(|s| (s, p as u32))).collect(),
+        slot_page: page_slot
+            .iter()
+            .enumerate()
+            .filter_map(|(p, s)| s.map(|s| (s, p as u32)))
+            .collect(),
     };
     let lookup = |s: u32, l: u32| pool.cluster(s, l);
     let asset = RefAsset {
@@ -195,12 +236,20 @@ fn run_cuts(
         let drawn: HashSet<(u32, u32)> = sel
             .drawn
             .iter()
-            .map(|&cs| (pool.slot_page[&cluster_slot_page(cs)], cluster_slot_local(cs)))
+            .map(|&cs| {
+                (
+                    pool.slot_page[&cluster_slot_page(cs)],
+                    cluster_slot_local(cs),
+                )
+            })
             .collect();
         let what = format!("{what} dist={dist} tau={tau} scale={scale}");
         check_one_per_path(r, parents, &drawn, &what);
         for &p in &sel.requested_pages {
-            assert!(page_slot[p as usize].is_none(), "{what}: requested resident page {p}");
+            assert!(
+                page_slot[p as usize].is_none(),
+                "{what}: requested resident page {p}"
+            );
         }
         checked += 1;
         requested += sel.requested_pages.len();
@@ -213,7 +262,10 @@ fn cut_is_exact_on_a_real_asset_fully_resident_and_under_streaming_churn() {
     let bytes = build_torus(260, 130);
     let r = VgeoReader::parse(&bytes).unwrap();
     let pages = r.header.asset.page_count as usize;
-    assert!(pages >= 6, "test asset should span several pages, has {pages}");
+    assert!(
+        pages >= 6,
+        "test asset should span several pages, has {pages}"
+    );
     let parents = parents_map(&r);
 
     // T3's own parsing of the same bytes agrees with the builder's reader.
@@ -221,7 +273,10 @@ fn cut_is_exact_on_a_real_asset_fully_resident_and_under_streaming_churn() {
     assert_eq!(src.hierarchy().unwrap(), r.nodes);
     assert_eq!(src.group_refs().unwrap(), r.group_refs);
     assert_eq!(src.page_deps().unwrap(), r.page_deps);
-    assert_eq!(src.read_page(1).unwrap(), bytes[r.page_dir[1].file_offset as usize..][..PAGE_BYTES as usize]);
+    assert_eq!(
+        src.read_page(1).unwrap(),
+        bytes[r.page_dir[1].file_offset as usize..][..PAGE_BYTES as usize]
+    );
     let q = src.quant();
     assert_eq!((q.origin, q.step), (r.meta.origin, r.meta.step));
 
@@ -229,7 +284,10 @@ fn cut_is_exact_on_a_real_asset_fully_resident_and_under_streaming_churn() {
     // Fully resident (slot == page).
     let all: Vec<Option<u32>> = (0..pages as u32).map(Some).collect();
     let (n, req) = run_cuts(&r, &parents, &all, "all-resident", &mut rng);
-    assert!(n > 0 && req == 0, "nothing to request when everything is resident");
+    assert!(
+        n > 0 && req == 0,
+        "nothing to request when everything is resident"
+    );
 
     // Streaming churn through the real scheduler with a tight page budget.
     let slots = (r.header.asset.root_page_count + 3).max(5);
@@ -242,7 +300,9 @@ fn cut_is_exact_on_a_real_asset_fully_resident_and_under_streaming_churn() {
     };
     let mut core = StoreCore::new(cfg, slots);
     core.cfg.scheduler.eviction_grace_frames = 1;
-    let reg = core.register(Arc::new(VgeoBytes::new(bytes.clone()).unwrap())).unwrap();
+    let reg = core
+        .register(Arc::new(VgeoBytes::new(bytes.clone()).unwrap()))
+        .unwrap();
     let mut evictions_seen = false;
     let mut total_requested = 0;
     for step in 0..400 {
@@ -255,19 +315,29 @@ fn cut_is_exact_on_a_real_asset_fully_resident_and_under_streaming_churn() {
         for (p, s) in page_slot.iter().enumerate() {
             if s.is_some() {
                 for &d in &r.page_deps[p] {
-                    assert!(page_slot[d as usize].is_some(), "step {step}: page {p} resident without dependency {d}");
+                    assert!(
+                        page_slot[d as usize].is_some(),
+                        "step {step}: page {p} resident without dependency {d}"
+                    );
                 }
             }
         }
         if core.is_ready(reg.slot) {
-            let (_, requested) = run_cuts(&r, &parents, &page_slot, &format!("step {step}"), &mut rng);
+            let (_, requested) =
+                run_cuts(&r, &parents, &page_slot, &format!("step {step}"), &mut rng);
             total_requested += requested;
             // Feed what the GPU would have asked for: every page the fine
             // cut wants (close camera), plus a random page.
             let v = view(2.5);
-            let pool_slot_page: HashMap<u32, u32> =
-                page_slot.iter().enumerate().filter_map(|(p, s)| s.map(|s| (s, p as u32))).collect();
-            let pool = Pool { r: &r, slot_page: pool_slot_page };
+            let pool_slot_page: HashMap<u32, u32> = page_slot
+                .iter()
+                .enumerate()
+                .filter_map(|(p, s)| s.map(|s| (s, p as u32)))
+                .collect();
+            let pool = Pool {
+                r: &r,
+                slot_page: pool_slot_page,
+            };
             let lookup = |s: u32, l: u32| pool.cluster(s, l);
             let asset = RefAsset {
                 root_node: r.header.asset.root_node,
@@ -287,8 +357,14 @@ fn cut_is_exact_on_a_real_asset_fully_resident_and_under_streaming_churn() {
         evictions_seen |= core.scheduler_stats().evictions > 0;
     }
     assert!(core.is_ready(reg.slot));
-    assert!(total_requested > 0, "the partially resident cut must have requested child pages");
-    assert!(evictions_seen, "the budget was tight enough to force evictions");
+    assert!(
+        total_requested > 0,
+        "the partially resident cut must have requested child pages"
+    );
+    assert!(
+        evictions_seen,
+        "the budget was tight enough to force evictions"
+    );
 }
 
 #[test]
@@ -333,7 +409,10 @@ fn builder_cone_never_culls_front_faces_and_culls_back_faces_end_to_end() {
                 let is_culled = cluster_cone_culled(&v, &inst, c);
                 if is_culled {
                     culled += 1;
-                    assert!(!any_front, "cone cull dropped a cluster with a front-facing triangle");
+                    assert!(
+                        !any_front,
+                        "cone cull dropped a cluster with a front-facing triangle"
+                    );
                 }
                 if all_back {
                     backfacing_clusters += 1;
@@ -358,7 +437,14 @@ fn builder_cone_never_culls_front_faces_and_culls_back_faces_end_to_end() {
         cluster: &lookup,
     };
     let v = view(6.0);
-    let with = select_clusters_ex(&asset, &v, 0.5, &instance(1.0, INST_CONE_CULL), true).drawn.len();
-    let without = select_clusters(&asset, &v, 0.5, &instance(1.0, INST_CONE_CULL)).drawn.len();
-    assert!(with < without, "cone culling removes some of the {without} clusters ({with} left)");
+    let with = select_clusters_ex(&asset, &v, 0.5, &instance(1.0, INST_CONE_CULL), true)
+        .drawn
+        .len();
+    let without = select_clusters(&asset, &v, 0.5, &instance(1.0, INST_CONE_CULL))
+        .drawn
+        .len();
+    assert!(
+        with < without,
+        "cone culling removes some of the {without} clusters ({with} left)"
+    );
 }

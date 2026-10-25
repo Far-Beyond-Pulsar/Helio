@@ -79,7 +79,10 @@ fn centroid(frame: &Frame, at: (f32, f32), radius: i32, channel: usize) -> (f32,
 }
 
 fn total(frame: &Frame, channel: usize) -> f32 {
-    (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| frame.pixel(x, y)[channel]).sum()
+    (0..SIZE)
+        .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+        .map(|(x, y)| frame.pixel(x, y)[channel])
+        .sum()
 }
 
 /// What the lens does to the frame without its elements.
@@ -91,17 +94,32 @@ fn plain(rig: &mut Rig, scene: &Scene) -> Frame {
 fn rectilinear_projection_is_an_exact_identity() {
     let mut rig = Rig::new();
     let scene = Scene::new(
-        |x, y| [x as f32 * 0.37 + 0.1, y as f32 * 3.1 + 0.2, 40.0 + (x ^ y) as f32],
+        |x, y| {
+            [
+                x as f32 * 0.37 + 0.1,
+                y as f32 * 3.1 + 0.2,
+                40.0 + (x ^ y) as f32,
+            ]
+        },
         |_, _| 3.0,
     );
     let reference = plain(&mut rig, &scene);
-    let element = [LensElementComponent::projection(ProjectionModel::Rectilinear, LensRegion::FullFrame)];
+    let element = [LensElementComponent::projection(
+        ProjectionModel::Rectilinear,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
-    assert_eq!(frame.output, reference.output, "an identity map changed the image");
+    assert_eq!(
+        frame.output, reference.output,
+        "an identity map changed the image"
+    );
     let resolved = rig.resolved();
     assert_eq!(resolved.map_flags, MAP_REMAP);
     assert_eq!(resolved.spectral_samples, 1);
-    assert!((resolved.required_overscan - 1.0).abs() < 1.0e-4, "{resolved:?}");
+    assert!(
+        (resolved.required_overscan - 1.0).abs() < 1.0e-4,
+        "{resolved:?}"
+    );
     // A lens with no map elements takes the texel-for-texel path.
     plain(&mut rig, &scene);
     assert_eq!(rig.resolved().map_flags, 0);
@@ -114,7 +132,11 @@ fn brown_conrady_places_a_point_where_the_opencv_model_says() {
     let scene = blobs(&points, 1.4);
     let k = [-0.25, 0.06, -0.01, 0.0, 0.0, 0.0];
     let p = [0.012, -0.009];
-    let element = [LensElementComponent::brown_conrady(k, p, LensRegion::FullFrame)];
+    let element = [LensElementComponent::brown_conrady(
+        k,
+        p,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for &(px, py) in &points {
         // The ideal point in focal-length units, then the OpenCV model.
@@ -126,7 +148,10 @@ fn brown_conrady_places_a_point_where_the_opencv_model_says() {
             x * radial + 2.0 * p[0] * x * y + p[1] * (r2 + 2.0 * x * x),
             y * radial + p[0] * (r2 + 2.0 * y * y) + 2.0 * p[1] * x * y,
         ];
-        let expected = (index_of(distorted[0] / SCALE), index_of(distorted[1] / SCALE));
+        let expected = (
+            index_of(distorted[0] / SCALE),
+            index_of(distorted[1] / SCALE),
+        );
         let (cx, cy, mass) = centroid(&frame, expected, 6, 1);
         assert!(mass > 1.0, "no point near {expected:?}");
         assert!(
@@ -162,7 +187,10 @@ fn fisheye_projections_record_radius_by_angle() {
         (ProjectionModel::Stereographic, |t| 2.0 * (t * 0.5).tan()),
     ];
     for (model, radius) in cases {
-        let element = [LensElementComponent::projection(model, LensRegion::FullFrame)];
+        let element = [LensElementComponent::projection(
+            model,
+            LensRegion::FullFrame,
+        )];
         let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
         let mut measured = Vec::new();
         for (&theta, &(sx, sy)) in thetas.iter().zip(&scene_points) {
@@ -170,7 +198,10 @@ fn fisheye_projections_record_radius_by_angle() {
             let (cx_scene, cy_scene) = (q_of(sx) * SCALE, q_of(sy) * SCALE);
             let r_scene = (cx_scene * cx_scene + cy_scene * cy_scene).sqrt();
             let scale = radius(theta) / r_scene;
-            let expected = (index_of(cx_scene * scale / SCALE), index_of(cy_scene * scale / SCALE));
+            let expected = (
+                index_of(cx_scene * scale / SCALE),
+                index_of(cy_scene * scale / SCALE),
+            );
             let (cx, cy, mass) = centroid(&frame, expected, 6, 1);
             assert!(mass > 1.0, "{model:?}: no point near {expected:?}");
             assert!(
@@ -185,7 +216,10 @@ fn fisheye_projections_record_radius_by_angle() {
         if model == ProjectionModel::Equidistant {
             // Radius proportional to angle: the ratio is the focal length (1).
             for ratio in &measured {
-                assert!((ratio - 1.0).abs() < 0.02, "equidistant radius/angle {measured:?}");
+                assert!(
+                    (ratio - 1.0).abs() < 0.02,
+                    "equidistant radius/angle {measured:?}"
+                );
             }
         }
     }
@@ -198,9 +232,14 @@ fn spectral_weights_reconstruct_white_at_every_sample_count() {
         assert_eq!(samples.len(), n);
         for channel in 0..3 {
             let sum: f32 = samples.iter().map(|s| s.weights[channel]).sum();
-            assert!((sum - 1.0).abs() < 1.0e-5, "n {n} channel {channel}: weights sum to {sum}");
+            assert!(
+                (sum - 1.0).abs() < 1.0e-5,
+                "n {n} channel {channel}: weights sum to {sum}"
+            );
         }
-        assert!(samples.iter().all(|s| s.weights.iter().all(|&w| w >= 0.0) && s.t.abs() <= 1.0));
+        assert!(samples
+            .iter()
+            .all(|s| s.weights.iter().all(|&w| w >= 0.0) && s.t.abs() <= 1.0));
         assert!(samples.windows(2).all(|w| w[0].t < w[1].t));
     }
     assert_eq!(
@@ -215,18 +254,29 @@ fn a_neutral_spectral_lens_is_the_identity_at_every_quality() {
     let scene = Scene::new(
         |x, y| {
             let (u, v) = (x as f32 / SIZE as f32, y as f32 / SIZE as f32);
-            [0.1 + 3.0 * u, 0.2 + 2.0 * v * v, 1.0 + (7.0 * u).sin() * (5.0 * v).cos()]
+            [
+                0.1 + 3.0 * u,
+                0.2 + 2.0 * v * v,
+                1.0 + (7.0 * u).sin() * (5.0 * v).cos(),
+            ]
         },
         |_, _| 3.0,
     );
     let reference = plain(&mut rig, &scene);
-    let element = [LensElementComponent::lateral_ca(0.0, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::lateral_ca(
+        0.0,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     for (quality, samples) in [(0, 3), (1, 7), (2, 16)] {
         let mut lens = stacked(&element);
         lens.quality = quality;
         let frame = rig.record(&scene, Some(&[lens]), rows(&element));
         let resolved = rig.resolved();
-        assert_eq!((resolved.quality, resolved.spectral_samples), (quality, samples));
+        assert_eq!(
+            (resolved.quality, resolved.spectral_samples),
+            (quality, samples)
+        );
         assert_eq!(resolved.map_flags, MAP_REMAP | MAP_SPECTRAL);
         let mut worst = 0.0f32;
         for y in 0..SIZE {
@@ -237,7 +287,10 @@ fn a_neutral_spectral_lens_is_the_identity_at_every_quality() {
                 }
             }
         }
-        assert!(worst < 2.0e-3, "quality {quality}: {samples} samples changed the image by {worst}");
+        assert!(
+            worst < 2.0e-3,
+            "quality {quality}: {samples} samples changed the image by {worst}"
+        );
     }
 }
 
@@ -254,7 +307,11 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
         |_, _| 3.0,
     );
     let d1 = 0.06;
-    let element = [LensElementComponent::lateral_ca(d1, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::lateral_ca(
+        d1,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let mut lens = stacked(&element);
     lens.quality = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
@@ -276,7 +333,10 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
         // it, weighted by the channel.
         let q = q_of(centre);
         let expected = |channel: usize| {
-            let at: f32 = samples.iter().map(|s| s.weights[channel] * q * (1.0 + d1 * s.t)).sum();
+            let at: f32 = samples
+                .iter()
+                .map(|s| s.weights[channel] * q * (1.0 + d1 * s.t))
+                .sum();
             index_of(at)
         };
         for (channel, found) in [(0, r), (1, g), (2, b)] {
@@ -291,17 +351,30 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
             assert!((r - b).abs() < 0.1, "axis line split: {r} {b}");
         } else if line > 64.0 {
             // Positive dispersion: red outward (right), blue inward.
-            assert!(r > g && g > b && r - b > 1.5, "right line: r {r:.2} g {g:.2} b {b:.2}");
+            assert!(
+                r > g && g > b && r - b > 1.5,
+                "right line: r {r:.2} g {g:.2} b {b:.2}"
+            );
         } else {
-            assert!(r < g && g < b && b - r > 1.5, "left line: r {r:.2} g {g:.2} b {b:.2}");
+            assert!(
+                r < g && g < b && b - r > 1.5,
+                "left line: r {r:.2} g {g:.2} b {b:.2}"
+            );
         }
     }
     // Negative dispersion reverses it.
-    let element = [LensElementComponent::lateral_ca(-d1, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::lateral_ca(
+        -d1,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let mut lens = stacked(&element);
     lens.quality = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
-    let (r, b) = (centroid(&frame, (100.5, 64.0), 8, 0).0, centroid(&frame, (100.5, 64.0), 8, 2).0);
+    let (r, b) = (
+        centroid(&frame, (100.5, 64.0), 8, 0).0,
+        centroid(&frame, (100.5, 64.0), 8, 2).0,
+    );
     assert!(r < b, "negative dispersion should put red inward: {r} {b}");
 }
 
@@ -309,14 +382,27 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
 fn natural_vignette_follows_cos4_of_the_ray_angle() {
     let mut rig = Rig::new();
     let scene = flat([1.0; 3]);
-    let element = [LensElementComponent::natural_vignette(1.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::natural_vignette(
+        1.0,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     let resolved = rig.resolved();
-    assert_eq!((resolved.map_flags, resolved.natural_vignette), (MAP_TRANSMISSION, 1.0));
+    assert_eq!(
+        (resolved.map_flags, resolved.natural_vignette),
+        (MAP_TRANSMISSION, 1.0)
+    );
     assert_eq!(resolved.required_overscan, 1.0);
     assert!((frame.pixel(64, 64)[0] - 1.0).abs() < 2.0e-3);
     let mut previous = 1.0;
-    for &(x, y) in &[(64u32, 64u32), (96, 64), (127, 64), (110, 110), (3, 3), (0, 127)] {
+    for &(x, y) in &[
+        (64u32, 64u32),
+        (96, 64),
+        (127, 64),
+        (110, 110),
+        (3, 3),
+        (0, 127),
+    ] {
         let (qx, qy) = (q_of(x as f32) * SCALE, q_of(y as f32) * SCALE);
         let expected = 1.0 / ((1.0 + qx * qx + qy * qy) * (1.0 + qx * qx + qy * qy));
         let found = frame.pixel(x, y);
@@ -328,7 +414,10 @@ fn natural_vignette_follows_cos4_of_the_ray_angle() {
             );
         }
         if y == 64 {
-            assert!(found[0] <= previous + 1.0e-3, "falloff must not rise outward");
+            assert!(
+                found[0] <= previous + 1.0e-3,
+                "falloff must not rise outward"
+            );
             previous = found[0];
         }
     }
@@ -349,7 +438,10 @@ fn natural_vignette_follows_cos4_of_the_ray_angle() {
         );
     }
     // Half the amount lands halfway.
-    let element = [LensElementComponent::natural_vignette(0.5, LensRegion::FullFrame)];
+    let element = [LensElementComponent::natural_vignette(
+        0.5,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     let (qx, qy) = (q_of(3.0) * SCALE, q_of(3.0) * SCALE);
     let full = 1.0 / ((1.0 + qx * qx + qy * qy) * (1.0 + qx * qx + qy * qy));
@@ -382,7 +474,10 @@ fn graduated_nd_ramps_monotonically_hard_or_soft_and_tinted() {
         for c in 0..3 {
             assert!((column[2][c] - 1.0).abs() < 3.0e-3);
             let full = 0.25 * tint[c];
-            assert!((column[SIZE as usize - 3][c] - full).abs() < 3.0e-3 + 0.01 * full, "{column:?}");
+            assert!(
+                (column[SIZE as usize - 3][c] - full).abs() < 3.0e-3 + 0.01 * full,
+                "{column:?}"
+            );
         }
         // 10-90% of the way down, in pixels (of the green channel's range).
         let green_full = 0.25 * tint[1];
@@ -410,12 +505,19 @@ fn t_stop_light_loss_scales_the_exposure() {
     // Not applied until an element asks: t_stop is carried, not enforced.
     let frame = rig.record(&scene, Some(&[lens]), None);
     assert_eq!(frame.pixel(40, 40), [1.0; 3]);
-    let element = [LensElementComponent::t_stop_loss(1.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::t_stop_loss(
+        1.0,
+        LensRegion::FullFrame,
+    )];
     lens.element_count = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
     let expected = (2.8f32 / 4.0).powi(2);
     for c in 0..3 {
-        assert!((frame.pixel(40, 40)[c] - expected).abs() < 2.0e-3, "{:?}", frame.pixel(40, 40));
+        assert!(
+            (frame.pixel(40, 40)[c] - expected).abs() < 2.0e-3,
+            "{:?}",
+            frame.pixel(40, 40)
+        );
     }
     // A T-stop equal to the f-number loses nothing.
     lens.t_stop = 2.8;
@@ -433,16 +535,26 @@ fn prism_copies_are_weighted_and_preserve_energy() {
 
     // Five copies in a line, one eighth of the frame apart.
     let spacing = 0.12;
-    let element = [LensElementComponent::prism(5, spacing, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::prism(
+        5,
+        spacing,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for c in 0..3 {
         let after = total(&frame, c);
-        assert!((after / before[c] - 1.0).abs() < 0.005, "energy {} -> {after}", before[c]);
+        assert!(
+            (after / before[c] - 1.0).abs() < 0.005,
+            "energy {} -> {after}",
+            before[c]
+        );
     }
     let peak = reference.pixel(63, 64)[1].max(reference.pixel(64, 64)[1]);
     for copy in 0..5 {
         let x = 63.5 + (copy as f32 - 2.0) * spacing * SIZE as f32;
-        let found = frame.pixel(x.floor() as u32, 64)[1].max(frame.pixel(x.floor() as u32 + 1, 64)[1]);
+        let found =
+            frame.pixel(x.floor() as u32, 64)[1].max(frame.pixel(x.floor() as u32 + 1, 64)[1]);
         assert!(
             (found / (0.2 * peak) - 1.0).abs() < 0.15,
             "copy {copy} at {x}: {found} against a fifth of {peak}"
@@ -452,13 +564,19 @@ fn prism_copies_are_weighted_and_preserve_energy() {
     // A ring of six, falling off, still sums to one; so does a kaleidoscope
     // that turns each copy.
     for element in [
-        LensElementComponent::prism(6, 0.2, 0.3, LensRegion::FullFrame).with_prism_ring().with_prism_falloff(0.7),
+        LensElementComponent::prism(6, 0.2, 0.3, LensRegion::FullFrame)
+            .with_prism_ring()
+            .with_prism_falloff(0.7),
         LensElementComponent::prism(4, 0.1, 0.0, LensRegion::FullFrame).with_prism_spin(0.4),
     ] {
         let frame = rig.record(&scene, Some(&[stacked(&[element])]), rows(&[element]));
         for c in 0..3 {
             let after = total(&frame, c);
-            assert!((after / before[c] - 1.0).abs() < 0.01, "ring energy {} -> {after}", before[c]);
+            assert!(
+                (after / before[c] - 1.0).abs() < 0.01,
+                "ring energy {} -> {after}",
+                before[c]
+            );
         }
     }
 
@@ -470,7 +588,10 @@ fn prism_copies_are_weighted_and_preserve_energy() {
         3,
         0.1,
         0.0,
-        LensRegion::HalfPlane { angle: 0.0, offset: 0.0 },
+        LensRegion::HalfPlane {
+            angle: 0.0,
+            offset: 0.0,
+        },
     )
     .with_feather(0.01)];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
@@ -478,9 +599,15 @@ fn prism_copies_are_weighted_and_preserve_energy() {
     let left_changed = (0..SIZE)
         .flat_map(|y| (0..60).map(move |x| (x, y)))
         .any(|(x, y)| (frame.pixel(x, y)[1] - reference.pixel(x, y)[1]).abs() > 1.0e-3);
-    assert!(!left_changed, "a prism limited to the right half changed the left");
+    assert!(
+        !left_changed,
+        "a prism limited to the right half changed the left"
+    );
     let (after, before) = (total(&frame, 1), total(&reference, 1));
-    assert!((after / before - 1.0).abs() < 0.02, "region prism energy {before} -> {after}");
+    assert!(
+        (after / before - 1.0).abs() < 0.02,
+        "region prism energy {before} -> {after}"
+    );
 }
 
 #[test]
@@ -498,27 +625,57 @@ fn required_overscan_reports_how_far_the_map_reaches() {
         elements: Vec<LensElementComponent>,
         expect: fn(f32) -> bool,
     }
-    let bc = |k1: f32| LensElementComponent::brown_conrady([k1, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], LensRegion::FullFrame);
+    let bc = |k1: f32| {
+        LensElementComponent::brown_conrady(
+            [k1, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0; 2],
+            LensRegion::FullFrame,
+        )
+    };
     let cases = [
-        Case { name: "no elements", lens: lens(), elements: vec![], expect: |o| (o - 1.0).abs() < 1.0e-5 },
+        Case {
+            name: "no elements",
+            lens: lens(),
+            elements: vec![],
+            expect: |o| (o - 1.0).abs() < 1.0e-5,
+        },
         Case {
             name: "identity",
             lens: lens(),
-            elements: vec![LensElementComponent::projection(ProjectionModel::Rectilinear, LensRegion::FullFrame)],
+            elements: vec![LensElementComponent::projection(
+                ProjectionModel::Rectilinear,
+                LensRegion::FullFrame,
+            )],
             expect: |o| (o - 1.0).abs() < 1.0e-4,
         },
-        Case { name: "barrel", lens: lens(), elements: vec![bc(-0.5)], expect: |o| o > 1.2 },
-        Case { name: "pincushion", lens: lens(), elements: vec![bc(0.4)], expect: |o| o == 1.0 },
+        Case {
+            name: "barrel",
+            lens: lens(),
+            elements: vec![bc(-0.5)],
+            expect: |o| o > 1.2,
+        },
+        Case {
+            name: "pincushion",
+            lens: lens(),
+            elements: vec![bc(0.4)],
+            expect: |o| o == 1.0,
+        },
         Case {
             name: "14 mm equidistant fisheye",
             lens: wide(14.0),
-            elements: vec![LensElementComponent::projection(ProjectionModel::Equidistant, LensRegion::FullFrame)],
+            elements: vec![LensElementComponent::projection(
+                ProjectionModel::Equidistant,
+                LensRegion::FullFrame,
+            )],
             expect: |o| o > 1.5,
         },
         Case {
             name: "2x squeeze",
             lens: lens(),
-            elements: vec![LensElementComponent::anamorphic_squeeze(2.0, LensRegion::FullFrame)],
+            elements: vec![LensElementComponent::anamorphic_squeeze(
+                2.0,
+                LensRegion::FullFrame,
+            )],
             expect: |o| (o - 2.0).abs() < 1.0e-3,
         },
         Case {
@@ -530,24 +687,45 @@ fn required_overscan_reports_how_far_the_map_reaches() {
         Case {
             name: "lateral CA",
             lens: lens(),
-            elements: vec![LensElementComponent::lateral_ca(0.05, 0.0, LensRegion::FullFrame)],
+            elements: vec![LensElementComponent::lateral_ca(
+                0.05,
+                0.0,
+                LensRegion::FullFrame,
+            )],
             expect: |o| (o - 1.0 / 0.95).abs() < 1.0e-3,
         },
         Case {
             name: "prism",
             lens: lens(),
-            elements: vec![LensElementComponent::prism(3, 0.1, 0.0, LensRegion::FullFrame)],
+            elements: vec![LensElementComponent::prism(
+                3,
+                0.1,
+                0.0,
+                LensRegion::FullFrame,
+            )],
             expect: |o| (o - 1.2).abs() < 1.0e-3,
         },
     ];
     for case in cases {
         let mut lens = case.lens;
         lens.element_count = case.elements.len() as u32;
-        rig.record(&scene, Some(&[lens]), (!case.elements.is_empty()).then_some(&case.elements[..]));
+        rig.record(
+            &scene,
+            Some(&[lens]),
+            (!case.elements.is_empty()).then_some(&case.elements[..]),
+        );
         let gpu = rig.resolved().required_overscan;
         let cpu = required_overscan(&lens, &case.elements, 1.0);
-        assert!((case.expect)(gpu), "{}: GPU overscan {gpu} (CPU {cpu})", case.name);
-        assert!((gpu - cpu).abs() < 2.0e-3 * cpu, "{}: GPU {gpu} and CPU {cpu} disagree", case.name);
+        assert!(
+            (case.expect)(gpu),
+            "{}: GPU overscan {gpu} (CPU {cpu})",
+            case.name
+        );
+        assert!(
+            (gpu - cpu).abs() < 2.0e-3 * cpu,
+            "{}: GPU {gpu} and CPU {cpu} disagree",
+            case.name
+        );
     }
 }
 
@@ -555,7 +733,10 @@ fn required_overscan_reports_how_far_the_map_reaches() {
 fn smooth_scene() -> Scene {
     Scene::new(
         |x, y| {
-            let (u, v) = ((x as f32 + 0.5) / SIZE as f32, (y as f32 + 0.5) / SIZE as f32);
+            let (u, v) = (
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            );
             [
                 0.5 + 0.4 * (6.0 * u).sin() * (4.0 * v).cos(),
                 0.5 + 0.4 * (5.0 * u + 3.0 * v).cos(),
@@ -568,21 +749,33 @@ fn smooth_scene() -> Scene {
 
 /// The smooth scene sampled bilinearly at `uv`, clamped to its edge texels.
 fn sample_scene(scene: &Scene, uv: [f32; 2]) -> [f32; 3] {
-    let at = |x: i32, y: i32| scene.color[(y.clamp(0, SIZE as i32 - 1) as u32 * SIZE + x.clamp(0, SIZE as i32 - 1) as u32) as usize];
-    let (px, py) = (uv[0].clamp(0.0, 1.0) * SIZE as f32 - 0.5, uv[1].clamp(0.0, 1.0) * SIZE as f32 - 0.5);
+    let at = |x: i32, y: i32| {
+        scene.color[(y.clamp(0, SIZE as i32 - 1) as u32 * SIZE + x.clamp(0, SIZE as i32 - 1) as u32)
+            as usize]
+    };
+    let (px, py) = (
+        uv[0].clamp(0.0, 1.0) * SIZE as f32 - 0.5,
+        uv[1].clamp(0.0, 1.0) * SIZE as f32 - 0.5,
+    );
     let (bx, by) = (px.floor(), py.floor());
     let (fx, fy) = (px - bx, py - by);
     let (x, y) = (bx as i32, by as i32);
     let (a, b, c, d) = (at(x, y), at(x + 1, y), at(x, y + 1), at(x + 1, y + 1));
     let mut out = [0.0; 3];
     for k in 0..3 {
-        out[k] = (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy;
+        out[k] =
+            (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy;
     }
     out
 }
 
 /// The GPU image against the twin's map applied to the smooth scene.
-fn assert_matches_the_twin(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent], what: &str) -> Frame {
+fn assert_matches_the_twin(
+    rig: &mut Rig,
+    lens: LensComponent,
+    elements: &[LensElementComponent],
+    what: &str,
+) -> Frame {
     let scene = smooth_scene();
     let frame = rig.record(&scene, Some(&[lens]), rows(elements));
     let map = RayMap::new(&lens, elements, 1.0);
@@ -598,7 +791,10 @@ fn assert_matches_the_twin(rig: &mut Rig, lens: LensComponent, elements: &[LensE
             }
         }
     }
-    assert!(worst < 6.0e-3, "{what}: the GPU image differs from the twin's by {worst}");
+    assert!(
+        worst < 6.0e-3,
+        "{what}: the GPU image differs from the twin's by {worst}"
+    );
     frame
 }
 
@@ -607,33 +803,73 @@ fn every_map_element_matches_its_cpu_twin() {
     let mut rig = Rig::new();
     let full = LensRegion::FullFrame;
     let cases: Vec<(&str, LensComponent, Vec<LensElementComponent>)> = vec![
-        ("shift", lens(), vec![LensElementComponent::shift(0.07, -0.04, full)]),
-        ("squeeze", lens(), vec![LensElementComponent::anamorphic_squeeze(1.5, full)]),
-        ("keystone", lens(), vec![LensElementComponent::keystone(0.2, -0.3, full)]),
-        ("division", lens(), vec![LensElementComponent::division(-0.4, 0.1, full)]),
+        (
+            "shift",
+            lens(),
+            vec![LensElementComponent::shift(0.07, -0.04, full)],
+        ),
+        (
+            "squeeze",
+            lens(),
+            vec![LensElementComponent::anamorphic_squeeze(1.5, full)],
+        ),
+        (
+            "keystone",
+            lens(),
+            vec![LensElementComponent::keystone(0.2, -0.3, full)],
+        ),
+        (
+            "division",
+            lens(),
+            vec![LensElementComponent::division(-0.4, 0.1, full)],
+        ),
         (
             "anamorphic distortion",
             lens(),
-            vec![LensElementComponent::anamorphic_distortion([-0.3, 0.0], [0.2, 0.0], full)],
+            vec![LensElementComponent::anamorphic_distortion(
+                [-0.3, 0.0],
+                [0.2, 0.0],
+                full,
+            )],
         ),
         (
             "rational brown-conrady",
             lens(),
-            vec![LensElementComponent::brown_conrady([-0.2, 0.03, 0.0, 0.05, 0.0, 0.0], [0.01, 0.0], full)],
+            vec![LensElementComponent::brown_conrady(
+                [-0.2, 0.03, 0.0, 0.05, 0.0, 0.0],
+                [0.01, 0.0],
+                full,
+            )],
         ),
         (
             "kannala-brandt",
             lens(),
-            vec![LensElementComponent::projection(ProjectionModel::KannalaBrandt, full)
-                .with_kannala_brandt([-0.02, 0.003, 0.0, 0.0])],
+            vec![
+                LensElementComponent::projection(ProjectionModel::KannalaBrandt, full)
+                    .with_kannala_brandt([-0.02, 0.003, 0.0, 0.0]),
+            ],
         ),
         (
             "panini",
             lens(),
-            vec![LensElementComponent::projection(ProjectionModel::Panini, full).with_panini(1.0, 0.8)],
+            vec![
+                LensElementComponent::projection(ProjectionModel::Panini, full)
+                    .with_panini(1.0, 0.8),
+            ],
         ),
-        ("cylindrical", lens(), vec![LensElementComponent::projection(ProjectionModel::Cylindrical, full)]),
-        ("flat port", lens(), vec![LensElementComponent::flat_port(1.333, 0.0, full)]),
+        (
+            "cylindrical",
+            lens(),
+            vec![LensElementComponent::projection(
+                ProjectionModel::Cylindrical,
+                full,
+            )],
+        ),
+        (
+            "flat port",
+            lens(),
+            vec![LensElementComponent::flat_port(1.333, 0.0, full)],
+        ),
         (
             "dome port",
             lens(),
@@ -649,7 +885,11 @@ fn every_map_element_matches_its_cpu_twin() {
             vec![LensElementComponent::brown_conrady(
                 [-0.3, 0.0, 0.0, 0.0, 0.0, 0.0],
                 [0.0; 2],
-                LensRegion::Ellipse { center: [0.1, 0.0], radii: [0.3, 0.25], rotation: 0.4 },
+                LensRegion::Ellipse {
+                    center: [0.1, 0.0],
+                    radii: [0.3, 0.25],
+                    rotation: 0.4,
+                },
             )
             .with_feather(0.1)],
         ),
@@ -658,7 +898,11 @@ fn every_map_element_matches_its_cpu_twin() {
             lens(),
             vec![
                 LensElementComponent::shift(0.06, 0.02, full),
-                LensElementComponent::brown_conrady([-0.25, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], full),
+                LensElementComponent::brown_conrady(
+                    [-0.25, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0; 2],
+                    full,
+                ),
                 LensElementComponent::anamorphic_squeeze(1.3, full),
             ],
         ),
@@ -670,7 +914,8 @@ fn every_map_element_matches_its_cpu_twin() {
 
     // The order of the stack matters.
     let shift = LensElementComponent::shift(0.1, 0.0, full);
-    let barrel = LensElementComponent::brown_conrady([-0.5, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], full);
+    let barrel =
+        LensElementComponent::brown_conrady([-0.5, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], full);
     let a = [shift, barrel];
     let b = [barrel, shift];
     let (mut la, mut lb) = (lens(), lens());
@@ -682,7 +927,10 @@ fn every_map_element_matches_its_cpu_twin() {
         .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
         .map(|(x, y)| (fa.pixel(x, y)[0] - fb.pixel(x, y)[0]).abs())
         .fold(0.0, f32::max);
-    assert!(differ > 0.02, "swapping the elements changed nothing ({differ})");
+    assert!(
+        differ > 0.02,
+        "swapping the elements changed nothing ({differ})"
+    );
 }
 
 #[test]
@@ -698,7 +946,10 @@ fn outside_the_rendered_frame_the_image_clamps_to_its_edge() {
         for x in [64u32, 100, 127] {
             let found = frame.pixel(x, y);
             for c in 0..3 {
-                assert!((found[c] - edge[c]).abs() < 2.0e-3, "pixel {x},{y}: {found:?} against edge {edge:?}");
+                assert!(
+                    (found[c] - edge[c]).abs() < 2.0e-3,
+                    "pixel {x},{y}: {found:?} against edge {edge:?}"
+                );
             }
         }
     }
@@ -712,7 +963,11 @@ fn a_flat_port_magnifies_by_the_refractive_index_and_disperses() {
     // angle theta_w reaches the camera at sin(theta) = n sin(theta_w).
     let points = [(index_of(0.12), 64.0f32), (index_of(0.3), 64.0)];
     let scene = blobs(&points, 1.4);
-    let element = [LensElementComponent::flat_port(n, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::flat_port(
+        n,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for &(sx, sy) in &points {
         let x_scene = q_of(sx) * SCALE;
@@ -721,13 +976,23 @@ fn a_flat_port_magnifies_by_the_refractive_index_and_disperses() {
         let expected = index_of(theta_air.tan() / SCALE);
         let (cx, _, mass) = centroid(&frame, (expected, sy), 6, 1);
         assert!(mass > 1.0);
-        assert!((cx - expected).abs() < 0.4, "flat port: found {cx:.2}, expected {expected:.2}");
+        assert!(
+            (cx - expected).abs() < 0.4,
+            "flat port: found {cx:.2}, expected {expected:.2}"
+        );
         // Magnified: further out than the same point without the port, and
         // by more than 1.25x near the axis.
-        assert!(cx - 63.5 > (sx - 63.5) * 1.25, "no magnification: {cx} for {sx}");
+        assert!(
+            cx - 63.5 > (sx - 63.5) * 1.25,
+            "no magnification: {cx} for {sx}"
+        );
     }
     // Dispersion: the higher index of blue magnifies it more.
-    let element = [LensElementComponent::flat_port(n, 0.05, LensRegion::FullFrame)];
+    let element = [LensElementComponent::flat_port(
+        n,
+        0.05,
+        LensRegion::FullFrame,
+    )];
     let mut lens = stacked(&element);
     lens.quality = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
@@ -736,8 +1001,14 @@ fn a_flat_port_magnifies_by_the_refractive_index_and_disperses() {
         let theta_w = (q_of(points[1].0) * SCALE).atan();
         index_of((n * theta_w.sin()).asin().tan() / SCALE)
     };
-    let (r, b) = (centroid(&frame, (green, 64.0), 8, 0).0, centroid(&frame, (green, 64.0), 8, 2).0);
-    assert!(b > r + 0.2, "blue should sit outside red: r {r:.2} b {b:.2}");
+    let (r, b) = (
+        centroid(&frame, (green, 64.0), 8, 0).0,
+        centroid(&frame, (green, 64.0), 8, 2).0,
+    );
+    assert!(
+        b > r + 0.2,
+        "blue should sit outside red: r {r:.2} b {b:.2}"
+    );
 }
 
 #[test]
@@ -755,7 +1026,10 @@ fn a_dome_port_refracts_off_centre_and_curves_the_focus() {
         .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
         .map(|(x, y)| (frame.pixel(x, y)[0] - reference.pixel(x, y)[0]).abs())
         .fold(0.0, f32::max);
-    assert!(worst < 2.0e-3, "a centred dome changed the image by {worst}");
+    assert!(
+        worst < 2.0e-3,
+        "a centred dome changed the image by {worst}"
+    );
 
     // Off-centre: a point lands where the refraction at the glass puts it.
     let (radius, offset) = (0.1f32, 0.05f32);
@@ -775,29 +1049,45 @@ fn a_dome_port_refracts_off_centre_and_curves_the_focus() {
     let (mut lo, mut hi) = (0.0f32, 1.4);
     for _ in 0..60 {
         let mid = 0.5 * (lo + hi);
-        if forward(mid) < theta_w { lo = mid } else { hi = mid }
+        if forward(mid) < theta_w {
+            lo = mid
+        } else {
+            hi = mid
+        }
     }
     let expected = index_of(lo.tan() / SCALE);
     let (cx, _, mass) = centroid(&frame, (expected, 64.0), 6, 1);
     assert!(mass > 1.0);
-    assert!((cx - expected).abs() < 0.4, "dome: found {cx:.2}, expected {expected:.2}");
+    assert!(
+        (cx - expected).abs() < 0.4,
+        "dome: found {cx:.2}, expected {expected:.2}"
+    );
 
     // The virtual image is a sphere: a flat wall in focus on the axis is
     // out of focus toward the corner. Camera: 0.8 rad vertical fov, square.
     let wall = Scene::new(Scene::checker, |_, _| 3.0);
-    let element = [LensElementComponent::dome_port(0.1, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::dome_port(
+        0.1,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&wall, Some(&[stacked(&element)]), rows(&element));
     let tan_half = (0.8f32 * 0.5).tan();
     let (cx, cy) = (3u32, 3u32);
-    let d = [(q_of(cx as f32) * 2.0) * tan_half, (q_of(cy as f32) * 2.0) * tan_half];
+    let d = [
+        (q_of(cx as f32) * 2.0) * tan_half,
+        (q_of(cy as f32) * 2.0) * tan_half,
+    ];
     let secant = (1.0 + d[0] * d[0] + d[1] * d[1]).sqrt();
     let image_radius = 0.1 * n / (n - 1.0);
     let focus_dpt = 1.0 / 3.0 + (secant - 1.0) / image_radius;
     let expected_coc = expected_coc(&lens(), 1.0 / focus_dpt, 3.0);
     let found = frame.coc(cx, cy)[0];
     assert!(frame.coc(64, 64)[0].abs() < 0.03, "the axis stays in focus");
-    assert!(expected_coc.abs() > 0.5 && (found - expected_coc).abs() < 0.1 * expected_coc.abs() + 0.05,
-        "corner circle {found}, expected {expected_coc}");
+    assert!(
+        expected_coc.abs() > 0.5 && (found - expected_coc).abs() < 0.1 * expected_coc.abs() + 0.05,
+        "corner circle {found}, expected {expected_coc}"
+    );
 }
 
 #[test]
@@ -806,7 +1096,10 @@ fn focus_breathing_follows_the_focus_and_scales_the_circles() {
     // Magnification 1 + k (D - D_ref): k = -0.2 per dioptre.
     let points = [(index_of(0.3), 64.0f32)];
     let scene = blobs(&points, 1.4);
-    let element = [LensElementComponent::focus_breathing(-0.2, LensRegion::FullFrame)];
+    let element = [LensElementComponent::focus_breathing(
+        -0.2,
+        LensRegion::FullFrame,
+    )];
     for (focus, expected_scale) in [(2.0f32, 0.9f32), (0.5, 0.6)] {
         let mut lens = stacked(&element);
         lens.focus_distance_m = focus;
@@ -816,7 +1109,10 @@ fn focus_breathing_follows_the_focus_and_scales_the_circles() {
         let expected = index_of(0.3 * expected_scale);
         let (cx, _, mass) = centroid(&frame, (expected, 64.0), 14, 1);
         assert!(mass > 1.0);
-        assert!((cx - expected).abs() < 0.6, "focus {focus}: found {cx:.2}, expected {expected:.2}");
+        assert!(
+            (cx - expected).abs() < 0.6,
+            "focus {focus}: found {cx:.2}, expected {expected:.2}"
+        );
     }
 
     // The circle of confusion is on the sensor; the gather runs on the
@@ -830,11 +1126,17 @@ fn focus_breathing_follows_the_focus_and_scales_the_circles() {
     lens.max_coc_px = 64.0;
     let wall = Scene::new(Scene::checker, |_, _| 2.0);
     let before = rig.record(&wall, Some(&[lens]), None).coc(64, 64)[0];
-    let element = [LensElementComponent::focus_breathing(1.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::focus_breathing(
+        1.0,
+        LensRegion::FullFrame,
+    )];
     lens.element_count = 1;
     let after = rig.record(&wall, Some(&[lens]), rows(&element)).coc(64, 64)[0];
     assert!(before > 3.0, "{before}");
-    assert!((after / before - 0.5).abs() < 0.03, "circle {before} became {after}, expected half");
+    assert!(
+        (after / before - 0.5).abs() < 0.03,
+        "circle {before} became {after}, expected half"
+    );
 }
 
 #[test]
@@ -854,33 +1156,67 @@ fn transmission_elements_apply_in_their_regions() {
     }
 
     // A circular hood: open inside, black outside, half at the rim.
-    let element = [LensElementComponent::circular_hood(0.35, 0.04, LensRegion::FullFrame)];
+    let element = [LensElementComponent::circular_hood(
+        0.35,
+        0.04,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     assert!(frame.pixel(64, 64)[1] > 0.995 && frame.pixel(3, 3)[1] < 0.005);
     let rim = index_of(0.35);
     let at_rim = frame.pixel(rim.floor() as u32, 64)[1];
     assert!((at_rim - 0.5).abs() < 0.2, "rim {at_rim}");
     // A matte box cuts the corners but not the middle of the edges.
-    let element = [LensElementComponent::matte_box([0.45, 0.45], 0.0, 0.02, LensRegion::FullFrame)];
+    let element = [LensElementComponent::matte_box(
+        [0.45, 0.45],
+        0.0,
+        0.02,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
-    assert!(frame.pixel(64, 64)[1] > 0.99 && frame.pixel(2, 64)[1] < 0.2, "{}", frame.pixel(2, 64)[1]);
+    assert!(
+        frame.pixel(64, 64)[1] > 0.99 && frame.pixel(2, 64)[1] < 0.2,
+        "{}",
+        frame.pixel(2, 64)[1]
+    );
 
     // Optical vignetting is the area of the iris the barrel leaves: the unit
     // circle against one displaced toward the axis by the field radius.
-    let element = [LensElementComponent::optical_vignette(1.0, 1.0, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::optical_vignette(
+        1.0,
+        1.0,
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
-    assert!((frame.pixel(64, 64)[1] - 1.0).abs() < 8.0e-3, "centre loses light");
+    assert!(
+        (frame.pixel(64, 64)[1] - 1.0).abs() < 8.0e-3,
+        "centre loses light"
+    );
     let corner_r = (q_of(0.0) * q_of(0.0) * 2.0).sqrt() / (0.5 * 2.0f32.sqrt());
     let expected = crate::ray_map::circle_overlap(corner_r, 1.0);
     assert!(expected < 0.7);
-    assert!((frame.pixel(0, 0)[1] - expected).abs() < 0.01, "corner {} against {expected}", frame.pixel(0, 0)[1]);
+    assert!(
+        (frame.pixel(0, 0)[1] - expected).abs() < 0.01,
+        "corner {} against {expected}",
+        frame.pixel(0, 0)[1]
+    );
     // The barrel is a fixed size: stopped down from its reference f/2.8 to
     // f/5.6 against a smaller iris, the corner is clear again.
     let mut lens = stacked(&element);
     lens.f_number = 5.6;
-    let element = [LensElementComponent::optical_vignette(1.0, 1.0, 2.8, LensRegion::FullFrame)];
+    let element = [LensElementComponent::optical_vignette(
+        1.0,
+        1.0,
+        2.8,
+        LensRegion::FullFrame,
+    )];
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
-    assert!(frame.pixel(0, 0)[1] > 0.99, "stopped down corner {}", frame.pixel(0, 0)[1]);
+    assert!(
+        frame.pixel(0, 0)[1] > 0.99,
+        "stopped down corner {}",
+        frame.pixel(0, 0)[1]
+    );
     lens.f_number = 2.8;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
     assert!((frame.pixel(0, 0)[1] - expected).abs() < 0.01);
@@ -897,7 +1233,14 @@ fn the_twin_agrees_with_the_shader_on_transmission() {
         LensElementComponent::optical_vignette(0.6, 0.9, 0.0, full),
         LensElementComponent::circular_hood(0.5, 0.1, full),
         LensElementComponent::graduated_nd(1.5, 0.4, 0.05, 0.3, [1.0, 0.8, 0.6], full),
-        LensElementComponent::nd_filter(0.5, LensRegion::HalfPlane { angle: 1.0, offset: 0.1 }).with_feather(0.1),
+        LensElementComponent::nd_filter(
+            0.5,
+            LensRegion::HalfPlane {
+                angle: 1.0,
+                offset: 0.1,
+            },
+        )
+        .with_feather(0.1),
         LensElementComponent::color_filter([0.9, 1.0, 0.7], 0.5, full),
         LensElementComponent::t_stop_loss(1.0, full),
     ];
@@ -915,24 +1258,49 @@ fn the_twin_agrees_with_the_shader_on_transmission() {
             }
         }
     }
-    assert!(worst < 4.0e-3, "transmission differs from the twin's by {worst}");
+    assert!(
+        worst < 4.0e-3,
+        "transmission differs from the twin's by {worst}"
+    );
 }
 
 #[test]
 fn the_new_elements_are_built_with_the_documented_slots() {
     let full = LensRegion::FullFrame;
     let e = LensElementComponent::projection(ProjectionModel::Panini, full).with_panini(0.5, 0.25);
-    assert_eq!((e.kind, e.params[..3].to_vec()), (element_kind::PROJECTION, vec![6.0, 0.5, 0.25]));
-    let e = LensElementComponent::projection(ProjectionModel::KannalaBrandt, full).with_kannala_brandt([1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        (e.kind, e.params[..3].to_vec()),
+        (element_kind::PROJECTION, vec![6.0, 0.5, 0.25])
+    );
+    let e = LensElementComponent::projection(ProjectionModel::KannalaBrandt, full)
+        .with_kannala_brandt([1.0, 2.0, 3.0, 4.0]);
     assert_eq!(e.params[..5].to_vec(), vec![5.0, 1.0, 2.0, 3.0, 4.0]);
     let e = LensElementComponent::brown_conrady([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0], full);
-    assert_eq!((e.kind, e.params[..8].to_vec()), (element_kind::BROWN_CONRADY, (1..=8).map(|n| n as f32).collect::<Vec<_>>()));
-    let e = LensElementComponent::prism(4, 0.1, 0.5, full).with_prism_ring().with_prism_spin(0.3).with_prism_falloff(0.8);
+    assert_eq!(
+        (e.kind, e.params[..8].to_vec()),
+        (
+            element_kind::BROWN_CONRADY,
+            (1..=8).map(|n| n as f32).collect::<Vec<_>>()
+        )
+    );
+    let e = LensElementComponent::prism(4, 0.1, 0.5, full)
+        .with_prism_ring()
+        .with_prism_spin(0.3)
+        .with_prism_falloff(0.8);
     assert_eq!(e.params[..6].to_vec(), vec![4.0, 0.1, 0.5, 1.0, 0.3, 0.8]);
     let e = LensElementComponent::graduated_nd(2.0, 1.0, 0.1, 0.3, [0.5, 0.6, 0.7], full);
-    assert_eq!(e.params[..7].to_vec(), vec![2.0, 1.0, 0.1, 0.3, 0.5, 0.6, 0.7]);
-    assert_eq!(LensElementComponent::lateral_ca(0.1, 0.02, full).params[..2].to_vec(), vec![0.1, 0.02]);
-    assert_eq!(LensElementComponent::dome_port(0.1, 0.02, full).params[dome_port::CURVATURE], 1.0);
+    assert_eq!(
+        e.params[..7].to_vec(),
+        vec![2.0, 1.0, 0.1, 0.3, 0.5, 0.6, 0.7]
+    );
+    assert_eq!(
+        LensElementComponent::lateral_ca(0.1, 0.02, full).params[..2].to_vec(),
+        vec![0.1, 0.02]
+    );
+    assert_eq!(
+        LensElementComponent::dome_port(0.1, 0.02, full).params[dome_port::CURVATURE],
+        1.0
+    );
     // Every kind is distinct and in the documented order.
     let kinds = [
         element_kind::PROJECTION,

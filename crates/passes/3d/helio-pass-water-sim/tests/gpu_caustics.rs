@@ -119,7 +119,10 @@ fn grid_mesh() -> (Vec<[f32; 4]>, Vec<u32>) {
 }
 
 /// The `indoor_cathedral_water` pool, which is the case that looked empty.
-fn pool_volume(wave_amplitude: f32, caustics_intensity: f32) -> helio_pass_water_sim::GpuWaterVolume {
+fn pool_volume(
+    wave_amplitude: f32,
+    caustics_intensity: f32,
+) -> helio_pass_water_sim::GpuWaterVolume {
     let sun = {
         let (x, y, z) = (0.5f32, 1.0f32, 0.5f32);
         let l = (x * x + y * y + z * z).sqrt();

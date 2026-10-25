@@ -259,8 +259,20 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut texture_store = pulsar_scenedb::gpu::TextureStore::new(2);
         let (brick_albedo, brick_normal) = generate_brick_textures();
-        let brick_base = upload_texture(&device, &queue, &mut texture_store, &brick_albedo, TexelKind::Colour);
-        let brick_nrm = upload_texture(&device, &queue, &mut texture_store, &brick_normal, TexelKind::Normal);
+        let brick_base = upload_texture(
+            &device,
+            &queue,
+            &mut texture_store,
+            &brick_albedo,
+            TexelKind::Colour,
+        );
+        let brick_nrm = upload_texture(
+            &device,
+            &queue,
+            &mut texture_store,
+            &brick_normal,
+            TexelKind::Normal,
+        );
         let scene_handle = scene_db_handle(&scene_db)
             .with_texture_store(Arc::new(RwLock::new(texture_store)))
             .unwrap();

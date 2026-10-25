@@ -106,13 +106,15 @@ impl RenderGraph {
                 for d in builder.declarations() {
                     // Reading a `write_group` name (e.g. the G-buffer group) reads
                     // every member texture of that group.
-                    let reads_group = self
-                        .resource_groups
-                        .iter()
-                        .any(|(_, group, members)| *group == d.name && members.iter().any(|m| *m == w.name));
+                    let reads_group = self.resource_groups.iter().any(|(_, group, members)| {
+                        *group == d.name && members.iter().any(|m| *m == w.name)
+                    });
                     if d.access == crate::graph::ResourceAccess::Read
-                        && (d.name == w.name || reads_group || aliases.iter().any(|(allocation, published)|
-                            *allocation == w.name && *published == d.name))
+                        && (d.name == w.name
+                            || reads_group
+                            || aliases.iter().any(|(allocation, published)| {
+                                *allocation == w.name && *published == d.name
+                            }))
                         && j > last_read
                     {
                         last_read = j;
@@ -268,8 +270,11 @@ impl RenderGraph {
         let mut actions: Vec<Vec<PrePassAction>> =
             (0..self.passes.len()).map(|_| Vec::new()).collect();
         self.route_names.clear();
-        self.route_names
-            .extend(self.resources.keys().map(|name| name.clone().into_boxed_str()));
+        self.route_names.extend(
+            self.resources
+                .keys()
+                .map(|name| name.clone().into_boxed_str()),
+        );
         for (name, rl) in &self.resources {
             let pi = rl.first_write_pass;
             if pi >= actions.len() {
@@ -282,12 +287,11 @@ impl RenderGraph {
                     // graph lock or resize.
                     name: unsafe {
                         std::mem::transmute::<&str, &'static str>(
-                            self
-                        .route_names
-                        .iter()
-                        .find(|route_name| route_name.as_ref() == name.as_str())
-                        .map(|route_name| route_name.as_ref())
-                        .expect("route name was populated above"),
+                            self.route_names
+                                .iter()
+                                .find(|route_name| route_name.as_ref() == name.as_str())
+                                .map(|route_name| route_name.as_ref())
+                                .expect("route name was populated above"),
                         )
                     },
                     view: wgpu::TextureView::clone(view),
@@ -334,24 +338,35 @@ mod publication_alias_tests {
     #[ignore = "requires a GPU device"]
     fn published_view_outlives_its_allocation_name() {
         pollster::block_on(async {
-            let instance=wgpu::Instance::new(crate::wgpu_instance_descriptor().with_env());
-            let adapter=instance.request_adapter(&Default::default()).await.unwrap();
-            let (device,queue)=adapter.request_device(&Default::default()).await.unwrap();
-            let device=std::sync::Arc::new(device);
-            let queue=std::sync::Arc::new(queue);
-            let mut graph=RenderGraph::new(&device,&queue);
-            let mut producer=ResourceBuilder::new();
-            producer.write_color_raw("water_output",wgpu::TextureFormat::Rgba16Float,crate::graph::ResourceSize::MatchSurface);
-            producer.publish_alias("water_output","pre_aa");
-            let mut filter=ResourceBuilder::new();
+            let instance = wgpu::Instance::new(crate::wgpu_instance_descriptor().with_env());
+            let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+            let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+            let device = std::sync::Arc::new(device);
+            let queue = std::sync::Arc::new(queue);
+            let mut graph = RenderGraph::new(&device, &queue);
+            let mut producer = ResourceBuilder::new();
+            producer.write_color_raw(
+                "water_output",
+                wgpu::TextureFormat::Rgba16Float,
+                crate::graph::ResourceSize::MatchSurface,
+            );
+            producer.publish_alias("water_output", "pre_aa");
+            let mut filter = ResourceBuilder::new();
             filter.read("pre_aa");
-            filter.write_color_raw("filtered",wgpu::TextureFormat::Rgba16Float,crate::graph::ResourceSize::MatchSurface);
-            let mut consumer=ResourceBuilder::new();
+            filter.write_color_raw(
+                "filtered",
+                wgpu::TextureFormat::Rgba16Float,
+                crate::graph::ResourceSize::MatchSurface,
+            );
+            let mut consumer = ResourceBuilder::new();
             consumer.read("filtered");
-            graph.build_resource_lifetimes(&[producer,filter,consumer]);
-            assert_eq!(graph.resources["water_output"].last_read_pass,1);
+            graph.build_resource_lifetimes(&[producer, filter, consumer]);
+            assert_eq!(graph.resources["water_output"].last_read_pass, 1);
             graph.assign_chain_aware_alias_groups();
-            assert_ne!(graph.resources["water_output"].alias_group,graph.resources["filtered"].alias_group);
+            assert_ne!(
+                graph.resources["water_output"].alias_group,
+                graph.resources["filtered"].alias_group
+            );
         });
     }
 }

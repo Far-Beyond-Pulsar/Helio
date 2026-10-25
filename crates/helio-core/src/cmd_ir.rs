@@ -92,11 +92,14 @@ impl RenderPassDesc {
                     })
                 })
                 .collect(),
-            depth_stencil: desc.depth_stencil_attachment.as_ref().map(|d| DepthStencilAttachment {
-                view: d.view.clone(),
-                depth_ops: d.depth_ops,
-                stencil_ops: d.stencil_ops,
-            }),
+            depth_stencil: desc
+                .depth_stencil_attachment
+                .as_ref()
+                .map(|d| DepthStencilAttachment {
+                    view: d.view.clone(),
+                    depth_ops: d.depth_ops,
+                    stencil_ops: d.stencil_ops,
+                }),
             timestamp_writes: desc.timestamp_writes.as_ref().map(|t| PassTimestamps {
                 set: t.query_set.clone(),
                 begin: t.beginning_of_pass_write_index,
@@ -376,7 +379,11 @@ pub(crate) fn first_difference(old: &[Cmd], new: &[Cmd]) -> String {
             old[i].kind(),
             new[i].kind()
         ),
-        None => format!("length changed from {} to {} commands", old.len(), new.len()),
+        None => format!(
+            "length changed from {} to {} commands",
+            old.len(),
+            new.len()
+        ),
     }
 }
 
@@ -390,12 +397,14 @@ pub(crate) fn encode(cmds: &[Cmd], encoder: &mut wgpu::CommandEncoder) {
                     .color
                     .iter()
                     .map(|attachment| {
-                        attachment.as_ref().map(|a| wgpu::RenderPassColorAttachment {
-                            view: &a.view,
-                            depth_slice: a.depth_slice,
-                            resolve_target: a.resolve_target.as_ref(),
-                            ops: a.ops,
-                        })
+                        attachment
+                            .as_ref()
+                            .map(|a| wgpu::RenderPassColorAttachment {
+                                view: &a.view,
+                                depth_slice: a.depth_slice,
+                                resolve_target: a.resolve_target.as_ref(),
+                                ops: a.ops,
+                            })
                     })
                     .collect();
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -545,7 +554,9 @@ fn encode_render(cmd: &Cmd, pass: &mut wgpu::RenderPass<'_>) {
             count_buffer,
             count_offset,
             max_count,
-        } => pass.multi_draw_indirect_count(buffer, *offset, count_buffer, *count_offset, *max_count),
+        } => {
+            pass.multi_draw_indirect_count(buffer, *offset, count_buffer, *count_offset, *max_count)
+        }
         Cmd::MultiDrawIndexedIndirectCount {
             buffer,
             offset,

@@ -35,7 +35,11 @@ pub(crate) const SLOTS_AT: usize = TILES_AT + 4 * MAX_SPAWNS * TILE_BATCH;
 
 /// `feature_blocks`' words for `features` (a word without features).
 pub(crate) fn words(features: &CompiledFeatures) -> usize {
-    if features.is_empty() { 1 } else { SLOTS_AT + TILE_BATCH * features.blocks }
+    if features.is_empty() {
+        1
+    } else {
+        SLOTS_AT + TILE_BATCH * features.blocks
+    }
 }
 
 /// The WGSL constants of the layout (chunk_generate.wgsl).
@@ -63,8 +67,15 @@ pub(crate) struct CandidateBlocks {
 
 /// Each near spawn of footprint `fp`'s blocks: the first, and how many
 /// each way.
-fn spans(features: &CompiledFeatures, fp: Footprint) -> impl Iterator<Item = (usize, [i32; 2], [i32; 2])> + '_ {
-    let near = if fp.level < NEAR_LEVELS { features.near(fp.level) } else { 0 };
+fn spans(
+    features: &CompiledFeatures,
+    fp: Footprint,
+) -> impl Iterator<Item = (usize, [i32; 2], [i32; 2])> + '_ {
+    let near = if fp.level < NEAR_LEVELS {
+        features.near(fp.level)
+    } else {
+        0
+    };
     let first = [fp.cx * 64 << fp.level, fp.cy * 64 << fp.level];
     (0..near).map(move |s| {
         let (g, side) = features.squares(fp.level, s, first);
@@ -76,18 +87,35 @@ fn spans(features: &CompiledFeatures, fp: Footprint) -> impl Iterator<Item = (us
 
 /// Footprint `fp`'s blocks, spawn by spawn, row by row.
 fn blocks(features: &CompiledFeatures, fp: Footprint) -> impl Iterator<Item = BlockKey> + '_ {
-    spans(features, fp).flat_map(move |(s, lo, n)| (0..n[1]).flat_map(move |y| (0..n[0]).map(move |x| BlockKey { face: fp.face, spawn: s as u8, bx: lo[0] + x, by: lo[1] + y })))
+    spans(features, fp).flat_map(move |(s, lo, n)| {
+        (0..n[1]).flat_map(move |y| {
+            (0..n[0]).map(move |x| BlockKey {
+                face: fp.face,
+                spawn: s as u8,
+                bx: lo[0] + x,
+                by: lo[1] + y,
+            })
+        })
+    })
 }
 
 impl CandidateBlocks {
     pub(crate) fn new() -> Self {
-        Self { pool: SlotPool::new(BLOCK_POOL), jobs: Vec::new() }
+        Self {
+            pool: SlotPool::new(BLOCK_POOL),
+            jobs: Vec::new(),
+        }
     }
 
     /// The blocks footprint `fp`'s squares span kept for `frame`, a job
     /// queued for each the pool lacks: false when the frame's jobs or the
     /// pool have no room for them (then `fp` is not computed this frame).
-    pub(crate) fn reserve(&mut self, features: &CompiledFeatures, fp: Footprint, frame: u64) -> bool {
+    pub(crate) fn reserve(
+        &mut self,
+        features: &CompiledFeatures,
+        fp: Footprint,
+        frame: u64,
+    ) -> bool {
         // Those kept first (marked this frame's: no later one evicts them).
         let mut missing = Vec::new();
         for key in blocks(features, fp) {
@@ -104,7 +132,12 @@ impl CandidateBlocks {
             match self.pool.take(key, frame) {
                 None => return false,
                 Some((_, true)) => {}
-                Some((slot, false)) => self.jobs.push([u32::from(key.face) | u32::from(key.spawn) << 3, key.bx as u32, key.by as u32, slot]),
+                Some((slot, false)) => self.jobs.push([
+                    u32::from(key.face) | u32::from(key.spawn) << 3,
+                    key.bx as u32,
+                    key.by as u32,
+                    slot,
+                ]),
             }
         }
         true
@@ -113,17 +146,31 @@ impl CandidateBlocks {
     /// The frame's jobs (taken), and the tables of its computed footprints
     /// `computed` (their blocks reserved this frame): headers from
     /// `TILES_AT`, slots from `SLOTS_AT`.
-    pub(crate) fn take_batch(&mut self, features: &CompiledFeatures, computed: impl Iterator<Item = Footprint>) -> (Vec<[u32; 4]>, Vec<u32>, Vec<u32>) {
+    pub(crate) fn take_batch(
+        &mut self,
+        features: &CompiledFeatures,
+        computed: impl Iterator<Item = Footprint>,
+    ) -> (Vec<[u32; 4]>, Vec<u32>, Vec<u32>) {
         let mut tiles = Vec::new();
         let mut slots = Vec::new();
         for fp in computed {
             let at = tiles.len();
             tiles.resize(at + 4 * MAX_SPAWNS, 0);
             for (s, lo, n) in spans(features, fp) {
-                tiles[at + 4 * s..at + 4 * s + 4].copy_from_slice(&[lo[0] as u32, lo[1] as u32, n[0] as u32, slots.len() as u32]);
+                tiles[at + 4 * s..at + 4 * s + 4].copy_from_slice(&[
+                    lo[0] as u32,
+                    lo[1] as u32,
+                    n[0] as u32,
+                    slots.len() as u32,
+                ]);
                 for y in 0..n[1] {
                     for x in 0..n[0] {
-                        let key = BlockKey { face: fp.face, spawn: s as u8, bx: lo[0] + x, by: lo[1] + y };
+                        let key = BlockKey {
+                            face: fp.face,
+                            spawn: s as u8,
+                            bx: lo[0] + x,
+                            by: lo[1] + y,
+                        };
                         slots.push(self.pool.slots[&key]);
                     }
                 }

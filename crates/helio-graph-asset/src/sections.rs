@@ -58,15 +58,29 @@ pub fn expand(asset: &GraphAsset) -> Expanded {
 
     for _ in 0..MAX_DEPTH {
         let Some(position) = out.nodes.iter().position(|n| section_id(&n.kind).is_some()) else {
-            return Expanded { asset: out, diagnostics };
+            return Expanded {
+                asset: out,
+                diagnostics,
+            };
         };
         let placeholder = out.nodes.remove(position);
-        let id = section_id(&placeholder.kind).unwrap_or_default().to_string();
-        let incoming: Vec<Connection> =
-            out.connections.iter().filter(|c| c.to.node == placeholder.id).cloned().collect();
-        let outgoing: Vec<Connection> =
-            out.connections.iter().filter(|c| c.from.node == placeholder.id).cloned().collect();
-        out.connections.retain(|c| c.to.node != placeholder.id && c.from.node != placeholder.id);
+        let id = section_id(&placeholder.kind)
+            .unwrap_or_default()
+            .to_string();
+        let incoming: Vec<Connection> = out
+            .connections
+            .iter()
+            .filter(|c| c.to.node == placeholder.id)
+            .cloned()
+            .collect();
+        let outgoing: Vec<Connection> = out
+            .connections
+            .iter()
+            .filter(|c| c.from.node == placeholder.id)
+            .cloned()
+            .collect();
+        out.connections
+            .retain(|c| c.to.node != placeholder.id && c.from.node != placeholder.id);
 
         let Some(section) = asset.sections.iter().find(|s| s.id == id) else {
             diagnostics.push(Diagnostic {
@@ -85,14 +99,18 @@ pub fn expand(asset: &GraphAsset) -> Expanded {
                 (false, false) => out.connections.push(wire.clone()),
                 (true, false) => {
                     for outer in incoming.iter().filter(|c| c.to.pin == wire.from.pin) {
-                        out.connections
-                            .push(Connection { from: outer.from.clone(), to: wire.to.clone() });
+                        out.connections.push(Connection {
+                            from: outer.from.clone(),
+                            to: wire.to.clone(),
+                        });
                     }
                 }
                 (false, true) => {
                     for outer in outgoing.iter().filter(|c| c.from.pin == wire.to.pin) {
-                        out.connections
-                            .push(Connection { from: wire.from.clone(), to: outer.to.clone() });
+                        out.connections.push(Connection {
+                            from: wire.from.clone(),
+                            to: outer.to.clone(),
+                        });
                     }
                 }
                 (true, true) => {
@@ -115,7 +133,10 @@ pub fn expand(asset: &GraphAsset) -> Expanded {
         message: "sections are nested too deeply (does one hold itself?)".to_string(),
     });
     out.nodes.retain(|n| section_id(&n.kind).is_none());
-    Expanded { asset: out, diagnostics }
+    Expanded {
+        asset: out,
+        diagnostics,
+    }
 }
 
 /// Moves the nodes of each lane comment (the groups [`crate::auto_layout`] makes)
@@ -123,18 +144,28 @@ pub fn expand(asset: &GraphAsset) -> Expanded {
 /// graph. On Frame Start and Output stay in the main graph. Wires that crossed a
 /// lane's edge become the section's ports. The graph is laid out again after.
 pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
-    let lanes: Vec<_> =
-        asset.comments.iter().filter(|c| c.id.starts_with(LANE_PREFIX)).cloned().collect();
+    let lanes: Vec<_> = asset
+        .comments
+        .iter()
+        .filter(|c| c.id.starts_with(LANE_PREFIX))
+        .cloned()
+        .collect();
     asset.comments.retain(|c| !c.id.starts_with(LANE_PREFIX));
 
     for (lane_index, lane) in lanes.iter().enumerate() {
-        let kinds: HashMap<&str, &str> =
-            asset.nodes.iter().map(|n| (n.id.as_str(), n.kind.as_str())).collect();
+        let kinds: HashMap<&str, &str> = asset
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.kind.as_str()))
+            .collect();
         let members: HashSet<String> = lane
             .nodes
             .iter()
             .filter(|id| {
-                !matches!(kinds.get(id.as_str()), Some(&ON_FRAME_START) | Some(&OUTPUT) | None)
+                !matches!(
+                    kinds.get(id.as_str()),
+                    Some(&ON_FRAME_START) | Some(&OUTPUT) | None
+                )
             })
             .cloned()
             .collect();
@@ -169,10 +200,18 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
 
         // A port per member pin that a wire crosses at, shared by every such wire.
         let port_for = |section: &mut GraphSection, pin: PinDesc, input: bool, key: &str| {
-            let list = if input { &mut section.inputs } else { &mut section.outputs };
+            let list = if input {
+                &mut section.inputs
+            } else {
+                &mut section.outputs
+            };
             let name = format!("{}{key}", if input { "in_" } else { "out_" });
             if !list.iter().any(|p| p.name == name) {
-                list.push(SectionPort { name: name.clone(), ty: pin.ty, resource: pin.resource });
+                list.push(SectionPort {
+                    name: name.clone(),
+                    ty: pin.ty,
+                    resource: pin.resource,
+                });
             }
             name
         };
@@ -191,7 +230,10 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
                         from: PinRef::new(SECTION_ENTRY, &port),
                         to: wire.to,
                     });
-                    outer.push(Connection { from: wire.from, to: PinRef::new(&node_id, port) });
+                    outer.push(Connection {
+                        from: wire.from,
+                        to: PinRef::new(&node_id, port),
+                    });
                 }
                 (true, false) => {
                     let pin = pin_of(&wire.from.node, &wire.from.pin, false);
@@ -201,7 +243,10 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
                         from: wire.from,
                         to: PinRef::new(SECTION_EXIT, &port),
                     });
-                    outer.push(Connection { from: PinRef::new(&node_id, port), to: wire.to });
+                    outer.push(Connection {
+                        from: PinRef::new(&node_id, port),
+                        to: wire.to,
+                    });
                 }
             }
         }
@@ -209,7 +254,9 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
         asset.connections = outer;
 
         let (moved, kept): (Vec<NodeInstance>, Vec<NodeInstance>) =
-            std::mem::take(&mut asset.nodes).into_iter().partition(|n| members.contains(&n.id));
+            std::mem::take(&mut asset.nodes)
+                .into_iter()
+                .partition(|n| members.contains(&n.id));
         asset.nodes = kept;
         section.nodes = moved;
         asset.nodes.push(NodeInstance {
@@ -228,18 +275,37 @@ mod tests {
     use super::*;
 
     fn node(id: &str, kind: &str) -> NodeInstance {
-        NodeInstance { id: id.into(), kind: kind.into(), params: Default::default(), position: [0.0; 2] }
+        NodeInstance {
+            id: id.into(),
+            kind: kind.into(),
+            params: Default::default(),
+            position: [0.0; 2],
+        }
     }
 
     fn wire(from: (&str, &str), to: (&str, &str)) -> Connection {
-        Connection { from: PinRef::new(from.0, from.1), to: PinRef::new(to.0, to.1) }
+        Connection {
+            from: PinRef::new(from.0, from.1),
+            to: PinRef::new(to.0, to.1),
+        }
     }
 
     fn sample() -> GraphAsset {
-        let port = |name: &str| SectionPort { name: name.into(), ty: PinType::FLOW, resource: String::new() };
+        let port = |name: &str| SectionPort {
+            name: name.into(),
+            ty: PinType::FLOW,
+            resource: String::new(),
+        };
         GraphAsset {
-            nodes: vec![node("start", ON_FRAME_START), node("box", "section:s1"), node("end", OUTPUT)],
-            connections: vec![wire(("start", "out"), ("box", "in")), wire(("box", "out"), ("end", "in"))],
+            nodes: vec![
+                node("start", ON_FRAME_START),
+                node("box", "section:s1"),
+                node("end", OUTPUT),
+            ],
+            connections: vec![
+                wire(("start", "out"), ("box", "in")),
+                wire(("box", "out"), ("end", "in")),
+            ],
             sections: vec![GraphSection {
                 id: "s1".into(),
                 name: "Box".into(),
@@ -259,7 +325,11 @@ mod tests {
     #[test]
     fn expanding_joins_wires_through_the_section() {
         let expanded = expand(&sample());
-        assert!(expanded.diagnostics.is_empty(), "{:?}", expanded.diagnostics);
+        assert!(
+            expanded.diagnostics.is_empty(),
+            "{:?}",
+            expanded.diagnostics
+        );
         let ids: Vec<_> = expanded.asset.nodes.iter().map(|n| n.id.as_str()).collect();
         assert!(ids.contains(&"a") && ids.contains(&"b") && !ids.contains(&"box"));
         let c = &expanded.asset.connections;
@@ -273,10 +343,16 @@ mod tests {
     fn a_missing_or_self_holding_section_is_an_error() {
         let mut asset = sample();
         asset.sections.clear();
-        assert!(expand(&asset).diagnostics.iter().any(|d| d.message.contains("not defined")));
+        assert!(expand(&asset)
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("not defined")));
 
         let mut looped = sample();
         looped.sections[0].nodes.push(node("again", "section:s1"));
-        assert!(expand(&looped).diagnostics.iter().any(|d| d.message.contains("nested too deeply")));
+        assert!(expand(&looped)
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("nested too deeply")));
     }
 }

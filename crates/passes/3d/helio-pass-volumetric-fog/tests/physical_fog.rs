@@ -8,8 +8,7 @@ use wgpu::util::DeviceExt;
 
 fn gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&Default::default())
             .await
@@ -137,7 +136,11 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
         &[0; 512],
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     );
-    let globals = buffer(&device, &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES], wgpu::BufferUsages::UNIFORM);
+    let globals = buffer(
+        &device,
+        &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES],
+        wgpu::BufferUsages::UNIFORM,
+    );
     let indices = buffer(&device, &[0; 1920], wgpu::BufferUsages::STORAGE);
     let bg = group(
         &device,
@@ -145,7 +148,11 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
         &[(2, &globals), (12, &indices), (20, &output)],
     );
     let mut encoder = device.create_command_encoder(&Default::default());
-    run(&mut CommandRecorder::from_encoder(&mut encoder), &pipeline, &bg);
+    run(
+        &mut CommandRecorder::from_encoder(&mut encoder),
+        &pipeline,
+        &bg,
+    );
     queue.submit([encoder.finish()]);
     let values = floats(&read(&device, &queue, &output));
     for v in values[..48].as_chunks::<4>().0 {
@@ -398,10 +405,22 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
         );
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&fog, 0, None);
-        run(&mut CommandRecorder::from_encoder(&mut encoder), &resolve, &resolve_bg);
+        run(
+            &mut CommandRecorder::from_encoder(&mut encoder),
+            &resolve,
+            &resolve_bg,
+        );
         encoder.copy_buffer_to_buffer(&resolved, 0, &fog, 0, 64);
-        run(&mut CommandRecorder::from_encoder(&mut encoder), &classify, &classify_bg);
-        run(&mut CommandRecorder::from_encoder(&mut encoder), &probe, &probe_bg);
+        run(
+            &mut CommandRecorder::from_encoder(&mut encoder),
+            &classify,
+            &classify_bg,
+        );
+        run(
+            &mut CommandRecorder::from_encoder(&mut encoder),
+            &probe,
+            &probe_bg,
+        );
         queue.submit([encoder.finish()]);
         (
             floats(&read(&device, &queue, &output)),
@@ -452,7 +471,11 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
     let dispatch = sample(&world).1;
     let dispatch = bytemuck::cast_slice::<u8, u32>(&dispatch);
     assert_eq!(dispatch[6], 0, "a neutral grid needs no integration");
-    assert_eq!(f32::from_bits(dispatch[9]), 0.0, "a neutral grid publishes no range");
+    assert_eq!(
+        f32::from_bits(dispatch[9]),
+        0.0,
+        "a neutral grid publishes no range"
+    );
     world.remove::<VolumetricFogSettingsComponent>(settings);
     assert_eq!(
         sample(&world).0[9],
@@ -549,15 +572,27 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         ..Default::default()
     });
     let fog = buffer(&device, &[0; 64], wgpu::BufferUsages::UNIFORM);
-    let globals = buffer(&device, &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES], wgpu::BufferUsages::UNIFORM);
+    let globals = buffer(
+        &device,
+        &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES],
+        wgpu::BufferUsages::UNIFORM,
+    );
     let indices = buffer(&device, &[0; 1920], storage);
     let volumes = buffer(
         &device,
         &vec![0; std::mem::size_of::<helio_pass_postprocess::GpuPostProcessVolume>()],
         storage,
     );
-    let global = buffer(&device, &[0; std::mem::size_of::<GlobalFogComponent>()], storage);
-    let local = buffer(&device, &[0; std::mem::size_of::<LocalFogVolumeComponent>()], storage);
+    let global = buffer(
+        &device,
+        &[0; std::mem::size_of::<GlobalFogComponent>()],
+        storage,
+    );
+    let local = buffer(
+        &device,
+        &[0; std::mem::size_of::<LocalFogVolumeComponent>()],
+        storage,
+    );
     let output = buffer(&device, &[0; 96], storage | wgpu::BufferUsages::COPY_SRC);
     let mut entries: Vec<_> = [
         (0, &scene.camera),
@@ -589,7 +624,11 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
     // zeroed transmittance layer means no glass.
     let glass = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -602,13 +641,23 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         ..Default::default()
     });
     // The glass lookup loads texels, so the probe binds no sampler for it.
-    entries.push(wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(&view) });
-    entries.push(wgpu::BindGroupEntry { binding: 21, resource: wgpu::BindingResource::TextureView(&glass_view) });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 20,
+        resource: wgpu::BindingResource::TextureView(&view),
+    });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 21,
+        resource: wgpu::BindingResource::TextureView(&glass_view),
+    });
     // No terrain's sun occlusion: an empty map, a frame of no levels.
     let no_occlusion = device
         .create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -616,21 +665,45 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
-        .create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
-    let no_frame = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES, usage: wgpu::BufferUsages::UNIFORM, mapped_at_creation: false });
-    entries.push(wgpu::BindGroupEntry { binding: 22, resource: wgpu::BindingResource::TextureView(&no_occlusion) });
-    entries.push(wgpu::BindGroupEntry { binding: 23, resource: no_frame.as_entire_binding() });
+        .create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+    let no_frame = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES,
+        usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: false,
+    });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 22,
+        resource: wgpu::BindingResource::TextureView(&no_occlusion),
+    });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 23,
+        resource: no_frame.as_entire_binding(),
+    });
     // No clouds' shadow.
     let (no_clouds, no_cloud_frame) = helio_pass_sky::clouds::cloud_shadow_fallback(&device);
-    entries.push(wgpu::BindGroupEntry { binding: 24, resource: wgpu::BindingResource::TextureView(&no_clouds) });
-    entries.push(wgpu::BindGroupEntry { binding: 25, resource: no_cloud_frame.as_entire_binding() });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 24,
+        resource: wgpu::BindingResource::TextureView(&no_clouds),
+    });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 25,
+        resource: no_cloud_frame.as_entire_binding(),
+    });
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &probe.get_bind_group_layout(0),
         entries: &entries,
     });
     let mut encoder = device.create_command_encoder(&Default::default());
-    run(&mut CommandRecorder::from_encoder(&mut encoder), &producer, &producer_bg);
+    run(
+        &mut CommandRecorder::from_encoder(&mut encoder),
+        &producer,
+        &producer_bg,
+    );
     for face in 0..6 {
         let face_view = atlas.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
@@ -654,7 +727,11 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
             multiview_mask: None,
         });
     }
-    run(&mut CommandRecorder::from_encoder(&mut encoder), &probe, &bg);
+    run(
+        &mut CommandRecorder::from_encoder(&mut encoder),
+        &probe,
+        &bg,
+    );
     queue.submit([encoder.finish()]);
     let values = floats(&read(&device, &queue, &output));
     for (face, v) in values.as_chunks::<4>().0.iter().enumerate() {
@@ -735,7 +812,9 @@ impl helio_core::RenderPass for ShadowProducer {
         registry.write(
             helio_core::resource_keys::shadow_matrices(),
             helio_pass_shadow_matrix::ShadowMatricesFrameData {
-                desired_matrices: None, residency: None, budget: Default::default(),
+                desired_matrices: None,
+                residency: None,
+                budget: Default::default(),
                 shadow_matrices: matrices,
                 shadow_count: 6,
                 per_caster_dirty_gen: [0; helio_pass_shadow_matrix::MAX_SHADOW_CASTERS],
@@ -959,7 +1038,10 @@ fn production_graph_native_fog_black_without_lights_emission_and_disable_clear_h
     );
     graph.find_pass_mut::<ShadowProducer>().unwrap().clear_depth = 1.0;
     let unblocked = sample(&world, &mut scene, &mut graph);
-    assert!(unblocked[0] > 0.0, "removing a blocker must light fog this frame: {unblocked:?}");
+    assert!(
+        unblocked[0] > 0.0,
+        "removing a blocker must light fog this frame: {unblocked:?}"
+    );
     graph.find_pass_mut::<ShadowProducer>().unwrap().clear_depth = 0.0;
     assert_eq!(
         sample(&world, &mut scene, &mut graph)[0],
@@ -1006,15 +1088,27 @@ fn smooth_case(local: bool) {
             LocalFogVolumeComponent::new(
                 [-9., -9., -40.],
                 [9., 9., -6.],
-                GlobalFogComponent { extinction: 0.15, ..Default::default() },
+                GlobalFogComponent {
+                    extinction: 0.15,
+                    ..Default::default()
+                },
             ),
         );
     } else {
-        world.insert(entity, GlobalFogComponent { extinction: 0.02, ..Default::default() });
+        world.insert(
+            entity,
+            GlobalFogComponent {
+                extinction: 0.02,
+                ..Default::default()
+            },
+        );
     }
     world.insert(
         settings,
-        VolumetricFogSettingsComponent { max_distance: 100., ..Default::default() },
+        VolumetricFogSettingsComponent {
+            max_distance: 100.,
+            ..Default::default()
+        },
     );
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -1035,21 +1129,36 @@ fn smooth_case(local: bool) {
             .into(),
         ),
     });
-    let output = buffer(&device, &[0; 16 * 1024], wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let output = buffer(
+        &device,
+        &[0; 16 * 1024],
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    );
     let mut light = point_light(0.);
     for (word, value) in light[..3].iter_mut().zip([6.0f32, 3.0, -12.0]) {
         *word = value.to_bits();
     }
     light[3] = 80f32.to_bits();
     light[11] = 2000f32.to_bits();
-    let lights = buffer(&device, bytemuck::cast_slice(&light), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+    let lights = buffer(
+        &device,
+        bytemuck::cast_slice(&light),
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
     let mut graph = helio_core::RenderGraph::new_with_external_device(&device, &queue);
     graph.add_pass(Box::new(VolumetricFogPass::new(&device)));
-    graph.add_pass(Box::new(ReadFog { pipeline: pipeline(&device, &shader, "main"), output: output.clone() }));
+    graph.add_pass(Box::new(ReadFog {
+        pipeline: pipeline(&device, &shader, "main"),
+        output: output.clone(),
+    }));
     graph.lock(1280, 720);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size: wgpu::Extent3d { width: 1280, height: 720, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1280,
+            height: 720,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1061,12 +1170,25 @@ fn smooth_case(local: bool) {
     let mut columns = Vec::new();
     for _ in 0..6 {
         world.flush_gpu_mirror(&queue);
-        let handles = mirror.store().buffer_registry().keys().into_iter().filter_map(|key| {
-            mirror.store().resolve_buffer_handle(key).map(|handle| (key, handle))
-        });
+        let handles = mirror
+            .store()
+            .buffer_registry()
+            .keys()
+            .into_iter()
+            .filter_map(|key| {
+                mirror
+                    .store()
+                    .resolve_buffer_handle(key)
+                    .map(|handle| (key, handle))
+            });
         scene.projection = SceneBufferProjection::from_handles(handles.chain(std::iter::once((
             helio_core::BufferKey::of("scene_lights"),
-            helio_core::BufferHandle { buffer: lights.clone(), epoch: 0, row_bytes: 128, content_generation: scene.frame },
+            helio_core::BufferHandle {
+                buffer: lights.clone(),
+                epoch: 0,
+                row_bytes: 128,
+                content_generation: scene.frame,
+            },
         ))));
         scene.frame += 1;
         graph.execute(&mut scene, &target, &target).unwrap();
@@ -1076,9 +1198,14 @@ fn smooth_case(local: bool) {
     for c in 0..4 {
         let col = &columns[c * 256 * 4..(c + 1) * 256 * 4];
         let depth_slices = col.chunks(4).take_while(|t| t[3] > 0.0).count();
-        let delta: Vec<f32> = (1..depth_slices).map(|z| col[z * 4] - col[(z - 1) * 4]).collect();
+        let delta: Vec<f32> = (1..depth_slices)
+            .map(|z| col[z * 4] - col[(z - 1) * 4])
+            .collect();
         let series: Vec<String> = delta.iter().map(|d| format!("{d:.4}")).collect();
-        eprintln!("column {c}: slices {depth_slices}\n  d = [{}]", series.join(", "));
+        eprintln!(
+            "column {c}: slices {depth_slices}\n  d = [{}]",
+            series.join(", ")
+        );
         for z in 1..delta.len().saturating_sub(1) {
             let mean = 0.5 * (delta[z - 1] + delta[z + 1]);
             // Below ~4e-3 the increment is a few ulps of the half-float running sum.
@@ -1092,8 +1219,14 @@ fn smooth_case(local: bool) {
         }
     }
     eprintln!("worst relative roughness {worst}");
-    assert!(columns[127 * 4] > 1e-3, "fog must be lit for the measurement to mean anything");
-    assert!(worst < 0.2, "per-slice scattering is not smooth: worst relative roughness {worst}");
+    assert!(
+        columns[127 * 4] > 1e-3,
+        "fog must be lit for the measurement to mean anything"
+    );
+    assert!(
+        worst < 0.2,
+        "per-slice scattering is not smooth: worst relative roughness {worst}"
+    );
 }
 
 /// Renders `poses` (camera positions looking down -Z, previous-frame matrices
@@ -1109,10 +1242,19 @@ fn render_columns(poses: &[glam::Vec3], jitter: bool, half: f32) -> Vec<f32> {
         LocalFogVolumeComponent::new(
             [-half, -half, -60.],
             [half, half, -6.],
-            GlobalFogComponent { extinction: 0.15, ..Default::default() },
+            GlobalFogComponent {
+                extinction: 0.15,
+                ..Default::default()
+            },
         ),
     );
-    world.insert(settings, VolumetricFogSettingsComponent { max_distance: 100., ..Default::default() });
+    world.insert(
+        settings,
+        VolumetricFogSettingsComponent {
+            max_distance: 100.,
+            ..Default::default()
+        },
+    );
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
         source: wgpu::ShaderSource::Wgsl(
@@ -1132,21 +1274,36 @@ fn render_columns(poses: &[glam::Vec3], jitter: bool, half: f32) -> Vec<f32> {
             .into(),
         ),
     });
-    let output = buffer(&device, &[0; 16 * 1024], wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let output = buffer(
+        &device,
+        &[0; 16 * 1024],
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    );
     let mut light = point_light(0.);
     for (word, value) in light[..3].iter_mut().zip([6.0f32, 3.0, -20.0]) {
         *word = value.to_bits();
     }
     light[3] = 80f32.to_bits();
     light[11] = 2000f32.to_bits();
-    let lights = buffer(&device, bytemuck::cast_slice(&light), wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+    let lights = buffer(
+        &device,
+        bytemuck::cast_slice(&light),
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
     let mut graph = helio_core::RenderGraph::new_with_external_device(&device, &queue);
     graph.add_pass(Box::new(VolumetricFogPass::new(&device)));
-    graph.add_pass(Box::new(ReadFog { pipeline: pipeline(&device, &shader, "main"), output: output.clone() }));
+    graph.add_pass(Box::new(ReadFog {
+        pipeline: pipeline(&device, &shader, "main"),
+        output: output.clone(),
+    }));
     graph.lock(1280, 720);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
-        size: wgpu::Extent3d { width: 1280, height: 720, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: 1280,
+            height: 720,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1172,17 +1329,39 @@ fn render_columns(poses: &[glam::Vec3], jitter: bool, half: f32) -> Vec<f32> {
     for (frame, pos) in poses.iter().enumerate() {
         let view = glam::Mat4::from_translation(-*pos);
         let proj = jittered(frame + 1);
-        scene.data = GpuCameraUniforms::new(view, proj, *pos, 0.1, 100.0, frame as u32, jitter_of(frame + 1), previous);
+        scene.data = GpuCameraUniforms::new(
+            view,
+            proj,
+            *pos,
+            0.1,
+            100.0,
+            frame as u32,
+            jitter_of(frame + 1),
+            previous,
+        );
         scene.data.jitter_frame[3] = f32::from_bits(42);
         queue.write_buffer(&scene.camera, 0, bytemuck::cast_slice(&[scene.data; 2]));
         previous = proj * view;
         world.flush_gpu_mirror(&queue);
-        let handles = mirror.store().buffer_registry().keys().into_iter().filter_map(|key| {
-            mirror.store().resolve_buffer_handle(key).map(|handle| (key, handle))
-        });
+        let handles = mirror
+            .store()
+            .buffer_registry()
+            .keys()
+            .into_iter()
+            .filter_map(|key| {
+                mirror
+                    .store()
+                    .resolve_buffer_handle(key)
+                    .map(|handle| (key, handle))
+            });
         scene.projection = SceneBufferProjection::from_handles(handles.chain(std::iter::once((
             helio_core::BufferKey::of("scene_lights"),
-            helio_core::BufferHandle { buffer: lights.clone(), epoch: 0, row_bytes: 128, content_generation: scene.frame },
+            helio_core::BufferHandle {
+                buffer: lights.clone(),
+                epoch: 0,
+                row_bytes: 128,
+                content_generation: scene.frame,
+            },
         ))));
         scene.frame += 1;
         graph.execute(&mut scene, &target, &target).unwrap();
@@ -1206,8 +1385,9 @@ fn moving_camera_fog_with_tsr_jitter_matches_static_reference() {
 
 fn moving_case(jitter: bool) {
     let end = glam::Vec3::new(0.0, 0.0, -14.0);
-    let moving: Vec<glam::Vec3> =
-        (0..60).map(|i| glam::Vec3::new(0.0, 0.0, -14.0 * i as f32 / 59.0)).collect();
+    let moving: Vec<glam::Vec3> = (0..60)
+        .map(|i| glam::Vec3::new(0.0, 0.0, -14.0 * i as f32 / 59.0))
+        .collect();
     let a = render_columns(&moving, jitter, 9.0);
     let b = render_columns(&[end; 8], false, 9.0);
     let mut worst = (0.0f32, 0usize, 0usize);
@@ -1227,7 +1407,10 @@ fn moving_case(jitter: bool) {
         eprintln!("column {c} relative error per slice: [{}]", line.join(", "));
     }
     eprintln!("worst moving-vs-static error {:?}", worst);
-    assert!(worst.0 < 0.1, "moving fog differs from the static reference: {worst:?}");
+    assert!(
+        worst.0 < 0.1,
+        "moving fog differs from the static reference: {worst:?}"
+    );
 }
 
 /// A bounded volume farther from the camera than the configured fog range must
@@ -1240,5 +1423,8 @@ fn bounded_volume_beyond_configured_range_is_not_clipped() {
     let last = 3 * 256 + 127;
     let (radiance, transmittance) = (columns[last * 4], columns[last * 4 + 3]);
     eprintln!("far volume: radiance {radiance}, transmittance {transmittance}");
-    assert!(radiance > 1e-3 && transmittance < 0.9, "distant volume was clipped by the fog far plane");
+    assert!(
+        radiance > 1e-3 && transmittance < 0.9,
+        "distant volume was clipped by the fog far plane"
+    );
 }

@@ -2,11 +2,17 @@
 //! materials, the character), the voxel planet pass wired to the world, and
 //! drawing a frame for the player's camera.
 
-use crate::player::avatar::Avatar;
 use crate::palette;
-use crate::v3_demo_common::{directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle, set_camera_postprocess, spawn_light, update_light, SceneRays};
+use crate::player::avatar::Avatar;
+use crate::v3_demo_common::{
+    directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle,
+    set_camera_postprocess, spawn_light, update_light, SceneRays,
+};
 use glam::{DMat4, DVec3, Vec3};
-use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig};
+use helio::{
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
+    RendererBuilder, RendererConfig,
+};
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_foliage_place::components::FoliageInteractorComponent;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
@@ -39,8 +45,11 @@ impl Gpu {
         let surface = instance.create_surface(window).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface), force_fallback_adapter: false, apply_limit_buckets: false,
-        })).expect("a GPU adapter");
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .expect("a GPU adapter");
         log::info!("adapter: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Voxel Craft"),
@@ -48,10 +57,22 @@ impl Gpu {
             required_limits: required_wgpu_limits(adapter.limits()),
             experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
-        })).expect("device");
+        }))
+        .expect("device");
         let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
-        Self { surface, surface_format, alpha_mode: caps.alpha_modes[0], device: Arc::new(device), queue: Arc::new(queue) }
+        let surface_format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+        Self {
+            surface,
+            surface_format,
+            alpha_mode: caps.alpha_modes[0],
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+        }
     }
 }
 
@@ -113,9 +134,20 @@ struct PassTimings {
 impl PassTimings {
     /// Adds the renderer's latest completed GPU frame, and logs the means every
     /// `window` frames.
-    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, voxel: &[helio_pass_voxel_planet::chunks::FrameTimings], stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>, size: [u32; 2]) {
+    fn add(
+        &mut self,
+        snapshot: &helio::RenderTimingSnapshot,
+        voxel: &[helio_pass_voxel_planet::chunks::FrameTimings],
+        stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>,
+        size: [u32; 2],
+    ) {
         if let Some(s) = stats {
-            for (sum, n) in self.residency.iter_mut().zip([s.generated_chunks, s.evicted_chunks, s.evicted_unseen, s.switches]) {
+            for (sum, n) in self.residency.iter_mut().zip([
+                s.generated_chunks,
+                s.evicted_chunks,
+                s.evicted_unseen,
+                s.switches,
+            ]) {
                 *sum += n;
             }
             self.last_stats = Some(s);
@@ -123,16 +155,35 @@ impl PassTimings {
         for t in voxel {
             self.voxel.0 += 1;
             let [a, b, c, d, e] = t.shadow_stages;
-            for (sum, ms) in self.voxel.1.iter_mut().zip([t.draw, t.seed, t.shadow, t.denoise, t.generate, a, b, c, d, e, t.occlusion, t.fallbacks]) {
+            for (sum, ms) in self.voxel.1.iter_mut().zip([
+                t.draw,
+                t.seed,
+                t.shadow,
+                t.denoise,
+                t.generate,
+                a,
+                b,
+                c,
+                d,
+                e,
+                t.occlusion,
+                t.fallbacks,
+            ]) {
                 *sum += ms;
             }
-            for (sum, ms) in self.generation.iter_mut().zip(t.stages.iter().chain(&t.tile_stages)) {
+            for (sum, ms) in self
+                .generation
+                .iter_mut()
+                .zip(t.stages.iter().chain(&t.tile_stages))
+            {
                 *sum += ms;
             }
             self.generated[0] += t.tiles;
             self.generated[1] += t.chunks;
         }
-        let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else { return };
+        let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else {
+            return;
+        };
         self.last = frame;
         self.frames += 1;
         self.total += f64::from(snapshot.total_gpu_ms.unwrap_or(0.0));
@@ -143,16 +194,33 @@ impl PassTimings {
             return;
         }
         let n = f64::from(self.frames);
-        let mut passes: Vec<_> = self.passes.iter().map(|(name, ms)| (*name, ms / n)).collect();
+        let mut passes: Vec<_> = self
+            .passes
+            .iter()
+            .map(|(name, ms)| (*name, ms / n))
+            .collect();
         passes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let list: Vec<String> = passes.iter().filter(|(_, ms)| *ms >= 0.02).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
-        log::info!("[timings] {}x{} over {} frames: gpu {:.3} ms; {}", size[0], size[1], self.frames, self.total / n, list.join(", "));
+        let list: Vec<String> = passes
+            .iter()
+            .filter(|(_, ms)| *ms >= 0.02)
+            .map(|(name, ms)| format!("{name} {ms:.3}"))
+            .collect();
+        log::info!(
+            "[timings] {}x{} over {} frames: gpu {:.3} ms; {}",
+            size[0],
+            size[1],
+            self.frames,
+            self.total / n,
+            list.join(", ")
+        );
         if self.voxel.0 > 0 {
-            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion, fallbacks] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
+            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion, fallbacks] =
+                self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
             log::info!("[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3} (fallbacks {fallbacks:.3}), local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}, sun occlusion {occlusion:.3}", self.voxel.0);
         }
         if self.voxel.0 > 0 {
-            let [tiles, columns, builds, nodes, tile_columns, halos, features] = self.generation.map(|ms| ms / f64::from(self.voxel.0));
+            let [tiles, columns, builds, nodes, tile_columns, halos, features] =
+                self.generation.map(|ms| ms / f64::from(self.voxel.0));
             let per = |n: usize| n as f64 / f64::from(self.voxel.0);
             log::info!("[timings] generation: tiles {tiles:.3} (nodes {nodes:.3}, columns {tile_columns:.3}, halos {halos:.3}, features {features:.3}), chunk columns {columns:.3}, chunk builds {builds:.3}; a frame {:.1} tiles, {:.1} chunks", per(self.generated[0]), per(self.generated[1]));
         }
@@ -172,7 +240,12 @@ impl PassTimings {
 
 /// Residency settings for chunk trees at a window of height `h`.
 fn chunk_config(h: u32) -> ResidencyConfig {
-    let number = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let number = |name: &str, default: f64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
     let mut config = ResidencyConfig::default();
     config.plan.pixel_angle = 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h);
     // Cells a pixel wide at most: one-block detail wherever it shows.
@@ -223,11 +296,18 @@ impl Gfx {
     pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
         // OpenXR must choose/create the Vulkan device before a renderer exists.
         #[cfg(not(target_arch = "wasm32"))]
-        let (gpu, xr) = crate::xr::try_init(window.clone()).map(|(gpu, xr)| (gpu, Some(xr)))
+        let (gpu, xr) = crate::xr::try_init(window.clone())
+            .map(|(gpu, xr)| (gpu, Some(xr)))
             .unwrap_or_else(|| (Gpu::desktop(window.clone()), None));
         #[cfg(target_arch = "wasm32")]
         let gpu = Gpu::desktop(window.clone());
-        let Gpu { surface, surface_format, alpha_mode, device, queue } = gpu;
+        let Gpu {
+            surface,
+            surface_format,
+            alpha_mode,
+            device,
+            queue,
+        } = gpu;
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("[GPU] {e:?}")));
         // The surface is configured at the first frame (`configure`): just
         // after the window opens its reported size can still be the one
@@ -235,7 +315,10 @@ impl Gfx {
         let size = window.inner_size();
         let size = [size.width.max(1), size.height.max(1)];
         #[cfg(not(target_arch = "wasm32"))]
-        let (render_size, render_format, vr) = xr.as_ref().map_or((size, surface_format, false), |xr| (xr.size(), xr.format(), true));
+        let (render_size, render_format, vr) =
+            xr.as_ref().map_or((size, surface_format, false), |xr| {
+                (xr.size(), xr.format(), true)
+            });
         #[cfg(target_arch = "wasm32")]
         let (render_size, render_format, vr) = (size, surface_format, false);
 
@@ -245,7 +328,9 @@ impl Gfx {
         let palette = palette::load(&mut scene.world);
         // Grass and flowers on the world's grass: the engine's voxel meadow, with stands
         // of tall grass in places and a fresh breeze through it.
-        let meadow = helio_pass_voxel_planet::meadow::meadow().with_tall_stands().with_wind([1.0, 0.35], 4.5, 0.8);
+        let meadow = helio_pass_voxel_planet::meadow::meadow()
+            .with_tall_stands()
+            .with_wind([1.0, 0.35], 4.5, 0.8);
         for row in meadow.types {
             let entity = scene.world.spawn();
             scene.world.insert(entity, row);
@@ -254,8 +339,14 @@ impl Gfx {
         scene.world.insert(wind, meadow.wind);
         // The player's feet push it aside, and leave a track that rises behind them.
         let feet = scene.world.spawn();
-        scene.world.insert(feet, FoliageInteractorComponent::new(DVec3::ZERO, 0.7, 1.0, Vec3::ZERO, 1.2));
-        let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
+        scene.world.insert(
+            feet,
+            FoliageInteractorComponent::new(DVec3::ZERO, 0.7, 1.0, Vec3::ZERO, 1.2),
+        );
+        let sun_light = spawn_light(
+            &mut scene.world,
+            sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]),
+        );
         let air = scene.world.spawn();
         // Fair-weather cumulus, sized for the small planet: a layer from 0.9
         // to 2.2 km over the ground, drifting with a light breeze
@@ -270,8 +361,13 @@ impl Gfx {
             wind: [6.0, 0.0, 2.5],
             ..helio_pass_sky::CloudLayer::cumulus()
         };
-        let sky = helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius());
-        let sky = if std::env::var_os("VOXEL_CRAFT_NO_CLOUDS").is_some() { sky } else { sky.with_clouds(clouds) };
+        let sky = helio_pass_sky::AtmosphereComponent::earth()
+            .around_planet([0.0; 3], planet.grid().radius());
+        let sky = if std::env::var_os("VOXEL_CRAFT_NO_CLOUDS").is_some() {
+            sky
+        } else {
+            sky.with_clouds(clouds)
+        };
         scene.world.insert(air, sky);
         // A light ground haze, thinning with altitude over the planet, the
         // sun scatters forward through: shafts past trees and ridges (the
@@ -279,8 +375,14 @@ impl Gfx {
         let haze = scene.world.spawn();
         scene.world.insert(
             haze,
-            helio_pass_volumetric_fog::GlobalFogComponent { mode: 1, extinction: 0.001, height_falloff: 0.01, anisotropy: 0.6, ..Default::default() }
-                .around_planet([0.0; 3], planet.grid().radius()),
+            helio_pass_volumetric_fog::GlobalFogComponent {
+                mode: 1,
+                extinction: 0.001,
+                height_falloff: 0.01,
+                anisotropy: 0.6,
+                ..Default::default()
+            }
+            .around_planet([0.0; 3], planet.grid().radius()),
         );
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         // AgX with its punchy look: sunlit leaves and grass roll toward
@@ -321,39 +423,77 @@ impl Gfx {
         let handle = scene_db_handle(&scene);
         let mut renderer = RendererBuilder::new(renderer_config, handle)
             .with_external_device()
-            .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
-            .build(device.clone(), queue.clone(), render_size[0], render_size[1], render_format);
-        if vr { renderer.set_jitter_enabled(false); }
+            .with_pass_build_context(Box::new(move |ctx| {
+                build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
+            }))
+            .build(
+                device.clone(),
+                queue.clone(),
+                render_size[0],
+                render_size[1],
+                render_format,
+            );
+        if vr {
+            renderer.set_jitter_enabled(false);
+        }
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         // `VOXEL_CRAFT_DEBUG=<mode>`: one of the renderer's debug views.
-        if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {
+        if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             renderer.set_debug_mode(mode);
         }
-        let timings = std::env::var("VOXEL_CRAFT_TIMINGS").ok().and_then(|v| v.parse().ok()).map(|window: u32| PassTimings {
-            frames: 0,
-            window: window.max(1),
-            last: u64::MAX,
-            total: 0.0,
-            passes: Default::default(),
-            voxel: (0, [0.0; 12]),
-            residency: [0; 4],
-            last_stats: None,
-            generation: [0.0; 7],
-            generated: [0; 2],
-        });
+        let timings = std::env::var("VOXEL_CRAFT_TIMINGS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|window: u32| PassTimings {
+                frames: 0,
+                window: window.max(1),
+                last: u64::MAX,
+                total: 0.0,
+                passes: Default::default(),
+                voxel: (0, [0.0; 12]),
+                residency: [0; 4],
+                last_stats: None,
+                generation: [0.0; 7],
+                generated: [0; 2],
+            });
         let rays = SceneRays::new(&device, &queue);
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             xr,
-            failed: false, window, surface, surface_format, device, queue, renderer, scene, avatar, rays, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings
+            failed: false,
+            window,
+            surface,
+            surface_format,
+            device,
+            queue,
+            renderer,
+            scene,
+            avatar,
+            rays,
+            feet,
+            source,
+            sun_light,
+            origin: DVec3::ZERO,
+            size,
+            alpha_mode,
+            configured: None,
+            clock: 0.0,
+            timings,
         }
     }
 
     pub fn vr_active(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.xr.is_some() }
+        {
+            self.xr.is_some()
+        }
         #[cfg(target_arch = "wasm32")]
-        { false }
+        {
+            false
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -379,7 +519,11 @@ impl Gfx {
                 format: self.surface_format,
                 width: size[0],
                 height: size[1],
-                present_mode: if self.vr_active() { wgpu::PresentMode::AutoNoVsync } else { wgpu::PresentMode::Fifo },
+                present_mode: if self.vr_active() {
+                    wgpu::PresentMode::AutoNoVsync
+                } else {
+                    wgpu::PresentMode::Fifo
+                },
                 alpha_mode: self.alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
@@ -395,7 +539,9 @@ impl Gfx {
 
     /// Whether the planet pass is still generating terrain for this view.
     pub fn settled(&self) -> bool {
-        self.renderer.find_pass::<ChunkPass>().is_none_or(ChunkPass::settled)
+        self.renderer
+            .find_pass::<ChunkPass>()
+            .is_none_or(ChunkPass::settled)
     }
 
     /// Where the renderer's origin is for a camera at `eye`.
@@ -407,7 +553,14 @@ impl Gfx {
     pub fn draw(&mut self, view: &View) {
         let (planet, eye, forward) = (view.planet, view.eye, view.look);
         let sun = view.sun.normalize();
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: sun.as_vec3(), picks: None, kept: None, export: None });
+        *self.source.lock().unwrap() = Some(PlanetFrame {
+            eye,
+            planet: planet.clone(),
+            sun: sun.as_vec3(),
+            picks: None,
+            kept: None,
+            export: None,
+        });
         // The sun's light follows the sky.
         update_light(
             &mut self.scene.world,
@@ -431,16 +584,34 @@ impl Gfx {
         let origin = self.origin;
         // The character and what it holds, and the targeted block's outline.
         #[cfg(not(target_arch = "wasm32"))]
-        let hand = view.vr.map(|vr| vr.grips[1].map(|pose| (DMat4::from_translation(-origin) * pose).as_mat4()));
+        let hand = view
+            .vr
+            .map(|vr| vr.grips[1].map(|pose| (DMat4::from_translation(-origin) * pose).as_mat4()));
         #[cfg(target_arch = "wasm32")]
         let hand = None;
-        self.avatar.pose(&mut self.scene.world, &mut self.renderer, view.player, (eye, forward), origin, view.time, hand);
-        if let Some(mut feet) = self.scene.world.get_mut::<FoliageInteractorComponent>(self.feet) {
+        self.avatar.pose(
+            &mut self.scene.world,
+            &mut self.renderer,
+            view.player,
+            (eye, forward),
+            origin,
+            view.time,
+            hand,
+        );
+        if let Some(mut feet) = self
+            .scene
+            .world
+            .get_mut::<FoliageInteractorComponent>(self.feet)
+        {
             feet.set_motion(view.player.position, view.player.velocity.as_vec3());
         }
         self.renderer.debug_clear();
         for (a, b) in view.outline {
-            self.renderer.debug_line((*a - origin).as_vec3().to_array(), (*b - origin).as_vec3().to_array(), [0.05, 0.05, 0.05, 1.0]);
+            self.renderer.debug_line(
+                (*a - origin).as_vec3().to_array(),
+                (*b - origin).as_vec3().to_array(),
+                [0.05, 0.05, 0.05, 1.0],
+            );
         }
         // A crosshair fixed in front of the eye.
         if !view.player.third_person && !self.vr_active() {
@@ -450,7 +621,11 @@ impl Gfx {
             let centre = eye + look * 0.6;
             let reach = 0.0045;
             for (a, b) in [(-right, right), (-above, above)] {
-                self.renderer.debug_line(((centre + a * reach) - origin).as_vec3().to_array(), ((centre + b * reach) - origin).as_vec3().to_array(), [1.0, 1.0, 1.0, 0.9]);
+                self.renderer.debug_line(
+                    ((centre + a * reach) - origin).as_vec3().to_array(),
+                    ((centre + b * reach) - origin).as_vec3().to_array(),
+                    [1.0, 1.0, 1.0, 0.9],
+                );
             }
         }
 
@@ -462,20 +637,38 @@ impl Gfx {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(vr) = view.vr {
             let (start, direction) = vr.aim;
-            let end = view.target.unwrap_or(start + direction * crate::config::REACH);
-            self.renderer.debug_line((start - origin).as_vec3().to_array(), (end - origin).as_vec3().to_array(), [0.3, 0.85, 1.0, 0.8]);
+            let end = view
+                .target
+                .unwrap_or(start + direction * crate::config::REACH);
+            self.renderer.debug_line(
+                (start - origin).as_vec3().to_array(),
+                (end - origin).as_vec3().to_array(),
+                [0.3, 0.85, 1.0, 0.8],
+            );
             for grip in vr.grips.iter().flatten() {
                 let a = grip.transform_point3(DVec3::new(0.0, 0.0, 0.04)) - origin;
                 let b = grip.transform_point3(DVec3::new(0.0, 0.0, -0.12)) - origin;
-                self.renderer.debug_line(a.as_vec3().to_array(), b.as_vec3().to_array(), [0.9, 0.9, 0.95, 1.0]);
+                self.renderer.debug_line(
+                    a.as_vec3().to_array(),
+                    b.as_vec3().to_array(),
+                    [0.9, 0.9, 0.95, 1.0],
+                );
             }
             let output = if now.width > 0 && now.height > 0 {
                 match self.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
-                    _ => { self.configured = None; None }
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                    _ => {
+                        self.configured = None;
+                        None
+                    }
                 }
-            } else { None };
-            let mirror = output.as_ref().map(|t| t.texture.create_view(&Default::default()));
+            } else {
+                None
+            };
+            let mirror = output
+                .as_ref()
+                .map(|t| t.texture.create_view(&Default::default()));
             flush_scene_db(&self.scene, &self.queue);
             if let Some(pass) = self.renderer.find_pass_mut::<ChunkPass>() {
                 pass.set_residency_eye(Some(view.eye));
@@ -483,52 +676,92 @@ impl Gfx {
             let mut xr = self.xr.take().expect("VR frame has a runtime");
             self.renderer.set_xr_mode(true);
             let xr_size = xr.size();
+            let mirror_stats = helio::XrMirrorStats {
+                fps: (view.dt > 0.0).then_some(1.0 / view.dt),
+                display_hz: xr.display_refresh_rate_hz(),
+                gpu_ms: self.renderer.gpu_frame_ms(),
+            };
             let device = self.device.clone();
             let queue = self.queue.clone();
-            let result = xr.draw(&device, &queue, vr.world_from_stage, origin, mirror.as_ref().map(|v| (v, self.size)), |eye_index, camera, target| {
-                let mut camera = camera.clone();
-                // Stable identity lets camera-dependent temporal effects keep
-                // independent left/right reprojection state across frames.
-                camera.view_id = eye_index as u32 + 1;
-                if let Some(frame) = self.source.lock().unwrap().as_mut() {
-                    frame.eye = origin + camera.position.as_dvec3();
-                }
-                // Advance animation once. Retain the previous draw's camera for
-                // lighting reprojection as the view alternates between eyes.
-                // The renderer requires a positive integration interval. Split it
-                // across the two draws; only the world clock may hold at zero.
-                self.renderer.set_frame_delta_override(Some((view.dt * 0.5).max(1.0e-6)));
-                self.renderer.set_frame_clock_delta(Some(if eye_index == 0 { weather_delta } else { 0.0 }));
-                self.rays.publish(&self.scene.world, &mut self.renderer);
-                self.renderer.render(&camera, target)?;
-                if let Some(timings) = &mut self.timings {
-                    let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
-                    let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());
-                    timings.add(self.renderer.timing_snapshot(), &voxel, stats, xr_size);
-                }
-                Ok(())
-            });
+            let result = xr.draw(
+                &device,
+                &queue,
+                vr.world_from_stage,
+                origin,
+                mirror.as_ref().map(|v| (v, self.size)),
+                mirror_stats,
+                |eye_index, camera, target| {
+                    let mut camera = camera.clone();
+                    // Stable identity lets camera-dependent temporal effects keep
+                    // independent left/right reprojection state across frames.
+                    camera.view_id = eye_index as u32 + 1;
+                    if let Some(frame) = self.source.lock().unwrap().as_mut() {
+                        frame.eye = origin + camera.position.as_dvec3();
+                    }
+                    // Advance animation once. Retain the previous draw's camera for
+                    // lighting reprojection as the view alternates between eyes.
+                    // The renderer requires a positive integration interval. Split it
+                    // across the two draws; only the world clock may hold at zero.
+                    self.renderer
+                        .set_frame_delta_override(Some((view.dt * 0.5).max(1.0e-6)));
+                    self.renderer.set_frame_clock_delta(Some(if eye_index == 0 {
+                        weather_delta
+                    } else {
+                        0.0
+                    }));
+                    self.rays.publish(&self.scene.world, &mut self.renderer);
+                    self.renderer.render(&camera, target)?;
+                    if let Some(timings) = &mut self.timings {
+                        let voxel = self
+                            .renderer
+                            .find_pass_mut::<ChunkPass>()
+                            .map(ChunkPass::take_timings)
+                            .unwrap_or_default();
+                        let stats = self
+                            .renderer
+                            .find_pass::<ChunkPass>()
+                            .map(|pass| *pass.stats());
+                        timings.add(self.renderer.timing_snapshot(), &voxel, stats, xr_size);
+                    }
+                    Ok(())
+                },
+            );
             self.xr = Some(xr);
             self.renderer.set_xr_mode(false);
             if let Err(error) = result {
                 log::error!("[XR] render: {error}");
                 self.failed = true;
             }
-            if let Some(output) = output { self.queue.present(output); }
+            if let Some(output) = output {
+                self.queue.present(output);
+            }
             return;
         }
         let up = eye.normalize().as_vec3();
         let forward = forward.normalize().as_vec3();
-        let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+        let up = if forward.dot(up).abs() > 0.999 {
+            up.any_orthonormal_vector()
+        } else {
+            up
+        };
         let near = (planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let mut camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, 70f32.to_radians(), aspect, near, 40_000_000.0);
+        let mut camera = Camera::perspective_look_at(
+            Vec3::ZERO,
+            forward,
+            up,
+            70f32.to_radians(),
+            aspect,
+            near,
+            40_000_000.0,
+        );
         let local = eye - origin;
         camera.position = local.as_vec3();
         camera.view = (camera.view.as_dmat4() * DMat4::from_translation(-local)).as_mat4();
 
         let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             _ => return,
         };
         let target = output.texture.create_view(&Default::default());
@@ -538,8 +771,15 @@ impl Gfx {
             log::error!("render: {error:?}");
         }
         if let Some(timings) = &mut self.timings {
-            let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
-            let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());
+            let voxel = self
+                .renderer
+                .find_pass_mut::<ChunkPass>()
+                .map(ChunkPass::take_timings)
+                .unwrap_or_default();
+            let stats = self
+                .renderer
+                .find_pass::<ChunkPass>()
+                .map(|pass| *pass.stats());
             timings.add(self.renderer.timing_snapshot(), &voxel, stats, self.size);
         }
         if let Some(path) = view.screenshot {
@@ -559,22 +799,49 @@ impl Gfx {
     fn read_pixels(&self, texture: &wgpu::Texture) -> Vec<u8> {
         let [w, h] = self.size;
         let row = (w * 4).div_ceil(256) * 256;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(row) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
-        let bgra = matches!(self.surface_format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let bgra = matches!(
+            self.surface_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
         for line in data.chunks(row as usize).take(h as usize) {
             for p in line[..(w * 4) as usize].chunks(4) {
-                pixels.extend_from_slice(&if bgra { [p[2], p[1], p[0], 255] } else { [p[0], p[1], p[2], 255] });
+                pixels.extend_from_slice(&if bgra {
+                    [p[2], p[1], p[0], 255]
+                } else {
+                    [p[0], p[1], p[2], 255]
+                });
             }
         }
         drop(data);

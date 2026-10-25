@@ -60,43 +60,30 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         let world = &mut scene_db.world;
         // Ground plane
-        let ground_mat = crate::common::spawn_material(world, make_material(
-            [0.30, 0.27, 0.22, 1.0],
-            0.85,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let ground =
-            crate::common::spawn_mesh(world, crate::common::box_mesh(
-                    [0.0, -1.0, 0.0],
-                    [200.0, 0.4, 200.0],
-                ));
+        let ground_mat = crate::common::spawn_material(
+            world,
+            make_material([0.30, 0.27, 0.22, 1.0], 0.85, 0.0, [0.0; 3], 0.0),
+        );
+        let ground = crate::common::spawn_mesh(
+            world,
+            crate::common::box_mesh([0.0, -1.0, 0.0], [200.0, 0.4, 200.0]),
+        );
         let _ = insert_object(world, ground, ground_mat, Mat4::IDENTITY, 10.0);
 
         // Rock materials
         let mats = [
-            crate::common::spawn_material(world, make_material(
-                [0.20, 0.18, 0.14, 1.0],
-                0.90,
-                0.0,
-                [0.0; 3],
-                0.0,
-            )),
-            crate::common::spawn_material(world, make_material(
-                [0.28, 0.24, 0.20, 1.0],
-                0.80,
-                0.05,
-                [0.0; 3],
-                0.0,
-            )),
-            crate::common::spawn_material(world, make_material(
-                [0.15, 0.14, 0.12, 1.0],
-                0.95,
-                0.0,
-                [0.0; 3],
-                0.0,
-            )),
+            crate::common::spawn_material(
+                world,
+                make_material([0.20, 0.18, 0.14, 1.0], 0.90, 0.0, [0.0; 3], 0.0),
+            ),
+            crate::common::spawn_material(
+                world,
+                make_material([0.28, 0.24, 0.20, 1.0], 0.80, 0.05, [0.0; 3], 0.0),
+            ),
+            crate::common::spawn_material(
+                world,
+                make_material([0.15, 0.14, 0.12, 1.0], 0.95, 0.0, [0.0; 3], 0.0),
+            ),
         ];
         let rock_mesh = crate::common::spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 0.5));
 
@@ -136,7 +123,8 @@ impl HelioWasmApp for Demo {
             Ok(scene) => {
                 let mat_ids = upload_scene_materials(world, &scene);
                 for mesh in &scene.meshes {
-                    let mesh_id = crate::common::spawn_mesh(world,
+                    let mesh_id = crate::common::spawn_mesh(
+                        world,
                         helio::MeshUpload {
                             vertices: mesh.vertices.clone(),
                             indices: mesh.indices.clone(),
@@ -147,13 +135,10 @@ impl HelioWasmApp for Demo {
                         .and_then(|i| mat_ids.get(i).copied())
                         .or_else(|| mat_ids.first().copied())
                         .unwrap_or_else(|| {
-                            crate::common::spawn_material(world, make_material(
-                                [0.40, 0.40, 0.48, 1.0],
-                                0.3,
-                                0.7,
-                                [0.0; 3],
-                                0.0,
-                            ))
+                            crate::common::spawn_material(
+                                world,
+                                make_material([0.40, 0.40, 0.48, 1.0], 0.3, 0.7, [0.0; 3], 0.0),
+                            )
                         });
                     let t = Mat4::from_scale_rotation_translation(
                         Vec3::ONE,
@@ -167,28 +152,24 @@ impl HelioWasmApp for Demo {
         }
 
         // Lighting
-        let sun_light_id = crate::common::spawn_light(world, directional_light(
-                [-0.5, -0.8, 0.3],
-                [1.0, 0.97, 0.88],
-                2.2,
-            ));
-        crate::common::spawn_light(world, directional_light(
-                [0.3, 0.6, -0.8],
-                [0.3, 0.4, 0.6],
-                0.05,
-            ));
+        let sun_light_id = crate::common::spawn_light(
+            world,
+            directional_light([-0.5, -0.8, 0.3], [1.0, 0.97, 0.88], 2.2),
+        );
+        crate::common::spawn_light(
+            world,
+            directional_light([0.3, 0.6, -0.8], [0.3, 0.4, 0.6], 0.05),
+        );
         // Scatter a few warm rock pool lights
         let mut light_seed: u64 = 0xFEEDFACE;
         for _ in 0..6 {
             let a = lcg(&mut light_seed) * std::f32::consts::TAU;
             let d = 5.0 + lcg(&mut light_seed) * 25.0;
             let p = Vec3::new(a.cos() * d, 1.5, a.sin() * d);
-            crate::common::spawn_light(world, point_light(
-                    p.to_array(),
-                    [1.0, 0.85, 0.60],
-                    4.0,
-                    18.0,
-                ));
+            crate::common::spawn_light(
+                world,
+                point_light(p.to_array(), [1.0, 0.85, 0.60], 4.0, 18.0),
+            );
         }
         renderer.set_ambient([0.4, 0.42, 0.48], 0.12);
 

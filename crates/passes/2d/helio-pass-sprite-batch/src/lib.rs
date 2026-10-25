@@ -182,13 +182,20 @@ pub struct SpriteComponent {
 impl From<SpriteInstance> for SpriteComponent {
     fn from(value: SpriteInstance) -> Self {
         Self {
-            position_x: value.position[0], position_y: value.position[1],
-            size_x: value.size[0], size_y: value.size[1],
-            rotation: value.rotation, depth: value.depth,
-            _pad_uv_x: value._pad_uv[0], _pad_uv_y: value._pad_uv[1],
-            uv_rect: value.uv_rect, color: value.color,
+            position_x: value.position[0],
+            position_y: value.position[1],
+            size_x: value.size[0],
+            size_y: value.size[1],
+            rotation: value.rotation,
+            depth: value.depth,
+            _pad_uv_x: value._pad_uv[0],
+            _pad_uv_y: value._pad_uv[1],
+            uv_rect: value.uv_rect,
+            color: value.color,
             atlas_layer: value.atlas_layer,
-            _pad_tail_0: value._pad_tail[0], _pad_tail_1: value._pad_tail[1], _pad_tail_2: value._pad_tail[2],
+            _pad_tail_0: value._pad_tail[0],
+            _pad_tail_1: value._pad_tail[1],
+            _pad_tail_2: value._pad_tail[2],
         }
     }
 }
@@ -196,10 +203,14 @@ impl From<SpriteInstance> for SpriteComponent {
 impl From<SpriteComponent> for SpriteInstance {
     fn from(value: SpriteComponent) -> Self {
         Self {
-            position: [value.position_x, value.position_y], size: [value.size_x, value.size_y],
-            rotation: value.rotation, depth: value.depth,
-            _pad_uv: [value._pad_uv_x, value._pad_uv_y], uv_rect: value.uv_rect,
-            color: value.color, atlas_layer: value.atlas_layer,
+            position: [value.position_x, value.position_y],
+            size: [value.size_x, value.size_y],
+            rotation: value.rotation,
+            depth: value.depth,
+            _pad_uv: [value._pad_uv_x, value._pad_uv_y],
+            uv_rect: value.uv_rect,
+            color: value.color,
+            atlas_layer: value.atlas_layer,
             _pad_tail: [value._pad_tail_0, value._pad_tail_1, value._pad_tail_2],
         }
     }
@@ -330,7 +341,11 @@ impl SpriteBatchPass {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = helio_core::shader::module(device, "Sprite Batch Shader", helio_core::include_wgsl!("../shaders/sprite.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Sprite Batch Shader",
+            helio_core::include_wgsl!("../shaders/sprite.wgsl"),
+        );
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Batch BGL"),
@@ -407,38 +422,41 @@ impl SpriteBatchPass {
             ],
         };
 
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Sprite Batch Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_layout)],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Sprite Batch Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(vertex_layout)],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        // Straight-alpha atlas texels over an opaque or transparent
+                        // target; premultiplied atlases should premultiply at import
+                        // time and use `BlendState::REPLACE` via a future variant.
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    // Straight-alpha atlas texels over an opaque or transparent
-                    // target; premultiplied atlases should premultiply at import
-                    // time and use `BlendState::REPLACE` via a future variant.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sprite Camera Uniform"),
@@ -570,35 +588,38 @@ impl SpriteBatchPass {
             bind_group_layouts: &[Some(&pass.bgl), Some(&textures_bgl)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Sprite Scene Pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(quad_vertex_layout())],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Sprite Scene Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(quad_vertex_layout())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         pass.scene_overlay = Some(SceneOverlay {
             pipeline,
             textures_bgl,
@@ -802,36 +823,38 @@ impl SpriteBatchPass {
             .gpu_culling
             .as_ref()
             .expect("set_atlas_array: call use_gpu_culling() first");
-        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Sprite Batch BG"),
-            layout: &self.bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self
+        self.bind_group = Some(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Sprite Batch BG"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self
                             .scene_instances_buf
                             .as_ref()
                             .unwrap_or(&self.instances_buf)
                             .as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: gpu.draw_order_buf.as_entire_binding(),
-                },
-            ],
-        }));
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: gpu.draw_order_buf.as_entire_binding(),
+                    },
+                ],
+            }),
+        );
     }
 
     /// Overrides the orthographic view: `center` and `half_extent` in world
@@ -1006,15 +1029,19 @@ impl RenderPass for SpriteBatchPass {
         // every other executor-managed pass: the descriptor only needs to live
         // for this frame's `execute()` call, and the executor drops it before
         // the next `render_pass_descriptor()`.
-        if self.scene_overlay.as_ref().is_some_and(|overlay| !overlay.live) {
+        if self
+            .scene_overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.live)
+        {
             return None;
         }
         let load = match self.clear_color {
             Some(color) => wgpu::LoadOp::Clear(color),
             None => wgpu::LoadOp::Load,
         };
-        let attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
@@ -1131,36 +1158,38 @@ impl RenderPass for SpriteBatchPass {
         };
 
         if self.bind_group.is_none() {
-            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Sprite Batch BG"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.camera_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.atlas_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self
-                            .scene_instances_buf
-                            .as_ref()
-                            .unwrap_or(&self.instances_buf)
-                            .as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: gpu.draw_order_buf.as_entire_binding(),
-                    },
-                ],
-            }));
+            self.bind_group = Some(
+                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Sprite Batch BG"),
+                    layout: &self.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.camera_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self
+                                .scene_instances_buf
+                                .as_ref()
+                                .unwrap_or(&self.instances_buf)
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: gpu.draw_order_buf.as_entire_binding(),
+                        },
+                    ],
+                }),
+            );
         }
 
         let Some(mut rp) = ctx.render_cmds() else {
@@ -1168,10 +1197,13 @@ impl RenderPass for SpriteBatchPass {
         };
         if let Some(overlay) = self.scene_overlay.as_mut() {
             // The scene's texture table, published per frame by the renderer.
-            let Some(textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
-                "SpriteBatch",
-            ) else {
+            let Some(textures) = ctx
+                .registry
+                .read::<helio_mats::MaterialTextureBindings<'_>>(
+                    helio_core::resource_keys::material_textures(),
+                    "SpriteBatch",
+                )
+            else {
                 return Ok(());
             };
             if overlay.textures_version != Some(textures.version) || overlay.textures_bg.is_none() {
@@ -1182,11 +1214,12 @@ impl RenderPass for SpriteBatchPass {
                     textures.texture_views,
                     textures.samplers,
                 );
-                overlay.textures_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Sprite Scene Textures BG"),
-                    layout: &overlay.textures_bgl,
-                    entries: &entries,
-                }));
+                overlay.textures_bg =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Sprite Scene Textures BG"),
+                        layout: &overlay.textures_bgl,
+                        entries: &entries,
+                    }));
                 overlay.textures_version = Some(textures.version);
             }
             rp.set_pipeline(&overlay.pipeline);
@@ -1202,5 +1235,3 @@ impl RenderPass for SpriteBatchPass {
         Ok(())
     }
 }
-
-

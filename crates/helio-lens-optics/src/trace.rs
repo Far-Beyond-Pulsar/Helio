@@ -93,7 +93,10 @@ impl Field {
     pub fn meridional(tan: f64, distance: Option<f64>) -> Field {
         match distance {
             None => Field::Infinity { tan: [tan, 0.0] },
-            Some(d) => Field::Point { height: [-d * tan, 0.0], distance: d },
+            Some(d) => Field::Point {
+                height: [-d * tan, 0.0],
+                distance: d,
+            },
         }
     }
 }
@@ -126,9 +129,17 @@ impl<'a> Tracer<'a> {
         };
         let mut n_after = Vec::with_capacity(rx.surfaces.len());
         for (i, s) in rx.surfaces.iter().enumerate() {
-            n_after.push(s.glass.index_at(wavelength_nm).ok_or(OpticsError::UnknownGlass { surface: i })?);
+            n_after.push(
+                s.glass
+                    .index_at(wavelength_nm)
+                    .ok_or(OpticsError::UnknownGlass { surface: i })?,
+            );
         }
-        let max_ap = rx.surfaces.iter().map(|s| s.semi_aperture).fold(0.0, f64::max);
+        let max_ap = rx
+            .surfaces
+            .iter()
+            .map(|s| s.semi_aperture)
+            .fold(0.0, f64::max);
         Ok(Tracer {
             rx,
             wavelength_nm,
@@ -206,10 +217,18 @@ impl<'a> Tracer<'a> {
     fn hit(&self, i: usize, ray: &Ray) -> Result<(f64, V3), RayFail> {
         let s = &self.rx.surfaces[i];
         let o = [ray.origin[0], ray.origin[1], ray.origin[2] - self.z[i]];
-        let t = s
-            .intersect(o, ray.dir)
-            .ok_or(RayFail { surface: i, kind: RayFailKind::Miss })?;
-        Ok((t, [o[0] + t * ray.dir[0], o[1] + t * ray.dir[1], o[2] + t * ray.dir[2]]))
+        let t = s.intersect(o, ray.dir).ok_or(RayFail {
+            surface: i,
+            kind: RayFailKind::Miss,
+        })?;
+        Ok((
+            t,
+            [
+                o[0] + t * ray.dir[0],
+                o[1] + t * ray.dir[1],
+                o[2] + t * ray.dir[2],
+            ],
+        ))
     }
 
     /// Intersect, optionally clip and refract at surface `i`.
@@ -219,13 +238,19 @@ impl<'a> Tracer<'a> {
         if clip {
             let a = self.aperture(i);
             if p[0] * p[0] + p[1] * p[1] > a * a * (1.0 + 1e-12) {
-                return Err(RayFail { surface: i, kind: RayFailKind::Aperture });
+                return Err(RayFail {
+                    surface: i,
+                    kind: RayFailKind::Aperture,
+                });
             }
         }
         ray.origin = [p[0], p[1], p[2] + self.z[i]];
         if let Some(f) = s.thin_focal_length {
             if ray.dir[2] <= 0.0 {
-                return Err(RayFail { surface: i, kind: RayFailKind::Backward });
+                return Err(RayFail {
+                    surface: i,
+                    kind: RayFailKind::Backward,
+                });
             }
             let tx = ray.dir[0] / ray.dir[2] - p[0] / f;
             let ty = ray.dir[1] / ray.dir[2] - p[1] / f;
@@ -235,24 +260,37 @@ impl<'a> Tracer<'a> {
             let n2 = self.n_after[i];
             if n1 != n2 {
                 let n = s.normal(p[0], p[1]);
-                ray.dir = refract(ray.dir, n, n1 / n2)
-                    .ok_or(RayFail { surface: i, kind: RayFailKind::TotalInternalReflection })?;
+                ray.dir = refract(ray.dir, n, n1 / n2).ok_or(RayFail {
+                    surface: i,
+                    kind: RayFailKind::TotalInternalReflection,
+                })?;
             }
             if ray.dir[2] <= 0.0 {
-                return Err(RayFail { surface: i, kind: RayFailKind::Backward });
+                return Err(RayFail {
+                    surface: i,
+                    kind: RayFailKind::Backward,
+                });
             }
         }
         Ok(())
     }
 
-    fn run<F: FnMut(usize, &Ray)>(&self, mut ray: Ray, clip: bool, mut visit: F) -> Result<Ray, RayFail> {
+    fn run<F: FnMut(usize, &Ray)>(
+        &self,
+        mut ray: Ray,
+        clip: bool,
+        mut visit: F,
+    ) -> Result<Ray, RayFail> {
         for i in 0..self.rx.surfaces.len() {
             self.step(i, &mut ray, clip)?;
             visit(i, &ray);
         }
         let t = (self.sensor_z - ray.origin[2]) / ray.dir[2];
         if t.is_nan() || t < 0.0 {
-            return Err(RayFail { surface: self.rx.surfaces.len(), kind: RayFailKind::Backward });
+            return Err(RayFail {
+                surface: self.rx.surfaces.len(),
+                kind: RayFailKind::Backward,
+            });
         }
         ray.origin = [
             ray.origin[0] + t * ray.dir[0],
@@ -295,11 +333,17 @@ impl<'a> Tracer<'a> {
             Field::Infinity { tan } => {
                 let dir = normalize([tan[0], tan[1], 1.0]);
                 let k = self.launch_margin / dir[2];
-                Ray { origin: [p[0] - dir[0] * k, p[1] - dir[1] * k, -dir[2] * k], dir }
+                Ray {
+                    origin: [p[0] - dir[0] * k, p[1] - dir[1] * k, -dir[2] * k],
+                    dir,
+                }
             }
             Field::Point { height, distance } => {
                 let o = [height[0], height[1], -distance];
-                Ray { origin: o, dir: normalize([p[0] - o[0], p[1] - o[1], -o[2]]) }
+                Ray {
+                    origin: o,
+                    dir: normalize([p[0] - o[0], p[1] - o[1], -o[2]]),
+                }
             }
         }
     }
@@ -317,17 +361,29 @@ impl<'a> Tracer<'a> {
             Field::Infinity { tan } => [e[0] - tan[0] * e[2], e[1] - tan[1] * e[2]],
             Field::Point { height, distance } => {
                 let k = distance / (distance + e[2]);
-                [height[0] + (e[0] - height[0]) * k, height[1] + (e[1] - height[1]) * k]
+                [
+                    height[0] + (e[0] - height[0]) * k,
+                    height[1] + (e[1] - height[1]) * k,
+                ]
             }
         };
-        let fail = RayFail { surface: self.stop, kind: RayFailKind::AimFailed };
+        let fail = RayFail {
+            surface: self.stop,
+            kind: RayFailKind::AimFailed,
+        };
         let tol = 1e-9 * rs.max(1e-3);
         let eval = |p: [f64; 2]| -> Result<[f64; 2], RayFail> {
             let h = self.stop_hit(self.make_ray(&field, p))?;
             Ok([h[0] - target[0], h[1] - target[1]])
         };
         let mut r = eval(p)?;
-        let step_h = 1e-6 * self.rx.surfaces.iter().map(|s| s.semi_aperture).fold(1.0, f64::max);
+        let step_h = 1e-6
+            * self
+                .rx
+                .surfaces
+                .iter()
+                .map(|s| s.semi_aperture)
+                .fold(1.0, f64::max);
         for _ in 0..40 {
             if r[0].abs().max(r[1].abs()) < tol {
                 return Ok(self.make_ray(&field, p));
@@ -382,13 +438,19 @@ impl<'a> Tracer<'a> {
     /// Radial image height (mm) of the chief ray of a meridional field, i.e.
     /// the sensor x coordinate.
     pub fn chief_height(&self, tan: f64, object_distance: Option<f64>) -> Result<f64, RayFail> {
-        Ok(self.chief_ray(Field::meridional(tan, object_distance))?.origin[0])
+        Ok(self
+            .chief_ray(Field::meridional(tan, object_distance))?
+            .origin[0])
     }
 
     /// Solve for the meridional field tangent whose chief ray lands at
     /// `height_mm` on the sensor. Fails (aim, TIR, miss) when the lens does not
     /// cover that height.
-    pub fn tan_for_height(&self, height_mm: f64, object_distance: Option<f64>) -> Result<f64, RayFail> {
+    pub fn tan_for_height(
+        &self,
+        height_mm: f64,
+        object_distance: Option<f64>,
+    ) -> Result<f64, RayFail> {
         if height_mm <= 0.0 {
             return Ok(0.0);
         }
@@ -400,7 +462,10 @@ impl<'a> Tracer<'a> {
                     lo = hi;
                     hi *= 1.5;
                     if hi > 30.0 {
-                        return Err(RayFail { surface: self.rx.surfaces.len(), kind: RayFailKind::AimFailed });
+                        return Err(RayFail {
+                            surface: self.rx.surfaces.len(),
+                            kind: RayFailKind::AimFailed,
+                        });
                     }
                 }
                 Ok(_) => break,
@@ -419,7 +484,10 @@ impl<'a> Tracer<'a> {
         // A failed bracket end would converge on the coverage limit; verify.
         match self.chief_height(t, object_distance) {
             Ok(h) if (h - height_mm).abs() < 1e-6 * height_mm.max(1e-3) => Ok(t),
-            Ok(_) => Err(RayFail { surface: self.rx.surfaces.len(), kind: RayFailKind::AimFailed }),
+            Ok(_) => Err(RayFail {
+                surface: self.rx.surfaces.len(),
+                kind: RayFailKind::AimFailed,
+            }),
             Err(e) => Err(e),
         }
     }

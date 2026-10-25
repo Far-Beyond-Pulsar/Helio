@@ -99,7 +99,8 @@ pub fn write_glb<W: Write>(
     w.write_all(b"glTF").map_err(io)?;
     w.write_all(&2u32.to_le_bytes()).map_err(io)?;
     w.write_all(&(total as u32).to_le_bytes()).map_err(io)?;
-    w.write_all(&(json_chunk as u32).to_le_bytes()).map_err(io)?;
+    w.write_all(&(json_chunk as u32).to_le_bytes())
+        .map_err(io)?;
     w.write_all(b"JSON").map_err(io)?;
     w.write_all(json.as_bytes()).map_err(io)?;
     w.write_all(&vec![b' '; json_pad]).map_err(io)?;
@@ -124,7 +125,10 @@ mod tests {
         let mut out = Vec::new();
         write_glb(&mut out, "tri", "tri_stone", &p, &n, &[0, 1, 2]).unwrap();
         assert_eq!(&out[..4], b"glTF");
-        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize, out.len());
+        assert_eq!(
+            u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize,
+            out.len()
+        );
         let jl = u32::from_le_bytes(out[12..16].try_into().unwrap()) as usize;
         assert_eq!(&out[16..20], b"JSON");
         let json: serde_json::Value = serde_json::from_slice(&out[20..20 + jl]).unwrap();

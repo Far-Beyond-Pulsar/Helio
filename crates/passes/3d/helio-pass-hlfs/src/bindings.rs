@@ -213,7 +213,11 @@ impl ExternalBindings {
         tlas: &wgpu::Tlas,
         transmission: &wgpu::Buffer,
     ) {
-        if !self.ray_key.as_ref().is_some_and(|(old_tlas, old_buffer)| old_tlas == tlas && old_buffer == transmission) {
+        if !self
+            .ray_key
+            .as_ref()
+            .is_some_and(|(old_tlas, old_buffer)| old_tlas == tlas && old_buffer == transmission)
+        {
             self.ray = Some(bind_group(
                 device,
                 "HLFS scene TLAS",

@@ -386,7 +386,13 @@ mod tests {
             "binary_little_endian"
         })
         .into_bytes();
-        let f = |v: f32| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let f = |v: f32| {
+            if big {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
         for p in POS {
             for c in p {
                 d.extend(f(c));
@@ -395,7 +401,11 @@ mod tests {
         }
         d.push(4);
         for i in [0i32, 1, 2, 3] {
-            d.extend(if big { i.to_be_bytes() } else { i.to_le_bytes() });
+            d.extend(if big {
+                i.to_be_bytes()
+            } else {
+                i.to_le_bytes()
+            });
         }
         d
     }

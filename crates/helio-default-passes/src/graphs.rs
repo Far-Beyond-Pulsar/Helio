@@ -111,7 +111,10 @@ fn connect(asset: &mut GraphAsset, from: (&str, &str), to: (&str, &str)) {
 /// It has no wires; nodes build in this order. Every pass is in it, so every pass
 /// gets pins.
 fn probe_asset(registry: &NodeRegistry) -> GraphAsset {
-    let mut asset = GraphAsset { name: "Pin probe".into(), ..Default::default() };
+    let mut asset = GraphAsset {
+        name: "Pin probe".into(),
+        ..Default::default()
+    };
     add_node(&mut asset, "start", core_nodes::ON_FRAME_START);
     for name in HOST_INPUTS {
         add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
@@ -139,7 +142,11 @@ fn probe_asset(registry: &NodeRegistry) -> GraphAsset {
 /// others make a headless pair (see `engine_backend`'s pipeline module).
 pub fn probe_pins(registry: &NodeRegistry, env: &mut BuildEnv<'_>) -> Result<Probe, String> {
     probe(&probe_asset(registry), registry, env).map_err(|diagnostics| {
-        diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+        diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
     })
 }
 
@@ -158,7 +165,10 @@ pub fn apply_probe(registry: &mut NodeRegistry, probe: &Probe) {
             )
             .with_pins(
                 Vec::new(),
-                vec![PinDesc::resource(PinType::BUFFER, format!("{SCENEDB_PREFIX}{key}"))],
+                vec![PinDesc::resource(
+                    PinType::BUFFER,
+                    format!("{SCENEDB_PREFIX}{key}"),
+                )],
             )
             .with_data_only(),
         );
@@ -198,7 +208,11 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
     for pair in DEFERRED.windows(2) {
         connect(&mut asset, (pair[0], "out"), (pair[1], "in"));
     }
-    connect(&mut asset, (DEFERRED[DEFERRED.len() - 1], "out"), ("output", "in"));
+    connect(
+        &mut asset,
+        (DEFERRED[DEFERRED.len() - 1], "out"),
+        ("output", "in"),
+    );
 
     if !wired {
         for name in HOST_INPUTS {
@@ -212,7 +226,9 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
     let pins: HashMap<&str, helio_graph_asset::NodePins> = DEFERRED
         .iter()
         .filter_map(|name| {
-            registry.get(&kind(name)).map(|descriptor| (*name, descriptor.pins(&Default::default())))
+            registry
+                .get(&kind(name))
+                .map(|descriptor| (*name, descriptor.pins(&Default::default())))
         })
         .collect();
 
@@ -230,8 +246,14 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
     // is a variable: the Gets read the latest Set before the pass using them, so no
     // wire runs between passes.
     for &name in DEFERRED {
-        let Some(node_pins) = pins.get(name) else { continue };
-        for input in node_pins.inputs.iter().filter(|p| p.ty.kind != PinKind::Flow) {
+        let Some(node_pins) = pins.get(name) else {
+            continue;
+        };
+        for input in node_pins
+            .inputs
+            .iter()
+            .filter(|p| p.ty.kind != PinKind::Flow)
+        {
             let Some(entry) = helio_graph_asset::buffers::entry(input.ty, &input.resource) else {
                 continue;
             };
@@ -239,7 +261,11 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
             add_buffer_node(&mut asset, &id, core_nodes::BUFFER_GET, &entry);
             connect(&mut asset, (&id, &input.resource), (name, &input.name));
         }
-        for output in node_pins.outputs.iter().filter(|p| p.ty.kind != PinKind::Flow) {
+        for output in node_pins
+            .outputs
+            .iter()
+            .filter(|p| p.ty.kind != PinKind::Flow)
+        {
             if !read_somewhere.contains(&output.resource) {
                 continue;
             }
@@ -274,7 +300,10 @@ mod tests {
     fn every_default_pass_is_registered() {
         let registry = base_registry();
         for name in DEFERRED {
-            assert!(registry.get(&kind(name)).is_some(), "no node for pass `{name}`");
+            assert!(
+                registry.get(&kind(name)).is_some(),
+                "no node for pass `{name}`"
+            );
         }
         for host in HOST_INPUTS {
             assert!(registry.get(&host_kind(host)).is_some());
@@ -291,13 +320,20 @@ mod tests {
         let validation = validate(&asset, &registry);
         assert!(!validation.has_errors(), "{:?}", validation.diagnostics);
         assert!(
-            !validation.diagnostics.iter().any(|d| d.message.contains("execution chain")),
+            !validation
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("execution chain")),
             "every pass is on the chain: {:?}",
             validation.diagnostics
         );
         let flat = validation.flat.expect("expanded");
         let plan = validation.plan.expect("valid");
-        let ids: Vec<_> = plan.order.iter().map(|i| flat.nodes[*i].id.as_str()).collect();
+        let ids: Vec<_> = plan
+            .order
+            .iter()
+            .map(|i| flat.nodes[*i].id.as_str())
+            .collect();
         let at = |id: &str| ids.iter().position(|k| *k == id).unwrap();
         assert!(at("start") < at("object_batch"));
         assert!(at("shadow_matrix") < at("shadow_dirty") && at("shadow_dirty") < at("shadow"));
@@ -309,7 +345,11 @@ mod tests {
         // Laid out: each lane is a section, and the main graph is the chain through them.
         assert!(asset.sections.len() >= 4, "{:?}", asset.sections.len());
         assert!(asset.nodes.iter().any(|n| asset.section_of(n).is_some()));
-        assert!(asset.nodes.len() < 12, "the passes are inside sections: {}", asset.nodes.len());
+        assert!(
+            asset.nodes.len() < 12,
+            "the passes are inside sections: {}",
+            asset.nodes.len()
+        );
     }
 
     fn pins(inputs: Vec<PinDesc>, outputs: Vec<PinDesc>) -> NodePins {
@@ -317,7 +357,10 @@ mod tests {
         all_inputs.extend(inputs);
         let mut all_outputs = vec![PinDesc::flow("out")];
         all_outputs.extend(outputs);
-        NodePins { inputs: all_inputs, outputs: all_outputs }
+        NodePins {
+            inputs: all_inputs,
+            outputs: all_outputs,
+        }
     }
 
     #[test]
@@ -365,18 +408,32 @@ mod tests {
         };
         // A pass reads through its own Get and writes through its own Set; nothing is
         // wired from one pass to another.
-        assert!(has(("get:hiz@occlusion_cull", "hiz"), ("occlusion_cull", "hiz")));
+        assert!(has(
+            ("get:hiz@occlusion_cull", "hiz"),
+            ("occlusion_cull", "hiz")
+        ));
         assert!(has(("hiz", "out_hiz"), ("set:hiz@hiz", "hiz")));
         assert!(has(("get:depth@hiz", "depth"), ("hiz", "depth")));
-        assert!(has(("gbuffer", "out_depth"), ("set:depth@gbuffer", "depth")));
-        assert!(has(("get:scenedb.materials@gbuffer", "scenedb.materials"), ("gbuffer", "scenedb.materials")));
-        assert!(!all.iter().any(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull"));
+        assert!(has(
+            ("gbuffer", "out_depth"),
+            ("set:depth@gbuffer", "depth")
+        ));
+        assert!(has(
+            ("get:scenedb.materials@gbuffer", "scenedb.materials"),
+            ("gbuffer", "scenedb.materials")
+        ));
+        assert!(!all
+            .iter()
+            .any(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull"));
 
         // The buffers resolve: occlusion cull reads what Hi-Z set, and Hi-Z reads the
         // depth the GBuffer sets later in the frame (history).
         let validation = validate(&asset, &registry);
         assert!(
-            validation.diagnostics.iter().all(|d| d.severity != Severity::Error),
+            validation
+                .diagnostics
+                .iter()
+                .all(|d| d.severity != Severity::Error),
             "{:?}",
             validation.diagnostics
         );

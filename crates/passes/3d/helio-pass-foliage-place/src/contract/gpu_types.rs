@@ -18,7 +18,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use super::packing::{f16_bits_to_f32, f32_to_f16_bits, pack_unorm16, pack_unorm8, unpack_unorm16, unpack_unorm8};
+use super::packing::{
+    f16_bits_to_f32, f32_to_f16_bits, pack_unorm16, pack_unorm8, unpack_unorm16, unpack_unorm8,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Blade instance
@@ -222,15 +224,28 @@ pub fn pack_blade_colour_seed(colour: Option<[f32; 3]>, seed: u16) -> u32 {
 /// Inverse of [`pack_blade_colour_seed`]: `(colour, seed)`.
 #[inline]
 pub fn unpack_blade_colour_seed(packed: u32) -> (Option<[f32; 3]>, u16) {
-    (unpack_rgb565((packed & 0xffff) as u16), (packed >> 16) as u16)
+    (
+        unpack_rgb565((packed & 0xffff) as u16),
+        (packed >> 16) as u16,
+    )
 }
 
 /// Encode a blade for the GPU arena: the CPU mirror of the tail of the placement shader.
 pub fn pack_blade(params: BladeParams) -> GpuBladeInstance {
     GpuBladeInstance {
         packed_pos: pack_blade_pos(params.tile_uv[0], params.tile_uv[1]),
-        packed_height_tuft: pack_blade_height_tuft(params.height_offset, params.blade, params.blades, params.rank),
-        packed_scale_type: pack_blade_scale_type(params.height_scale, params.aux, params.type_id, params.variant),
+        packed_height_tuft: pack_blade_height_tuft(
+            params.height_offset,
+            params.blade,
+            params.blades,
+            params.rank,
+        ),
+        packed_scale_type: pack_blade_scale_type(
+            params.height_scale,
+            params.aux,
+            params.type_id,
+            params.variant,
+        ),
         packed_colour_seed: pack_blade_colour_seed(params.colour, params.seed),
     }
 }
@@ -242,10 +257,23 @@ pub fn pack_blade(params: BladeParams) -> GpuBladeInstance {
 /// idempotent from the second application onward.
 pub fn unpack_blade(instance: &GpuBladeInstance) -> BladeParams {
     let tile_uv = unpack_blade_pos(instance.packed_pos);
-    let (height_offset, blade, blades, rank) = unpack_blade_height_tuft(instance.packed_height_tuft);
+    let (height_offset, blade, blades, rank) =
+        unpack_blade_height_tuft(instance.packed_height_tuft);
     let (height_scale, aux, type_id, variant) = unpack_blade_scale_type(instance.packed_scale_type);
     let (colour, seed) = unpack_blade_colour_seed(instance.packed_colour_seed);
-    BladeParams { tile_uv, height_offset, blade, blades, rank, height_scale, aux, type_id, variant, colour, seed }
+    BladeParams {
+        tile_uv,
+        height_offset,
+        blade,
+        blades,
+        rank,
+        height_scale,
+        aux,
+        type_id,
+        variant,
+        colour,
+        seed,
+    }
 }
 
 impl GpuBladeInstance {
@@ -994,13 +1022,25 @@ mod tests {
             88
         );
         assert_eq!(offset_of(&value.ground_mask as *const u32 as *const u8), 92);
-        assert_eq!(offset_of(&value.blades_per_tuft as *const u32 as *const u8), 96);
+        assert_eq!(
+            offset_of(&value.blades_per_tuft as *const u32 as *const u8),
+            96
+        );
         assert_eq!(offset_of(value.lean_range.as_ptr() as *const u8), 100);
         assert_eq!(offset_of(&value.curve as *const f32 as *const u8), 108);
-        assert_eq!(offset_of(&value.fall_chance as *const f32 as *const u8), 112);
+        assert_eq!(
+            offset_of(&value.fall_chance as *const f32 as *const u8),
+            112
+        );
         assert_eq!(offset_of(&value.tip_color as *const u32 as *const u8), 116);
-        assert_eq!(offset_of(&value.patch_scale as *const f32 as *const u8), 120);
-        assert_eq!(offset_of(&value.patch_strength as *const f32 as *const u8), 124);
+        assert_eq!(
+            offset_of(&value.patch_scale as *const f32 as *const u8),
+            120
+        );
+        assert_eq!(
+            offset_of(&value.patch_strength as *const f32 as *const u8),
+            124
+        );
         assert_eq!(std::mem::size_of::<GpuFoliageType>(), 128);
     }
 
@@ -1122,7 +1162,7 @@ mod tests {
         assert_eq!(pack_blade_height_tuft(0.0, 0, 15, 0.0), 0x00f0_0000);
         assert_eq!(pack_blade_height_tuft(0.0, 0, 0, 1.0), 0xff00_0000);
         assert_eq!(pack_blade_colour_seed(None, 0xffff), 0xffff_0000);
-        assert_eq!(pack_blade_colour_seed(Some([1.0; 3]), 0) , 0x0000_ffff);
+        assert_eq!(pack_blade_colour_seed(Some([1.0; 3]), 0), 0x0000_ffff);
         // A black ground is still a colour.
         assert_eq!(pack_blade_colour_seed(Some([0.0; 3]), 0), 1);
     }
@@ -1161,17 +1201,28 @@ mod tests {
 
         for original in cases {
             let decoded = unpack_blade(&pack_blade(original));
-            assert!((decoded.tile_uv[0] - original.tile_uv[0]).abs() <= 1.0 / 65535.0, "{decoded:?} vs {original:?}");
+            assert!(
+                (decoded.tile_uv[0] - original.tile_uv[0]).abs() <= 1.0 / 65535.0,
+                "{decoded:?} vs {original:?}"
+            );
             assert!((decoded.tile_uv[1] - original.tile_uv[1]).abs() <= 1.0 / 65535.0);
-            assert!((decoded.height_offset - original.height_offset).abs() <= original.height_offset.abs() * 1.0e-3 + 1.0e-6);
+            assert!(
+                (decoded.height_offset - original.height_offset).abs()
+                    <= original.height_offset.abs() * 1.0e-3 + 1.0e-6
+            );
             assert!((decoded.height_scale - original.height_scale).abs() <= 1.0 / 255.0);
             assert!((decoded.rank - original.rank).abs() <= 1.0 / 255.0);
             match (decoded.colour, original.colour) {
-                (Some(d), Some(o)) => assert!(d.iter().zip(o).all(|(d, o)| (d - o).abs() <= 1.0 / 31.0)),
+                (Some(d), Some(o)) => {
+                    assert!(d.iter().zip(o).all(|(d, o)| (d - o).abs() <= 1.0 / 31.0))
+                }
                 (d, o) => assert_eq!(d.is_some(), o.is_some()),
             }
             // Identifiers and the seed are exact.
-            assert_eq!((decoded.blade, decoded.blades, decoded.aux), (original.blade, original.blades, original.aux));
+            assert_eq!(
+                (decoded.blade, decoded.blades, decoded.aux),
+                (original.blade, original.blades, original.aux)
+            );
             assert_eq!(decoded.type_id, original.type_id);
             assert_eq!(decoded.variant, original.variant);
             assert_eq!(decoded.seed, original.seed);
@@ -1278,7 +1329,12 @@ mod tests {
             Some(FoliageKind::Card)
         );
 
-        for kind in [FoliageKind::Blade, FoliageKind::Card, FoliageKind::Mesh, FoliageKind::Block] {
+        for kind in [
+            FoliageKind::Blade,
+            FoliageKind::Card,
+            FoliageKind::Mesh,
+            FoliageKind::Block,
+        ] {
             assert_eq!(FoliageKind::from_u32(kind.as_u32()), Some(kind));
         }
         assert_eq!(FoliageKind::from_u32(4), None);

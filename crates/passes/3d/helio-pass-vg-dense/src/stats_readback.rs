@@ -41,7 +41,11 @@ impl StatsReadback {
 
     /// Copy `buffers`' counter header into a free staging slot.
     pub fn record(&mut self, rec: &mut helio_core::CommandRecorder<'_>, buffers: &DenseBuffers) {
-        if let Some((buffer, slot)) = self.staging.iter_mut().find(|(_, s)| matches!(s, Slot::Free)) {
+        if let Some((buffer, slot)) = self
+            .staging
+            .iter_mut()
+            .find(|(_, s)| matches!(s, Slot::Free))
+        {
             rec.copy_buffer_to_buffer(&buffers.state, 0, buffer, 0, BYTES);
             *slot = Slot::Recorded;
         }

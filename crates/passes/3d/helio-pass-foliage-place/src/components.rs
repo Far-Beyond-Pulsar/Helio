@@ -87,8 +87,18 @@ pub struct FoliageInteractorComponent {
 impl FoliageInteractorComponent {
     /// An interactor at world `position` (the point that presses the ground: feet, a
     /// wheel's contact) moving at `velocity`.
-    pub fn new(position: glam::DVec3, radius: f32, strength: f32, velocity: glam::Vec3, wake: f32) -> Self {
-        let mut row = Self { position_hi_radius: [0.0, 0.0, 0.0, radius], position_lo_strength: [0.0, 0.0, 0.0, strength], velocity_wake: [0.0; 4] };
+    pub fn new(
+        position: glam::DVec3,
+        radius: f32,
+        strength: f32,
+        velocity: glam::Vec3,
+        wake: f32,
+    ) -> Self {
+        let mut row = Self {
+            position_hi_radius: [0.0, 0.0, 0.0, radius],
+            position_lo_strength: [0.0, 0.0, 0.0, strength],
+            velocity_wake: [0.0; 4],
+        };
         row.set_motion(position, velocity);
         row.velocity_wake[3] = wake;
         row
@@ -107,7 +117,11 @@ impl FoliageInteractorComponent {
     pub fn position(&self) -> glam::DVec3 {
         let [hx, hy, hz, _] = self.position_hi_radius;
         let [lx, ly, lz, _] = self.position_lo_strength;
-        glam::DVec3::new(f64::from(hx) + f64::from(lx), f64::from(hy) + f64::from(ly), f64::from(hz) + f64::from(lz))
+        glam::DVec3::new(
+            f64::from(hx) + f64::from(lx),
+            f64::from(hy) + f64::from(ly),
+            f64::from(hz) + f64::from(lz),
+        )
     }
 }
 

@@ -203,7 +203,13 @@ pub fn peel_tile(tris: &[RefTri], origin: [f32; 2], p: &PeelParams) -> TileResul
             break;
         }
     }
-    TileResult { z, id, layers, clamped, clamped_tris }
+    TileResult {
+        z,
+        id,
+        layers,
+        clamped,
+        clamped_tris,
+    }
 }
 
 /// Plain z-sort-equivalent: every triangle against every pixel, nearest wins
@@ -214,7 +220,9 @@ pub fn brute_force_tile(tris: &[RefTri], origin: [f32; 2], p: &PeelParams) -> Ti
     let mut z = vec![0.0f32; n];
     let mut id = vec![0u32; n];
     for t in tris {
-        let Some(s) = setup_tri(t, origin, p) else { continue };
+        let Some(s) = setup_tri(t, origin, p) else {
+            continue;
+        };
         for y in s.bbox[1]..=s.bbox[3] {
             for x in s.bbox[0]..=s.bbox[2] {
                 if let Some(f) = fragment(&s, x, y) {
@@ -227,7 +235,13 @@ pub fn brute_force_tile(tris: &[RefTri], origin: [f32; 2], p: &PeelParams) -> Ti
             }
         }
     }
-    TileResult { z, id, layers: 0, clamped: false, clamped_tris: 0 }
+    TileResult {
+        z,
+        id,
+        layers: 0,
+        clamped: false,
+        clamped_tris: 0,
+    }
 }
 
 /// Independent f64 evaluation (textbook barycentrics, no setup shortcuts) used
@@ -240,7 +254,13 @@ pub fn reference_f64(tris: &[RefTri], origin: [f32; 2], tile: u32) -> (Vec<f64>,
         if !t.v.iter().all(|v| v.valid) {
             continue;
         }
-        let p = |i: usize| (t.v[i].x as f64 - origin[0] as f64, t.v[i].y as f64 - origin[1] as f64, t.v[i].z as f64);
+        let p = |i: usize| {
+            (
+                t.v[i].x as f64 - origin[0] as f64,
+                t.v[i].y as f64 - origin[1] as f64,
+                t.v[i].z as f64,
+            )
+        };
         let (a, b, c) = (p(0), p(1), p(2));
         let area = (b.0 - a.0) * (c.1 - a.1) - (c.0 - a.0) * (b.1 - a.1);
         if area.abs() < 1e-12 {
@@ -306,7 +326,12 @@ pub fn sphere_tile_bounds(
     }
     let ft = tile as f32;
     let t = |v: f32, hi: u32| (v / ft).floor().clamp(0.0, (hi - 1) as f32) as u32;
-    Some([t(px0, tiles_x), t(py0, tiles_y), t(px1, tiles_x), t(py1, tiles_y)])
+    Some([
+        t(px0, tiles_x),
+        t(py0, tiles_y),
+        t(px1, tiles_x),
+        t(py1, tiles_y),
+    ])
 }
 
 #[cfg(test)]
@@ -326,23 +351,44 @@ mod tests {
         }
     }
 
-    fn random_tris(rng: &mut Rng, n: usize, tile: f32, z_lo: f32, z_hi: f32, size: f32) -> Vec<RefTri> {
+    fn random_tris(
+        rng: &mut Rng,
+        n: usize,
+        tile: f32,
+        z_lo: f32,
+        z_hi: f32,
+        size: f32,
+    ) -> Vec<RefTri> {
         (0..n)
             .map(|i| {
                 let (cx, cy) = (rng.f(-2.0, tile + 2.0), rng.f(-2.0, tile + 2.0));
-                let mut v = [RefVertex { x: 0.0, y: 0.0, z: 0.0, valid: true }; 3];
+                let mut v = [RefVertex {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    valid: true,
+                }; 3];
                 for vv in &mut v {
                     vv.x = cx + rng.f(-size, size);
                     vv.y = cy + rng.f(-size, size);
                     vv.z = rng.f(z_lo, z_hi);
                 }
-                RefTri { v, id: i as u32 + 1 }
+                RefTri {
+                    v,
+                    id: i as u32 + 1,
+                }
             })
             .collect()
     }
 
     fn cfg(tile: u32, bits: u32, slab: u32, nominal: u32, max: u32) -> PeelParams {
-        PeelParams { tile, bucket_bits: bits, slab_tris: slab, nominal_layers: nominal, max_layers: max }
+        PeelParams {
+            tile,
+            bucket_bits: bits,
+            slab_tris: slab,
+            nominal_layers: nominal,
+            max_layers: max,
+        }
     }
 
     /// Without a layer cap the peel equals the brute-force z-sort exactly, for
@@ -367,7 +413,10 @@ mod tests {
                     let peel = peel_tile(&tris, [0.0, 0.0], &p);
                     let brute = brute_force_tile(&tris, [0.0, 0.0], &p);
                     assert!(!peel.clamped);
-                    assert_eq!(peel.id, brute.id, "bits={bits} slab={slab} tile={tile} n={n}");
+                    assert_eq!(
+                        peel.id, brute.id,
+                        "bits={bits} slab={slab} tile={tile} n={n}"
+                    );
                     assert_eq!(peel.z, brute.z);
                 }
             }
@@ -381,18 +430,48 @@ mod tests {
         let big = RefTri {
             // Nearest vertex z=0.9 (bucket near), far vertices z=0.1; covers the tile.
             v: [
-                RefVertex { x: -50.0, y: -50.0, z: 0.9, valid: true },
-                RefVertex { x: 90.0, y: -50.0, z: 0.1, valid: true },
-                RefVertex { x: -50.0, y: 90.0, z: 0.1, valid: true },
+                RefVertex {
+                    x: -50.0,
+                    y: -50.0,
+                    z: 0.9,
+                    valid: true,
+                },
+                RefVertex {
+                    x: 90.0,
+                    y: -50.0,
+                    z: 0.1,
+                    valid: true,
+                },
+                RefVertex {
+                    x: -50.0,
+                    y: 90.0,
+                    z: 0.1,
+                    valid: true,
+                },
             ],
             id: 1,
         };
         let small = RefTri {
             // Flat at z=0.5: in a later bucket than `big`, but in front of it away from the near corner.
             v: [
-                RefVertex { x: 4.0, y: 4.0, z: 0.5, valid: true },
-                RefVertex { x: 12.0, y: 4.0, z: 0.5, valid: true },
-                RefVertex { x: 4.0, y: 12.0, z: 0.5, valid: true },
+                RefVertex {
+                    x: 4.0,
+                    y: 4.0,
+                    z: 0.5,
+                    valid: true,
+                },
+                RefVertex {
+                    x: 12.0,
+                    y: 4.0,
+                    z: 0.5,
+                    valid: true,
+                },
+                RefVertex {
+                    x: 4.0,
+                    y: 12.0,
+                    z: 0.5,
+                    valid: true,
+                },
             ],
             id: 2,
         };
@@ -411,9 +490,24 @@ mod tests {
         // Opaque near cover (two triangles), then lots of far clutter.
         let q = |x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32, z: f32, id| RefTri {
             v: [
-                RefVertex { x: x0, y: y0, z, valid: true },
-                RefVertex { x: x1, y: y1, z, valid: true },
-                RefVertex { x: x2, y: y2, z, valid: true },
+                RefVertex {
+                    x: x0,
+                    y: y0,
+                    z,
+                    valid: true,
+                },
+                RefVertex {
+                    x: x1,
+                    y: y1,
+                    z,
+                    valid: true,
+                },
+                RefVertex {
+                    x: x2,
+                    y: y2,
+                    z,
+                    valid: true,
+                },
             ],
             id,
         };
@@ -462,7 +556,10 @@ mod tests {
                 }
             }
         }
-        assert!(mismatch * 100 <= total, "{mismatch}/{total} pixels disagree");
+        assert!(
+            mismatch * 100 <= total,
+            "{mismatch}/{total} pixels disagree"
+        );
     }
 
     #[test]
@@ -497,18 +594,25 @@ mod tests {
                 let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3);
                 let k = r * rng.f(0.0, 1.0) / l;
                 let p = [c[0] + d[0] * k, c[1] + d[1] * k, c[2] + d[2] * k];
-                let clip = |row: usize| m[0][row] * p[0] + m[1][row] * p[1] + m[2][row] * p[2] + m[3][row];
+                let clip =
+                    |row: usize| m[0][row] * p[0] + m[1][row] * p[1] + m[2][row] * p[2] + m[3][row];
                 let w = clip(3);
                 if w <= 1e-4 {
                     continue;
                 }
-                let (sx, sy) = ((clip(0) / w * 0.5 + 0.5) * 1920.0, (0.5 - clip(1) / w * 0.5) * 1080.0);
+                let (sx, sy) = (
+                    (clip(0) / w * 0.5 + 0.5) * 1920.0,
+                    (0.5 - clip(1) / w * 0.5) * 1080.0,
+                );
                 if !(0.0..1920.0).contains(&sx) || !(0.0..1080.0).contains(&sy) {
                     continue;
                 }
                 let b = b.expect("an on-screen sphere point implies bounds");
                 let (tx, ty) = ((sx / 16.0) as u32, (sy / 16.0) as u32);
-                assert!(tx >= b[0] && tx <= b[2] && ty >= b[1] && ty <= b[3], "{tx},{ty} outside {b:?}");
+                assert!(
+                    tx >= b[0] && tx <= b[2] && ty >= b[1] && ty <= b[3],
+                    "{tx},{ty} outside {b:?}"
+                );
             }
         }
     }

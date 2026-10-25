@@ -488,11 +488,7 @@ impl SubLevelResolver {
                                         )
                                     })
                                     .and_then(|rect| source_rect.intersect(rect))
-                                    .or_else(|| {
-                                        view_projection
-                                            .is_none()
-                                            .then_some(source_rect)
-                                    })?;
+                                    .or_else(|| view_projection.is_none().then_some(source_rect))?;
                                 Some(ChainState {
                                     source: next_source,
                                     portals: portals.clone(),
@@ -684,7 +680,6 @@ impl SubLevelResolver {
         }));
         candidates
     }
-
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1090,18 +1085,10 @@ mod tests {
         for (index, (normal, up_hint)) in faces.into_iter().enumerate() {
             let right = up_hint.cross(normal).normalize();
             let up = normal.cross(right).normalize();
-            let pose = crate::portal_math::portal_pose_facing(
-                normal * 6.0,
-                -normal,
-                up,
-            );
+            let pose = crate::portal_math::portal_pose_facing(normal * 6.0, -normal, up);
             portals.push((
                 entities[index],
-                PortalComponent::new(
-                    Some(entities[opposite[index]]),
-                    pose.transform,
-                    [1.6, 1.6],
-                ),
+                PortalComponent::new(Some(entities[opposite[index]]), pose.transform, [1.6, 1.6]),
             ));
         }
         let mut resolver = SubLevelResolver::new();
@@ -1113,7 +1100,8 @@ mod tests {
             -std::f32::consts::FRAC_1_SQRT_2 * 0.883,
         )
         .normalize();
-        let view = glam::camera::rh::view::look_at_mat4(position, position + forward, glam::Vec3::Y);
+        let view =
+            glam::camera::rh::view::look_at_mat4(position, position + forward, glam::Vec3::Y);
         let projection = glam::camera::rh::proj::directx::perspective(
             std::f32::consts::FRAC_PI_4,
             1280.0 / 720.0,
@@ -1222,6 +1210,9 @@ mod tests {
     fn recursion_depth_is_runtime_configured() {
         let resolver = SubLevelResolver::new();
         assert!(resolver.resolve_chains(4).is_ok());
-        assert!(matches!(resolver.resolve_chains(0), Err(ResolutionError::InvalidRecursionDepth { .. })));
+        assert!(matches!(
+            resolver.resolve_chains(0),
+            Err(ResolutionError::InvalidRecursionDepth { .. })
+        ));
     }
 }

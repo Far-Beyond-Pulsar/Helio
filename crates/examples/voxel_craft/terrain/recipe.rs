@@ -6,7 +6,9 @@
 //! moisture and depth (meadows, deserts, beaches, rock, strata).
 
 use crate::config::{PLANET_RADIUS_M, VOXEL_M, WORLD_SEED};
-use helio_pass_voxel_planet::layers::{self, Caves, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, Overhangs, TerrainLayers};
+use helio_pass_voxel_planet::layers::{
+    self, Caves, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, Overhangs, TerrainLayers,
+};
 use helio_pass_voxel_planet::terrain::TerrainSource;
 use helio_pass_voxel_planet::PlanetRecipe;
 
@@ -72,7 +74,10 @@ pub fn terrain_layers() -> TerrainLayers {
             entrance_share: 0.12,
             entrance_spacing_m: 55.0,
         },
-        overhangs: Overhangs { enabled: false, ..Overhangs::default() },
+        overhangs: Overhangs {
+            enabled: false,
+            ..Overhangs::default()
+        },
         materials: MaterialStyle::Rules,
         snowline_m: 1.0e5,
         soil_depth_m: 4.0,

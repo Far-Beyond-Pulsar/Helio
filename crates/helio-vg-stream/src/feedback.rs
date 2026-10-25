@@ -23,7 +23,10 @@ pub struct FeedbackLayout {
 
 impl FeedbackLayout {
     pub fn new(list_capacity: u32, page_capacity: u32) -> Self {
-        Self { list_capacity, bits_words: page_capacity.div_ceil(32).max(1) }
+        Self {
+            list_capacity,
+            bits_words: page_capacity.div_ceil(32).max(1),
+        }
     }
     pub fn total_words(&self) -> u32 {
         HEADER_WORDS + self.list_capacity + 2 * self.bits_words
@@ -74,7 +77,10 @@ pub fn decode(words: &[u32], layout: FeedbackLayout, page_count: u32) -> Feedbac
     fb.requests.dedup();
 
     let ub = layout.used_bits_offset_words() as usize;
-    for (wi, &w) in words[ub..ub + layout.bits_words as usize].iter().enumerate() {
+    for (wi, &w) in words[ub..ub + layout.bits_words as usize]
+        .iter()
+        .enumerate()
+    {
         let mut bits = w;
         while bits != 0 {
             let b = bits.trailing_zeros();

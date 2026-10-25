@@ -28,7 +28,10 @@ pub struct BuildOptions {
 
 impl Default for BuildOptions {
     fn default() -> Self {
-        Self { content_id: [0; 2], resident_levels: 2 }
+        Self {
+            content_id: [0; 2],
+            resident_levels: 2,
+        }
     }
 }
 
@@ -67,7 +70,11 @@ fn cone_for(dag: &Dag, tris: &[[u32; 3]]) -> u32 {
     let mut normals = Vec::with_capacity(tris.len());
     let mut sum = [0.0f32; 3];
     for t in tris {
-        let (a, b, c) = (dag.vs.pos[t[0] as usize], dag.vs.pos[t[1] as usize], dag.vs.pos[t[2] as usize]);
+        let (a, b, c) = (
+            dag.vs.pos[t[0] as usize],
+            dag.vs.pos[t[1] as usize],
+            dag.vs.pos[t[2] as usize],
+        );
         let n = normalize(cross(sub(b, a), sub(c, a)));
         if n != [0.0; 3] {
             sum = add(sum, n);
@@ -131,7 +138,10 @@ fn encode_cluster(dag: &Dag, ci: usize, attrs: &[u8], stride: usize, lat: &Latti
         idx.push(0);
     }
 
-    let q: Vec<[u32; 3]> = verts.iter().map(|&v| lat.quantize(dag.vs.pos[v as usize])).collect();
+    let q: Vec<[u32; 3]> = verts
+        .iter()
+        .map(|&v| lat.quantize(dag.vs.pos[v as usize]))
+        .collect();
     let mut lo = [u32::MAX; 3];
     let mut hi = [0u32; 3];
     for p in &q {
@@ -140,7 +150,9 @@ fn encode_cluster(dag: &Dag, ci: usize, attrs: &[u8], stride: usize, lat: &Latti
             hi[i] = hi[i].max(p[i]);
         }
     }
-    let bits: Vec<u32> = (0..3).map(|i| 32 - (hi[i] - lo[i]).leading_zeros()).collect();
+    let bits: Vec<u32> = (0..3)
+        .map(|i| 32 - (hi[i] - lo[i]).leading_zeros())
+        .collect();
     let per_vert = (bits[0] + bits[1] + bits[2]) as usize;
     let stream_words = (per_vert * q.len() + 31) / 32;
     let mut words = vec![0u32; POS_BLOCK_HEADER_WORDS + stream_words];
@@ -150,7 +162,12 @@ fn encode_cluster(dag: &Dag, ci: usize, attrs: &[u8], stride: usize, lat: &Latti
     let mut bitpos = 0;
     for p in &q {
         for i in 0..3 {
-            put_bits(&mut words[POS_BLOCK_HEADER_WORDS..], bitpos, p[i] - lo[i], bits[i]);
+            put_bits(
+                &mut words[POS_BLOCK_HEADER_WORDS..],
+                bitpos,
+                p[i] - lo[i],
+                bits[i],
+            );
             bitpos += bits[i] as usize;
         }
     }
@@ -219,7 +236,11 @@ pub fn write_vgeo(
     opts: &BuildOptions,
 ) -> Result<Vec<u8>, BuildError> {
     // ── lattice ────────────────────────────────────────────────────────────
-    let used = dag.clusters.iter().flat_map(|c| c.tris.iter().flatten()).map(|&v| dag.vs.pos[v as usize]);
+    let used = dag
+        .clusters
+        .iter()
+        .flat_map(|c| c.tris.iter().flatten())
+        .map(|&v| dag.vs.pos[v as usize]);
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
     for p in used {
         for i in 0..3 {
@@ -228,7 +249,11 @@ pub fn write_vgeo(
         }
     }
     let ext = (0..3).map(|i| (hi[i] - lo[i]) as f64).fold(0.0, f64::max);
-    let step = if ext > 0.0 { (ext * (1.0 + 1e-6) / LATTICE_MAX as f64) as f32 } else { 1.0 };
+    let step = if ext > 0.0 {
+        (ext * (1.0 + 1e-6) / LATTICE_MAX as f64) as f32
+    } else {
+        1.0
+    };
     let lat = Lattice { origin: lo, step };
 
     // ── encode clusters ────────────────────────────────────────────────────
@@ -241,11 +266,19 @@ pub fn write_vgeo(
     // Coarsest level first so root/coarse pages are a resident prefix; within
     // a level, Morton order keeps spatially close groups in the same page so a
     // view-dependent request touches few pages.
-    let frame = morton_frame(dag.groups.iter().map(|g| [g.sphere[0], g.sphere[1], g.sphere[2]]));
+    let frame = morton_frame(
+        dag.groups
+            .iter()
+            .map(|g| [g.sphere[0], g.sphere[1], g.sphere[2]]),
+    );
     let mut order: Vec<usize> = (0..dag.groups.len()).collect();
     let key = |g: usize| {
         let s = dag.groups[g].sphere;
-        (std::cmp::Reverse(dag.groups[g].level), morton3([s[0], s[1], s[2]], frame), g)
+        (
+            std::cmp::Reverse(dag.groups[g].level),
+            morton3([s[0], s[1], s[2]], frame),
+            g,
+        )
     };
     order.sort_by_key(|&g| key(g));
 
@@ -253,7 +286,11 @@ pub fn write_vgeo(
     let mut pages: Vec<Vec<usize>> = Vec::new();
     let mut used_bytes = usize::MAX;
     for &g in &order {
-        let sz: usize = dag.groups[g].clusters.iter().map(|&c| enc[c as usize].bytes()).sum();
+        let sz: usize = dag.groups[g]
+            .clusters
+            .iter()
+            .map(|&c| enc[c as usize].bytes())
+            .sum();
         if sz > page_payload {
             return Err(BuildError::GroupTooLarge);
         }
@@ -264,7 +301,14 @@ pub fn write_vgeo(
         pages.last_mut().unwrap().push(g);
         used_bytes += sz;
     }
-    let level_count = dag.groups.iter().filter(|g| g.is_root).map(|g| g.level).max().unwrap_or(0) + 1;
+    let level_count = dag
+        .groups
+        .iter()
+        .filter(|g| g.is_root)
+        .map(|g| g.level)
+        .max()
+        .unwrap_or(0)
+        + 1;
 
     // Group-ref ids follow page order.
     let mut group_id = vec![NONE; dag.groups.len()];
@@ -280,7 +324,11 @@ pub fn write_vgeo(
         for &g in groups {
             group_id[g] = refs.len() as u32;
             group_page[g] = pid as u32;
-            refs.push(GpuGroupRef::new(pid as u32, first as u32, dag.groups[g].clusters.len() as u32));
+            refs.push(GpuGroupRef::new(
+                pid as u32,
+                first as u32,
+                dag.groups[g].clusters.len() as u32,
+            ));
             first += dag.groups[g].clusters.len();
         }
     }
@@ -306,7 +354,11 @@ pub fn write_vgeo(
             let s = grp.sphere;
             (
                 morton3([s[0], s[1], s[2]], frame),
-                Item { id: group_id[g], sphere: s, err: grp.error },
+                Item {
+                    id: group_id[g],
+                    sphere: s,
+                    err: grp.error,
+                },
             )
         })
         .collect();
@@ -331,7 +383,9 @@ pub fn write_vgeo(
     };
     let root_page_count = pages_for(1);
     if root_page_count > MAX_ROOT_PAGES {
-        return Err(BuildError::RootTooLarge { pages: root_page_count });
+        return Err(BuildError::RootTooLarge {
+            pages: root_page_count,
+        });
     }
     let mut root_page_count = root_page_count;
     for levels in 2..=opts.resident_levels.max(1).min(level_count) {
@@ -343,10 +397,17 @@ pub fn write_vgeo(
     }
 
     // ── container ──────────────────────────────────────────────────────────
-    let hierarchy_offset = align(std::mem::size_of::<VgeoHeader>() + std::mem::size_of::<VgeoMeta>(), 16);
-    let group_refs_offset = hierarchy_offset + nodes.len() * std::mem::size_of::<GpuHierarchyNode>();
+    let hierarchy_offset = align(
+        std::mem::size_of::<VgeoHeader>() + std::mem::size_of::<VgeoMeta>(),
+        16,
+    );
+    let group_refs_offset =
+        hierarchy_offset + nodes.len() * std::mem::size_of::<GpuHierarchyNode>();
     let page_dir_offset = group_refs_offset + refs.len() * std::mem::size_of::<GpuGroupRef>();
-    let page_deps_offset = align(page_dir_offset + pages.len() * std::mem::size_of::<PageDirEntry>(), 4);
+    let page_deps_offset = align(
+        page_dir_offset + pages.len() * std::mem::size_of::<PageDirEntry>(),
+        4,
+    );
     let mut deps_csr: Vec<u32> = Vec::with_capacity(pages.len() + 1);
     let mut deps_flat: Vec<u32> = Vec::new();
     for d in &deps {
@@ -414,7 +475,11 @@ pub fn write_vgeo(
                 counts_material: GpuCluster::pack_counts(e.tris, e.verts, c.mat),
                 vertex_offset: po as u32,
                 index_offset: io as u32,
-                group_id: if c.producer == NONE { NODE_INVALID } else { group_id[c.producer as usize] },
+                group_id: if c.producer == NONE {
+                    NODE_INVALID
+                } else {
+                    group_id[c.producer as usize]
+                },
                 flags,
             };
             let at = clusters_off + slot * std::mem::size_of::<GpuCluster>();
@@ -426,7 +491,12 @@ pub fn write_vgeo(
             max_l = max_l.max(c.level);
         }
         cluster_total += n as u32;
-        dir.push(PageDirEntry { file_offset: 0, cluster_count: n as u32, min_level: min_l, max_level: max_l });
+        dir.push(PageDirEntry {
+            file_offset: 0,
+            cluster_count: n as u32,
+            min_level: min_l,
+            max_level: max_l,
+        });
     }
 
     for (i, d) in dir.iter_mut().enumerate() {
@@ -470,8 +540,10 @@ pub fn write_vgeo(
     out[VGEO_META_OFFSET..VGEO_META_OFFSET + 32].copy_from_slice(bytes_of(&meta));
     out[hierarchy_offset..group_refs_offset].copy_from_slice(bytemuck::cast_slice(&nodes));
     out[group_refs_offset..page_dir_offset].copy_from_slice(bytemuck::cast_slice(&refs));
-    out[page_dir_offset..page_dir_offset + dir.len() * 16].copy_from_slice(bytemuck::cast_slice(&dir));
-    out[page_deps_offset..page_deps_offset + deps_csr.len() * 4].copy_from_slice(bytemuck::cast_slice(&deps_csr));
+    out[page_dir_offset..page_dir_offset + dir.len() * 16]
+        .copy_from_slice(bytemuck::cast_slice(&dir));
+    out[page_deps_offset..page_deps_offset + deps_csr.len() * 4]
+        .copy_from_slice(bytemuck::cast_slice(&deps_csr));
     let fo = page_deps_offset + deps_csr.len() * 4;
     out[fo..fo + deps_flat.len() * 4].copy_from_slice(bytemuck::cast_slice(&deps_flat));
     Ok(out)
@@ -507,6 +579,10 @@ fn lod_summary(dag: &Dag) -> ([f32; 4], f32, [u32; helio_vg_format::LOD_TABLE_WO
             *v = helio_vg_format::LodTable::quantize(tris as f64);
         }
     }
-    let words = helio_vg_format::LodTable { error_max: e_max, q }.words();
+    let words = helio_vg_format::LodTable {
+        error_max: e_max,
+        q,
+    }
+    .words();
     (sphere.unwrap_or([0.0; 4]), e_max, words)
 }

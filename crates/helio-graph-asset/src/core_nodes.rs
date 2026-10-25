@@ -67,8 +67,14 @@ fn resource_name(build: &NodeBuild<'_, '_>) -> Result<String, String> {
 /// One output pin named by the node's `name` parameter.
 fn named_output(ty: PinType) -> impl Fn(&Params) -> NodePins + Send + Sync {
     move |params| {
-        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or_default();
-        NodePins { inputs: Vec::new(), outputs: vec![PinDesc::resource(ty, name)] }
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        NodePins {
+            inputs: Vec::new(),
+            outputs: vec![PinDesc::resource(ty, name)],
+        }
     }
 }
 
@@ -157,12 +163,19 @@ pub fn register(registry: &mut NodeRegistry) {
                 let name = resource_name(build)?;
                 let format = ResourceFormat::from(parse_format(&build.text("format"))?);
                 let size = transient_size(&build.text("size"))?;
-                build.graph.add_pass(Box::new(TransientTexturePass::new(&name, format, size, false)));
+                build.graph.add_pass(Box::new(TransientTexturePass::new(
+                    &name, format, size, false,
+                )));
                 Ok(())
             },
         )
         .with_param(ParamDesc::text("name", "Name", "my_texture"))
-        .with_param(ParamDesc::choice("format", "Format", &format_names(), "rgba16float"))
+        .with_param(ParamDesc::choice(
+            "format",
+            "Format",
+            &format_names(),
+            "rgba16float",
+        ))
         .with_param(ParamDesc::choice("size", "Size", SIZES, "internal"))
         .with_dynamic_pins(named_output(PinType::TEXTURE)),
     );

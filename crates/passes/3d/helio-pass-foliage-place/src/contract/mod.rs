@@ -32,8 +32,8 @@
 //! API belongs to `helio::Scene`.
 
 pub mod bands;
-pub mod ground;
 pub mod gpu_types;
+pub mod ground;
 pub mod packing;
 pub mod placement;
 pub mod quality;
@@ -85,16 +85,33 @@ mod tests {
 
         let first = place([12, -7], 3);
         let second = place([12, -7], 3);
-        assert_eq!(first, second, "the same tile and generation must produce a byte-identical record list");
+        assert_eq!(
+            first, second,
+            "the same tile and generation must produce a byte-identical record list"
+        );
 
         // A generation bump must reshuffle, not merely perturb.
         let bumped = place([12, -7], 4);
-        let unchanged = first.iter().zip(bumped.iter()).filter(|(a, b)| a.packed_pos == b.packed_pos).count();
-        assert!(unchanged <= 2, "{unchanged} of 128 tufts kept their position across a generation bump");
+        let unchanged = first
+            .iter()
+            .zip(bumped.iter())
+            .filter(|(a, b)| a.packed_pos == b.packed_pos)
+            .count();
+        assert!(
+            unchanged <= 2,
+            "{unchanged} of 128 tufts kept their position across a generation bump"
+        );
 
         // And a neighbouring tile must be an independent draw, not an offset copy.
         let neighbour = place([13, -7], 3);
-        let shared = first.iter().zip(neighbour.iter()).filter(|(a, b)| a.packed_pos == b.packed_pos).count();
-        assert!(shared <= 2, "{shared} of 128 tufts are shared with the neighbouring tile");
+        let shared = first
+            .iter()
+            .zip(neighbour.iter())
+            .filter(|(a, b)| a.packed_pos == b.packed_pos)
+            .count();
+        assert!(
+            shared <= 2,
+            "{shared} of 128 tufts are shared with the neighbouring tile"
+        );
     }
 }

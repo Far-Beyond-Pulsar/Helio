@@ -59,7 +59,11 @@ impl GroundGeometry for PlanetGround {
         let grid = self.grid()?;
         let n = f64::from(grid.cells());
         let mut face = self.face.lock().expect("planet ground");
-        let within = |f: u8| grid.face_coords(f, eye).is_some_and(|c| (0..2).all(|a| c[a] > -CHART_HYSTERESIS * n && c[a] < (1.0 + CHART_HYSTERESIS) * n));
+        let within = |f: u8| {
+            grid.face_coords(f, eye).is_some_and(|c| {
+                (0..2).all(|a| c[a] > -CHART_HYSTERESIS * n && c[a] < (1.0 + CHART_HYSTERESIS) * n)
+            })
+        };
         let f = match *face {
             Some(f) if grid.is_plane() || within(f) => f,
             _ => grid.locate(eye).0.face,
@@ -67,7 +71,10 @@ impl GroundGeometry for PlanetGround {
         *face = Some(f);
         let c = grid.face_coords(f, eye)?;
         let s = grid.voxel_size();
-        Some(GroundChart { id: u64::from(f), eye: [c[0] * s, c[1] * s] })
+        Some(GroundChart {
+            id: u64::from(f),
+            eye: [c[0] * s, c[1] * s],
+        })
     }
 
     fn tile_frame(&self, chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame> {
@@ -113,7 +120,14 @@ impl ProbeTile {
     /// The tile `frame` whose queries start `start_height` along its up, walked from
     /// `walk_height` (under it: where drawn chunks are near; `frac.w` holds the drop), for
     /// an eye at world `eye`. `None` where the grid has no cell there.
-    pub fn new(grid: &Grid, frame: &TileFrame, start_height: f64, walk_height: f64, eye: DVec3, first: u32) -> Option<Self> {
+    pub fn new(
+        grid: &Grid,
+        frame: &TileFrame,
+        start_height: f64,
+        walk_height: f64,
+        eye: DVec3,
+        first: u32,
+    ) -> Option<Self> {
         let up = frame.up.normalize_or(DVec3::Y);
         let walk_height = walk_height.min(start_height);
         let p = frame.origin + (frame.axis_u + frame.axis_v) * 0.5 + up * walk_height;
@@ -128,8 +142,16 @@ impl ProbeTile {
         }
         Some(Self {
             cell: [cell.i, cell.j, cell.k, i32::from(cell.face) | 8],
-            frac: [(c[0] - f64::from(cell.i)) as f32, (c[1] - f64::from(cell.j)) as f32, (c[2] - f64::from(cell.k)) as f32, (start_height - walk_height) as f32],
-            at: { let e = (p - eye).as_vec3(); [e.x, e.y, e.z, f32::from_bits(first)] },
+            frac: [
+                (c[0] - f64::from(cell.i)) as f32,
+                (c[1] - f64::from(cell.j)) as f32,
+                (c[2] - f64::from(cell.k)) as f32,
+                (start_height - walk_height) as f32,
+            ],
+            at: {
+                let e = (p - eye).as_vec3();
+                [e.x, e.y, e.z, f32::from_bits(first)]
+            },
             jacobian,
         })
     }
@@ -152,23 +174,38 @@ mod tests {
     #[test]
     fn sphere_tiles_are_eight_metres_on_the_face_under_the_eye() {
         let ground = PlanetGround::default();
-        assert!(ground.chart(DVec3::new(0.0, 16_010.0, 0.0)).is_none(), "no chart before the grid");
+        assert!(
+            ground.chart(DVec3::new(0.0, 16_010.0, 0.0)).is_none(),
+            "no chart before the grid"
+        );
         let grid = Grid::new(16_000.0, 0.1).unwrap();
         ground.set_grid(grid);
         let eye = DVec3::new(30.0, 16_010.0, -40.0);
         let chart = ground.chart(eye).unwrap();
         assert_eq!(chart.id, u64::from(grid.locate(eye).0.face));
-        let tile = [(chart.eye[0] / 8.0).floor() as i32, (chart.eye[1] / 8.0).floor() as i32];
+        let tile = [
+            (chart.eye[0] / 8.0).floor() as i32,
+            (chart.eye[1] / 8.0).floor() as i32,
+        ];
         let frame = ground.tile_frame(chart.id, tile, 1).unwrap();
-        assert!((frame.axis_u.length() - 8.0).abs() < 0.1 && (frame.axis_v.length() - 8.0).abs() < 0.1, "{frame:?}");
+        assert!(
+            (frame.axis_u.length() - 8.0).abs() < 0.1 && (frame.axis_v.length() - 8.0).abs() < 0.1,
+            "{frame:?}"
+        );
         assert!((frame.origin.length() - 16_000.0).abs() < 1e-6);
         assert!(frame.up.dot(eye.normalize()) > 0.999_99);
         // The eye's own tile holds it.
         let at = ground.locate(chart.id, eye).unwrap();
-        assert_eq!([(at[0] / 8.0).floor() as i32, (at[1] / 8.0).floor() as i32], tile);
+        assert_eq!(
+            [(at[0] / 8.0).floor() as i32, (at[1] / 8.0).floor() as i32],
+            tile
+        );
         // A probe tile's reference point is its cell's.
         let probe = ProbeTile::new(&grid, &frame, 12.0, 12.0, eye, 0).unwrap();
-        assert!(probe.frac[..3].iter().all(|f| (0.0..1.0).contains(f)), "{probe:?}");
+        assert!(
+            probe.frac[..3].iter().all(|f| (0.0..1.0).contains(f)),
+            "{probe:?}"
+        );
     }
 
     #[test]
@@ -178,12 +215,18 @@ mod tests {
         ground.set_grid(grid);
         let n = f64::from(grid.cells());
         let face = 2;
-        let a = ground.chart(grid.position(face, [n - 10.0, n * 0.5, 100.0])).unwrap();
+        let a = ground
+            .chart(grid.position(face, [n - 10.0, n * 0.5, 100.0]))
+            .unwrap();
         // Just across the edge: still the first face.
-        let b = ground.chart(grid.position(face, [n + 50.0, n * 0.5, 100.0])).unwrap();
+        let b = ground
+            .chart(grid.position(face, [n + 50.0, n * 0.5, 100.0]))
+            .unwrap();
         assert_eq!(a.id, b.id);
         // Far across: the other face.
-        let c = ground.chart(grid.position(face, [n * 1.5, n * 0.5, 100.0])).unwrap();
+        let c = ground
+            .chart(grid.position(face, [n * 1.5, n * 0.5, 100.0]))
+            .unwrap();
         assert_ne!(a.id, c.id);
     }
 

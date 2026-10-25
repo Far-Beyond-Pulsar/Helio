@@ -8,13 +8,18 @@ use helio_vg_build::*;
 struct Rng(u64);
 impl Rng {
     fn f(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 40) as f32) / (1u64 << 24) as f32
     }
 }
 
 fn attrs(p: &[[f32; 3]]) -> Vec<u8> {
-    p.iter().flat_map(|v| v.iter().flat_map(|f| f.to_le_bytes())).collect()
+    p.iter()
+        .flat_map(|v| v.iter().flat_map(|f| f.to_le_bytes()))
+        .collect()
 }
 
 /// `cards` disjoint 2-triangle quads of size `size` scattered in a ball of
@@ -47,7 +52,11 @@ pub fn canopy(cards: usize, radius: f32, size: f32, seed: u64) -> TestMesh {
     for i in 0..=seg {
         for k in 0..ring {
             let a = std::f32::consts::TAU * k as f32 / ring as f32;
-            p.push([0.02 * radius * a.cos(), -radius + 2.0 * radius * i as f32 / seg as f32, 0.02 * radius * a.sin()]);
+            p.push([
+                0.02 * radius * a.cos(),
+                -radius + 2.0 * radius * i as f32 / seg as f32,
+                0.02 * radius * a.sin(),
+            ]);
         }
     }
     for i in 0..seg {
@@ -58,21 +67,39 @@ pub fn canopy(cards: usize, radius: f32, size: f32, seed: u64) -> TestMesh {
     }
     let n = idx.len() / 3;
     let attributes = attrs(&p);
-    TestMesh { positions: p, attributes, stride: 12, indices: idx, mats: vec![0; n] }
+    TestMesh {
+        positions: p,
+        attributes,
+        stride: 12,
+        indices: idx,
+        mats: vec![0; n],
+    }
 }
 
 /// Triangles selected at a distance for an object of radius `rad`.
 pub fn selected(r: &VgeoReader, d: f32, rad: f32) -> usize {
     let scale = 1080.0 / (2.0 * (60f32.to_radians() * 0.5).tan());
-    let proj = Projection { eye: [rad + d, 0.0, 0.0], scale };
-    r.select_clusters(1.0, &proj).unwrap().iter().map(|s| s.cluster.tri_count() as usize).sum()
+    let proj = Projection {
+        eye: [rad + d, 0.0, 0.0],
+        scale,
+    };
+    r.select_clusters(1.0, &proj)
+        .unwrap()
+        .iter()
+        .map(|s| s.cluster.tri_count() as usize)
+        .sum()
 }
 
 #[test]
 fn disjoint_canopy_builds_coarse_root() {
     let mesh = canopy(30_000, 3.0, 0.05, 7);
     let dag = build_dag(&mesh.input()).unwrap();
-    let leaf: usize = dag.clusters.iter().filter(|c| c.level == 0).map(|c| c.tris.len()).sum();
+    let leaf: usize = dag
+        .clusters
+        .iter()
+        .filter(|c| c.level == 0)
+        .map(|c| c.tris.len())
+        .sum();
     let roots: usize = dag
         .groups
         .iter()
@@ -89,17 +116,26 @@ fn disjoint_canopy_selection_tracks_screen_size() {
     let mesh = canopy(30_000, 3.0, 0.05, 7);
     let bytes = build_vgeo(&mesh.input(), &BuildOptions::default()).unwrap();
     let r = VgeoReader::parse(&bytes).unwrap();
-    let s: Vec<usize> = [30.0, 240.0, 960.0, 3840.0, 15360.0].iter().map(|&d| selected(&r, d, 3.0)).collect();
+    let s: Vec<usize> = [30.0, 240.0, 960.0, 3840.0, 15360.0]
+        .iter()
+        .map(|&d| selected(&r, d, 3.0))
+        .collect();
     println!("selected {s:?} of {}", mesh.tri_count());
     for w in s.windows(2) {
         assert!(w[1] <= w[0], "{s:?}");
     }
-    assert!(s[4] * 20 < s[0], "selection must collapse with distance: {s:?}");
+    assert!(
+        s[4] * 20 < s[0],
+        "selection must collapse with distance: {s:?}"
+    );
     // Sparse foliage must already coarsen at the second sample. Applying
     // point-to-surface distance as its coverage error retained 62,090 of
     // 63,200 triangles here; the coverage metric selects about 15,763.
     // Keep margin for partition changes while rejecting that regression.
-    assert!(s[1] < mesh.tri_count() / 2, "mid-distance foliage failed to coarsen: {s:?}");
+    assert!(
+        s[1] < mesh.tri_count() / 2,
+        "mid-distance foliage failed to coarsen: {s:?}"
+    );
     assert!(s[2] < mesh.tri_count() / 2, "{s:?}");
 }
 
@@ -113,31 +149,40 @@ fn cache_dir() -> std::path::PathBuf {
 fn leaf_mesh(bytes: &[u8]) -> TestMesh {
     let r = VgeoReader::parse(bytes).unwrap();
     let stride = r.meta.attribute_stride as usize;
-    let (mut positions, mut attributes, mut indices, mut mats) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut positions, mut attributes, mut indices, mut mats) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for pid in 0..r.page_dir.len() as u32 {
-      let page = r.page(pid).unwrap();
-      for i in 0..page.header.cluster_count {
-        let cl = page.cluster(i).unwrap();
-        if cl.group_id != helio_vg_format::NODE_INVALID {
-            continue;
+        let page = r.page(pid).unwrap();
+        for i in 0..page.header.cluster_count {
+            let cl = page.cluster(i).unwrap();
+            if cl.group_id != helio_vg_format::NODE_INVALID {
+                continue;
+            }
+            let d = page.decode_cluster(i).unwrap();
+            let base = positions.len() as u32;
+            positions.extend_from_slice(&d.positions);
+            attributes.extend_from_slice(d.attributes);
+            for t in &d.tris {
+                indices.extend(t.map(|x| base + x as u32));
+                mats.push(cl.counts_material >> 16);
+            }
         }
-        let d = page.decode_cluster(i).unwrap();
-        let base = positions.len() as u32;
-        positions.extend_from_slice(&d.positions);
-        attributes.extend_from_slice(d.attributes);
-        for t in &d.tris {
-            indices.extend(t.map(|x| base + x as u32));
-            mats.push(cl.counts_material >> 16);
-        }
-      }
     }
-    TestMesh { positions, attributes, stride, indices, mats }
+    TestMesh {
+        positions,
+        attributes,
+        stride,
+        indices,
+        mats,
+    }
 }
 
 #[test]
 #[ignore = "reads the cached vg_stress assets; run with --release -- --ignored --nocapture"]
 fn real_assets_leaf_stats() {
-    let Ok(rd) = std::fs::read_dir(cache_dir()) else { return };
+    let Ok(rd) = std::fs::read_dir(cache_dir()) else {
+        return;
+    };
     let only = std::env::var("VG_ONLY").ok();
     for e in rd.flatten() {
         let p = e.path();
@@ -149,7 +194,9 @@ fn real_assets_leaf_stats() {
             continue;
         }
         let bytes = std::fs::read(&p).unwrap();
-        let Ok(r) = VgeoReader::parse(&bytes) else { continue };
+        let Ok(r) = VgeoReader::parse(&bytes) else {
+            continue;
+        };
         let tris = r.header.asset.triangle_count;
         if tris < 100_000 {
             continue;
@@ -165,7 +212,12 @@ fn real_assets_leaf_stats() {
             x
         }
         let mut pm = std::collections::HashMap::new();
-        let canon_v: Vec<u32> = m.positions.iter().enumerate().map(|(i, q)| *pm.entry(q.map(f32::to_bits)).or_insert(i as u32)).collect();
+        let canon_v: Vec<u32> = m
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| *pm.entry(q.map(f32::to_bits)).or_insert(i as u32))
+            .collect();
         for t in m.indices.chunks(3) {
             let a = find(&mut parent, canon_v[t[0] as usize]);
             for k in 1..3 {
@@ -177,7 +229,9 @@ fn real_assets_leaf_stats() {
         }
         let mut comp = std::collections::HashMap::new();
         for t in m.indices.chunks(3) {
-            *comp.entry(find(&mut parent, canon_v[t[0] as usize])).or_insert(0usize) += 1;
+            *comp
+                .entry(find(&mut parent, canon_v[t[0] as usize]))
+                .or_insert(0usize) += 1;
         }
         let mut sizes: Vec<usize> = comp.values().copied().collect();
         sizes.sort_unstable();
@@ -188,7 +242,10 @@ fn real_assets_leaf_stats() {
                 *edges.entry((a.min(b), a.max(b))).or_insert(0u32) += 1;
             }
         }
-        let uniq = canon_v.iter().collect::<std::collections::HashSet<_>>().len();
+        let uniq = canon_v
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         println!("  unique positions {uniq} of {} verts", m.positions.len());
         let open = edges.values().filter(|&&c| c == 1).count();
         let nm = edges.values().filter(|&&c| c > 2).count();
@@ -224,17 +281,30 @@ fn cut_sizes(r: &VgeoReader) -> [usize; 3] {
     let rad = ((0..3).map(|a| (hi[a] - lo[a]).powi(2)).sum::<f32>()).sqrt() / 2.0;
     let scale = 1080.0 / (2.0 * (60f32.to_radians() * 0.5).tan());
     [20.0f32, 50.0, 100.0].map(|d| {
-        let proj = Projection { eye: [c[0] + rad + d, c[1], c[2]], scale };
-        r.select_clusters(1.0, &proj).unwrap().iter().map(|s| s.cluster.tri_count() as usize).sum()
+        let proj = Projection {
+            eye: [c[0] + rad + d, c[1], c[2]],
+            scale,
+        };
+        r.select_clusters(1.0, &proj)
+            .unwrap()
+            .iter()
+            .map(|s| s.cluster.tri_count() as usize)
+            .sum()
     })
 }
 
 #[test]
 #[ignore = "rebuilds cached vg_stress assets; VG_ONLY=<hash prefix> to pick one; run with --release -- --ignored --nocapture"]
 fn real_assets_rebuild_and_reduce() {
-    let Ok(rd) = std::fs::read_dir(cache_dir()) else { return };
+    let Ok(rd) = std::fs::read_dir(cache_dir()) else {
+        return;
+    };
     let only = std::env::var("VG_ONLY").ok();
-    let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|s| s.to_str()) == Some("vgeo")).collect();
+    let mut files: Vec<_> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("vgeo"))
+        .collect();
     files.sort();
     for p in files {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
@@ -242,7 +312,9 @@ fn real_assets_rebuild_and_reduce() {
             continue;
         }
         let bytes = std::fs::read(&p).unwrap();
-        let Ok(r) = VgeoReader::parse(&bytes) else { continue };
+        let Ok(r) = VgeoReader::parse(&bytes) else {
+            continue;
+        };
         let tris = r.header.asset.triangle_count;
         if tris < 300_000 || (only.is_none() && tris > 8_000_000) {
             continue;
@@ -254,9 +326,14 @@ fn real_assets_rebuild_and_reduce() {
         let secs = t0.elapsed().as_secs_f32();
         let r2 = VgeoReader::parse(&out).unwrap();
         let after = cut_sizes(&r2);
-        println!("{name}: {tris} tris, built {secs:.1}s, 20/50/100 m before {before:?} after {after:?}");
+        println!(
+            "{name}: {tris} tris, built {secs:.1}s, 20/50/100 m before {before:?} after {after:?}"
+        );
         if only.is_none() {
-            assert!(after[2] * 10 <= after[0].max(1) * 10 && after[2] < tris as usize / 4, "{name} did not reduce: {after:?}");
+            assert!(
+                after[2] * 10 <= after[0].max(1) * 10 && after[2] < tris as usize / 4,
+                "{name} did not reduce: {after:?}"
+            );
         }
     }
 }
@@ -264,7 +341,9 @@ fn real_assets_rebuild_and_reduce() {
 #[test]
 #[ignore = "diagnostic: per-level sphere/error stats of a rebuilt cached asset (VG_ONLY=prefix)"]
 fn real_asset_level_stats() {
-    let Ok(rd) = std::fs::read_dir(cache_dir()) else { return };
+    let Ok(rd) = std::fs::read_dir(cache_dir()) else {
+        return;
+    };
     let only = std::env::var("VG_ONLY").unwrap_or_default();
     for p in rd.flatten().map(|e| e.path()) {
         let name = p.file_name().unwrap().to_string_lossy().to_string();
@@ -290,10 +369,24 @@ fn real_asset_level_stats() {
 #[test]
 fn root_set_is_page_bounded() {
     let mesh = canopy(30_000, 3.0, 0.05, 7);
-    let bytes = build_vgeo(&mesh.input(), &BuildOptions { content_id: [1, 2], resident_levels: 64 }).unwrap();
+    let bytes = build_vgeo(
+        &mesh.input(),
+        &BuildOptions {
+            content_id: [1, 2],
+            resident_levels: 64,
+        },
+    )
+    .unwrap();
     let r = VgeoReader::parse(&bytes).unwrap();
-    assert!(r.header.asset.root_page_count <= MAX_ROOT_PAGES, "{}", r.header.asset.root_page_count);
-    assert!(r.header.asset.root_page_count < r.header.asset.page_count || r.header.asset.page_count <= MAX_ROOT_PAGES);
+    assert!(
+        r.header.asset.root_page_count <= MAX_ROOT_PAGES,
+        "{}",
+        r.header.asset.root_page_count
+    );
+    assert!(
+        r.header.asset.root_page_count < r.header.asset.page_count
+            || r.header.asset.page_count <= MAX_ROOT_PAGES
+    );
 }
 
 #[test]
@@ -339,7 +432,14 @@ fn connected_open_surface_keeps_its_border() {
         .chunks(3)
         .map(|t| [0, 1, 2].map(|k| quantize(mesh.positions[t[k] as usize], &r.meta)))
         .collect();
-    let (_, cut) = cut_tris(&r, 1e30, &Projection { eye: [0.5, 5.0, 0.5], scale: 1000.0 });
+    let (_, cut) = cut_tris(
+        &r,
+        1e30,
+        &Projection {
+            eye: [0.5, 5.0, 0.5],
+            scale: 1000.0,
+        },
+    );
     assert_eq!(open_edges(&cut), open_edges(&src));
 }
 
@@ -349,23 +449,41 @@ fn recook_non_reducing_caches() {
     if std::env::var("VG_RECOOK").is_err() {
         return;
     }
-    let Ok(rd) = std::fs::read_dir(cache_dir()) else { return };
-    let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|s| s.to_str()) == Some("vgeo")).collect();
+    let Ok(rd) = std::fs::read_dir(cache_dir()) else {
+        return;
+    };
+    let mut files: Vec<_> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("vgeo"))
+        .collect();
     files.sort();
     for p in files {
         let bytes = std::fs::read(&p).unwrap();
-        let Ok(r) = VgeoReader::parse(&bytes) else { continue };
+        let Ok(r) = VgeoReader::parse(&bytes) else {
+            continue;
+        };
         let a = r.header.asset;
         let rev = r.header.asset.flags >> 16;
-        let healthy = a.root_page_count < a.page_count.min(64) && a.root_page_count <= MAX_ROOT_PAGES;
+        let healthy =
+            a.root_page_count < a.page_count.min(64) && a.root_page_count <= MAX_ROOT_PAGES;
         // Older healthy cooks are left alone (the loader refreshes them on demand);
         // unbounded roots and caches of an earlier build of this revision are redone.
-        if rev > COOK_REVISION || (healthy && rev != COOK_REVISION) || (healthy && std::env::var("VG_RECOOK_ONLY_BAD").is_ok()) {
+        if rev > COOK_REVISION
+            || (healthy && rev != COOK_REVISION)
+            || (healthy && std::env::var("VG_RECOOK_ONLY_BAD").is_ok())
+        {
             continue;
         }
         let m = leaf_mesh(&bytes);
         let t0 = std::time::Instant::now();
-        let out = build_vgeo(&m.input(), &BuildOptions { content_id: r.header.content_id, resident_levels: 2 });
+        let out = build_vgeo(
+            &m.input(),
+            &BuildOptions {
+                content_id: r.header.content_id,
+                resident_levels: 2,
+            },
+        );
         let secs = t0.elapsed().as_secs_f32();
         match out {
             Ok(out) => {

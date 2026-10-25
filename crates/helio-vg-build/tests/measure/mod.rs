@@ -108,7 +108,11 @@ impl Soup {
         let grids = [1.0f32, 8.0, 64.0]
             .iter()
             .map(|m| {
-                let mut g = Grid { cell: base * m, origin: lo, map: HashMap::new() };
+                let mut g = Grid {
+                    cell: base * m,
+                    origin: lo,
+                    map: HashMap::new(),
+                };
                 for (i, t) in tris.iter().enumerate() {
                     let mut a = [f32::INFINITY; 3];
                     let mut b = [f32::NEG_INFINITY; 3];
@@ -200,7 +204,13 @@ impl Soup {
 
 /// Vertices, edge midpoints and centroid of a triangle (7 samples).
 pub fn tri_samples(t: &[V3; 3]) -> [V3; 7] {
-    let mid = |a: V3, b: V3| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+    let mid = |a: V3, b: V3| {
+        [
+            (a[0] + b[0]) * 0.5,
+            (a[1] + b[1]) * 0.5,
+            (a[2] + b[2]) * 0.5,
+        ]
+    };
     [
         t[0],
         t[1],
@@ -253,7 +263,10 @@ pub fn measure_level(
         .par_iter()
         .enumerate()
         .map(|(i, t)| {
-            let d = tri_samples(t).iter().map(|&p| original.nearest(p).0).fold(0.0f32, f32::max);
+            let d = tri_samples(t)
+                .iter()
+                .map(|&p| original.nearest(p).0)
+                .fold(0.0f32, f32::max);
             (owner[i], d)
         })
         .collect();
@@ -295,7 +308,13 @@ pub fn measure_level(
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let max = sorted.last().copied().unwrap_or(0.0);
     let p99 = sorted[((sorted.len() as f32 * 0.99) as usize).min(sorted.len().saturating_sub(1))];
-    LevelDeviation { per_cluster: per, samples, max, p99, worst_ratio }
+    LevelDeviation {
+        per_cluster: per,
+        samples,
+        max,
+        p99,
+        worst_ratio,
+    }
 }
 
 /// Deterministic noisy sphere (bumpy "scan-like" detail) with
@@ -347,7 +366,11 @@ pub fn noisy_sphere(subdiv: u32) -> (Vec<V3>, Vec<u32>) {
         let mut mid = |a: u32, b: u32, p: &mut Vec<V3>| -> u32 {
             *cache.entry((a.min(b), a.max(b))).or_insert_with(|| {
                 let (pa, pb) = (p[a as usize], p[b as usize]);
-                let m = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5, (pa[2] + pb[2]) * 0.5];
+                let m = [
+                    (pa[0] + pb[0]) * 0.5,
+                    (pa[1] + pb[1]) * 0.5,
+                    (pa[2] + pb[2]) * 0.5,
+                ];
                 let l = dot(m, m).sqrt();
                 p.push([m[0] / l, m[1] / l, m[2] / l]);
                 (p.len() - 1) as u32
@@ -355,7 +378,11 @@ pub fn noisy_sphere(subdiv: u32) -> (Vec<V3>, Vec<u32>) {
         };
         let mut next = Vec::new();
         for t in &idx {
-            let (a, b, c) = (mid(t[0], t[1], &mut p), mid(t[1], t[2], &mut p), mid(t[2], t[0], &mut p));
+            let (a, b, c) = (
+                mid(t[0], t[1], &mut p),
+                mid(t[1], t[2], &mut p),
+                mid(t[2], t[0], &mut p),
+            );
             next.extend([[t[0], a, c], [t[1], b, a], [t[2], c, b], [a, b, c]]);
         }
         idx = next;
@@ -364,8 +391,16 @@ pub fn noisy_sphere(subdiv: u32) -> (Vec<V3>, Vec<u32>) {
     for v in p.iter_mut() {
         let d = *v;
         let mut h = 0.0f32;
-        for (k, amp) in [(2.0f32, 0.06f32), (7.0, 0.02), (23.0, 0.006), (71.0, 0.0015)] {
-            h += amp * ((d[0] * k + 0.3).sin() * (d[1] * k * 1.3 + 1.1).sin() * (d[2] * k * 0.9 + 2.0).cos());
+        for (k, amp) in [
+            (2.0f32, 0.06f32),
+            (7.0, 0.02),
+            (23.0, 0.006),
+            (71.0, 0.0015),
+        ] {
+            h += amp
+                * ((d[0] * k + 0.3).sin()
+                    * (d[1] * k * 1.3 + 1.1).sin()
+                    * (d[2] * k * 0.9 + 2.0).cos());
         }
         let bits = (d[0].to_bits().wrapping_mul(0x9E37_79B1)
             ^ d[1].to_bits().wrapping_mul(0x85EB_CA6B)
@@ -390,16 +425,28 @@ pub fn load_glb(path: &str) -> (Vec<V3>, Vec<u32>) {
     let accessor = |i: usize| -> (usize, usize, usize) {
         let a = &json["accessors"][i];
         let v = &json["bufferViews"][a["bufferView"].as_u64().unwrap() as usize];
-        let off = v["byteOffset"].as_u64().unwrap_or(0) as usize + a["byteOffset"].as_u64().unwrap_or(0) as usize;
-        (off, a["count"].as_u64().unwrap() as usize, a["componentType"].as_u64().unwrap() as usize)
+        let off = v["byteOffset"].as_u64().unwrap_or(0) as usize
+            + a["byteOffset"].as_u64().unwrap_or(0) as usize;
+        (
+            off,
+            a["count"].as_u64().unwrap() as usize,
+            a["componentType"].as_u64().unwrap() as usize,
+        )
     };
     let (mut pos, mut idx) = (Vec::new(), Vec::new());
     for mesh in json["meshes"].as_array().unwrap() {
         for prim in mesh["primitives"].as_array().unwrap() {
             let base = pos.len() as u32;
-            let (off, count, _) = accessor(prim["attributes"]["POSITION"].as_u64().unwrap() as usize);
+            let (off, count, _) =
+                accessor(prim["attributes"]["POSITION"].as_u64().unwrap() as usize);
             for i in 0..count {
-                let f = |k: usize| f32::from_le_bytes(bin[off + i * 12 + k * 4..off + i * 12 + k * 4 + 4].try_into().unwrap());
+                let f = |k: usize| {
+                    f32::from_le_bytes(
+                        bin[off + i * 12 + k * 4..off + i * 12 + k * 4 + 4]
+                            .try_into()
+                            .unwrap(),
+                    )
+                };
                 pos.push([f(0), f(1), f(2)]);
             }
             let (off, count, ty) = accessor(prim["indices"].as_u64().unwrap() as usize);
@@ -408,7 +455,8 @@ pub fn load_glb(path: &str) -> (Vec<V3>, Vec<u32>) {
                     base + if ty == 5125 {
                         u32::from_le_bytes(bin[off + i * 4..off + i * 4 + 4].try_into().unwrap())
                     } else {
-                        u16::from_le_bytes(bin[off + i * 2..off + i * 2 + 2].try_into().unwrap()) as u32
+                        u16::from_le_bytes(bin[off + i * 2..off + i * 2 + 2].try_into().unwrap())
+                            as u32
                     },
                 );
             }

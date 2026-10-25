@@ -187,7 +187,10 @@ impl VgRuntime {
     /// Whether `content_id` was requested (registered or pending).
     pub fn has_asset(&self, content_id: u128) -> bool {
         let content = content_words(content_id);
-        lock(&self.0.state).assets.iter().any(|e| e.content == content)
+        lock(&self.0.state)
+            .assets
+            .iter()
+            .any(|e| e.content == content)
     }
 
     /// Every requested asset that was not rejected, registered or pending:
@@ -202,10 +205,17 @@ impl VgRuntime {
             .filter_map(|e| {
                 let source = match (&e.source, e.handle, state.store.as_ref()) {
                     (Some(source), _, _) => source.clone(),
-                    (None, Some(handle), Some(store)) => store.core().asset_source(handle.slot())?.0,
+                    (None, Some(handle), Some(store)) => {
+                        store.core().asset_source(handle.slot())?.0
+                    }
                     _ => return None,
                 };
-                Some(VgAssetInfo { content: e.content, vertex_offset: e.vertex_offset, vertex_count: e.vertex_count, source })
+                Some(VgAssetInfo {
+                    content: e.content,
+                    vertex_offset: e.vertex_offset,
+                    vertex_count: e.vertex_count,
+                    source,
+                })
             })
             .collect()
     }
@@ -237,13 +247,21 @@ impl VgRuntime {
         let budget = self.settings().page_budget_mb;
         let mut state = lock(&self.0.state);
         if state.store.is_none() {
-            let cfg = VgStreamConfig { budget_mb: budget, ..VgStreamConfig::default() };
+            let cfg = VgStreamConfig {
+                budget_mb: budget,
+                ..VgStreamConfig::default()
+            };
             state.store = Some(VgAssetStore::new(device, queue, cfg));
         }
         let State { store, assets } = &mut *state;
         let store = store.as_mut().expect("store created above");
-        for entry in assets.iter_mut().filter(|e| e.handle.is_none() && !e.failed) {
-            let Some(source) = entry.source.clone() else { continue };
+        for entry in assets
+            .iter_mut()
+            .filter(|e| e.handle.is_none() && !e.failed)
+        {
+            let Some(source) = entry.source.clone() else {
+                continue;
+            };
             match store.register(source) {
                 Ok(handle) => {
                     entry.handle = Some(handle);
@@ -298,7 +316,8 @@ impl VgRuntime {
             .collect();
         (
             store.asset_ready_rows(&mapping, min_rows),
-            host.wrapping_mul(0x9e37_79b9).wrapping_add(store.content_version()),
+            host.wrapping_mul(0x9e37_79b9)
+                .wrapping_add(store.content_version()),
         )
     }
 }
@@ -326,10 +345,10 @@ impl VgRuntime {
     pub fn handle_id(&self) -> u64 {
         let mut table = lock(table());
         table.retain(|_, weak| weak.strong_count() > 0);
-        if let Some((&id, _)) = table
-            .iter()
-            .find(|(_, weak)| weak.upgrade().is_some_and(|inner| Arc::ptr_eq(&inner, &self.0)))
-        {
+        if let Some((&id, _)) = table.iter().find(|(_, weak)| {
+            weak.upgrade()
+                .is_some_and(|inner| Arc::ptr_eq(&inner, &self.0))
+        }) {
             return id;
         }
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -346,7 +365,9 @@ impl VgRuntime {
     /// Whether any registered asset has its root pages resident.
     pub fn any_ready(&self) -> bool {
         let state = lock(&self.0.state);
-        let Some(store) = state.store.as_ref() else { return false };
+        let Some(store) = state.store.as_ref() else {
+            return false;
+        };
         state
             .assets
             .iter()

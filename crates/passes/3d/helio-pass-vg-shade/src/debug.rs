@@ -117,7 +117,12 @@ impl DebugPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { bgl0, bgl1, pipeline, params }
+        Self {
+            bgl0,
+            bgl1,
+            pipeline,
+            params,
+        }
     }
 }
 
@@ -160,36 +165,108 @@ impl VgShade {
             label: Some("VgShade debug 0"),
             layout: &pipeline.bgl0,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf(inputs.camera) },
-                wgpu::BindGroupEntry { binding: 1, resource: buf(&pipeline.params) },
-                wgpu::BindGroupEntry { binding: 2, resource: buf(inputs.static_objects) },
-                wgpu::BindGroupEntry { binding: 3, resource: buf(inputs.coordinate_spaces) },
-                wgpu::BindGroupEntry { binding: 4, resource: buf(inputs.visible) },
-                wgpu::BindGroupEntry { binding: 5, resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)) },
-                wgpu::BindGroupEntry { binding: 6, resource: buf(inputs.instances) },
-                wgpu::BindGroupEntry { binding: 7, resource: buf(s.page_pool) },
-                wgpu::BindGroupEntry { binding: 8, resource: buf(s.residency) },
-                wgpu::BindGroupEntry { binding: 9, resource: buf(s.nodes) },
-                wgpu::BindGroupEntry { binding: 10, resource: buf(s.group_refs) },
-                wgpu::BindGroupEntry { binding: 11, resource: buf(s.asset_headers) },
-                wgpu::BindGroupEntry { binding: 12, resource: buf(s.asset_bases) },
-                wgpu::BindGroupEntry { binding: 13, resource: buf(s.asset_quant) },
-                wgpu::BindGroupEntry { binding: 14, resource: buf(inputs.materials) },
-                wgpu::BindGroupEntry { binding: 15, resource: buf(debug.cull_state) },
-                wgpu::BindGroupEntry { binding: 16, resource: buf(debug.tile_counters) },
-                wgpu::BindGroupEntry { binding: 17, resource: buf(debug.dense_mask) },
-                wgpu::BindGroupEntry { binding: 18, resource: buf(debug.resolved_mask.unwrap_or(&self.dummy_keys)) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf(inputs.camera),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf(&pipeline.params),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf(inputs.static_objects),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf(inputs.coordinate_spaces),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buf(inputs.visible),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: buf(inputs.instances),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: buf(s.page_pool),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: buf(s.residency),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: buf(s.nodes),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: buf(s.group_refs),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: buf(s.asset_headers),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: buf(s.asset_bases),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: buf(s.asset_quant),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: buf(inputs.materials),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: buf(debug.cull_state),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 16,
+                    resource: buf(debug.tile_counters),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 17,
+                    resource: buf(debug.dense_mask),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 18,
+                    resource: buf(debug.resolved_mask.unwrap_or(&self.dummy_keys)),
+                },
             ],
         });
-        let payload_view = self.payload_view.as_ref().expect("encode_rec resized the targets");
-        let source_view = self.source_view.as_ref().expect("encode_rec resized the targets");
+        let payload_view = self
+            .payload_view
+            .as_ref()
+            .expect("encode_rec resized the targets");
+        let source_view = self
+            .source_view
+            .as_ref()
+            .expect("encode_rec resized the targets");
         let group1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgShade debug 1"),
             layout: &pipeline.bgl1,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(payload_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(targets.albedo) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(source_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(payload_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(targets.albedo),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

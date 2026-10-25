@@ -177,8 +177,16 @@ impl CoronaPass {
         camera_buf: &wgpu::Buffer,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let compute_shader = helio_core::shader::module(device, "Corona Compute Shader", helio_core::include_wgsl!("../shaders/corona.wgsl"));
-        let render_shader = helio_core::shader::module(device, "Corona Render Shader", helio_core::include_wgsl!("../shaders/corona_render.wgsl"));
+        let compute_shader = helio_core::shader::module(
+            device,
+            "Corona Compute Shader",
+            helio_core::include_wgsl!("../shaders/corona.wgsl"),
+        );
+        let render_shader = helio_core::shader::module(
+            device,
+            "Corona Render Shader",
+            helio_core::include_wgsl!("../shaders/corona_render.wgsl"),
+        );
 
         // ── Buffers ──────────────────────────────────────────────────────────
 
@@ -367,14 +375,17 @@ impl CoronaPass {
         // ── Compute pipelines ────────────────────────────────────────────────
 
         let mk_compute = |entry: &str| -> wgpu::ComputePipeline {
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(&format!("Corona {entry}")),
-                layout: Some(&compute_pl),
-                module: &compute_shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(&format!("Corona {entry}")),
+                    layout: Some(&compute_pl),
+                    module: &compute_shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
 
         let simulate_pipeline = mk_compute("cs_simulate");
@@ -390,52 +401,59 @@ impl CoronaPass {
 
         // ── Render pipeline ──────────────────────────────────────────────────
 
-        let render_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Corona Render"),
-            layout: Some(&render_pl),
-            vertex: wgpu::VertexState {
-                module: &render_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
+        let render_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Corona Render"),
+                layout: Some(&render_pl),
+                vertex: wgpu::VertexState {
+                    module: &render_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &render_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &render_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         // ── Initial bind group ───────────────────────────────────────────────
 
-        let bg_key = Some([particle_buf.clone(), emitter_buf.clone(), camera_buf.clone()]);
+        let bg_key = Some([
+            particle_buf.clone(),
+            emitter_buf.clone(),
+            camera_buf.clone(),
+        ]);
 
         let compute_bg = Some(Self::build_bg(
             device,
@@ -846,12 +864,7 @@ impl RenderPass for CoronaPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "pre_aa",
-            "full_res_depth",
-            "corona_emitters",
-            "depth",
-        ]
+        &["pre_aa", "full_res_depth", "corona_emitters", "depth"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -917,10 +930,12 @@ impl RenderPass for CoronaPass {
         let depth_view = if pre_aa.is_some() {
             depth
         } else {
-            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
+            resources
+                .get(helio_core::ResourceKey::new("full_res_depth"))
+                .unwrap_or(depth)
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -958,7 +973,11 @@ impl RenderPass for CoronaPass {
             .get(BufferKey::of("corona_emitters"))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.emitter_buf);
-        let key = [self.particle_buf.clone(), emitter_buf.clone(), ctx.camera.clone()];
+        let key = [
+            self.particle_buf.clone(),
+            emitter_buf.clone(),
+            ctx.camera.clone(),
+        ];
 
         if self.bg_key.as_ref() != Some(&key) {
             self.compute_bg = Some(Self::build_bg(
@@ -1017,13 +1036,7 @@ impl RenderPass for CoronaPass {
             p.dispatch_workgroups(1, 1, 1);
         }
         // STORAGE output → INDIRECT args, as for the draw args below.
-        cmds.copy_buffer_to_buffer(
-            &self.pool_layout_buf,
-            0,
-            &self.pool_dispatch_buf,
-            0,
-            12,
-        );
+        cmds.copy_buffer_to_buffer(&self.pool_layout_buf, 0, &self.pool_dispatch_buf, 0, 12);
 
         // ── Pass 1: Simulate ─────────────────────────────────────────────────
         {
@@ -1174,6 +1187,3 @@ impl RenderPass for CoronaPass {
         Ok(())
     }
 }
-
-
-

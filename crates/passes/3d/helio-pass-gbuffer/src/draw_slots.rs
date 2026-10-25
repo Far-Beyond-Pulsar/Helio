@@ -77,9 +77,18 @@ mod tests {
     fn gpu_driven_vertex_shaders_read_the_slot_attribute() {
         let sources = [
             ("gbuffer", include_str!("../shaders/gbuffer.wgsl")),
-            ("depth prepass", include_str!("../../helio-pass-depth-prepass/shaders/depth_prepass.wgsl")),
-            ("forward lit", include_str!("../../helio-pass-forward-lit/shaders/forward_lit.wgsl")),
-            ("shadow", include_str!("../../helio-pass-shadow/shaders/shadow.wgsl")),
+            (
+                "depth prepass",
+                include_str!("../../helio-pass-depth-prepass/shaders/depth_prepass.wgsl"),
+            ),
+            (
+                "forward lit",
+                include_str!("../../helio-pass-forward-lit/shaders/forward_lit.wgsl"),
+            ),
+            (
+                "shadow",
+                include_str!("../../helio-pass-shadow/shaders/shadow.wgsl"),
+            ),
             (
                 "shadow transmittance",
                 include_str!("../../helio-pass-shadow/shaders/shadow_transmittance.wgsl"),
@@ -88,8 +97,14 @@ mod tests {
                 "portal instances",
                 include_str!("../../helio-pass-portal-instances/shaders/gbuffer_portal.wgsl"),
             ),
-            ("transparent", include_str!("../../../../helio-mats/templates/transparent_base.wgsl")),
-            ("corona", include_str!("../../helio-pass-corona/shaders/corona_render.wgsl")),
+            (
+                "transparent",
+                include_str!("../../../../helio-mats/templates/transparent_base.wgsl"),
+            ),
+            (
+                "corona",
+                include_str!("../../helio-pass-corona/shaders/corona_render.wgsl"),
+            ),
         ];
         let attribute = format!("@location({})", super::DRAW_SLOT_LOCATION);
         for (name, source) in sources {
@@ -102,7 +117,10 @@ mod tests {
                 !code.contains("builtin(instance_index)"),
                 "{name}: reads @builtin(instance_index)"
             );
-            assert!(code.contains(&attribute), "{name}: has no {attribute} slot input");
+            assert!(
+                code.contains(&attribute),
+                "{name}: has no {attribute} slot input"
+            );
         }
     }
 }

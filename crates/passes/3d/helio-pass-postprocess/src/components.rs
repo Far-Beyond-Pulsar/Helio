@@ -55,7 +55,8 @@ pub struct PostProcessVolumeComponent {
 /// `settings` and `lens` arrays.
 const SPLIT: usize = std::mem::size_of::<[u32; 116]>();
 const _: () = assert!(
-    SPLIT + std::mem::size_of::<[f32; 16]>() == std::mem::size_of::<crate::GpuPostProcessUniforms>()
+    SPLIT + std::mem::size_of::<[f32; 16]>()
+        == std::mem::size_of::<crate::GpuPostProcessUniforms>()
 );
 
 /// Split `GpuPostProcessUniforms` into the reflection-supported row parts.
@@ -119,14 +120,25 @@ mod tests {
         settings.fog_density = 0.125;
         let gpu = settings.to_gpu();
         let camera = CameraPostProcessComponent::new(3, &settings);
-        assert_eq!(bytemuck::bytes_of(&camera.settings()), bytemuck::bytes_of(&gpu));
+        assert_eq!(
+            bytemuck::bytes_of(&camera.settings()),
+            bytemuck::bytes_of(&gpu)
+        );
         assert_eq!(camera.view_id, 3);
 
         let mut descriptor = crate::PostProcessVolumeDescriptor::default();
         descriptor.settings = settings;
         descriptor.override_mask = [1, 2, 3, 4];
         let row = PostProcessVolumeComponent::from(descriptor.to_gpu());
-        assert_eq!([row.override_mask_0, row.override_mask_1, row.override_mask_2, row.override_mask_3], [1, 2, 3, 4]);
+        assert_eq!(
+            [
+                row.override_mask_0,
+                row.override_mask_1,
+                row.override_mask_2,
+                row.override_mask_3
+            ],
+            [1, 2, 3, 4]
+        );
         let back = crate::GpuPostProcessVolume::from(row);
         assert_eq!(bytemuck::bytes_of(&back.settings), bytemuck::bytes_of(&gpu));
     }
@@ -194,7 +206,14 @@ impl CameraPostProcessComponent {
     }
     pub fn from_gpu(view_id: u32, settings: &crate::GpuPostProcessUniforms) -> Self {
         let (settings, lens) = split_settings(settings);
-        Self { view_id, enabled: 1, _pad0: 0, _pad1: 0, settings, lens }
+        Self {
+            view_id,
+            enabled: 1,
+            _pad0: 0,
+            _pad1: 0,
+            settings,
+            lens,
+        }
     }
     pub fn settings(&self) -> crate::GpuPostProcessUniforms {
         join_settings(&self.settings, &self.lens)
@@ -213,6 +232,7 @@ fn clear_camera_row(mirror: &pulsar_scenedb::gpu::GpuMirrorHandle, row: u32) {
     let zero: CameraPostProcessComponent = bytemuck::Zeroable::zeroed();
     mirror.store().mark_gpu_row_dirty(
         pulsar_scenedb::component::component_id::<__ScenedbGpuPacked_CameraPostProcessComponent>(),
-        row, bytemuck::bytes_of(&zero),
+        row,
+        bytemuck::bytes_of(&zero),
     );
 }

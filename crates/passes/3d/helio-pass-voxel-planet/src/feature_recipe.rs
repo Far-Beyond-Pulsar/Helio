@@ -65,30 +65,82 @@ pub struct Growth {
 
 impl Default for Growth {
     fn default() -> Self {
-        Self { form: Form::Tree, species: Species::Oak, material: material::WOOD, second_material: material::LEAVES, min_size_m: 0.5, max_size_m: 1.3, blocks: 0, seed: 0, variants: 6 }
+        Self {
+            form: Form::Tree,
+            species: Species::Oak,
+            material: material::WOOD,
+            second_material: material::LEAVES,
+            min_size_m: 0.5,
+            max_size_m: 1.3,
+            blocks: 0,
+            seed: 0,
+            variants: 6,
+        }
     }
 }
 
 impl Growth {
     /// `variants` trees of `species`.
     pub fn tree(species: Species, wood: u32, leaves: u32, seed: u64) -> Self {
-        Self { form: Form::Tree, species, material: wood, second_material: leaves, seed, ..Self::default() }
+        Self {
+            form: Form::Tree,
+            species,
+            material: wood,
+            second_material: leaves,
+            seed,
+            ..Self::default()
+        }
     }
     pub fn bush(leaves: u32, seed: u64) -> Self {
-        Self { form: Form::Bush, material: leaves, second_material: 0, seed, ..Self::default() }
+        Self {
+            form: Form::Bush,
+            material: leaves,
+            second_material: 0,
+            seed,
+            ..Self::default()
+        }
     }
     pub fn shrub(wood: u32, leaves: u32, seed: u64) -> Self {
-        Self { form: Form::Shrub, material: wood, second_material: leaves, seed, ..Self::default() }
+        Self {
+            form: Form::Shrub,
+            material: wood,
+            second_material: leaves,
+            seed,
+            ..Self::default()
+        }
     }
     pub fn cactus(body: u32, seed: u64) -> Self {
-        Self { form: Form::Cactus, material: body, second_material: 0, seed, ..Self::default() }
+        Self {
+            form: Form::Cactus,
+            material: body,
+            second_material: 0,
+            seed,
+            ..Self::default()
+        }
     }
     /// Boulders `size_m` across, a third of them of `other` (0: none).
     pub fn boulder(rock: u32, other: u32, size_m: [f64; 2], seed: u64) -> Self {
-        Self { form: Form::Boulder, material: rock, second_material: other, min_size_m: size_m[0], max_size_m: size_m[1], seed, ..Self::default() }
+        Self {
+            form: Form::Boulder,
+            material: rock,
+            second_material: other,
+            min_size_m: size_m[0],
+            max_size_m: size_m[1],
+            seed,
+            ..Self::default()
+        }
     }
     pub fn crater(rim: u32, rocks: u32, blocks: u32, diameter_m: [f64; 2], seed: u64) -> Self {
-        Self { form: Form::Crater, material: rim, second_material: rocks, min_size_m: diameter_m[0], max_size_m: diameter_m[1], blocks, seed, ..Self::default() }
+        Self {
+            form: Form::Crater,
+            material: rim,
+            second_material: rocks,
+            min_size_m: diameter_m[0],
+            max_size_m: diameter_m[1],
+            blocks,
+            seed,
+            ..Self::default()
+        }
     }
 
     /// Its stamps on a world of seed `world_seed`, in cells of `voxel` m.
@@ -97,15 +149,32 @@ impl Growth {
             .map(|v| {
                 let seed = world_seed ^ (self.seed << 40) ^ v.wrapping_mul(0x9e37_79b9);
                 match self.form {
-                    Form::Tree => flora::tree(self.species, self.material, self.second_material, seed, voxel),
+                    Form::Tree => flora::tree(
+                        self.species,
+                        self.material,
+                        self.second_material,
+                        seed,
+                        voxel,
+                    ),
                     Form::Bush => flora::bush(self.material, seed, voxel),
                     Form::Shrub => flora::shrub(self.material, self.second_material, seed, voxel),
                     Form::Cactus => flora::cactus(self.material, seed, voxel),
                     Form::Boulder => {
-                        let rock = if self.second_material != 0 && seed % 3 == 0 { self.second_material } else { self.material };
+                        let rock = if self.second_material != 0 && seed % 3 == 0 {
+                            self.second_material
+                        } else {
+                            self.material
+                        };
                         flora::boulder_sized(rock, seed, voxel, [self.min_size_m, self.max_size_m])
                     }
-                    Form::Crater => flora::crater(self.material, self.second_material, self.blocks, seed, voxel, [self.min_size_m, self.max_size_m]),
+                    Form::Crater => flora::crater(
+                        self.material,
+                        self.second_material,
+                        self.blocks,
+                        seed,
+                        voxel,
+                        [self.min_size_m, self.max_size_m],
+                    ),
                 }
             })
             .collect()
@@ -209,10 +278,18 @@ impl FeatureRecipe {
                 surfaces: s.surfaces.clone(),
                 heights_m: [s.min_height_m, s.max_height_m],
                 height_wander_m: [s.height_wander_m, s.height_wander_scale_m],
-                max_relief: if s.max_relief_m > 0.0 { cells(s.max_relief_m) } else { u32::MAX },
+                max_relief: if s.max_relief_m > 0.0 {
+                    cells(s.max_relief_m)
+                } else {
+                    u32::MAX
+                },
                 sink: (s.sink_m / voxel).round() as i32,
                 far_material: s.far_material,
-                far_height: if s.far_height_m > 0.0 { cells(s.far_height_m) } else { 0 },
+                far_height: if s.far_height_m > 0.0 {
+                    cells(s.far_height_m)
+                } else {
+                    0
+                },
             });
         }
         set
@@ -241,9 +318,14 @@ impl FeatureRecipe {
         // stop at the tree line, below the snow; both lines wander a few
         // hundred metres over half a kilometre (no contour lines).
         let (conifer_line, tree_line) = (1_100.0, 2_600.0);
-        let ([lowland_wander, lowland_scale], [tree_line_wander, tree_line_scale]) = ([150.0, 500.0], [200.0, 450.0]);
+        let ([lowland_wander, lowland_scale], [tree_line_wander, tree_line_scale]) =
+            ([150.0, 500.0], [200.0, 450.0]);
         let meadow = vec![GRASS, DIRT];
-        let forest = |name: &str, growths: Vec<Growth>, field_scale_m: f64, field_threshold: f32, far_material: u32| SpawnRecipe {
+        let forest = |name: &str,
+                      growths: Vec<Growth>,
+                      field_scale_m: f64,
+                      field_threshold: f32,
+                      far_material: u32| SpawnRecipe {
             name: name.into(),
             growths,
             spacing_m: 9.0,
@@ -258,12 +340,25 @@ impl FeatureRecipe {
             far_material,
             ..SpawnRecipe::default()
         };
-        let broadleaf = vec![Growth::tree(Species::Oak, WOOD, LEAVES, 1), Growth::tree(Species::Oak, WOOD, LEAVES, 2), Growth::tree(Species::DarkOak, WOOD, LEAVES, 3)];
-        let conifers = vec![Growth::tree(Species::Spruce, WOOD, NEEDLES, 5), Growth::tree(Species::Pine, WOOD, NEEDLES, 6)];
+        let broadleaf = vec![
+            Growth::tree(Species::Oak, WOOD, LEAVES, 1),
+            Growth::tree(Species::Oak, WOOD, LEAVES, 2),
+            Growth::tree(Species::DarkOak, WOOD, LEAVES, 3),
+        ];
+        let conifers = vec![
+            Growth::tree(Species::Spruce, WOOD, NEEDLES, 5),
+            Growth::tree(Species::Pine, WOOD, NEEDLES, 6),
+        ];
         Self {
             spawns: vec![
                 forest("broadleaf woods", broadleaf, 2_400.0, 0.05, LEAVES),
-                forest("birch woods", vec![Growth::tree(Species::Birch, BIRCH_BARK, LEAVES, 4)], 900.0, 0.45, LEAVES),
+                forest(
+                    "birch woods",
+                    vec![Growth::tree(Species::Birch, BIRCH_BARK, LEAVES, 4)],
+                    900.0,
+                    0.45,
+                    LEAVES,
+                ),
                 SpawnRecipe {
                     min_height_m: conifer_line,
                     max_height_m: tree_line,
@@ -322,26 +417,62 @@ impl FeatureRecipe {
     pub fn moon() -> Self {
         use material::*;
         let mut spawns = Vec::new();
-        for (n, (diameter, spacing_m, density, blocks)) in [([14.0, 36.0], 100.0, 0.3, 14), ([5.0, 14.0], 40.0, 0.35, 8), ([1.2, 5.0], 12.0, 0.35, 0)].into_iter().enumerate() {
+        for (n, (diameter, spacing_m, density, blocks)) in [
+            ([14.0, 36.0], 100.0, 0.3, 14),
+            ([5.0, 14.0], 40.0, 0.35, 8),
+            ([1.2, 5.0], 12.0, 0.35, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let seed = 20 + 4 * n as u64;
-            let craters = |name: String, growth: Growth, surfaces: Vec<u32>, density: f32| SpawnRecipe {
-                name,
-                growths: vec![growth],
-                spacing_m,
-                density,
-                surfaces,
-                // Gentle ground: a crater's rim stays level.
-                max_relief_m: diameter[1] * 0.12,
-                ..SpawnRecipe::default()
-            };
+            let craters =
+                |name: String, growth: Growth, surfaces: Vec<u32>, density: f32| SpawnRecipe {
+                    name,
+                    growths: vec![growth],
+                    spacing_m,
+                    density,
+                    surfaces,
+                    // Gentle ground: a crater's rim stays level.
+                    max_relief_m: diameter[1] * 0.12,
+                    ..SpawnRecipe::default()
+                };
             let size = format!("{:.0}-{:.0} m", diameter[0], diameter[1]);
             // Fresh craters are rarer: a third of the young-looking ones.
-            spawns.push(craters(format!("fresh craters {size}"), Growth::crater(EJECTA, BOULDER, blocks, diameter, seed + 2), vec![REGOLITH, MARE, EJECTA], density * 0.3));
-            spawns.push(craters(format!("highland craters {size}"), Growth::crater(REGOLITH, BOULDER, blocks / 2, diameter, seed), vec![REGOLITH, EJECTA], density));
-            spawns.push(craters(format!("mare craters {size}"), Growth::crater(MARE, BASALT, blocks / 2, diameter, seed + 1), vec![MARE], density));
+            spawns.push(craters(
+                format!("fresh craters {size}"),
+                Growth::crater(EJECTA, BOULDER, blocks, diameter, seed + 2),
+                vec![REGOLITH, MARE, EJECTA],
+                density * 0.3,
+            ));
+            spawns.push(craters(
+                format!("highland craters {size}"),
+                Growth::crater(REGOLITH, BOULDER, blocks / 2, diameter, seed),
+                vec![REGOLITH, EJECTA],
+                density,
+            ));
+            spawns.push(craters(
+                format!("mare craters {size}"),
+                Growth::crater(MARE, BASALT, blocks / 2, diameter, seed + 1),
+                vec![MARE],
+                density,
+            ));
         }
-        spawns.push(SpawnRecipe { name: "boulders".into(), growths: vec![Growth::boulder(BOULDER, 0, [0.3, 1.6], 40)], spacing_m: 6.0, density: 0.08, ..SpawnRecipe::default() });
-        spawns.push(SpawnRecipe { name: "boulder fields".into(), growths: vec![Growth::boulder(BOULDER, 0, [0.1, 0.45], 41)], spacing_m: 2.5, density: 0.12, surfaces: vec![EJECTA], ..SpawnRecipe::default() });
+        spawns.push(SpawnRecipe {
+            name: "boulders".into(),
+            growths: vec![Growth::boulder(BOULDER, 0, [0.3, 1.6], 40)],
+            spacing_m: 6.0,
+            density: 0.08,
+            ..SpawnRecipe::default()
+        });
+        spawns.push(SpawnRecipe {
+            name: "boulder fields".into(),
+            growths: vec![Growth::boulder(BOULDER, 0, [0.1, 0.45], 41)],
+            spacing_m: 2.5,
+            density: 0.12,
+            surfaces: vec![EJECTA],
+            ..SpawnRecipe::default()
+        });
         Self { spawns }
     }
 
@@ -350,8 +481,22 @@ impl FeatureRecipe {
         use material::*;
         Self {
             spawns: vec![
-                SpawnRecipe { name: "sandstone boulders".into(), growths: vec![Growth::boulder(SANDSTONE, 0, [1.5, 3.5], 50)], spacing_m: 36.0, density: 0.25, field_scale_m: 900.0, field_threshold: -0.2, ..SpawnRecipe::default() },
-                SpawnRecipe { name: "rocks".into(), growths: vec![Growth::boulder(STONE, DARK_STONE, [0.25, 0.9], 51)], spacing_m: 8.0, density: 0.07, ..SpawnRecipe::default() },
+                SpawnRecipe {
+                    name: "sandstone boulders".into(),
+                    growths: vec![Growth::boulder(SANDSTONE, 0, [1.5, 3.5], 50)],
+                    spacing_m: 36.0,
+                    density: 0.25,
+                    field_scale_m: 900.0,
+                    field_threshold: -0.2,
+                    ..SpawnRecipe::default()
+                },
+                SpawnRecipe {
+                    name: "rocks".into(),
+                    growths: vec![Growth::boulder(STONE, DARK_STONE, [0.25, 0.9], 51)],
+                    spacing_m: 8.0,
+                    density: 0.07,
+                    ..SpawnRecipe::default()
+                },
                 SpawnRecipe {
                     name: "shrubs".into(),
                     growths: vec![Growth::shrub(DRY_WOOD, SAGE, 52)],
@@ -371,14 +516,31 @@ impl FeatureRecipe {
     /// by patches over the land as the turf does.
     pub fn appearance(mut base: TerrainAppearance) -> TerrainAppearance {
         let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
-        let look = |c: [u8; 3], roughness: f32, patches: Option<[[u8; 3]; 3]>, transmission: f32| {
-            let [r, g, b] = unit(c);
-            MaterialAppearance { colour: [r, g, b, roughness], patches: patches.map(|p| p.map(unit)), transmission, ..MaterialAppearance::default() }
-        };
-        base.materials[material::LEAVES as usize].patches = Some([[86, 112, 50], [59, 102, 52], [40, 80, 40]].map(unit));
-        base.materials[NEEDLES as usize] = look([42, 68, 48], 0.9, Some([[62, 84, 54], [42, 68, 48], [30, 54, 42]]), 0.5);
+        let look =
+            |c: [u8; 3], roughness: f32, patches: Option<[[u8; 3]; 3]>, transmission: f32| {
+                let [r, g, b] = unit(c);
+                MaterialAppearance {
+                    colour: [r, g, b, roughness],
+                    patches: patches.map(|p| p.map(unit)),
+                    transmission,
+                    ..MaterialAppearance::default()
+                }
+            };
+        base.materials[material::LEAVES as usize].patches =
+            Some([[86, 112, 50], [59, 102, 52], [40, 80, 40]].map(unit));
+        base.materials[NEEDLES as usize] = look(
+            [42, 68, 48],
+            0.9,
+            Some([[62, 84, 54], [42, 68, 48], [30, 54, 42]]),
+            0.5,
+        );
         base.materials[BIRCH_BARK as usize] = look([212, 208, 196], 0.8, None, 0.0);
-        base.materials[SAGE as usize] = look([146, 150, 116], 0.92, Some([[170, 164, 124], [146, 150, 116], [116, 126, 96]]), 0.4);
+        base.materials[SAGE as usize] = look(
+            [146, 150, 116],
+            0.92,
+            Some([[170, 164, 124], [146, 150, 116], [116, 126, 96]]),
+            0.4,
+        );
         base.materials[DRY_WOOD as usize] = look([110, 94, 78], 0.9, None, 0.0);
         base
     }
@@ -388,7 +550,7 @@ impl FeatureRecipe {
 mod tests {
     use super::*;
     use crate::layers::TerrainLayers;
-    use crate::planet::{EARTH_RADIUS, Planet, PlanetRecipe};
+    use crate::planet::{Planet, PlanetRecipe, EARTH_RADIUS};
 
     /// Every preset grows a valid set of its planet, the same set from the
     /// same voxel size and seed, and another from another seed.
@@ -397,13 +559,27 @@ mod tests {
         for (recipe, stack, radius) in [
             (FeatureRecipe::earth(), TerrainLayers::earth(), EARTH_RADIUS),
             (FeatureRecipe::moon(), TerrainLayers::moon(), 1_737_400.0),
-            (FeatureRecipe::desert(), TerrainLayers::desert(), EARTH_RADIUS),
+            (
+                FeatureRecipe::desert(),
+                TerrainLayers::desert(),
+                EARTH_RADIUS,
+            ),
         ] {
             let set = recipe.grow(0.1, 7);
             assert_eq!(set.spawns.len(), recipe.spawns.len());
             assert_eq!(set, recipe.grow(0.1, 7));
-            assert_ne!(set.stamps, recipe.grow(0.1, 8).stamps, "another world grows other variants");
-            Planet::new(PlanetRecipe { radius_m: radius, terrain: stack.source(7), features: set, ..Default::default() }).unwrap();
+            assert_ne!(
+                set.stamps,
+                recipe.grow(0.1, 8).stamps,
+                "another world grows other variants"
+            );
+            Planet::new(PlanetRecipe {
+                radius_m: radius,
+                terrain: stack.source(7),
+                features: set,
+                ..Default::default()
+            })
+            .unwrap();
         }
     }
 
@@ -418,8 +594,15 @@ mod tests {
         assert_eq!(serde_json::from_str::<FeatureRecipe>(&json).unwrap(), earth);
         let (fine, coarse) = (earth.grow(0.1, 7), earth.grow(0.5, 7));
         assert_eq!((fine.spawns[0].spacing, coarse.spawns[0].spacing), (90, 18));
-        assert_eq!((fine.spawns[0].max_relief, fine.spawns[3].max_relief), (30, u32::MAX));
+        assert_eq!(
+            (fine.spawns[0].max_relief, fine.spawns[3].max_relief),
+            (30, u32::MAX)
+        );
         let empty: FeatureRecipe = serde_json::from_str("[{}]").unwrap();
-        assert_eq!(empty.spawns[0], SpawnRecipe::default(), "every field has a default");
+        assert_eq!(
+            empty.spawns[0],
+            SpawnRecipe::default(),
+            "every field has a default"
+        );
     }
 }

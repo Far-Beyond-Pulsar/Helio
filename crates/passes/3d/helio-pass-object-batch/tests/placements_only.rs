@@ -180,7 +180,13 @@ fn a_placements_run_matches_a_full_run_over_the_moved_rows() {
 
     // The pass under test: a full run over `before`, then only placements.
     let mut pass = ObjectBatchPass::new(&device);
-    pass.run_once_for_testing(&device, &queue, &buffer(&before), &materials_buf, before.len() as u32);
+    pass.run_once_for_testing(
+        &device,
+        &queue,
+        &buffer(&before),
+        &materials_buf,
+        before.len() as u32,
+    );
     let draw_calls_before = read(&device, &queue, pass.draw_calls_buffer());
     let indirect_before = read(&device, &queue, pass.indirect_buffer());
     let first_instances = read(&device, &queue, pass.instances_buffer());
@@ -188,7 +194,13 @@ fn a_placements_run_matches_a_full_run_over_the_moved_rows() {
 
     // The reference: a full run over `after` on a fresh pass.
     let mut reference = ObjectBatchPass::new(&device);
-    reference.run_once_for_testing(&device, &queue, &buffer(&after), &materials_buf, after.len() as u32);
+    reference.run_once_for_testing(
+        &device,
+        &queue,
+        &buffer(&after),
+        &materials_buf,
+        after.len() as u32,
+    );
 
     let live = after.len();
     let got = read(&device, &queue, pass.instances_buffer());
@@ -197,15 +209,27 @@ fn a_placements_run_matches_a_full_run_over_the_moved_rows() {
     // after the move. Equal sort keys may tie in either order between two
     // separate full runs, so the slots are compared against the first run's
     // own order, not the reference's.
-    let key = |bounds: &[f32; 4]| [bounds[0].to_bits(), bounds[1].to_bits(), bounds[2].to_bits()];
+    let key = |bounds: &[f32; 4]| {
+        [
+            bounds[0].to_bits(),
+            bounds[1].to_bits(),
+            bounds[2].to_bits(),
+        ]
+    };
     let slot_key = |bytes: &[u8], i: usize| {
         let b: &[f32] = bytemuck::cast_slice(&bytes[i * STRIDE + 112..i * STRIDE + 128]);
         key(&[b[0], b[1], b[2], b[3]])
     };
-    let before_row: std::collections::HashMap<_, _> =
-        before.iter().enumerate().map(|(i, r)| (key(&r.bounds), i)).collect();
-    let after_row: std::collections::HashMap<_, _> =
-        after.iter().enumerate().map(|(i, r)| (key(&r.bounds), i)).collect();
+    let before_row: std::collections::HashMap<_, _> = before
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (key(&r.bounds), i))
+        .collect();
+    let after_row: std::collections::HashMap<_, _> = after
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (key(&r.bounds), i))
+        .collect();
     let words = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     let mut moved = 0;
     let mut seen = vec![false; live];
@@ -213,11 +237,22 @@ fn a_placements_run_matches_a_full_run_over_the_moved_rows() {
         let was = before_row[&slot_key(&first_instances, i)];
         let now = after_row[&slot_key(&got, i)];
         assert_eq!(was, now, "slot {i}: the object in it changed");
-        assert!(!std::mem::replace(&mut seen[now], true), "row {now} in two slots");
+        assert!(
+            !std::mem::replace(&mut seen[now], true),
+            "row {now} in two slots"
+        );
         let row = &after[now];
         let slot = &got[i * STRIDE..(i + 1) * STRIDE];
-        assert_eq!(&slot[..64], bytemuck::bytes_of(&row.transform), "slot {i}: transform");
-        assert_eq!(&slot[112..128], bytemuck::bytes_of(&row.bounds), "slot {i}: bounds");
+        assert_eq!(
+            &slot[..64],
+            bytemuck::bytes_of(&row.transform),
+            "slot {i}: transform"
+        );
+        assert_eq!(
+            &slot[112..128],
+            bytemuck::bytes_of(&row.bounds),
+            "slot {i}: bounds"
+        );
         assert_eq!(words(slot, 192), row.mesh_slot, "slot {i}: mesh");
         assert_eq!(words(slot, 196), row.material_slot, "slot {i}: material");
         assert_eq!(words(slot, 200), row.flags, "slot {i}: flags");
@@ -311,11 +346,23 @@ fn a_moved_rows_run_is_byte_identical_to_a_placements_run_over_every_row() {
     });
 
     let mut all = ObjectBatchPass::new(&device);
-    all.run_once_for_testing(&device, &queue, &buffer(&before), &materials_buf, before.len() as u32);
+    all.run_once_for_testing(
+        &device,
+        &queue,
+        &buffer(&before),
+        &materials_buf,
+        before.len() as u32,
+    );
     all.run_placements_for_testing(&device, &queue, &buffer(&after), &materials_buf);
 
     let mut only_moved = ObjectBatchPass::new(&device);
-    only_moved.run_once_for_testing(&device, &queue, &buffer(&before), &materials_buf, before.len() as u32);
+    only_moved.run_once_for_testing(
+        &device,
+        &queue,
+        &buffer(&before),
+        &materials_buf,
+        before.len() as u32,
+    );
     only_moved.run_moved_placements_for_testing(
         &device,
         &queue,
@@ -332,7 +379,10 @@ fn a_moved_rows_run_is_byte_identical_to_a_placements_run_over_every_row() {
         (0..live)
             .map(|i| {
                 let slot = &instances[i * STRIDE..(i + 1) * STRIDE];
-                (slot[112..124].to_vec(), (slot.to_vec(), aabbs[i * 32..(i + 1) * 32].to_vec()))
+                (
+                    slot[112..124].to_vec(),
+                    (slot.to_vec(), aabbs[i * 32..(i + 1) * 32].to_vec()),
+                )
             })
             .collect::<std::collections::HashMap<_, _>>()
     };

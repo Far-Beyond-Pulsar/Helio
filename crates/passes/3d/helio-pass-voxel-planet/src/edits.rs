@@ -12,8 +12,8 @@
 use crate::grid::{face_axes, Grid, VolumeMap, VOLUME_MAP_ERROR};
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec3};
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Largest brush radius in half cells (54 000 km at 0.1 m voxels): the
 /// containment test squares offsets exactly in 64 bits, and band bounds
@@ -105,8 +105,12 @@ impl FaceBrush {
     pub fn contains(&self, center_half: [i32; 3], point: impl FnOnce() -> IVec3) -> bool {
         if self.shape() == SHAPE_CUBE {
             // A box: the radius across, its own range vertically.
-            return (0..2).all(|axis| center_half[axis].wrapping_sub(self.center[axis]).unsigned_abs() <= self.radius_half)
-                && (self.k_lo..=self.k_hi).contains(&center_half[2]);
+            return (0..2).all(|axis| {
+                center_half[axis]
+                    .wrapping_sub(self.center[axis])
+                    .unsigned_abs()
+                    <= self.radius_half
+            }) && (self.k_lo..=self.k_hi).contains(&center_half[2]);
         }
         let q = point();
         let r = self.ball[3].unsigned_abs();
@@ -176,7 +180,12 @@ impl Brush {
             }
             let r = radius_half as i32;
             // A box's vertical half extent, in half cells (a cube's radius).
-            let h = if self.height > 0.0 { ((2.0 * self.height / grid.voxel_size()).round() as i32).clamp(1, MAX_RADIUS_HALF as i32) } else { r };
+            let h = if self.height > 0.0 {
+                ((2.0 * self.height / grid.voxel_size()).round() as i32)
+                    .clamp(1, MAX_RADIUS_HALF as i32)
+            } else {
+                r
+            };
             out.push(FaceBrush {
                 flags: flags | u32::from(face),
                 radius_half,
@@ -210,7 +219,11 @@ impl Brush {
         let flags = self.op_flags(SHAPE_BALL);
         // Volume units per metre: the domain sphere's radius over the
         // planet's (sphere), 1.25 cm units (plane).
-        let units = if grid.is_plane() { 1.0 / crate::grid::DOMAIN_UNIT } else { f64::from(grid.sphere_constants()[2]) / grid.radius() };
+        let units = if grid.is_plane() {
+            1.0 / crate::grid::DOMAIN_UNIT
+        } else {
+            f64::from(grid.sphere_constants()[2]) / grid.radius()
+        };
         let r_units = self.radius * units;
         if r_units >= f64::from(i32::MAX) / 2.0 {
             return Err("brush radius exceeds the volume space".into());
@@ -220,16 +233,31 @@ impl Brush {
             (IVec3::ZERO, -(grid.radius() / s))
         } else {
             let (cell, coords) = grid.locate(center);
-            (grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0), coords[2])
+            (
+                grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0),
+                coords[2],
+            )
         };
-        let ball = [ball_centre.x, ball_centre.y, ball_centre.z, r_units.round() as i32];
+        let ball = [
+            ball_centre.x,
+            ball_centre.y,
+            ball_centre.z,
+            r_units.round() as i32,
+        ];
         // Heights it can touch, in half cells (two layers of margin; the
         // volume radius of a cell is exact up to rounding).
         let half = |layers: f64| (layers * 2.0).clamp(-2.0e9, 2.0e9) as i32;
         let k_lo = half(centre_layer - radius_layers - 2.0);
         let k_hi = half(centre_layer + radius_layers + 2.0);
         let n = grid.cells();
-        let whole = |face: u8| FaceBrush { flags: flags | u32::from(face), radius_half, k_lo, k_hi, center: [n, n, 0, n + 16], ball };
+        let whole = |face: u8| FaceBrush {
+            flags: flags | u32::from(face),
+            radius_half,
+            k_lo,
+            k_hi,
+            center: [n, n, 0, n + 16],
+            ball,
+        };
         if grid.is_plane() {
             let (cell, _) = grid.locate(center);
             let extent = radius_half.saturating_add(4).min(i32::MAX as u32) as i32;
@@ -245,13 +273,21 @@ impl Brush {
         // Angular radius of the ball seen from the planet's centre (all
         // directions when it holds the centre).
         let len = center.length();
-        let theta = if len > self.radius { (self.radius / len).asin() } else { std::f64::consts::PI };
+        let theta = if len > self.radius {
+            (self.radius / len).asin()
+        } else {
+            std::f64::consts::PI
+        };
         // A face's pyramid reaches 54.74 degrees from its normal.
         let corner = (1.0f64 / 3.0f64.sqrt()).acos();
         let mut out = Vec::new();
         for &face in grid.faces() {
             let [nrm, _, _] = face_axes(face);
-            let angle = if len > 0.0 { (center.dot(nrm) / len).clamp(-1.0, 1.0).acos() } else { 0.0 };
+            let angle = if len > 0.0 {
+                (center.dot(nrm) / len).clamp(-1.0, 1.0).acos()
+            } else {
+                0.0
+            };
             if theta < std::f64::consts::PI && angle > corner + theta + 0.01 {
                 continue;
             }
@@ -267,7 +303,12 @@ impl Brush {
                         radius_half,
                         k_lo,
                         k_hi,
-                        center: [(c[0] * 2.0).round() as i32, (c[1] * 2.0).round() as i32, (c[2] * 2.0).round() as i32, (cells * 2.0).min(f64::from(n) * 2.0 + 32.0) as i32],
+                        center: [
+                            (c[0] * 2.0).round() as i32,
+                            (c[1] * 2.0).round() as i32,
+                            (c[2] * 2.0).round() as i32,
+                            (cells * 2.0).min(f64::from(n) * 2.0 + 32.0) as i32,
+                        ],
                         ball,
                     });
                 }
@@ -338,18 +379,27 @@ pub(crate) struct Cube {
 }
 
 impl Cube {
-    const ROOT: Cube = Cube { lo: [-(1i64 << (ROOT_LOG2 - 1)); 3], log2: ROOT_LOG2 };
+    const ROOT: Cube = Cube {
+        lo: [-(1i64 << (ROOT_LOG2 - 1)); 3],
+        log2: ROOT_LOG2,
+    };
     fn size(&self) -> i64 {
         1i64 << self.log2
     }
     /// The brick (8 level cells a side) of `level` brick coordinates.
     pub(crate) fn brick(b: [i64; 3], level: u32) -> Cube {
-        Cube { lo: b.map(|v| (v * 8) << level), log2: 3 + level }
+        Cube {
+            lo: b.map(|v| (v * 8) << level),
+            log2: 3 + level,
+        }
     }
     fn child(&self, c: usize) -> Cube {
         let h = 1i64 << (self.log2 - 1);
         let at = |bit: usize| ((c >> bit) & 1) as i64 * h;
-        Cube { lo: [self.lo[0] + at(0), self.lo[1] + at(1), self.lo[2] + at(2)], log2: self.log2 - 1 }
+        Cube {
+            lo: [self.lo[0] + at(0), self.lo[1] + at(1), self.lo[2] + at(2)],
+            log2: self.log2 - 1,
+        }
     }
     /// Overlaps the inclusive base-cell box `[lo, hi]`.
     fn overlaps(&self, lo: [i64; 3], hi: [i64; 3]) -> bool {
@@ -382,8 +432,14 @@ pub(crate) fn meets(fb: &FaceBrush, cube: Cube, grid: &Grid, map: &VolumeMap) ->
         if (0..2).any(|a| hi[a] < c[a] - r || lo[a] > c[a] + r) {
             return Meets::Outside;
         }
-        let inside = (0..2).all(|a| lo[a] >= c[a] - r && hi[a] <= c[a] + r) && lo[2] >= k_lo && hi[2] <= k_hi;
-        return if inside { Meets::Contains } else { Meets::Crosses };
+        let inside = (0..2).all(|a| lo[a] >= c[a] - r && hi[a] <= c[a] + r)
+            && lo[2] >= k_lo
+            && hi[2] <= k_hi;
+        return if inside {
+            Meets::Contains
+        } else {
+            Meets::Crosses
+        };
     }
     // A ball, in the f64 volume map: the cube's corner points hold every
     // level cell centre inside it in their hull, give or take the map's
@@ -392,14 +448,22 @@ pub(crate) fn meets(fb: &FaceBrush, cube: Cube, grid: &Grid, map: &VolumeMap) ->
     let face_end = f64::from(grid.cells());
     let span = |a: usize| {
         let (lo, hi) = (cube.lo[a] as f64, (cube.lo[a] + cube.size()) as f64);
-        if a < 2 && !grid.is_plane() { (lo.max(0.0), hi.min(face_end)) } else { (lo, hi) }
+        if a < 2 && !grid.is_plane() {
+            (lo.max(0.0), hi.min(face_end))
+        } else {
+            (lo, hi)
+        }
     };
     let spans = [span(0), span(1), span(2)];
     if spans[..2].iter().any(|(lo, hi)| lo >= hi) {
         return Meets::Outside;
     }
     let bounds = map.bounds;
-    let centre = DVec3::new(f64::from(fb.ball[0]), f64::from(fb.ball[1]), f64::from(fb.ball[2]));
+    let centre = DVec3::new(
+        f64::from(fb.ball[0]),
+        f64::from(fb.ball[1]),
+        f64::from(fb.ball[2]),
+    );
     let r = f64::from(fb.ball[3].unsigned_abs());
     let lift = 1.0 + spans[2].0.abs().max(spans[2].1.abs()) / bounds.layers;
     // First from the middle alone: no point of the cube is farther from it
@@ -408,16 +472,27 @@ pub(crate) fn meets(fb: &FaceBrush, cube: Cube, grid: &Grid, map: &VolumeMap) ->
     let mid = spans.map(|(lo, hi)| (lo + hi) / 2.0);
     let reach = spans.map(|(lo, hi)| (hi - lo) / 2.0);
     let d = map.point(fb.face(), mid).distance(centre);
-    let spread = bounds.across * lift * (reach[0] + reach[1]) + bounds.up * reach[2] + VOLUME_SLACK * lift;
+    let spread =
+        bounds.across * lift * (reach[0] + reach[1]) + bounds.up * reach[2] + VOLUME_SLACK * lift;
     if d + spread < r {
         return Meets::Contains;
     }
     if d - spread > r {
         return Meets::Outside;
     }
-    let (mut farthest, mut lo, mut hi) = (0.0f64, DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+    let (mut farthest, mut lo, mut hi) = (
+        0.0f64,
+        DVec3::splat(f64::INFINITY),
+        DVec3::splat(f64::NEG_INFINITY),
+    );
     for c in 0..8 {
-        let at = |a: usize| if (c >> a) & 1 == 0 { spans[a].0 } else { spans[a].1 };
+        let at = |a: usize| {
+            if (c >> a) & 1 == 0 {
+                spans[a].0
+            } else {
+                spans[a].1
+            }
+        };
         let q = map.point(fb.face(), [at(0), at(1), at(2)]);
         farthest = farthest.max(q.distance(centre));
         lo = lo.min(q);
@@ -450,7 +525,11 @@ impl TreeContext<'_> {
     }
     /// Smallest edge a node holding `items` may split into.
     fn split_limit(&self, items: &[Item]) -> i64 {
-        let radius = items.iter().map(|it| self.brush(it.id, it.index).radius_half).min().unwrap_or(0);
+        let radius = items
+            .iter()
+            .map(|it| self.brush(it.id, it.index).radius_half)
+            .min()
+            .unwrap_or(0);
         MIN_NODE_CELLS.max(i64::from(radius) / 128)
     }
 }
@@ -476,7 +555,10 @@ fn leaf_insert(items: &mut Vec<Item>, item: Item, fb: &FaceBrush, ctx: &TreeCont
             it.contains && b.op() == 0 && b.radius_half >= fb.radius_half
         });
         if let Some(at) = emptied {
-            if items[at + 1..].iter().all(|it| ctx.brush(it.id, it.index).op() != 1) {
+            if items[at + 1..]
+                .iter()
+                .all(|it| ctx.brush(it.id, it.index).op() != 1)
+            {
                 return;
             }
         }
@@ -491,7 +573,11 @@ fn insert(slot: &mut Option<Arc<Node>>, cube: Cube, id: u32, index: u8, ctx: &Tr
     if how == Meets::Outside {
         return;
     }
-    let item = Item { id, index, contains: how == Meets::Contains };
+    let item = Item {
+        id,
+        index,
+        contains: how == Meets::Contains,
+    };
     let Some(node) = slot.as_mut() else {
         *slot = Some(Arc::new(Node::Leaf(vec![item])));
         return;
@@ -512,7 +598,15 @@ fn insert(slot: &mut Option<Arc<Node>>, cube: Cube, id: u32, index: u8, ctx: &Tr
                 if b.radius_half > fb.radius_half {
                     let m = meets(&b, cube, ctx.grid, &ctx.map);
                     if m != Meets::Outside {
-                        leaf_insert(&mut items, Item { contains: m == Meets::Contains, ..it }, &b, ctx);
+                        leaf_insert(
+                            &mut items,
+                            Item {
+                                contains: m == Meets::Contains,
+                                ..it
+                            },
+                            &b,
+                            ctx,
+                        );
                     }
                 }
             }
@@ -599,7 +693,9 @@ pub struct EditLog {
 /// Hash of a brush history (what [`crate::planet::Edits::hash`] reports
 /// for a world with exactly these brushes applied in order).
 pub fn history_hash<'a>(brushes: impl IntoIterator<Item = &'a Brush>) -> u64 {
-    brushes.into_iter().fold(0, |hash, brush| brush_hash(hash, brush))
+    brushes
+        .into_iter()
+        .fold(0, |hash, brush| brush_hash(hash, brush))
 }
 
 pub(crate) fn brush_hash(seed: u64, brush: &Brush) -> u64 {
@@ -631,7 +727,10 @@ impl EditLog {
         self.len == 0
     }
     pub fn brushes(&self) -> impl Iterator<Item = &Brush> {
-        self.chunks.iter().flat_map(|chunk| chunk.iter()).map(|r| &r.brush)
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .map(|r| &r.brush)
     }
     pub fn resolved(&self, id: u32) -> &Resolved {
         let id = id as usize;
@@ -649,15 +748,33 @@ impl EditLog {
             self.chunks.push(Arc::new(Vec::with_capacity(CHUNK)));
         }
         // Copies only this chunk when another log still shares it.
-        Arc::make_mut(self.chunks.last_mut().expect("pushed above")).push(Resolved { brush, faces, prefix });
+        Arc::make_mut(self.chunks.last_mut().expect("pushed above")).push(Resolved {
+            brush,
+            faces,
+            prefix,
+        });
         self.len += 1;
         self.index(grid, id);
         Ok(id)
     }
     fn index(&mut self, grid: &Grid, id: u32) {
-        let ctx = TreeContext { chunks: &self.chunks, grid, map: grid.volume_map() };
-        for (index, fb) in ctx.chunks[id as usize / CHUNK][id as usize % CHUNK].faces.iter().enumerate() {
-            insert(&mut self.tree.roots[usize::from(fb.face())], Cube::ROOT, id, index as u8, &ctx);
+        let ctx = TreeContext {
+            chunks: &self.chunks,
+            grid,
+            map: grid.volume_map(),
+        };
+        for (index, fb) in ctx.chunks[id as usize / CHUNK][id as usize % CHUNK]
+            .faces
+            .iter()
+            .enumerate()
+        {
+            insert(
+                &mut self.tree.roots[usize::from(fb.face())],
+                Cube::ROOT,
+                id,
+                index as u8,
+                &ctx,
+            );
         }
     }
     /// Remove the most recent brush (undo); the index is rebuilt (the
@@ -679,8 +796,20 @@ impl EditLog {
     /// base-cell box `[i0, i1] × [j0, j1] × [k0, k1]` of `face` at LOD
     /// `level` ([`ALL_LAYERS`]: a whole column). Returned as `(brush id,
     /// index into that brush's faces)`.
-    pub fn query(&self, face: u8, [i0, i1]: [i64; 2], [j0, j1]: [i64; 2], [k0, k1]: [i64; 2], level: u32) -> Vec<(u32, u8)> {
-        let Some(root) = self.tree.roots.get(usize::from(face)).and_then(|r| r.as_ref()) else {
+    pub fn query(
+        &self,
+        face: u8,
+        [i0, i1]: [i64; 2],
+        [j0, j1]: [i64; 2],
+        [k0, k1]: [i64; 2],
+        level: u32,
+    ) -> Vec<(u32, u8)> {
+        let Some(root) = self
+            .tree
+            .roots
+            .get(usize::from(face))
+            .and_then(|r| r.as_ref())
+        else {
             return Vec::new();
         };
         let mut found = Vec::new();
@@ -710,7 +839,13 @@ pub const ALL_LAYERS: [i64; 2] = [i32::MIN as i64, i32::MAX as i64];
 /// Apply ordered brushes to a canonical terrain `(kind, material)` at a level
 /// cell centre. Kind: 0 air, 1 solid.
 /// `point` is the cell's volume point (computed once, when a ball needs it).
-pub fn apply(brushes: impl Iterator<Item = FaceBrush>, center: [i32; 3], point: impl Fn() -> IVec3, mut kind: u32, mut material: u32) -> (u32, u32) {
+pub fn apply(
+    brushes: impl Iterator<Item = FaceBrush>,
+    center: [i32; 3],
+    point: impl Fn() -> IVec3,
+    mut kind: u32,
+    mut material: u32,
+) -> (u32, u32) {
     let mut q = None;
     for b in brushes {
         if !b.contains(center, || *q.get_or_insert_with(&point)) {
@@ -735,7 +870,6 @@ pub fn apply(brushes: impl Iterator<Item = FaceBrush>, center: [i32; 3], point: 
     (kind, material)
 }
 
-
 #[cfg(test)]
 mod tree {
     use super::*;
@@ -745,7 +879,10 @@ mod tree {
     struct Lcg(u64);
     impl Lcg {
         fn next(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             (self.0 >> 11) as f64 / (1u64 << 53) as f64
         }
         fn range(&mut self, lo: f64, hi: f64) -> f64 {
@@ -776,7 +913,18 @@ mod tree {
                     _ => (BrushOp::Remove, BrushShape::Sphere),
                 };
                 let radius = radius * rng.range(0.9, 1.1);
-                log.push(grid, Brush { center: at.to_array(), radius, shape, op, material: 3 + (n % 5) as u32, height: 0.0 }).unwrap();
+                log.push(
+                    grid,
+                    Brush {
+                        center: at.to_array(),
+                        radius,
+                        shape,
+                        op,
+                        material: 3 + (n % 5) as u32,
+                        height: 0.0,
+                    },
+                )
+                .unwrap();
             }
         }
         log
@@ -784,11 +932,16 @@ mod tree {
 
     /// Every face brush of `log` on `face` that applies at `level`, in order.
     fn every(log: &EditLog, face: u8, level: u32) -> Vec<FaceBrush> {
-        (0..log.len() as u32).flat_map(|id| log.resolved(id).faces.iter().copied()).filter(|fb| fb.face() == face && fb.active(level)).collect()
+        (0..log.len() as u32)
+            .flat_map(|id| log.resolved(id).faces.iter().copied())
+            .filter(|fb| fb.face() == face && fb.active(level))
+            .collect()
     }
 
     fn listed(log: &EditLog, refs: &[(u32, u8)]) -> Vec<FaceBrush> {
-        refs.iter().map(|&(id, index)| log.resolved(id).faces[usize::from(index)]).collect()
+        refs.iter()
+            .map(|&(id, index)| log.resolved(id).faces[usize::from(index)])
+            .collect()
     }
 
     /// A cell's edits from the pruned lists (of the cell, and of its whole
@@ -807,19 +960,37 @@ mod tree {
         let (mut cells, mut changed) = (0, 0);
         for _ in 0..6_000 {
             let level = (rng.next() * 13.0) as u32;
-            let p = ground + side * rng.range(-6_000.0, 6_000.0) + ahead * rng.range(-6_000.0, 6_000.0) + up * rng.range(-2_600.0, 600.0);
+            let p = ground
+                + side * rng.range(-6_000.0, 6_000.0)
+                + ahead * rng.range(-6_000.0, 6_000.0)
+                + up * rng.range(-2_600.0, 600.0);
             let (cell, _) = grid.locate(p);
             let (face, i, j, k) = (cell.face, cell.i >> level, cell.j >> level, cell.k >> level);
             let range = |v: i32| [i64::from(v) << level, ((i64::from(v) + 1) << level) - 1];
-            let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
+            let center = [
+                center_half(i, level),
+                center_half(j, level),
+                center_half(k, level),
+            ];
             let point = || grid.volume_point(face, i, j, k, level);
             let everything = every(&log, face, level);
             let of_cell = listed(&log, &log.query(face, range(i), range(j), range(k), level));
-            let of_column = listed(&log, &log.query(face, range(i), range(j), ALL_LAYERS, level));
+            let of_column = listed(
+                &log,
+                &log.query(face, range(i), range(j), ALL_LAYERS, level),
+            );
             for (kind, material) in [(1, 0), (0, 0), (1, 9)] {
                 let want = apply(everything.iter().copied(), center, point, kind, material);
-                assert_eq!(apply(of_cell.iter().copied(), center, point, kind, material), want, "cell {face} {i} {j} {k} level {level}");
-                assert_eq!(apply(of_column.iter().copied(), center, point, kind, material), want, "column {face} {i} {j} {k} level {level}");
+                assert_eq!(
+                    apply(of_cell.iter().copied(), center, point, kind, material),
+                    want,
+                    "cell {face} {i} {j} {k} level {level}"
+                );
+                assert_eq!(
+                    apply(of_column.iter().copied(), center, point, kind, material),
+                    want,
+                    "column {face} {i} {j} {k} level {level}"
+                );
                 changed += usize::from(want != (kind, material));
             }
             cells += 1;
@@ -845,8 +1016,22 @@ mod tree {
         // Four passes of a 2 km dig over the same line, as a hand drags.
         for pass in 0..4 {
             for n in 0..100 {
-                let at = ground + side * (n as f64 * 150.0 - 7_500.0 + rng.range(-200.0, 200.0)) + ahead * rng.range(-300.0, 300.0) - up * (pass as f64 * 150.0);
-                log.push(&grid, Brush { center: at.to_array(), radius: 2_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+                let at = ground
+                    + side * (n as f64 * 150.0 - 7_500.0 + rng.range(-200.0, 200.0))
+                    + ahead * rng.range(-300.0, 300.0)
+                    - up * (pass as f64 * 150.0);
+                log.push(
+                    &grid,
+                    Brush {
+                        center: at.to_array(),
+                        radius: 2_000.0,
+                        shape: BrushShape::Sphere,
+                        op: BrushOp::Remove,
+                        material: 0,
+                        height: 0.0,
+                    },
+                )
+                .unwrap();
             }
         }
         let per_brush = started.elapsed().as_secs_f64() * 1e3 / log.len() as f64;
@@ -859,13 +1044,23 @@ mod tree {
                 let (c, _) = grid.locate(p);
                 let (i, j) = (c.i >> level, c.j >> level);
                 let range = |v: i32| [i64::from(v) << level, ((i64::from(v) + 1) << level) - 1];
-                let n = log.query(cell.face, range(i), range(j), ALL_LAYERS, level).len();
+                let n = log
+                    .query(cell.face, range(i), range(j), ALL_LAYERS, level)
+                    .len();
                 longest = longest.max(n);
                 total += n;
                 columns += 1;
             }
-            eprintln!("level {level}: {:.1} brushes a column, at most {longest} (of {})", total as f64 / columns as f64, log.len());
-            assert!(longest <= 32, "level {level}: a column lists {longest} of {} brushes", log.len());
+            eprintln!(
+                "level {level}: {:.1} brushes a column, at most {longest} (of {})",
+                total as f64 / columns as f64,
+                log.len()
+            );
+            assert!(
+                longest <= 32,
+                "level {level}: a column lists {longest} of {} brushes",
+                log.len()
+            );
         }
     }
 
@@ -874,10 +1069,22 @@ mod tree {
     fn copies_share_structure_and_undo_rebuilds_the_index() {
         let grid = Grid::plane(Shape::Plane, 512.0, 0.1).unwrap();
         let brush = |k: usize| Brush {
-            center: [((k * 37) % 400) as f64 - 200.0, 1.0, ((k * 91) % 400) as f64 - 200.0],
+            center: [
+                ((k * 37) % 400) as f64 - 200.0,
+                1.0,
+                ((k * 91) % 400) as f64 - 200.0,
+            ],
             radius: if k % 97 == 0 { 6.0 } else { 0.3 },
-            shape: if k % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
-            op: if k % 2 == 0 { BrushOp::Add } else { BrushOp::Remove },
+            shape: if k % 3 == 0 {
+                BrushShape::Cube
+            } else {
+                BrushShape::Sphere
+            },
+            op: if k % 2 == 0 {
+                BrushOp::Add
+            } else {
+                BrushOp::Remove
+            },
             material: 13,
             height: 0.0,
         };
@@ -889,7 +1096,11 @@ mod tree {
         for _ in 0..100 {
             std::hint::black_box(a.clone());
         }
-        assert!(t.elapsed().as_millis() < 50, "{:?} for 100 copies", t.elapsed());
+        assert!(
+            t.elapsed().as_millis() < 50,
+            "{:?} for 100 copies",
+            t.elapsed()
+        );
         let mut b = EditLog::default();
         let mut fresh = EditLog::default();
         for k in 0..60 {
@@ -906,7 +1117,11 @@ mod tree {
         let c = grid.cells() as i64 / 2;
         for level in [0u32, 3, 6] {
             let box_ = [c - 2_000, c + 2_000];
-            assert_eq!(b.query(face, box_, box_, ALL_LAYERS, level), fresh.query(face, box_, box_, ALL_LAYERS, level), "level {level}");
+            assert_eq!(
+                b.query(face, box_, box_, ALL_LAYERS, level),
+                fresh.query(face, box_, box_, ALL_LAYERS, level),
+                "level {level}"
+            );
         }
     }
 }

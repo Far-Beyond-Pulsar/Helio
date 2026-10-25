@@ -171,22 +171,48 @@ const KERNELS: [Kernel; 12] = [
     Kernel {
         name: "VgBvh GatherLocal",
         entry: "cs_gather_local",
-        bindings: &[(Cfg, true), (Instances, true), (Objects, true), (SceneBounds, false), (LocalRank, false), (BlockTotals, false)],
+        bindings: &[
+            (Cfg, true),
+            (Instances, true),
+            (Objects, true),
+            (SceneBounds, false),
+            (LocalRank, false),
+            (BlockTotals, false),
+        ],
     },
     Kernel {
         name: "VgBvh BlockScan",
         entry: "cs_block_scan",
-        bindings: &[(Cfg, true), (Header, false), (BlockTotals, false), (Args, false)],
+        bindings: &[
+            (Cfg, true),
+            (Header, false),
+            (BlockTotals, false),
+            (Args, false),
+        ],
     },
     Kernel {
         name: "VgBvh GatherWrite",
         entry: "cs_gather_write",
-        bindings: &[(Cfg, true), (Instances, true), (Objects, true), (SceneBounds, false), (LocalRank, false), (BlockTotals, false), (KeysA, false), (IdxA, false)],
+        bindings: &[
+            (Cfg, true),
+            (Instances, true),
+            (Objects, true),
+            (SceneBounds, false),
+            (LocalRank, false),
+            (BlockTotals, false),
+            (KeysA, false),
+            (IdxA, false),
+        ],
     },
     Kernel {
         name: "VgBvh Histogram",
         entry: "cs_histogram",
-        bindings: &[(SortBit, true), (Header, true), (SrcKeys, true), (BlockHist, false)],
+        bindings: &[
+            (SortBit, true),
+            (Header, true),
+            (SrcKeys, true),
+            (BlockHist, false),
+        ],
     },
     Kernel {
         name: "VgBvh Scan",
@@ -196,32 +222,75 @@ const KERNELS: [Kernel; 12] = [
     Kernel {
         name: "VgBvh Scatter",
         entry: "cs_scatter",
-        bindings: &[(SortBit, true), (Header, true), (SrcKeys, true), (SrcIdx, true), (DstKeys, false), (DstIdx, false), (BlockHist, true)],
+        bindings: &[
+            (SortBit, true),
+            (Header, true),
+            (SrcKeys, true),
+            (SrcIdx, true),
+            (DstKeys, false),
+            (DstIdx, false),
+            (BlockHist, true),
+        ],
     },
     Kernel {
         name: "VgBvh ChunkEval",
         entry: "cs_chunk_eval",
-        bindings: &[(Cfg, true), (Header, true), (Instances, true), (Objects, true), (IdxA, true), (ChunkLeaf, false), (ChunkMerge, false)],
+        bindings: &[
+            (Cfg, true),
+            (Header, true),
+            (Instances, true),
+            (Objects, true),
+            (IdxA, true),
+            (ChunkLeaf, false),
+            (ChunkMerge, false),
+        ],
     },
     Kernel {
         name: "VgBvh ChunkScan",
         entry: "cs_chunk_scan",
-        bindings: &[(Cfg, true), (Header, false), (ChunkLeaf, true), (ChunkMerge, true), (ChunkBase, false), (Args, false)],
+        bindings: &[
+            (Cfg, true),
+            (Header, false),
+            (ChunkLeaf, true),
+            (ChunkMerge, true),
+            (ChunkBase, false),
+            (Args, false),
+        ],
     },
     Kernel {
         name: "VgBvh MakeLeaves",
         entry: "cs_make_leaves",
-        bindings: &[(Cfg, true), (Header, true), (ChunkMerge, true), (ChunkBase, true), (Nodes, false)],
+        bindings: &[
+            (Cfg, true),
+            (Header, true),
+            (ChunkMerge, true),
+            (ChunkBase, true),
+            (Nodes, false),
+        ],
     },
     Kernel {
         name: "VgBvh Karras",
         entry: "cs_karras",
-        bindings: &[(Header, true), (KeysA, true), (Nodes, false), (Parents, false)],
+        bindings: &[
+            (Header, true),
+            (KeysA, true),
+            (Nodes, false),
+            (Parents, false),
+        ],
     },
     Kernel {
         name: "VgBvh RefitLeaves",
         entry: "cs_refit_leaves",
-        bindings: &[(Header, true), (Instances, true), (Objects, true), (IdxA, true), (Nodes, true), (Parents, true), (RefitBounds, false), (Counters, false)],
+        bindings: &[
+            (Header, true),
+            (Instances, true),
+            (Objects, true),
+            (IdxA, true),
+            (Nodes, true),
+            (Parents, true),
+            (RefitBounds, false),
+            (Counters, false),
+        ],
     },
     Kernel {
         name: "VgBvh Finalize",
@@ -230,7 +299,12 @@ const KERNELS: [Kernel; 12] = [
     },
 ];
 
-fn storage_buffer(device: &wgpu::Device, label: &str, size: u64, extra: wgpu::BufferUsages) -> wgpu::Buffer {
+fn storage_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    extra: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: size.max(16),
@@ -357,7 +431,9 @@ impl VgBvhPass {
                             min_binding_size: None,
                         },
                         _ => wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: *read_only },
+                            ty: wgpu::BufferBindingType::Storage {
+                                read_only: *read_only,
+                            },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -459,9 +535,22 @@ impl VgBvhPass {
     pub fn scratch_bytes(&self) -> u64 {
         let s = &self.scratch;
         [
-            &s.scene_bounds, &s.block_totals, &s.local_rank, &s.keys_a, &s.keys_b, &s.idx_a, &s.idx_b,
-            &s.block_hist, &s.chunk_leaf, &s.chunk_merge, &s.chunk_base, &s.nodes, &s.parents,
-            &s.refit_bounds, &s.counters, &s.args,
+            &s.scene_bounds,
+            &s.block_totals,
+            &s.local_rank,
+            &s.keys_a,
+            &s.keys_b,
+            &s.idx_a,
+            &s.idx_b,
+            &s.block_hist,
+            &s.chunk_leaf,
+            &s.chunk_merge,
+            &s.chunk_base,
+            &s.nodes,
+            &s.parents,
+            &s.refit_bounds,
+            &s.counters,
+            &s.args,
         ]
         .iter()
         .map(|b| b.size())
@@ -490,8 +579,16 @@ impl VgBvhPass {
         odd: bool,
     ) -> wgpu::BindingResource<'a> {
         let s = &self.scratch;
-        let (src_keys, dst_keys) = if odd { (&s.keys_b, &s.keys_a) } else { (&s.keys_a, &s.keys_b) };
-        let (src_idx, dst_idx) = if odd { (&s.idx_b, &s.idx_a) } else { (&s.idx_a, &s.idx_b) };
+        let (src_keys, dst_keys) = if odd {
+            (&s.keys_b, &s.keys_a)
+        } else {
+            (&s.keys_a, &s.keys_b)
+        };
+        let (src_idx, dst_idx) = if odd {
+            (&s.idx_b, &s.idx_a)
+        } else {
+            (&s.idx_a, &s.idx_b)
+        };
         let buf = match res {
             Cfg => &self.cfg_uniform,
             SortBit => {
@@ -551,7 +648,12 @@ impl VgBvhPass {
         })
     }
 
-    fn rebuild_binds(&mut self, device: &wgpu::Device, instances: &wgpu::Buffer, objects: &wgpu::Buffer) {
+    fn rebuild_binds(
+        &mut self,
+        device: &wgpu::Device,
+        instances: &wgpu::Buffer,
+        objects: &wgpu::Buffer,
+    ) {
         let groups = (0..KERNELS.len())
             .map(|k| self.make_group(device, k, instances, objects, false))
             .collect();
@@ -649,31 +751,97 @@ impl VgBvhPass {
     }
 
     fn record(&self, cmds: &mut CommandRecorder<'_>, mode: BvhMode) {
-        let Some(binds) = self.binds.as_ref() else { return };
+        let Some(binds) = self.binds.as_ref() else {
+            return;
+        };
         let g = &binds.groups;
         if mode == BvhMode::Rebuild {
             let blocks = self.rows.div_ceil(WG).max(1);
             cmds.clear_buffer(&self.scratch.scene_bounds, 0, None);
-            self.dispatch(cmds, K_GATHER_LOCAL, &g[K_GATHER_LOCAL], &[], Dispatch::Direct(blocks));
-            self.dispatch(cmds, K_BLOCK_SCAN, &g[K_BLOCK_SCAN], &[], Dispatch::Direct(1));
-            self.dispatch(cmds, K_GATHER_WRITE, &g[K_GATHER_WRITE], &[], Dispatch::Direct(blocks));
+            self.dispatch(
+                cmds,
+                K_GATHER_LOCAL,
+                &g[K_GATHER_LOCAL],
+                &[],
+                Dispatch::Direct(blocks),
+            );
+            self.dispatch(
+                cmds,
+                K_BLOCK_SCAN,
+                &g[K_BLOCK_SCAN],
+                &[],
+                Dispatch::Direct(1),
+            );
+            self.dispatch(
+                cmds,
+                K_GATHER_WRITE,
+                &g[K_GATHER_WRITE],
+                &[],
+                Dispatch::Direct(blocks),
+            );
             for bit in 0..SORT_BITS {
                 let odd = bit % 2 == 1;
                 let off = [(bit as u64 * SORT_BIT_STRIDE) as u32];
                 let hist = if odd { &binds.hist_odd } else { &g[K_HIST] };
-                let scatter = if odd { &binds.scatter_odd } else { &g[K_SCATTER] };
+                let scatter = if odd {
+                    &binds.scatter_odd
+                } else {
+                    &g[K_SCATTER]
+                };
                 self.dispatch(cmds, K_HIST, hist, &off, Dispatch::Indirect(ARGS_ITEMS));
                 self.dispatch(cmds, K_SCAN, &g[K_SCAN], &[], Dispatch::Direct(1));
-                self.dispatch(cmds, K_SCATTER, scatter, &off, Dispatch::Indirect(ARGS_ITEMS));
+                self.dispatch(
+                    cmds,
+                    K_SCATTER,
+                    scatter,
+                    &off,
+                    Dispatch::Indirect(ARGS_ITEMS),
+                );
             }
-            self.dispatch(cmds, K_CHUNK_EVAL, &g[K_CHUNK_EVAL], &[], Dispatch::Indirect(ARGS_CHUNKS));
-            self.dispatch(cmds, K_CHUNK_SCAN, &g[K_CHUNK_SCAN], &[], Dispatch::Direct(1));
-            self.dispatch(cmds, K_MAKE_LEAVES, &g[K_MAKE_LEAVES], &[], Dispatch::Indirect(ARGS_CHUNKS));
-            self.dispatch(cmds, K_KARRAS, &g[K_KARRAS], &[], Dispatch::Indirect(ARGS_INTERNAL));
+            self.dispatch(
+                cmds,
+                K_CHUNK_EVAL,
+                &g[K_CHUNK_EVAL],
+                &[],
+                Dispatch::Indirect(ARGS_CHUNKS),
+            );
+            self.dispatch(
+                cmds,
+                K_CHUNK_SCAN,
+                &g[K_CHUNK_SCAN],
+                &[],
+                Dispatch::Direct(1),
+            );
+            self.dispatch(
+                cmds,
+                K_MAKE_LEAVES,
+                &g[K_MAKE_LEAVES],
+                &[],
+                Dispatch::Indirect(ARGS_CHUNKS),
+            );
+            self.dispatch(
+                cmds,
+                K_KARRAS,
+                &g[K_KARRAS],
+                &[],
+                Dispatch::Indirect(ARGS_INTERNAL),
+            );
         }
         cmds.clear_buffer(&self.scratch.counters, 0, None);
-        self.dispatch(cmds, K_REFIT, &g[K_REFIT], &[], Dispatch::Indirect(ARGS_LEAVES));
-        self.dispatch(cmds, K_FINALIZE, &g[K_FINALIZE], &[], Dispatch::Indirect(ARGS_NODES));
+        self.dispatch(
+            cmds,
+            K_REFIT,
+            &g[K_REFIT],
+            &[],
+            Dispatch::Indirect(ARGS_LEAVES),
+        );
+        self.dispatch(
+            cmds,
+            K_FINALIZE,
+            &g[K_FINALIZE],
+            &[],
+            Dispatch::Indirect(ARGS_NODES),
+        );
     }
 
     /// Runs one frame outside a render graph, blocking until the GPU is done:
@@ -690,7 +858,10 @@ impl VgBvhPass {
         let rows = (instances.size() / INSTANCE_BYTES) as u32;
         let grew = self.ensure_capacity(device, rows);
         self.rows = rows;
-        if grew || self.binds.is_none() || self.bind_key.as_ref().map(|k| (&k.1, &k.2)) != Some((instances, objects)) {
+        if grew
+            || self.binds.is_none()
+            || self.bind_key.as_ref().map(|k| (&k.1, &k.2)) != Some((instances, objects))
+        {
             self.rebuild_binds(device, instances, objects);
             self.bind_key = Some((self.scratch_generation, instances.clone(), objects.clone()));
         }
@@ -786,7 +957,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuBvhNode>(), 32);
         assert_eq!(std::mem::size_of::<GpuBvhHeader>(), 128);
         assert_eq!(std::mem::size_of::<BuildCfgGpu>(), 16);
-        assert_eq!(std::mem::size_of::<helio_pass_gbuffer::StaticObjectComponent>(), 252);
+        assert_eq!(
+            std::mem::size_of::<helio_pass_gbuffer::StaticObjectComponent>(),
+            252
+        );
         assert_eq!(header_offsets::DISPATCH_LEAVES, 16 * 4);
         assert_eq!(header_offsets::DISPATCH_INSTANCES, 19 * 4);
         assert_eq!(header_offsets::DISPATCH_NODES, 22 * 4);

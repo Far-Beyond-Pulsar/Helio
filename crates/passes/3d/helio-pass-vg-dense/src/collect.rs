@@ -71,7 +71,10 @@ enum SlotState {
     Free,
     /// Copy recorded this frame, not yet mapped.
     Recorded(u64),
-    Mapping(u64, std::sync::Mutex<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>),
+    Mapping(
+        u64,
+        std::sync::Mutex<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+    ),
 }
 
 struct Staging {
@@ -86,13 +89,18 @@ struct Grow {
 
 impl Grow {
     fn new(device: &wgpu::Device, label: &str, words: u32) -> Self {
-        Self { buffer: Self::alloc(device, label, words), words }
+        Self {
+            buffer: Self::alloc(device, label, words),
+            words,
+        }
     }
     fn alloc(device: &wgpu::Device, label: &str, words: u32) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: words.max(4) as u64 * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         })
     }
@@ -187,7 +195,11 @@ impl RtCollect {
             if self.covered_cpu.len() < words as usize {
                 self.covered_cpu.resize(words as usize, 0);
             }
-            queue.write_buffer(&self.covered.buffer, 0, bytemuck::cast_slice(&self.covered_cpu[..words as usize]));
+            queue.write_buffer(
+                &self.covered.buffer,
+                0,
+                bytemuck::cast_slice(&self.covered_cpu[..words as usize]),
+            );
         }
     }
 
@@ -226,7 +238,11 @@ impl RtCollect {
             }
             let (a, b) = (touched[i], touched[j]);
             if b < gpu_words {
-                queue.write_buffer(&self.covered.buffer, a as u64 * 4, bytemuck::cast_slice(&self.covered_cpu[a..=b]));
+                queue.write_buffer(
+                    &self.covered.buffer,
+                    a as u64 * 4,
+                    bytemuck::cast_slice(&self.covered_cpu[a..=b]),
+                );
             }
             i = j + 1;
         }
@@ -247,7 +263,15 @@ impl RtCollect {
         inputs: &DenseNonRtInputs<'_>,
         instance_rows: u32,
     ) {
-        self.record_scoped(device, queue, rec, dense, inputs, instance_rows, &mut crate::common::GpuScopes::none());
+        self.record_scoped(
+            device,
+            queue,
+            rec,
+            dense,
+            inputs,
+            instance_rows,
+            &mut crate::common::GpuScopes::none(),
+        );
     }
 
     /// [`Self::record_rec`] with GPU timestamp scopes around the collect kernel.
@@ -295,7 +319,11 @@ impl RtCollect {
         }
         scopes.end(rec, "vg_dense collect");
         // Readback: header + records, then the dense tile count, into a free slot.
-        if let Some(slot) = self.staging.iter_mut().find(|s| matches!(s.state, SlotState::Free)) {
+        if let Some(slot) = self
+            .staging
+            .iter_mut()
+            .find(|s| matches!(s.state, SlotState::Free))
+        {
             let cand_bytes = (HEADER_WORDS + self.capacity * STRIDE_WORDS) as u64 * 4;
             rec.copy_buffer_to_buffer(&self.cand, 0, &slot.buffer, 0, cand_bytes);
             rec.copy_buffer_to_buffer(&dense.state, 0, &slot.buffer, cand_bytes, 4);
@@ -309,9 +337,11 @@ impl RtCollect {
         for slot in &mut self.staging {
             if let SlotState::Recorded(frame) = slot.state {
                 let (tx, rx) = mpsc::channel();
-                slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                    let _ = tx.send(r);
-                });
+                slot.buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| {
+                        let _ = tx.send(r);
+                    });
                 slot.state = SlotState::Mapping(frame, std::sync::Mutex::new(rx));
             }
         }
@@ -325,19 +355,28 @@ impl RtCollect {
         let _ = device;
         let mut best: Option<CollectResult> = None;
         for slot in &mut self.staging {
-            let SlotState::Mapping(frame, rx) = &slot.state else { continue };
+            let SlotState::Mapping(frame, rx) = &slot.state else {
+                continue;
+            };
             let frame = *frame;
             let received = rx.lock().unwrap_or_else(|p| p.into_inner()).try_recv();
             match received {
                 Ok(Ok(())) => {
                     let result = {
-                        let view = slot.buffer.slice(..).get_mapped_range().expect("mapped range");
+                        let view = slot
+                            .buffer
+                            .slice(..)
+                            .get_mapped_range()
+                            .expect("mapped range");
                         let words: &[u32] = bytemuck::cast_slice(&view);
                         parse(words, self.capacity, frame)
                     };
                     slot.buffer.unmap();
                     slot.state = SlotState::Free;
-                    if best.as_ref().is_none_or(|b| result.recorded_frame > b.recorded_frame) {
+                    if best
+                        .as_ref()
+                        .is_none_or(|b| result.recorded_frame > b.recorded_frame)
+                    {
                         best = Some(result);
                     }
                 }
@@ -372,5 +411,12 @@ fn parse(words: &[u32], capacity: u32, recorded_frame: u64) -> CollectResult {
         });
     }
     let dense_tiles = words[(HEADER_WORDS + capacity * STRIDE_WORDS) as usize];
-    CollectResult { total, uncovered, dense_tiles, masked_clusters: words[2], records, recorded_frame }
+    CollectResult {
+        total,
+        uncovered,
+        dense_tiles,
+        masked_clusters: words[2],
+        records,
+        recorded_frame,
+    }
 }

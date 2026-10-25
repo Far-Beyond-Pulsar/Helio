@@ -31,8 +31,8 @@ pub mod cpu_ref;
 mod debug;
 pub mod graph;
 pub use debug::{debug_source, VgShadeDebug, DEBUG_WGSL};
-pub use helio_vg_format::debug_view as debug_views;
 pub use graph::VgShadePass;
+pub use helio_vg_format::debug_view as debug_views;
 
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
@@ -57,8 +57,12 @@ pub const COMMON_WGSL: &str = include_str!("../shaders/vg_common.wgsl");
 /// followed by `DECODE_ATTR_WGSL`. The shade shaders declare `vg_page_pool` and
 /// `vg_asset_quant` themselves.
 pub fn shared_decode() -> String {
-    format!("{}
-{}", helio_vg_format::DECODE_WGSL, helio_vg_format::DECODE_ATTR_WGSL)
+    format!(
+        "{}
+{}",
+        helio_vg_format::DECODE_WGSL,
+        helio_vg_format::DECODE_ATTR_WGSL
+    )
 }
 
 /// The classic G-buffer shader whose material evaluator the shade pass reuses.
@@ -169,7 +173,9 @@ pub mod shader_source {
     /// WebGPU fixups applied).
     pub fn gradient_sampling(src: &str, max_textures: usize, bindless: bool) -> String {
         const GRAD: &str = "uv, vg_slot_grad(slot, vg_duv_dx), vg_slot_grad(slot, vg_duv_dy)";
-        let src = &src.replace("dpdx(n)", "vg_dn_dx").replace("dpdy(n)", "vg_dn_dy");
+        let src = &src
+            .replace("dpdx(n)", "vg_dn_dx")
+            .replace("dpdy(n)", "vg_dn_dy");
         if bindless {
             return src.replace(
                 "textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv)",
@@ -264,14 +270,14 @@ pub struct VgShadeInputs<'a> {
 /// targets need `STORAGE_BINDING` (see the crate report for what the classic
 /// pass declares today).
 pub struct VgShadeTargets<'a> {
-    pub albedo: &'a wgpu::TextureView,         // Rgba8Unorm
-    pub normal: &'a wgpu::TextureView,         // Rgba16Float
-    pub orm: &'a wgpu::TextureView,            // Rgba8Unorm
-    pub emissive: &'a wgpu::TextureView,       // Rgba16Float
-    pub lightmap_uv: &'a wgpu::TextureView,    // Rg16Float, RENDER_ATTACHMENT only (written by the depth pass)
-    pub sss: &'a wgpu::TextureView,            // Rgba16Float
-    pub extra: &'a wgpu::TextureView,          // Rgba16Float
-    pub velocity: &'a wgpu::TextureView,       // Rgba16Float
+    pub albedo: &'a wgpu::TextureView,      // Rgba8Unorm
+    pub normal: &'a wgpu::TextureView,      // Rgba16Float
+    pub orm: &'a wgpu::TextureView,         // Rgba8Unorm
+    pub emissive: &'a wgpu::TextureView,    // Rgba16Float
+    pub lightmap_uv: &'a wgpu::TextureView, // Rg16Float, RENDER_ATTACHMENT only (written by the depth pass)
+    pub sss: &'a wgpu::TextureView,         // Rgba16Float
+    pub extra: &'a wgpu::TextureView,       // Rgba16Float
+    pub velocity: &'a wgpu::TextureView,    // Rgba16Float
     /// Depth32Float attachment the final depth pass writes (the classic depth).
     pub depth: &'a wgpu::TextureView,
 }
@@ -451,7 +457,12 @@ impl VgShade {
                 cache: None,
             })
         };
-        let resolve_pipeline = compute("VgShade vis_resolve", &resolve_layout, &resolve_module, "vis_resolve");
+        let resolve_pipeline = compute(
+            "VgShade vis_resolve",
+            &resolve_layout,
+            &resolve_module,
+            "vis_resolve",
+        );
 
         // ── binning ──
         let bin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -471,9 +482,15 @@ impl VgShade {
             immediate_size: 0,
         });
         let bin_module = module("VgShade bin", shader_source::bin());
-        let bin_count_pipeline = compute("VgShade bin_count", &bin_layout, &bin_module, "bin_count");
+        let bin_count_pipeline =
+            compute("VgShade bin_count", &bin_layout, &bin_module, "bin_count");
         let bin_scan_pipeline = compute("VgShade bin_scan", &bin_layout, &bin_module, "bin_scan");
-        let bin_scatter_pipeline = compute("VgShade bin_scatter", &bin_layout, &bin_module, "bin_scatter");
+        let bin_scatter_pipeline = compute(
+            "VgShade bin_scatter",
+            &bin_layout,
+            &bin_module,
+            "bin_scatter",
+        );
 
         // ── shade ──
         let mut s0 = vec![storage_entry(0, true), uniform_entry(1)];
@@ -576,7 +593,11 @@ impl VgShade {
             std::mem::size_of::<VgShadeGlobals>() as u64,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let bins = buffer("VgShade bins", u64::from(BIN_COUNT) * 16, storage | wgpu::BufferUsages::COPY_SRC);
+        let bins = buffer(
+            "VgShade bins",
+            u64::from(BIN_COUNT) * 16,
+            storage | wgpu::BufferUsages::COPY_SRC,
+        );
         let dispatch_args = buffer(
             "VgShade dispatch args",
             u64::from(BIN_COUNT) * 16,
@@ -587,7 +608,11 @@ impl VgShade {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -688,7 +713,11 @@ impl VgShade {
 
     /// (Re)create the size-dependent resources.
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if self.size.as_ref().is_some_and(|s| s.width == width && s.height == height) {
+        if self
+            .size
+            .as_ref()
+            .is_some_and(|s| s.width == width && s.height == height)
+        {
             return;
         }
         let pixels = u64::from(width.max(1)) * u64::from(height.max(1));
@@ -736,7 +765,10 @@ impl VgShade {
         match &self.templates {
             Some(shared) => {
                 let reg = shared.read().unwrap();
-                reg.keys().into_iter().filter(|k| *k < BIN_COUNT).fold(0u32, |m, k| m | 1 << k)
+                reg.keys()
+                    .into_iter()
+                    .filter(|k| *k < BIN_COUNT)
+                    .fold(0u32, |m, k| m | 1 << k)
             }
             None => helio_mats::RadiantTemplateRegistry::new()
                 .keys()
@@ -755,7 +787,12 @@ impl VgShade {
             // A bin without a registered template shades as class 0.
             let class = match &self.templates {
                 Some(shared) if shared.read().unwrap().get(bin).is_some() => bin,
-                None if helio_mats::RadiantTemplateRegistry::new().get(bin).is_some() => bin,
+                None if helio_mats::RadiantTemplateRegistry::new()
+                    .get(bin)
+                    .is_some() =>
+                {
+                    bin
+                }
                 _ => 0,
             };
             if !self.shade_modules.contains_key(&class) {
@@ -778,8 +815,8 @@ impl VgShade {
                 self.shade_modules.insert(class, module);
             }
             let module = &self.shade_modules[&class];
-            self.shade_pipelines[bin as usize] =
-                Some(device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            self.shade_pipelines[bin as usize] = Some(device.create_compute_pipeline(
+                &wgpu::ComputePipelineDescriptor {
                     label: Some("VgShade vg_shade"),
                     layout: Some(&self.shade_layout),
                     module,
@@ -789,7 +826,8 @@ impl VgShade {
                         ..Default::default()
                     },
                     cache: None,
-                }));
+                },
+            ));
         }
     }
 
@@ -810,7 +848,9 @@ impl VgShade {
         globals: &VgShadeGlobals,
     ) {
         let mut rec = helio_core::CommandRecorder::from_encoder(encoder);
-        self.encode_rec(device, queue, &mut rec, width, height, inputs, targets, globals);
+        self.encode_rec(
+            device, queue, &mut rec, width, height, inputs, targets, globals,
+        );
     }
 
     /// As [`Self::encode`], into a render-graph command stream.
@@ -875,35 +915,99 @@ impl VgShade {
             label: Some("VgShade resolve 0"),
             layout: &self.resolve_bgl0,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf(inputs.camera) },
-                wgpu::BindGroupEntry { binding: 1, resource: buf(&self.params) },
-                wgpu::BindGroupEntry { binding: 2, resource: buf(inputs.static_objects) },
-                wgpu::BindGroupEntry { binding: 3, resource: buf(inputs.coordinate_spaces) },
-                wgpu::BindGroupEntry { binding: 4, resource: buf(inputs.visible) },
-                wgpu::BindGroupEntry { binding: 5, resource: buf(inputs.asset_quant) },
-                wgpu::BindGroupEntry { binding: 6, resource: buf(inputs.instances) },
-                wgpu::BindGroupEntry { binding: 7, resource: buf(inputs.pages) },
-                wgpu::BindGroupEntry { binding: 8, resource: buf(inputs.sw_keys.unwrap_or(&self.dummy_keys)) },
-                wgpu::BindGroupEntry { binding: 9, resource: buf(inputs.dense_keys.unwrap_or(&self.dummy_keys)) },
-                wgpu::BindGroupEntry { binding: 10, resource: buf(pixel_material) },
-                wgpu::BindGroupEntry { binding: 11, resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)) },
-                wgpu::BindGroupEntry { binding: 12, resource: buf(inputs.dense_mask.unwrap_or(&self.dummy_keys)) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf(inputs.camera),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf(&self.params),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf(inputs.static_objects),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf(inputs.coordinate_spaces),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buf(inputs.visible),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: buf(inputs.asset_quant),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: buf(inputs.instances),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: buf(inputs.pages),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: buf(inputs.sw_keys.unwrap_or(&self.dummy_keys)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: buf(inputs.dense_keys.unwrap_or(&self.dummy_keys)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: buf(pixel_material),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: buf(inputs.dense_mask.unwrap_or(&self.dummy_keys)),
+                },
             ],
         });
-        let (rt_payload, rt_depth) =
-            inputs.rt.unwrap_or((&self.dummy_rt_payload, &self.dummy_rt_depth));
+        let (rt_payload, rt_depth) = inputs
+            .rt
+            .unwrap_or((&self.dummy_rt_payload, &self.dummy_rt_depth));
         let resolve1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgShade resolve 1"),
             layout: &self.resolve_bgl1,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: res(inputs.hw_vis) },
-                wgpu::BindGroupEntry { binding: 1, resource: res(inputs.hw_depth) },
-                wgpu::BindGroupEntry { binding: 2, resource: res(inputs.scene_depth) },
-                wgpu::BindGroupEntry { binding: 3, resource: res(rt_payload) },
-                wgpu::BindGroupEntry { binding: 4, resource: res(rt_depth) },
-                wgpu::BindGroupEntry { binding: 5, resource: res(payload_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: res(depth_view) },
-                wgpu::BindGroupEntry { binding: 7, resource: res(source_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: res(inputs.hw_vis),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: res(inputs.hw_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: res(inputs.scene_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: res(rt_payload),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: res(rt_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: res(payload_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: res(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: res(source_view),
+                },
             ],
         });
         {
@@ -922,21 +1026,47 @@ impl VgShade {
             label: Some("VgShade bin"),
             layout: &self.bin_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf(&self.params) },
-                wgpu::BindGroupEntry { binding: 1, resource: buf(pixel_material) },
-                wgpu::BindGroupEntry { binding: 2, resource: buf(inputs.materials) },
-                wgpu::BindGroupEntry { binding: 3, resource: buf(&self.bins) },
-                wgpu::BindGroupEntry { binding: 4, resource: buf(pixel_list) },
-                wgpu::BindGroupEntry { binding: 5, resource: buf(&self.dispatch_args) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf(&self.params),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf(pixel_material),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf(inputs.materials),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf(&self.bins),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buf(pixel_list),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: buf(&self.dispatch_args),
+                },
             ],
         });
         let groups = pixels.div_ceil(64);
         let gx = groups.min(4096).max(1);
         let gy = groups.div_ceil(gx).max(1);
         for (label, pipeline, dispatch) in [
-            ("VgShade bin_count", &self.bin_count_pipeline, Some((gx, gy))),
+            (
+                "VgShade bin_count",
+                &self.bin_count_pipeline,
+                Some((gx, gy)),
+            ),
             ("VgShade bin_scan", &self.bin_scan_pipeline, None),
-            ("VgShade bin_scatter", &self.bin_scatter_pipeline, Some((gx, gy))),
+            (
+                "VgShade bin_scatter",
+                &self.bin_scatter_pipeline,
+                Some((gx, gy)),
+            ),
         ] {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
@@ -956,26 +1086,76 @@ impl VgShade {
             label: Some("VgShade shade 0"),
             layout: &self.shade_bgl0,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf(inputs.camera) },
-                wgpu::BindGroupEntry { binding: 1, resource: buf(&self.globals) },
-                wgpu::BindGroupEntry { binding: 2, resource: buf(inputs.static_objects) },
-                wgpu::BindGroupEntry { binding: 3, resource: buf(inputs.coordinate_spaces) },
-                wgpu::BindGroupEntry { binding: 4, resource: buf(inputs.coordinate_spaces_prev) },
-                wgpu::BindGroupEntry { binding: 5, resource: buf(inputs.visible) },
-                wgpu::BindGroupEntry { binding: 6, resource: buf(inputs.asset_quant) },
-                wgpu::BindGroupEntry { binding: 7, resource: buf(inputs.instances) },
-                wgpu::BindGroupEntry { binding: 8, resource: buf(inputs.pages) },
-                wgpu::BindGroupEntry { binding: 9, resource: buf(&self.params) },
-                wgpu::BindGroupEntry { binding: 10, resource: buf(pixel_list) },
-                wgpu::BindGroupEntry { binding: 11, resource: buf(&self.bins) },
-                wgpu::BindGroupEntry { binding: 12, resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf(inputs.camera),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf(&self.globals),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: buf(inputs.static_objects),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: buf(inputs.coordinate_spaces),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: buf(inputs.coordinate_spaces_prev),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: buf(inputs.visible),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: buf(inputs.asset_quant),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: buf(inputs.instances),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: buf(inputs.pages),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: buf(&self.params),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: buf(pixel_list),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: buf(&self.bins),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: buf(inputs.rt_visible.unwrap_or(&self.dummy_keys)),
+                },
             ],
         });
         let mut material_entries = vec![
-            wgpu::BindGroupEntry { binding: 0, resource: buf(inputs.materials) },
-            wgpu::BindGroupEntry { binding: 1, resource: buf(mt.material_textures) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buf(inputs.materials),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf(mt.material_textures),
+            },
         ];
-        self.binding.append_bind_group_entries(&mut material_entries, 2, mt.texture_views, mt.samplers);
+        self.binding.append_bind_group_entries(
+            &mut material_entries,
+            2,
+            mt.texture_views,
+            mt.samplers,
+        );
         let shade1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgShade shade 1"),
             layout: &self.shade_bgl1,
@@ -985,15 +1165,42 @@ impl VgShade {
             label: Some("VgShade shade 2"),
             layout: &self.shade_bgl2,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: res(payload_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: res(depth_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: res(targets.albedo) },
-                wgpu::BindGroupEntry { binding: 3, resource: res(targets.normal) },
-                wgpu::BindGroupEntry { binding: 4, resource: res(targets.orm) },
-                wgpu::BindGroupEntry { binding: 5, resource: res(targets.emissive) },
-                wgpu::BindGroupEntry { binding: 6, resource: res(targets.sss) },
-                wgpu::BindGroupEntry { binding: 7, resource: res(targets.extra) },
-                wgpu::BindGroupEntry { binding: 8, resource: res(targets.velocity) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: res(payload_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: res(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: res(targets.albedo),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: res(targets.normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: res(targets.orm),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: res(targets.emissive),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: res(targets.sss),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: res(targets.extra),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: res(targets.velocity),
+                },
             ],
         });
         {
@@ -1014,14 +1221,19 @@ impl VgShade {
 
         // 3b. the selected debug view, over the albedo just written
         if let Some(debug) = &inputs.debug {
-            self.encode_debug(device, queue, encoder, width, height, inputs, targets, debug);
+            self.encode_debug(
+                device, queue, encoder, width, height, inputs, targets, debug,
+            );
         }
 
         // 4. final depth
         let depth_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgShade depth"),
             layout: &self.depth_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: res(depth_view) }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: res(depth_view),
+            }],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("VgShade depth"),
@@ -1029,7 +1241,10 @@ impl VgShade {
                 view: targets.lightmap_uv,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: targets.depth,
@@ -1080,8 +1295,14 @@ mod tests {
     #[test]
     fn resolve_bin_depth_validate() {
         let m = validate("vg_resolve", &shader_source::resolve(&shared_decode()));
-        assert_eq!(struct_size(&m, "VgVisibleCluster"), std::mem::size_of::<VgVisibleCluster>());
-        assert_eq!(struct_size(&m, "Params"), std::mem::size_of::<VgShadeParams>());
+        assert_eq!(
+            struct_size(&m, "VgVisibleCluster"),
+            std::mem::size_of::<VgVisibleCluster>()
+        );
+        assert_eq!(
+            struct_size(&m, "Params"),
+            std::mem::size_of::<VgShadeParams>()
+        );
         validate("vg_bin", &shader_source::bin());
         validate("vg_depth", &shader_source::depth());
     }
@@ -1090,10 +1311,17 @@ mod tests {
     fn debug_views_validate_and_every_view_has_a_shader_constant() {
         let source = debug_source();
         let m = validate("vg_debug", &source);
-        assert_eq!(struct_size(&m, "DebugParams"), std::mem::size_of::<debug::DebugParams>());
+        assert_eq!(
+            struct_size(&m, "DebugParams"),
+            std::mem::size_of::<debug::DebugParams>()
+        );
         // Every registered id is a `VGDBG_*` constant the shader switches on.
         for view in helio_vg_format::debug_view::ALL {
-            let constant = format!("const VGDBG_{}: u32 = {}u;", view.key().to_ascii_uppercase(), view.id());
+            let constant = format!(
+                "const VGDBG_{}: u32 = {}u;",
+                view.key().to_ascii_uppercase(),
+                view.id()
+            );
             assert!(source.contains(&constant), "{constant}");
             let case = format!("case VGDBG_{}:", view.key().to_ascii_uppercase());
             let tile = matches!(
@@ -1121,15 +1349,24 @@ mod tests {
                 };
                 let binding = material_binding(mode, max_textures);
                 let src = shader_source::shade(template, binding, &shared_decode());
-                assert!(src.contains("textureSampleGrad"), "class {class}: no gradient sampling");
+                assert!(
+                    src.contains("textureSampleGrad"),
+                    "class {class}: no gradient sampling"
+                );
                 assert!(
                     !src.contains("textureSample(") && !src.contains("textureSampleLevel("),
                     "class {class}: implicit-derivative sampling left in a compute shader"
                 );
                 let m = validate(&format!("vg_shade class {class} bindless={bindless}"), &src);
                 if class == 0 && bindless {
-                    assert_eq!(struct_size(&m, "Globals"), std::mem::size_of::<VgShadeGlobals>());
-                    assert_eq!(struct_size(&m, "Params"), std::mem::size_of::<VgShadeParams>());
+                    assert_eq!(
+                        struct_size(&m, "Globals"),
+                        std::mem::size_of::<VgShadeGlobals>()
+                    );
+                    assert_eq!(
+                        struct_size(&m, "Params"),
+                        std::mem::size_of::<VgShadeParams>()
+                    );
                 }
                 checked += 1;
             }
@@ -1185,7 +1422,10 @@ mod tests {
     #[allow(deprecated)]
     fn camera(width: f32, height: f32) -> (Mat4, Mat4) {
         let view = Mat4::look_at_rh(Vec3::new(0.3, 0.2, 2.0), Vec3::new(0.1, 0.0, -3.0), Vec3::Y);
-        (view, helio_core::depth::perspective(60f32.to_radians(), width / height, 0.1))
+        (
+            view,
+            helio_core::depth::perspective(60f32.to_radians(), width / height, 0.1),
+        )
     }
 
     /// Exact barycentrics from the clip-space solve match the ray / plane
@@ -1197,22 +1437,39 @@ mod tests {
         let inv = (proj * view).inverse();
         let cam_pos = view.inverse().transform_point3(Vec3::ZERO);
         let triangles = [
-            [Vec3::new(-1.0, -1.0, -3.0), Vec3::new(1.2, -0.8, -3.5), Vec3::new(0.1, 1.3, -2.5)],
+            [
+                Vec3::new(-1.0, -1.0, -3.0),
+                Vec3::new(1.2, -0.8, -3.5),
+                Vec3::new(0.1, 1.3, -2.5),
+            ],
             // strongly foreshortened: a long ground-plane sliver receding away
-            [Vec3::new(-2.0, -1.0, 0.0), Vec3::new(2.0, -1.0, 0.0), Vec3::new(0.0, -1.0, -60.0)],
+            [
+                Vec3::new(-2.0, -1.0, 0.0),
+                Vec3::new(2.0, -1.0, 0.0),
+                Vec3::new(0.0, -1.0, -60.0),
+            ],
             // large depth range across a small screen area
-            [Vec3::new(0.0, 0.0, -0.5), Vec3::new(0.2, 0.1, -40.0), Vec3::new(-0.2, 0.15, -39.0)],
+            [
+                Vec3::new(0.0, 0.0, -0.5),
+                Vec3::new(0.2, 0.1, -40.0),
+                Vec3::new(-0.2, 0.15, -39.0),
+            ],
         ];
         let mut tested = 0;
         for tri in triangles {
             let c = tri.map(|p| cpu_ref::clip(view, proj, p.into()));
             for y in (0..360).step_by(7) {
                 for x in (0..640).step_by(7) {
-                    let ndc = cpu_ref::pixel_ndc(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), Vec2::new(w, h));
+                    let ndc = cpu_ref::pixel_ndc(
+                        Vec2::new(x as f32 + 0.5, y as f32 + 0.5),
+                        Vec2::new(w, h),
+                    );
                     let b = cpu_ref::bary_from_clip(c, ndc);
                     let far = inv * glam::Vec4::new(ndc.x, ndc.y, 1e-6, 1.0);
                     let dir = (far.truncate() / far.w - cam_pos).normalize();
-                    let Some(r) = cpu_ref::bary_from_ray(tri, cam_pos, dir) else { continue };
+                    let Some(r) = cpu_ref::bary_from_ray(tri, cam_pos, dir) else {
+                        continue;
+                    };
                     let inside = r.iter().all(|v| *v >= 0.0);
                     if !inside {
                         continue;
@@ -1243,9 +1500,16 @@ mod tests {
         let (w, h) = (320.0, 240.0);
         let view = Mat4::IDENTITY;
         let proj = helio_core::depth::perspective(70f32.to_radians(), w / h, 0.05);
-        let tri = [Vec3::new(-1.0, -1.0, -2.0), Vec3::new(1.0, -1.0, -2.0), Vec3::new(0.0, 0.5, 1.0)];
+        let tri = [
+            Vec3::new(-1.0, -1.0, -2.0),
+            Vec3::new(1.0, -1.0, -2.0),
+            Vec3::new(0.0, 0.5, 1.0),
+        ];
         let c = tri.map(|p| cpu_ref::clip(view, proj, p));
-        assert!(c[2].w < 0.0 && c[0].w > 0.0, "vertex 2 must be behind the eye");
+        assert!(
+            c[2].w < 0.0 && c[0].w > 0.0,
+            "vertex 2 must be behind the eye"
+        );
         // A pixel low in the frame sees only the visible part: weights must be
         // a valid combination reproducing the NDC point.
         let ndc = cpu_ref::pixel_ndc(Vec2::new(160.0, 200.0), Vec2::new(w, h));
@@ -1254,7 +1518,9 @@ mod tests {
         let p = c[0] * b[0] + c[1] * b[1] + c[2] * b[2];
         // Compare without the divide: P.w may be tiny near the eye plane.
         let scale = c.iter().map(|v| v.abs().max_element()).fold(0.0, f32::max);
-        assert!((p.x - ndc.x * p.w).abs() < 1e-5 * scale && (p.y - ndc.y * p.w).abs() < 1e-5 * scale);
+        assert!(
+            (p.x - ndc.x * p.w).abs() < 1e-5 * scale && (p.y - ndc.y * p.w).abs() < 1e-5 * scale
+        );
     }
 
     /// Payload precision: unorm16 packing round-trips within half a step, and
@@ -1274,7 +1540,10 @@ mod tests {
         assert!(worst <= half_step, "worst error {worst} > {half_step}");
         // Edge cases the packing must keep exactly.
         assert_eq!(cpu_ref::payload_bary([1.0, 0.0, 0.0]), 0);
-        assert_eq!(cpu_ref::payload_unbary(helio_vg_format::bary_pack(1.0, 0.0))[1], 1.0);
+        assert_eq!(
+            cpu_ref::payload_unbary(helio_vg_format::bary_pack(1.0, 0.0))[1],
+            1.0
+        );
         // 128-pixel-wide triangle, UV spanning 1.0: error in texels.
         let texel_error = half_step * 128.0;
         assert!(texel_error < 0.002, "{texel_error}");

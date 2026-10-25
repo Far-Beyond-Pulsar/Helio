@@ -170,7 +170,10 @@ pub fn partition(
                         scale(s, 1.0 / members.len() as f32)
                     };
                     let at = rank[seed as usize];
-                    let (lo, hi) = (at.saturating_sub(SPATIAL_WINDOW), (at + SPATIAL_WINDOW).min(n - 1));
+                    let (lo, hi) = (
+                        at.saturating_sub(SPATIAL_WINDOW),
+                        (at + SPATIAL_WINDOW).min(n - 1),
+                    );
                     let near = (lo..=hi)
                         .map(|r| order[r])
                         .filter(|&c| group_of[c as usize] == NONE)

@@ -26,7 +26,9 @@ fn tufts(ty: &GpuFoliageType, tufts: u32) -> Vec<Vec<(u32, Blade)>> {
             let n = 4 + t % 12;
             let turn = (hash(t) & 0xff) as f32 / 256.0;
             let height = (hash(t ^ 0x55) & 0xff) as f32 / 255.0;
-            (0..n).map(|j| (j, tuft_blade(ty, seed, turn, height, j, n))).collect()
+            (0..n)
+                .map(|j| (j, tuft_blade(ty, seed, turn, height, j, n)))
+                .collect()
         })
         .collect()
 }
@@ -46,8 +48,14 @@ fn blocky_blades_are_connected_staircases_off_their_tufts_root_column() {
                 );
             }
             if j > 0 {
-                assert!(cubes.iter().all(|c| c[0] > 0), "blade {j} in the root column");
-                assert!(!cubes.is_empty() || block_steps(&b, 0.05, 1.0, STACK_STEPS)[0] == 0, "blade {j} hidden");
+                assert!(
+                    cubes.iter().all(|c| c[0] > 0),
+                    "blade {j} in the root column"
+                );
+                assert!(
+                    !cubes.is_empty() || block_steps(&b, 0.05, 1.0, STACK_STEPS)[0] == 0,
+                    "blade {j} hidden"
+                );
             } else if let Some(first) = cubes.first() {
                 assert_eq!(*first, [0, 0]);
             }
@@ -69,7 +77,11 @@ fn a_tufts_blades_never_draw_one_cube_twice() {
             }
             let dir = compass_step(b.compass);
             for c in block_cubes(&b, j, 0.05, 1.0) {
-                let at = [(dir[0] * c[0] as f32) as i32, (dir[1] * c[0] as f32) as i32, c[1] as i32];
+                let at = [
+                    (dir[0] * c[0] as f32) as i32,
+                    (dir[1] * c[0] as f32) as i32,
+                    c[1] as i32,
+                ];
                 if let Some(other) = owner.insert(at, j) {
                     panic!("blades {other} and {j} both draw cube {at:?}");
                 }
@@ -93,7 +105,10 @@ fn a_blocky_blades_boxes_fit_its_strip() {
         }
     }
     // A blade with more boxes than its strip loses its tip: rare enough not to see.
-    assert!(over * 100 <= total, "{over} of {total} blades overflow L0's strip");
+    assert!(
+        over * 100 <= total,
+        "{over} of {total} blades overflow L0's strip"
+    );
 }
 
 #[test]
@@ -106,7 +121,11 @@ fn boxes_cover_their_blades_cubes() {
             let dir = compass_step(b.compass);
             let size = if j >= 8 { 0.05 * 0.86 } else { 0.05 };
             for c in &cubes {
-                let centre = [dir[0] * c[0] as f32 * size, dir[1] * c[0] as f32 * size, (c[1] as f32 + 0.5) * 0.05];
+                let centre = [
+                    dir[0] * c[0] as f32 * size,
+                    dir[1] * c[0] as f32 * size,
+                    (c[1] as f32 + 0.5) * 0.05,
+                ];
                 let inside = boxes.iter().any(|bx| {
                     (centre[0] - bx.centre[0]).abs() <= bx.half[0] + 1e-5
                         && (centre[1] - bx.centre[1]).abs() <= bx.half[1] + 1e-5
@@ -121,7 +140,11 @@ fn boxes_cover_their_blades_cubes() {
 
 #[test]
 fn smooth_blades_keep_their_length_as_they_lean() {
-    let mut ty = GpuFoliageType { lean_range: [0.2, 1.2], curve: 0.5, ..GpuFoliageType::default() };
+    let mut ty = GpuFoliageType {
+        lean_range: [0.2, 1.2],
+        curve: 0.5,
+        ..GpuFoliageType::default()
+    };
     ty.set_blades_per_tuft([5, 12]);
     for tuft in tufts(&ty, 50) {
         for (_, b) in tuft {
@@ -139,14 +162,21 @@ fn smooth_blades_keep_their_length_as_they_lean() {
             let reach = b.lean + b.curve;
             // Between the upright length and the leaning path's: never a stretched blade
             // or one collapsed to nothing.
-            assert!(length > 0.6 * b.height && length < b.height * (1.0 + reach), "{length} for {} m leaning {reach}", b.height);
+            assert!(
+                length > 0.6 * b.height && length < b.height * (1.0 + reach),
+                "{length} for {} m leaning {reach}",
+                b.height
+            );
         }
     }
 }
 
 #[test]
 fn a_tufts_blades_spread_around_it() {
-    let mut ty = GpuFoliageType { lean_range: [0.2, 1.2], ..GpuFoliageType::default() };
+    let mut ty = GpuFoliageType {
+        lean_range: [0.2, 1.2],
+        ..GpuFoliageType::default()
+    };
     ty.set_blades_per_tuft([8, 8]);
     for tuft in tufts(&ty, 50) {
         let n = tuft.len() as f32;
@@ -167,7 +197,12 @@ fn boxes_by_levels_are_the_walks_boxes() {
     // The draw finds a blade's boxes from its sideways steps' levels; they must be the
     // cube-by-cube walk's, box for box.
     let mut checked = 0;
-    for (lean, curve, fall, width) in [([0.0, 0.3], 0.15, 0.05, [0.05, 0.05]), ([0.2, 1.2], 0.6, 0.15, [0.05, 0.05]), ([0.9, 1.6], 0.3, 0.0, [0.05, 0.15]), ([0.0, 0.0], 0.0, 0.0, [0.05, 0.05])] {
+    for (lean, curve, fall, width) in [
+        ([0.0, 0.3], 0.15, 0.05, [0.05, 0.05]),
+        ([0.2, 1.2], 0.6, 0.15, [0.05, 0.05]),
+        ([0.9, 1.6], 0.3, 0.0, [0.05, 0.15]),
+        ([0.0, 0.0], 0.0, 0.0, [0.05, 0.05]),
+    ] {
         let ty = block_type(lean, curve, fall, width);
         let leafy = width[1] > 1.5 * width[0];
         for tuft in tufts(&ty, 300) {
@@ -176,10 +211,22 @@ fn boxes_by_levels_are_the_walks_boxes() {
                     for steps in [STACK_STEPS, L1_STEPS] {
                         let walk = block_boxes(&b, j, 0.05, scale, leafy, steps);
                         let levels = block_boxes_by_levels(&b, j, 0.05, scale, leafy, steps);
-                        assert_eq!(walk.len(), levels.len(), "blade {j} {b:?} scale {scale} steps {steps}");
+                        assert_eq!(
+                            walk.len(),
+                            levels.len(),
+                            "blade {j} {b:?} scale {scale} steps {steps}"
+                        );
                         for (w, l) in walk.iter().zip(&levels) {
                             let close = |a: f32, b: f32| (a - b).abs() <= 1.0e-5;
-                            assert!(close(w.centre[0], l.centre[0]) && close(w.centre[1], l.centre[1]) && close(w.half[0], l.half[0]) && close(w.half[1], l.half[1]) && close(w.y0, l.y0) && close(w.y1, l.y1), "blade {j}: {w:?} vs {l:?}");
+                            assert!(
+                                close(w.centre[0], l.centre[0])
+                                    && close(w.centre[1], l.centre[1])
+                                    && close(w.half[0], l.half[0])
+                                    && close(w.half[1], l.half[1])
+                                    && close(w.y0, l.y0)
+                                    && close(w.y1, l.y1),
+                                "blade {j}: {w:?} vs {l:?}"
+                            );
                         }
                         checked += 1;
                     }

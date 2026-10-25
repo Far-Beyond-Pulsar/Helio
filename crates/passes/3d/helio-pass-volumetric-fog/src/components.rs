@@ -319,7 +319,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<GlobalFogComponent>(), 80);
         assert_eq!(std::mem::size_of::<LocalFogVolumeComponent>(), 128);
         assert_eq!(std::mem::offset_of!(GlobalFogComponent, planet), 64);
-        assert_eq!(std::mem::offset_of!(LocalFogVolumeComponent, medium_planet), 96);
+        assert_eq!(
+            std::mem::offset_of!(LocalFogVolumeComponent, medium_planet),
+            96
+        );
         assert_eq!(std::mem::offset_of!(LocalFogVolumeComponent, medium), 32);
         assert_eq!(std::mem::offset_of!(GlobalFogComponent, albedo), 32);
         assert_eq!(std::mem::offset_of!(GlobalFogComponent, emission), 48);

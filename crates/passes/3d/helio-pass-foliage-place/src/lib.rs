@@ -77,8 +77,8 @@ pub mod wind;
 pub use frame_data::FoliageTerrainViews;
 pub use pass::{FoliagePlacePass, INTERACTOR_BYTES, MAX_FOLIAGE_LAYERS, MAX_FOLIAGE_TYPES};
 pub use reference::{
-    chart_noise, flat_ground, foliage_hash, patch_weight, place_tile_reference, type_grows, ReferenceCandidate, ReferenceGround,
-    ReferencePlacement,
+    chart_noise, flat_ground, foliage_hash, patch_weight, place_tile_reference, type_grows,
+    ReferenceCandidate, ReferenceGround, ReferencePlacement,
 };
 pub use residency::{RingUpdate, TileRing};
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
@@ -137,7 +137,6 @@ pub const FOLIAGE_STACK_CUBES: u32 = 24;
 /// Interactors the foliage draw looks at, at most: the first gathered each frame
 /// (`FoliagePlacePass::interactors`).
 pub const FOLIAGE_MAX_INTERACTORS: u32 = 16;
-
 
 /// Number of `u32` blade indices reserved for each LOD region of `visible_blades`.
 ///

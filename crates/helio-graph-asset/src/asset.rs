@@ -22,7 +22,10 @@ pub struct PinRef {
 
 impl PinRef {
     pub fn new(node: impl Into<String>, pin: impl Into<String>) -> Self {
-        Self { node: node.into(), pin: pin.into() }
+        Self {
+            node: node.into(),
+            pin: pin.into(),
+        }
     }
 }
 
@@ -184,7 +187,10 @@ mod tests {
 
     #[test]
     fn round_trips_and_rejects_newer_formats() {
-        let mut asset = GraphAsset { name: "x".into(), ..Default::default() };
+        let mut asset = GraphAsset {
+            name: "x".into(),
+            ..Default::default()
+        };
         asset.nodes.push(NodeInstance {
             id: "n1".into(),
             kind: "core.output".into(),

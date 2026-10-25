@@ -9,8 +9,8 @@
 //! When a headset is present, the Vulkan instance and device are created
 //! *through* OpenXR (`xrCreateVulkanInstanceKHR` / `xrCreateVulkanDeviceKHR`)
 //! via `helio_xr::create_wgpu_instance` / `create_wgpu_device` so the runtime's
-//! required extensions are enabled and the HMD's GPU is used. The mirror window
-//! stays idle in XR mode.
+//! required extensions are enabled and the HMD's GPU is used. Helio mirrors the
+//! stereo pair into the app's normal window while it drives the headset.
 //!
 //! Controls:
 //!   WASD / Space / Shift — fly (desktop mirror mode)
@@ -23,8 +23,8 @@
 //!   cargo run -p examples --bin vr_demo
 //!
 //! Without a headset (or without OpenXR + a Vulkan-capable GPU) the demo logs a
-//! warning and runs the desktop mirror path; with one, `renderer.render_xr()`
-//! drives the headset each frame.
+//! warning and runs the desktop path; with one, `renderer.render_window_frame()`
+//! drives the headset and mirrors its stereo output each frame.
 
 mod input;
 mod scene;
@@ -54,88 +54,15 @@ use winit::{
 // ── OpenXR state (native only) ───────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
-struct XrBundle {
-    instance: helio_xr::XrInstance,
-    session: helio_xr::XrSession,
-    swapchain: helio_xr::XrSwapchain,
-    input: helio_xr::XrInput,
-    wgpu_instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-}
-
-/// The features the XR device is asked for. `create_wgpu_device` masks this
-/// down to what the HMD's Vulkan adapter actually supports.
-#[cfg(not(target_arch = "wasm32"))]
-fn xr_features() -> wgpu::Features {
-    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
-        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-        | wgpu::Features::INDIRECT_FIRST_INSTANCE
-        | wgpu::Features::MULTIVIEW
-        | wgpu::Features::MULTISAMPLE_ARRAY;
-    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
-        | wgpu::Features::TIMESTAMP_QUERY
-        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
-        | wgpu::Features::VERTEX_WRITABLE_STORAGE;
-    required | optional
-}
+type XrBundle = helio::XrRuntime;
 
 /// Bring up the full OpenXR stack: OpenXR instance → wgpu Vulkan instance →
 /// wgpu device → session → swapchain. Any failure degrades to `None`, which
 /// switches the demo to desktop mirror mode.
 #[cfg(not(target_arch = "wasm32"))]
 fn try_init_xr() -> Option<XrBundle> {
-    let result = (|| -> helio_xr::Result<XrBundle> {
-        let instance = helio_xr::XrInstance::create("helio_vr_demo")?;
-        let wgpu_instance = helio_xr::create_wgpu_instance(&instance.instance, instance.system)?;
-        let (adapter, device, queue) = helio_xr::create_wgpu_device(
-            &instance.instance,
-            instance.system,
-            &wgpu_instance,
-            xr_features(),
-        )?;
-        // Actions must be declared and their bindings suggested BEFORE the session is
-        // created; the runtime resolves them at session creation and will not accept new
-        // suggestions afterwards.
-        let input = helio_xr::XrInput::new(&instance.instance)?;
-        let session = helio_xr::XrSession::create(
-            &instance.instance,
-            instance.system,
-            &wgpu_instance,
-            &device,
-            &queue,
-        )?;
-        // Attach exactly once, after creation and before the first sync.
-        input.attach(&session.session)?;
-        let swapchain = helio_xr::XrSwapchain::create(
-            &device,
-            &session.session,
-            session.width,
-            session.height,
-            wgpu::TextureFormat::Rgba8UnormSrgb,
-        )?;
-        log::info!(
-            "[XR] OpenXR ready — {}x{} eye buffer, {} array layer(s), format {:?}",
-            session.width,
-            session.height,
-            swapchain.array_size,
-            swapchain.format,
-        );
-        Ok(XrBundle {
-            instance,
-            session,
-            swapchain,
-            input,
-            wgpu_instance,
-            adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-        })
-    })();
-
-    match result {
-        Ok(bundle) => Some(bundle),
+    match XrBundle::start_helio("helio_vr_demo", wgpu::TextureFormat::Rgba8UnormSrgb) {
+        Ok(runtime) => Some(runtime),
         Err(e) => {
             log::warn!("[XR] OpenXR init failed ({e}); running in desktop mirror mode instead");
             None
@@ -185,21 +112,15 @@ impl App {
 
 struct AppState {
     window: Arc<Window>,
-    /// Present only in desktop mode; idle/absent while the headset is driven.
     surface: Option<wgpu::Surface<'static>>,
     surface_format: wgpu::TextureFormat,
     alpha_mode: wgpu::CompositeAlphaMode,
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
     renderer: Renderer,
     scene_db: SceneDb,
     input: FreeCam,
-    /// True when a live OpenXR session is driving `renderer.render_xr()`.
+    /// True when a live OpenXR session is installed in the renderer.
     xr_active: bool,
-    /// Controller actions, and a handle to the session to sync them against.
-    ///
-    /// The session is cloned rather than borrowed from the renderer: `openxr::Session` is
-    /// reference-counted, and the renderer owns the original.
     #[cfg(not(target_arch = "wasm32"))]
     xr_input: Option<(helio_xr::XrInput, helio_xr::XrSessionHandle)>,
     /// Player locomotion, applied as the XR stage transform. Position is the stage
@@ -291,7 +212,9 @@ impl AppState {
             }
         }
     }
+}
 
+impl AppState {
     fn configure_surface(&self, width: u32, height: u32) {
         let Some(surface) = &self.surface else { return };
         surface.configure(
@@ -343,46 +266,17 @@ impl ApplicationHandler for App {
         let (device, queue, surface, surface_format, alpha_mode, config, xr_owned) = match xr_owned
         {
             Some(bundle) => {
-                let config = RendererConfig::new(
-                    bundle.session.width,
-                    bundle.session.height,
-                    bundle.swapchain.format,
-                )
-                .with_render_mode(RenderMode::ForwardOpaque)
-                // The graph's internal resolution must match the XR eye buffer
-                // exactly (it becomes the swapchain target); no scaling. Note:
-                // the graph is intentionally built in single-layer (non-multiview)
-                // mode — render_xr renders each eye separately (dual-pass stereo)
-                // so every existing pass and shader works unchanged.
-                .with_render_scale(1.0);
+                let config = RendererConfig::for_xr(&bundle, RenderMode::ForwardOpaque);
                 // PC mirror surface: the OpenXR-created device presents both eye
                 // buffers side-by-side into this window.
                 let mirror_surface = bundle
-                    .wgpu_instance
-                    .create_surface(window.clone())
+                    .create_mirror_surface(window.clone())
                     .expect("Failed to create mirror surface");
-                let caps = mirror_surface.get_capabilities(&bundle.adapter);
-                let mirror_format = caps
-                    .formats
-                    .iter()
-                    .find(|f| f.is_srgb())
-                    .copied()
-                    .unwrap_or(caps.formats[0]);
-                let mirror_alpha = caps.alpha_modes[0];
                 let mirror_size = window.inner_size();
-                mirror_surface.configure(
-                    &bundle.device,
-                    &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: mirror_format,
-                        color_space: wgpu::SurfaceColorSpace::Auto,
-                        width: mirror_size.width.max(1),
-                        height: mirror_size.height.max(1),
-                        present_mode: wgpu::PresentMode::Fifo,
-                        alpha_mode: mirror_alpha,
-                        view_formats: vec![],
-                        desired_maximum_frame_latency: 2,
-                    },
+                let (mirror_format, mirror_alpha) = bundle.configure_mirror_surface(
+                    &mirror_surface,
+                    mirror_size.width,
+                    mirror_size.height,
                 );
                 (
                     bundle.device.clone(),
@@ -479,14 +373,10 @@ impl ApplicationHandler for App {
             renderer.set_xr_camera(template);
             renderer.set_xr_mirror_format(surface_format);
             let session_handle = bundle.session.session.clone();
-            xr_input = Some((bundle.input, session_handle));
-            renderer.set_xr_session(
-                Some(bundle.instance),
-                Some(bundle.session),
-                Some(bundle.swapchain),
-            );
-            // No temporal AA in VR (jitter is disabled in render_xr anyway).
-            renderer.set_jitter_enabled(false);
+            let input = renderer
+                .install_xr_runtime(bundle)
+                .expect("XR runtime must use the renderer's device");
+            xr_input = Some((input, session_handle));
             true
         } else {
             false
@@ -502,7 +392,6 @@ impl ApplicationHandler for App {
             surface_format,
             alpha_mode,
             device,
-            queue,
             renderer,
             scene_db,
             input: FreeCam::new(),
@@ -612,29 +501,21 @@ impl ApplicationHandler for App {
                         scene_time,
                     );
                     state.update_hands();
-                    // Headset path: render_xr() polls session events, locates the
-                    // per-eye poses, uploads the stereo camera and renders both
-                    // eyes. The mirror surface (if any) receives both eye buffers
-                    // side by side via the renderer's mirror blit.
-                    let mirror = match &state.surface {
-                        Some(surface) => match surface.get_current_texture() {
-                            wgpu::CurrentSurfaceTexture::Success(texture)
-                            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
-                            _ => None,
-                        },
-                        None => None,
-                    };
-                    let mirror_view = mirror.as_ref().map(|t| {
-                        t.texture
-                            .create_view(&wgpu::TextureViewDescriptor::default())
-                    });
                     // Upload this frame's SceneDB writes to the GPU mirror (Helio#266).
                     v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
-                    if let Err(e) = state.renderer.render_xr(mirror_view.as_ref()) {
-                        log::error!("[XR] render_xr error: {e:?}");
-                    }
-                    if let Some(output) = mirror {
-                        state.queue.present(output);
+                    if let Some(surface) = state.surface.as_ref() {
+                        let camera = Camera::perspective_look_at(
+                            Vec3::new(0.0, 1.6, 0.0),
+                            Vec3::new(0.0, 1.6, -1.0),
+                            Vec3::Y,
+                            std::f32::consts::FRAC_PI_4,
+                            1.0,
+                            0.05,
+                            200.0,
+                        );
+                        if let Err(e) = state.renderer.render_window_frame(&camera, surface) {
+                            log::error!("[XR] render error: {e:?}");
+                        }
                     }
                     state.input.mouse_delta = (0.0, 0.0);
                     state.fps.tick();
@@ -659,24 +540,11 @@ impl ApplicationHandler for App {
                     state.window.request_redraw();
                     return;
                 };
-                let output = match surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(texture)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-                    _ => {
-                        log::warn!("surface acquire failed");
-                        state.window.request_redraw();
-                        return;
-                    }
-                };
-                let view = output
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
                 // Upload this frame's SceneDB writes to the GPU mirror (Helio#266).
                 v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
-                if let Err(e) = state.renderer.render(&camera, &view) {
+                if let Err(e) = state.renderer.render_window_frame(&camera, surface) {
                     log::error!("Render error: {e:?}");
                 }
-                state.queue.present(output);
                 state.fps.tick();
                 state.window.request_redraw();
             }

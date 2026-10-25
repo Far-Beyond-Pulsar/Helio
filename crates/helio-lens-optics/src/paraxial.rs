@@ -71,7 +71,11 @@ impl Paraxial {
         let stop = rx.stop_index();
         let mut idx = Vec::with_capacity(n);
         for (i, s) in rx.surfaces.iter().enumerate() {
-            idx.push(s.glass.index_at(wavelength_nm).ok_or(OpticsError::UnknownGlass { surface: i })?);
+            idx.push(
+                s.glass
+                    .index_at(wavelength_nm)
+                    .ok_or(OpticsError::UnknownGlass { surface: i })?,
+            );
         }
         let power = |i: usize| -> f64 {
             let s = &rx.surfaces[i];
@@ -107,7 +111,9 @@ impl Paraxial {
         let n_last = idx[n - 1];
         let c = total[1][0];
         if c.abs() < 1e-14 {
-            return Err(OpticsError::Degenerate("afocal system has no finite focal length"));
+            return Err(OpticsError::Degenerate(
+                "afocal system has no finite focal length",
+            ));
         }
         let efl = -n_last / c;
         let bfl = -total[0][0] * n_last / c;
@@ -193,7 +199,9 @@ impl Prescription {
                 let e = image_error(&rx)?;
                 rx.surfaces[n - 1].thickness += e;
                 if rx.surfaces[n - 1].thickness < 0.0 {
-                    return Err(OpticsError::Invalid("focus would place sensor inside the lens".into()));
+                    return Err(OpticsError::Invalid(
+                        "focus would place sensor inside the lens".into(),
+                    ));
                 }
                 Ok(rx)
             }
@@ -232,7 +240,9 @@ impl Prescription {
                 }
                 let rx = apply(d0);
                 if rx.surfaces[first - 1].thickness < 0.0 || rx.surfaces[last].thickness < 0.0 {
-                    return Err(OpticsError::Invalid("focus group travel exceeds available space".into()));
+                    return Err(OpticsError::Invalid(
+                        "focus group travel exceeds available space".into(),
+                    ));
                 }
                 Ok(rx)
             }

@@ -22,9 +22,14 @@ fn read_u32(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer) -> u
     let mut encoder = device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(src, 0, &readback, 0, 4);
     queue.submit([encoder.finish()]);
-    readback.slice(..).map_async(wgpu::MapMode::Read, |result| result.unwrap());
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |result| result.unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let mapped = readback.slice(..).get_mapped_range().expect("readback is mapped");
+    let mapped = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("readback is mapped");
     let value = u32::from_le_bytes(mapped[..4].try_into().unwrap());
     drop(mapped);
     readback.unmap();
@@ -118,7 +123,11 @@ fn reusable_command_buffers_resubmit_and_interleave_with_queue_writes() {
             wgpu::SubmitItem::Once(tail),
             wgpu::SubmitItem::Reusable(&increment),
         ]);
-        assert_eq!(read_u32(&device, &queue, &counter), 12, "write, then two replays");
+        assert_eq!(
+            read_u32(&device, &queue, &counter),
+            12,
+            "write, then two replays"
+        );
 
         // Dropping it while nothing is in flight, and again after reuse, is fine.
         drop(increment);
@@ -131,9 +140,7 @@ fn reusable_command_buffers_resubmit_and_interleave_with_queue_writes() {
 #[test]
 fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(
-            helio_core::wgpu_instance_descriptor().with_env(),
-        );
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: render replay stress");
             return;
@@ -149,7 +156,8 @@ fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("replay frame color"),
-            source: wgpu::ShaderSource::Wgsl(r#"
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
 @group(0) @binding(0) var<uniform> color: vec4<u32>;
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     let p = array<vec2<f32>, 3>(vec2(-1., -1.), vec2(3., -1.), vec2(-1., 3.));
@@ -158,34 +166,53 @@ fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
 @fragment fn fs() -> @location(0) vec4<f32> {
     return vec4<f32>(color) / 255.;
 }
-"#.into()),
+"#
+                .into(),
+            ),
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("replay frame color"),
             layout: None,
             vertex: wgpu::VertexState {
-                module: &shader, entry_point: Some("vs"),
-                compilation_options: Default::default(), buffers: &[],
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader, entry_point: Some("fs"),
+                module: &shader,
+                entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None, write_mask: wgpu::ColorWrites::ALL,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: Default::default(), depth_stencil: None,
-            multisample: Default::default(), multiview_mask: None, cache: None,
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         });
         let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None, layout: &pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() }],
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params.as_entire_binding(),
+            }],
         });
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("replay stress target"),
-            size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
@@ -200,23 +227,30 @@ fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("replay stress draw"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view, depth_slice: None, resolve_target: None,
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None, timestamp_writes: None,
-                occlusion_query_set: None, multiview_mask: None,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &binding, &[]);
-            for _ in 0..32 { pass.draw(0..3, 0..1); }
+            for _ in 0..32 {
+                pass.draw(0..3, 0..1);
+            }
         }
         let draw = encoder.finish().into_reusable().unwrap();
         const FRAMES: u32 = 96;
         let pixels = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("replay frame pixels"), size: u64::from(FRAMES) * 256,
+            label: Some("replay frame pixels"),
+            size: u64::from(FRAMES) * 256,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -230,24 +264,33 @@ fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
                     buffer: &pixels,
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: u64::from(frame) * 256,
-                        bytes_per_row: Some(256), rows_per_image: Some(1),
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
                     },
                 },
-                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
             );
             queue.submit_mixed([
                 wgpu::SubmitItem::Reusable(&draw),
                 wgpu::SubmitItem::Once(capture.finish()),
             ]);
         }
-        pixels.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        pixels
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let mapped = pixels.slice(..).get_mapped_range().unwrap();
         for frame in 0..FRAMES {
             let offset = frame as usize * 256;
-            assert_eq!(&mapped[offset..offset + 4],
+            assert_eq!(
+                &mapped[offset..offset + 4],
                 &[frame as u8 + 1, 255 - frame as u8, 127, 255],
-                "{backend:?}: frame {frame} became black or stale");
+                "{backend:?}: frame {frame} became black or stale"
+            );
         }
         drop(mapped);
         pixels.unmap();

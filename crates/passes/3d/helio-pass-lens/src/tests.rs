@@ -12,7 +12,11 @@ const FAR: f32 = 100.0;
 /// The depth-buffer value of a surface `distance` metres away (the engine's
 /// reversed depth with no far plane: `near / distance`, sky 0).
 fn raw_depth(distance: f32) -> f32 {
-    if distance.is_finite() { NEAR / distance } else { helio_core::depth::CLEAR }
+    if distance.is_finite() {
+        NEAR / distance
+    } else {
+        helio_core::depth::CLEAR
+    }
 }
 const VIEW: u32 = 7;
 
@@ -92,7 +96,11 @@ struct Frame {
 impl Frame {
     fn pixel(&self, x: u32, y: u32) -> [f32; 3] {
         let i = ((y * SIZE + x) * 4) as usize;
-        [f16_to_f32(self.output[i]), f16_to_f32(self.output[i + 1]), f16_to_f32(self.output[i + 2])]
+        [
+            f16_to_f32(self.output[i]),
+            f16_to_f32(self.output[i + 1]),
+            f16_to_f32(self.output[i + 2]),
+        ]
     }
 
     fn coc(&self, x: u32, y: u32) -> [f32; 4] {
@@ -111,11 +119,11 @@ impl Rig {
 
     /// A rig whose lens shader has the USER hooks `snippet` defines.
     fn with_user(snippet: Option<&str>) -> Self {
-        let serial = GPU_SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+        let serial = GPU_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let (device, queue) = pollster::block_on(async {
-            let instance = wgpu::Instance::new(
-                helio_core::wgpu_instance_descriptor().with_env(),
-            );
+            let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
             let adapter = instance
                 .request_adapter(&Default::default())
                 .await
@@ -140,7 +148,16 @@ impl Rig {
             usage: wgpu::BufferUsages::STORAGE,
         });
         let pass = LensPass::new_with_user(&device, SIZE, SIZE, snippet);
-        Self { device, queue, pass, camera, shapes: None, masks: None, prescriptions: None, _serial: serial }
+        Self {
+            device,
+            queue,
+            pass,
+            camera,
+            shapes: None,
+            masks: None,
+            prescriptions: None,
+            _serial: serial,
+        }
     }
 
     fn color_view(&self, scene: &Scene) -> wgpu::TextureView {
@@ -156,7 +173,11 @@ impl Rig {
                 &self.queue,
                 &wgpu::TextureDescriptor {
                     label: Some("lens test colour"),
-                    size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -173,17 +194,17 @@ impl Rig {
     /// The raw depth-buffer values of the engine projection (the pass reads
     /// them as plain floats).
     fn depth_view(&self, scene: &Scene) -> wgpu::TextureView {
-        let raw: Vec<f32> = scene
-            .distance
-            .iter()
-            .map(|&d| raw_depth(d))
-            .collect();
+        let raw: Vec<f32> = scene.distance.iter().map(|&d| raw_depth(d)).collect();
         self.device
             .create_texture_with_data(
                 &self.queue,
                 &wgpu::TextureDescriptor {
                     label: Some("lens test depth"),
-                    size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -212,8 +233,12 @@ impl Rig {
 
     fn map(&self, readback: &wgpu::Buffer) -> Vec<u8> {
         let (tx, rx) = std::sync::mpsc::channel();
-        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         rx.recv().unwrap().unwrap();
         let data = readback.slice(..).get_mapped_range().unwrap().to_vec();
         data
@@ -240,7 +265,11 @@ impl Rig {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit([encoder.finish()]);
         bytemuck::cast_slice(&self.map(&readback)).to_vec()
@@ -257,11 +286,12 @@ impl Rig {
         let color = self.color_view(scene);
         let depth = self.depth_view(scene);
         let buffer = |rows: &[u8]| {
-            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("lens test rows"),
-                contents: rows,
-                usage: wgpu::BufferUsages::STORAGE,
-            })
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("lens test rows"),
+                    contents: rows,
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
         };
         let lenses = lenses.map(|rows| buffer(bytes(rows)));
         let elements = elements.map(|rows| buffer(bytes(rows)));
@@ -287,7 +317,14 @@ impl Rig {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|t| [f16_to_f32(t[0]), f16_to_f32(t[1]), f16_to_f32(t[2]), f16_to_f32(t[3])])
+            .map(|t| {
+                [
+                    f16_to_f32(t[0]),
+                    f16_to_f32(t[1]),
+                    f16_to_f32(t[2]),
+                    f16_to_f32(t[3]),
+                ]
+            })
             .collect();
         Frame { output, coc }
     }
@@ -303,7 +340,8 @@ impl Rig {
 
     /// Frame time for autofocus easing.
     fn set_delta_time(&self, seconds: f32) {
-        self.queue.write_buffer(&self.pass.frame, 0, bytes(&[seconds, 0.0, 0.0, 0.0]));
+        self.queue
+            .write_buffer(&self.pass.frame, 0, bytes(&[seconds, 0.0, 0.0, 0.0]));
     }
 }
 
@@ -311,7 +349,11 @@ impl Rig {
 fn expected_coc(lens: &LensComponent, focus: f32, distance: f32) -> f32 {
     let f = lens.focal_length_mm * 1.0e-3;
     let aperture = f / lens.f_number;
-    let distance = if distance.is_finite() { distance } else { 1.0e5 };
+    let distance = if distance.is_finite() {
+        distance
+    } else {
+        1.0e5
+    };
     let on_sensor = aperture * (distance - focus).abs() / distance * f / (focus - f);
     on_sensor / (lens.sensor_width_mm * 1.0e-3) * SIZE as f32 * (distance - focus).signum()
 }
@@ -361,10 +403,20 @@ fn no_enabled_lens_for_the_view_passes_the_image_through_exactly() {
     let frame = rig.record(&scene, None, None);
     assert_eq!(frame.output, expected, "missing buffers changed the image");
     let args = rig.args();
-    assert_eq!(&args[..15], &[0; 15], "defocus dispatches must be empty with no lens");
+    assert_eq!(
+        &args[..15],
+        &[0; 15],
+        "defocus dispatches must be empty with no lens"
+    );
     assert!(args[15] > 0, "the copy is still dispatched");
     let resolved = rig.resolved();
-    assert_eq!(resolved, ResolvedLens { focus_distance_m: resolved.focus_distance_m, ..Default::default() });
+    assert_eq!(
+        resolved,
+        ResolvedLens {
+            focus_distance_m: resolved.focus_distance_m,
+            ..Default::default()
+        }
+    );
 
     // A disabled row, and an enabled row belonging to another view.
     let mut disabled = lens();
@@ -372,7 +424,10 @@ fn no_enabled_lens_for_the_view_passes_the_image_through_exactly() {
     let mut other = lens();
     other.view_id = VIEW + 1;
     let frame = rig.record(&scene, Some(&[disabled, other]), None);
-    assert_eq!(frame.output, expected, "an unmatched lens changed the image");
+    assert_eq!(
+        frame.output, expected,
+        "an unmatched lens changed the image"
+    );
     assert_eq!(rig.resolved().enabled, 0);
 }
 
@@ -407,12 +462,21 @@ fn resolve_matches_the_first_enabled_row_of_the_view() {
     assert_eq!(resolved.focal_length_mm, 85.0);
     assert_eq!(resolved.sensor_width_mm, 24.0);
     assert_eq!(resolved.sensor_height_mm, 16.0, "zero height derives 3:2");
-    assert!((resolved.focus_distance_m - 4.0).abs() < 1.0e-4, "{resolved:?}");
-    assert_eq!((resolved.aperture_blades, resolved.aperture_rotation), (9, 0.25));
+    assert!(
+        (resolved.focus_distance_m - 4.0).abs() < 1.0e-4,
+        "{resolved:?}"
+    );
+    assert_eq!(
+        (resolved.aperture_blades, resolved.aperture_rotation),
+        (9, 0.25)
+    );
     assert_eq!((resolved.max_coc_px, resolved.quality), (12.0, 1));
     assert_eq!((resolved.element_first, resolved.element_count), (3, 2));
     let args = rig.args();
-    assert!(args[..18].iter().all(|&n| n > 0), "an enabled lens dispatches every stage: {args:?}");
+    assert!(
+        args[..18].iter().all(|&n| n > 0),
+        "an enabled lens dispatches every stage: {args:?}"
+    );
 }
 
 #[test]
@@ -434,11 +498,18 @@ fn thin_lens_circle_of_confusion_matches_the_formula() {
             (coc_a - expected).abs() <= 0.01 * expected.abs() + 0.03,
             "depth {distance}: circle {coc_a}, expected {expected}"
         );
-        assert_eq!((coc_b, seam, transmission), (coc_a, 0.0, 1.0), "no seam without elements");
+        assert_eq!(
+            (coc_b, seam, transmission),
+            (coc_a, 0.0, 1.0),
+            "no seam without elements"
+        );
     }
     // Near geometry is negative, far positive, the focal plane exactly sharp.
     assert!(frame.coc(10, 64)[0] < -10.0 && frame.coc(SIZE - 10, 64)[0] > 5.0);
-    assert!(frame.coc(SIZE / 2 - 4, 64)[0].abs() < 0.03, "the focal plane is sharp");
+    assert!(
+        frame.coc(SIZE / 2 - 4, 64)[0].abs() < 0.03,
+        "the focal plane is sharp"
+    );
 
     // The aperture scales every circle; the clamp bounds them.
     lens.f_number = 2.8;
@@ -456,11 +527,21 @@ fn depth_rendered_below_image_resolution_keeps_foreground_focus() {
     let mut rig = Rig::new();
     // The depth buffer is a quarter-size texture; the foreground column's
     // footprint straddles two texels and must take the nearer.
-    let scene = Scene::new(Scene::checker, |x, _| if (60..68).contains(&x) { 1.0 } else { 9.0 });
+    let scene = Scene::new(Scene::checker, |x, _| {
+        if (60..68).contains(&x) {
+            1.0
+        } else {
+            9.0
+        }
+    });
     let color = rig.color_view(&scene);
     let raw: Vec<f32> = (0..32 * 32)
         .map(|i| {
-            raw_depth(if (15..17).contains(&(i % 32)) { 1.0 } else { 9.0 })
+            raw_depth(if (15..17).contains(&(i % 32)) {
+                1.0
+            } else {
+                9.0
+            })
         })
         .collect();
     let depth = rig
@@ -469,7 +550,11 @@ fn depth_rendered_below_image_resolution_keeps_foreground_focus() {
             &rig.queue,
             &wgpu::TextureDescriptor {
                 label: Some("lens test low-resolution depth"),
-                size: wgpu::Extent3d { width: 32, height: 32, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 32,
+                    height: 32,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -485,11 +570,13 @@ fn depth_rendered_below_image_resolution_keeps_foreground_focus() {
     lens.focus_distance_m = 1.0;
     lens.focal_length_mm = 100.0;
     lens.f_number = 1.4;
-    let lenses = rig.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("lens test rows"),
-        contents: bytes(&[lens]),
-        usage: wgpu::BufferUsages::STORAGE,
-    });
+    let lenses = rig
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lens test rows"),
+            contents: bytes(&[lens]),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
     let mut encoder = rig.device.create_command_encoder(&Default::default());
     rig.pass.record(
         &rig.device,
@@ -533,11 +620,17 @@ fn defocus_preserves_energy() {
         lens.quality = quality;
         let frame = rig.record(&scene, Some(&[lens]), None);
         let expected = expected_coc(&lens, 1.0, f32::INFINITY);
-        assert!(expected > 5.0 && expected < 8.0, "test geometry: circle {expected}");
+        assert!(
+            expected > 5.0 && expected < 8.0,
+            "test geometry: circle {expected}"
+        );
         assert!((frame.coc(64, 64)[0] - expected).abs() < 0.2);
         for channel in 0..3 {
             let sum = |pixel: &dyn Fn(u32, u32) -> f32| -> f32 {
-                (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| pixel(x, y)).sum()
+                (0..SIZE)
+                    .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+                    .map(|(x, y)| pixel(x, y))
+                    .sum()
             };
             let before = sum(&|x, y| scene.color[(y * SIZE + x) as usize][channel]);
             let after = sum(&|x, y| frame.pixel(x, y)[channel]);
@@ -549,8 +642,14 @@ fn defocus_preserves_energy() {
         // And it really did blur: the patch edge spreads outward and the
         // patch's own corner is no longer at full strength.
         assert!(frame.pixel(45, 64)[0] > 0.5, "no spill outside the patch");
-        assert!(frame.pixel(49, 49)[0] < 7.0, "the patch corner stayed sharp");
-        assert!(frame.pixel(64, 64)[0] > 7.0, "the patch interior lost energy");
+        assert!(
+            frame.pixel(49, 49)[0] < 7.0,
+            "the patch corner stayed sharp"
+        );
+        assert!(
+            frame.pixel(64, 64)[0] > 7.0,
+            "the patch interior lost energy"
+        );
     }
 }
 
@@ -559,8 +658,20 @@ fn near_field_blur_covers_what_is_behind_it() {
     let mut rig = Rig::new();
     // A bright near square, out of focus, in front of a dim in-focus wall.
     let scene = Scene::new(
-        |x, y| if (48..80).contains(&x) && (48..80).contains(&y) { [10.0; 3] } else { [0.5; 3] },
-        |x, y| if (48..80).contains(&x) && (48..80).contains(&y) { 0.6 } else { 3.0 },
+        |x, y| {
+            if (48..80).contains(&x) && (48..80).contains(&y) {
+                [10.0; 3]
+            } else {
+                [0.5; 3]
+            }
+        },
+        |x, y| {
+            if (48..80).contains(&x) && (48..80).contains(&y) {
+                0.6
+            } else {
+                3.0
+            }
+        },
     );
     let mut lens = lens();
     lens.focal_length_mm = 50.0;
@@ -571,18 +682,28 @@ fn near_field_blur_covers_what_is_behind_it() {
     assert!(frame.coc(10, 10)[0].abs() < 0.03, "the wall is in focus");
     // The blurred square bleeds over the sharp wall, and the wall's far side
     // is untouched.
-    assert!(frame.pixel(45, 64)[0] > 1.0, "near blur must cover the wall");
+    assert!(
+        frame.pixel(45, 64)[0] > 1.0,
+        "near blur must cover the wall"
+    );
     // Inside its own edge the blurred square fades into what is behind it.
     let inner = frame.pixel(49, 64)[0];
     assert!(inner > 3.0 && inner < 9.5, "inner edge {inner}");
     assert_eq!(frame.pixel(5, 5), [0.5; 3]);
     let total = |frame: &Frame| -> f32 {
-        (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| frame.pixel(x, y)[0]).sum()
+        (0..SIZE)
+            .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+            .map(|(x, y)| frame.pixel(x, y)[0])
+            .sum()
     };
     let before: f32 = scene.color.iter().map(|c| c[0]).sum();
     // The square's light spreads over wall it hides; the displaced wall
     // light is the loss, so the total stays within a few percent.
-    assert!((total(&frame) / before - 1.0).abs() < 0.06, "{} vs {before}", total(&frame));
+    assert!(
+        (total(&frame) / before - 1.0).abs() < 0.06,
+        "{} vs {before}",
+        total(&frame)
+    );
 }
 
 /// Pixels of a row whose seam weight exceeds `threshold`.
@@ -599,7 +720,10 @@ fn split_diopter_focuses_each_half_and_the_seam_follows_the_aperture() {
     let scene = Scene::new(Scene::checker, |x, _| if x < SIZE / 2 { 2.0 } else { 6.0 });
     let diopter = LensElementComponent::diopter(
         2.0,
-        LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.0 },
+        LensRegion::HalfPlane {
+            angle: std::f32::consts::PI,
+            offset: 0.0,
+        },
     )
     .with_mount_distance(0.5);
     let mut lens = lens();
@@ -611,14 +735,27 @@ fn split_diopter_focuses_each_half_and_the_seam_follows_the_aperture() {
     let wide = rig.record(&scene, Some(&[lens]), Some(&[diopter]));
     for x in (0..28).chain(100..SIZE) {
         let [coc_a, _, seam, _] = wide.coc(x, 64);
-        assert!(coc_a.abs() < 0.1 && seam == 0.0, "column {x}: circle {coc_a}, seam {seam}");
-        assert_eq!(wide.pixel(x, 64), scene.color[(64 * SIZE + x) as usize].map(|v| f16_to_f32(f32_to_f16(v))));
+        assert!(
+            coc_a.abs() < 0.1 && seam == 0.0,
+            "column {x}: circle {coc_a}, seam {seam}"
+        );
+        assert_eq!(
+            wide.pixel(x, 64),
+            scene.color[(64 * SIZE + x) as usize].map(|v| f16_to_f32(f32_to_f16(v)))
+        );
     }
     // Without the diopter the near plane is out of focus.
     lens.element_count = 0;
     let control = rig.record(&scene, Some(&[lens]), Some(&[diopter]));
-    assert!(control.coc(10, 64)[0] < -4.0, "control circle {}", control.coc(10, 64)[0]);
-    assert_ne!(control.pixel(10, 64), scene.color[(64 * SIZE + 10) as usize]);
+    assert!(
+        control.coc(10, 64)[0] < -4.0,
+        "control circle {}",
+        control.coc(10, 64)[0]
+    );
+    assert_ne!(
+        control.pixel(10, 64),
+        scene.color[(64 * SIZE + 10) as usize]
+    );
 
     // The seam is the entrance pupil seen from the filter: A / e radians over
     // the sensor, so it narrows with the aperture.
@@ -643,13 +780,20 @@ fn split_diopter_focuses_each_half_and_the_seam_follows_the_aperture() {
         })
         .collect();
     let ratio = widths[0].1 as f32 / widths[1].1 as f32;
-    assert!((ratio - 4.0).abs() < 0.6, "seam widths {widths:?} do not scale with 1/N");
+    assert!(
+        (ratio - 4.0).abs() < 0.6,
+        "seam widths {widths:?} do not scale with 1/N"
+    );
 
     // An authored feather replaces the physical one.
     lens.f_number = 1.4;
     let hard = diopter.with_feather(0.02);
     let frame = rig.record(&scene, Some(&[lens]), Some(&[hard]));
-    assert!(seam_width(&frame, 64) <= 3, "authored feather ignored: {}", seam_width(&frame, 64));
+    assert!(
+        seam_width(&frame, 64) <= 3,
+        "authored feather ignored: {}",
+        seam_width(&frame, 64)
+    );
 }
 
 #[test]
@@ -667,7 +811,10 @@ fn a_diopter_region_blurs_each_pixel_by_its_own_depth() {
     let scene = Scene::new(Scene::checker, depth);
     let diopter = LensElementComponent::diopter(
         2.0,
-        LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.0 },
+        LensRegion::HalfPlane {
+            angle: std::f32::consts::PI,
+            offset: 0.0,
+        },
     )
     .with_feather(0.004);
     let mut lens = lens();
@@ -687,7 +834,11 @@ fn a_diopter_region_blurs_each_pixel_by_its_own_depth() {
         lens.focus_distance_m = focus;
         let frame = rig.record(&scene, Some(&[lens]), Some(&[diopter]));
         let circles = rows.map(|y| frame.coc(x, y)[0]);
-        assert!(circles[0].abs() < 0.1, "focus {focus}: 2 m row circle {}", circles[0]);
+        assert!(
+            circles[0].abs() < 0.1,
+            "focus {focus}: 2 m row circle {}",
+            circles[0]
+        );
         for (y, s2) in [(1, 6.0), (2, 0.8)] {
             let expected = thin_lens(2.0, s2);
             assert!(
@@ -696,10 +847,15 @@ fn a_diopter_region_blurs_each_pixel_by_its_own_depth() {
                 circles[y]
             );
         }
-        assert!(circles[1] > 0.0 && circles[2] < 0.0, "behind blurs far, in front near: {circles:?}");
+        assert!(
+            circles[1] > 0.0 && circles[2] < 0.0,
+            "behind blurs far, in front near: {circles:?}"
+        );
         // Outside the region the lens's own focus holds.
         let outside = frame.coc(108, 64)[0];
-        assert!((outside - thin_lens(focus, 6.0)).abs() < 0.02 * thin_lens(focus, 6.0).abs().max(1.0));
+        assert!(
+            (outside - thin_lens(focus, 6.0)).abs() < 0.02 * thin_lens(focus, 6.0).abs().max(1.0)
+        );
     }
 }
 
@@ -717,13 +873,19 @@ fn diopters_stack_across_many_regions() {
         // Covers x < 1/6 of the image height right of centre: left and middle.
         LensElementComponent::diopter(
             3.0,
-            LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: -1.0 / 6.0 },
+            LensRegion::HalfPlane {
+                angle: std::f32::consts::PI,
+                offset: -1.0 / 6.0,
+            },
         )
         .with_feather(0.004),
         // Covers x < -1/6: the left third, which also has the first.
         LensElementComponent::diopter(
             1.5,
-            LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 1.0 / 6.0 },
+            LensRegion::HalfPlane {
+                angle: std::f32::consts::PI,
+                offset: 1.0 / 6.0,
+            },
         )
         .with_feather(0.004),
     ];
@@ -734,7 +896,11 @@ fn diopters_stack_across_many_regions() {
     lens.element_count = 2;
     let frame = rig.record(&scene, Some(&[lens]), Some(&thirds));
     for x in [6, 20, 64, 90, 115, 124] {
-        assert!(frame.coc(x, 64)[0].abs() < 0.1, "column {x}: circle {}", frame.coc(x, 64)[0]);
+        assert!(
+            frame.coc(x, 64)[0].abs() < 0.1,
+            "column {x}: circle {}",
+            frame.coc(x, 64)[0]
+        );
     }
     // Drop the second diopter: the left third is no longer in focus.
     lens.element_count = 1;
@@ -748,7 +914,10 @@ fn nested_regions_of_any_shape_focus_independently() {
     let mut rig = Rig::new();
     // A disc at 1.5 m inside a ring at 3 m inside a floor at 9 m.
     let radius = |x: u32, y: u32| {
-        let q = [(x as f32 + 0.5) / SIZE as f32 - 0.5, (y as f32 + 0.5) / SIZE as f32 - 0.5];
+        let q = [
+            (x as f32 + 0.5) / SIZE as f32 - 0.5,
+            (y as f32 + 0.5) / SIZE as f32 - 0.5,
+        ];
         (q[0] * q[0] + q[1] * q[1]).sqrt()
     };
     let scene = Scene::new(Scene::checker, |x, y| match radius(x, y) {
@@ -759,7 +928,11 @@ fn nested_regions_of_any_shape_focus_independently() {
     let elements = [
         LensElementComponent::diopter(
             3.0,
-            LensRegion::Ellipse { center: [0.0; 2], radii: [0.33, 0.33], rotation: 0.0 },
+            LensRegion::Ellipse {
+                center: [0.0; 2],
+                radii: [0.33, 0.33],
+                rotation: 0.0,
+            },
         )
         .with_feather(0.004),
         LensElementComponent::diopter(
@@ -781,7 +954,10 @@ fn nested_regions_of_any_shape_focus_independently() {
         if (0.13..0.17).contains(&r) || (0.31..0.35).contains(&r) {
             continue;
         }
-        assert!(coc.abs() < 0.1 && seam == 0.0, "({x}, {y}) r {r}: circle {coc}, seam {seam}");
+        assert!(
+            coc.abs() < 0.1 && seam == 0.0,
+            "({x}, {y}) r {r}: circle {coc}, seam {seam}"
+        );
     }
 }
 
@@ -799,15 +975,34 @@ fn every_region_kind_covers_what_it_describes() {
     type Case<'a> = (LensRegion<'a>, (u32, u32), (u32, u32));
     let cases: [Case; 7] = [
         (LensRegion::FullFrame, (64, 64), (5, 5)),
-        (LensRegion::HalfPlane { angle: 0.0, offset: 0.0 }, (100, 64), (20, 64)),
         (
-            LensRegion::Ellipse { center: [0.1, 0.0], radii: [0.3, 0.1], rotation: 0.0 },
+            LensRegion::HalfPlane {
+                angle: 0.0,
+                offset: 0.0,
+            },
+            (100, 64),
+            (20, 64),
+        ),
+        (
+            LensRegion::Ellipse {
+                center: [0.1, 0.0],
+                radii: [0.3, 0.1],
+                rotation: 0.0,
+            },
             (70, 64),
             (70, 20),
         ),
         (LensRegion::Polygon(&triangle), (64, 70), (20, 20)),
         (LensRegion::Polygon(&reversed), (64, 70), (20, 20)),
-        (LensRegion::RadialBand { r0: 0.2, r1: 0.35, center: [0.0; 2] }, (64 + 33, 64), (64, 64)),
+        (
+            LensRegion::RadialBand {
+                r0: 0.2,
+                r1: 0.35,
+                center: [0.0; 2],
+            },
+            (64 + 33, 64),
+            (64, 64),
+        ),
         (LensRegion::Mask, (64, 64), (64, 64)),
     ];
     for (i, (region, inside, outside)) in cases.into_iter().enumerate() {
@@ -819,7 +1014,11 @@ fn every_region_kind_covers_what_it_describes() {
             assert!(at(inside).abs() < 0.1, "case {i}: inside {}", at(inside));
         }
         if i != 0 {
-            assert!((at(outside) - 10.0).abs() < 0.1, "case {i}: outside {}", at(outside));
+            assert!(
+                (at(outside) - 10.0).abs() < 0.1,
+                "case {i}: outside {}",
+                at(outside)
+            );
         }
     }
 }
@@ -840,7 +1039,11 @@ fn tilt_and_field_curvature_shape_the_focus_field() {
     lens.tilt_angle = 0.6;
     lens.tilt_axis = 0.0;
     let tilted = rig.record(&scene, Some(&[lens]), None);
-    assert!(tilted.coc(SIZE - 1, 64)[0] > 3.0, "{}", tilted.coc(SIZE - 1, 64)[0]);
+    assert!(
+        tilted.coc(SIZE - 1, 64)[0] > 3.0,
+        "{}",
+        tilted.coc(SIZE - 1, 64)[0]
+    );
     assert!(tilted.coc(0, 64)[0] < -3.0, "{}", tilted.coc(0, 64)[0]);
     assert!(tilted.coc(63, 64)[0].abs() < 0.8);
     // About a vertical axis the field varies vertically instead.
@@ -876,14 +1079,20 @@ fn autofocus_tracks_the_depth_at_its_point_and_eases() {
     lens.af_speed = 10.0;
     rig.set_delta_time(0.0);
     rig.record(&scene, Some(&[lens]), None);
-    assert!((rig.resolved().focus_distance_m - 5.0).abs() < 0.05, "moved without time");
+    assert!(
+        (rig.resolved().focus_distance_m - 5.0).abs() < 0.05,
+        "moved without time"
+    );
     rig.set_delta_time(1.0 / 60.0);
     rig.record(&scene, Some(&[lens]), None);
     let eased = rig.resolved().focus_distance_m;
     // alpha = 1 - exp(-10 / 60), from 0.2 dpt toward 0.5 dpt.
     let alpha = 1.0 - (-10.0f32 / 60.0).exp();
     let expected = 1.0 / (0.2 + 0.3 * alpha);
-    assert!((eased - expected).abs() < 0.02, "eased to {eased}, expected {expected}");
+    assert!(
+        (eased - expected).abs() < 0.02,
+        "eased to {eased}, expected {expected}"
+    );
     // Without an ease rate the next read is immediate.
     lens.af_speed = 0.0;
     rig.record(&scene, Some(&[lens]), None);
@@ -901,7 +1110,10 @@ fn seam_darkening_dims_the_diopter_edge() {
     let scene = Scene::new(|_, _| [1.0; 3], |x, _| if x < SIZE / 2 { 2.0 } else { 6.0 });
     let diopter = LensElementComponent::diopter(
         2.0,
-        LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.0 },
+        LensRegion::HalfPlane {
+            angle: std::f32::consts::PI,
+            offset: 0.0,
+        },
     )
     .with_feather(0.1)
     .with_seam_darkening(0.5);
@@ -910,7 +1122,10 @@ fn seam_darkening_dims_the_diopter_edge() {
     lens.element_count = 1;
     let frame = rig.record(&scene, Some(&[lens]), Some(&[diopter]));
     let [.., centre] = frame.coc(63, 64);
-    assert!((centre - 0.5).abs() < 0.08, "darkest at the seam centre: {centre}");
+    assert!(
+        (centre - 0.5).abs() < 0.08,
+        "darkest at the seam centre: {centre}"
+    );
     assert_eq!(frame.coc(10, 64)[3], 1.0);
     assert!(frame.pixel(63, 64)[0] < 0.6 && frame.pixel(10, 64)[0] > 0.99);
 }
@@ -970,13 +1185,22 @@ fn edge_width_between(
         .map(|t| {
             let sum: f32 = along
                 .clone()
-                .map(|s| if vertical { frame.pixel(t, s)[1] } else { frame.pixel(s, t)[1] })
+                .map(|s| {
+                    if vertical {
+                        frame.pixel(t, s)[1]
+                    } else {
+                        frame.pixel(s, t)[1]
+                    }
+                })
                 .sum();
             sum / along.len() as f32
         })
         .collect();
     let cross = |level: f32| -> f32 {
-        let i = profile.iter().position(|&v| v < level).expect("edge never falls below the level");
+        let i = profile
+            .iter()
+            .position(|&v| v < level)
+            .expect("edge never falls below the level");
         let (a, b) = (profile[i - 1], profile[i]);
         (i - 1) as f32 + (a - level) / (a - b)
     };
@@ -986,18 +1210,34 @@ fn edge_width_between(
 /// Widths of the middle of the transition (30-70%) of a vertical (x) and a
 /// horizontal (y) edge, averaged over the whole frame. The middle slope is
 /// the pupil's chord through its centre, which a polygon's tails hide.
-fn core_widths(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent]) -> (f32, f32) {
+fn core_widths(
+    rig: &mut Rig,
+    lens: LensComponent,
+    elements: &[LensElementComponent],
+) -> (f32, f32) {
     let mut width = |vertical: bool| {
-        let frame = rig.record(&edge_scene(vertical, 64), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        let frame = rig.record(
+            &edge_scene(vertical, 64),
+            Some(&[lens]),
+            (!elements.is_empty()).then_some(elements),
+        );
         edge_width_between(&frame, vertical, 8..120, 0.3, 0.7)
     };
     (width(true), width(false))
 }
 
 /// Widths of a vertical (x) and a horizontal (y) edge through the centre.
-fn edge_widths(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent]) -> (f32, f32) {
+fn edge_widths(
+    rig: &mut Rig,
+    lens: LensComponent,
+    elements: &[LensElementComponent],
+) -> (f32, f32) {
     let mut width = |vertical: bool| {
-        let frame = rig.record(&edge_scene(vertical, 64), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        let frame = rig.record(
+            &edge_scene(vertical, 64),
+            Some(&[lens]),
+            (!elements.is_empty()).then_some(elements),
+        );
         edge_width(&frame, vertical, 52..76)
     };
     (width(true), width(false))
@@ -1022,7 +1262,10 @@ fn blades_make_the_bokeh_polygonal() {
     assert!(hx / hy > 1.04, "vertex-on-x hexagon {hx} x {hy}");
     assert!(ry / rx > 1.02, "turned hexagon {rx} x {ry}");
     // The circumscribed circle bounds the polygon.
-    assert!(hx < cx * 1.05 && hy < cx * 0.95, "hexagon {hx} x {hy} within the circle {cx}");
+    assert!(
+        hx < cx * 1.05 && hy < cx * 0.95,
+        "hexagon {hx} x {hy} within the circle {cx}"
+    );
     // Fewer blades are less round: a triangle with a vertex on +x has chords of 1.15 R
     // along x and 1.5 R along y.
     lens.aperture_rotation = 0.0;
@@ -1068,13 +1311,25 @@ fn anamorphic_squeeze_ovals_the_bokeh() {
 
 /// Radial and tangential widths at the middle of the right edge region: x is
 /// radial on the row through the centre, y is tangential.
-fn radial_and_tangential(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent]) -> (f32, f32) {
+fn radial_and_tangential(
+    rig: &mut Rig,
+    lens: LensComponent,
+    elements: &[LensElementComponent],
+) -> (f32, f32) {
     let radial = {
-        let frame = rig.record(&edge_scene(true, 108), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        let frame = rig.record(
+            &edge_scene(true, 108),
+            Some(&[lens]),
+            (!elements.is_empty()).then_some(elements),
+        );
         edge_width(&frame, true, 56..72)
     };
     let tangential = {
-        let frame = rig.record(&edge_scene(false, 64), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        let frame = rig.record(
+            &edge_scene(false, 64),
+            Some(&[lens]),
+            (!elements.is_empty()).then_some(elements),
+        );
         edge_width(&frame, false, 100..116)
     };
     (radial, tangential)
@@ -1093,10 +1348,16 @@ fn cats_eye_clips_the_bokeh_radially_off_axis_only() {
     // does not.
     let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[element]);
     println!("off axis: radial {radial}, tangential {tangential}");
-    assert!(radial < 0.85 * tangential, "off axis: radial {radial}, tangential {tangential}");
+    assert!(
+        radial < 0.85 * tangential,
+        "off axis: radial {radial}, tangential {tangential}"
+    );
     // Without the element the same place is round.
     let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[]);
-    assert!((radial / tangential - 1.0).abs() < 0.08, "control: {radial} x {tangential}");
+    assert!(
+        (radial / tangential - 1.0).abs() < 0.08,
+        "control: {radial} x {tangential}"
+    );
 }
 
 #[test]
@@ -1106,7 +1367,10 @@ fn swirl_stretches_the_bokeh_tangentially_toward_the_edges() {
     let element = LensElementComponent::pupil(LensRegion::FullFrame).with_swirl(2.0);
     let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[element]);
     println!("swirl: radial {radial}, tangential {tangential}");
-    assert!(radial < 0.8 * tangential, "swirl: radial {radial}, tangential {tangential}");
+    assert!(
+        radial < 0.8 * tangential,
+        "swirl: radial {radial}, tangential {tangential}"
+    );
     // And the centre is untouched.
     let (cx, cy) = edge_widths(&mut rig, lens, &[element]);
     assert!((cx / cy - 1.0).abs() < 0.07, "centre {cx} x {cy}");
@@ -1150,7 +1414,11 @@ fn spherical_aberration_trades_light_between_rim_and_centre() {
         let element = LensElementComponent::pupil(LensRegion::FullFrame)
             .with_spherical_aberration(amount, asymmetry);
         let frame = rig.record(scene, Some(&[lens]), Some(&[element]));
-        assert!(frame.coc(64, 64)[0].abs() > 25.0, "test geometry: circle {}", frame.coc(64, 64)[0]);
+        assert!(
+            frame.coc(64, 64)[0].abs() > 25.0,
+            "test geometry: circle {}",
+            frame.coc(64, 64)[0]
+        );
         let centre = ring_mean(&frame, 1, 0.0, 3.0);
         let rim = ring_mean(&frame, 1, 10.5, 13.0);
         println!("sa {amount} asym {asymmetry}: rim {rim}, centre {centre}");
@@ -1158,21 +1426,36 @@ fn spherical_aberration_trades_light_between_rim_and_centre() {
     };
     // The control: no aberration, a flat disc (rim and centre alike).
     let (rim, centre) = rim_and_centre(&mut rig, &far, 0.0, 0.0);
-    assert!(rim > 0.1 && centre > 0.1 && (rim / centre - 1.0).abs() < 0.6, "flat: rim {rim}, centre {centre}");
+    assert!(
+        rim > 0.1 && centre > 0.1 && (rim / centre - 1.0).abs() < 0.6,
+        "flat: rim {rim}, centre {centre}"
+    );
     // Soap bubble: a bright rim.
     let (rim, centre) = rim_and_centre(&mut rig, &far, 1.0, 0.0);
-    assert!(rim > 2.5 * centre, "soap bubble: rim {rim}, centre {centre}");
+    assert!(
+        rim > 2.5 * centre,
+        "soap bubble: rim {rim}, centre {centre}"
+    );
     // Soft: weighted to the centre.
     let (rim, centre) = rim_and_centre(&mut rig, &far, -1.0, 0.0);
     assert!(centre > 2.5 * rim, "soft: rim {rim}, centre {centre}");
     // Fully asymmetric: the profile flips between front and back focus.
     let (rim_far, centre_far) = rim_and_centre(&mut rig, &far, 1.0, 1.0);
     let (rim_near, centre_near) = rim_and_centre(&mut rig, &near, 1.0, 1.0);
-    assert!(rim_far > 2.5 * centre_far, "behind the focus: rim {rim_far}, centre {centre_far}");
-    assert!(centre_near > 2.5 * rim_near, "in front of the focus: rim {rim_near}, centre {centre_near}");
+    assert!(
+        rim_far > 2.5 * centre_far,
+        "behind the focus: rim {rim_far}, centre {centre_far}"
+    );
+    assert!(
+        centre_near > 2.5 * rim_near,
+        "in front of the focus: rim {rim_near}, centre {centre_near}"
+    );
     // Without asymmetry the front matches the back.
     let (rim_near, centre_near) = rim_and_centre(&mut rig, &near, 1.0, 0.0);
-    assert!(rim_near > 2.5 * centre_near, "symmetric, in front: rim {rim_near}, centre {centre_near}");
+    assert!(
+        rim_near > 2.5 * centre_near,
+        "symmetric, in front: rim {rim_near}, centre {centre_near}"
+    );
 }
 
 #[test]
@@ -1182,14 +1465,24 @@ fn apodization_and_onion_rings_shape_the_profile() {
     let far = blob_scene(f32::INFINITY);
     let apodized = LensElementComponent::pupil(LensRegion::FullFrame).with_apodization(0.35);
     let frame = rig.record(&far, Some(&[lens]), Some(&[apodized]));
-    let flat = rig.record(&far, Some(&[lens]), Some(&[LensElementComponent::pupil(LensRegion::FullFrame)]));
-    let (rim, centre) = (ring_mean(&frame, 1, 10.5, 13.0), ring_mean(&frame, 1, 0.0, 3.0));
+    let flat = rig.record(
+        &far,
+        Some(&[lens]),
+        Some(&[LensElementComponent::pupil(LensRegion::FullFrame)]),
+    );
+    let (rim, centre) = (
+        ring_mean(&frame, 1, 10.5, 13.0),
+        ring_mean(&frame, 1, 0.0, 3.0),
+    );
     println!("apodized: rim {rim}, centre {centre}");
     assert!(centre > 3.0 * rim, "apodized: rim {rim}, centre {centre}");
     // The edge fades out smoothly instead of ending.
     let soft_edge = ring_mean(&frame, 1, 12.0, 14.0) / ring_mean(&frame, 1, 0.0, 3.0);
     let hard_edge = ring_mean(&flat, 1, 12.0, 14.0) / ring_mean(&flat, 1, 0.0, 3.0);
-    assert!(soft_edge < 0.5 * hard_edge, "edge {soft_edge} vs {hard_edge}");
+    assert!(
+        soft_edge < 0.5 * hard_edge,
+        "edge {soft_edge} vs {hard_edge}"
+    );
 
     // Concentric ripples: the brightness alternates with radius.
     let onion = LensElementComponent::pupil(LensRegion::FullFrame).with_onion_rings(0.9, 1.0);
@@ -1199,7 +1492,10 @@ fn apodization_and_onion_rings_shape_the_profile() {
     let peak = ring_mean(&frame, 1, 0.0, 3.0);
     let trough = ring_mean(&frame, 1, 6.0, 8.0);
     println!("onion: peak {peak}, trough {trough}");
-    assert!(peak > 1.5 * trough, "onion rings: peak {peak}, trough {trough}");
+    assert!(
+        peak > 1.5 * trough,
+        "onion rings: peak {peak}, trough {trough}"
+    );
 }
 
 #[test]
@@ -1211,12 +1507,18 @@ fn central_obstruction_leaves_a_dark_hole() {
     let control = rig.record(&far, Some(&[lens]), Some(&[open]));
     let donut = LensElementComponent::pupil(LensRegion::FullFrame).with_central_obstruction(0.6);
     let frame = rig.record(&far, Some(&[lens]), Some(&[donut]));
-    let (centre, ring) = (ring_mean(&frame, 1, 0.0, 3.0), ring_mean(&frame, 1, 9.5, 13.0));
+    let (centre, ring) = (
+        ring_mean(&frame, 1, 0.0, 3.0),
+        ring_mean(&frame, 1, 9.5, 13.0),
+    );
     let flat_centre = ring_mean(&control, 1, 0.0, 3.0);
     println!("donut: centre {centre}, ring {ring}, open centre {flat_centre}");
     assert!(flat_centre > 0.3, "control centre {flat_centre}");
     assert!(centre < 0.1 * ring, "donut: centre {centre}, ring {ring}");
-    assert!(centre < 0.2 * flat_centre, "donut centre {centre} vs flat {flat_centre}");
+    assert!(
+        centre < 0.2 * flat_centre,
+        "donut centre {centre} vs flat {flat_centre}"
+    );
 }
 
 #[test]
@@ -1238,14 +1540,18 @@ fn longitudinal_chromatic_aberration_fringes_by_depth() {
     assert!(
         near[0] > 3.0 * near[1] && near[2] > 3.0 * near[1] && near[0] > 0.02,
         "foreground fringe r {} g {} b {}",
-        near[0], near[1], near[2]
+        near[0],
+        near[1],
+        near[2]
     );
     let far = fringe(&mut rig, f32::INFINITY, (16.0, 18.0), ca);
     println!("background fringe {far:?}");
     assert!(
         far[1] > 3.0 * far[0] && far[1] > 3.0 * far[2] && far[1] > 0.02,
         "background fringe r {} g {} b {}",
-        far[0], far[1], far[2]
+        far[0],
+        far[1],
+        far[2]
     );
     // No shift, no fringe.
     let none = LensElementComponent::longitudinal_ca(0.0, 0.0, 0.0, LensRegion::FullFrame);
@@ -1253,10 +1559,19 @@ fn longitudinal_chromatic_aberration_fringes_by_depth() {
     assert!(flat.iter().all(|&c| c < 0.02), "neutral: {flat:?}");
     // Region limited: outside it the channels agree.
     let left = LensElementComponent::longitudinal_ca(
-        -0.6, 0.0, -0.6, LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.3 },
+        -0.6,
+        0.0,
+        -0.6,
+        LensRegion::HalfPlane {
+            angle: std::f32::consts::PI,
+            offset: 0.3,
+        },
     );
     let outside = fringe(&mut rig, 0.5, (20.0, 24.0), left);
-    assert!(outside.iter().all(|&c| c < 0.02), "outside the region: {outside:?}");
+    assert!(
+        outside.iter().all(|&c| c < 0.02),
+        "outside the region: {outside:?}"
+    );
 }
 
 #[test]
@@ -1266,11 +1581,18 @@ fn a_texture_replaces_the_iris() {
     // Layer 0: open. Layer 1: a vertical bar a fifth of the width.
     const N: usize = 32;
     let open = vec![255u8; N * N];
-    let bar: Vec<u8> = (0..N * N).map(|i| if (13..19).contains(&(i % N)) { 255 } else { 0 }).collect();
-    rig.shapes = Some(aperture_shape_array(&rig.device, &rig.queue, N as u32, &[&open, &bar]));
+    let bar: Vec<u8> = (0..N * N)
+        .map(|i| if (13..19).contains(&(i % N)) { 255 } else { 0 })
+        .collect();
+    rig.shapes = Some(aperture_shape_array(
+        &rig.device,
+        &rig.queue,
+        N as u32,
+        &[&open, &bar],
+    ));
     let measure = |rig: &mut Rig, layer: u32, amount: f32| {
-        let element = LensElementComponent::pupil(LensRegion::FullFrame)
-            .with_aperture_texture(layer, amount);
+        let element =
+            LensElementComponent::pupil(LensRegion::FullFrame).with_aperture_texture(layer, amount);
         edge_widths(rig, lens, &[element])
     };
     let (x, y) = measure(&mut rig, 0, 1.0);
@@ -1280,7 +1602,10 @@ fn a_texture_replaces_the_iris() {
     assert!(y / x > 2.0, "bar layer {x} x {y}");
     // Half strength sits between the polygon and the texture.
     let (hx, hy) = measure(&mut rig, 1, 0.5);
-    assert!(hy / hx > 1.05 && hy / hx < y / x, "half strength {hx} x {hy}");
+    assert!(
+        hy / hx > 1.05 && hy / hx < y / x,
+        "half strength {hx} x {hy}"
+    );
     // No texture bound: the neutral layer is open.
     rig.shapes = None;
     let (x, y) = measure(&mut rig, 1, 1.0);
@@ -1292,14 +1617,20 @@ fn pupil_elements_are_region_limited() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
     // Anamorphic only in the right of the frame.
-    let right = LensElementComponent::pupil(LensRegion::HalfPlane { angle: 0.0, offset: 0.1 })
-        .with_anamorphic(2.0);
+    let right = LensElementComponent::pupil(LensRegion::HalfPlane {
+        angle: 0.0,
+        offset: 0.1,
+    })
+    .with_anamorphic(2.0);
     let covered = rig.record(&edge_scene(true, 100), Some(&[lens]), Some(&[right]));
     let uncovered = rig.record(&edge_scene(true, 28), Some(&[lens]), Some(&[right]));
     let covered_x = edge_width(&covered, true, 56..72);
     let uncovered_x = edge_width(&uncovered, true, 56..72);
     println!("covered {covered_x}, uncovered {uncovered_x}");
-    assert!((covered_x / uncovered_x - 0.5).abs() < 0.07, "covered {covered_x}, uncovered {uncovered_x}");
+    assert!(
+        (covered_x / uncovered_x - 0.5).abs() < 0.07,
+        "covered {covered_x}, uncovered {uncovered_x}"
+    );
 }
 
 #[test]
@@ -1338,7 +1669,11 @@ fn the_pupil_variants_preserve_energy() {
         ("anamorphic", 0, pupil().with_anamorphic(2.0)),
         ("cat's eye", 0, pupil().with_cats_eye(1.2, 1.0)),
         ("swirl", 0, pupil().with_swirl(2.0)),
-        ("soap bubble", 0, pupil().with_spherical_aberration(1.0, 0.0)),
+        (
+            "soap bubble",
+            0,
+            pupil().with_spherical_aberration(1.0, 0.0),
+        ),
         ("soft", 0, pupil().with_spherical_aberration(-1.0, 0.0)),
         ("asymmetric", 0, pupil().with_spherical_aberration(1.0, 1.0)),
         ("onion", 0, pupil().with_onion_rings(0.8, 4.0)),
@@ -1354,7 +1689,10 @@ fn the_pupil_variants_preserve_energy() {
             let frame = rig.record(&scene, Some(&[lens]), Some(&[*element]));
             for channel in 0..3 {
                 let sum = |pixel: &dyn Fn(u32, u32) -> f32| -> f32 {
-                    (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| pixel(x, y)).sum()
+                    (0..SIZE)
+                        .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
+                        .map(|(x, y)| pixel(x, y))
+                        .sum()
                 };
                 let before = sum(&|x, y| scene.color[(y * SIZE + x) as usize][channel]);
                 let after = sum(&|x, y| frame.pixel(x, y)[channel]);
@@ -1389,11 +1727,14 @@ fn pupil_element_builders_fill_the_documented_slots() {
     let inherits = LensElementComponent::pupil(LensRegion::FullFrame);
     assert!(inherits.params[pupil::BLADES] < 0.0 && inherits.params[pupil::SQUEEZE] == 1.0);
     let ca = LensElementComponent::longitudinal_ca(-0.1, 0.0, -0.2, LensRegion::FullFrame);
-    assert_eq!((ca.kind, ca.params[..3].to_vec()), (element_kind::LONGITUDINAL_CA, vec![-0.1, 0.0, -0.2]));
+    assert_eq!(
+        (ca.kind, ca.params[..3].to_vec()),
+        (element_kind::LONGITUDINAL_CA, vec![-0.1, 0.0, -0.2])
+    );
 }
 
-mod optics;
 mod aberration;
-mod prescription;
-mod overscan;
 mod bundled;
+mod optics;
+mod overscan;
+mod prescription;

@@ -33,8 +33,14 @@ impl Interaction {
     /// Updates the target and applies this frame's clicks.
     pub fn update(&mut self, player: &mut Player, world: &mut World, controls: &Controls, dt: f64) {
         self.cooldown = (self.cooldown - dt).max(0.0);
-        let (eye, look) = controls.aim.unwrap_or_else(|| (player.eye(), player.look()));
-        self.target = world.raycast(eye, look, REACH).map(|hit| Target { cell: hit.cell, front: hit.previous, point: eye + look * hit.distance });
+        let (eye, look) = controls
+            .aim
+            .unwrap_or_else(|| (player.eye(), player.look()));
+        self.target = world.raycast(eye, look, REACH).map(|hit| Target {
+            cell: hit.cell,
+            front: hit.previous,
+            point: eye + look * hit.distance,
+        });
         let Some(target) = self.target else { return };
 
         if controls.mine && self.cooldown == 0.0 {
@@ -43,7 +49,10 @@ impl Interaction {
         }
         if controls.pick {
             if let Some(block) = world.block_at(target.cell) {
-                if let Some(slot) = crate::blocks::Block::HOTBAR.iter().position(|b| *b == block) {
+                if let Some(slot) = crate::blocks::Block::HOTBAR
+                    .iter()
+                    .position(|b| *b == block)
+                {
                     player.hotbar = slot;
                 }
             }
@@ -54,7 +63,11 @@ impl Interaction {
             let grid = *world.planet().grid();
             // Not into the player's own body.
             let frame: Frame = player.frame();
-            if !edit.cells(&grid).iter().any(|(cell, _)| occupies(world, player.position, &frame, *cell)) {
+            if !edit
+                .cells(&grid)
+                .iter()
+                .any(|(cell, _)| occupies(world, player.position, &frame, *cell))
+            {
                 world.edit(&[edit]);
                 self.cooldown = 0.12;
             }
@@ -63,11 +76,22 @@ impl Interaction {
 
     /// The twelve edges of the block a build would lay, planet-centred.
     pub fn outline(&self, world: &World) -> Vec<(DVec3, DVec3)> {
-        let Some(target) = self.target else { return Vec::new() };
+        let Some(target) = self.target else {
+            return Vec::new();
+        };
         let grid = world.planet().grid();
         let c = block_origin(grid, target.front);
         let n = block_cells(grid);
-        let corner = |a: i32, b: i32, k: i32| grid.position(c.face, [f64::from(c.i + a * n), f64::from(c.j + b * n), f64::from(c.k + k * n)]);
+        let corner = |a: i32, b: i32, k: i32| {
+            grid.position(
+                c.face,
+                [
+                    f64::from(c.i + a * n),
+                    f64::from(c.j + b * n),
+                    f64::from(c.k + k * n),
+                ],
+            )
+        };
         let mut edges = Vec::with_capacity(12);
         for a in 0..2 {
             for b in 0..2 {

@@ -72,7 +72,11 @@ impl Default for RtTierConfig {
             retain_frames: 90,
             max_tlas_instances: 16_384,
             registrations_per_frame: 1,
-            proxy: ProxyOptionsCfg { levels: p.levels, ratio: p.ratio, max_triangles_per_lod: p.max_triangles_per_lod },
+            proxy: ProxyOptionsCfg {
+                levels: p.levels,
+                ratio: p.ratio,
+                max_triangles_per_lod: p.max_triangles_per_lod,
+            },
         }
     }
 }
@@ -135,13 +139,20 @@ pub struct RtTier {
 }
 
 impl RtTier {
-    pub fn new(device: &wgpu::Device, dense: DenseConfig, cfg: RtTierConfig) -> Result<Self, RtError> {
+    pub fn new(
+        device: &wgpu::Device,
+        dense: DenseConfig,
+        cfg: RtTierConfig,
+    ) -> Result<Self, RtError> {
         let rt = DenseRtPass::new(device, dense)?;
         let dev = Arc::new(device.clone());
         let proxy = ProxyOptions {
             levels: cfg.proxy.levels,
             ratio: cfg.proxy.ratio,
-            max_triangles_per_lod: cfg.proxy.max_triangles_per_lod.min(device.limits().max_blas_primitive_count),
+            max_triangles_per_lod: cfg
+                .proxy
+                .max_triangles_per_lod
+                .min(device.limits().max_blas_primitive_count),
             ..ProxyOptions::default()
         };
         Ok(Self {
@@ -223,14 +234,24 @@ impl RtTier {
             }
             self.seen.insert(
                 c.instance,
-                Seen { asset_slot: c.asset_slot, lod_error_scale: c.lod_error_scale, transform: c.transform, last_seen: self.frame },
+                Seen {
+                    asset_slot: c.asset_slot,
+                    lod_error_scale: c.lod_error_scale,
+                    transform: c.transform,
+                    last_seen: self.frame,
+                },
             );
         }
         // Resolve the proxy key of assets met for the first time and start
         // their background builds.
         for slot in new_slots {
-            let found = env.runtime.with_store(|s| s.core().asset_source(slot)).flatten();
-            let Some((source, content, _quant)) = found else { continue };
+            let found = env
+                .runtime
+                .with_store(|s| s.core().asset_source(slot))
+                .flatten();
+            let Some((source, content, _quant)) = found else {
+                continue;
+            };
             let key = proxy_key(content);
             self.slot_key.insert(slot, key);
             self.key_slot.insert(key, slot);
@@ -260,7 +281,9 @@ impl RtTier {
         }
         self.pending.extend(self.cache.take_ready());
         for _ in 0..self.cfg.registrations_per_frame {
-            let Some((key, build)) = self.pending.pop() else { break };
+            let Some((key, build)) = self.pending.pop() else {
+                break;
+            };
             let build = Arc::try_unwrap(build).unwrap_or_else(|a| (*a).clone());
             let bounds = build.bounds;
             let asset = ProxyAsset {
@@ -295,7 +318,10 @@ impl RtTier {
         self.seen.retain(|_, s| s.last_seen >= horizon);
 
         let t_proxy = t_start.elapsed();
-        let mut prep = RtPrep { rt_ready: false, dense_tiles: self.last_dense_tiles };
+        let mut prep = RtPrep {
+            rt_ready: false,
+            dense_tiles: self.last_dense_tiles,
+        };
         let mut requests: Vec<RtInstanceRequest> = Vec::with_capacity(self.seen.len());
         let mut ids: Vec<u32> = self.seen.keys().copied().collect();
         if ids.len() > self.cfg.max_tlas_instances as usize {
@@ -313,10 +339,15 @@ impl RtTier {
             self.cache.touch(key, frame, 8);
             let m = s.transform;
             let scale = {
-                let col = |c: usize| (m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c]).sqrt();
+                let col =
+                    |c: usize| (m[c] * m[c] + m[4 + c] * m[4 + c] + m[8 + c] * m[8 + c]).sqrt();
                 col(0).max(col(1)).max(col(2))
             };
-            let b = self.bounds.get(&key).copied().unwrap_or([0.0, 0.0, 0.0, 0.0]);
+            let b = self
+                .bounds
+                .get(&key)
+                .copied()
+                .unwrap_or([0.0, 0.0, 0.0, 0.0]);
             let center = [
                 m[0] * b[0] + m[1] * b[1] + m[2] * b[2] + m[3],
                 m[4] * b[0] + m[5] * b[1] + m[6] * b[2] + m[7],
@@ -335,16 +366,29 @@ impl RtTier {
         let t_requests = t_start.elapsed();
         let mut info = RtFrameInfo::default();
         if !requests.is_empty() {
-            let mut encoder =
-                env.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("vg dense RT acceleration") });
-            let Self { rt, blas, tlas, key_slot, .. } = self;
+            let mut encoder = env
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("vg dense RT acceleration"),
+                });
+            let Self {
+                rt,
+                blas,
+                tlas,
+                key_slot,
+                ..
+            } = self;
             let result = env
                 .runtime
                 .with_store(|store| {
                     let version = store.core().table_version();
                     let r = {
                         let core = store.core();
-                        let resolve = |key: u64, page: u32| key_slot.get(&key).and_then(|&slot| core.local_page_slot(slot, page));
+                        let resolve = |key: u64, page: u32| {
+                            key_slot
+                                .get(&key)
+                                .and_then(|&slot| core.local_page_slot(slot, page))
+                        };
                         rt.prepare_frame_resolved(
                             env.device,
                             env.queue,
@@ -364,7 +408,9 @@ impl RtTier {
                         // the selection wants, resident or not.
                         for &(key, lod) in &info.wanted_lods {
                             if let Some(&slot) = key_slot.get(&key) {
-                                store.core_mut().request_local_pages(slot, rt.lod_pages(key, lod));
+                                store
+                                    .core_mut()
+                                    .request_local_pages(slot, rt.lod_pages(key, lod));
                             }
                         }
                     }
@@ -376,7 +422,10 @@ impl RtTier {
                 Err(e) => {
                     log::warn!("virtual geometry RT: acceleration structure update failed: {e}");
                     self.tlas.invalidate();
-                    info = RtFrameInfo { missing_proxy_instances: requests.len() as u32, ..Default::default() };
+                    info = RtFrameInfo {
+                        missing_proxy_instances: requests.len() as u32,
+                        ..Default::default()
+                    };
                 }
             }
             if info.blas_builds > 0 || info.tlas_rebuilt {
@@ -396,15 +445,22 @@ impl RtTier {
             && info.tlas_instances > 0
             && info.complete()
             && self.rt.tlas_instance_count() == info.tlas_instances;
-        prep.rt_ready = self.traceable_ready && self.coverage_verified && self.have_result && frame >= self.masked_until;
+        prep.rt_ready = self.traceable_ready
+            && self.coverage_verified
+            && self.have_result
+            && frame >= self.masked_until;
         if frame % 128 == 0 {
             self.rt.evict_unused(&mut self.blas, 1200);
         }
 
         let (proxy_assets, proxy_bytes) = self.rt.proxy_stats();
         let cache = self.cache.stats();
-        let (tlas_rebuilt, blas_builds, over_tau, tlas_n) =
-            (info.tlas_rebuilt, info.blas_builds, info.over_tau_instances, info.tlas_instances);
+        let (tlas_rebuilt, blas_builds, over_tau, tlas_n) = (
+            info.tlas_rebuilt,
+            info.blas_builds,
+            info.over_tau_instances,
+            info.tlas_instances,
+        );
         let had_requests = !requests.is_empty();
         let dense_tiles = self.last_dense_tiles;
         env.runtime.update_tier3_stats(|s| {
@@ -430,7 +486,10 @@ impl RtTier {
         if frame % 60 == 0 && std::env::var_os("VG_DEBUG").is_some() {
             eprintln!(
                 "VgDense RT cpu us: poll {} proxies {} requests {} accel+rest {}",
-                t_poll.as_micros(), (t_proxy - t_poll).as_micros(), (t_requests - t_proxy).as_micros(), (t_start.elapsed() - t_requests).as_micros()
+                t_poll.as_micros(),
+                (t_proxy - t_poll).as_micros(),
+                (t_requests - t_proxy).as_micros(),
+                (t_start.elapsed() - t_requests).as_micros()
             );
             eprintln!(
                 "VgDense RT frame {frame}: requests {} tlas {} missing_proxy {} unresolved_pages {} dropped {} traceable {} coverage_verified {} have_result {} dense_tiles {} unknown_asset {}",
@@ -471,7 +530,8 @@ impl RtTier {
         instance_rows: u32,
         scopes: &mut crate::common::GpuScopes<'_>,
     ) {
-        self.collect.record_scoped(device, queue, rec, dense, inputs, instance_rows, scopes);
+        self.collect
+            .record_scoped(device, queue, rec, dense, inputs, instance_rows, scopes);
     }
 
     /// Record the ray trace over dense tiles against the current TLAS.
@@ -484,12 +544,17 @@ impl RtTier {
         tile_mask: &wgpu::Buffer,
         scopes: &mut crate::common::GpuScopes<'_>,
     ) -> Result<(), RtError> {
-        self.rt.record_scoped(device, queue, rec, frame, tile_mask, &self.tlas, scopes)
+        self.rt
+            .record_scoped(device, queue, rec, frame, tile_mask, &self.tlas, scopes)
     }
 
     /// The RT output buffers: `(dense_key, bary, rt_visible)`.
     pub fn outputs(&self) -> Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)> {
         let b = self.rt.buffers()?;
-        Some((b.dense_key.clone(), self.rt.dense_bary()?.clone(), self.rt.rt_visible().clone()))
+        Some((
+            b.dense_key.clone(),
+            self.rt.dense_bary()?.clone(),
+            self.rt.rt_visible().clone(),
+        ))
     }
 }

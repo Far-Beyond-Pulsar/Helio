@@ -4,7 +4,8 @@
 
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use helio_pass_vg_shade::{
-    cpu_ref, shader_source, VgShade, VgShadeGlobals, VgShadeInputs, VgShadeTargets, VgVisibleCluster,
+    cpu_ref, shader_source, VgShade, VgShadeGlobals, VgShadeInputs, VgShadeTargets,
+    VgVisibleCluster,
 };
 use helio_vg_format::{vis_pack, GpuVgInstance};
 use wgpu::util::DeviceExt;
@@ -37,24 +38,29 @@ fn gpu() -> Option<Gpu> {
         return None;
     };
     let limits = adapter.limits();
-    if limits.max_storage_buffers_per_shader_stage < 20 || limits.max_storage_textures_per_shader_stage < 8 {
+    if limits.max_storage_buffers_per_shader_stage < 20
+        || limits.max_storage_textures_per_shader_stage < 8
+    {
         eprintln!("SKIP: adapter limits too low for the shade pass");
         return None;
     }
     let features = adapter.features() & helio_mats::BINDLESS_MATERIAL_FEATURES;
-    let (device, queue) = match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("vg-shade test"),
-        required_features: features,
-        required_limits: limits,
-        ..Default::default()
-    })) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("SKIP: device creation failed: {e}");
-            return None;
-        }
-    };
-    device.on_uncaptured_error(std::sync::Arc::new(|e| panic!("GPU validation error: {e:?}")));
+    let (device, queue) =
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("vg-shade test"),
+            required_features: features,
+            required_limits: limits,
+            ..Default::default()
+        })) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("SKIP: device creation failed: {e}");
+                return None;
+            }
+        };
+    device.on_uncaptured_error(std::sync::Arc::new(|e| {
+        panic!("GPU validation error: {e:?}")
+    }));
     Some(Gpu { device, queue })
 }
 
@@ -66,7 +72,11 @@ fn texture(
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: N, height: N, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -85,7 +95,11 @@ fn upload(gpu: &Gpu, tex: &wgpu::Texture, bytes: &[u8], bytes_per_pixel: u32) {
             bytes_per_row: Some(N * bytes_per_pixel),
             rows_per_image: Some(N),
         },
-        wgpu::Extent3d { width: N, height: N, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 1,
+        },
     );
 }
 
@@ -161,7 +175,10 @@ fn depth_texture(gpu: &Gpu, label: &str, data: &[f32]) -> wgpu::Texture {
     let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &bgl,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&view),
+        }],
     });
     let depth_view = depth.create_view(&Default::default());
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -189,7 +206,12 @@ fn depth_texture(gpu: &Gpu, label: &str, data: &[f32]) -> wgpu::Texture {
     depth
 }
 
-fn read_texture(gpu: &Gpu, tex: &wgpu::Texture, bytes_per_pixel: u32, aspect: wgpu::TextureAspect) -> Vec<u8> {
+fn read_texture(
+    gpu: &Gpu,
+    tex: &wgpu::Texture,
+    bytes_per_pixel: u32,
+    aspect: wgpu::TextureAspect,
+) -> Vec<u8> {
     let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: u64::from(N * N * bytes_per_pixel),
@@ -212,7 +234,11 @@ fn read_texture(gpu: &Gpu, tex: &wgpu::Texture, bytes_per_pixel: u32, aspect: wg
                 rows_per_image: Some(N),
             },
         },
-        wgpu::Extent3d { width: N, height: N, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
     map(gpu, &staging)
@@ -233,10 +259,16 @@ fn read_buffer(gpu: &Gpu, src: &wgpu::Buffer, size: u64) -> Vec<u8> {
 
 fn map(gpu: &Gpu, staging: &wgpu::Buffer) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    staging.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().unwrap().unwrap();
-    let data = staging.slice(..).get_mapped_range().expect("mapped").to_vec();
+    let data = staging
+        .slice(..)
+        .get_mapped_range()
+        .expect("mapped")
+        .to_vec();
     staging.unmap();
     data
 }
@@ -276,7 +308,8 @@ fn attr_rows(uv: [[u16; 2]; 3]) -> Vec<[u8; 16]> {
         let mut r = [0u8; 16];
         r[0..4].copy_from_slice(&(127u32 << 16).to_le_bytes());
         r[4..8].copy_from_slice(&(127u32 | (127 << 24)).to_le_bytes());
-        r[8..12].copy_from_slice(&(u32::from(uv[i][0]) | (u32::from(uv[i][1]) << 16)).to_le_bytes());
+        r[8..12]
+            .copy_from_slice(&(u32::from(uv[i][0]) | (u32::from(uv[i][1]) << 16)).to_le_bytes());
         rows.push(r);
     }
     rows
@@ -318,7 +351,11 @@ fn resolve_bin_shade_and_final_depth() {
     let Some(gpu) = gpu() else { return };
     let device = &gpu.device;
     let init = |label: &str, data: &[u8], usage: wgpu::BufferUsages| {
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: data, usage })
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: data,
+            usage,
+        })
     };
     let storage = wgpu::BufferUsages::STORAGE;
 
@@ -340,8 +377,16 @@ fn resolve_bin_shade_and_final_depth() {
     let camera = init("camera", bytemuck::cast_slice(&[cam, cam]), storage);
 
     // ── scene: two triangles in two material sections of one instance ──
-    let tri_a = [Vec3::new(0.1, -1.0, -2.5), Vec3::new(1.6, -0.9, -3.5), Vec3::new(0.3, 1.1, -3.0)];
-    let tri_b = [Vec3::new(-1.7, -1.0, -3.2), Vec3::new(-0.2, -1.1, -2.6), Vec3::new(-0.9, 1.2, -3.0)];
+    let tri_a = [
+        Vec3::new(0.1, -1.0, -2.5),
+        Vec3::new(1.6, -0.9, -3.5),
+        Vec3::new(0.3, 1.1, -3.0),
+    ];
+    let tri_b = [
+        Vec3::new(-1.7, -1.0, -3.2),
+        Vec3::new(-0.2, -1.1, -2.6),
+        Vec3::new(-0.9, 1.2, -3.0),
+    ];
     let one = 0x3c00u16;
     let pos = |t: &[Vec3; 3]| t.iter().map(|v| v.to_array()).collect::<Vec<[f32; 3]>>();
     let (pa, pb) = (pos(&tri_a), pos(&tri_b));
@@ -350,22 +395,43 @@ fn resolve_bin_shade_and_final_depth() {
     let page = helio_vg_format::testing::TestPage::build(
         0,
         &[
-            helio_vg_format::testing::TestCluster { positions: &pa, tris: &[[0, 1, 2]], material: 0, attrs: Some(&aa) },
-            helio_vg_format::testing::TestCluster { positions: &pb, tris: &[[0, 1, 2]], material: 1, attrs: Some(&ab) },
+            helio_vg_format::testing::TestCluster {
+                positions: &pa,
+                tris: &[[0, 1, 2]],
+                material: 0,
+                attrs: Some(&aa),
+            },
+            helio_vg_format::testing::TestCluster {
+                positions: &pb,
+                tris: &[[0, 1, 2]],
+                material: 1,
+                attrs: Some(&ab),
+            },
         ],
     );
     let pages = init("pages", &page.pool(), storage);
     let asset_quant = init("asset_quant", bytemuck::bytes_of(&page.quant), storage);
     let instances = init(
         "instances",
-        bytemuck::bytes_of(&GpuVgInstance { asset_slot: 0, flags: 1, lod_error_scale: 1.0, object_row: 0 }),
+        bytemuck::bytes_of(&GpuVgInstance {
+            asset_slot: 0,
+            flags: 1,
+            lod_error_scale: 1.0,
+            object_row: 0,
+        }),
         storage,
     );
     let visible = init(
         "visible",
         bytemuck::cast_slice(&[
-            VgVisibleCluster { instance: 0, cluster_slot: page.slots[0] },
-            VgVisibleCluster { instance: 0, cluster_slot: page.slots[1] },
+            VgVisibleCluster {
+                instance: 0,
+                cluster_slot: page.slots[0],
+            },
+            VgVisibleCluster {
+                instance: 0,
+                cluster_slot: page.slots[1],
+            },
         ]),
         storage,
     );
@@ -384,7 +450,11 @@ fn resolve_bin_shade_and_final_depth() {
     let binding = helio_mats::MaterialBindingConfig::for_device(device);
     let mut fallback = [0u32; 88];
     fallback[87] = (-1.0f32).to_bits();
-    let material_textures = init("material textures", bytemuck::cast_slice(&fallback), storage);
+    let material_textures = init(
+        "material textures",
+        bytemuck::cast_slice(&fallback),
+        storage,
+    );
     let white = texture(
         device,
         "white",
@@ -416,11 +486,14 @@ fn resolve_bin_shade_and_final_depth() {
             if y >= HIDDEN_FROM_ROW {
                 classic[i] = CLASSIC_DEPTH;
             }
-            let ndc = cpu_ref::pixel_ndc(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), Vec2::new(w, h));
+            let ndc =
+                cpu_ref::pixel_ndc(Vec2::new(x as f32 + 0.5, y as f32 + 0.5), Vec2::new(w, h));
             let p = inv * Vec4::new(ndc.x, ndc.y, 0.5, 1.0);
             let dir = (p.truncate() / p.w).normalize();
             for (t, tri) in [tri_a, tri_b].iter().enumerate() {
-                let Some(r) = cpu_ref::bary_from_ray(*tri, Vec3::ZERO, dir) else { continue };
+                let Some(r) = cpu_ref::bary_from_ray(*tri, Vec3::ZERO, dir) else {
+                    continue;
+                };
                 if r.iter().any(|v| *v < 1e-3) {
                     continue;
                 }
@@ -435,7 +508,12 @@ fn resolve_bin_shade_and_final_depth() {
                     sw_keys[i * 2 + 1] = depth.to_bits();
                 }
                 if y < HIDDEN_FROM_ROW {
-                    expect[i] = Some(Expect { id, bary: r, depth, tri: t });
+                    expect[i] = Some(Expect {
+                        id,
+                        bary: r,
+                        depth,
+                        tri: t,
+                    });
                 }
             }
         }
@@ -443,7 +521,10 @@ fn resolve_bin_shade_and_final_depth() {
     let covered = expect.iter().flatten().count();
     let in_a = expect.iter().flatten().filter(|e| e.tri == 0).count();
     let in_b = covered - in_a;
-    assert!(in_a > 100 && in_b > 100, "scene must cover both triangles: {in_a} / {in_b}");
+    assert!(
+        in_a > 100 && in_b > 100,
+        "scene must cover both triangles: {in_a} / {in_b}"
+    );
 
     let hw_vis_tex = texture(
         device,
@@ -470,13 +551,26 @@ fn resolve_bin_shade_and_final_depth() {
     let normal = target("normal", F::Rgba16Float);
     let orm = target("orm", F::Rgba8Unorm);
     let emissive = target("emissive", F::Rgba16Float);
-    let lightmap_uv = texture(device, "lightmap uv", F::Rg16Float, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+    let lightmap_uv = texture(
+        device,
+        "lightmap uv",
+        F::Rg16Float,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
     let sss = target("sss", F::Rgba16Float);
     let extra = target("extra", F::Rgba16Float);
     let velocity = target("velocity", F::Rgba16Float);
     let v = |t: &wgpu::Texture| t.create_view(&Default::default());
-    let (albedo_v, normal_v, orm_v, emissive_v, lm_v, sss_v, extra_v, velocity_v) =
-        (v(&albedo), v(&normal), v(&orm), v(&emissive), v(&lightmap_uv), v(&sss), v(&extra), v(&velocity));
+    let (albedo_v, normal_v, orm_v, emissive_v, lm_v, sss_v, extra_v, velocity_v) = (
+        v(&albedo),
+        v(&normal),
+        v(&orm),
+        v(&emissive),
+        v(&lightmap_uv),
+        v(&sss),
+        v(&extra),
+        v(&velocity),
+    );
     let hw_vis_v = v(&hw_vis_tex);
     let hw_depth_v = hw_depth_tex.create_view(&wgpu::TextureViewDescriptor {
         aspect: wgpu::TextureAspect::DepthOnly,
@@ -491,31 +585,31 @@ fn resolve_bin_shade_and_final_depth() {
     macro_rules! inputs {
         ($debug:expr) => {
             VgShadeInputs {
-        camera: &camera,
-        static_objects: &static_objects,
-        coordinate_spaces: &coordinate_spaces,
-        coordinate_spaces_prev: &coordinate_spaces,
-        materials: &materials,
-        material_textures: helio_mats::MaterialTextureBindings {
-            material_textures: &material_textures,
-            texture_views: &views,
-            samplers: &samplers,
-            version: 1,
-        },
-        visible: &visible,
-        asset_quant: &asset_quant,
-        instances: &instances,
-        pages: &pages,
-        hw_vis: &hw_vis_v,
-        hw_depth: &hw_depth_v,
-        scene_depth: &scene_depth_v,
-        sw_keys: Some(&sw_buffer),
-        dense_keys: None,
-        rt: None,
-        rt_visible: None,
-        dense_mask: None,
-            dense_merge: false,
-        debug: $debug,
+                camera: &camera,
+                static_objects: &static_objects,
+                coordinate_spaces: &coordinate_spaces,
+                coordinate_spaces_prev: &coordinate_spaces,
+                materials: &materials,
+                material_textures: helio_mats::MaterialTextureBindings {
+                    material_textures: &material_textures,
+                    texture_views: &views,
+                    samplers: &samplers,
+                    version: 1,
+                },
+                visible: &visible,
+                asset_quant: &asset_quant,
+                instances: &instances,
+                pages: &pages,
+                hw_vis: &hw_vis_v,
+                hw_depth: &hw_depth_v,
+                scene_depth: &scene_depth_v,
+                sw_keys: Some(&sw_buffer),
+                dense_keys: None,
+                rt: None,
+                rt_visible: None,
+                dense_mask: None,
+                dense_merge: false,
+                debug: $debug,
             }
         };
     }
@@ -539,13 +633,27 @@ fn resolve_bin_shade_and_final_depth() {
             velocity: &velocity_v,
             depth: &scene_depth_v,
         },
-        &VgShadeGlobals { screen_width: w, screen_height: h, ..Default::default() },
+        &VgShadeGlobals {
+            screen_width: w,
+            screen_height: h,
+            ..Default::default()
+        },
     );
     gpu.queue.submit([encoder.finish()]);
 
     // ── resolve: payload, depth ──
-    let payload = read_texture(&gpu, pass.payload_texture().unwrap(), 8, wgpu::TextureAspect::All);
-    let resolved = read_texture(&gpu, pass.resolved_depth_texture().unwrap(), 4, wgpu::TextureAspect::All);
+    let payload = read_texture(
+        &gpu,
+        pass.payload_texture().unwrap(),
+        8,
+        wgpu::TextureAspect::All,
+    );
+    let resolved = read_texture(
+        &gpu,
+        pass.resolved_depth_texture().unwrap(),
+        4,
+        wgpu::TextureAspect::All,
+    );
     let mut worst_bary = 0.0f32;
     for i in 0..(N * N) as usize {
         let id = u32::from_le_bytes(payload[i * 8..i * 8 + 4].try_into().unwrap());
@@ -554,7 +662,10 @@ fn resolve_bin_shade_and_final_depth() {
         match &expect[i] {
             Some(e) => {
                 assert_eq!(id, e.id, "pixel {i}");
-                assert_eq!(depth, e.depth, "pixel {i} resolved depth (merged raster depth)");
+                assert_eq!(
+                    depth, e.depth,
+                    "pixel {i} resolved depth (merged raster depth)"
+                );
                 let b = cpu_ref::payload_unbary(bary_word);
                 for k in 0..3 {
                     worst_bary = worst_bary.max((b[k] - e.bary[k]).abs());
@@ -574,7 +685,12 @@ fn resolve_bin_shade_and_final_depth() {
     // B through the software keys; pixels left to classic geometry have no source.
     {
         use helio_vg_format::debug_view::pixel_source;
-        let source = read_texture(&gpu, pass.source_texture().unwrap(), 4, wgpu::TextureAspect::All);
+        let source = read_texture(
+            &gpu,
+            pass.source_texture().unwrap(),
+            4,
+            wgpu::TextureAspect::All,
+        );
         let (mut hw, mut sw) = (0, 0);
         for i in 0..(N * N) as usize {
             let got = u32::from_le_bytes(source[i * 4..i * 4 + 4].try_into().unwrap());
@@ -591,7 +707,10 @@ fn resolve_bin_shade_and_final_depth() {
             };
             assert_eq!(got, want, "pixel {i}: recorded source");
         }
-        assert!(hw > 100 && sw > 100, "both sources must be exercised: {hw} hardware / {sw} software");
+        assert!(
+            hw > 100 && sw > 100,
+            "both sources must be exercised: {hw} hardware / {sw} software"
+        );
     }
 
     // ── binning ──
@@ -605,13 +724,21 @@ fn resolve_bin_shade_and_final_depth() {
     assert_eq!(word(&args, 0) as usize, in_a.div_ceil(64));
     assert_eq!(word(&args, 4) as usize, in_b.div_ceil(64));
     assert_eq!(word(&args, 8), 0, "empty bin dispatches nothing");
-    let list = read_buffer(&gpu, pass.pixel_list_buffer().unwrap(), u64::from(N * N * 4));
+    let list = read_buffer(
+        &gpu,
+        pass.pixel_list_buffer().unwrap(),
+        u64::from(N * N * 4),
+    );
     let mut seen = std::collections::HashSet::new();
     for slot in 0..(in_a + in_b) {
         let pixel = word(&list, slot) as usize;
         assert!(seen.insert(pixel), "pixel {pixel} listed twice");
         let want_bin = expect[pixel].as_ref().expect("listed pixel is VG").tri;
-        assert_eq!(usize::from(slot >= in_a), want_bin, "pixel {pixel} in the wrong bin");
+        assert_eq!(
+            usize::from(slot >= in_a),
+            want_bin,
+            "pixel {pixel} in the wrong bin"
+        );
     }
 
     // ── shaded G-buffer ──
@@ -637,18 +764,39 @@ fn resolve_bin_shade_and_final_depth() {
                 near(n[1], 0.0, 0.01, "normal.y", i);
                 near(n[2], 1.0, 0.01, "normal.z", i);
                 near(n[3], 0.04 + (0.8 - 0.04) * 0.1, 0.01, "F0.r", i);
-                near(f32::from(orm_px[i * 4 + 1]) / 255.0, 0.5, 1.5 / 255.0, "roughness", i);
-                near(f32::from(orm_px[i * 4 + 2]) / 255.0, 0.1, 1.5 / 255.0, "metallic", i);
+                near(
+                    f32::from(orm_px[i * 4 + 1]) / 255.0,
+                    0.5,
+                    1.5 / 255.0,
+                    "roughness",
+                    i,
+                );
+                near(
+                    f32::from(orm_px[i * 4 + 2]) / 255.0,
+                    0.1,
+                    1.5 / 255.0,
+                    "metallic",
+                    i,
+                );
                 // Static scene, same view: no motion. Valid-correction marker set.
                 let vel = f16s(&velocity_px, i);
                 near(vel[0], 0.0, 0.02, "velocity.x", i);
                 near(vel[1], 0.0, 0.02, "velocity.y", i);
-                near(f16_to_f32(u16::from_le_bytes([lm_px[i * 4], lm_px[i * 4 + 1]])), -1.0, 0.001, "lightmap u", i);
+                near(
+                    f16_to_f32(u16::from_le_bytes([lm_px[i * 4], lm_px[i * 4 + 1]])),
+                    -1.0,
+                    0.001,
+                    "lightmap u",
+                    i,
+                );
                 shaded_a += 1;
             }
             Some(_) => {
                 // class 1 (clear coat template): evaluated through its override.
-                assert!(rgba[3] > 0 && rgba[2] > 0, "pixel {i} was not shaded by the class-1 pipeline");
+                assert!(
+                    rgba[3] > 0 && rgba[2] > 0,
+                    "pixel {i} was not shaded by the class-1 pipeline"
+                );
                 shaded_b += 1;
             }
             None => assert_eq!(rgba, &[0, 0, 0, 0], "pixel {i}: stray G-buffer write"),
@@ -737,13 +885,20 @@ fn resolve_bin_shade_and_final_depth() {
                 tau_px: 1.0,
             })),
             &targets,
-            &VgShadeGlobals { screen_width: w, screen_height: h, ..Default::default() },
+            &VgShadeGlobals {
+                screen_width: w,
+                screen_height: h,
+                ..Default::default()
+            },
         );
         gpu.queue.submit([encoder.finish()]);
         let error = pollster::block_on(scope.pop());
         assert!(error.is_none(), "{view:?}: GPU validation error: {error:?}");
         let px = read_texture(&gpu, &albedo, 4, wgpu::TextureAspect::All);
-        let whole_frame = matches!(view, D::SwOverdraw | D::DenseOverlap | D::DenseMask | D::VgMask);
+        let whole_frame = matches!(
+            view,
+            D::SwOverdraw | D::DenseOverlap | D::DenseMask | D::VgMask
+        );
         let colours: std::collections::HashSet<[u8; 4]> = (0..(N * N) as usize)
             .filter(|&i| whole_frame || expect[i].is_some())
             .map(|i| px[i * 4..i * 4 + 4].try_into().unwrap())
@@ -787,7 +942,11 @@ fn resolve_bin_shade_and_final_depth() {
             tau_px: 1.0,
         })),
         &targets,
-        &VgShadeGlobals { screen_width: w, screen_height: h, ..Default::default() },
+        &VgShadeGlobals {
+            screen_width: w,
+            screen_height: h,
+            ..Default::default()
+        },
     );
     gpu.queue.submit([encoder.finish()]);
     assert!(pollster::block_on(scope.pop()).is_none());
@@ -833,20 +992,36 @@ fn resolve_bin_shade_and_final_depth() {
             tau_px: 1.0,
         })),
         &targets,
-        &VgShadeGlobals { screen_width: w, screen_height: h, ..Default::default() },
+        &VgShadeGlobals {
+            screen_width: w,
+            screen_height: h,
+            ..Default::default()
+        },
     );
     gpu.queue.submit([encoder.finish()]);
     assert!(pollster::block_on(scope.pop()).is_none());
     let px = read_texture(&gpu, &albedo, 4, wgpu::TextureAspect::All);
     // Painted pixels carry albedo alpha 0, the marker the lighting pass looks for;
     // a classic pixel keeps its own albedo and alpha.
-    let near = |got: &[u8], want: [u8; 3]| got[..3].iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1) && got[3] == 0;
+    let near = |got: &[u8], want: [u8; 3]| {
+        got[..3].iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1) && got[3] == 0
+    };
     for i in 0..(N * N) as usize {
         let rgba = &px[i * 4..i * 4 + 4];
         match &expect[i] {
-            Some(e) if e.tri == 0 => assert!(near(rgba, [255, 92, 20]), "pixel {i}: hardware raster {rgba:?}"),
-            Some(_) => assert!(near(rgba, [255, 217, 26]), "pixel {i}: micro-raster {rgba:?}"),
-            None => assert_eq!(rgba, &[46, 46, 46, 255], "pixel {i}: left to the lighting pass"),
+            Some(e) if e.tri == 0 => assert!(
+                near(rgba, [255, 92, 20]),
+                "pixel {i}: hardware raster {rgba:?}"
+            ),
+            Some(_) => assert!(
+                near(rgba, [255, 217, 26]),
+                "pixel {i}: micro-raster {rgba:?}"
+            ),
+            None => assert_eq!(
+                rgba,
+                &[46, 46, 46, 255],
+                "pixel {i}: left to the lighting pass"
+            ),
         }
     }
 }

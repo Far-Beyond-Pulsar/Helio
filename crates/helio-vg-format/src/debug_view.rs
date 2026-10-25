@@ -242,7 +242,11 @@ pub fn wgsl_constants() -> String {
         let _ = writeln!(s, "const VGDBG_{name}: u32 = {}u;", view.id());
     }
     // Painted but not registered by us (see [`VgDebugView::RayVsRaster`]).
-    let _ = writeln!(s, "const VGDBG_RAY_VS_RASTER: u32 = {}u;", RAY_VS_RASTER_MODE);
+    let _ = writeln!(
+        s,
+        "const VGDBG_RAY_VS_RASTER: u32 = {}u;",
+        RAY_VS_RASTER_MODE
+    );
     s
 }
 
@@ -277,7 +281,10 @@ mod tests {
     fn ray_vs_raster_is_painted_but_not_registered() {
         assert!(!ALL.contains(&VgDebugView::RayVsRaster));
         assert_eq!(VgDebugView::from_id(33), None);
-        assert_eq!(VgDebugView::from_active_id(33), Some(VgDebugView::RayVsRaster));
+        assert_eq!(
+            VgDebugView::from_active_id(33),
+            Some(VgDebugView::RayVsRaster)
+        );
         assert_eq!(VgDebugView::RayVsRaster.id(), RAY_VS_RASTER_MODE);
         assert_eq!(parse("33"), None);
         assert!(wgsl_constants().contains("const VGDBG_RAY_VS_RASTER: u32 = 33u;"));

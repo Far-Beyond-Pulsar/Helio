@@ -36,7 +36,10 @@ pub struct DenseFrame {
 
 impl DenseFrame {
     pub fn tiles(&self, cfg: &DenseConfig) -> [u32; 2] {
-        [self.viewport[0].div_ceil(cfg.tile), self.viewport[1].div_ceil(cfg.tile)]
+        [
+            self.viewport[0].div_ceil(cfg.tile),
+            self.viewport[1].div_ceil(cfg.tile),
+        ]
     }
 }
 
@@ -122,11 +125,21 @@ pub struct DenseBuffers {
 }
 
 impl DenseBuffers {
-    pub fn new(device: &wgpu::Device, cfg: &DenseConfig, viewport: [u32; 2], with_lists: bool) -> Self {
-        let tiles = [viewport[0].div_ceil(cfg.tile), viewport[1].div_ceil(cfg.tile)];
+    pub fn new(
+        device: &wgpu::Device,
+        cfg: &DenseConfig,
+        viewport: [u32; 2],
+        with_lists: bool,
+    ) -> Self {
+        let tiles = [
+            viewport[0].div_ceil(cfg.tile),
+            viewport[1].div_ceil(cfg.tile),
+        ];
         let tile_count = tiles[0] * tiles[1];
         let max_slots = cfg.max_dense_slots.min(tile_count).max(1);
-        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let storage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
         let make = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -153,10 +166,18 @@ impl DenseBuffers {
             ),
             slot_lists: make(
                 "vg_dense slot_lists",
-                if with_lists { cfg.slot_list_words() * 4 } else { 16 },
+                if with_lists {
+                    cfg.slot_list_words() * 4
+                } else {
+                    16
+                },
                 storage,
             ),
-            args: make("vg_dense args", (8 + 2 * 2 * helio_vg_format::CULL_BIN_COUNT as u64 + 1) * 4, storage | wgpu::BufferUsages::INDIRECT),
+            args: make(
+                "vg_dense args",
+                (8 + 2 * 2 * helio_vg_format::CULL_BIN_COUNT as u64 + 1) * 4,
+                storage | wgpu::BufferUsages::INDIRECT,
+            ),
             dense_key: make(
                 "vg_dense key",
                 viewport[0] as u64 * viewport[1] as u64 * 8,
@@ -187,9 +208,24 @@ impl DenseBuffers {
         let p = DenseParamsGpu {
             view_proj: frame.view_proj,
             inv_view_proj: frame.inv_view_proj,
-            camera_pos: [frame.camera_pos[0], frame.camera_pos[1], frame.camera_pos[2], 0.0],
-            viewport: [frame.viewport[0], frame.viewport[1], self.tiles[0], self.tiles[1]],
-            limits: [self.tile_count(), self.max_slots, frame.visible_capacity, flags],
+            camera_pos: [
+                frame.camera_pos[0],
+                frame.camera_pos[1],
+                frame.camera_pos[2],
+                0.0,
+            ],
+            viewport: [
+                frame.viewport[0],
+                frame.viewport[1],
+                self.tiles[0],
+                self.tiles[1],
+            ],
+            limits: [
+                self.tile_count(),
+                self.max_slots,
+                frame.visible_capacity,
+                flags,
+            ],
             misc: [frame.ray_t[0], frame.ray_t[1], 0.0, 0.0],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&p));
@@ -198,7 +234,13 @@ impl DenseBuffers {
     /// Record a copy of the counters header for readback with
     /// [`DenseBuffers::read_stats`] after submission.
     pub fn copy_stats(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.copy_buffer_to_buffer(&self.state, 0, &self.stats_staging, 0, STATE_HEADER_WORDS as u64 * 4);
+        encoder.copy_buffer_to_buffer(
+            &self.state,
+            0,
+            &self.stats_staging,
+            0,
+            STATE_HEADER_WORDS as u64 * 4,
+        );
     }
 
     /// Blocking read of the counters copied by [`DenseBuffers::copy_stats`]
@@ -214,14 +256,21 @@ impl DenseBuffers {
 }
 
 /// Blocking buffer readback helper (tests, tools).
-pub fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, size: u64) -> Vec<u8> {
+pub fn read_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Buffer,
+    size: u64,
+) -> Vec<u8> {
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("vg_dense readback"),
         size,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("vg_dense readback") });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("vg_dense readback"),
+    });
     enc.copy_buffer_to_buffer(src, 0, &staging, 0, size);
     queue.submit(Some(enc.finish()));
     let slice = staging.slice(..);
@@ -233,7 +282,12 @@ pub fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffe
 }
 
 pub(crate) fn bgl_entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None }
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    }
 }
 
 pub(crate) fn storage(read_only: bool) -> wgpu::BindingType {
@@ -252,8 +306,15 @@ pub(crate) fn uniform() -> wgpu::BindingType {
     }
 }
 
-pub(crate) fn bgl(device: &wgpu::Device, label: &str, entries: &[wgpu::BindGroupLayoutEntry]) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries })
+pub(crate) fn bgl(
+    device: &wgpu::Device,
+    label: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries,
+    })
 }
 
 pub(crate) fn pipeline(
@@ -283,7 +344,10 @@ pub(crate) fn pipeline(
 }
 
 pub(crate) fn bg_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
 }
 
 /// Optional per-kernel GPU timestamp scopes. The render-graph wrapper hands a
@@ -299,7 +363,9 @@ impl<'a> GpuScopes<'a> {
         Self { f: None }
     }
 
-    pub fn new(f: &'a mut dyn FnMut(&mut helio_core::CommandRecorder<'_>, &'static str, bool)) -> Self {
+    pub fn new(
+        f: &'a mut dyn FnMut(&mut helio_core::CommandRecorder<'_>, &'static str, bool),
+    ) -> Self {
         Self { f: Some(f) }
     }
 

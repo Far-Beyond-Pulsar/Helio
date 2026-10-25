@@ -7,7 +7,10 @@ use helio_vg_format::{GpuVgInstance, INST_ENABLED};
 pub struct Rng(pub u64);
 impl Rng {
     pub fn next_u32(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
     }
     /// Uniform in [0, 1).
@@ -48,11 +51,19 @@ pub fn object(center: [f32; 3], radius: f32) -> StaticObjectComponent {
 }
 
 pub fn dead_object() -> StaticObjectComponent {
-    StaticObjectComponent { mesh_generation: 0, ..object([0.0; 3], 0.0) }
+    StaticObjectComponent {
+        mesh_generation: 0,
+        ..object([0.0; 3], 0.0)
+    }
 }
 
 pub fn instance(object_row: u32) -> GpuVgInstance {
-    GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row }
+    GpuVgInstance {
+        asset_slot: 0,
+        flags: INST_ENABLED,
+        lod_error_scale: 1.0,
+        object_row,
+    }
 }
 
 /// `n` instances at random positions in a `size`-wide cube, radii in
@@ -71,7 +82,11 @@ pub fn random_scene(
     for i in 0..n {
         let c = [rng.unit() * size, rng.unit() * size, rng.unit() * size];
         let r = r_lo + rng.unit() * (r_hi - r_lo);
-        objects.push(if i % 13 == 7 { dead_object() } else { object(c, r) });
+        objects.push(if i % 13 == 7 {
+            dead_object()
+        } else {
+            object(c, r)
+        });
     }
     let mut instances = Vec::with_capacity(n);
     for i in 0..n {
@@ -85,7 +100,11 @@ pub fn random_scene(
 }
 
 /// Dense cluster of tiny objects (batch-leaf candidates) plus a few big ones.
-pub fn city_scene(seed: u64, blocks: usize, per_block: usize) -> (Vec<GpuVgInstance>, Vec<StaticObjectComponent>) {
+pub fn city_scene(
+    seed: u64,
+    blocks: usize,
+    per_block: usize,
+) -> (Vec<GpuVgInstance>, Vec<StaticObjectComponent>) {
     let mut rng = Rng(seed);
     let mut objects = Vec::new();
     for b in 0..blocks {

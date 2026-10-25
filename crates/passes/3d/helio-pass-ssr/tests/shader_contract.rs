@@ -38,8 +38,7 @@ fn half_resolution_contract_reconstructs_full_resolution_inputs() {
 #[ignore = "requires hardware ray queries"]
 fn hybrid_pipeline_accepts_shared_camera_and_normal_contract() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&Default::default())
             .await

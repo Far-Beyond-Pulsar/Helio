@@ -41,7 +41,13 @@ pub struct TransientTexturePass {
 impl TransientTexturePass {
     pub fn new(name: &str, format: ResourceFormat, size: ResourceSize, depth: bool) -> Self {
         let name = intern(name);
-        Self { name, writes: single(name), format, size, depth }
+        Self {
+            name,
+            writes: single(name),
+            format,
+            size,
+            depth,
+        }
     }
 }
 
@@ -92,7 +98,10 @@ impl PersistentTexturePass {
             | wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::COPY_DST;
-        let allowed = desc.format.guaranteed_format_features(device.features()).allowed_usages;
+        let allowed = desc
+            .format
+            .guaranteed_format_features(device.features())
+            .allowed_usages;
         if allowed.contains(wgpu::TextureUsages::STORAGE_BINDING) {
             usage |= wgpu::TextureUsages::STORAGE_BINDING;
         }
@@ -111,7 +120,12 @@ impl PersistentTexturePass {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Self { name, desc, _texture: texture, view }
+        Self {
+            name,
+            desc,
+            _texture: texture,
+            view,
+        }
     }
 
     pub fn desc(&self) -> PersistentTextureDesc {

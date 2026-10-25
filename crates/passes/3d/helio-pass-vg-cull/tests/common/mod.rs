@@ -8,9 +8,7 @@
 #![allow(dead_code)]
 
 use helio_pass_vg_cull::reference::RefAsset;
-use helio_vg_format::{
-    GpuCluster, GpuGroupRef, GpuHierarchyNode, NODE_INVALID, NODE_LEAF_BIT,
-};
+use helio_vg_format::{GpuCluster, GpuGroupRef, GpuHierarchyNode, NODE_INVALID, NODE_LEAF_BIT};
 
 pub const INF: f32 = f32::INFINITY;
 
@@ -36,7 +34,11 @@ impl SynthDag {
 
     /// Pool slot of each page for a residency mask: slot == page id.
     pub fn slots(&self, resident: &[bool]) -> Vec<Option<u32>> {
-        resident.iter().enumerate().map(|(p, &r)| r.then_some(p as u32)).collect()
+        resident
+            .iter()
+            .enumerate()
+            .map(|(p, &r)| r.then_some(p as u32))
+            .collect()
     }
 
     /// Cluster record at `(pool slot, local index)`.
@@ -181,7 +183,12 @@ pub fn build(leaves: usize, interleave: bool) -> SynthDag {
                 clusters[c as usize].parent_sphere = sphere;
                 clusters[c as usize].parent_error = error;
             }
-            groups.push(Group { inputs: inputs.clone(), sphere, error, outputs });
+            groups.push(Group {
+                inputs: inputs.clone(),
+                sphere,
+                error,
+                outputs,
+            });
         }
         // Next level ordering.
         let mut order = next_slots.clone();
@@ -199,8 +206,14 @@ pub fn build(leaves: usize, interleave: bool) -> SynthDag {
         clusters[r as usize].parent_sphere = clusters[r as usize].sphere;
         clusters[r as usize].flags |= GpuCluster::FLAG_ROOT;
     }
-    let root_lo = roots.iter().map(|&c| span(clusters[c as usize].sphere).0).fold(f32::MAX, f32::min);
-    let root_hi = roots.iter().map(|&c| span(clusters[c as usize].sphere).1).fold(f32::MIN, f32::max);
+    let root_lo = roots
+        .iter()
+        .map(|&c| span(clusters[c as usize].sphere).0)
+        .fold(f32::MAX, f32::min);
+    let root_hi = roots
+        .iter()
+        .map(|&c| span(clusters[c as usize].sphere).1)
+        .fold(f32::MIN, f32::max);
     groups.push(Group {
         inputs: roots.clone(),
         sphere: sphere_of(root_lo, root_hi),
@@ -255,7 +268,11 @@ pub fn build(leaves: usize, interleave: bool) -> SynthDag {
     let mut items: Vec<Item> = groups
         .iter()
         .enumerate()
-        .map(|(gi, g)| Item { sphere: g.sphere, mpe: g.error, child: NODE_LEAF_BIT | gi as u32 })
+        .map(|(gi, g)| Item {
+            sphere: g.sphere,
+            mpe: g.error,
+            child: NODE_LEAF_BIT | gi as u32,
+        })
         .collect();
     items.sort_by(|a, b| a.sphere[0].partial_cmp(&b.sphere[0]).unwrap());
     let mut nodes: Vec<GpuHierarchyNode> = Vec::new();
@@ -264,8 +281,14 @@ pub fn build(leaves: usize, interleave: bool) -> SynthDag {
     loop {
         let mut next_layer = Vec::new();
         for chunk in layer.chunks(4) {
-            let lo = chunk.iter().map(|i| span(i.sphere).0).fold(f32::MAX, f32::min);
-            let hi = chunk.iter().map(|i| span(i.sphere).1).fold(f32::MIN, f32::max);
+            let lo = chunk
+                .iter()
+                .map(|i| span(i.sphere).0)
+                .fold(f32::MAX, f32::min);
+            let hi = chunk
+                .iter()
+                .map(|i| span(i.sphere).1)
+                .fold(f32::MIN, f32::max);
             let mut node = GpuHierarchyNode::default();
             for (s, it) in chunk.iter().enumerate() {
                 node.spheres[s] = it.sphere;

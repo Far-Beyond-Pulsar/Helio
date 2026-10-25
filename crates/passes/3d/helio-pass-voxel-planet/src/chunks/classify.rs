@@ -26,13 +26,24 @@ pub struct Footprint {
 
 impl Footprint {
     pub fn node(self, cz: i32) -> NodeKey {
-        NodeKey { face: self.face, level: self.level, cx: self.cx, cy: self.cy, cz }
+        NodeKey {
+            face: self.face,
+            level: self.level,
+            cx: self.cx,
+            cy: self.cy,
+            cz,
+        }
     }
 
     /// Its columns' half-cell bounds along i and j (inclusive).
     pub fn span_half(self) -> ((i64, i64), (i64, i64)) {
         let shift = self.level + 1;
-        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let span = |c: i32| {
+            (
+                i64::from(c * CHUNK) << shift,
+                (i64::from(c * CHUNK + CHUNK) << shift) - 1,
+            )
+        };
         (span(self.cx), span(self.cy))
     }
 }
@@ -51,19 +62,41 @@ pub struct NodeKey {
 
 impl NodeKey {
     pub fn footprint(self) -> Footprint {
-        Footprint { face: self.face, level: self.level, cx: self.cx, cy: self.cy }
+        Footprint {
+            face: self.face,
+            level: self.level,
+            cx: self.cx,
+            cy: self.cy,
+        }
     }
 
     pub fn table_key(self) -> [i32; 4] {
-        [i32::from(self.face) | ((self.level as i32) << 8), self.cx, self.cy, self.cz]
+        [
+            i32::from(self.face) | ((self.level as i32) << 8),
+            self.cx,
+            self.cy,
+            self.cz,
+        ]
     }
 
     pub fn from_table_key(k: [i32; 4]) -> Self {
-        Self { face: (k[0] & 0xff) as u8, level: (k[0] >> 8) as u32, cx: k[1], cy: k[2], cz: k[3] }
+        Self {
+            face: (k[0] & 0xff) as u8,
+            level: (k[0] >> 8) as u32,
+            cx: k[1],
+            cy: k[2],
+            cz: k[3],
+        }
     }
 
     pub fn parent(self) -> Self {
-        Self { face: self.face, level: self.level + 1, cx: self.cx >> 1, cy: self.cy >> 1, cz: self.cz >> 1 }
+        Self {
+            face: self.face,
+            level: self.level + 1,
+            cx: self.cx >> 1,
+            cy: self.cy >> 1,
+            cz: self.cz >> 1,
+        }
     }
 
     /// The eight nodes under it (none at level 0); those past the face's
@@ -72,7 +105,13 @@ impl NodeKey {
         let level = self.level.checked_sub(1);
         (0..8).filter_map(move |n| {
             let level = level?;
-            let c = Self { face: self.face, level, cx: self.cx * 2 + (n & 1), cy: self.cy * 2 + ((n >> 1) & 1), cz: self.cz * 2 + (n >> 2) };
+            let c = Self {
+                face: self.face,
+                level,
+                cx: self.cx * 2 + (n & 1),
+                cy: self.cy * 2 + ((n >> 1) & 1),
+                cz: self.cz * 2 + (n >> 2),
+            };
             (c.cx < tiles && c.cy < tiles).then_some(c)
         })
     }
@@ -109,13 +148,19 @@ impl Ranges {
     /// its parent's cell of the parent's surface).
     pub fn child(self) -> Self {
         let half = |(lo, hi): (i32, i32)| (lo.saturating_mul(2) - 2, hi.saturating_mul(2) + 2);
-        Self { volume: half(self.volume), surface: half(self.surface) }
+        Self {
+            volume: half(self.volume),
+            surface: half(self.surface),
+        }
     }
 
     /// The ranges holding all of `parts` (none if none is).
     pub fn hull(parts: &[Option<Ranges>]) -> Option<Self> {
         let join = |a: (i32, i32), b: (i32, i32)| (a.0.min(b.0), a.1.max(b.1));
-        parts.iter().flatten().copied().reduce(|a, b| Self { volume: join(a.volume, b.volume), surface: join(a.surface, b.surface) })
+        parts.iter().flatten().copied().reduce(|a, b| Self {
+            volume: join(a.volume, b.volume),
+            surface: join(a.surface, b.surface),
+        })
     }
 }
 
@@ -188,10 +233,32 @@ impl BrickIndex {
 
     /// This index with the bricks of `columns` added (a seal: bricks are
     /// only added until an unseal restores them, which needs [`Self::new`]).
-    pub fn extended(&self, grid: &Grid, store: &EditStore, columns: impl Iterator<Item = crate::edit_store::ColumnKey>) -> Self {
-        let mut index = Self { footprints: self.footprints.clone(), nodes: self.nodes.clone(), layers: self.layers };
+    pub fn extended(
+        &self,
+        grid: &Grid,
+        store: &EditStore,
+        columns: impl Iterator<Item = crate::edit_store::ColumnKey>,
+    ) -> Self {
+        let mut index = Self {
+            footprints: self.footprints.clone(),
+            nodes: self.nodes.clone(),
+            layers: self.layers,
+        };
         let keys: Vec<crate::edit_store::BrickKey> = columns
-            .filter_map(|c| store.column(&c).map(|column| column.iter().map(move |(bk, _)| crate::edit_store::BrickKey { face: c.face, level: c.level, bi: c.ci, bj: c.cj, bk: *bk }).collect::<Vec<_>>()))
+            .filter_map(|c| {
+                store.column(&c).map(|column| {
+                    column
+                        .iter()
+                        .map(move |(bk, _)| crate::edit_store::BrickKey {
+                            face: c.face,
+                            level: c.level,
+                            bi: c.ci,
+                            bj: c.cj,
+                            bk: *bk,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
             .flatten()
             .collect();
         index.add(grid, keys.into_iter());
@@ -202,11 +269,25 @@ impl BrickIndex {
         let top = grid.levels() - 1;
         for k in keys {
             let level = u32::from(k.level);
-            self.footprints.insert(Footprint { face: k.face, level, cx: k.bi >> 3, cy: k.bj >> 3 });
+            self.footprints.insert(Footprint {
+                face: k.face,
+                level,
+                cx: k.bi >> 3,
+                cy: k.bj >> 3,
+            });
             let (lo, hi) = ((k.bk * 8) << level, (k.bk * 8 + 8) << level);
-            self.layers = Some(self.layers.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+            self.layers = Some(
+                self.layers
+                    .map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))),
+            );
             // A node marked is marked with its ancestors.
-            let mut node = NodeKey { face: k.face, level, cx: k.bi >> 3, cy: k.bj >> 3, cz: k.bk >> 3 };
+            let mut node = NodeKey {
+                face: k.face,
+                level,
+                cx: k.bi >> 3,
+                cy: k.bj >> 3,
+                cz: k.bk >> 3,
+            };
             loop {
                 let layers = self.nodes.entry(node.footprint()).or_default();
                 if layers.contains(&node.cz) {
@@ -239,7 +320,11 @@ pub struct BrushIndex {
 /// a large-layer brush's below its bake level.
 pub fn brush_top(fb: &FaceBrush, large: bool) -> u32 {
     let size = 32 - fb.radius_half.leading_zeros();
-    if large { size.min(crate::planet::bake_level(fb)) } else { size }
+    if large {
+        size.min(crate::planet::bake_level(fb))
+    } else {
+        size
+    }
 }
 
 /// The finest buckets: 4096 half cells (204.8 m at 0.1 m voxels).
@@ -271,7 +356,10 @@ impl BrushIndex {
             let levels = &mut index.parts[part].1;
             let (i, j) = brush_extent(fb);
             let mut level = 0;
-            while BUCKET_LOG2 + level < 62 && ((i.1 >> (BUCKET_LOG2 + level)) - (i.0 >> (BUCKET_LOG2 + level)) > 1 || (j.1 >> (BUCKET_LOG2 + level)) - (j.0 >> (BUCKET_LOG2 + level)) > 1) {
+            while BUCKET_LOG2 + level < 62
+                && ((i.1 >> (BUCKET_LOG2 + level)) - (i.0 >> (BUCKET_LOG2 + level)) > 1
+                    || (j.1 >> (BUCKET_LOG2 + level)) - (j.0 >> (BUCKET_LOG2 + level)) > 1)
+            {
                 level += 1;
             }
             if levels.len() <= level as usize {
@@ -280,7 +368,10 @@ impl BrushIndex {
             let s = BUCKET_LOG2 + level;
             for bi in (i.0 >> s)..=(i.1 >> s) {
                 for bj in (j.0 >> s)..=(j.1 >> s) {
-                    levels[level as usize].entry((fb.face(), bi, bj)).or_default().push(first + n as u32);
+                    levels[level as usize]
+                        .entry((fb.face(), bi, bj))
+                        .or_default()
+                        .push(first + n as u32);
                 }
             }
         }
@@ -292,13 +383,20 @@ impl BrushIndex {
     /// callers test each exactly (`brush_meets`).
     pub fn query(&self, face: u8, i: (i64, i64), j: (i64, i64), level: u32) -> Vec<u32> {
         let mut out = Vec::new();
-        for (size, buckets) in self.parts.iter().filter(|(top, _)| level < *top).flat_map(|(_, sizes)| sizes.iter().enumerate()) {
+        for (size, buckets) in self
+            .parts
+            .iter()
+            .filter(|(top, _)| level < *top)
+            .flat_map(|(_, sizes)| sizes.iter().enumerate())
+        {
             let s = BUCKET_LOG2 + size as u32;
             let (bi, bj) = ((i.0 >> s, i.1 >> s), (j.0 >> s, j.1 >> s));
             if (bi.1 - bi.0 + 1).saturating_mul(bj.1 - bj.0 + 1) <= SCAN_BUCKETS {
                 for x in bi.0..=bi.1 {
                     for y in bj.0..=bj.1 {
-                        out.extend_from_slice(buckets.get(&(face, x, y)).map_or(&[][..], Vec::as_slice));
+                        out.extend_from_slice(
+                            buckets.get(&(face, x, y)).map_or(&[][..], Vec::as_slice),
+                        );
                     }
                 }
             } else {
@@ -317,13 +415,25 @@ impl BrushIndex {
 
 /// Whether `fb` can touch cells of `level` with half-cell bounds `i`, `j`,
 /// `k` (inclusive).
-pub fn brush_meets(fb: &FaceBrush, face: u8, level: u32, i: (i64, i64), j: (i64, i64), k: (i64, i64)) -> bool {
+pub fn brush_meets(
+    fb: &FaceBrush,
+    face: u8,
+    level: u32,
+    i: (i64, i64),
+    j: (i64, i64),
+    k: (i64, i64),
+) -> bool {
     if fb.face() != face || fb.radius_half < (1u32 << level) {
         return false;
     }
     let w = i64::from(fb.center[3]);
     let (ci, cj) = (i64::from(fb.center[0]), i64::from(fb.center[1]));
-    ci + w >= i.0 && ci - w <= i.1 && cj + w >= j.0 && cj - w <= j.1 && i64::from(fb.k_hi) >= k.0 && i64::from(fb.k_lo) <= k.1
+    ci + w >= i.0
+        && ci - w <= i.1
+        && cj + w >= j.0
+        && cj - w <= j.1
+        && i64::from(fb.k_hi) >= k.0
+        && i64::from(fb.k_lo) <= k.1
 }
 
 impl EditView {
@@ -332,7 +442,12 @@ impl EditView {
     /// still makes the nodes it crosses Mixed, so the cut refines to it).
     fn shapes_over(&self, fp: Footprint) -> impl Iterator<Item = (usize, &FaceBrush)> {
         let (i, j) = fp.span_half();
-        self.brushes_near(fp.face, i, j, 0).into_iter().map(|n| (n as usize, &self.faces[n as usize])).filter(move |(_, fb)| fb.op() <= 1 && brush_meets(fb, fp.face, 0, i, j, (i64::MIN / 4, i64::MAX / 4)))
+        self.brushes_near(fp.face, i, j, 0)
+            .into_iter()
+            .map(|n| (n as usize, &self.faces[n as usize]))
+            .filter(move |(_, fb)| {
+                fb.op() <= 1 && brush_meets(fb, fp.face, 0, i, j, (i64::MIN / 4, i64::MAX / 4))
+            })
     }
 
     /// Analytic brushes (indices into `faces`, in their order) that apply
@@ -355,14 +470,22 @@ impl EditView {
     pub fn surface_bands(&self, fb: &FaceBrush, fp: Footprint) -> [(i32, i32); 2] {
         let grid = &self.grid;
         let shift = fp.level + 1;
-        let band = |k_lo: i32, k_hi: i32| ((k_lo.max(fb.k_lo) >> shift) - 1, (k_hi.min(fb.k_hi) >> shift) + 2);
+        let band = |k_lo: i32, k_hi: i32| {
+            (
+                (k_lo.max(fb.k_lo) >> shift) - 1,
+                (k_hi.min(fb.k_hi) >> shift) + 2,
+            )
+        };
         const NO_BAND: (i32, i32) = (0, 0);
         if fb.shape() != crate::edits::SHAPE_BALL || grid.is_plane() {
             return [band(fb.k_lo, fb.k_hi), NO_BAND];
         }
         let units = f64::from(grid.sphere_constants()[2]) / grid.radius();
         let centre = glam::IVec3::from_slice(&fb.ball[..3]).as_dvec3() / units;
-        let (d, r) = (centre.length(), f64::from(fb.ball[3].unsigned_abs()) / units);
+        let (d, r) = (
+            centre.length(),
+            f64::from(fb.ball[3].unsigned_abs()) / units,
+        );
         // The footprint's directions in the brushes' (domain) space: its
         // middle, and the angle to its farthest corner cell (its edges are
         // great circles) and two base cells more.
@@ -370,31 +493,61 @@ impl EditView {
         let (i0, j0) = (fp.cx * size, fp.cy * size);
         let towards = |i: i32, j: i32| grid.domain_point(fp.face, i, j, 0).as_dvec3().normalize();
         let middle = towards(i0 + size / 2, j0 + size / 2);
-        let spread = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().map(|&(a, b)| middle.angle_between(towards(i0 + a * (size - 1), j0 + b * (size - 1)))).fold(0.0, f64::max) * 1.01
+        let spread = [(0, 0), (1, 0), (0, 1), (1, 1)]
+            .iter()
+            .map(|&(a, b)| middle.angle_between(towards(i0 + a * (size - 1), j0 + b * (size - 1))))
+            .fold(0.0, f64::max)
+            * 1.01
             + 2.0 * grid.voxel_size() / grid.radius();
-        let t = if d > 0.0 { middle.angle_between(centre / d) } else { 0.0 };
-        let (near, far) = ((t - spread).max(0.0), (t + spread).min(std::f64::consts::PI));
+        let t = if d > 0.0 {
+            middle.angle_between(centre / d)
+        } else {
+            0.0
+        };
+        let (near, far) = (
+            (t - spread).max(0.0),
+            (t + spread).min(std::f64::consts::PI),
+        );
         // Half base cells of a radius, two cells of margin.
-        let k = |radius: f64, margin: f64| (((radius - grid.radius()) / grid.voxel_size() + margin) * 2.0).clamp(-2.0e9, 2.0e9) as i32;
-        let cap = |t: f64, sign: f64| d * t.cos() + sign * (r * r - (d * t.sin()).powi(2)).max(0.0).sqrt();
+        let k = |radius: f64, margin: f64| {
+            (((radius - grid.radius()) / grid.voxel_size() + margin) * 2.0).clamp(-2.0e9, 2.0e9)
+                as i32
+        };
+        let cap = |t: f64, sign: f64| {
+            d * t.cos() + sign * (r * r - (d * t.sin()).powi(2)).max(0.0).sqrt()
+        };
         if d <= r {
             // The planet's centre is inside: the upper cap alone.
-            return [band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)), NO_BAND];
+            return [
+                band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)),
+                NO_BAND,
+            ];
         }
         let silhouette = (r / d).asin();
         if near >= silhouette {
             return [NO_BAND; 2];
         }
         if far >= silhouette {
-            return [band(k(cap(near, -1.0), -2.0), k(cap(near, 1.0), 2.0)), NO_BAND];
+            return [
+                band(k(cap(near, -1.0), -2.0), k(cap(near, 1.0), 2.0)),
+                NO_BAND,
+            ];
         }
-        [band(k(cap(near, -1.0), -2.0), k(cap(far, -1.0), 2.0)), band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0))]
+        [
+            band(k(cap(near, -1.0), -2.0), k(cap(far, -1.0), 2.0)),
+            band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)),
+        ]
     }
 
     /// The layers [lo, hi) (level cells) of `fp`'s nodes holding baked
     /// bricks or over them.
     fn baked_bands(&self, fp: Footprint) -> impl Iterator<Item = (i32, i32)> + '_ {
-        self.bricks.nodes.get(&fp).into_iter().flatten().map(|&cz| (cz * CHUNK, cz * CHUNK + CHUNK))
+        self.bricks
+            .nodes
+            .get(&fp)
+            .into_iter()
+            .flatten()
+            .map(|&cz| (cz * CHUNK, cz * CHUNK + CHUNK))
     }
 
     /// `fp`'s nodes from its `ranges`: the field's surface band and every
@@ -418,7 +571,10 @@ impl EditView {
             }
         }
         bands.extend(self.baked_bands(fp));
-        let mut layers: Vec<(i32, i32)> = bands.iter().map(|&(a, b)| (a.div_euclid(CHUNK), (b - 1).div_euclid(CHUNK))).collect();
+        let mut layers: Vec<(i32, i32)> = bands
+            .iter()
+            .map(|&(a, b)| (a.div_euclid(CHUNK), (b - 1).div_euclid(CHUNK)))
+            .collect();
         layers.sort_unstable();
         let mut mixed: Vec<(i32, i32)> = Vec::new();
         for (a, b) in layers {
@@ -427,9 +583,17 @@ impl EditView {
                 _ => mixed.push((a, b)),
             }
         }
-        let floor = ranges.volume.0.min(ranges.surface.0 - (self.volume_depth >> fp.level) - DESCENT);
+        let floor = ranges
+            .volume
+            .0
+            .min(ranges.surface.0 - (self.volume_depth >> fp.level) - DESCENT);
         let buried = (floor.div_euclid(CHUNK), (field.0 - 1).div_euclid(CHUNK));
-        Class { mixed, buried, volume_floor: floor, shapes }
+        Class {
+            mixed,
+            buried,
+            volume_floor: floor,
+            shapes,
+        }
     }
 
     /// Node `cz` of `fp`, of class `class`. Outside every surface band a
@@ -441,10 +605,27 @@ impl EditView {
         if class.mixed.iter().any(|&(a, b)| (a..=b).contains(&cz)) {
             return Kind::Mixed;
         }
-        let (i, j, z) = (fp.cx * CHUNK + CHUNK / 2, fp.cy * CHUNK + CHUNK / 2, cz * CHUNK + CHUNK / 2);
-        let centre = [center_half(i, fp.level), center_half(j, fp.level), center_half(z, fp.level)];
+        let (i, j, z) = (
+            fp.cx * CHUNK + CHUNK / 2,
+            fp.cy * CHUNK + CHUNK / 2,
+            cz * CHUNK + CHUNK / 2,
+        );
+        let centre = [
+            center_half(i, fp.level),
+            center_half(j, fp.level),
+            center_half(z, fp.level),
+        ];
         let mut point = None;
-        let brush = class.shapes.iter().rev().map(|&n| &self.faces[n as usize]).find(|b| b.contains(centre, || *point.get_or_insert_with(|| self.grid.volume_point(fp.face, i, j, z, fp.level))));
+        let brush = class
+            .shapes
+            .iter()
+            .rev()
+            .map(|&n| &self.faces[n as usize])
+            .find(|b| {
+                b.contains(centre, || {
+                    *point.get_or_insert_with(|| self.grid.volume_point(fp.face, i, j, z, fp.level))
+                })
+            });
         match brush {
             Some(b) if b.op() == 1 => Kind::Solid,
             Some(_) => Kind::Empty,
@@ -475,7 +656,14 @@ mod tests {
                 // Sizes from a cell to a continent.
                 let w = 1i32 << (next() % 28);
                 let (ci, cj) = ((next() % (1 << 30)) as i32, (next() % (1 << 30)) as i32);
-                FaceBrush { flags: face | ((next() % 3) as u32) << 4, radius_half: w as u32, k_lo: -100, k_hi: 100, center: [ci, cj, 0, w], ball: [0; 4] }
+                FaceBrush {
+                    flags: face | ((next() % 3) as u32) << 4,
+                    radius_half: w as u32,
+                    k_lo: -100,
+                    k_hi: 100,
+                    center: [ci, cj, 0, w],
+                    ball: [0; 4],
+                }
             })
             .collect();
         // The first half large (applying below their bake level).
@@ -488,7 +676,10 @@ mod tests {
             let w = 1i64 << (next() % 31);
             let (i0, j0) = ((next() % (1 << 30)) as i64, (next() % (1 << 30)) as i64);
             let (i, j) = ((i0, i0 + w), (j0, j0 + w));
-            let applies = |n: u32| level < brush_top(&faces[n as usize], (n as usize) < large) && brush_meets(&faces[n as usize], face, level, i, j, (-1000, 1000));
+            let applies = |n: u32| {
+                level < brush_top(&faces[n as usize], (n as usize) < large)
+                    && brush_meets(&faces[n as usize], face, level, i, j, (-1000, 1000))
+            };
             let mut found: Vec<u32> = index.query(face, i, j, level);
             found.extend(recent.query(face, i, j, level));
             found.retain(|&n| applies(n));

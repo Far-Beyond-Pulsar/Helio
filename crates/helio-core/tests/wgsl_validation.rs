@@ -149,17 +149,24 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
         "helio-pass-depth-prepass/shaders/depth_prepass.wgsl",
         "helio-pass-shadow/shaders/shadow.wgsl",
     ];
-    if DEPTH_MATERIAL.iter().any(|suffix| normalized.ends_with(suffix)) {
+    if DEPTH_MATERIAL
+        .iter()
+        .any(|suffix| normalized.ends_with(suffix))
+    {
         let material = root.join("crates/passes/3d/helio-pass-gbuffer/shaders/depth_material.wgsl");
         let material = std::fs::read_to_string(material).expect("depth_material.wgsl");
-        return format!("{material}
-{source}");
+        return format!(
+            "{material}
+{source}"
+        );
     }
     // `helio_pass_volumetric_fog::shader_source` sizes the post-process row's
     // words around its fog block from its Rust ABI; any lengths validate the
     // same.
     if normalized.ends_with("helio-pass-volumetric-fog/shaders/volumetric_fog.wgsl") {
-        return source.replace("__PP_HEAD_VEC4__", "1").replace("__PP_TAIL_VEC4__", "1");
+        return source
+            .replace("__PP_HEAD_VEC4__", "1")
+            .replace("__PP_TAIL_VEC4__", "1");
     }
     source
 }
@@ -265,17 +272,29 @@ fn every_wgsl_shader_parses_and_validates() {
 fn composed_shaders_parse_and_validate() {
     let mut sources = helio_pass_voxel_planet::engine::validation_sources();
     sources.extend(helio_default_passes::scene_join::validation_sources());
-    sources.push(("volumetric_fog.wgsl".into(), helio_pass_volumetric_fog::shader_source()));
+    sources.push((
+        "volumetric_fog.wgsl".into(),
+        helio_pass_volumetric_fog::shader_source(),
+    ));
     let failures: Vec<String> = sources
         .iter()
         .filter_map(|(name, source)| {
             // The fog's source holds its snippets already (`shader_source`):
             // its pass resolves the prelude alone.
-            let source = if name == "volumetric_fog.wgsl" { helio_core::shader::resolve(source).into_owned() } else { helio_core::shader::resolve_with(source, SNIPPETS).into_owned() };
+            let source = if name == "volumetric_fog.wgsl" {
+                helio_core::shader::resolve(source).into_owned()
+            } else {
+                helio_core::shader::resolve_with(source, SNIPPETS).into_owned()
+            };
             let module = match naga::front::wgsl::parse_str(&source) {
                 Ok(module) => module,
-                Err(e) => return Some(format!("{name}:
-{}", e.emit_to_string(&source))),
+                Err(e) => {
+                    return Some(format!(
+                        "{name}:
+{}",
+                        e.emit_to_string(&source)
+                    ))
+                }
             };
             Validator::new(ValidationFlags::all(), Capabilities::all())
                 .validate(&module)
@@ -284,9 +303,16 @@ fn composed_shaders_parse_and_validate() {
         })
         .collect();
     assert!(sources.len() >= 10, "{} composed shaders", sources.len());
-    assert!(failures.is_empty(), "{} composed shaders failed:
+    assert!(
+        failures.is_empty(),
+        "{} composed shaders failed:
 
-{}", failures.len(), failures.join("
+{}",
+        failures.len(),
+        failures.join(
+            "
 
-"));
+"
+        )
+    );
 }

@@ -90,7 +90,12 @@ pub fn noise(p: IVec3, shift: u32, seed: u32) -> i32 {
     let w = f.map(fade);
     let corner = |dx: i32, dy: i32, dz: i32| {
         grad(
-            hash3(c[0].wrapping_add(dx), c[1].wrapping_add(dy), c[2].wrapping_add(dz), seed),
+            hash3(
+                c[0].wrapping_add(dx),
+                c[1].wrapping_add(dy),
+                c[2].wrapping_add(dz),
+                seed,
+            ),
             f[0] - dx * ONE,
             f[1] - dy * ONE,
             f[2] - dz * ONE,
@@ -148,7 +153,12 @@ pub fn noise_fine(p: IVec3, shift: u32, seed: u32) -> i32 {
     let w = f.map(fade_q24);
     let corner = |dx: i32, dy: i32, dz: i32| {
         grad(
-            hash3(c[0].wrapping_add(dx), c[1].wrapping_add(dy), c[2].wrapping_add(dz), seed),
+            hash3(
+                c[0].wrapping_add(dx),
+                c[1].wrapping_add(dy),
+                c[2].wrapping_add(dz),
+                seed,
+            ),
             f[0] - dx * FINE_ONE,
             f[1] - dy * FINE_ONE,
             f[2] - dz * FINE_ONE,
@@ -202,10 +212,28 @@ pub fn noise_fine_grad(p: IVec3, shift: u32, seed: u32) -> (i32, IVec3) {
     let mut v = [0i32; 8];
     let mut g = [[0i32; 3]; 8];
     for (index, (vc, gc)) in v.iter_mut().zip(g.iter_mut()).enumerate() {
-        let (dx, dy, dz) = ((index & 1) as i32, ((index >> 1) & 1) as i32, (index >> 2) as i32);
-        let h = hash3(c[0].wrapping_add(dx), c[1].wrapping_add(dy), c[2].wrapping_add(dz), seed);
-        *vc = grad(h, f[0] - dx * FINE_ONE, f[1] - dy * FINE_ONE, f[2] - dz * FINE_ONE);
-        *gc = [grad(h, FINE_ONE, 0, 0), grad(h, 0, FINE_ONE, 0), grad(h, 0, 0, FINE_ONE)];
+        let (dx, dy, dz) = (
+            (index & 1) as i32,
+            ((index >> 1) & 1) as i32,
+            (index >> 2) as i32,
+        );
+        let h = hash3(
+            c[0].wrapping_add(dx),
+            c[1].wrapping_add(dy),
+            c[2].wrapping_add(dz),
+            seed,
+        );
+        *vc = grad(
+            h,
+            f[0] - dx * FINE_ONE,
+            f[1] - dy * FINE_ONE,
+            f[2] - dz * FINE_ONE,
+        );
+        *gc = [
+            grad(h, FINE_ONE, 0, 0),
+            grad(h, 0, FINE_ONE, 0),
+            grad(h, 0, 0, FINE_ONE),
+        ];
     }
     let x00 = lerp(v[0], v[1], w[0]);
     let x10 = lerp(v[2], v[3], w[0]);
@@ -222,7 +250,11 @@ pub fn noise_fine_grad(p: IVec3, shift: u32, seed: u32) -> (i32, IVec3) {
         let y1 = lerp(lerp(k[4], k[5], w[0]), lerp(k[6], k[7], w[0]), w[1]);
         lerp(y0, y1, w[2])
     };
-    let along_x = lerp(lerp(v[1] - v[0], v[3] - v[2], w[1]), lerp(v[5] - v[4], v[7] - v[6], w[1]), w[2]);
+    let along_x = lerp(
+        lerp(v[1] - v[0], v[3] - v[2], w[1]),
+        lerp(v[5] - v[4], v[7] - v[6], w[1]),
+        w[2],
+    );
     let along_y = lerp(x10 - x00, x11 - x01, w[2]);
     let along_z = y1 - y0;
     let gradient = IVec3::new(
@@ -275,7 +307,13 @@ pub fn unit_q30(v: IVec3) -> IVec3 {
     }
     // Largest component in [2^29, 2^30).
     let bits = 32 - m.leading_zeros();
-    let a = a.map(|x| if bits > 30 { x >> (bits - 30) } else { x << (30 - bits) });
+    let a = a.map(|x| {
+        if bits > 30 {
+            x >> (bits - 30)
+        } else {
+            x << (30 - bits)
+        }
+    });
     let mut s = a.iter().fold(0u32, |sum, &x| sum + mul_shr(x, x, 30));
     let wide = s < Q30;
     if wide {
@@ -283,7 +321,11 @@ pub fn unit_q30(v: IVec3) -> IVec3 {
     }
     let r = rsqrt_wide(s);
     let u = a.map(|x| (mul_shr(x, r, 30) << u32::from(wide)) as i32);
-    IVec3::new(if v.x < 0 { -u[0] } else { u[0] }, if v.y < 0 { -u[1] } else { u[1] }, if v.z < 0 { -u[2] } else { u[2] })
+    IVec3::new(
+        if v.x < 0 { -u[0] } else { u[0] },
+        if v.y < 0 { -u[1] } else { u[1] },
+        if v.z < 0 { -u[2] } else { u[2] },
+    )
 }
 
 #[cfg(test)]
@@ -298,17 +340,29 @@ mod tests {
     fn noise_slope_is_bounded() {
         let mut seed = 1u64;
         let mut next = |m: i32| {
-            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             ((seed >> 33) as i64).rem_euclid(i64::from(m)) as i32
         };
         for shift in [4u32, 8, 10, 14, 20] {
             let mut worst = 0.0f64;
             for _ in 0..400_000 {
-                let p = IVec3::new(next(1 << 24) - (1 << 23), next(1 << 24) - (1 << 23), next(1 << 24) - (1 << 23));
+                let p = IVec3::new(
+                    next(1 << 24) - (1 << 23),
+                    next(1 << 24) - (1 << 23),
+                    next(1 << 24) - (1 << 23),
+                );
                 let r = [1, 4, 32, 256, 4096][next(5) as usize];
-                let d = IVec3::new(next(2 * r + 1) - r, next(2 * r + 1) - r, next(2 * r + 1) - r);
+                let d = IVec3::new(
+                    next(2 * r + 1) - r,
+                    next(2 * r + 1) - r,
+                    next(2 * r + 1) - r,
+                );
                 let (a, b) = (noise(p, shift, 7), noise(p + d, shift, 7));
-                let allowed = f64::from(NOISE_SLOPE) * d.as_dvec3().length() / f64::from(1u32 << shift) + f64::from(NOISE_ROUNDING);
+                let allowed = f64::from(NOISE_SLOPE) * d.as_dvec3().length()
+                    / f64::from(1u32 << shift)
+                    + f64::from(NOISE_ROUNDING);
                 worst = worst.max(f64::from((a - b).abs()) - allowed);
             }
             assert!(worst <= 0.0, "shift {shift}: {worst} units past the bound");
@@ -334,14 +388,22 @@ mod tests {
         for shift in [8u32, 16, 22, 26, 29] {
             // Two domain units at the gradient bound (5.3 per lattice spacing)
             // plus rounding: the 16-bit noise steps far beyond this.
-            let bound = (2.0 * 5.3 * f64::from(FINE_ONE) / f64::from(1u32 << shift)).ceil() as i32 + 8;
+            let bound =
+                (2.0 * 5.3 * f64::from(FINE_ONE) / f64::from(1u32 << shift)).ceil() as i32 + 8;
             for x in -2000..2000 {
                 // Mid-cell: at a lattice point the noise may be flat along x.
-                let p = IVec3::new((1 << (shift - 1)) + x * 2 + 1, 99_614_720, (1 << (shift - 2)) - 81);
+                let p = IVec3::new(
+                    (1 << (shift - 1)) + x * 2 + 1,
+                    99_614_720,
+                    (1 << (shift - 2)) - 81,
+                );
                 let fine = noise_fine(p, shift, 7);
                 let coarse = noise(p, shift, 7) * 256;
                 // Agrees with the 16-bit noise to within its truncation error.
-                assert!((fine - coarse).abs() <= 16 * 256, "shift {shift} x {x}: fine {fine} coarse {coarse}");
+                assert!(
+                    (fine - coarse).abs() <= 16 * 256,
+                    "shift {shift} x {x}: fine {fine} coarse {coarse}"
+                );
                 let step = (noise_fine(p + IVec3::X * 2, shift, 7) - fine).abs();
                 assert!(step <= bound, "shift {shift} x {x}: step {step} > {bound}");
             }
@@ -363,12 +425,16 @@ mod tests {
                     let ahead = noise_fine(p + d * step, shift, 99);
                     let behind = noise_fine(p - d * step, shift, 99);
                     // Central difference per lattice spacing.
-                    let numeric = f64::from(ahead - behind) / (2.0 * f64::from(step)) * f64::from(1u32 << shift);
+                    let numeric = f64::from(ahead - behind) / (2.0 * f64::from(step))
+                        * f64::from(1u32 << shift);
                     let error = (numeric - f64::from(gradient[axis])).abs() / f64::from(FINE_ONE);
                     worst = worst.max(error);
                 }
             }
-            assert!(worst < 0.05, "shift {shift}: gradient off by {worst} per lattice spacing");
+            assert!(
+                worst < 0.05,
+                "shift {shift}: gradient off by {worst} per lattice spacing"
+            );
         }
     }
 
@@ -376,7 +442,11 @@ mod tests {
     fn integer_helpers_match_their_definitions() {
         for t in (-200_000..200_000).step_by(137) {
             let exact = (f64::from(t) / 65_536.0 * std::f64::consts::TAU).sin() * 65_536.0;
-            assert!((f64::from(sin_turns(t)) - exact).abs() < 140.0, "sin {t}: {} vs {exact}", sin_turns(t));
+            assert!(
+                (f64::from(sin_turns(t)) - exact).abs() < 140.0,
+                "sin {t}: {} vs {exact}",
+                sin_turns(t)
+            );
         }
     }
 

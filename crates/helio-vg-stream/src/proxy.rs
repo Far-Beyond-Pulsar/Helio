@@ -70,7 +70,14 @@ pub struct ProxyOptions {
 
 impl Default for ProxyOptions {
     fn default() -> Self {
-        Self { levels: 5, ratio: 4.0, max_triangles_per_lod: 8 << 20, finest_relative_error: 0.0, max_lods: usize::MAX, uvs: false }
+        Self {
+            levels: 5,
+            ratio: 4.0,
+            max_triangles_per_lod: 8 << 20,
+            finest_relative_error: 0.0,
+            max_lods: usize::MAX,
+            uvs: false,
+        }
     }
 }
 
@@ -133,7 +140,11 @@ impl ProxyLodCpu {
     /// Bytes of GPU + CPU-side tables this level costs (vertex + uv + index
     /// + prim_map + per-cluster rows).
     pub fn bytes(&self) -> usize {
-        self.positions.len() * 12 + self.uvs.len() * 8 + self.indices.len() * 4 + self.prim_map.len() * 4 + self.clusters.len() * 8
+        self.positions.len() * 12
+            + self.uvs.len() * 8
+            + self.indices.len() * 4
+            + self.prim_map.len() * 4
+            + self.clusters.len() * 8
     }
 }
 
@@ -179,7 +190,8 @@ fn root_cut_radius(source: &dyn VgeoSource, quant: &GpuAssetQuant) -> Result<f32
             .map(bytemuck::pod_read_unaligned)
             .ok_or_else(|| format!("proxy: page {page_id} truncated"))?;
         for local in 0..ph.cluster_count {
-            let co = ph.clusters_offset as usize + local as usize * std::mem::size_of::<GpuCluster>();
+            let co =
+                ph.clusters_offset as usize + local as usize * std::mem::size_of::<GpuCluster>();
             let c: GpuCluster = bytes
                 .get(co..co + std::mem::size_of::<GpuCluster>())
                 .map(bytemuck::pod_read_unaligned)
@@ -252,7 +264,11 @@ pub fn build_proxy(
         return Err("proxy: asset has no finite hierarchy error (single level)".into());
     }
     // The radius only matters to a relative finest error (reads the root pages).
-    let radius = if opts.finest_relative_error > 0.0 { root_cut_radius(source, &quant)? } else { 0.0 };
+    let radius = if opts.finest_relative_error > 0.0 {
+        root_cut_radius(source, &quant)?
+    } else {
+        0.0
+    };
     let ladder = error_ladder(root_error, radius, opts);
     let mut lods: Vec<LodBuild> = ladder
         .iter()
@@ -284,7 +300,8 @@ pub fn build_proxy(
             return Err(format!("proxy: page {page_id} bad magic"));
         }
         for local in 0..ph.cluster_count {
-            let co = ph.clusters_offset as usize + local as usize * std::mem::size_of::<GpuCluster>();
+            let co =
+                ph.clusters_offset as usize + local as usize * std::mem::size_of::<GpuCluster>();
             let c: GpuCluster = bytes
                 .get(co..co + std::mem::size_of::<GpuCluster>())
                 .map(bytemuck::pod_read_unaligned)
@@ -323,7 +340,11 @@ pub fn build_proxy(
                 }
                 let tris = &d.tris;
                 for (t, tri) in tris.iter().enumerate() {
-                    lod.indices.extend_from_slice(&[map[tri[0] as usize], map[tri[1] as usize], map[tri[2] as usize]]);
+                    lod.indices.extend_from_slice(&[
+                        map[tri[0] as usize],
+                        map[tri[1] as usize],
+                        map[tri[2] as usize],
+                    ]);
                     lod.prim_map.push((ordinal << VIS_TRI_BITS) | t as u32);
                 }
                 if lod.prim_map.len() as u32 > opts.max_triangles_per_lod {
@@ -381,7 +402,12 @@ pub fn build_proxy(
     }
     // Strictly increasing error (the ladder is, but dedup above can only drop).
     let bounds = bounding_sphere(&out[0].positions);
-    Ok(ProxyBuild { lods: out, bounds, source_triangles, skipped_levels: skipped })
+    Ok(ProxyBuild {
+        lods: out,
+        bounds,
+        source_triangles,
+        skipped_levels: skipped,
+    })
 }
 
 fn bounding_sphere(points: &[[f32; 3]]) -> [f32; 4] {
@@ -395,7 +421,11 @@ fn bounding_sphere(points: &[[f32; 3]]) -> [f32; 4] {
             hi[a] = hi[a].max(p[a]);
         }
     }
-    let c = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5];
+    let c = [
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+    ];
     let r2 = points
         .iter()
         .map(|p| (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2))
@@ -436,7 +466,12 @@ fn f16_to_f32(h: u32) -> f32 {
 /// (`uvs`; word 2 of each [`ATTR_STRIDE`] attribute record, whose stream
 /// starts at the position block's word 4) and indices; the mirror of
 /// `vg_decode.wgsl` / `vg_alpha_uv.wgsl` / `VgeoReader::decode_cluster`.
-fn decode_cluster(page: &[u8], c: &GpuCluster, quant: &GpuAssetQuant, uvs: bool) -> Result<Decoded, String> {
+fn decode_cluster(
+    page: &[u8],
+    c: &GpuCluster,
+    quant: &GpuAssetQuant,
+    uvs: bool,
+) -> Result<Decoded, String> {
     let (nv, nt) = (c.vert_count() as usize, c.tri_count() as usize);
     let po = c.vertex_offset as usize;
     let word = |k: usize| -> Result<u32, String> {
@@ -481,7 +516,9 @@ fn decode_cluster(page: &[u8], c: &GpuCluster, quant: &GpuAssetQuant, uvs: bool)
         positions.push(dequantize(q, quant));
     }
     let io = c.index_offset as usize;
-    let raw = page.get(io..io + nt * 3).ok_or_else(|| "proxy: index stream out of range".to_string())?;
+    let raw = page
+        .get(io..io + nt * 3)
+        .ok_or_else(|| "proxy: index stream out of range".to_string())?;
     let tris: Vec<[u8; 3]> = raw.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
     if tris.iter().flatten().any(|&i| i as usize >= nv) {
         return Err("proxy: triangle index out of range".into());
@@ -491,11 +528,18 @@ fn decode_cluster(page: &[u8], c: &GpuCluster, quant: &GpuAssetQuant, uvs: bool)
         let attributes = word(4)? as usize;
         for v in 0..nv {
             let at = attributes + v * ATTR_STRIDE as usize + 8;
-            let bytes = page.get(at..at + 4).ok_or_else(|| "proxy: attribute stream out of range".to_string())?;
+            let bytes = page
+                .get(at..at + 4)
+                .ok_or_else(|| "proxy: attribute stream out of range".to_string())?;
             uv_bits.push(u32::from_le_bytes(bytes.try_into().unwrap()));
         }
     }
-    Ok(Decoded { positions, lattice, uv_bits, tris })
+    Ok(Decoded {
+        positions,
+        lattice,
+        uv_bits,
+        tris,
+    })
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────
@@ -563,7 +607,10 @@ impl ProxyCache {
             cancel: Arc::new(AtomicBool::new(false)),
             in_flight: 0,
             ready: Vec::new(),
-            stats: ProxyCacheStats { budget_bytes: budget_bytes as u64, ..Default::default() },
+            stats: ProxyCacheStats {
+                budget_bytes: budget_bytes as u64,
+                ..Default::default()
+            },
         }
     }
 
@@ -583,7 +630,15 @@ impl ProxyCache {
             e.last_used = frame;
             return;
         }
-        self.entries.insert(key, Entry { state: ProxyState::Building, bytes: 0, last_used: frame, pinned_until: 0 });
+        self.entries.insert(
+            key,
+            Entry {
+                state: ProxyState::Building,
+                bytes: 0,
+                last_used: frame,
+                pinned_until: 0,
+            },
+        );
         self.queued.push((key, source));
     }
 
@@ -613,10 +668,12 @@ impl ProxyCache {
             let cancel = self.cancel.clone();
             self.in_flight += 1;
             self.stats.jobs_started += 1;
-            let spawned = std::thread::Builder::new().name("vg-proxy-build".into()).spawn(move || {
-                let r = build_proxy(source.as_ref(), &opts, Some(&cancel));
-                let _ = tx.send((key, r));
-            });
+            let spawned = std::thread::Builder::new()
+                .name("vg-proxy-build".into())
+                .spawn(move || {
+                    let r = build_proxy(source.as_ref(), &opts, Some(&cancel));
+                    let _ = tx.send((key, r));
+                });
             if spawned.is_err() {
                 self.in_flight -= 1;
                 if let Some(e) = self.entries.get_mut(&key) {
@@ -629,7 +686,9 @@ impl ProxyCache {
             let Ok((key, result)) = received else { break };
             self.in_flight = self.in_flight.saturating_sub(1);
             self.stats.jobs_finished += 1;
-            let Some(e) = self.entries.get_mut(&key) else { continue };
+            let Some(e) = self.entries.get_mut(&key) else {
+                continue;
+            };
             match result {
                 Ok(build) => {
                     let bytes = build.bytes();
@@ -662,7 +721,9 @@ impl ProxyCache {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(_, e)| matches!(e.state, ProxyState::Ready) && e.pinned_until < frame && e.bytes > 0)
+                .filter(|(_, e)| {
+                    matches!(e.state, ProxyState::Ready) && e.pinned_until < frame && e.bytes > 0
+                })
                 .min_by_key(|(_, e)| e.last_used)
                 .map(|(k, _)| *k);
             let Some(k) = victim else { break };

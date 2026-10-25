@@ -45,17 +45,80 @@ pub fn features() -> FeatureSet {
         set.stamps.extend(stamps);
         (first..set.stamps.len() as u32).collect()
     };
-    let structures = |kinds: &[(Kind, usize)], rng: &mut Rng| -> Vec<Stamp> { kinds.iter().flat_map(|&(kind, n)| (0..n).map(|_| structure(kind, rng.u64())).collect::<Vec<_>>()).collect() };
-    let temperate = add(&mut set, structures(&[(Kind::Cottage, 4), (Kind::Tower, 2), (Kind::Ruins, 2), (Kind::Well, 2)], &mut rng));
-    let desert = add(&mut set, structures(&[(Kind::Pyramid, 3), (Kind::Well, 2)], &mut rng));
+    let structures = |kinds: &[(Kind, usize)], rng: &mut Rng| -> Vec<Stamp> {
+        kinds
+            .iter()
+            .flat_map(|&(kind, n)| {
+                (0..n)
+                    .map(|_| structure(kind, rng.u64()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let temperate = add(
+        &mut set,
+        structures(
+            &[
+                (Kind::Cottage, 4),
+                (Kind::Tower, 2),
+                (Kind::Ruins, 2),
+                (Kind::Well, 2),
+            ],
+            &mut rng,
+        ),
+    );
+    let desert = add(
+        &mut set,
+        structures(&[(Kind::Pyramid, 3), (Kind::Well, 2)], &mut rng),
+    );
     let mountain = add(&mut set, structures(&[(Kind::Ruins, 3)], &mut rng));
     let jungle = add(&mut set, grow(&[Species::Jungle]));
-    let broadleaf = add(&mut set, grow(&[Species::Oak, Species::Oak, Species::DarkOak]));
+    let broadleaf = add(
+        &mut set,
+        grow(&[Species::Oak, Species::Oak, Species::DarkOak]),
+    );
     let birch = add(&mut set, grow(&[Species::Birch]));
     let conifer = add(&mut set, grow(&[Species::Spruce, Species::Pine]));
-    let boulders = add(&mut set, (0..VARIANTS).map(|v| flora::boulder(if v % 3 == 0 { Block::Andesite } else { Block::Stone }.material(), WORLD_SEED ^ (v << 8), VOXEL_M)).collect());
-    let cacti = add(&mut set, (0..VARIANTS).map(|v| flora::cactus(Block::Cactus.material(), WORLD_SEED ^ (v << 16), VOXEL_M)).collect());
-    let bushes = add(&mut set, (0..VARIANTS).map(|v| flora::bush(if v % 2 == 0 { Block::OakLeaves } else { Block::BirchLeaves }.material(), WORLD_SEED ^ (v << 24), VOXEL_M)).collect());
+    let boulders = add(
+        &mut set,
+        (0..VARIANTS)
+            .map(|v| {
+                flora::boulder(
+                    if v % 3 == 0 {
+                        Block::Andesite
+                    } else {
+                        Block::Stone
+                    }
+                    .material(),
+                    WORLD_SEED ^ (v << 8),
+                    VOXEL_M,
+                )
+            })
+            .collect(),
+    );
+    let cacti = add(
+        &mut set,
+        (0..VARIANTS)
+            .map(|v| flora::cactus(Block::Cactus.material(), WORLD_SEED ^ (v << 16), VOXEL_M))
+            .collect(),
+    );
+    let bushes = add(
+        &mut set,
+        (0..VARIANTS)
+            .map(|v| {
+                flora::bush(
+                    if v % 2 == 0 {
+                        Block::OakLeaves
+                    } else {
+                        Block::BirchLeaves
+                    }
+                    .material(),
+                    WORLD_SEED ^ (v << 24),
+                    VOXEL_M,
+                )
+            })
+            .collect(),
+    );
     let lowland = [-1e9, TREE_LINE_M];
     let structure = |name: &str, stamps: Vec<u32>, surfaces: &[u32], density: f32| Spawn {
         name: name.into(),
@@ -66,7 +129,12 @@ pub fn features() -> FeatureSet {
         max_relief: cells(7.0),
         ..Spawn::default()
     };
-    let forest = |name: &str, stamps: Vec<u32>, spacing_m: f64, field_scale_m: f64, field_threshold: f32, leaves: Block| Spawn {
+    let forest = |name: &str,
+                  stamps: Vec<u32>,
+                  spacing_m: f64,
+                  field_scale_m: f64,
+                  field_threshold: f32,
+                  leaves: Block| Spawn {
         name: name.into(),
         stamps,
         spacing: cells(spacing_m),
@@ -80,16 +148,97 @@ pub fn features() -> FeatureSet {
         ..Spawn::default()
     };
     set.spawns = vec![
-        structure("temperate structures", temperate, &[material::GRASS, material::DIRT, material::CLAY], 0.8),
-        structure("desert structures", desert, &[material::SAND, material::SANDSTONE], 0.8),
-        structure("mountain ruins", mountain, &[material::SNOW, material::STONE, material::GRAVEL], 0.35),
-        Spawn { density: 0.6, ..forest("jungle", jungle, JUNGLE_SPACING_M, 420.0, 0.35, Block::JungleLeaves) },
-        forest("broadleaf forest", broadleaf, TREE_SPACING_M, 260.0, -0.1, Block::OakLeaves),
-        forest("birch woods", birch, TREE_SPACING_M, 300.0, 0.2, Block::BirchLeaves),
-        Spawn { surfaces: vec![material::GRASS, material::DIRT, material::SNOW], heights_m: [TREE_LINE_M, 1e9], ..forest("conifers", conifer, TREE_SPACING_M, 200.0, -0.3, Block::SpruceLeaves) },
-        Spawn { name: "boulders".into(), stamps: boulders, spacing: cells(BOULDER_SPACING_M), density: 0.12, surfaces: vec![material::GRASS, material::STONE, material::GRAVEL, material::SNOW], ..Spawn::default() },
-        Spawn { name: "cacti".into(), stamps: cacti, spacing: cells(CACTUS_SPACING_M), density: 0.12, surfaces: vec![material::SAND], max_relief: cells(2.0), ..Spawn::default() },
-        Spawn { name: "bushes".into(), stamps: bushes, spacing: cells(BUSH_SPACING_M), density: 0.18, field_scale_m: 120.0, field_threshold: -0.2, surfaces: vec![material::GRASS], heights_m: lowland, max_relief: cells(1.0), ..Spawn::default() },
+        structure(
+            "temperate structures",
+            temperate,
+            &[material::GRASS, material::DIRT, material::CLAY],
+            0.8,
+        ),
+        structure(
+            "desert structures",
+            desert,
+            &[material::SAND, material::SANDSTONE],
+            0.8,
+        ),
+        structure(
+            "mountain ruins",
+            mountain,
+            &[material::SNOW, material::STONE, material::GRAVEL],
+            0.35,
+        ),
+        Spawn {
+            density: 0.6,
+            ..forest(
+                "jungle",
+                jungle,
+                JUNGLE_SPACING_M,
+                420.0,
+                0.35,
+                Block::JungleLeaves,
+            )
+        },
+        forest(
+            "broadleaf forest",
+            broadleaf,
+            TREE_SPACING_M,
+            260.0,
+            -0.1,
+            Block::OakLeaves,
+        ),
+        forest(
+            "birch woods",
+            birch,
+            TREE_SPACING_M,
+            300.0,
+            0.2,
+            Block::BirchLeaves,
+        ),
+        Spawn {
+            surfaces: vec![material::GRASS, material::DIRT, material::SNOW],
+            heights_m: [TREE_LINE_M, 1e9],
+            ..forest(
+                "conifers",
+                conifer,
+                TREE_SPACING_M,
+                200.0,
+                -0.3,
+                Block::SpruceLeaves,
+            )
+        },
+        Spawn {
+            name: "boulders".into(),
+            stamps: boulders,
+            spacing: cells(BOULDER_SPACING_M),
+            density: 0.12,
+            surfaces: vec![
+                material::GRASS,
+                material::STONE,
+                material::GRAVEL,
+                material::SNOW,
+            ],
+            ..Spawn::default()
+        },
+        Spawn {
+            name: "cacti".into(),
+            stamps: cacti,
+            spacing: cells(CACTUS_SPACING_M),
+            density: 0.12,
+            surfaces: vec![material::SAND],
+            max_relief: cells(2.0),
+            ..Spawn::default()
+        },
+        Spawn {
+            name: "bushes".into(),
+            stamps: bushes,
+            spacing: cells(BUSH_SPACING_M),
+            density: 0.18,
+            field_scale_m: 120.0,
+            field_threshold: -0.2,
+            surfaces: vec![material::GRASS],
+            heights_m: lowland,
+            max_relief: cells(1.0),
+            ..Spawn::default()
+        },
     ];
     set
 }
@@ -101,7 +250,15 @@ fn grow(species: &[Species]) -> Vec<Stamp> {
         .enumerate()
         .flat_map(|(n, &s)| {
             let (wood, leaves) = blocks(s);
-            (0..VARIANTS).map(move |v| flora::tree(s, wood.material(), leaves.material(), WORLD_SEED ^ ((n as u64) << 32) ^ (v * 0x9e37_79b9) ^ s as u64, VOXEL_M))
+            (0..VARIANTS).map(move |v| {
+                flora::tree(
+                    s,
+                    wood.material(),
+                    leaves.material(),
+                    WORLD_SEED ^ ((n as u64) << 32) ^ (v * 0x9e37_79b9) ^ s as u64,
+                    VOXEL_M,
+                )
+            })
         })
         .collect()
 }
@@ -145,13 +302,21 @@ mod tests {
     fn trees_grow_and_dig_like_ground() {
         let mut planet = Planet::new(recipe()).unwrap();
         let n = planet.grid().cells();
-        let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog].map(Block::material);
+        let logs = [
+            Block::OakLog,
+            Block::BirchLog,
+            Block::SpruceLog,
+            Block::JungleLog,
+        ]
+        .map(Block::material);
         let mut trunk = None;
         'search: for i in (n / 2 - 2000..n / 2 + 2000).step_by(7) {
             for j in (n / 2 - 2000..n / 2 + 2000).step_by(7) {
                 let top = planet.terrain_top(2, i, j);
                 for k in top..top + 3 {
-                    if logs.contains(&planet.material(Cell::new(2, i, j, k))) && planet.solid(Cell::new(2, i, j, k)) {
+                    if logs.contains(&planet.material(Cell::new(2, i, j, k)))
+                        && planet.solid(Cell::new(2, i, j, k))
+                    {
                         trunk = Some(Cell::new(2, i, j, k));
                         break 'search;
                     }
@@ -160,7 +325,16 @@ mod tests {
         }
         let trunk = trunk.expect("no tree grows near the face's middle");
         let grid = *planet.grid();
-        planet.apply(helio_pass_voxel_planet::Brush { center: grid.cell_center(trunk).to_array(), radius: 0.5, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        planet
+            .apply(helio_pass_voxel_planet::Brush {
+                center: grid.cell_center(trunk).to_array(),
+                radius: 0.5,
+                shape: BrushShape::Cube,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 0.0,
+            })
+            .unwrap();
         assert!(!planet.solid(trunk));
     }
 }

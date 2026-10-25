@@ -350,7 +350,10 @@ impl<'a> RenderCmds<'a> {
 
     /// Replays pre-recorded render bundles. Only the graph's own bundle path
     /// should need this.
-    pub fn execute_bundles<'b, I: IntoIterator<Item = &'b wgpu::RenderBundle>>(&mut self, bundles: I) {
+    pub fn execute_bundles<'b, I: IntoIterator<Item = &'b wgpu::RenderBundle>>(
+        &mut self,
+        bundles: I,
+    ) {
         render!(
             self,
             |p| p.execute_bundles(bundles),
@@ -436,9 +439,9 @@ impl<'a> ComputeCmds<'a> {
         desc: &wgpu::ComputePassDescriptor<'_>,
     ) -> ComputeCmds<'a> {
         // SAFETY: see `render!`.
-        unsafe { stream.as_mut() }.push(Cmd::BeginComputePass(
-            cmd_ir::ComputePassDesc::capture(desc),
-        ));
+        unsafe { stream.as_mut() }.push(Cmd::BeginComputePass(cmd_ir::ComputePassDesc::capture(
+            desc,
+        )));
         ComputeCmds {
             inner: ComputeInner::Recorded {
                 stream,
@@ -570,7 +573,10 @@ pub struct CommandRecorder<'a> {
 }
 
 enum RecorderInner<'a> {
-    Wgpu(NonNull<wgpu::CommandEncoder>, PhantomData<&'a mut wgpu::CommandEncoder>),
+    Wgpu(
+        NonNull<wgpu::CommandEncoder>,
+        PhantomData<&'a mut wgpu::CommandEncoder>,
+    ),
     Recorded(NonNull<Stream>, PhantomData<&'a mut ()>),
 }
 
@@ -774,12 +780,7 @@ impl<'a> CommandRecorder<'a> {
     ) {
         encoder!(
             self,
-            |e| e.resolve_query_set(
-                query_set,
-                query_range,
-                destination,
-                destination_offset
-            ),
+            |e| e.resolve_query_set(query_set, query_range, destination, destination_offset),
             Cmd::ResolveQuerySet {
                 set: query_set.clone(),
                 range: query_range,
@@ -855,55 +856,70 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
         let counter = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(COMPUTE.into()),
         });
-        let compute = crate::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: None,
-            layout: None,
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let compute = crate::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: None,
+                layout: None,
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &compute.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: counter.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: counter.as_entire_binding(),
+            }],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(RENDER.into()),
         });
         let format = wgpu::TextureFormat::Rgba8Unorm;
-        let render = crate::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let render = crate::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(format.into())],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(format.into())],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -918,7 +934,15 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        Work { counter, group, compute, render, target, view, out }
+        Work {
+            counter,
+            group,
+            compute,
+            render,
+            target,
+            view,
+            out,
+        }
     }
 
     /// A clear, a compute pass, a scissored render pass and two copies.
@@ -963,11 +987,20 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
                     rows_per_image: None,
                 },
             },
-            wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
         );
     }
 
-    fn run(device: &wgpu::Device, queue: &wgpu::Queue, w: &Work, encoder: wgpu::CommandEncoder) -> Vec<u8> {
+    fn run(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        w: &Work,
+        encoder: wgpu::CommandEncoder,
+    ) -> Vec<u8> {
         queue.submit([encoder.finish()]);
         let slice = w.out.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
@@ -990,25 +1023,42 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
         let direct = run(&device, &queue, &w, encoder);
 
         let mut stream = Stream::new();
-        record(&mut CommandRecorder::from_stream(NonNull::from(&mut stream)), &w);
+        record(
+            &mut CommandRecorder::from_stream(NonNull::from(&mut stream)),
+            &w,
+        );
         let mut encoder = device.create_command_encoder(&Default::default());
         cmd_ir::encode(&stream, &mut encoder);
         let replayed = run(&device, &queue, &w, encoder);
 
         assert_eq!(&direct[..4], &5u32.to_le_bytes(), "five dispatches counted");
         let pixel = |x: u64, y: u64| &direct[(ROW + y * ROW + x * 4) as usize..][..4];
-        assert_eq!(pixel(0, 0), &[0, 255, 0, 255], "scissored draw covers the left half");
-        assert_eq!(pixel(3, 3), &[255, 0, 0, 255], "the clear shows on the right");
+        assert_eq!(
+            pixel(0, 0),
+            &[0, 255, 0, 255],
+            "scissored draw covers the left half"
+        );
+        assert_eq!(
+            pixel(3, 3),
+            &[255, 0, 0, 255],
+            "the clear shows on the right"
+        );
         assert_eq!(direct, replayed, "replaying the stream does the same work");
 
         // The same commands against the same objects compare equal, so a
         // cache can tell an unchanged frame from a changed one.
         let mut again = Stream::new();
-        record(&mut CommandRecorder::from_stream(NonNull::from(&mut again)), &w);
+        record(
+            &mut CommandRecorder::from_stream(NonNull::from(&mut again)),
+            &w,
+        );
         assert_eq!(stream, again);
         let other = work(&device);
         let mut changed = Stream::new();
-        record(&mut CommandRecorder::from_stream(NonNull::from(&mut changed)), &other);
+        record(
+            &mut CommandRecorder::from_stream(NonNull::from(&mut changed)),
+            &other,
+        );
         assert_ne!(stream, changed, "different objects are different commands");
     }
 }

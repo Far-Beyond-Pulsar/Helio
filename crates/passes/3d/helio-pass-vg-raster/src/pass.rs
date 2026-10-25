@@ -205,7 +205,11 @@ impl VgTargets {
         let tex = |label, format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -236,15 +240,19 @@ impl VgTargets {
                 mapped_at_creation: false,
             })
         };
-        let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let st = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
         let fallback = raster.uses_tile_fallback();
         let cap = raster.config.tile_bin_cap as u64;
-        let make_params = || device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("VG Raster Params"),
-            size: std::mem::size_of::<VgRasterParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let make_params = || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("VG Raster Params"),
+                size: std::mem::size_of::<VgRasterParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
         let params = [make_params(), make_params()];
         let params_masked = [make_params(), make_params()];
         let params_dense = [make_params(), make_params()];
@@ -281,8 +289,16 @@ impl VgTargets {
             dense_args: buf("VG Dense Args", 16, st | wgpu::BufferUsages::INDIRECT),
             dense_est: buf("VG Dense Estimate", tiles * 4, st),
             dense_age: buf("VG Dense Age", tiles * 4, st),
-            tile_bin_counts: buf("VG Tile Bin Counts", if fallback { tiles * 4 } else { 16 }, st),
-            tile_bin_entries: buf("VG Tile Bin Entries", if fallback { tiles * cap * 4 } else { 16 }, st),
+            tile_bin_counts: buf(
+                "VG Tile Bin Counts",
+                if fallback { tiles * 4 } else { 16 },
+                st,
+            ),
+            tile_bin_entries: buf(
+                "VG Tile Bin Entries",
+                if fallback { tiles * cap * 4 } else { 16 },
+                st,
+            ),
             params,
             params_masked,
             params_dense,
@@ -299,7 +315,11 @@ impl VgTargets {
     }
 }
 
-fn storage_entry(binding: u32, vis: wgpu::ShaderStages, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+fn storage_entry(
+    binding: u32,
+    vis: wgpu::ShaderStages,
+    read_only: bool,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: vis,
@@ -335,8 +355,15 @@ fn depth_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         count: None,
     }
 }
-fn bgl(device: &wgpu::Device, label: &str, entries: &[wgpu::BindGroupLayoutEntry]) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries })
+fn bgl(
+    device: &wgpu::Device,
+    label: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries,
+    })
 }
 fn pipeline_layout(
     device: &wgpu::Device,
@@ -480,7 +507,13 @@ impl VgRaster {
                 ],
             );
             let pl = pipeline_layout(device, "VG SW Raster PL", &[&bgl0_compute, &bgl1]);
-            (Some(Sw64 { pipeline: compute(device, "VG SW Raster", &pl, &m, "sw_raster_main"), bgl1 }), None)
+            (
+                Some(Sw64 {
+                    pipeline: compute(device, "VG SW Raster", &pl, &m, "sw_raster_main"),
+                    bgl1,
+                }),
+                None,
+            )
         } else {
             let bm = module(device, "VG SW Bin", shaders::sw_bin_source());
             let bin_bgl1 = bgl(
@@ -543,7 +576,11 @@ impl VgRaster {
             "VG Dense Count G1",
             &[storage_entry(0, c, false), storage_entry(1, c, true)],
         );
-        let dcpl = pipeline_layout(device, "VG Dense Count PL", &[&bgl0_compute, &dense_count_bgl1]);
+        let dcpl = pipeline_layout(
+            device,
+            "VG Dense Count PL",
+            &[&bgl0_compute, &dense_count_bgl1],
+        );
         let dense_count = compute(device, "VG Dense Count", &dcpl, &dcm, "dense_count_main");
 
         Self {
@@ -578,9 +615,21 @@ impl VgRaster {
         self.masked.get_or_init(|| {
             let f = wgpu::ShaderStages::FRAGMENT;
             let c = wgpu::ShaderStages::COMPUTE;
-            let hw_bgl1 = bgl(device, "VG HW Masked G1 (alpha)", &helio_mats::vg_alpha::layout_entries(self.binding, 0, f));
-            let hw_mod = module(device, "VG HW Raster Masked", shaders::hw_masked_source(self.binding));
-            let hw_layout = pipeline_layout(device, "VG HW Raster Masked PL", &[&self.bgl0_vertex, &hw_bgl1]);
+            let hw_bgl1 = bgl(
+                device,
+                "VG HW Masked G1 (alpha)",
+                &helio_mats::vg_alpha::layout_entries(self.binding, 0, f),
+            );
+            let hw_mod = module(
+                device,
+                "VG HW Raster Masked",
+                shaders::hw_masked_source(self.binding),
+            );
+            let hw_layout = pipeline_layout(
+                device,
+                "VG HW Raster Masked PL",
+                &[&self.bgl0_vertex, &hw_bgl1],
+            );
             let hw = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("VG HW Raster Masked"),
                 layout: Some(&hw_layout),
@@ -619,10 +668,31 @@ impl VgRaster {
                 cache: None,
             });
             let sw = self.sw64.as_ref().map(|sw64| {
-                let alpha_bgl = bgl(device, "VG SW Masked G2 (alpha)", &helio_mats::vg_alpha::layout_entries(self.binding, 0, c));
-                let m = module(device, "VG SW Raster Masked", shaders::sw_masked_source(self.binding));
-                let pl = pipeline_layout(device, "VG SW Raster Masked PL", &[&self.bgl0_compute, &sw64.bgl1, &alpha_bgl]);
-                (compute(device, "VG SW Raster Masked", &pl, &m, "sw_raster_masked_main"), alpha_bgl)
+                let alpha_bgl = bgl(
+                    device,
+                    "VG SW Masked G2 (alpha)",
+                    &helio_mats::vg_alpha::layout_entries(self.binding, 0, c),
+                );
+                let m = module(
+                    device,
+                    "VG SW Raster Masked",
+                    shaders::sw_masked_source(self.binding),
+                );
+                let pl = pipeline_layout(
+                    device,
+                    "VG SW Raster Masked PL",
+                    &[&self.bgl0_compute, &sw64.bgl1, &alpha_bgl],
+                );
+                (
+                    compute(
+                        device,
+                        "VG SW Raster Masked",
+                        &pl,
+                        &m,
+                        "sw_raster_masked_main",
+                    ),
+                    alpha_bgl,
+                )
             });
             MaskedPipelines { hw, hw_bgl1, sw }
         })
@@ -668,19 +738,36 @@ impl VgRaster {
             height: t.height,
             tiles_x: t.tiles_x,
             tiles_y: t.tiles_y,
-            flags: if self.config.cull_back { VgRasterParams::FLAG_CULL_BACK } else { 0 },
+            flags: if self.config.cull_back {
+                VgRasterParams::FLAG_CULL_BACK
+            } else {
+                0
+            },
             tile_bin_cap: self.config.tile_bin_cap,
             view_index: i.view_index,
             sw_meta_word: i.sw_meta_offset_words,
         };
         queue.write_buffer(&t.params[slot], 0, bytemuck::bytes_of(&params));
         if let Some(mi) = &i.masked {
-            let masked_params = VgRasterParams { sw_meta_word: mi.sw_meta_offset_words, ..params };
-            queue.write_buffer(&t.params_masked[slot], 0, bytemuck::bytes_of(&masked_params));
+            let masked_params = VgRasterParams {
+                sw_meta_word: mi.sw_meta_offset_words,
+                ..params
+            };
+            queue.write_buffer(
+                &t.params_masked[slot],
+                0,
+                bytemuck::bytes_of(&masked_params),
+            );
         }
 
         if phase == 0 {
-            for b in [&t.sw_keys, &t.tile_counters, &t.stats, &t.dense_args, &t.dense_est] {
+            for b in [
+                &t.sw_keys,
+                &t.tile_counters,
+                &t.stats,
+                &t.dense_args,
+                &t.dense_est,
+            ] {
                 rec.clear_buffer(b, 0, None);
             }
         }
@@ -711,7 +798,12 @@ impl VgRaster {
                 let alpha = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("VG HW Masked alpha"),
                     layout: &m.hw_bgl1,
-                    entries: &helio_mats::vg_alpha::bind_entries(self.binding, 0, mi.materials, mi.material_textures),
+                    entries: &helio_mats::vg_alpha::bind_entries(
+                        self.binding,
+                        0,
+                        mi.materials,
+                        mi.material_textures,
+                    ),
                 });
                 (m, alpha, mi.hw_indirect_offset)
             });
@@ -734,11 +826,17 @@ impl VgRaster {
                     view: &t.vis_view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: color_load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &t.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: depth_load,
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -804,7 +902,12 @@ impl VgRaster {
                     let alpha = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("VG SW Masked alpha"),
                         layout: alpha_bgl,
-                        entries: &helio_mats::vg_alpha::bind_entries(self.binding, 0, mi.materials, mi.material_textures),
+                        entries: &helio_mats::vg_alpha::bind_entries(
+                            self.binding,
+                            0,
+                            mi.materials,
+                            mi.material_textures,
+                        ),
                     });
                     cpass.set_pipeline(pipeline);
                     cpass.set_bind_group(0, &g0m, &[]);
@@ -817,7 +920,10 @@ impl VgRaster {
         if let Some(d) = &i.dense {
             // Estimate the overlap of clusters diverted to Tier 3, so the tiles
             // they sit in keep counting as dense (see `vg_dense_count.wgsl`).
-            let params_dense = VgRasterParams { sw_meta_word: d.meta_offset_words, ..params };
+            let params_dense = VgRasterParams {
+                sw_meta_word: d.meta_offset_words,
+                ..params
+            };
             queue.write_buffer(&t.params_dense[slot], 0, bytemuck::bytes_of(&params_dense));
             let g0d = g0(&self.bgl0_compute, &t.params_dense[slot]);
             let g1d = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -870,7 +976,12 @@ impl VgRaster {
     /// Record tile classification over the counters of every phase recorded so
     /// far, and flip the double-buffered dense mask. Afterwards
     /// [`VgTargets::dense_mask_last_frame`] is the mask just classified.
-    pub fn encode_classify(&self, device: &wgpu::Device, rec: &mut CommandRecorder<'_>, t: &mut VgTargets) {
+    pub fn encode_classify(
+        &self,
+        device: &wgpu::Device,
+        rec: &mut CommandRecorder<'_>,
+        t: &mut VgTargets,
+    ) {
         let write = t.parity;
         let read = t.parity ^ 1;
         let gc = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -902,5 +1013,8 @@ impl VgRaster {
 }
 
 fn bind(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
 }

@@ -9,7 +9,8 @@
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
-    BufferKey, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult, ViewGroup,
+    BufferKey, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult,
+    ViewGroup,
 };
 use helio_pass_vg_cull::{VgCullFrameData, VgCullInputs, KEY_CULL, KEY_INPUTS};
 use helio_pass_vg_dense::{VgDenseFrameData, KEY_DENSE};
@@ -29,11 +30,19 @@ pub type VgTauSource = Arc<dyn Fn() -> f32 + Send + Sync>;
 const VIEW_COUNT: usize = debug_view::ALL.len();
 
 const fn view_descriptors() -> [DebugViewDescriptor; VIEW_COUNT] {
-    let mut out = [DebugViewDescriptor { name: "", debug_mode: 0, description: "" }; VIEW_COUNT];
+    let mut out = [DebugViewDescriptor {
+        name: "",
+        debug_mode: 0,
+        description: "",
+    }; VIEW_COUNT];
     let mut i = 0;
     while i < VIEW_COUNT {
         let view = debug_view::ALL[i];
-        out[i] = DebugViewDescriptor { name: view.name(), debug_mode: view.id(), description: view.description() };
+        out[i] = DebugViewDescriptor {
+            name: view.name(),
+            debug_mode: view.id(),
+            description: view.description(),
+        };
         i += 1;
     }
     out
@@ -45,7 +54,13 @@ const fn stop(label: &'static str, color: [u8; 3]) -> DebugViewLegendStop {
     DebugViewLegendStop { label, color }
 }
 
-const HEAT: [[u8; 3]; 5] = [[0, 0, 255], [0, 255, 255], [0, 255, 0], [255, 255, 0], [255, 0, 0]];
+const HEAT: [[u8; 3]; 5] = [
+    [0, 0, 255],
+    [0, 255, 255],
+    [0, 255, 0],
+    [255, 255, 0],
+    [255, 0, 0],
+];
 
 macro_rules! heat_stops {
     ($($label:expr),*) => {{
@@ -88,46 +103,46 @@ fn legend(view: VgDebugView) -> Option<DebugViewLegend> {
         stop("SW tris", [64, 64, 64]),
         stop("Dense", [255, 128, 13]),
     ];
-    let (title, unit, stops): (&'static str, &'static str, &'static [DebugViewLegendStop]) = match view {
-        VgDebugView::LodLevel => (
-            "Cluster coarseness",
-            "error / size",
-            heat_stops!("Finest", "", "Mid", "", "Coarsest"),
-        ),
-        VgDebugView::DetailRatio => (
-            "Detail vs asset root",
-            "log error ratio",
-            heat_stops!("Full detail", "", "", "", "Root"),
-        ),
-        VgDebugView::TriangleSize => (
-            "Projected triangle area",
-            "px²",
-            heat_stops!("64+", "16", "4", "1", "0.1"),
-        ),
-        VgDebugView::SwOverdraw => (
-            "SW overdraw per tile",
-            "hits / pixel",
-            heat_stops!("0", "2", "4", "6", "8+"),
-        ),
-        VgDebugView::DenseOverlap => (
-            "SW triangles per tile",
-            "triangles",
-            heat_stops!("0", "16", "32", "48", "64+"),
-        ),
-        VgDebugView::ErrorVsTau => (
-            "Projected error / tau",
-            "ratio",
-            heat_stops!("0", "0.25", "0.5", "0.75", "1"),
-        ),
-        VgDebugView::RasterTier => ("Raster tier", "", &TIER),
-        VgDebugView::PageResidency => ("Page residency", "", &RESIDENCY),
-        VgDebugView::CullSurvival => ("Cull survival", "", &CULL),
-        VgDebugView::DenseMask => ("Dense tile mask", "", &MASK),
-        _ => return None,
-    };
+    let (title, unit, stops): (&'static str, &'static str, &'static [DebugViewLegendStop]) =
+        match view {
+            VgDebugView::LodLevel => (
+                "Cluster coarseness",
+                "error / size",
+                heat_stops!("Finest", "", "Mid", "", "Coarsest"),
+            ),
+            VgDebugView::DetailRatio => (
+                "Detail vs asset root",
+                "log error ratio",
+                heat_stops!("Full detail", "", "", "", "Root"),
+            ),
+            VgDebugView::TriangleSize => (
+                "Projected triangle area",
+                "px²",
+                heat_stops!("64+", "16", "4", "1", "0.1"),
+            ),
+            VgDebugView::SwOverdraw => (
+                "SW overdraw per tile",
+                "hits / pixel",
+                heat_stops!("0", "2", "4", "6", "8+"),
+            ),
+            VgDebugView::DenseOverlap => (
+                "SW triangles per tile",
+                "triangles",
+                heat_stops!("0", "16", "32", "48", "64+"),
+            ),
+            VgDebugView::ErrorVsTau => (
+                "Projected error / tau",
+                "ratio",
+                heat_stops!("0", "0.25", "0.5", "0.75", "1"),
+            ),
+            VgDebugView::RasterTier => ("Raster tier", "", &TIER),
+            VgDebugView::PageResidency => ("Page residency", "", &RESIDENCY),
+            VgDebugView::CullSurvival => ("Cull survival", "", &CULL),
+            VgDebugView::DenseMask => ("Dense tile mask", "", &MASK),
+            _ => return None,
+        };
     Some(DebugViewLegend { title, unit, stops })
 }
-
 
 /// Tier-3-aware shading as a graph pass.
 pub struct VgShadePass {
@@ -220,7 +235,15 @@ impl RenderPass for VgShadePass {
             .registry
             .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
         let (ambient_color, ambient_intensity) = match environment {
-            Some(e) => ([e.ambient_color[0], e.ambient_color[1], e.ambient_color[2], 1.0], e.ambient_intensity),
+            Some(e) => (
+                [
+                    e.ambient_color[0],
+                    e.ambient_color[1],
+                    e.ambient_color[2],
+                    1.0,
+                ],
+                e.ambient_intensity,
+            ),
             None => ([0.1, 0.1, 0.15, 1.0], 0.1),
         };
         self.globals = VgShadeGlobals {
@@ -242,21 +265,30 @@ impl RenderPass for VgShadePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(cull_inputs) = ctx.registry.get::<VgCullInputs<'_>>(ResourceKey::new(KEY_INPUTS)) else {
-            return Ok(());
-        };
-        let Some(cull) = ctx.registry.get::<VgCullFrameData<'_>>(ResourceKey::new(KEY_CULL)) else {
-            return Ok(());
-        };
-        let Some(raster) = ctx.registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER))
-        else {
-            return Ok(());
-        };
-        let dense = ctx.registry.get::<VgDenseFrameData<'_>>(ResourceKey::new(KEY_DENSE));
-        let Some(material_textures) = ctx
+        let Some(cull_inputs) = ctx
             .registry
-            .get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures())
+            .get::<VgCullInputs<'_>>(ResourceKey::new(KEY_INPUTS))
         else {
+            return Ok(());
+        };
+        let Some(cull) = ctx
+            .registry
+            .get::<VgCullFrameData<'_>>(ResourceKey::new(KEY_CULL))
+        else {
+            return Ok(());
+        };
+        let Some(raster) = ctx
+            .registry
+            .get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER))
+        else {
+            return Ok(());
+        };
+        let dense = ctx
+            .registry
+            .get::<VgDenseFrameData<'_>>(ResourceKey::new(KEY_DENSE));
+        let Some(material_textures) = ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(
+            helio_core::resource_keys::material_textures(),
+        ) else {
             return Ok(());
         };
         let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
@@ -264,11 +296,16 @@ impl RenderPass for VgShadePass {
         };
         let coordinate_spaces = ctx
             .registry
-            .get::<helio_core::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces());
+            .get::<helio_core::CoordinateSpacesFrameData<'_>>(
+                helio_core::resource_keys::coordinate_spaces(),
+            );
         let (spaces, spaces_prev) = coordinate_spaces
             .map(|c| (c.coordinate_spaces, c.coordinate_spaces_prev))
             .unwrap_or((ctx.camera, ctx.camera));
-        let Some(gbuffer) = ctx.registry.get::<ViewGroup<'_, 4>>(ResourceKey::new("gbuffer")) else {
+        let Some(gbuffer) = ctx
+            .registry
+            .get::<ViewGroup<'_, 4>>(ResourceKey::new("gbuffer"))
+        else {
             return Ok(());
         };
         let reg = ctx.registry;

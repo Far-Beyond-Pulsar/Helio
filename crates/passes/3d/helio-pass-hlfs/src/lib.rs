@@ -127,7 +127,9 @@ impl HlfsConfig {
 
     fn validate_device(&self, device: &wgpu::Device) -> Result<()> {
         if self.temporal_resampling
-            && (self.mode != HlfsMode::RayTraced || !self.tile_presampling || self.sample_scale != 2)
+            && (self.mode != HlfsMode::RayTraced
+                || !self.tile_presampling
+                || self.sample_scale != 2)
         {
             return Err(helio_core::Error::InvalidPassConfig(
                 "Temporal RIS requires presampled RT with sample_scale=2".into(),
@@ -378,7 +380,8 @@ impl HlfsPass {
         let resize = config.sample_scale != self.config.sample_scale
             || config.tile_presampling != self.config.tile_presampling
             || config.temporal_resampling != self.config.temporal_resampling
-            || (config.temporal_resampling && config.samples_per_pixel != self.config.samples_per_pixel);
+            || (config.temporal_resampling
+                && config.samples_per_pixel != self.config.samples_per_pixel);
         self.config = config;
         if mode_changed {
             self.pipelines
@@ -534,7 +537,10 @@ impl HlfsPass {
             pass.set_pipeline(&p.compact);
             pass.set_bind_group(
                 0,
-                self.external.compact.as_ref().expect("HLFS light copy bound"),
+                self.external
+                    .compact
+                    .as_ref()
+                    .expect("HLFS light copy bound"),
                 &[],
             );
             pass.dispatch_workgroups(self.current_light_count.div_ceil(256), 1, 1);
@@ -547,7 +553,10 @@ impl HlfsPass {
             pass.set_pipeline(&p.list_live);
             pass.set_bind_group(
                 0,
-                self.external.compact.as_ref().expect("HLFS light copy bound"),
+                self.external
+                    .compact
+                    .as_ref()
+                    .expect("HLFS light copy bound"),
                 &[],
             );
             // One workgroup: an ordered scan keeps the list deterministic.
@@ -556,7 +565,15 @@ impl HlfsPass {
             self.live_key = Some(key);
         }
         if self.config.tile_presampling {
-            dispatch(encoder, "HLFS dominant light", &p.select_key, &self.internal.grid, 1, 1, None);
+            dispatch(
+                encoder,
+                "HLFS dominant light",
+                &p.select_key,
+                &self.internal.grid,
+                1,
+                1,
+                None,
+            );
         }
         dispatch(
             encoder,
@@ -602,7 +619,11 @@ impl HlfsPass {
         dispatch(
             encoder,
             "HLFS sample and visibility",
-            if self.external.transmission { p.transmission_visibility.as_ref().unwrap().pipeline(small) } else { p.visibility.pipeline(small) },
+            if self.external.transmission {
+                p.transmission_visibility.as_ref().unwrap().pipeline(small)
+            } else {
+                p.visibility.pipeline(small)
+            },
             &self.internal.sample[parity],
             t.sample_width.div_ceil(8),
             t.sample_height.div_ceil(8),
@@ -647,7 +668,11 @@ impl HlfsPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(if self.external.transmission { p.transmission_composite.as_ref().unwrap() } else { &p.composite });
+            pass.set_pipeline(if self.external.transmission {
+                p.transmission_composite.as_ref().unwrap()
+            } else {
+                &p.composite
+            });
             pass.set_bind_group(0, common, &[]);
             pass.set_bind_group(1, gbuffer, &[]);
             pass.set_bind_group(2, &self.internal.composite[parity], &[]);
@@ -677,7 +702,15 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "pre_aa", "render_environment", "ray_transmission", "static_shadow_atlas", "shadow_transmittance", helio_pass_gi::GI_IRRADIANCE]
+        &[
+            "gbuffer",
+            "pre_aa",
+            "render_environment",
+            "ray_transmission",
+            "static_shadow_atlas",
+            "shadow_transmittance",
+            helio_pass_gi::GI_IRRADIANCE,
+        ]
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let output: &'a wgpu::TextureView =
@@ -797,8 +830,13 @@ impl RenderPass for HlfsPass {
                 | (u32::from(self.previous_light_generation == Some(ctx.frame_num)) << 1)
                 | (u32::from(self.config.tile_presampling) << 2)
                 | (u32::from(self.config.temporal_resampling) << 3)
-                | (u32::from(self.config.mode == HlfsMode::RayTraced
-                    && ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some()) << 4),
+                | (u32::from(
+                    self.config.mode == HlfsMode::RayTraced
+                        && ctx
+                            .registry
+                            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
+                            .is_some(),
+                ) << 4),
             max_history: self.config.max_history_frames as f32,
             discovery_fraction: self.config.discovery_fraction,
             exposure: self.config.pre_exposure,
@@ -903,7 +941,10 @@ impl RenderPass for HlfsPass {
                 .registry
                 .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("baked_lightmap_sampler"))
                 .unwrap_or(&f.linear_sampler),
-            gi_irradiance: ctx.registry.buffer_binding(helio_pass_gi::GI_IRRADIANCE).unwrap_or(&f.empty_gi),
+            gi_irradiance: ctx
+                .registry
+                .buffer_binding(helio_pass_gi::GI_IRRADIANCE)
+                .unwrap_or(&f.empty_gi),
         };
         self.external.update(
             ctx.device,
@@ -915,7 +956,10 @@ impl RenderPass for HlfsPass {
         );
         self.external.transmission = screen_space_glass
             || (self.config.mode == HlfsMode::RayTraced
-                && ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some());
+                && ctx
+                    .registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
+                    .is_some());
         if self.config.mode == HlfsMode::RayTraced {
             let tlas = ctx
                 .registry
@@ -930,7 +974,9 @@ impl RenderPass for HlfsPass {
                 ctx.device,
                 self.pipelines.rt_bgl.as_ref().expect("validated RT layout"),
                 tlas,
-                ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).unwrap_or(&f.empty_lights),
+                ctx.registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
+                    .unwrap_or(&f.empty_lights),
             );
         }
         // These dispatches read the GBuffer just rendered, so they belong on the

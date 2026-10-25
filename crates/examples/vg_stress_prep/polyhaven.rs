@@ -38,7 +38,10 @@ pub struct Api {
 
 impl Api {
     pub fn new(base: impl Into<String>, backoff: Duration) -> Self {
-        Self { base: base.into().trim_end_matches('/').to_string(), backoff }
+        Self {
+            base: base.into().trim_end_matches('/').to_string(),
+            backoff,
+        }
     }
 
     pub fn production() -> Self {
@@ -59,7 +62,8 @@ impl Api {
             match agent.get(&url).call() {
                 Ok(resp) => {
                     let text = resp.into_string().map_err(|e| format!("{url}: {e}"))?;
-                    return serde_json::from_str(&text).map_err(|e| format!("{url}: bad JSON: {e}"));
+                    return serde_json::from_str(&text)
+                        .map_err(|e| format!("{url}: bad JSON: {e}"));
                 }
                 Err(ureq::Error::Status(code, _)) if code >= 500 || code == 429 => {
                     last = format!("HTTP {code}");
@@ -111,7 +115,9 @@ pub fn safe_rel(rel: &str) -> Result<(), String> {
         || rel.starts_with('/')
         || rel.contains('\\')
         || rel.contains(':')
-        || rel.split('/').any(|c| c.is_empty() || c == "." || c == "..");
+        || rel
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == "..");
     if bad {
         Err(format!("unsafe file path `{rel}` in the file list"))
     } else {
@@ -120,22 +126,42 @@ pub fn safe_rel(rel: &str) -> Result<(), String> {
 }
 
 fn file_name(url: &str) -> &str {
-    url.split(['?', '#']).next().unwrap_or(url).rsplit('/').next().unwrap_or(url)
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or(url)
 }
 
 fn remote(rel: &str, node: &Value) -> Result<RemoteFile, String> {
     safe_rel(rel)?;
-    let field = |k: &str| node.get(k).ok_or_else(|| format!("{rel}: file entry has no `{k}`"));
-    let url = field("url")?.as_str().ok_or_else(|| format!("{rel}: bad url"))?;
+    let field = |k: &str| {
+        node.get(k)
+            .ok_or_else(|| format!("{rel}: file entry has no `{k}`"))
+    };
+    let url = field("url")?
+        .as_str()
+        .ok_or_else(|| format!("{rel}: bad url"))?;
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(format!("{rel}: unsupported url scheme"));
     }
-    let md5 = field("md5")?.as_str().ok_or_else(|| format!("{rel}: bad md5"))?.to_ascii_lowercase();
+    let md5 = field("md5")?
+        .as_str()
+        .ok_or_else(|| format!("{rel}: bad md5"))?
+        .to_ascii_lowercase();
     if md5.len() != 32 || !md5.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("{rel}: malformed md5"));
     }
-    let size = field("size")?.as_u64().ok_or_else(|| format!("{rel}: bad size"))?;
-    Ok(RemoteFile { rel: rel.to_string(), url: url.to_string(), md5, size })
+    let size = field("size")?
+        .as_u64()
+        .ok_or_else(|| format!("{rel}: bad size"))?;
+    Ok(RemoteFile {
+        rel: rel.to_string(),
+        url: url.to_string(),
+        md5,
+        size,
+    })
 }
 
 /// The glTF package at the best available of `resolutions`: the `.gltf` plus
@@ -144,15 +170,30 @@ fn remote(rel: &str, node: &Value) -> Result<RemoteFile, String> {
 pub fn plan_gltf_package(files: &Value, resolutions: &[&str]) -> Result<Plan, String> {
     let gltf = files.get("gltf").ok_or("file list has no `gltf` section")?;
     for res in resolutions {
-        let Some(entry) = gltf.get(*res).and_then(|r| r.get("gltf")) else { continue };
-        let main = remote(file_name(entry.get("url").and_then(Value::as_str).unwrap_or("")), entry)?;
-        let mut out = vec![PlannedFile { remote: main, role: "gltf".into() }];
+        let Some(entry) = gltf.get(*res).and_then(|r| r.get("gltf")) else {
+            continue;
+        };
+        let main = remote(
+            file_name(entry.get("url").and_then(Value::as_str).unwrap_or("")),
+            entry,
+        )?;
+        let mut out = vec![PlannedFile {
+            remote: main,
+            role: "gltf".into(),
+        }];
         if let Some(include) = entry.get("include").and_then(Value::as_object) {
             let mut keys: Vec<_> = include.keys().collect();
             keys.sort();
             for rel in keys {
-                let role = if rel.ends_with(".bin") { "bin" } else { "texture" };
-                out.push(PlannedFile { remote: remote(rel, &include[rel])?, role: role.into() });
+                let role = if rel.ends_with(".bin") {
+                    "bin"
+                } else {
+                    "texture"
+                };
+                out.push(PlannedFile {
+                    remote: remote(rel, &include[rel])?,
+                    role: role.into(),
+                });
             }
         }
         // The JPEG glTF package omits the separate opacity maps shipped with
@@ -177,10 +218,16 @@ pub fn plan_gltf_package(files: &Value, resolutions: &[&str]) -> Result<Plan, St
         }
         for (rel, node) in opacity {
             if !out.iter().any(|f| f.remote.rel == rel) {
-                out.push(PlannedFile { remote: remote(&rel, &node)?, role: "opacity".into() });
+                out.push(PlannedFile {
+                    remote: remote(&rel, &node)?,
+                    role: "opacity".into(),
+                });
             }
         }
-        return Ok(Plan { resolution: (*res).to_string(), files: out });
+        return Ok(Plan {
+            resolution: (*res).to_string(),
+            files: out,
+        });
     }
     Err(format!("no glTF at any of {resolutions:?}"))
 }
@@ -197,26 +244,41 @@ const MARBLE_MAPS: &[(&str, &str, bool)] = &[
 /// required map as a JPEG (`.jpg` is Poly Haven's high-quality lossy format;
 /// the PNG of an 8k map is 100 to 350 MB). `displacement` adds the optional
 /// height map where available.
-pub fn plan_texture_set(files: &Value, resolutions: &[&str], displacement: bool) -> Result<Plan, String> {
+pub fn plan_texture_set(
+    files: &Value,
+    resolutions: &[&str],
+    displacement: bool,
+) -> Result<Plan, String> {
     'res: for res in resolutions {
         let mut out = Vec::new();
         for (role, key, required) in MARBLE_MAPS {
-            let entry = files.get(*key).and_then(|m| m.get(*res)).and_then(|r| r.get("jpg"));
+            let entry = files
+                .get(*key)
+                .and_then(|m| m.get(*res))
+                .and_then(|r| r.get("jpg"));
             match entry {
                 Some(node) => {
                     if *role == "displacement" && !displacement {
                         continue;
                     }
                     let url = node.get("url").and_then(Value::as_str).unwrap_or("");
-                    out.push(PlannedFile { remote: remote(file_name(url), node)?, role: (*role).into() });
+                    out.push(PlannedFile {
+                        remote: remote(file_name(url), node)?,
+                        role: (*role).into(),
+                    });
                 }
                 None if *required => continue 'res,
                 None => {}
             }
         }
-        return Ok(Plan { resolution: (*res).to_string(), files: out });
+        return Ok(Plan {
+            resolution: (*res).to_string(),
+            files: out,
+        });
     }
-    Err(format!("no jpg texture set with diffuse, normal and ARM maps at any of {resolutions:?}"))
+    Err(format!(
+        "no jpg texture set with diffuse, normal and ARM maps at any of {resolutions:?}"
+    ))
 }
 
 /// `[(name, role)]` from an `/info/<id>` response, sorted by name.
@@ -224,7 +286,11 @@ pub fn authors(info: &Value) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = info
         .get("authors")
         .and_then(Value::as_object)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     v.sort();
     v
@@ -239,7 +305,8 @@ struct Pins {
 fn pins() -> &'static Pins {
     static PINS: OnceLock<Pins> = OnceLock::new();
     PINS.get_or_init(|| {
-        let v: Value = serde_json::from_str(include_str!("polyhaven_pins.json")).expect("pins JSON");
+        let v: Value =
+            serde_json::from_str(include_str!("polyhaven_pins.json")).expect("pins JSON");
         let mut assets = HashMap::new();
         for (id, a) in v["assets"].as_object().expect("pins assets") {
             let res = a["res"].as_str().unwrap_or("").to_string();
@@ -247,7 +314,15 @@ fn pins() -> &'static Pins {
                 .as_object()
                 .expect("pin files")
                 .iter()
-                .map(|(rel, f)| (rel.clone(), (f["size"].as_u64().unwrap_or(0), f["md5"].as_str().unwrap_or("").to_string())))
+                .map(|(rel, f)| {
+                    (
+                        rel.clone(),
+                        (
+                            f["size"].as_u64().unwrap_or(0),
+                            f["md5"].as_str().unwrap_or("").to_string(),
+                        ),
+                    )
+                })
                 .collect();
             assets.insert(id.clone(), (res, files));
         }
@@ -261,7 +336,13 @@ pub fn pinned_bytes(id: &str) -> u64 {
     pins()
         .assets
         .get(id)
-        .map(|(_, files)| files.iter().filter(|(rel, _)| !rel.contains("_disp_")).map(|(_, (s, _))| *s).sum())
+        .map(|(_, files)| {
+            files
+                .iter()
+                .filter(|(rel, _)| !rel.contains("_disp_"))
+                .map(|(_, (s, _))| *s)
+                .sum()
+        })
         .unwrap_or(0)
 }
 
@@ -269,16 +350,19 @@ pub fn pinned_bytes(id: &str) -> u64 {
 /// files. The API stays authoritative; a mismatch only warns that upstream
 /// replaced something.
 pub fn pin_warnings(id: &str, plan: &Plan) -> Vec<String> {
-    let Some((res, pinned)) = pins().assets.get(id) else { return Vec::new() };
+    let Some((res, pinned)) = pins().assets.get(id) else {
+        return Vec::new();
+    };
     if *res != plan.resolution {
         return Vec::new();
     }
     plan.files
         .iter()
         .filter_map(|f| match pinned.get(&f.remote.rel) {
-            Some((size, md5)) if *size != f.remote.size || *md5 != f.remote.md5 => {
-                Some(format!("{id}/{}: upstream file changed since the pins were captured", f.remote.rel))
-            }
+            Some((size, md5)) if *size != f.remote.size || *md5 != f.remote.md5 => Some(format!(
+                "{id}/{}: upstream file changed since the pins were captured",
+                f.remote.rel
+            )),
             _ => None,
         })
         .collect()
@@ -302,23 +386,34 @@ pub struct Unit {
 
 impl From<&'static TreeDef> for Unit {
     fn from(t: &'static TreeDef) -> Self {
-        Unit { kind: UnitKind::Tree, id: t.id, label: t.label, resolutions: t.resolutions }
+        Unit {
+            kind: UnitKind::Tree,
+            id: t.id,
+            label: t.label,
+            resolutions: t.resolutions,
+        }
     }
 }
 
 impl From<&'static MarbleDef> for Unit {
     fn from(m: &'static MarbleDef) -> Self {
-        Unit { kind: UnitKind::Marble, id: m.id, label: m.label, resolutions: m.resolutions }
+        Unit {
+            kind: UnitKind::Marble,
+            id: m.id,
+            label: m.label,
+            resolutions: m.resolutions,
+        }
     }
 }
 
 impl Unit {
     pub fn dir(&self, assets: &Path) -> PathBuf {
-        assets.join(match self.kind {
-            UnitKind::Tree => "trees",
-            UnitKind::Marble => "marble",
-        })
-        .join(self.id)
+        assets
+            .join(match self.kind {
+                UnitKind::Tree => "trees",
+                UnitKind::Marble => "marble",
+            })
+            .join(self.id)
     }
 
     /// Key in `prepared.json`.
@@ -327,7 +422,11 @@ impl Unit {
     }
 
     pub fn recipe(&self) -> String {
-        format!("ph{PH_RECIPE_VERSION}:{}:{}", self.id, self.resolutions.join("/"))
+        format!(
+            "ph{PH_RECIPE_VERSION}:{}:{}",
+            self.id,
+            self.resolutions.join("/")
+        )
     }
 }
 
@@ -376,18 +475,33 @@ impl Manifest {
             authors: v["authors"]
                 .as_array()?
                 .iter()
-                .map(|a| Some((a["name"].as_str()?.to_string(), a["role"].as_str()?.to_string())))
+                .map(|a| {
+                    Some((
+                        a["name"].as_str()?.to_string(),
+                        a["role"].as_str()?.to_string(),
+                    ))
+                })
                 .collect::<Option<_>>()?,
             files: v["files"]
                 .as_array()?
                 .iter()
-                .map(|f| Some((f["rel"].as_str()?.to_string(), f["role"].as_str()?.to_string(), f["size"].as_u64()?, f["md5"].as_str()?.to_string())))
+                .map(|f| {
+                    Some((
+                        f["rel"].as_str()?.to_string(),
+                        f["role"].as_str()?.to_string(),
+                        f["size"].as_u64()?,
+                        f["md5"].as_str()?.to_string(),
+                    ))
+                })
                 .collect::<Option<_>>()?,
         })
     }
 
     pub fn file(&self, role: &str) -> Option<&str> {
-        self.files.iter().find(|f| f.1 == role).map(|f| f.0.as_str())
+        self.files
+            .iter()
+            .find(|f| f.1 == role)
+            .map(|f| f.0.as_str())
     }
 }
 
@@ -401,9 +515,13 @@ pub fn read_manifest(dir: &Path) -> Option<Manifest> {
 /// present. No network and no hashing: the hash was checked when downloaded.
 pub fn unit_complete(assets: &Path, unit: &Unit, want_displacement: bool) -> bool {
     let dir = unit.dir(assets);
-    let Some(m) = read_manifest(&dir) else { return false };
+    let Some(m) = read_manifest(&dir) else {
+        return false;
+    };
     m.recipe == unit.recipe()
-        && m.files.iter().all(|(rel, _, size, _)| std::fs::metadata(dir.join(rel)).is_ok_and(|x| x.len() == *size))
+        && m.files.iter().all(|(rel, _, size, _)| {
+            std::fs::metadata(dir.join(rel)).is_ok_and(|x| x.len() == *size)
+        })
         && (!want_displacement || unit.kind != UnitKind::Marble || m.file("displacement").is_some())
 }
 
@@ -454,7 +572,13 @@ pub fn provision_unit(
     }
     say(
         unit.id,
-        &format!("{}: {} files, {} MB at {}", unit.label, plan.files.len(), plan.total_bytes() >> 20, plan.resolution),
+        &format!(
+            "{}: {} files, {} MB at {}",
+            unit.label,
+            plan.files.len(),
+            plan.total_bytes() >> 20,
+            plan.resolution
+        ),
     );
 
     let dir = unit.dir(assets);
@@ -502,11 +626,22 @@ pub fn provision_unit(
         files: plan
             .files
             .iter()
-            .map(|f| (f.remote.rel.clone(), f.role.clone(), f.remote.size, f.remote.md5.clone()))
+            .map(|f| {
+                (
+                    f.remote.rel.clone(),
+                    f.role.clone(),
+                    f.remote.size,
+                    f.remote.md5.clone(),
+                )
+            })
             .collect(),
     };
     let tmp = dir.join(format!("{MANIFEST_NAME}.tmp"));
-    std::fs::write(&tmp, serde_json::to_string_pretty(&manifest.to_json()).unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&manifest.to_json()).unwrap(),
+    )
+    .map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, dir.join(MANIFEST_NAME)).map_err(|e| e.to_string())?;
     Ok(manifest)
 }
@@ -526,7 +661,13 @@ whose API and CDN deliver the files.\n\n"
         } else {
             m.authors
                 .iter()
-                .map(|(n, r)| if r.is_empty() { n.clone() } else { format!("{n} ({r})") })
+                .map(|(n, r)| {
+                    if r.is_empty() {
+                        n.clone()
+                    } else {
+                        format!("{n} ({r})")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -548,12 +689,19 @@ pub fn write_credits(assets: &Path, config: &catalog::Config) -> Result<(), Stri
     if manifests.is_empty() {
         return Ok(());
     }
-    std::fs::write(assets.join("CREDITS_POLYHAVEN.md"), credits_markdown(&manifests)).map_err(|e| e.to_string())
+    std::fs::write(
+        assets.join("CREDITS_POLYHAVEN.md"),
+        credits_markdown(&manifests),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// `{unit key: recipe}` entries for `prepared.json`.
 pub fn recipes(config: &catalog::Config) -> BTreeMap<String, String> {
-    units(config).iter().map(|u| (u.key(), u.recipe())).collect()
+    units(config)
+        .iter()
+        .map(|u| (u.key(), u.recipe()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -565,8 +713,12 @@ mod tests {
     };
 
     fn fixture(name: &str) -> Value {
-        let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("vg_stress_prep/fixtures").join(name))
-            .unwrap();
+        let text = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("vg_stress_prep/fixtures")
+                .join(name),
+        )
+        .unwrap();
         serde_json::from_str(&text).unwrap()
     }
 
@@ -586,11 +738,18 @@ mod tests {
         assert_eq!(plan.files.len(), 12);
         assert_eq!(plan.files[0].remote.rel, "island_tree_01_2k.gltf");
         assert_eq!(plan.files[0].role, "gltf");
-        assert!(plan.files.iter().any(|f| f.role == "bin" && f.remote.rel == "island_tree_01.bin" && f.remote.size == 60_709_812));
+        assert!(plan.files.iter().any(|f| f.role == "bin"
+            && f.remote.rel == "island_tree_01.bin"
+            && f.remote.size == 60_709_812));
         let textures: Vec<_> = plan.files.iter().filter(|f| f.role == "texture").collect();
         assert_eq!(textures.len(), 9);
-        assert!(textures.iter().all(|f| f.remote.rel.starts_with("textures/") && f.remote.rel.ends_with("_2k.jpg")));
-        assert!(plan.files.iter().all(|f| f.remote.url.starts_with("https://dl.polyhaven.org/")));
+        assert!(textures
+            .iter()
+            .all(|f| f.remote.rel.starts_with("textures/") && f.remote.rel.ends_with("_2k.jpg")));
+        assert!(plan
+            .files
+            .iter()
+            .all(|f| f.remote.url.starts_with("https://dl.polyhaven.org/")));
         assert_eq!(plan.total_bytes(), 79_783_969 + 139_077);
         assert!(plan.files.iter().any(|f| f.role == "opacity"
             && f.remote.rel == "textures/island_tree_01_leaves_alpha_2k.png"));
@@ -612,25 +771,41 @@ mod tests {
 
     #[test]
     fn texture_set_picks_8k_jpg_diffuse_normal_arm_without_displacement() {
-        let plan = plan_texture_set(&fixture("files_marble_01.json"), &["8k", "4k", "2k"], false).unwrap();
+        let plan =
+            plan_texture_set(&fixture("files_marble_01.json"), &["8k", "4k", "2k"], false).unwrap();
         assert_eq!(plan.resolution, "8k");
         let roles: Vec<_> = plan.files.iter().map(|f| f.role.as_str()).collect();
         assert_eq!(roles, ["diffuse", "normal", "arm"]);
         let names: Vec<_> = plan.files.iter().map(|f| f.remote.rel.as_str()).collect();
-        assert_eq!(names, ["marble_01_diff_8k.jpg", "marble_01_nor_gl_8k.jpg", "marble_01_arm_8k.jpg"]);
+        assert_eq!(
+            names,
+            [
+                "marble_01_diff_8k.jpg",
+                "marble_01_nor_gl_8k.jpg",
+                "marble_01_arm_8k.jpg"
+            ]
+        );
         assert_eq!(plan.files[0].remote.size, 17_078_773);
         assert_eq!(plan.files[0].remote.md5, "f140d2527f16f2c9854a6b171ea9bf54");
         assert!(pin_warnings("marble_01", &plan).is_empty());
 
         let with_disp = plan_texture_set(&fixture("files_marble_01.json"), &["8k"], true).unwrap();
         assert_eq!(with_disp.files.last().unwrap().role, "displacement");
-        assert_eq!(with_disp.files.last().unwrap().remote.rel, "marble_01_disp_8k.jpg");
+        assert_eq!(
+            with_disp.files.last().unwrap().remote.rel,
+            "marble_01_disp_8k.jpg"
+        );
     }
 
     #[test]
     fn texture_set_skips_16k_and_falls_back_to_4k_when_8k_is_not_offered() {
         let files = fixture("files_grey_cartago_01.json");
-        assert_eq!(plan_texture_set(&files, &["8k", "4k", "2k"], false).unwrap().resolution, "8k");
+        assert_eq!(
+            plan_texture_set(&files, &["8k", "4k", "2k"], false)
+                .unwrap()
+                .resolution,
+            "8k"
+        );
         let mut no8k = files.clone();
         for map in no8k.as_object_mut().unwrap().values_mut() {
             map.as_object_mut().unwrap().remove("8k");
@@ -641,7 +816,12 @@ mod tests {
         // One missing required map at 8k drops the whole set to 4k (consistent sets).
         let mut partial = files.clone();
         partial["arm"].as_object_mut().unwrap().remove("8k");
-        assert_eq!(plan_texture_set(&partial, &["8k", "4k"], false).unwrap().resolution, "4k");
+        assert_eq!(
+            plan_texture_set(&partial, &["8k", "4k"], false)
+                .unwrap()
+                .resolution,
+            "4k"
+        );
         // Nothing usable at all is an error.
         partial["arm"].as_object_mut().unwrap().clear();
         assert!(plan_texture_set(&partial, &["8k", "4k"], false).is_err());
@@ -649,12 +829,22 @@ mod tests {
 
     #[test]
     fn unsafe_paths_and_malformed_entries_are_rejected() {
-        for bad in ["../evil.jpg", "/abs.jpg", "a//b", "a\\b", "C:/x", "textures/../../x", ""] {
+        for bad in [
+            "../evil.jpg",
+            "/abs.jpg",
+            "a//b",
+            "a\\b",
+            "C:/x",
+            "textures/../../x",
+            "",
+        ] {
             assert!(safe_rel(bad).is_err(), "{bad}");
         }
         assert!(safe_rel("textures/a_b.jpg").is_ok());
         let mut files = fixture("files_island_tree_01.json");
-        let include = files["gltf"]["2k"]["gltf"]["include"].as_object_mut().unwrap();
+        let include = files["gltf"]["2k"]["gltf"]["include"]
+            .as_object_mut()
+            .unwrap();
         let first = include.values().next().unwrap().clone();
         include.insert("../escape.bin".into(), first);
         assert!(plan_gltf_package(&files, &["2k"]).is_err());
@@ -667,7 +857,16 @@ mod tests {
     fn authors_and_credits_come_from_the_info_endpoint() {
         let info = fixture("info_island_tree_01.json");
         let a = authors(&info);
-        assert_eq!(a, [("Rico Cilliers".to_string(), "cleanup, processing".to_string()), ("Rob Tuytel".to_string(), "scanning, processing".to_string())]);
+        assert_eq!(
+            a,
+            [
+                (
+                    "Rico Cilliers".to_string(),
+                    "cleanup, processing".to_string()
+                ),
+                ("Rob Tuytel".to_string(), "scanning, processing".to_string())
+            ]
+        );
         let manifest = Manifest {
             recipe: "r".into(),
             id: "island_tree_01".into(),
@@ -677,7 +876,10 @@ mod tests {
             files: vec![],
         };
         let md = credits_markdown(&[manifest]);
-        assert!(md.contains("Island Tree 01") && md.contains("Rob Tuytel (scanning, processing)"), "{md}");
+        assert!(
+            md.contains("Island Tree 01") && md.contains("Rob Tuytel (scanning, processing)"),
+            "{md}"
+        );
         assert!(md.contains("CC0") && md.contains("https://polyhaven.com/a/island_tree_01"));
         assert!(md.contains("Stanford"));
     }
@@ -687,8 +889,17 @@ mod tests {
         for t in catalog::TREES {
             let (res, files) = &pins().assets[t.id];
             assert_eq!(res, "2k", "{}", t.id);
-            assert!(files.keys().any(|r| r.ends_with(".gltf")) && files.keys().any(|r| r.ends_with(".bin")), "{}", t.id);
-            assert!(files.keys().filter(|r| r.starts_with("textures/")).count() >= 9, "{}", t.id);
+            assert!(
+                files.keys().any(|r| r.ends_with(".gltf"))
+                    && files.keys().any(|r| r.ends_with(".bin")),
+                "{}",
+                t.id
+            );
+            assert!(
+                files.keys().filter(|r| r.starts_with("textures/")).count() >= 9,
+                "{}",
+                t.id
+            );
         }
         for m in catalog::MARBLES {
             let (res, files) = &pins().assets[m.id];
@@ -699,12 +910,20 @@ mod tests {
         assert!(pins().assets["pine_tree_01"].1["pine_tree_01.bin"].0 == 948_849_556);
         assert!((970_000_000..990_000_000).contains(&pinned_bytes("pine_tree_01")));
         assert!((470_000_000..520_000_000).contains(&pinned_bytes("fir_tree_01")));
-        assert!((76_000_000..82_000_000).contains(&pinned_bytes("grey_cartago_01")), "{}", pinned_bytes("grey_cartago_01"));
+        assert!(
+            (76_000_000..82_000_000).contains(&pinned_bytes("grey_cartago_01")),
+            "{}",
+            pinned_bytes("grey_cartago_01")
+        );
     }
 
     // ── end to end against a local fixture server ───────────────────────────
 
-    fn spawn_server(listener: TcpListener, routes: HashMap<String, Vec<u8>>, require_user_agent: bool) {
+    fn spawn_server(
+        listener: TcpListener,
+        routes: HashMap<String, Vec<u8>>,
+        require_user_agent: bool,
+    ) {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { break };
@@ -721,10 +940,16 @@ mod tests {
                         user_agent = v.trim().to_string();
                     }
                 }
-                let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let path = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("/")
+                    .to_string();
                 // The Poly Haven API terms ask clients to identify themselves.
                 if require_user_agent && !user_agent.contains("pulsarengine") {
-                    let _ = s.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let _ = s.write_all(
+                        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
                     continue;
                 }
                 match routes.get(&path) {
@@ -757,7 +982,9 @@ mod tests {
                 if map.contains_key("url") && map.contains_key("md5") && map.contains_key("size") {
                     let index = routes.len();
                     let name = file_name(map["url"].as_str().unwrap()).to_string();
-                    let body: Vec<u8> = (0..300 + index * 17).map(|i| ((i * 7 + index) % 251) as u8).collect();
+                    let body: Vec<u8> = (0..300 + index * 17)
+                        .map(|i| ((i * 7 + index) % 251) as u8)
+                        .collect();
                     let path = format!("/dl/{index}/{name}");
                     map.insert("url".into(), json!(format!("{base}{path}")));
                     map.insert("md5".into(), json!(super::super::md5::hex(&body)));
@@ -776,7 +1003,12 @@ mod tests {
     /// A local stand-in for the Poly Haven API serving the captured responses
     /// for `id`, with every file entry rewritten to a small local body.
     /// `tamper` can corrupt the (already localised) file list.
-    fn api_for(id: &str, files_fixture: &str, info_fixture: &str, tamper: &dyn Fn(&mut Value)) -> String {
+    fn api_for(
+        id: &str,
+        files_fixture: &str,
+        info_fixture: &str,
+        tamper: &dyn Fn(&mut Value),
+    ) -> String {
         api_for_many(&[(id, files_fixture, info_fixture)], tamper)
     }
 
@@ -790,7 +1022,10 @@ mod tests {
             localize(&mut files, &base, &mut routes);
             tamper(&mut files);
             routes.insert(format!("/files/{id}"), serde_json::to_vec(&files).unwrap());
-            routes.insert(format!("/info/{id}"), serde_json::to_vec(&fixture(info_fixture)).unwrap());
+            routes.insert(
+                format!("/info/{id}"),
+                serde_json::to_vec(&fixture(info_fixture)).unwrap(),
+            );
         }
         spawn_server(listener, routes, true);
         base
@@ -802,12 +1037,25 @@ mod tests {
 
     #[test]
     fn provisions_a_gltf_package_with_directory_structure_manifest_and_credits() {
-        let base = api_for("island_tree_01", "files_island_tree_01.json", "info_island_tree_01.json", &|_| {});
+        let base = api_for(
+            "island_tree_01",
+            "files_island_tree_01.json",
+            "info_island_tree_01.json",
+            &|_| {},
+        );
         let assets = tmp("tree");
         let api = Api::new(base, Duration::from_millis(1));
         let unit = island_unit();
         assert!(!unit_complete(&assets, &unit, false));
-        let manifest = provision_unit(&api, &assets, &unit, false, Duration::from_millis(1), &|_, _| {}).unwrap();
+        let manifest = provision_unit(
+            &api,
+            &assets,
+            &unit,
+            false,
+            Duration::from_millis(1),
+            &|_, _| {},
+        )
+        .unwrap();
         assert_eq!(manifest.files.len(), 12);
         assert_eq!(manifest.resolution, "2k");
         assert_eq!(manifest.authors.len(), 2);
@@ -822,48 +1070,108 @@ mod tests {
             assert_eq!(&super::super::md5::hex(&bytes), md5);
         }
         assert!(unit_complete(&assets, &unit, false));
-        assert_eq!(tree_gltf(&assets, "island_tree_01").unwrap(), dir.join("island_tree_01_2k.gltf"));
+        assert_eq!(
+            tree_gltf(&assets, "island_tree_01").unwrap(),
+            dir.join("island_tree_01_2k.gltf")
+        );
         assert_eq!(read_manifest(&dir).unwrap(), manifest);
 
         // A damaged file (wrong size) makes the unit incomplete again.
         std::fs::write(dir.join("island_tree_01.bin"), b"x").unwrap();
         assert!(!unit_complete(&assets, &unit, false));
 
-        write_credits(&assets, &catalog::Config { trees: vec![catalog::tree("island_tree_01").unwrap()], ..Default::default() }).unwrap();
+        write_credits(
+            &assets,
+            &catalog::Config {
+                trees: vec![catalog::tree("island_tree_01").unwrap()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let credits = std::fs::read_to_string(assets.join("CREDITS_POLYHAVEN.md")).unwrap();
-        assert!(credits.contains("Rob Tuytel") && credits.contains("CC0"), "{credits}");
+        assert!(
+            credits.contains("Rob Tuytel") && credits.contains("CC0"),
+            "{credits}"
+        );
     }
 
     #[test]
     fn provisions_a_marble_set_and_resolves_maps_by_role() {
-        let base = api_for("marble_01", "files_marble_01.json", "info_marble_01.json", &|_| {});
+        let base = api_for(
+            "marble_01",
+            "files_marble_01.json",
+            "info_marble_01.json",
+            &|_| {},
+        );
         let assets = tmp("marble");
         let api = Api::new(base, Duration::from_millis(1));
-        let unit = Unit::from(catalog::MARBLES.iter().find(|m| m.id == "marble_01").unwrap());
-        let manifest = provision_unit(&api, &assets, &unit, false, Duration::from_millis(1), &|_, _| {}).unwrap();
+        let unit = Unit::from(
+            catalog::MARBLES
+                .iter()
+                .find(|m| m.id == "marble_01")
+                .unwrap(),
+        );
+        let manifest = provision_unit(
+            &api,
+            &assets,
+            &unit,
+            false,
+            Duration::from_millis(1),
+            &|_, _| {},
+        )
+        .unwrap();
         assert_eq!(manifest.resolution, "8k");
         assert_eq!(manifest.files.len(), 3);
-        assert!(marble_map(&assets, "marble_01", "diffuse").unwrap().ends_with("marble_01_diff_8k.jpg"));
+        assert!(marble_map(&assets, "marble_01", "diffuse")
+            .unwrap()
+            .ends_with("marble_01_diff_8k.jpg"));
         assert!(marble_map(&assets, "marble_01", "arm").is_some());
         assert!(marble_map(&assets, "marble_01", "displacement").is_none());
         assert!(unit_complete(&assets, &unit, false));
         // Asking for displacement later means the set is not complete yet.
         assert!(!unit_complete(&assets, &unit, true));
-        provision_unit(&api, &assets, &unit, true, Duration::from_millis(1), &|_, _| {}).unwrap();
+        provision_unit(
+            &api,
+            &assets,
+            &unit,
+            true,
+            Duration::from_millis(1),
+            &|_, _| {},
+        )
+        .unwrap();
         assert!(unit_complete(&assets, &unit, true));
-        assert!(marble_map(&assets, "marble_01", "displacement").unwrap().ends_with("marble_01_disp_8k.jpg"));
+        assert!(marble_map(&assets, "marble_01", "displacement")
+            .unwrap()
+            .ends_with("marble_01_disp_8k.jpg"));
     }
 
     #[test]
     fn a_hash_mismatch_fails_the_unit_and_writes_no_manifest() {
-        let base = api_for("island_tree_01", "files_island_tree_01.json", "info_island_tree_01.json", &|files| {
-            files["gltf"]["2k"]["gltf"]["include"]["island_tree_01.bin"]["md5"] = json!("00000000000000000000000000000000");
-        });
+        let base = api_for(
+            "island_tree_01",
+            "files_island_tree_01.json",
+            "info_island_tree_01.json",
+            &|files| {
+                files["gltf"]["2k"]["gltf"]["include"]["island_tree_01.bin"]["md5"] =
+                    json!("00000000000000000000000000000000");
+            },
+        );
         let assets = tmp("mismatch");
         let api = Api::new(base, Duration::from_millis(1));
         let unit = island_unit();
-        let err = provision_unit(&api, &assets, &unit, false, Duration::from_millis(1), &|_, _| {}).unwrap_err();
-        assert!(err.contains("MD5 mismatch") && err.contains("island_tree_01.bin"), "{err}");
+        let err = provision_unit(
+            &api,
+            &assets,
+            &unit,
+            false,
+            Duration::from_millis(1),
+            &|_, _| {},
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("MD5 mismatch") && err.contains("island_tree_01.bin"),
+            "{err}"
+        );
         assert!(read_manifest(&unit.dir(&assets)).is_none());
         assert!(!unit.dir(&assets).join("island_tree_01.bin").exists());
         assert!(!unit_complete(&assets, &unit, false));
@@ -871,13 +1179,24 @@ mod tests {
 
     #[test]
     fn unknown_assets_are_an_error_and_clients_must_identify_themselves() {
-        let base = api_for("island_tree_01", "files_island_tree_01.json", "info_island_tree_01.json", &|_| {});
+        let base = api_for(
+            "island_tree_01",
+            "files_island_tree_01.json",
+            "info_island_tree_01.json",
+            &|_| {},
+        );
         let api = Api::new(base.clone(), Duration::from_millis(1));
-        assert!(api.get_json("files/not_an_asset").unwrap_err().contains("404"));
+        assert!(api
+            .get_json("files/not_an_asset")
+            .unwrap_err()
+            .contains("404"));
         assert!(api.get_json("files/island_tree_01").is_ok());
         // A bare request without a User-Agent is refused by the fixture, as the real API asks.
         let bare = ureq::AgentBuilder::new().user_agent("").build();
-        assert!(bare.get(&format!("{base}/files/island_tree_01")).call().is_err());
+        assert!(bare
+            .get(&format!("{base}/files/island_tree_01"))
+            .call()
+            .is_err());
     }
 
     #[test]
@@ -912,11 +1231,20 @@ mod tests {
 
     #[test]
     fn provisioning_all_units_records_recipes_and_writes_credits_and_is_idempotent() {
-        use super::super::{missing_units, provision_polyhaven, read_manifest as read_prepared, Lock};
-        let config = catalog::Config { trees: vec![catalog::tree("island_tree_01").unwrap()], ..Default::default() };
+        use super::super::{
+            missing_units, provision_polyhaven, read_manifest as read_prepared, Lock,
+        };
+        let config = catalog::Config {
+            trees: vec![catalog::tree("island_tree_01").unwrap()],
+            ..Default::default()
+        };
         let assets = tmp("all");
         assert_eq!(missing_units(&assets, &config).len(), 5);
-        let mut entries = vec![("island_tree_01", "files_island_tree_01.json", "info_island_tree_01.json")];
+        let mut entries = vec![(
+            "island_tree_01",
+            "files_island_tree_01.json",
+            "info_island_tree_01.json",
+        )];
         // The captured marble_01 answer stands in for every marble set.
         for m in catalog::MARBLES {
             entries.push((m.id, "files_marble_01.json", "info_marble_01.json"));
@@ -928,14 +1256,24 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert!(missing_units(&assets, &config).is_empty());
         let prepared = read_prepared(&assets);
-        assert_eq!(prepared["ph:marble_01"], Unit::from(&catalog::MARBLES[2]).recipe());
+        assert_eq!(
+            prepared["ph:marble_01"],
+            Unit::from(&catalog::MARBLES[2]).recipe()
+        );
         assert!(prepared["ph:island_tree_01"].starts_with(&format!("ph{PH_RECIPE_VERSION}:")));
         let credits = std::fs::read_to_string(assets.join("CREDITS_POLYHAVEN.md")).unwrap();
-        assert!(credits.contains("Island Tree 01") && credits.contains("Marble 01"), "{credits}");
+        assert!(
+            credits.contains("Island Tree 01") && credits.contains("Marble 01"),
+            "{credits}"
+        );
         // A recipe bump makes everything stale again (existing users re-provision).
         let mut stale = prepared.clone();
         stale.insert("ph:marble_01".into(), "ph0:old".into());
-        std::fs::write(assets.join("meshes/prepared.json"), super::super::serde_json_lite::write_map(&stale)).unwrap();
+        std::fs::write(
+            assets.join("meshes/prepared.json"),
+            super::super::serde_json_lite::write_map(&stale),
+        )
+        .unwrap();
         let again = missing_units(&assets, &config);
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].id, "marble_01");

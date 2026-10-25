@@ -16,8 +16,8 @@ use super::vg_stress_data::{
 };
 use super::vg_stress_prep::{catalog::Config, polyhaven};
 use helio::{MeshUpload, PackedVertex};
-use helio_asset_compat::{ConvertedMesh, LoadConfig, MaterialSource, load_scene_file_with_config};
-use helio_vg_stream::{VgeoBytes, content_words};
+use helio_asset_compat::{load_scene_file_with_config, ConvertedMesh, LoadConfig, MaterialSource};
+use helio_vg_stream::{content_words, VgeoBytes};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,9 +25,9 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
+        Arc, Mutex,
     },
     time::Instant,
 };
@@ -68,7 +68,10 @@ pub enum Event {
     /// A classic part: kit piece or masked foliage stand-in.
     Part(PreparedPart),
     /// Every VG part of an asset, all cooked: create its instances now.
-    VgAsset { asset: String, parts: Vec<VgPart> },
+    VgAsset {
+        asset: String,
+        parts: Vec<VgPart>,
+    },
     /// One decoded texture (full mip chain) and every material channel it feeds.
     Texture {
         bindings: Vec<(Mat, u8)>,
@@ -118,10 +121,21 @@ pub fn start(
         .name("museum-loader".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(&root, assets, vg_enabled, &config, tau, prepare_only, &tx, &stop)
+                run(
+                    &root,
+                    assets,
+                    vg_enabled,
+                    &config,
+                    tau,
+                    prepare_only,
+                    &tx,
+                    &stop,
+                )
             }));
             if result.is_err() {
-                let _ = tx.send(Event::Error("Asset loader panicked; loaded scene remains usable".into()));
+                let _ = tx.send(Event::Error(
+                    "Asset loader panicked; loaded scene remains usable".into(),
+                ));
             }
             let _ = tx.send(Event::Finished);
         })
@@ -165,7 +179,11 @@ fn resolve_path(root: &Path, key: &str) -> PathBuf {
 
 fn short_name(asset: &str) -> String {
     let (path, variant) = split_key(asset);
-    let stem = Path::new(path).file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let stem = Path::new(path)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     match variant {
         Some(v) => format!("{stem}#{v}"),
         None => stem,
@@ -183,8 +201,12 @@ struct LoadedScene {
 
 /// glTF `KHR_texture_transform` UV scale/offset is baked into the vertices.
 fn load_scene(path: &Path) -> Result<LoadedScene, String> {
-    let mut scene = load_scene_file_with_config(path, LoadConfig::default()).map_err(|e| e.to_string())?;
-    let info = if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gltf")) {
+    let mut scene =
+        load_scene_file_with_config(path, LoadConfig::default()).map_err(|e| e.to_string())?;
+    let info = if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("gltf"))
+    {
         textures::read_gltf_materials(path)
     } else {
         Default::default()
@@ -198,11 +220,18 @@ fn load_scene(path: &Path) -> Result<LoadedScene, String> {
             .and_then(|m| m.uv);
         if let Some((scale, offset)) = uv {
             for v in &mut mesh.vertices {
-                v.tex_coords0 = [v.tex_coords0[0] * scale[0] + offset[0], v.tex_coords0[1] * scale[1] + offset[1]];
+                v.tex_coords0 = [
+                    v.tex_coords0[0] * scale[0] + offset[0],
+                    v.tex_coords0[1] * scale[1] + offset[1],
+                ];
             }
         }
     }
-    Ok(LoadedScene { meshes, sources: std::mem::take(&mut scene.material_sources), info })
+    Ok(LoadedScene {
+        meshes,
+        sources: std::mem::take(&mut scene.material_sources),
+        info,
+    })
 }
 
 impl LoadedScene {
@@ -219,7 +248,9 @@ impl LoadedScene {
 
     /// Meshes of `variant` (all of them for `None`).
     fn variant_meshes(&self, variant: Option<usize>) -> impl Iterator<Item = &ConvertedMesh> {
-        self.meshes.iter().filter(move |m| variant.is_none_or(|v| m.source_mesh == v))
+        self.meshes
+            .iter()
+            .filter(move |m| variant.is_none_or(|v| m.source_mesh == v))
     }
 }
 
@@ -238,7 +269,9 @@ fn describe<'a>(
     let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
     for mesh in scene.variant_meshes(variant) {
         for vertex in &mesh.vertices {
-            let point = mesh.node_transform.transform_point3(glam::Vec3::from_array(vertex.position));
+            let point = mesh
+                .node_transform
+                .transform_point3(glam::Vec3::from_array(vertex.position));
             min = min.min(point);
             max = max.max(point);
         }
@@ -248,12 +281,16 @@ fn describe<'a>(
         super::is_scan_asset(path).then_some(super::SCAN_SCENE_HEIGHT_METERS)
     } else {
         let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join("assets/vg_stress/kit/meshes/kit_manifest.json")).map_err(|e| e.to_string())?,
+            &std::fs::read(root.join("assets/vg_stress/kit/meshes/kit_manifest.json"))
+                .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
         let stem = path.file_stem().unwrap_or_default().to_string_lossy();
         let bounds = &manifest[stem.as_ref()]["bounds_blender"];
-        bounds[5].as_f64().zip(bounds[2].as_f64()).map(|(hi, lo)| (hi - lo) as f32)
+        bounds[5]
+            .as_f64()
+            .zip(bounds[2].as_f64())
+            .map(|(hi, lo)| (hi - lo) as f32)
     };
     let scale = expected_height
         .filter(|h| *h > 1e-5 && height > 1e-5)
@@ -272,7 +309,8 @@ fn describe<'a>(
         }
         // Masked parts get no VG content id while they render classically.
         let use_vg = vg && (MASKED_PARTS_USE_VG || !masked);
-        let content = use_vg.then(|| content_words(cook::stable_content_id(&mesh.vertices, &mesh.indices)));
+        let content =
+            use_vg.then(|| content_words(cook::stable_content_id(&mesh.vertices, &mesh.indices)));
         let radius = mesh
             .vertices
             .iter()
@@ -311,7 +349,12 @@ fn describe<'a>(
 
 const RECORD_MAGIC: &[u8; 8] = b"VGPART06";
 
-fn record_path(cache: &Path, path: &Path, variant: Option<usize>, vg: bool) -> Result<PathBuf, String> {
+fn record_path(
+    cache: &Path,
+    path: &Path,
+    variant: Option<usize>,
+    vg: bool,
+) -> Result<PathBuf, String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let modified = meta
         .modified()
@@ -329,12 +372,15 @@ fn record_path(cache: &Path, path: &Path, variant: Option<usize>, vg: bool) -> R
         vg,
         variant.map(|v| v as i64).unwrap_or(-1)
     );
-    let hash = key.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
+    let hash = key.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+    });
     Ok(cache.join(format!("parts-v6-{hash:016x}.bin")))
 }
 
 fn write_record(path: &Path, parts: &[PreparedPart]) -> Result<(), String> {
-    let metadata = serde_json::to_vec(&parts.iter().map(|p| &p.meta).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
+    let metadata = serde_json::to_vec(&parts.iter().map(|p| &p.meta).collect::<Vec<_>>())
+        .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(RECORD_MAGIC);
     bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
@@ -354,7 +400,9 @@ fn read_record(path: &Path, asset: &str) -> Result<Vec<PreparedPart>, String> {
         return Err("oversize part record".into());
     }
     let mut bytes = Vec::new();
-    std::io::BufReader::new(file).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    std::io::BufReader::new(file)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     decode_record(&bytes, asset)
 }
 
@@ -362,10 +410,17 @@ fn decode_record(bytes: &[u8], asset: &str) -> Result<Vec<PreparedPart>, String>
     if bytes.get(..8) != Some(RECORD_MAGIC.as_slice()) {
         return Err("record header".into());
     }
-    let n = u32::from_le_bytes(bytes.get(8..12).ok_or("record metadata length")?.try_into().unwrap()) as usize;
+    let n = u32::from_le_bytes(
+        bytes
+            .get(8..12)
+            .ok_or("record metadata length")?
+            .try_into()
+            .unwrap(),
+    ) as usize;
     let mut cursor = 12usize.checked_add(n).ok_or("record overflow")?;
     let metadata: Vec<PartMeta> =
-        serde_json::from_slice(bytes.get(12..cursor).ok_or("record metadata")?).map_err(|e| e.to_string())?;
+        serde_json::from_slice(bytes.get(12..cursor).ok_or("record metadata")?)
+            .map_err(|e| e.to_string())?;
     let mut parts = Vec::new();
     for meta in metadata {
         let mut lods = Vec::new();
@@ -378,8 +433,10 @@ fn decode_record(bytes: &[u8], asset: &str) -> Result<Vec<PreparedPart>, String>
                 cursor = end;
                 Ok(result)
             };
-            let vertices: Vec<PackedVertex> =
-                bytemuck::pod_collect_to_vec(take(vertex_count, std::mem::size_of::<PackedVertex>())?);
+            let vertices: Vec<PackedVertex> = bytemuck::pod_collect_to_vec(take(
+                vertex_count,
+                std::mem::size_of::<PackedVertex>(),
+            )?);
             let indices: Vec<u32> = bytemuck::pod_collect_to_vec(take(index_count, 4)?);
             if indices.len() % 3 != 0 || indices.iter().any(|&i| i as usize >= vertices.len()) {
                 return Err("invalid record geometry".into());
@@ -389,7 +446,11 @@ fn decode_record(bytes: &[u8], asset: &str) -> Result<Vec<PreparedPart>, String>
         if !meta.radius.is_finite() || meta.transform.iter().any(|f| !f.is_finite()) {
             return Err("invalid record transform".into());
         }
-        parts.push(PreparedPart { asset: asset.to_string(), meta, lods });
+        parts.push(PreparedPart {
+            asset: asset.to_string(),
+            meta,
+            lods,
+        });
     }
     if cursor != bytes.len() || parts.is_empty() {
         return Err("record trailing data or empty".into());
@@ -414,7 +475,10 @@ fn assemble(cache: &Path, record: Vec<PreparedPart>) -> Option<Processed> {
         match part.meta.content {
             Some(words) => {
                 let vgeo = cook::read_vgeo(cache, content_id(words))?;
-                out.vg.push(VgPart { meta: part.meta, vgeo });
+                out.vg.push(VgPart {
+                    meta: part.meta,
+                    vgeo,
+                });
             }
             None if !part.lods.is_empty() => out.classic.push(part),
             None => return None,
@@ -448,18 +512,29 @@ fn process_asset(
     for (mesh, mut meta) in describe(scene, root, path, asset, vg)? {
         let mut lods = Vec::new();
         if !vg {
-            lods.push(MeshUpload { vertices: mesh.vertices.clone(), indices: mesh.indices.clone() });
+            lods.push(MeshUpload {
+                vertices: mesh.vertices.clone(),
+                indices: mesh.indices.clone(),
+            });
         } else if let Some(words) = meta.content {
             let content = content_id(words);
-            let build = || cook::load_or_build_vgeo_cache(content, &mesh.vertices, &mesh.indices, cache);
+            let build =
+                || cook::load_or_build_vgeo_cache(content, &mesh.vertices, &mesh.indices, cache);
             let (vgeo, _) = match pool {
                 Some(pool) => pool.install(build),
                 None => build(),
             }?;
             cooked.push(vgeo);
         }
-        meta.lods = lods.iter().map(|m| (m.vertices.len(), m.indices.len())).collect();
-        record.push(PreparedPart { asset: asset.to_string(), meta, lods });
+        meta.lods = lods
+            .iter()
+            .map(|m| (m.vertices.len(), m.indices.len()))
+            .collect();
+        record.push(PreparedPart {
+            asset: asset.to_string(),
+            meta,
+            lods,
+        });
     }
     let record_file = record_path(cache, path, variant, vg)?;
     if let Err(error) = write_record(&record_file, &record) {
@@ -470,7 +545,10 @@ fn process_asset(
     for part in record {
         if part.meta.content.is_some() {
             let vgeo = cooked.next().ok_or("cook result missing")?;
-            out.vg.push(VgPart { meta: part.meta, vgeo });
+            out.vg.push(VgPart {
+                meta: part.meta,
+                vgeo,
+            });
         } else {
             out.classic.push(part);
         }
@@ -503,11 +581,19 @@ fn triangle_estimate(root: &Path, key: &str) -> (u64, u64) {
             .map_or_else(|| tree.triangles(), |v| v.triangles);
         return (tree.triangles(), part);
     }
-    let stem = Path::new(rel).file_stem().unwrap_or_default().to_string_lossy();
-    if let Some(def) = [LUCY, THAI, XYZ_DRAGON, MANUSCRIPT, HAPPY, DRAGON].iter().find(|d| d.stem == stem) {
+    let stem = Path::new(rel)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    if let Some(def) = [LUCY, THAI, XYZ_DRAGON, MANUSCRIPT, HAPPY, DRAGON]
+        .iter()
+        .find(|d| d.stem == stem)
+    {
         return (def.triangles, def.triangles);
     }
-    let bytes = std::fs::metadata(resolve_path(root, key)).map(|m| m.len()).unwrap_or(0);
+    let bytes = std::fs::metadata(resolve_path(root, key))
+        .map(|m| m.len())
+        .unwrap_or(0);
     (bytes / 48, bytes / 48)
 }
 
@@ -532,8 +618,10 @@ struct Progress {
 /// The title / console progress text.
 fn progress_line(p: &Progress) -> String {
     let elapsed = p.started.elapsed().as_secs_f64();
-    let eta = cook::eta_seconds(p.done_triangles, p.total_triangles, elapsed)
-        .map_or_else(|| "estimating".to_string(), |s| format!("about {}", cook::format_duration(s)));
+    let eta = cook::eta_seconds(p.done_triangles, p.total_triangles, elapsed).map_or_else(
+        || "estimating".to_string(),
+        |s| format!("about {}", cook::format_duration(s)),
+    );
     let now = p
         .running
         .iter()
@@ -553,7 +641,11 @@ fn progress_line(p: &Progress) -> String {
         p.total_assets,
         cook::millions(p.done_triangles),
         cook::millions(p.total_triangles),
-        if now.is_empty() { "queued".to_string() } else { now },
+        if now.is_empty() {
+            "queued".to_string()
+        } else {
+            now
+        },
         cook::format_duration(elapsed),
         eta
     )
@@ -591,13 +683,28 @@ impl Ctx<'_> {
                 println!("{line}");
             }
         }
-        send(self.tx, Event::VgAsset { asset: asset.to_string(), parts: processed.vg }, self.stop)
+        send(
+            self.tx,
+            Event::VgAsset {
+                asset: asset.to_string(),
+                parts: processed.vg,
+            },
+            self.stop,
+        )
     }
 
     fn begin(&self, asset: &str, triangles: u64) {
         let mut p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
-        p.running.push(Running { asset: asset.to_string(), triangles, since: Instant::now() });
-        println!("[Museum cook] start {} ({} tris)", short_name(asset), cook::millions(triangles));
+        p.running.push(Running {
+            asset: asset.to_string(),
+            triangles,
+            since: Instant::now(),
+        });
+        println!(
+            "[Museum cook] start {} ({} tris)",
+            short_name(asset),
+            cook::millions(triangles)
+        );
     }
 
     fn finish(&self, asset: &str, triangles: u64, ok: bool) {
@@ -632,7 +739,9 @@ impl Ctx<'_> {
                     self.finish(asset, *triangles, false);
                     send(
                         self.tx,
-                        Event::Error(format!("VG {asset}: import failed: {error}; nothing is shown for it")),
+                        Event::Error(format!(
+                            "VG {asset}: import failed: {error}; nothing is shown for it"
+                        )),
                         self.stop,
                     );
                 }
@@ -644,7 +753,15 @@ impl Ctx<'_> {
                 return;
             }
             self.begin(asset, *triangles);
-            let result = process_asset(self.cache, Some(self.pool), &scene, self.root, &group.path, asset, true);
+            let result = process_asset(
+                self.cache,
+                Some(self.pool),
+                &scene,
+                self.root,
+                &group.path,
+                asset,
+                true,
+            );
             self.finish(asset, *triangles, result.is_ok());
             match result {
                 Ok(processed) => {
@@ -656,7 +773,9 @@ impl Ctx<'_> {
                 Err(error) => {
                     if !send(
                         self.tx,
-                        Event::Error(format!("VG {asset}: cook failed: {error}; nothing is shown for it")),
+                        Event::Error(format!(
+                            "VG {asset}: cook failed: {error}; nothing is shown for it"
+                        )),
                         self.stop,
                     ) {
                         return;
@@ -679,20 +798,32 @@ impl Ctx<'_> {
 
 /// CPU reference cut of a cooked asset at 20/50/100 m, printed at startup.
 fn lod_report(cache: &Path, asset: &str, parts: &[VgPart], tau: f32) -> Vec<String> {
-    use helio_pass_vg_cull::reference::{RefAsset, RefInstance, RefView, select_clusters_ex};
+    use helio_pass_vg_cull::reference::{select_clusters_ex, RefAsset, RefInstance, RefView};
     use helio_vg_build::VgeoReader;
     use helio_vg_format::{
-        GpuCluster, GpuVgInstance, INST_CONE_CULL, INST_ENABLED, cluster_slot_local, cluster_slot_page,
+        cluster_slot_local, cluster_slot_page, GpuCluster, GpuVgInstance, INST_CONE_CULL,
+        INST_ENABLED,
     };
     let distances = [20.0f32, 50.0, 100.0];
     let mut totals = [0u64; 3];
     let mut source = 0u64;
     for part in parts {
-        let Some(words) = part.meta.content else { continue };
-        let Ok(bytes) = std::fs::read(cook::vgeo_path(cache, content_id(words))) else { continue };
-        let Ok(reader) = VgeoReader::parse(&bytes) else { continue };
+        let Some(words) = part.meta.content else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(cook::vgeo_path(cache, content_id(words))) else {
+            continue;
+        };
+        let Ok(reader) = VgeoReader::parse(&bytes) else {
+            continue;
+        };
         let pages: Option<Vec<Vec<GpuCluster>>> = (0..reader.header.asset.page_count)
-            .map(|p| reader.page(p).ok().and_then(|page| page.clusters().ok().map(|c| c.to_vec())))
+            .map(|p| {
+                reader
+                    .page(p)
+                    .ok()
+                    .and_then(|page| page.clusters().ok().map(|c| c.to_vec()))
+            })
             .collect();
         let Some(pages) = pages else { continue };
         let slots: Vec<_> = (0..reader.header.asset.page_count).map(Some).collect();
@@ -715,12 +846,17 @@ fn lod_report(cache: &Path, asset: &str, parts: &[VgPart], tau: f32) -> Vec<Stri
         };
         let mut lo = glam::Vec3::splat(f32::INFINITY);
         let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
-        for c in pages.iter().flatten().filter(|c| c.flags & GpuCluster::FLAG_LEAF != 0) {
+        for c in pages
+            .iter()
+            .flatten()
+            .filter(|c| c.flags & GpuCluster::FLAG_LEAF != 0)
+        {
             let center = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
             lo = lo.min(center - glam::Vec3::splat(c.sphere[3]));
             hi = hi.max(center + glam::Vec3::splat(c.sphere[3]));
         }
-        let center = glam::Mat4::from_cols_array(&part.meta.transform).transform_point3((lo + hi) * 0.5);
+        let center =
+            glam::Mat4::from_cols_array(&part.meta.transform).transform_point3((lo + hi) * 0.5);
         source += part.meta.source_triangles;
         for (i, distance) in distances.iter().enumerate() {
             let view = RefView::looking_down_neg_z(
@@ -732,7 +868,11 @@ fn lod_report(cache: &Path, asset: &str, parts: &[VgPart], tau: f32) -> Vec<Stri
             totals[i] += select_clusters_ex(&ref_asset, &view, tau, &inst, true)
                 .drawn
                 .iter()
-                .map(|&s| u64::from(lookup(cluster_slot_page(s), cluster_slot_local(s)).counts_material & 0xff))
+                .map(|&s| {
+                    u64::from(
+                        lookup(cluster_slot_page(s), cluster_slot_local(s)).counts_material & 0xff,
+                    )
+                })
                 .sum::<u64>();
         }
     }
@@ -769,7 +909,11 @@ fn run(
             let _ = tx.send(Event::Status(format!("Preparing assets: {message}")));
         };
         if let Err(error) = crate::vg_stress_prep::provision_with(&assets_dir, config, &progress) {
-            if !send(tx, Event::Error(format!("asset provisioning: {error}")), stop) {
+            if !send(
+                tx,
+                Event::Error(format!("asset provisioning: {error}")),
+                stop,
+            ) {
                 return;
             }
         }
@@ -779,7 +923,13 @@ fn run(
     assets.sort_by_key(|(asset, vg)| {
         (
             *vg,
-            if *vg { std::fs::metadata(resolve_path(root, asset)).map(|m| m.len()).unwrap_or(u64::MAX) } else { 0 },
+            if *vg {
+                std::fs::metadata(resolve_path(root, asset))
+                    .map(|m| m.len())
+                    .unwrap_or(u64::MAX)
+            } else {
+                0
+            },
             asset.clone(),
         )
     });
@@ -788,7 +938,11 @@ fn run(
     // 1. The architecture kit: the only always-classic geometry.
     if !prepare_only {
         for (asset, _) in &classic {
-            if !send(tx, Event::Status(format!("Loading {}", short_name(asset))), stop) {
+            if !send(
+                tx,
+                Event::Status(format!("Loading {}", short_name(asset))),
+                stop,
+            ) {
                 return;
             }
             match load_classic(root, &cache, asset) {
@@ -826,7 +980,12 @@ fn run(
                 if stop.load(Ordering::Relaxed) {
                     return;
                 }
-                match textures::decode_with_opacity(&job.path, job.opacity.as_deref(), job.role, job.cap) {
+                match textures::decode_with_opacity(
+                    &job.path,
+                    job.opacity.as_deref(),
+                    job.role,
+                    job.cap,
+                ) {
                     Ok(d) => {
                         let _ = send(
                             tx,
@@ -876,8 +1035,14 @@ fn run(
         .or_else(|| vg_assets.first().map(|(a, _)| a))
         .cloned();
     let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let threads = cook::cook_threads(std::env::var("VG_STRESS_COOK_THREADS").ok().as_deref(), cpus);
-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().expect("VG cook pool");
+    let threads = cook::cook_threads(
+        std::env::var("VG_STRESS_COOK_THREADS").ok().as_deref(),
+        cpus,
+    );
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("VG cook pool");
     let ctx = Ctx {
         root,
         cache: &cache,
@@ -927,7 +1092,10 @@ fn run(
     }
 
     let available = cook::available_memory_bytes();
-    let budget = cook::budget_bytes(std::env::var("VG_STRESS_COOK_MEM_GB").ok().as_deref(), available);
+    let budget = cook::budget_bytes(
+        std::env::var("VG_STRESS_COOK_MEM_GB").ok().as_deref(),
+        available,
+    );
     let workers = cook::job_workers(cpus);
     let mut work = Vec::new();
     let mut total_assets = 0;
@@ -940,8 +1108,14 @@ fn run(
             p.total_assets += group_assets.len();
             p.total_triangles += group_assets.iter().map(|(_, t)| *t).sum::<u64>();
             work.push((
-                JobCost { peak_bytes: cook::job_peak_bytes(file_tris, largest), heavy: cook::is_heavy(file_tris) },
-                Group { path, assets: group_assets },
+                JobCost {
+                    peak_bytes: cook::job_peak_bytes(file_tris, largest),
+                    heavy: cook::is_heavy(file_tris),
+                },
+                Group {
+                    path,
+                    assets: group_assets,
+                },
             ));
         }
         p.started = Instant::now();
@@ -955,7 +1129,13 @@ fn run(
         available.map_or("unknown".to_string(), |a| format!("{:.1} GiB", a as f64 / (1u64 << 30) as f64)),
     );
     let gate = cook::CookGate::new(budget);
-    cook::run_jobs(work, &gate, workers, &|group| ctx.run_group(group), &mut || ctx.heartbeat());
+    cook::run_jobs(
+        work,
+        &gate,
+        workers,
+        &|group| ctx.run_group(group),
+        &mut || ctx.heartbeat(),
+    );
     let p = ctx.progress.lock().unwrap_or_else(|e| e.into_inner());
     println!(
         "[Museum cook] finished: {}/{} assets in {}",
@@ -1011,7 +1191,13 @@ mod tests {
             }
         }
         let dimensions = hi - lo;
-        assert!((dimensions - glam::Vec3::new(1.34, 6.2, 1.34)).abs().max_element() < 0.005, "{dimensions:?}");
+        assert!(
+            (dimensions - glam::Vec3::new(1.34, 6.2, 1.34))
+                .abs()
+                .max_element()
+                < 0.005,
+            "{dimensions:?}"
+        );
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.pop();
         assert!(decode_record(&bytes, asset).is_err());
@@ -1021,8 +1207,9 @@ mod tests {
     #[test]
     fn museum_references_existing_assets_and_material_slots() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let layout =
-            super::super::vg_stress_data::layout::museum_layout(&super::super::vg_stress_data::dims::Dims::load());
+        let layout = super::super::vg_stress_data::layout::museum_layout(
+            &super::super::vg_stress_data::dims::Dims::load(),
+        );
         assert!(layout.placements.len() > 400);
         assert!(layout.statues.len() >= 18);
         for placement in layout.placements {
@@ -1031,18 +1218,25 @@ mod tests {
             } else if placement.asset.contains('#') {
                 // Poly Haven trees are provisioned on demand.
                 let (path, variant) = split_key(&placement.asset);
-                assert!(path.starts_with("assets/vg_stress/trees/") && path.ends_with(".gltf"), "{path}");
+                assert!(
+                    path.starts_with("assets/vg_stress/trees/") && path.ends_with(".gltf"),
+                    "{path}"
+                );
                 assert!(variant.is_some());
             } else {
                 // Scans are prepared on demand (vg_stress_prep), not committed.
                 assert!(
-                    crate::is_scan_asset(&root.join(&placement.asset)) && placement.asset.ends_with(".glb"),
+                    crate::is_scan_asset(&root.join(&placement.asset))
+                        && placement.asset.ends_with(".glb"),
                     "{}",
                     placement.asset
                 );
             }
             if let Some(piece) = placement.kit_piece() {
-                assert!(!super::super::vg_stress_data::materials::kit_slots(piece).is_empty(), "{piece}");
+                assert!(
+                    !super::super::vg_stress_data::materials::kit_slots(piece).is_empty(),
+                    "{piece}"
+                );
             }
         }
     }
@@ -1056,14 +1250,28 @@ mod tests {
         let layout = museum_layout_with(&Dims::load(), &Config::default());
         let mut per_asset: BTreeMap<&str, (usize, bool)> = BTreeMap::new();
         for p in &layout.placements {
-            let e = per_asset.entry(p.asset.as_str()).or_insert((0, p.virtual_geometry));
+            let e = per_asset
+                .entry(p.asset.as_str())
+                .or_insert((0, p.virtual_geometry));
             e.0 += 1;
-            assert_eq!(e.1, p.virtual_geometry, "{}: one asset must not be both VG and classic", p.asset);
+            assert_eq!(
+                e.1, p.virtual_geometry,
+                "{}: one asset must not be both VG and classic",
+                p.asset
+            );
         }
         let vg_assets = per_asset.values().filter(|(_, vg)| *vg).count();
-        let vg_instances: usize = per_asset.values().filter(|(_, vg)| *vg).map(|(n, _)| n).sum();
+        let vg_instances: usize = per_asset
+            .values()
+            .filter(|(_, vg)| *vg)
+            .map(|(n, _)| n)
+            .sum();
         let kit_assets = per_asset.len() - vg_assets;
-        let kit_instances: usize = per_asset.values().filter(|(_, vg)| !*vg).map(|(n, _)| n).sum();
+        let kit_instances: usize = per_asset
+            .values()
+            .filter(|(_, vg)| !*vg)
+            .map(|(n, _)| n)
+            .sum();
         eprintln!(
             "[instancing] placements {}: kit {} distinct meshes / {} instances; VG {} distinct assets / {} instances",
             layout.placements.len(),
@@ -1073,7 +1281,10 @@ mod tests {
             vg_instances
         );
         assert!(vg_assets <= 16, "{vg_assets}");
-        assert!(vg_instances > vg_assets * 5, "instances must far outnumber assets");
+        assert!(
+            vg_instances > vg_assets * 5,
+            "instances must far outnumber assets"
+        );
         assert!(kit_instances >= kit_assets);
     }
 
@@ -1093,7 +1304,10 @@ mod tests {
             last_print: Instant::now(),
         };
         let line = progress_line(&p);
-        assert!(line.contains("1/4 assets") && line.contains("p_2k#0") && line.contains("6.95M tris"), "{line}");
+        assert!(
+            line.contains("1/4 assets") && line.contains("p_2k#0") && line.contains("6.95M tris"),
+            "{line}"
+        );
         assert!(line.contains("ETA"), "{line}");
         p.done_triangles = 0;
         assert!(progress_line(&p).contains("estimating"));
@@ -1105,33 +1319,57 @@ mod tests {
     #[test]
     fn cook_first_end_to_end_on_a_small_tree() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let Some(gltf) = polyhaven::tree_gltf(&root.join("assets/vg_stress"), "island_tree_02") else {
+        let Some(gltf) = polyhaven::tree_gltf(&root.join("assets/vg_stress"), "island_tree_02")
+        else {
             eprintln!("island_tree_02 is not provisioned; skipping");
             return;
         };
         let asset = "assets/vg_stress/trees/island_tree_02/island_tree_02_2k.gltf#0";
         let cache = scratch("island");
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
-        assert!(warm_asset(root, &cache, asset, true).is_none(), "cold cache has nothing ready");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        assert!(
+            warm_asset(root, &cache, asset, true).is_none(),
+            "cold cache has nothing ready"
+        );
         let scene = load_scene(&gltf).unwrap();
         let cold = process_asset(&cache, Some(&pool), &scene, root, &gltf, asset, true).unwrap();
         drop(scene);
 
         // No stand-in: VG parts carry no classic mesh at all.
         assert!(!cold.vg.is_empty());
-        assert!(cold.vg.iter().all(|p| p.meta.content.is_some() && p.meta.lods.is_empty()));
-        assert!(cold.classic.is_empty(), "no classic part: masked leaves are VG too");
-        assert_eq!(cold.vg.iter().any(|p| p.meta.masked), MASKED_PARTS_USE_VG, "island_tree_02 leaves are cooked when masked VG is on");
+        assert!(cold
+            .vg
+            .iter()
+            .all(|p| p.meta.content.is_some() && p.meta.lods.is_empty()));
+        assert!(
+            cold.classic.is_empty(),
+            "no classic part: masked leaves are VG too"
+        );
+        assert_eq!(
+            cold.vg.iter().any(|p| p.meta.masked),
+            MASKED_PARTS_USE_VG,
+            "island_tree_02 leaves are cooked when masked VG is on"
+        );
         // Atomic cache files exist, valid, and no temp file is left behind.
         for part in &cold.vg {
             assert!(cook::read_vgeo(&cache, content_id(part.meta.content.unwrap())).is_some());
         }
-        assert!(std::fs::read_dir(&cache).unwrap().flatten().all(|e| e.path().extension().is_none_or(|x| x != "tmp")));
+        assert!(std::fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .all(|e| e.path().extension().is_none_or(|x| x != "tmp")));
 
         // Warm start: same parts straight from the caches, source not needed.
         if warm_asset(root, &cache, asset, true).is_none() {
             let rp = record_path(&cache, &resolve_path(root, asset), None, true).unwrap();
-            eprintln!("record {} -> {:?}", rp.display(), read_record(&rp, asset).err());
+            eprintln!(
+                "record {} -> {:?}",
+                rp.display(),
+                read_record(&rp, asset).err()
+            );
             eprintln!("variant path {:?}", split_key(asset));
         }
         let warm = warm_asset(root, &cache, asset, true).expect("warm start");
@@ -1153,27 +1391,43 @@ mod tests {
     #[test]
     #[ignore = "requires the six local museum scan part records and VG caches"]
     fn cached_museum_scans_reduce_triangles_with_distance() {
-        use helio_pass_vg_cull::reference::{RefAsset, RefInstance, RefView, select_clusters, select_clusters_ex};
+        use helio_pass_vg_cull::reference::{
+            select_clusters, select_clusters_ex, RefAsset, RefInstance, RefView,
+        };
         use helio_vg_build::VgeoReader;
         use helio_vg_format::{
-            GpuCluster, GpuVgInstance, INST_CONE_CULL, INST_ENABLED, cluster_slot_local, cluster_slot_page,
+            cluster_slot_local, cluster_slot_page, GpuCluster, GpuVgInstance, INST_CONE_CULL,
+            INST_ENABLED,
         };
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let cache = root.join("assets/vg_stress/cache");
-        let vgeo_cache =
-            std::env::var_os("HELIO_VG_CANDIDATE_CACHE").map(PathBuf::from).unwrap_or_else(|| cache.clone());
-        for name in ["dragon", "happy_buddha", "manuscript", "xyzrgb_dragon", "thai_statue", "lucy"] {
+        let vgeo_cache = std::env::var_os("HELIO_VG_CANDIDATE_CACHE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cache.clone());
+        for name in [
+            "dragon",
+            "happy_buddha",
+            "manuscript",
+            "xyzrgb_dragon",
+            "thai_statue",
+            "lucy",
+        ] {
             if std::env::var("HELIO_VG_SCAN").is_ok_and(|scan| scan != name) {
                 continue;
             }
             let asset = format!("assets/vg_stress/meshes/{name}.glb");
-            let parts = warm_asset(root, &cache, &asset, true)
-                .unwrap_or_else(|| panic!("{name}: not cooked; run `cargo vg-stress -- --prepare`"));
+            let parts = warm_asset(root, &cache, &asset, true).unwrap_or_else(|| {
+                panic!("{name}: not cooked; run `cargo vg-stress -- --prepare`")
+            });
             for part in parts.vg {
                 let content = content_id(part.meta.content.unwrap());
-                let bytes = std::fs::read(vgeo_cache.join(format!("{content:032x}.vgeo"))).expect("missing VG cache");
+                let bytes = std::fs::read(vgeo_cache.join(format!("{content:032x}.vgeo")))
+                    .expect("missing VG cache");
                 let reader = VgeoReader::parse(&bytes).unwrap();
-                assert!(helio_vg_build::is_current_cook(&reader.header), "{name}: stale cook, rebuild cache");
+                assert!(
+                    helio_vg_build::is_current_cook(&reader.header),
+                    "{name}: stale cook, rebuild cache"
+                );
                 let pages: Vec<Vec<GpuCluster>> = (0..reader.header.asset.page_count)
                     .map(|p| reader.page(p).unwrap().clusters().unwrap().to_vec())
                     .collect();
@@ -1188,12 +1442,17 @@ mod tests {
                 };
                 let mut lo = glam::Vec3::splat(f32::INFINITY);
                 let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
-                for c in pages.iter().flatten().filter(|c| c.flags & GpuCluster::FLAG_LEAF != 0) {
+                for c in pages
+                    .iter()
+                    .flatten()
+                    .filter(|c| c.flags & GpuCluster::FLAG_LEAF != 0)
+                {
                     let center = glam::Vec3::new(c.sphere[0], c.sphere[1], c.sphere[2]);
                     lo = lo.min(center - glam::Vec3::splat(c.sphere[3]));
                     hi = hi.max(center + glam::Vec3::splat(c.sphere[3]));
                 }
-                let center = glam::Mat4::from_cols_array(&part.meta.transform).transform_point3((lo + hi) * 0.5);
+                let center = glam::Mat4::from_cols_array(&part.meta.transform)
+                    .transform_point3((lo + hi) * 0.5);
                 let inst = RefInstance {
                     matrix: part.meta.transform,
                     inst: GpuVgInstance {
@@ -1203,8 +1462,15 @@ mod tests {
                         object_row: 0,
                     },
                 };
-                let roots: Vec<_> = pages.iter().flatten().filter(|c| c.flags & GpuCluster::FLAG_ROOT != 0).collect();
-                let root_tris: u64 = roots.iter().map(|c| u64::from(c.counts_material & 0xff)).sum();
+                let roots: Vec<_> = pages
+                    .iter()
+                    .flatten()
+                    .filter(|c| c.flags & GpuCluster::FLAG_ROOT != 0)
+                    .collect();
+                let root_tris: u64 = roots
+                    .iter()
+                    .map(|c| u64::from(c.counts_material & 0xff))
+                    .sum();
                 let tris = |distance: f32, cone: bool| -> u64 {
                     let view = RefView::looking_down_neg_z(
                         (center + glam::Vec3::Z * distance).to_array(),
@@ -1221,7 +1487,12 @@ mod tests {
                     selected
                         .drawn
                         .iter()
-                        .map(|&s| u64::from(lookup(cluster_slot_page(s), cluster_slot_local(s)).counts_material & 0xff))
+                        .map(|&s| {
+                            u64::from(
+                                lookup(cluster_slot_page(s), cluster_slot_local(s)).counts_material
+                                    & 0xff,
+                            )
+                        })
                         .sum()
                 };
                 let distances = [3.0, 6.0, 12.0, 24.0, 48.0, 96.0];
@@ -1231,11 +1502,27 @@ mod tests {
                     "{name}: source={} coarsest={root_tris}; 3/6/12/24/48/96m at 720p, 1px: no-cone={counts:?}, cone={cone:?}",
                     part.meta.source_triangles
                 );
-                assert!(counts.iter().all(|&c| c > 0), "{name}: disappeared: {counts:?}");
-                assert!(cone.iter().zip(&counts).all(|(c, n)| *c > 0 && c <= n), "{name}: cone {cone:?} vs {counts:?}");
-                assert!(counts.windows(2).all(|w| w[1] <= w[0]), "{name}: {counts:?}");
-                assert!(counts[5] * 4 < counts[0], "{name}: insufficient distance reduction: {counts:?}");
-                assert_eq!(tris(1.0e8, false), root_tris, "{name}: finite error must eventually select roots");
+                assert!(
+                    counts.iter().all(|&c| c > 0),
+                    "{name}: disappeared: {counts:?}"
+                );
+                assert!(
+                    cone.iter().zip(&counts).all(|(c, n)| *c > 0 && c <= n),
+                    "{name}: cone {cone:?} vs {counts:?}"
+                );
+                assert!(
+                    counts.windows(2).all(|w| w[1] <= w[0]),
+                    "{name}: {counts:?}"
+                );
+                assert!(
+                    counts[5] * 4 < counts[0],
+                    "{name}: insufficient distance reduction: {counts:?}"
+                );
+                assert_eq!(
+                    tris(1.0e8, false),
+                    root_tris,
+                    "{name}: finite error must eventually select roots"
+                );
             }
         }
     }
@@ -1247,8 +1534,18 @@ mod tests {
         let cache = std::env::var_os("HELIO_VG_CANDIDATE_CACHE")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("assets/vg_stress/cache"));
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-        for name in ["dragon", "happy_buddha", "manuscript", "xyzrgb_dragon", "thai_statue", "lucy"] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        for name in [
+            "dragon",
+            "happy_buddha",
+            "manuscript",
+            "xyzrgb_dragon",
+            "thai_statue",
+            "lucy",
+        ] {
             if std::env::var("HELIO_VG_SCAN").is_ok_and(|scan| scan != name) {
                 continue;
             }

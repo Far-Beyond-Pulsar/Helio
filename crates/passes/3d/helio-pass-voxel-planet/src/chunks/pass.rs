@@ -39,7 +39,10 @@ pub struct ChunkPass {
     /// The last frame's CPU milliseconds: prepare, execute.
     cpu_ms: [f64; 2],
     /// Voxel materials as the host's scene materials (`set_scene_materials`).
-    scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
+    scene: Option<(
+        super::scene::VoxelMaterialMap,
+        super::scene::SceneMaterialSource,
+    )>,
     /// Every hit walks its own sun ray (`set_steady_shadows`).
     steady_shadows: bool,
     /// The eye's world position this frame (`helio_pass_gi::eye`), where
@@ -64,7 +67,10 @@ impl ChunkPass {
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
         let planet_ground = std::sync::Arc::new(super::ground::PlanetGround::default());
-        let foliage_ground = std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(Box::new(planet_ground.clone())));
+        let foliage_ground =
+            std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(
+                Box::new(planet_ground.clone()),
+            ));
         Self {
             source,
             config,
@@ -103,7 +109,11 @@ impl ChunkPass {
     /// the frame's material table from the context (see
     /// `helio_default_passes::voxel_scene_materials`). Devices without
     /// texture binding arrays keep the appearance table's colours.
-    pub fn set_scene_materials(&mut self, map: super::scene::VoxelMaterialMap, source: super::scene::SceneMaterialSource) {
+    pub fn set_scene_materials(
+        &mut self,
+        map: super::scene::VoxelMaterialMap,
+        source: super::scene::SceneMaterialSource,
+    ) {
         self.scene = Some((map, source));
     }
 
@@ -136,9 +146,16 @@ impl ChunkPass {
     /// A host viewport should keep rendering until residency settles.
     /// A save's export too, until answered.
     pub fn needs_frame(&self) -> bool {
-        let Ok(source) = self.source.try_lock() else { return true };
-        let Some(frame) = source.as_ref() else { return false };
-        let exporting = frame.export.as_ref().is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted));
+        let Ok(source) = self.source.try_lock() else {
+            return true;
+        };
+        let Some(frame) = source.as_ref() else {
+            return false;
+        };
+        let exporting = frame
+            .export
+            .as_ref()
+            .is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted));
         exporting || self.world.as_ref().is_none_or(|w| !w.settled())
     }
 
@@ -326,8 +343,16 @@ impl RenderPass for ChunkPass {
             frame.write_buffer_binding("local_visibility", buffer, self.name());
         }
         if let Some((maps, sun_frame)) = self.world.as_ref().and_then(ChunkWorld::sun_occlusion) {
-            frame.write_texture_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, maps, self.name());
-            frame.write_buffer_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME, sun_frame, self.name());
+            frame.write_texture_binding(
+                helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
+                maps,
+                self.name(),
+            );
+            frame.write_buffer_binding(
+                helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
+                sun_frame,
+                self.name(),
+            );
         }
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -435,7 +460,10 @@ impl ChunkPass {
             if let Some(appearance) = &self.appearance {
                 world.set_appearance(appearance);
             }
-            self.kept_loaded = frame.kept.as_ref().map(|kept| world.load_kept(&frame.planet, kept));
+            self.kept_loaded = frame
+                .kept
+                .as_ref()
+                .map(|kept| world.load_kept(&frame.planet, kept));
             self.world = Some(world);
             self.built_for = Some(recipe);
             self.last_eye = [None; 2];
@@ -489,7 +517,11 @@ impl ChunkPass {
             view!("gbuffer_velocity"),
         ];
         let camera = ctx.camera_data;
-        let eye_index = if self.xr_mode && camera.jitter_frame[3].to_bits() == 2 { 1 } else { 0 };
+        let eye_index = if self.xr_mode && camera.jitter_frame[3].to_bits() == 2 {
+            1
+        } else {
+            0
+        };
         // Chunks are drawn relative to the eye. The frame's coordinates may
         // put the camera off their origin (a host's camera-relative frames
         // keep an origin while the camera moves within a cell of it): its
@@ -502,12 +534,14 @@ impl ChunkPass {
         let prev_view_proj =
             Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
-        let jitter = [jitter, std::mem::replace(&mut self.last_jitter[eye_index], jitter)];
+        let jitter = [
+            jitter,
+            std::mem::replace(&mut self.last_jitter[eye_index], jitter),
+        ];
         let now = std::time::Instant::now();
         let residency_eye = self.residency_eye.unwrap_or(frame.eye);
-        let interval = self
-            .last_eye[eye_index]
-            .map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
+        let interval =
+            self.last_eye[eye_index].map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
         let velocity = match (self.last_eye[eye_index], interval) {
             (Some((eye, _)), Some(dt)) => (residency_eye - eye) / dt,
             _ => DVec3::ZERO,
@@ -526,13 +560,31 @@ impl ChunkPass {
         let near = camera.position_near[3];
         // The scene's lights and their tile lists (light culling's), for
         // the terrain's shadows of them.
-        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
-        let tile_lists = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists")).map(|b| (*b).clone());
-        let tile_counts = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")).map(|b| (*b).clone());
+        let lights = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|h| h.buffer.clone());
+        let tile_lists = ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists"))
+            .map(|b| (*b).clone());
+        let tile_counts = ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
+            .map(|b| (*b).clone());
         // The GI probes' rays, when a GI pass runs before this one.
         let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
-        let clipmap = ctx.registry.get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
-        let gi = match (binding(helio_pass_gi::GI_FRAME), binding(helio_pass_gi::GI_RAYS), binding(helio_pass_gi::GI_HITS), binding(helio_pass_gi::GI_SUN), clipmap, self.gi_eye) {
+        let clipmap = ctx
+            .registry
+            .get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
+        let gi = match (
+            binding(helio_pass_gi::GI_FRAME),
+            binding(helio_pass_gi::GI_RAYS),
+            binding(helio_pass_gi::GI_HITS),
+            binding(helio_pass_gi::GI_SUN),
+            clipmap,
+            self.gi_eye,
+        ) {
             (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(clipmap), Some(world_eye)) => {
                 world.follow_gi(clipmap, world_eye, frame.eye);
                 Some((frame_gi, rays, hits, sun))
@@ -577,7 +629,11 @@ impl ChunkPass {
         }
         world.set_steady_shadows(self.steady_shadows);
         // The atmosphere's sun disk sizes the shadows' penumbrae.
-        world.set_atmosphere_frame(ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME)).map(|b| (*b).clone()));
+        world.set_atmosphere_frame(
+            ctx.registry
+                .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME))
+                .map(|b| (*b).clone()),
+        );
         // The sun's occlusion by the terrain, for what else the sun lights
         // (the GI probes' hits in this draw, volumetric fog): a level of its
         // clipmap a frame.
@@ -594,20 +650,44 @@ impl ChunkPass {
             [ctx.width, ctx.height],
             Some(ctx.depth),
             match (&lights, &tile_lists, &tile_counts) {
-                (Some(lights), Some(tile_lists), Some(tile_counts)) => Some(super::SceneLights { lights, tile_lists, tile_counts, eye: at }),
+                (Some(lights), Some(tile_lists), Some(tile_counts)) => Some(super::SceneLights {
+                    lights,
+                    tile_lists,
+                    tile_counts,
+                    eye: at,
+                }),
                 _ => None,
             }
             .as_ref(),
-            gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
+            gi.as_ref()
+                .map(|(frame, rays, hits, sun)| super::GiRays {
+                    frame,
+                    rays,
+                    hits,
+                    sun,
+                })
+                .as_ref(),
             eye_index,
         );
         // Foliage's ground: where the drawn terrain changed, and this frame's
         // questions (`chunks::ground`) answered against the cut just drawn.
-        self.foliage_ground.push_changes(world.take_ground_changes());
+        self.foliage_ground
+            .push_changes(world.take_ground_changes());
         if let Some(question) = self.foliage_ground.take_question() {
-            let exchange = (binding(helio_pass_foliage_place::GROUND_QUERIES), binding(helio_pass_foliage_place::GROUND_HITS));
+            let exchange = (
+                binding(helio_pass_foliage_place::GROUND_QUERIES),
+                binding(helio_pass_foliage_place::GROUND_HITS),
+            );
             if let (Some(queries), Some(hits)) = exchange {
-                world.probe_ground(encoder, &queries, &hits, &question.tiles, &frame.planet, frame.eye, at);
+                world.probe_ground(
+                    encoder,
+                    &queries,
+                    &hits,
+                    &question.tiles,
+                    &frame.planet,
+                    frame.eye,
+                    at,
+                );
                 self.foliage_ground.answer(question.batch);
             }
         }
@@ -643,7 +723,10 @@ mod stereo_tests {
             for x in [-1.0, 1.0] {
                 for y in [-1.0, 1.0] {
                     let ray = inverse.project_point3(Vec3::new(x, y, 1.0)).normalize();
-                    assert!(f64::from(-ray.z) + 1e-7 >= cos_half, "corner {ray:?} was culled");
+                    assert!(
+                        f64::from(-ray.z) + 1e-7 >= cos_half,
+                        "corner {ray:?} was culled"
+                    );
                 }
             }
         }

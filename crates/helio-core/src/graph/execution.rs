@@ -1,24 +1,30 @@
 use crate::graph::executor::{format_bpp, format_name};
 use crate::graph::resource::GraphTexturePool;
 use crate::graph::{PipelineFormatCache, PipelineFormatSet, PipelineRegistry};
-use crate::{PassContext, PrepareContext, Profiler, RenderFrameStorage, RenderPass, Result, SceneInput};
+use crate::{
+    PassContext, PrepareContext, Profiler, RenderFrameStorage, RenderPass, Result, SceneInput,
+};
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use super::recording_cache::{self, UnitBuffer, UnitCache};
 use super::resource_lifetime::ResourceLifetime;
-use crate::cmd_ir::{Cmd, RenderPassDesc, Stream};
-use crate::context::RecordedStreams;
 use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
+use crate::cmd_ir::{Cmd, RenderPassDesc, Stream};
+use crate::context::RecordedStreams;
 
 /// One command buffer of a frame's submission, in submission order.
 enum FrameBuffer {
     Once(wgpu::CommandBuffer),
     /// A unit's cached recording (see `recording_cache`): its first pass,
     /// the variant, and which of its two streams.
-    Cached { pass: usize, variant: usize, compute: bool },
+    Cached {
+        pass: usize,
+        variant: usize,
+        compute: bool,
+    },
     /// A reusable command buffer encoded this frame but not cached, kept in
     /// the frame's `frame_reusable` list.
     Uncached(usize),
@@ -532,7 +538,9 @@ impl RenderGraph {
     }
 
     fn reset_recording_cache(&mut self) {
-        self.unit_caches = (0..self.passes.len()).map(|_| UnitCache::default()).collect();
+        self.unit_caches = (0..self.passes.len())
+            .map(|_| UnitCache::default())
+            .collect();
     }
 
     /// Where this frame's cacheable units start: the end (exclusive) of the
@@ -570,9 +578,16 @@ impl RenderGraph {
                 Some(reason)
             } else if self.unit_caches[start].backing_off(frame) {
                 Some(recording_cache::BACKING_OFF)
-            } else if !range.clone().all(|index| self.passes[index].supports_recording_cache()) {
+            } else if !range
+                .clone()
+                .all(|index| self.passes[index].supports_recording_cache())
+            {
                 Some("a pass opts out")
-            } else if chained && range.clone().any(|index| self.gpu_render_bundles[index].is_some()) {
+            } else if chained
+                && range
+                    .clone()
+                    .any(|index| self.gpu_render_bundles[index].is_some())
+            {
                 // A bundle opens a render pass of its own.
                 Some("a fused chain with a render bundle")
             } else {
@@ -580,9 +595,11 @@ impl RenderGraph {
             };
             match direct {
                 None => ends[start] = Some(range.end),
-                Some(reason) => self
-                    .recording_cache_direct
-                    .extend(range.clone().map(|index| (self.passes[index].name(), reason))),
+                Some(reason) => self.recording_cache_direct.extend(
+                    range
+                        .clone()
+                        .map(|index| (self.passes[index].name(), reason)),
+                ),
             }
             start = range.end;
         }
@@ -971,9 +988,13 @@ impl RenderGraph {
                     old.name()
                 ));
             }
-            if self.reflected_pipelines[live].is_some() != replacement.reflected_pipelines[new].is_some()
+            if self.reflected_pipelines[live].is_some()
+                != replacement.reflected_pipelines[new].is_some()
             {
-                return Err(format!("pass '{}' changed its reflected bindings", old.name()));
+                return Err(format!(
+                    "pass '{}' changed its reflected bindings",
+                    old.name()
+                ));
             }
         }
         Ok(())
@@ -1005,11 +1026,14 @@ impl RenderGraph {
                 .map(Some)
                 .collect();
         for &(live, new) in picks {
-            let mut fresh = incoming[new].take().expect("check_swap rejects repeated picks");
+            let mut fresh = incoming[new]
+                .take()
+                .expect("check_swap rejects repeated picks");
             if fresh.inherit_persistent_state(&mut *self.passes[live]) {
                 fresh.on_resize(&self.device, self.internal_w, self.internal_h);
             }
-            self.pipeline_cache.invalidate_pass(self.passes[live].name());
+            self.pipeline_cache
+                .invalidate_pass(self.passes[live].name());
             self.passes[live] = fresh;
             self.pipeline_registries[live] = self.pipeline_registry_for(&*self.passes[live]);
             self.reflected_pipelines[live] = replacement.reflected_pipelines[new].take();
@@ -1131,7 +1155,9 @@ impl RenderGraph {
             writes: Vec::new(),
             scene_buffers: pass.scene_buffers().to_vec(),
         };
-        let mut push = |list: &mut Vec<DeclaredResource>, name: &'static str, kind: DeclaredKind| {
+        let mut push = |list: &mut Vec<DeclaredResource>,
+                        name: &'static str,
+                        kind: DeclaredKind| {
             match list.iter_mut().find(|existing| existing.name == name) {
                 // A precise kind beats the unknown one a bare name implies.
                 Some(existing) if existing.kind == DeclaredKind::Unknown => existing.kind = kind,
@@ -1160,7 +1186,11 @@ impl RenderGraph {
                     };
                     // A group member is published under the group's name, which
                     // is what readers ask for.
-                    push(&mut declaration.writes, resource.group.unwrap_or(resource.name), kind);
+                    push(
+                        &mut declaration.writes,
+                        resource.group.unwrap_or(resource.name),
+                        kind,
+                    );
                 }
             }
         }
@@ -1413,7 +1443,8 @@ impl RenderGraph {
         drop(timestamps_scope);
 
         #[cfg(not(target_arch = "wasm32"))]
-        let encoders_scope = profiling::ProfileScope::new_static("RenderGraph: create command encoders");
+        let encoders_scope =
+            profiling::ProfileScope::new_static("RenderGraph: create command encoders");
         let mut encoder = scene
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1572,8 +1603,7 @@ impl RenderGraph {
         if self.unit_caches.len() != self.passes.len() {
             self.reset_recording_cache();
         }
-        let recording_cache_decision =
-            self.recording_cache_decision(finish_breakdown);
+        let recording_cache_decision = self.recording_cache_decision(finish_breakdown);
         let use_recording_cache = recording_cache_decision.is_ok();
         self.recording_cache_active = use_recording_cache;
         self.recording_cache_inactive_reason = recording_cache_decision.err();
@@ -1612,8 +1642,7 @@ impl RenderGraph {
             // SAFETY: `frame_demands` is graph-owned and not modified again
             // until the next frame's `execute_with_registry`; the registry
             // entry is frame-scoped (same lifetime bridge as `publish`).
-            let demands: &crate::FrameDemands =
-                unsafe { &*std::ptr::addr_of!(self.frame_demands) };
+            let demands: &crate::FrameDemands = unsafe { &*std::ptr::addr_of!(self.frame_demands) };
             registry.write(
                 crate::ResourceKey::new(crate::FRAME_DEMANDS),
                 demands,
@@ -1642,57 +1671,55 @@ impl RenderGraph {
             // prepare() and the graph-owned outputs it publishes, before
             // execute().
             macro_rules! prepare_pass {
-                ($pass:expr, $pass_index:expr) => {
-                    {
-                        let _scope = self.profiler.scope($pass.name());
-                        let prepare_ctx = PrepareContext {
-                            device: scene.device(),
-                            queue: scene.queue(),
-                            frame_num: scene.frame_count(),
-                            camera: scene.camera(),
-                            camera_data: scene.camera_data(),
-                            camera_generation: scene.camera_generation(),
-                            scene_buffers: scene.scene_buffers(),
-                            registry: &*registry,
-                            resize: resized_this_frame,
-                            width: self.internal_w,
-                            height: self.internal_h,
-                            delta_time: self.delta_time,
-                            time: self.frame_time,
-                            time_delta: self.frame_time_delta,
-                            world_origin: scene.world_origin(),
-                            owns_device: self.owns_device,
-                        };
-                        #[cfg(not(target_arch = "wasm32"))]
-                        let _prepare_scope = profiling::is_profiling_enabled().then(|| {
-                            profiling::ProfileScope::new(format!("{}::prepare", $pass.name()))
-                        });
-                        $pass.prepare(&prepare_ctx)?;
-                    }
+                ($pass:expr, $pass_index:expr) => {{
+                    let _scope = self.profiler.scope($pass.name());
+                    let prepare_ctx = PrepareContext {
+                        device: scene.device(),
+                        queue: scene.queue(),
+                        frame_num: scene.frame_count(),
+                        camera: scene.camera(),
+                        camera_data: scene.camera_data(),
+                        camera_generation: scene.camera_generation(),
+                        scene_buffers: scene.scene_buffers(),
+                        registry: &*registry,
+                        resize: resized_this_frame,
+                        width: self.internal_w,
+                        height: self.internal_h,
+                        delta_time: self.delta_time,
+                        time: self.frame_time,
+                        time_delta: self.frame_time_delta,
+                        world_origin: scene.world_origin(),
+                        owns_device: self.owns_device,
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _prepare_scope = profiling::is_profiling_enabled().then(|| {
+                        profiling::ProfileScope::new(format!("{}::prepare", $pass.name()))
+                    });
+                    $pass.prepare(&prepare_ctx)?;
+                }
 
-                    // Populate graph-owned output textures into ResourceRegistry BEFORE execute().
-                    if let Some(actions) = unsafe { &*pre_pass_actions_ptr }.get($pass_index) {
-                        for action in actions {
-                            match action {
-                                PrePassAction::Route { name, view } => {
-                                    registry.route_named_texture(name, view, "Graph");
-                                }
-                                PrePassAction::Group { name, members } => {
-                                    // Generic: the core resolves a `write_group`'s
-                                    // members to concrete views but has no notion of
-                                    // what they mean — only the owning pass (this
-                                    // pass, since `Group` actions are always stored
-                                    // at their group's first-write pass index) knows
-                                    // how to publish them into its own bespoke
-                                    // `ResourceRegistry` field (e.g. `.gbuffer`).
-                                    let views: Vec<&wgpu::TextureView> =
-                                        members.iter().map(|(_, v)| v).collect();
-                                    $pass.publish_group(*name, &views, registry);
-                                }
+                // Populate graph-owned output textures into ResourceRegistry BEFORE execute().
+                if let Some(actions) = unsafe { &*pre_pass_actions_ptr }.get($pass_index) {
+                    for action in actions {
+                        match action {
+                            PrePassAction::Route { name, view } => {
+                                registry.route_named_texture(name, view, "Graph");
+                            }
+                            PrePassAction::Group { name, members } => {
+                                // Generic: the core resolves a `write_group`'s
+                                // members to concrete views but has no notion of
+                                // what they mean — only the owning pass (this
+                                // pass, since `Group` actions are always stored
+                                // at their group's first-write pass index) knows
+                                // how to publish them into its own bespoke
+                                // `ResourceRegistry` field (e.g. `.gbuffer`).
+                                let views: Vec<&wgpu::TextureView> =
+                                    members.iter().map(|(_, v)| v).collect();
+                                $pass.publish_group(*name, &views, registry);
                             }
                         }
                     }
-                };
+                }};
             }
             // A GPU timing span on one of the open unit's streams. The
             // profiler's query indices restart every frame, so a frame of the
@@ -1782,8 +1809,10 @@ impl RenderGraph {
                         }
                         cut_segment!();
                         if compute_pending {
-                            let done_compute =
-                                std::mem::replace(&mut compute_encoder, new_encoder("Compute Graph"));
+                            let done_compute = std::mem::replace(
+                                &mut compute_encoder,
+                                new_encoder("Compute Graph"),
+                            );
                             compute_segments.push(FrameBuffer::Once(done_compute.finish()));
                             compute_pending = false;
                         }
@@ -1822,9 +1851,11 @@ impl RenderGraph {
                         unit_span!(begin_gpu_pass_cmds, unit.graphics, pass_name);
                         unit_span!(begin_gpu_pass_cmds, unit.compute, pass_name);
                         if let Some(desc) = desc {
+                            unit.graphics.push(Cmd::BeginRenderPass(Box::new(
+                                RenderPassDesc::capture(&desc),
+                            )));
                             unit.graphics
-                                .push(Cmd::BeginRenderPass(Box::new(RenderPassDesc::capture(&desc))));
-                            unit.graphics.push(Cmd::ExecuteBundles(vec![bundle.clone()]));
+                                .push(Cmd::ExecuteBundles(vec![bundle.clone()]));
                             unit.graphics.push(Cmd::EndRenderPass);
                         } else {
                             record_execute!(unit, pass, pass_index, false, 0, 0);
@@ -1850,11 +1881,12 @@ impl RenderGraph {
                                 if pass_index == c.chain_range.start {
                                     unit_span!(begin_gpu_pass_cmds, unit.graphics, c.chain_label);
                                     unit.chain_span = Some(c.chain_label);
-                                    unit.graphics.push(Cmd::BeginRenderPass(captured_render_pass(
-                                        &desc,
-                                        &c.store_ops,
-                                        xr_active,
-                                    )));
+                                    unit.graphics
+                                        .push(Cmd::BeginRenderPass(captured_render_pass(
+                                            &desc,
+                                            &c.store_ops,
+                                            xr_active,
+                                        )));
                                     unit.render_pass_open = true;
                                 }
                                 record_execute!(
@@ -1874,9 +1906,10 @@ impl RenderGraph {
                                 unit_span!(begin_gpu_pass_cmds, unit.graphics, pass_name);
                                 unit_span!(begin_gpu_pass_cmds, unit.compute, pass_name);
                                 let store_ops = cached.map_or(&[][..], |c| &c.store_ops[..]);
-                                unit.graphics.push(Cmd::BeginRenderPass(captured_render_pass(
-                                    &desc, store_ops, xr_active,
-                                )));
+                                unit.graphics
+                                    .push(Cmd::BeginRenderPass(captured_render_pass(
+                                        &desc, store_ops, xr_active,
+                                    )));
                                 unit.render_pass_open = true;
                                 record_execute!(unit, pass, pass_index, false, 0, 0);
                                 close_unit_pass!(unit);
@@ -1968,12 +2001,14 @@ impl RenderGraph {
                     );
                     if let Some(desc) = desc {
                         self.profiler.begin_gpu_pass(&mut encoder, pass_name);
-                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        self.profiler
+                            .begin_gpu_pass(&mut compute_encoder, pass_name);
                         let mut pass_encoder = encoder.begin_render_pass(&desc);
                         pass_encoder.execute_bundles(std::iter::once(bundle));
                     } else {
                         self.profiler.begin_gpu_pass(&mut encoder, pass_name);
-                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        self.profiler
+                            .begin_gpu_pass(&mut compute_encoder, pass_name);
                         let mut ctx = PassContext {
                             encoder_ptr: &mut encoder as *mut _,
                             queue: scene.queue(),
@@ -2015,7 +2050,8 @@ impl RenderGraph {
                     pass.publish(registry);
                     let recorded = execute_start.elapsed();
                     segment_recording += recorded;
-                    self.profiler.record_external_cpu_timing(pass_name, recorded);
+                    self.profiler
+                        .record_external_cpu_timing(pass_name, recorded);
                     continue;
                 }
 
@@ -2046,7 +2082,8 @@ impl RenderGraph {
                     if !is_chained {
                         close_chain!();
                         self.profiler.begin_gpu_pass(&mut encoder, pass_name);
-                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        self.profiler
+                            .begin_gpu_pass(&mut compute_encoder, pass_name);
                         timed_main = true;
                         timed_compute = true;
                     }
@@ -2214,12 +2251,14 @@ impl RenderGraph {
                         // Inside an open chain: the main encoder is locked by
                         // the chain's render pass, and a chain-transparent
                         // pass only records on the compute encoder anyway.
-                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        self.profiler
+                            .begin_gpu_pass(&mut compute_encoder, pass_name);
                         timed_compute = true;
                     } else {
                         close_chain!();
                         self.profiler.begin_gpu_pass(&mut encoder, pass_name);
-                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        self.profiler
+                            .begin_gpu_pass(&mut compute_encoder, pass_name);
                         timed_main = true;
                         timed_compute = true;
                     }
@@ -2273,9 +2312,13 @@ impl RenderGraph {
                 pass.publish(registry);
                 let recorded = execute_start.elapsed();
                 segment_recording += recorded;
-                self.profiler.record_external_cpu_timing(pass_name, recorded);
+                self.profiler
+                    .record_external_cpu_timing(pass_name, recorded);
             }
-            debug_assert!(open_unit.is_none(), "a recording-cache unit ends at its last pass");
+            debug_assert!(
+                open_unit.is_none(),
+                "a recording-cache unit ends at its last pass"
+            );
         }
 
         close_chain!();
@@ -2340,9 +2383,11 @@ impl RenderGraph {
             }
             let mut command_buffers = compute_segments;
             command_buffers.extend(compute_last.map(FrameBuffer::Once));
-            command_buffers.extend(graphics_segments.into_iter().map(|segment| {
-                segment.expect("every graphics segment is finished before submit")
-            }));
+            command_buffers.extend(
+                graphics_segments.into_iter().map(|segment| {
+                    segment.expect("every graphics segment is finished before submit")
+                }),
+            );
             command_buffers.push(FrameBuffer::Once(graphics_last));
             command_buffers
         };
@@ -2352,9 +2397,17 @@ impl RenderGraph {
             let unit_caches = &self.unit_caches;
             let items = command_buffers.into_iter().map(|buffer| match buffer {
                 FrameBuffer::Once(buffer) => wgpu::SubmitItem::Once(buffer),
-                FrameBuffer::Cached { pass, variant, compute } => {
+                FrameBuffer::Cached {
+                    pass,
+                    variant,
+                    compute,
+                } => {
                     let recording = &unit_caches[pass].variants[variant];
-                    let buffer = if compute { &recording.compute } else { &recording.graphics };
+                    let buffer = if compute {
+                        &recording.compute
+                    } else {
+                        &recording.graphics
+                    };
                     wgpu::SubmitItem::Reusable(buffer.as_ref().expect("cached stream is not empty"))
                 }
                 FrameBuffer::Uncached(index) => wgpu::SubmitItem::Reusable(&frame_reusable[index]),
@@ -2368,7 +2421,8 @@ impl RenderGraph {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        let readback_scope = profiling::ProfileScope::new_static("RenderGraph: read GPU timestamps");
+        let readback_scope =
+            profiling::ProfileScope::new_static("RenderGraph: read GPU timestamps");
         if self.owns_device {
             self.profiler.read_gpu_timestamps_blocking(scene.device());
         } else {
@@ -2631,8 +2685,10 @@ impl RenderGraph {
                 let store_ops: Vec<Option<wgpu::StoreOp>> = vec![None; color_len];
                 let chain_label = match chain {
                     Some(c) => {
-                        let names: Vec<&'static str> =
-                            self.passes[c.clone()].iter().map(|pass| pass.name()).collect();
+                        let names: Vec<&'static str> = self.passes[c.clone()]
+                            .iter()
+                            .map(|pass| pass.name())
+                            .collect();
                         super::scheduling::chain_label(&names)
                     }
                     None => "",

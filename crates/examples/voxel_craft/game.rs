@@ -51,8 +51,13 @@ fn find_spawn(planet: &Planet) -> DVec3 {
     for ring in 0..400 {
         for step in 0..(8 * ring.max(1)) {
             let t = f64::from(step) / f64::from(8 * ring.max(1)) * std::f64::consts::TAU;
-            let (i, j) = (ci + (t.cos() * f64::from(ring) * 12.0) as i32, cj + (t.sin() * f64::from(ring) * 12.0) as i32);
-            let Some(ground) = terrain::ground(planet, face, i, j) else { continue };
+            let (i, j) = (
+                ci + (t.cos() * f64::from(ring) * 12.0) as i32,
+                cj + (t.sin() * f64::from(ring) * 12.0) as i32,
+            );
+            let Some(ground) = terrain::ground(planet, face, i, j) else {
+                continue;
+            };
             let top = planet.column_top(face, i, j, 0);
             let height = f64::from(top) * grid.voxel_size();
             if ground.cell.k + 1 != top || terrain::relief(planet, face, i, j, 3) > 2 {
@@ -60,12 +65,18 @@ fn find_spawn(planet: &Planet) -> DVec3 {
             }
             fallback.get_or_insert((i, j, top));
             if Biome::of(ground.material) == Biome::Temperate && (4.0..40.0).contains(&height) {
-                return grid.at_radial(grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5), grid.layer_radius(f64::from(top)) + 0.01);
+                return grid.at_radial(
+                    grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5),
+                    grid.layer_radius(f64::from(top)) + 0.01,
+                );
             }
         }
     }
     let (i, j, top) = fallback.unwrap_or((ci, cj, 8));
-    grid.at_radial(grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5), grid.layer_radius(f64::from(top)) + 0.01)
+    grid.at_radial(
+        grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5),
+        grid.layer_radius(f64::from(top)) + 0.01,
+    )
 }
 
 impl Game {
@@ -102,7 +113,9 @@ impl Game {
             sun_axes: (up, e1),
             show_help: true,
             total_frames: 0,
-            frame_limit: std::env::var("VOXEL_CRAFT_FRAMES").ok().and_then(|v| v.parse().ok()),
+            frame_limit: std::env::var("VOXEL_CRAFT_FRAMES")
+                .ok()
+                .and_then(|v| v.parse().ok()),
             tour,
             quit: false,
         }
@@ -130,7 +143,9 @@ impl Game {
         let xr_input = if self.gfx.vr_active() {
             match self.gfx.begin_vr() {
                 Ok(crate::xr::Begin::Frame(input)) => {
-                    if !input.focused { self.input.release_all(); }
+                    if !input.focused {
+                        self.input.release_all();
+                    }
                     Some(input)
                 }
                 Ok(crate::xr::Begin::Idle) => {
@@ -139,14 +154,19 @@ impl Game {
                     self.last_frame = Instant::now();
                     return;
                 }
-                Ok(crate::xr::Begin::Exit) => { self.quit = true; return; }
+                Ok(crate::xr::Begin::Exit) => {
+                    self.quit = true;
+                    return;
+                }
                 Err(error) => {
                     log::error!("[XR] frame: {error}");
                     self.quit = true;
                     return;
                 }
             }
-        } else { None };
+        } else {
+            None
+        };
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f64().min(0.1);
         self.last_frame = now;
@@ -164,7 +184,9 @@ impl Game {
             self.player.flying = !self.player.flying;
             self.player.velocity = DVec3::ZERO;
         }
-        if !self.gfx.vr_active() && (self.input.just_pressed(KeyCode::F5) || self.input.just_pressed(KeyCode::KeyV)) {
+        if !self.gfx.vr_active()
+            && (self.input.just_pressed(KeyCode::F5) || self.input.just_pressed(KeyCode::KeyV))
+        {
             self.player.third_person = !self.player.third_person;
         }
         if self.input.just_pressed(KeyCode::KeyR) {
@@ -173,7 +195,9 @@ impl Game {
             self.rig.reset();
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.input.just_pressed(KeyCode::KeyC) { self.rig.reset(); }
+        if self.input.just_pressed(KeyCode::KeyC) {
+            self.rig.reset();
+        }
         if self.input.just_pressed(KeyCode::KeyH) {
             self.show_help = !self.show_help;
         }
@@ -186,21 +210,28 @@ impl Game {
         let scroll = self.input.scroll();
         if scroll != 0.0 {
             let n = Block::HOTBAR.len() as i32;
-            self.player.hotbar = (self.player.hotbar as i32 - scroll.signum() as i32).rem_euclid(n) as usize;
+            self.player.hotbar =
+                (self.player.hotbar as i32 - scroll.signum() as i32).rem_euclid(n) as usize;
         }
 
         let mut controls = self.input.controls();
         self.world.update();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(input) = &xr_input {
-            self.rig.update(input, &mut self.player, &self.world, &mut controls);
+            self.rig
+                .update(input, &mut self.player, &self.world, &mut controls);
         }
         self.player.update(&self.world, &controls, dt);
         #[cfg(not(target_arch = "wasm32"))]
-        let vr = xr_input.as_ref().map(|input| self.rig.view(&self.player, input));
+        let vr = xr_input
+            .as_ref()
+            .map(|input| self.rig.view(&self.player, input));
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(vr) = &vr { controls.aim = Some(vr.aim); }
-        self.interaction.update(&mut self.player, &mut self.world, &controls, dt);
+        if let Some(vr) = &vr {
+            controls.aim = Some(vr.aim);
+        }
+        self.interaction
+            .update(&mut self.player, &mut self.world, &controls, dt);
 
         self.total_frames += 1;
         if let Some(t) = &self.tour {
@@ -208,10 +239,22 @@ impl Game {
                 let here = self.world.cell_at(self.player.position);
                 match nearest_wood(&self.world, here, (15.0 / crate::config::VOXEL_M) as i32) {
                     Some((cell, block)) => {
-                        log::info!("TRUNK {:?} at {:?} is {:?}, drawn material {}", block, cell, self.world.block_at(cell), block.material());
+                        log::info!(
+                            "TRUNK {:?} at {:?} is {:?}, drawn material {}",
+                            block,
+                            cell,
+                            self.world.block_at(cell),
+                            block.material()
+                        );
                         let target = self.world.cell_centre(cell);
                         let up = target.normalize();
-                        let along = (self.world.cell_centre(Cell::new(cell.face, cell.i, cell.j + 1, cell.k)) - target).normalize();
+                        let along = (self.world.cell_centre(Cell::new(
+                            cell.face,
+                            cell.i,
+                            cell.j + 1,
+                            cell.k,
+                        )) - target)
+                            .normalize();
                         for back in 1..=3 {
                             let c = Cell::new(cell.face, cell.i, cell.j - back, cell.k);
                             log::info!("TRUNK in front: {:?} -> {:?}", c, self.world.block_at(c));
@@ -226,10 +269,22 @@ impl Game {
                 }
             }
         }
-        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, self.gfx.settled(), &mut self.quit));
+        let shot = self.tour.as_mut().and_then(|t| {
+            t.step(
+                &mut self.player,
+                &mut self.world,
+                self.gfx.settled(),
+                &mut self.quit,
+            )
+        });
         let (eye, look) = self.player.camera(&self.world);
         #[cfg(not(target_arch = "wasm32"))]
-        let (eye, look) = vr.as_ref().map_or((eye, look), |vr| (vr.head.w_axis.truncate(), vr.head.transform_vector3(DVec3::NEG_Z).normalize()));
+        let (eye, look) = vr.as_ref().map_or((eye, look), |vr| {
+            (
+                vr.head.w_axis.truncate(),
+                vr.head.transform_vector3(DVec3::NEG_Z).normalize(),
+            )
+        });
         let outline = self.interaction.outline(&self.world);
         let view = View {
             #[cfg(not(target_arch = "wasm32"))]
@@ -248,8 +303,19 @@ impl Game {
         };
         self.gfx.draw(&view);
         self.quit |= self.gfx.failed;
-        if self.frame_limit.is_some_and(|limit| self.total_frames >= limit) {
-            log::info!("completed {} frames ({})", self.total_frames, if self.gfx.vr_active() { "VR" } else { "desktop" });
+        if self
+            .frame_limit
+            .is_some_and(|limit| self.total_frames >= limit)
+        {
+            log::info!(
+                "completed {} frames ({})",
+                self.total_frames,
+                if self.gfx.vr_active() {
+                    "VR"
+                } else {
+                    "desktop"
+                }
+            );
             self.quit = true;
         }
         self.input.end_frame();
@@ -270,7 +336,13 @@ impl Game {
         let hotbar: Vec<String> = Block::HOTBAR
             .iter()
             .enumerate()
-            .map(|(n, b)| if n == self.player.hotbar { format!("[{} {}]", n + 1, b.name()) } else { format!("{} {}", n + 1, b.name()) })
+            .map(|(n, b)| {
+                if n == self.player.hotbar {
+                    format!("[{} {}]", n + 1, b.name())
+                } else {
+                    format!("{} {}", n + 1, b.name())
+                }
+            })
             .collect();
         let hour = (self.time / DAY_SECONDS * 24.0 + 9.0).rem_euclid(24.0);
         let help = if self.show_help && self.gfx.vr_active() {
@@ -280,7 +352,11 @@ impl Game {
         } else {
             ""
         };
-        let target = self.interaction.target.and_then(|t| self.world.block_at(t.cell)).map_or(String::new(), |b| format!("  |  looking at {}", b.name()));
+        let target = self
+            .interaction
+            .target
+            .and_then(|t| self.world.block_at(t.cell))
+            .map_or(String::new(), |b| format!("  |  looking at {}", b.name()));
         self.gfx.window.set_title(&format!(
             "Voxel Craft  |  {:.0} fps  |  {:02}:{:02}  |  height {:.0} m  |  {}{}{}{}",
             self.fps,
@@ -289,7 +365,11 @@ impl Game {
             height,
             hotbar.join("  "),
             target,
-            if self.player.flying { "  |  FLYING" } else { "" },
+            if self.player.flying {
+                "  |  FLYING"
+            } else {
+                ""
+            },
             help
         ));
     }
@@ -353,22 +433,52 @@ const POSES: &[(f64, f64, bool, f64)] = &[
 impl Tour {
     fn new(dir: String) -> Self {
         let _ = std::fs::create_dir_all(&dir);
-        let burst = std::env::var("VOXEL_CRAFT_BURST").ok().and_then(|v| v.parse().ok()).unwrap_or(1u32).max(1);
-        let flight = std::env::var("VOXEL_CRAFT_FLIGHT").ok().and_then(|v| v.parse().ok()).map(|frames: u32| Flight {
-            frames: frames.max(1),
-            step: std::env::var("VOXEL_CRAFT_FLIGHT_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(FLY_SPEED) / 60.0,
-            start: DVec3::ZERO,
-            along: DVec3::ZERO,
-            flown: 0,
-            stills: 0,
-        });
-        Self { dir, pose: 0, waited: u32::MAX, trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some(), burst, shots: 0, flight }
+        let burst = std::env::var("VOXEL_CRAFT_BURST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1u32)
+            .max(1);
+        let flight = std::env::var("VOXEL_CRAFT_FLIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|frames: u32| Flight {
+                frames: frames.max(1),
+                step: std::env::var("VOXEL_CRAFT_FLIGHT_SPEED")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(FLY_SPEED)
+                    / 60.0,
+                start: DVec3::ZERO,
+                along: DVec3::ZERO,
+                flown: 0,
+                stills: 0,
+            });
+        Self {
+            dir,
+            pose: 0,
+            waited: u32::MAX,
+            trunk: std::env::var_os("VOXEL_CRAFT_TRUNK").is_some(),
+            burst,
+            shots: 0,
+            flight,
+        }
     }
 
     /// The flight's frame: places the glowstone and the camera first, then
     /// flies, then shoots the stills; the path to save this frame to.
-    fn fly(&mut self, player: &mut Player, world: &mut World, settled: bool, quit: &mut bool) -> Option<String> {
-        let frames = |name: &str, default: u32| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    fn fly(
+        &mut self,
+        player: &mut Player,
+        world: &mut World,
+        settled: bool,
+        quit: &mut bool,
+    ) -> Option<String> {
+        let frames = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
         let flight = self.flight.as_mut()?;
         if self.waited == u32::MAX {
             let frame = player.frame();
@@ -382,11 +492,17 @@ impl Tour {
                 if let Some(hit) = world.raycast(above, -u, 30.0) {
                     let base = world.cell_centre(hit.previous);
                     for k in 0..height {
-                        edits.push(Edit::Build(world.cell_at(base + u * (BLOCK_M * f64::from(k))), Block::Glowstone));
+                        edits.push(Edit::Build(
+                            world.cell_at(base + u * (BLOCK_M * f64::from(k))),
+                            Block::Glowstone,
+                        ));
                     }
                 }
             }
-            edits.push(Edit::Build(world.cell_at(flight.start + f * 9.0 + r * 3.0 + u * 1.5), Block::Glowstone));
+            edits.push(Edit::Build(
+                world.cell_at(flight.start + f * 9.0 + r * 3.0 + u * 1.5),
+                Block::Glowstone,
+            ));
             world.edit(&edits);
             player.flying = true;
             player.third_person = false;
@@ -399,7 +515,9 @@ impl Tour {
         let at = |n: u32| flight.start + flight.along * (flight.step * f64::from(n));
         if flight.flown < flight.frames {
             let minimum = frames("VOXEL_CRAFT_WAIT", 120);
-            if !((settled && self.waited >= minimum) || self.waited >= minimum.max(frames("VOXEL_CRAFT_WAIT_MAX", 900))) {
+            if !((settled && self.waited >= minimum)
+                || self.waited >= minimum.max(frames("VOXEL_CRAFT_WAIT_MAX", 900)))
+            {
                 return None;
             }
             player.position = at(flight.flown);
@@ -428,7 +546,13 @@ impl Tour {
 
     /// Advances the tour by a frame; the path to save this frame to, if it
     /// should be.
-    fn step(&mut self, player: &mut Player, world: &mut World, settled: bool, quit: &mut bool) -> Option<String> {
+    fn step(
+        &mut self,
+        player: &mut Player,
+        world: &mut World,
+        settled: bool,
+        quit: &mut bool,
+    ) -> Option<String> {
         if self.pose >= usize::MAX / 2 {
             return None;
         }
@@ -441,21 +565,38 @@ impl Tour {
         self.waited += 1;
         // A pose is shot once the terrain has settled and the temporal
         // anti-aliasing has had frames to converge (or after a long wait).
-        let frames = |name: &str, default: u32| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+        let frames = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
         let minimum = frames("VOXEL_CRAFT_WAIT", 120);
-        let ready = (settled && self.waited >= minimum) || self.waited >= minimum.max(frames("VOXEL_CRAFT_WAIT_MAX", 900));
+        let ready = (settled && self.waited >= minimum)
+            || self.waited >= minimum.max(frames("VOXEL_CRAFT_WAIT_MAX", 900));
         if !ready {
             return None;
         }
-        let path = if self.burst == 1 { format!("{}/shot_{:02}.png", self.dir, self.pose) } else { format!("{}/shot_{:02}_{:03}.png", self.dir, self.pose, self.shots) };
-        log::info!("shot {} at {} frames, settled {settled}", self.pose, self.waited);
+        let path = if self.burst == 1 {
+            format!("{}/shot_{:02}.png", self.dir, self.pose)
+        } else {
+            format!("{}/shot_{:02}_{:03}.png", self.dir, self.pose, self.shots)
+        };
+        log::info!(
+            "shot {} at {} frames, settled {settled}",
+            self.pose,
+            self.waited
+        );
         self.shots += 1;
         if self.shots < self.burst {
             return Some(path);
         }
         self.shots = 0;
         self.pose += 1;
-        let limit = std::env::var("VOXEL_CRAFT_POSES").ok().and_then(|v| v.parse().ok()).unwrap_or(POSES.len());
+        let limit = std::env::var("VOXEL_CRAFT_POSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(POSES.len());
         if self.pose >= limit.min(POSES.len()) {
             *quit = true;
             self.pose = usize::MAX / 2;
@@ -484,7 +625,12 @@ impl Tour {
 
 /// The nearest wood block within `reach` blocks of `from`, as (cell, block).
 fn nearest_wood(world: &World, from: Cell, reach: i32) -> Option<(Cell, Block)> {
-    let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog];
+    let logs = [
+        Block::OakLog,
+        Block::BirchLog,
+        Block::SpruceLog,
+        Block::JungleLog,
+    ];
     let mut best: Option<(i32, Cell, Block)> = None;
     for di in -reach..=reach {
         for dj in -reach..=reach {
@@ -523,6 +669,12 @@ mod tests {
                 rest.push((player.position, player.on_ground));
             }
         }
-        assert!(rest.iter().all(|r| r.1 && r.0 == rest[0].0), "moved {:e} m", rest.iter().map(|r| (r.0 - rest[0].0).length()).fold(0.0, f64::max));
+        assert!(
+            rest.iter().all(|r| r.1 && r.0 == rest[0].0),
+            "moved {:e} m",
+            rest.iter()
+                .map(|r| (r.0 - rest[0].0).length())
+                .fold(0.0, f64::max)
+        );
     }
 }

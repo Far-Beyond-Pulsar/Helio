@@ -360,7 +360,11 @@ fn binding_identity(entry: &wgpu::BindGroupEntry<'_>) -> Option<(u32, BindingIde
 /// ```
 #[derive(Default)]
 pub struct CachedBindGroup {
-    cached: Option<(wgpu::BindGroupLayout, Option<Vec<(u32, BindingIdentity)>>, wgpu::BindGroup)>,
+    cached: Option<(
+        wgpu::BindGroupLayout,
+        Option<Vec<(u32, BindingIdentity)>>,
+        wgpu::BindGroup,
+    )>,
 }
 
 impl CachedBindGroup {

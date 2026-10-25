@@ -11,7 +11,8 @@ fn transmission_buffer(device: &wgpu::Device, rows: &[[f32; 4]]) -> wgpu::Buffer
     let mut bytes = bytemuck::cast_slice(&[0u32, rows.len() as u32, 0, 0]).to_vec();
     bytes.extend_from_slice(bytemuck::cast_slice(rows));
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("generic RT transmission"), contents: &bytes,
+        label: Some("generic RT transmission"),
+        contents: &bytes,
         usage: wgpu::BufferUsages::STORAGE,
     })
 }
@@ -81,14 +82,19 @@ fn light() -> helio_pass_forward_lit::GpuLight {
 fn sparse_scenedb_light_slots_do_not_consume_the_sampling_budget() {
     pollster::block_on(async {
         for config in [
-            HlfsConfig { mode: HlfsMode::RayTraced, ..Default::default() },
+            HlfsConfig {
+                mode: HlfsMode::RayTraced,
+                ..Default::default()
+            },
             HlfsConfig::ray_traced_presampled(),
         ] {
             let mut f = Fixture::new_rt(65, 49).await;
             f.config(config);
             empty_scene(&mut f);
             f.lights(vec![light()]);
-            for _ in 0..8 { f.frame(); }
+            for _ in 0..8 {
+                f.frame();
+            }
             let dense = mean(&f.read());
             // Empty packed SceneDB rows have type zero (directional) and zero
             // power. The sole active light deliberately sits near the end.
@@ -98,10 +104,14 @@ fn sparse_scenedb_light_slots_do_not_consume_the_sampling_budget() {
             let mut sparse = vec![inactive; 64];
             sparse[61] = light();
             f.lights(sparse);
-            for _ in 0..8 { f.frame(); }
+            for _ in 0..8 {
+                f.frame();
+            }
             let actual = mean(&f.read());
-            assert!(dense > 1.0 && (actual / dense - 1.0).abs() < 0.01,
-                "empty light slots changed illumination: {dense} -> {actual}");
+            assert!(
+                dense > 1.0 && (actual / dense - 1.0).abs() < 0.01,
+                "empty light slots changed illumination: {dense} -> {actual}"
+            );
         }
     });
 }
@@ -192,20 +202,33 @@ fn small_directional_key_preserves_energy_with_empty_and_local_residuals() {
         // Front-facing, back-facing and tangent keys must all agree with the
         // unextracted reference, including an otherwise empty local population.
         for (count, direction) in [1, 2, 17].into_iter().flat_map(|count| {
-            [[0.0, 0.0, -1.0, 0.0], [0.0, 0.0, 1.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
-                .into_iter().map(move |direction| (count, direction))
+            [
+                [0.0, 0.0, -1.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+            ]
+            .into_iter()
+            .map(move |direction| (count, direction))
         }) {
             let mut lights = vec![point([1.0, 1.0, 2.0], [1.0; 3], 4.0); count];
             lights[0].light_type = 0;
             lights[0].direction_outer = direction;
-            for light in &mut lights { light.set_ray_traced_shadows(true); }
+            for light in &mut lights {
+                light.set_ray_traced_shadows(true);
+            }
             f.lights(lights);
-            f.config(HlfsConfig { mode: HlfsMode::RayTraced,
-                debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+            f.config(HlfsConfig {
+                mode: HlfsMode::RayTraced,
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
             f.frame();
             let reference = f.read();
-            f.config(HlfsConfig { sample_scale: 1, debug_mode: HlfsDebugMode::Unfiltered,
-                ..HlfsConfig::ray_traced_presampled() });
+            f.config(HlfsConfig {
+                sample_scale: 1,
+                debug_mode: HlfsDebugMode::Unfiltered,
+                ..HlfsConfig::ray_traced_presampled()
+            });
             for frame in 0..4 {
                 f.frame();
                 for (actual, expected) in f.read().iter().zip(&reference) {
@@ -229,17 +252,27 @@ fn compact_light_populations_do_not_add_candidate_energy_noise() {
             // Co-located sources differ only in power: their summed energy is
             // independent of which shadow sample is selected. Randomly scoring
             // only a subset introduces avoidable estimator variance here.
-            f.lights((0..count).map(|i| {
-                let mut l = point([1.0, 1.0, 2.0], [1.0; 3], 1.0 + (i * i) as f32);
-                l.set_ray_traced_shadows(true);
-                l
-            }).collect());
-            f.config(HlfsConfig { mode: HlfsMode::RayTraced,
-                debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+            f.lights(
+                (0..count)
+                    .map(|i| {
+                        let mut l = point([1.0, 1.0, 2.0], [1.0; 3], 1.0 + (i * i) as f32);
+                        l.set_ray_traced_shadows(true);
+                        l
+                    })
+                    .collect(),
+            );
+            f.config(HlfsConfig {
+                mode: HlfsMode::RayTraced,
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
             f.frame();
             let reference = f.read();
-            f.config(HlfsConfig { sample_scale: 1, debug_mode: HlfsDebugMode::Unfiltered,
-                ..HlfsConfig::ray_traced_presampled() });
+            f.config(HlfsConfig {
+                sample_scale: 1,
+                debug_mode: HlfsDebugMode::Unfiltered,
+                ..HlfsConfig::ray_traced_presampled()
+            });
             for frame in 0..8 {
                 f.frame();
                 for (pixel, (actual, expected)) in f.read().iter().zip(&reference).enumerate() {
@@ -257,27 +290,41 @@ fn compact_light_populations_do_not_add_candidate_energy_noise() {
 #[ignore = "requires Vulkan hardware ray queries"]
 fn uncovered_thin_edges_do_not_expose_small_population_sampling_noise() {
     pollster::block_on(async {
-        for sparse_slots in [false,true] {
+        for sparse_slots in [false, true] {
             let mut f = Fixture::new_rt(65, 49).await;
             empty_scene(&mut f);
             let center = 24 * 65 + 32;
             let mut depths = vec![helio_core::depth::CLEAR; 65 * 49];
             depths[center] = ortho_depth(3.0);
             f.depth_values(&depths);
-            let active: Vec<_> = (0..17).map(|i| {
-                let mut l = point([i as f32 - 8.0, 2.0, 2.0],
-                    [0.2 + (i % 3) as f32 * 0.4, 0.7, 0.3], 20.0 + i as f32 * 30.0);
-                l.set_ray_traced_shadows(true);
-                l
-            }).collect();
+            let active: Vec<_> = (0..17)
+                .map(|i| {
+                    let mut l = point(
+                        [i as f32 - 8.0, 2.0, 2.0],
+                        [0.2 + (i % 3) as f32 * 0.4, 0.7, 0.3],
+                        20.0 + i as f32 * 30.0,
+                    );
+                    l.set_ray_traced_shadows(true);
+                    l
+                })
+                .collect();
             // SceneDB uses sparse entity slots; allocation size is not population.
             let mut inactive = light();
-            inactive.color_intensity = [0.0;4];
+            inactive.color_intensity = [0.0; 4];
             let mut sparse = vec![inactive; 4096];
-            for (i,l) in active.into_iter().enumerate() { sparse[2000+i*37]=l; }
-            f.lights(if sparse_slots { sparse } else { (0..17).map(|i| sparse[2000+i*37]).collect() });
-            f.config(HlfsConfig { mode: HlfsMode::RayTraced,
-                debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+            for (i, l) in active.into_iter().enumerate() {
+                sparse[2000 + i * 37] = l;
+            }
+            f.lights(if sparse_slots {
+                sparse
+            } else {
+                (0..17).map(|i| sparse[2000 + i * 37]).collect()
+            });
+            f.config(HlfsConfig {
+                mode: HlfsMode::RayTraced,
+                debug_mode: HlfsDebugMode::Reference,
+                ..Default::default()
+            });
             f.frame();
             let reference = f.read()[center];
             f.config(HlfsConfig::ray_traced_presampled());
@@ -285,12 +332,18 @@ fn uncovered_thin_edges_do_not_expose_small_population_sampling_noise() {
             // in phases 1/2/3. No history can hide the raw repair estimator's noise.
             for frame in (1..32).filter(|frame| frame % 4 != 0) {
                 f.scene.frame_count = frame;
-                f.graph.find_pass_mut::<HlfsPass>().unwrap().invalidate_history();
+                f.graph
+                    .find_pass_mut::<HlfsPass>()
+                    .unwrap()
+                    .invalidate_history();
                 f.frame();
                 let actual = f.read()[center];
                 for channel in 0..3 {
-                    assert!((actual[channel] - reference[channel]).abs() < reference[channel] * 0.03 + 0.001,
-                        "thin edge frame {frame}: {actual:?}, reference {reference:?}");
+                    assert!(
+                        (actual[channel] - reference[channel]).abs()
+                            < reference[channel] * 0.03 + 0.001,
+                        "thin edge frame {frame}: {actual:?}, reference {reference:?}"
+                    );
                 }
             }
         }
@@ -396,13 +449,27 @@ fn receiver_plane(f: &mut Fixture, z: f32) {
 fn rasterized_depth_preserves_receiver_and_close_contact_shadows() {
     pollster::block_on(async {
         let mut f = Fixture::new_rt(65, 49).await;
-        f.config(HlfsConfig { mode: HlfsMode::RayTraced,
-            debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference,
+            ..Default::default()
+        });
         let proj = helio_core::depth::perspective(0.8, 65.0 / 49.0, 0.1);
-        for camera in [glam::Vec3::new(2.0, 2.0, 6.0), glam::Vec3::new(2.0, 2.0, 24.0)] {
-            let view = glam::Mat4::look_at_rh(camera, glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y);
+        for camera in [
+            glam::Vec3::new(2.0, 2.0, 6.0),
+            glam::Vec3::new(2.0, 2.0, 24.0),
+        ] {
+            let view =
+                glam::Mat4::look_at_rh(camera, glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y);
             f.scene.camera.update(helio_core::GpuCameraUniforms::new(
-                view, proj, camera, 0.1, 200.0, 0, [0.0; 2], proj * view,
+                view,
+                proj,
+                camera,
+                0.1,
+                200.0,
+                0,
+                [0.0; 2],
+                proj * view,
             ));
             let mut l = point(camera.to_array(), [1.0; 3], 100000.0);
             l.position_range[3] = 200.0;
@@ -426,8 +493,10 @@ fn rasterized_depth_preserves_receiver_and_close_contact_shadows() {
                 }
                 receiver_plane(&mut f, z + 0.02);
                 f.frame();
-                assert!(mean(&f.read()) < mean(&reference) * 0.05,
-                    "lost raster contact shadow: camera {camera:?}, distance {distance}");
+                assert!(
+                    mean(&f.read()) < mean(&reference) * 0.05,
+                    "lost raster contact shadow: camera {camera:?}, distance {distance}"
+                );
             }
         }
     });
@@ -572,7 +641,9 @@ fn benchmark_rt_resolution_and_acceleration() {
             f.compact_output();
             let glossy = std::env::var_os("HLFS_RT_PROBE_GLOSSY").is_some();
             let dominant = std::env::var_os("HLFS_RT_PROBE_DOMINANT").is_some();
-            if glossy { f.material([0.7,0.4,0.2,1.0], [1.0,0.1,0.9,1.0]); }
+            if glossy {
+                f.material([0.7, 0.4, 0.2, 1.0], [1.0, 0.1, 0.9, 1.0]);
+            }
             f.config(HlfsConfig {
                 mode: HlfsMode::RayTraced,
                 sample_scale: scale,
@@ -658,7 +729,11 @@ fn benchmark_rt_resolution_and_acceleration() {
                                     2.0,
                                 ],
                                 [1.0, 0.8, 0.5],
-                                if dominant && i == 0 { 8.0 } else { 16.0 / 1024.0 },
+                                if dominant && i == 0 {
+                                    8.0
+                                } else {
+                                    16.0 / 1024.0
+                                },
                             );
                             light.set_ray_traced_shadows(shadowed);
                             light
@@ -696,7 +771,8 @@ fn benchmark_rt_resolution_and_acceleration() {
                 encoder.resolve_query_set(&query, 0..2, &resolve, 0);
                 encoder.copy_buffer_to_buffer(&resolve, 0, &read, 0, 16);
                 f.queue.submit([encoder.finish()]);
-                let tlas_encode_submit_ms = cpu.elapsed().as_secs_f64() * 1000.0 - cpu_lights_ms - cpu_instances_ms;
+                let tlas_encode_submit_ms =
+                    cpu.elapsed().as_secs_f64() * 1000.0 - cpu_lights_ms - cpu_instances_ms;
                 f.frame();
                 // The fixture owns its device, so RenderGraph waits for GPU
                 // timestamp readback here. This is wall time, not CPU work.
@@ -743,9 +819,22 @@ fn benchmark_rt_resolution_and_acceleration() {
                 drop(bytes);
                 read.unmap();
                 if frame >= warmup {
-                    rows.push((graph_ms + tlas_ms, tlas_ms, graph_ms, frame_wall_ms, stages,
-                        [cpu_lights_ms, cpu_instances_ms, tlas_encode_submit_ms,
-                         frame_wall_ms - cpu_lights_ms - cpu_instances_ms - tlas_encode_submit_ms]));
+                    rows.push((
+                        graph_ms + tlas_ms,
+                        tlas_ms,
+                        graph_ms,
+                        frame_wall_ms,
+                        stages,
+                        [
+                            cpu_lights_ms,
+                            cpu_instances_ms,
+                            tlas_encode_submit_ms,
+                            frame_wall_ms
+                                - cpu_lights_ms
+                                - cpu_instances_ms
+                                - tlas_encode_submit_ms,
+                        ],
+                    ));
                 }
             }
             if let Ok(directory) = std::env::var("HLFS_RT_PROBE_OUTPUT") {
@@ -810,24 +899,31 @@ fn local_light_grid_output_is_repeatable() {
                     candidates_per_sample: 8,
                     ..Default::default()
                 });
-                f.lights((0..48).map(|i| {
-                    let mut light = point(
-                        [(i % 32) as f32 * 0.25 - 4.0,
-                         (i / 32) as f32 * 0.25 - 4.0, 2.0],
-                        [1.0, 0.7, 0.4],
-                        if i % 13 == 0 { 0.0 } else { 4.0 },
-                    );
-                    if mixed && i % 7 == 0 {
-                        light.light_type = 0;
-                        light.direction_outer = [0.0, 0.0, -1.0, 0.0];
-                    } else if mixed && i % 5 == 0 {
-                        light.light_type = 2;
-                        light.direction_outer = [0.0, 0.0, -1.0, 0.5];
-                        light.inner_angle = 0.9;
-                    }
-                    light.set_ray_traced_shadows(true);
-                    light
-                }).collect());
+                f.lights(
+                    (0..48)
+                        .map(|i| {
+                            let mut light = point(
+                                [
+                                    (i % 32) as f32 * 0.25 - 4.0,
+                                    (i / 32) as f32 * 0.25 - 4.0,
+                                    2.0,
+                                ],
+                                [1.0, 0.7, 0.4],
+                                if i % 13 == 0 { 0.0 } else { 4.0 },
+                            );
+                            if mixed && i % 7 == 0 {
+                                light.light_type = 0;
+                                light.direction_outer = [0.0, 0.0, -1.0, 0.0];
+                            } else if mixed && i % 5 == 0 {
+                                light.light_type = 2;
+                                light.direction_outer = [0.0, 0.0, -1.0, 0.5];
+                                light.inner_angle = 0.9;
+                            }
+                            light.set_ray_traced_shadows(true);
+                            light
+                        })
+                        .collect(),
+                );
                 empty_scene(&mut f);
                 let mut pixels = Vec::new();
                 for _ in 0..4 {
@@ -835,7 +931,10 @@ fn local_light_grid_output_is_repeatable() {
                     pixels.extend(f.read().iter().flat_map(|rgb| rgb.map(f32::to_bits)));
                 }
                 if let Some(expected) = &baseline {
-                    assert!(pixels == *expected, "mixed={mixed}, run={run}: identical local lights changed final output");
+                    assert!(
+                        pixels == *expected,
+                        "mixed={mixed}, run={run}: identical local lights changed final output"
+                    );
                 } else {
                     baseline = Some(pixels);
                 }
@@ -869,7 +968,10 @@ fn benchmark_candidate_output_audit() {
             ("packed-id-overflow", 65536, true, 2, 8),
             ("hdr-material-overflow", 1024, false, 2, 8),
         ] {
-            if selected_case.as_deref().is_some_and(|selected| selected != case) {
+            if selected_case
+                .as_deref()
+                .is_some_and(|selected| selected != case)
+            {
                 continue;
             }
             let mut f = Fixture::new_rt(65, 49).await;
@@ -1016,8 +1118,8 @@ fn benchmark_rt_quality_frontier() {
     let reactive_history = std::env::var_os("HLFS_RT_QUALITY_REACTIVE").is_some();
     let capture_motion = std::env::var_os("HLFS_RT_QUALITY_CAPTURE_MOTION").is_some();
     let glossy_motion = std::env::var_os("HLFS_RT_QUALITY_GLOSSY_MOTION").is_some();
-    let camera_motion = glossy_motion
-        || std::env::var_os("HLFS_RT_QUALITY_CAMERA_MOTION").is_some();
+    let camera_motion =
+        glossy_motion || std::env::var_os("HLFS_RT_QUALITY_CAMERA_MOTION").is_some();
     // Freeze an additional validation fixture; do not replace the original.
     // Constant-depth plane stays geometrically valid under lateral camera motion.
     let camera_at = |frame: u32| {
@@ -1050,12 +1152,14 @@ fn benchmark_rt_quality_frontier() {
     };
     let selected_setting = std::env::var("HLFS_RT_QUALITY_SETTING").ok();
     let settings = if let Some(setting) = &selected_setting {
-        let (samples,candidates)=setting.split_once(':').expect("samples:candidates");
-        let samples=samples.parse::<u32>().unwrap();
-        let candidates=candidates.parse::<u32>().unwrap();
+        let (samples, candidates) = setting.split_once(':').expect("samples:candidates");
+        let samples = samples.parse::<u32>().unwrap();
+        let candidates = candidates.parse::<u32>().unwrap();
         assert!((1..=4).contains(&samples) && (1..=16).contains(&candidates));
-        vec![(samples,candidates)]
-    } else { vec![(1,4),(1,8),(2,4),(2,8),(4,8)] };
+        vec![(samples, candidates)]
+    } else {
+        vec![(1, 4), (1, 8), (2, 4), (2, 8), (4, 8)]
+    };
     std::fs::create_dir_all(&directory).unwrap();
     pollster::block_on(async {
         let checkpoints = [
@@ -1063,14 +1167,18 @@ fn benchmark_rt_quality_frontier() {
         ];
         let mut csv = String::from("seed,samples,candidates,sample_scale,discovery,tile_presampling,reactive_history,mode,frame,mask,pixels,relative_mean_error,nrmse,quality_pass\n");
         let mut final_failures = 0usize;
-        let mut motion_csv = String::from("seed,samples,candidates,reactive_history,static_frame_delta_rms,motion_pass\n");
+        let mut motion_csv = String::from(
+            "seed,samples,candidates,reactive_history,static_frame_delta_rms,motion_pass\n",
+        );
         let mut motion_failures = 0usize;
-        let mut grain_csv = String::from("seed,samples,candidates,frame,display_residual_highpass_rms,grain_pass\n");
+        let mut grain_csv = String::from(
+            "seed,samples,candidates,frame,display_residual_highpass_rms,grain_pass\n",
+        );
         let mut grain_failures = 0usize;
         // Fixed regression seeds. Both sets have now been exercised during
         // development; they are not an untouched holdout. Keep thresholds fixed.
         let seeds = if std::env::var_os("HLFS_RT_QUALITY_REVIEW_SEEDS").is_some() {
-            [307u32,401,503,601]
+            [307u32, 401, 503, 601]
         } else if std::env::var_os("HLFS_RT_QUALITY_HELD_OUT").is_some() {
             [101u32, 131, 173, 211]
         } else {
@@ -1101,9 +1209,17 @@ fn benchmark_rt_quality_frontier() {
                                 0.8 + ((i + seed) % 5) as f32 * 0.4,
                             ],
                             color,
-                            if i == (if frame >= 80 && std::env::var_os("HLFS_RT_QUALITY_SWITCH_KEY").is_some() { 31 } else { 0 }) {
+                            if i == (if frame >= 80
+                                && std::env::var_os("HLFS_RT_QUALITY_SWITCH_KEY").is_some()
+                            {
+                                31
+                            } else {
+                                0
+                            }) {
                                 8.0
-                            } else { 0.025 },
+                            } else {
+                                0.025
+                            },
                         );
                         light.set_ray_traced_shadows(true);
                         light
@@ -1114,10 +1230,18 @@ fn benchmark_rt_quality_frontier() {
                 Ok("1440p") => (2560, 1440),
                 Ok("4k") => (3840, 2160),
                 Ok(other) => panic!("unknown quality resolution: {other}"),
-                Err(_) => if camera_motion { (257, 145) } else { (129, 73) },
+                Err(_) => {
+                    if camera_motion {
+                        (257, 145)
+                    } else {
+                        (129, 73)
+                    }
+                }
             };
             let mut oracle = Fixture::new_rt(width, height).await;
-            if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() { oracle.ambient = [0.0; 3]; }
+            if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() {
+                oracle.ambient = [0.0; 3];
+            }
             if glossy_motion {
                 oracle.material([0.7, 0.4, 0.2, 1.0], [1.0, 0.1, 0.9, 1.0]);
             }
@@ -1144,7 +1268,9 @@ fn benchmark_rt_quality_frontier() {
             let initial: Vec<_> = references[0].iter().map(luminance).collect();
             let peak = initial.iter().copied().fold(0.0, f64::max);
             let mut f = Fixture::new_rt(width, height).await;
-            if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() { f.ambient = [0.0; 3]; }
+            if std::env::var_os("HLFS_RT_QUALITY_DIRECT_ONLY").is_some() {
+                f.ambient = [0.0; 3];
+            }
             if glossy_motion {
                 f.material([0.7, 0.4, 0.2, 1.0], [1.0, 0.1, 0.9, 1.0]);
             }
@@ -1159,7 +1285,8 @@ fn benchmark_rt_quality_frontier() {
                         candidates_per_sample: candidates,
                         discovery_fraction: discovery,
                         tile_presampling,
-                        temporal_resampling: std::env::var_os("HLFS_RT_QUALITY_TEMPORAL_RIS").is_some(),
+                        temporal_resampling: std::env::var_os("HLFS_RT_QUALITY_TEMPORAL_RIS")
+                            .is_some(),
                         reactive_history,
                         ..Default::default()
                     });
@@ -1199,11 +1326,15 @@ fn benchmark_rt_quality_frontier() {
                                 }
                                 previous_static_display = Some(image.as_raw().clone());
                             }
-                            image.save(std::path::Path::new(&directory).join(format!(
-                                "motion-seed{seed}-spp{samples}-c{candidates}-f{frame:03}.png"
-                            ))).unwrap();
+                            image
+                                .save(std::path::Path::new(&directory).join(format!(
+                                    "motion-seed{seed}-spp{samples}-c{candidates}-f{frame:03}.png"
+                                )))
+                                .unwrap();
                             Some(pixels)
-                        } else { None };
+                        } else {
+                            None
+                        };
                         let Some(reference_index) =
                             checkpoints.iter().position(|&value| value == frame)
                         else {
@@ -1212,7 +1343,8 @@ fn benchmark_rt_quality_frontier() {
                         let reference = &references[reference_index];
                         let pixels = motion_pixels.unwrap_or_else(|| f.read());
                         assert!(pixels.iter().flatten().all(|v| v.is_finite()));
-                        if capture_motion && mode == HlfsDebugMode::Final
+                        if capture_motion
+                            && mode == HlfsDebugMode::Final
                             && [63, 64, 65, 71, 79, 80, 81, 95].contains(&frame)
                         {
                             let rms = display_residual_highpass_rms(
@@ -1304,8 +1436,16 @@ fn benchmark_rt_quality_frontier() {
         }
         std::fs::write(std::path::Path::new(&directory).join("quality.csv"), csv).unwrap();
         if capture_motion {
-            std::fs::write(std::path::Path::new(&directory).join("motion-metrics.csv"), motion_csv).unwrap();
-            std::fs::write(std::path::Path::new(&directory).join("grain-metrics.csv"), grain_csv).unwrap();
+            std::fs::write(
+                std::path::Path::new(&directory).join("motion-metrics.csv"),
+                motion_csv,
+            )
+            .unwrap();
+            std::fs::write(
+                std::path::Path::new(&directory).join("grain-metrics.csv"),
+                grain_csv,
+            )
+            .unwrap();
         }
         // Write all failures before returning a failing gate, never a misleading
         // successful test exit for the new review-acceptance fixture.
@@ -1315,8 +1455,14 @@ fn benchmark_rt_quality_frontier() {
                 "final-output quality gate failed; see quality.csv"
             );
         }
-        assert_eq!(motion_failures, 0, "moving visual flicker gate failed; see motion-metrics.csv and captured frames");
-        assert_eq!(grain_failures, 0, "spatial grain gate failed; see grain-metrics.csv and captured frames");
+        assert_eq!(
+            motion_failures, 0,
+            "moving visual flicker gate failed; see motion-metrics.csv and captured frames"
+        );
+        assert_eq!(
+            grain_failures, 0,
+            "spatial grain gate failed; see grain-metrics.csv and captured frames"
+        );
     });
 }
 
@@ -1449,7 +1595,8 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
-            f.ray_frame.publish(f.scene.frame_count, acceleration.frame());
+            f.ray_frame
+                .publish(f.scene.frame_count, acceleration.frame());
             f.frame();
             mean(&f.read())
         };
@@ -1506,20 +1653,32 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
             shadow < clear * 0.2,
             "SceneDB offscreen caster missing: {shadow}/{clear}"
         );
-        db.world.get_mut::<MaterialComponent>(material).unwrap().flags |= helio_mats::FLAG_ALPHA_BLEND;
+        db.world
+            .get_mut::<MaterialComponent>(material)
+            .unwrap()
+            .flags |= helio_mats::FLAG_ALPHA_BLEND;
         db.world.insert(material, RayTransmission([1.0; 3]));
         assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01);
         // One mesh may simultaneously use both acceleration opacity classes.
         let opaque_material = db.world.spawn();
-        db.world.insert(opaque_material, MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0));
+        db.world.insert(
+            opaque_material,
+            MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0),
+        );
         let mut opaque_row = *db.world.get::<StaticObjectComponent>(object).unwrap();
         opaque_row.material_slot = opaque_material.index();
         opaque_row.material_generation = opaque_material.generation() + 1;
         let opaque_object = db.world.spawn();
         db.world.insert(opaque_object, opaque_row);
-        assert!(render(&mut f, &mut acceleration, &db) < clear * 0.01, "opaque mesh variant must block through clear glass");
+        assert!(
+            render(&mut f, &mut acceleration, &db) < clear * 0.01,
+            "opaque mesh variant must block through clear glass"
+        );
         db.world.despawn(opaque_object);
-        assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01, "opaque variant removal must preserve the glass variant");
+        assert!(
+            (render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01,
+            "opaque variant removal must preserve the glass variant"
+        );
         db.world.insert(material, RayTransmission([0.25; 3]));
         assert!((render(&mut f, &mut acceleration, &db) / clear - 0.25).abs() < 0.015);
         db.world.insert(material, RayTransmission([f32::NAN; 3]));
@@ -1527,7 +1686,10 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         assert!(acceleration.prepare(&db.world).is_err());
         assert!(acceleration.transmission().is_none());
         db.world.remove::<RayTransmission>(material);
-        db.world.get_mut::<MaterialComponent>(material).unwrap().flags &= !helio_mats::FLAG_ALPHA_BLEND;
+        db.world
+            .get_mut::<MaterialComponent>(material)
+            .unwrap()
+            .flags &= !helio_mats::FLAG_ALPHA_BLEND;
         assert!(render(&mut f, &mut acceleration, &db) < clear * 0.2);
         {
             let mut mesh = db.world.get_mut::<MeshComponent>(mesh).unwrap();
@@ -1608,7 +1770,8 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
-            f.ray_frame.publish(f.scene.frame_count, acceleration.frame());
+            f.ray_frame
+                .publish(f.scene.frame_count, acceleration.frame());
             f.frame();
             mean(&f.read())
         };
@@ -1688,7 +1851,11 @@ fn colored_thin_sheets_multiply_and_opaque_blockers_still_occlude() {
     pollster::block_on(async {
         for debug_mode in [HlfsDebugMode::Reference, HlfsDebugMode::Unfiltered] {
             let mut f = Fixture::new_rt(65, 49).await;
-            f.config(HlfsConfig { debug_mode, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
+            f.config(HlfsConfig {
+                debug_mode,
+                sample_scale: 1,
+                ..HlfsConfig::ray_traced_presampled()
+            });
             f.lights(vec![light()]);
             empty_scene(&mut f);
             f.frame();
@@ -1697,16 +1864,26 @@ fn colored_thin_sheets_multiply_and_opaque_blockers_still_occlude() {
             for (rows, expected) in [
                 (vec![[1.0f32, 1.0, 1.0, 0.0]], [1.0, 1.0, 1.0]),
                 (vec![[0.8, 0.2, 0.05, 0.0]], [0.8, 0.2, 0.05]),
-                (vec![[0.8, 0.2, 0.05, 0.0], [0.5, 0.6, 0.8, 0.0]], [0.4, 0.12, 0.04]),
+                (
+                    vec![[0.8, 0.2, 0.05, 0.0], [0.5, 0.6, 0.8, 0.0]],
+                    [0.4, 0.12, 0.04],
+                ),
                 (vec![[0.8, 0.2, 0.05, 0.0], [0.0; 4]], [0.0; 3]),
                 (vec![[0.0; 4], [0.8, 0.2, 0.05, 0.0]], [0.0; 3]),
             ] {
-                let instances: Vec<_> = (0..rows.len()).map(|i| TlasInstanceInput {
-                    mesh_id: 1,
-                    transform: [1.0,0.0,0.0,i as f32,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0],
-                }).collect();
+                let instances: Vec<_> = (0..rows.len())
+                    .map(|i| TlasInstanceInput {
+                        mesh_id: 1,
+                        transform: [
+                            1.0, 0.0, 0.0, i as f32, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                        ],
+                    })
+                    .collect();
                 let mut encoder = f.device.create_command_encoder(&Default::default());
-                f.scene.tlas_manager.build(&mut encoder, &instances, &f.scene.blas_manager).unwrap();
+                f.scene
+                    .tlas_manager
+                    .build(&mut encoder, &instances, &f.scene.blas_manager)
+                    .unwrap();
                 f.queue.submit([encoder.finish()]);
                 f.transmission = Some(transmission_buffer(&f.device, &rows));
                 f.frame();
@@ -1714,8 +1891,12 @@ fn colored_thin_sheets_multiply_and_opaque_blockers_still_occlude() {
                 for channel in 0..3 {
                     let lit: f32 = clear.iter().map(|p| p[channel]).sum();
                     let transmitted: f32 = actual.iter().map(|p| p[channel]).sum();
-                    assert!((transmitted / lit - expected[channel]).abs() < 0.015,
-                        "{debug_mode:?}: channel {channel}, expected {}, actual {}", expected[channel], transmitted / lit);
+                    assert!(
+                        (transmitted / lit - expected[channel]).abs() < 0.015,
+                        "{debug_mode:?}: channel {channel}, expected {}, actual {}",
+                        expected[channel],
+                        transmitted / lit
+                    );
                 }
             }
             // Dropping metadata restores the binary path, never stale tint.
@@ -1736,18 +1917,30 @@ fn colored_visibility_cache_preserves_channels_with_many_lights() {
         f.lights(vec![source; 33]);
         blocker(&mut f, 5.0);
         f.transmission = Some(transmission_buffer(&f.device, &[[0.7, 0.3, 0.1, 0.0]]));
-        f.config(HlfsConfig { debug_mode: HlfsDebugMode::Reference, sample_scale: 1, ..HlfsConfig::ray_traced_presampled() });
+        f.config(HlfsConfig {
+            debug_mode: HlfsDebugMode::Reference,
+            sample_scale: 1,
+            ..HlfsConfig::ray_traced_presampled()
+        });
         f.frame();
         let reference = f.read();
         for (sample_scale, temporal_resampling) in [(1, false), (2, true)] {
-            f.config(HlfsConfig { debug_mode: HlfsDebugMode::Unfiltered, sample_scale, temporal_resampling, ..HlfsConfig::ray_traced_presampled() });
+            f.config(HlfsConfig {
+                debug_mode: HlfsDebugMode::Unfiltered,
+                sample_scale,
+                temporal_resampling,
+                ..HlfsConfig::ray_traced_presampled()
+            });
             for _ in 0..8 {
                 f.frame();
                 let result = f.read();
                 for channel in 0..3 {
                     let expected: f32 = reference.iter().map(|p| p[channel]).sum();
                     let actual: f32 = result.iter().map(|p| p[channel]).sum();
-                    assert!((actual / expected - 1.0).abs() < 0.04, "colored RIS channel {channel}: {actual}/{expected}");
+                    assert!(
+                        (actual / expected - 1.0).abs() < 0.04,
+                        "colored RIS channel {channel}: {actual}/{expected}"
+                    );
                 }
             }
         }
@@ -1763,25 +1956,47 @@ fn temporal_ris_rejects_same_capacity_light_reassignment() {
         f.ambient = [0.0; 3];
         empty_scene(&mut f);
         let make_lights = |start: usize| {
-            (0..1024).map(|i| {
-                let mut light = point([0.0, 0.0, 2.0], [1.0, 0.7, 0.3],
-                    if (start..start+128).contains(&i) { 2.0 / 128.0 } else { 0.0 });
-                light.set_ray_traced_shadows(true);
-                light
-            }).collect::<Vec<_>>()
+            (0..1024)
+                .map(|i| {
+                    let mut light = point(
+                        [0.0, 0.0, 2.0],
+                        [1.0, 0.7, 0.3],
+                        if (start..start + 128).contains(&i) {
+                            2.0 / 128.0
+                        } else {
+                            0.0
+                        },
+                    );
+                    light.set_ray_traced_shadows(true);
+                    light
+                })
+                .collect::<Vec<_>>()
         };
-        f.config(HlfsConfig { mode: HlfsMode::RayTraced, debug_mode: HlfsDebugMode::Reference, ..Default::default() });
+        f.config(HlfsConfig {
+            mode: HlfsMode::RayTraced,
+            debug_mode: HlfsDebugMode::Reference,
+            ..Default::default()
+        });
         f.lights(make_lights(0));
         f.frame();
         let reference = mean(&f.read());
         assert!(reference > 0.001);
-        f.config(HlfsConfig { temporal_resampling: true, debug_mode: HlfsDebugMode::Unfiltered, ..HlfsConfig::ray_traced_presampled() });
-        for _ in 0..16 { f.frame(); }
+        f.config(HlfsConfig {
+            temporal_resampling: true,
+            debug_mode: HlfsDebugMode::Unfiltered,
+            ..HlfsConfig::ray_traced_presampled()
+        });
+        for _ in 0..16 {
+            f.frame();
+        }
         for start in [512, 128, 768, 0] {
             f.lights(make_lights(start));
             f.frame();
             let error = (mean(&f.read()) - reference).abs() / reference;
-            assert!(error < 0.08, "first frame after light-slot reassignment {start}: relative energy error {error}");
+            assert!(
+                error < 0.08,
+                "first frame after light-slot reassignment {start}: relative energy error {error}"
+            );
         }
     });
 }
@@ -1790,24 +2005,32 @@ fn temporal_ris_rejects_same_capacity_light_reassignment() {
 #[ignore = "requires Vulkan hardware ray queries"]
 fn exact_transmission_sets_bypass_noisy_history_filters() {
     pollster::block_on(async {
-        let mut f=Fixture::new_rt(65,49).await;
-        f.ambient=[0.0;3];
-        blocker(&mut f,5.0);
-        f.transmission=Some(transmission_buffer(&f.device,&[[0.7,0.3,0.1,0.0]]));
-        let sources:Vec<_>=(0..8).map(|i| {
-            let mut source=point([8.0,i as f32*0.3-1.0,1.0],[1.0,0.7,0.4],20.0);
-            source.position_range[3]=10.0;
-            source.set_ray_traced_shadows(true);source
-        }).collect();
+        let mut f = Fixture::new_rt(65, 49).await;
+        f.ambient = [0.0; 3];
+        blocker(&mut f, 5.0);
+        f.transmission = Some(transmission_buffer(&f.device, &[[0.7, 0.3, 0.1, 0.0]]));
+        let sources: Vec<_> = (0..8)
+            .map(|i| {
+                let mut source = point([8.0, i as f32 * 0.3 - 1.0, 1.0], [1.0, 0.7, 0.4], 20.0);
+                source.position_range[3] = 10.0;
+                source.set_ray_traced_shadows(true);
+                source
+            })
+            .collect();
         f.lights(sources);
-        for frame in [0,1,8,16] {
-            let mut images=Vec::new();
-            for debug_mode in [HlfsDebugMode::Final,HlfsDebugMode::Reference] {
-                f.config(HlfsConfig {debug_mode,sample_scale:1,..HlfsConfig::ray_traced_presampled()});
-                f.scene.frame_count=frame;
-                f.frame();images.push(f.read());
+        for frame in [0, 1, 8, 16] {
+            let mut images = Vec::new();
+            for debug_mode in [HlfsDebugMode::Final, HlfsDebugMode::Reference] {
+                f.config(HlfsConfig {
+                    debug_mode,
+                    sample_scale: 1,
+                    ..HlfsConfig::ray_traced_presampled()
+                });
+                f.scene.frame_count = frame;
+                f.frame();
+                images.push(f.read());
             }
-            for (i,(actual,expected)) in images[0].iter().zip(&images[1]).enumerate() {
+            for (i, (actual, expected)) in images[0].iter().zip(&images[1]).enumerate() {
                 for channel in 0..3 {
                     assert!((actual[channel]-expected[channel]).abs()<0.00001,
                         "exact colored lighting filtered at pixel {i}, frame {frame}: {actual:?}/{expected:?}");

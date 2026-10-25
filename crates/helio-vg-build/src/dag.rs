@@ -24,7 +24,9 @@ use crate::deviation::{measure, Measured};
 use crate::math::*;
 use crate::mesh::{mark_floating, weld, BuildError, MeshInput, Tri, VertexStore};
 use crate::partition::partition;
-use crate::simplify::{simplify_group, GlobalEdges, SimplifyResult, COVERAGE_FACTOR, COVERAGE_FOOTPRINT};
+use crate::simplify::{
+    simplify_group, GlobalEdges, SimplifyResult, COVERAGE_FACTOR, COVERAGE_FOOTPRINT,
+};
 
 pub const NONE: u32 = u32::MAX;
 /// Safety factor on the measured deviation (covers the interior of original
@@ -121,7 +123,6 @@ fn split_into_clusters(vs: &VertexStore, tris: &[([u32; 3], u32)]) -> Vec<(Vec<[
     }
     out
 }
-
 
 /// Mean projected area of the mesh over the three axis directions: each
 /// vertex and triangle centroid marks a cell of a 128 x 128 grid over the
@@ -226,7 +227,11 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
         let groups = partition(&dag.vs, &cur, &dag.clusters, group_cap);
         // A group that covers everything left has no interior boundary to
         // protect, so it can halve like a monolithic simplification.
-        let keep = if groups.len() == 1 { (1, 2) } else { LEVEL_KEEP };
+        let keep = if groups.len() == 1 {
+            (1, 2)
+        } else {
+            LEVEL_KEEP
+        };
         let whole = groups.len() == 1;
         let base0 = dag.vs.len() as u32;
         // Error budget per group: a group that would raise the error far above
@@ -234,7 +239,11 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
         // `simplify_group`), so one hard region cannot pin every ancestor.
         let child_max: Vec<f32> = groups
             .iter()
-            .map(|g| g.iter().map(|&c| dag.clusters[c as usize].self_error).fold(0.0f32, f32::max))
+            .map(|g| {
+                g.iter()
+                    .map(|&c| dag.clusters[c as usize].self_error)
+                    .fold(0.0f32, f32::max)
+            })
             .collect();
         let typical = {
             let mut v: Vec<f32> = child_max.iter().copied().filter(|&e| e > 0.0).collect();
@@ -242,7 +251,11 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             v.get(v.len() / 2).copied().unwrap_or(0.0)
         };
         let global = (groups.len() > 1).then(|| {
-            GlobalEdges::build(&dag.vs, cur.iter().flat_map(|&c| dag.clusters[c as usize].tris.iter()))
+            GlobalEdges::build(
+                &dag.vs,
+                cur.iter()
+                    .flat_map(|&c| dag.clusters[c as usize].tris.iter()),
+            )
         });
         let results: Vec<SimplifyResult> = groups
             .par_iter()
@@ -272,7 +285,14 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
                         .max(typical * ERR_GROWTH_TYPICAL)
                         .max(BUDGET_EDGE_FRACTION * mean_edge)
                 };
-                simplify_group(&dag.vs, &tris, tris.len() * keep.0 / keep.1, budget, whole, global.as_ref())
+                simplify_group(
+                    &dag.vs,
+                    &tris,
+                    tris.len() * keep.0 / keep.1,
+                    budget,
+                    whole,
+                    global.as_ref(),
+                )
             })
             .collect();
 
@@ -282,7 +302,9 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             tris: Vec<([u32; 3], u32)>,
             coverage: Option<(usize, f32)>,
         }
-        let results_lock = results.iter().fold((0usize, 0usize, 0usize), |a, r| (a.0 + r.locked, a.1 + r.verts, a.2 + r.floating));
+        let results_lock = results.iter().fold((0usize, 0usize, 0usize), |a, r| {
+            (a.0 + r.locked, a.1 + r.verts, a.2 + r.floating)
+        });
         let mut staged: Vec<Staged> = Vec::with_capacity(results.len());
         for res in results {
             let coverage = res.coverage_tris;
@@ -374,7 +396,9 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
         // `DENSITY_TARGET` triangles on each pixel of the asset's silhouette.
         let level_pixel = (DENSITY_TARGET * silhouette / old_tris.max(1) as f32).sqrt();
         let mut next: Vec<u32> = Vec::with_capacity(new_total);
-        for (((members, st), pieces), meas) in groups.into_iter().zip(staged).zip(parts).zip(measured) {
+        for (((members, st), pieces), meas) in
+            groups.into_iter().zip(staged).zip(parts).zip(measured)
+        {
             // Group sphere contains every child sphere (so containment is
             // monotone up the DAG) and every vertex the simplifier produced.
             let mut sphere = dag.clusters[members[0] as usize].sphere;
@@ -396,8 +420,12 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
             // own estimate) is deliberately not used.
             let floor = 1e-5 * sphere[3].max(1e-6);
             let mut error = match st.coverage {
-                Some((n, foot)) => {                    let spacing = sphere[3] * (4.18879 / n.max(1) as f32).cbrt();
-                    child_err.max(COVERAGE_FOOTPRINT * foot).max(COVERAGE_FACTOR * spacing).max(floor)
+                Some((n, foot)) => {
+                    let spacing = sphere[3] * (4.18879 / n.max(1) as f32).cbrt();
+                    child_err
+                        .max(COVERAGE_FOOTPRINT * foot)
+                        .max(COVERAGE_FACTOR * spacing)
+                        .max(floor)
                 }
                 None => {
                     // Measured deviation, relaxed by at most `DENSITY_TOLERANCE_GAIN` while
@@ -413,7 +441,9 @@ pub fn build_dag(mesh: &MeshInput) -> Result<Dag, BuildError> {
                     }
                     let footprint = (area / count.max(1) as f64).sqrt() as f32;
                     let pixel = level_pixel.max(0.5 * footprint);
-                    child_err.max(geo.min(pixel.max(geo / DENSITY_TOLERANCE_GAIN))).max(floor)
+                    child_err
+                        .max(geo.min(pixel.max(geo / DENSITY_TOLERANCE_GAIN)))
+                        .max(floor)
                 }
             };
             if error <= child_err {

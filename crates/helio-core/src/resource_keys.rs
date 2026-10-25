@@ -81,11 +81,19 @@ pub const fn depth_draw_signature() -> ResourceKey<u64> {
 
 /// Folds `value` into this frame's [`depth_draw_signature`]. Order-independent,
 /// so any number of depth producers can contribute.
-pub fn fold_depth_draw_signature(registry: &mut ResourceRegistry<'_>, value: u64, writer: &'static str) {
+pub fn fold_depth_draw_signature(
+    registry: &mut ResourceRegistry<'_>,
+    value: u64,
+    writer: &'static str,
+) {
     let mut h = value.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     h = (h ^ (h >> 31)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     let sum = registry.get(depth_draw_signature()).unwrap_or(0);
-    registry.write(depth_draw_signature(), sum.wrapping_add(h ^ (h >> 29)), writer);
+    registry.write(
+        depth_draw_signature(),
+        sum.wrapping_add(h ^ (h >> 29)),
+        writer,
+    );
 }
 
 #[cfg(test)]
@@ -96,7 +104,10 @@ mod tests {
     fn shared_names_are_stable() {
         assert_eq!(material_textures::<u32>().name(), "material_textures");
         assert_eq!(coordinate_spaces::<u32>().name(), "coordinate_spaces");
-        assert_eq!(coordinate_spaces_prev::<u32>().name(), "coordinate_spaces_prev");
+        assert_eq!(
+            coordinate_spaces_prev::<u32>().name(),
+            "coordinate_spaces_prev"
+        );
         assert_eq!(render_environment::<u32>().name(), "render_environment");
         assert_eq!(shadow_matrices::<u32>().name(), "shadow_matrices");
         assert_eq!(baked_lightmap::<u32>().name(), "baked_lightmap");

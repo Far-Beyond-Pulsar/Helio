@@ -94,9 +94,16 @@ impl Group {
         let values = self
             .settings
             .iter()
-            .map(|s| lookup(s.key).and_then(|v| s.accept(v)).unwrap_or_else(|| s.default.clone()))
+            .map(|s| {
+                lookup(s.key)
+                    .and_then(|v| s.accept(v))
+                    .unwrap_or_else(|| s.default.clone())
+            })
             .collect();
-        Resolved { group: self, values }
+        Resolved {
+            group: self,
+            values,
+        }
     }
 
     /// The defaults.
@@ -110,7 +117,9 @@ impl Setting {
     pub fn accept(&self, value: Value) -> Option<Value> {
         match (self.kind, value) {
             (Kind::Toggle, Value::Bool(b)) => Some(Value::Bool(b)),
-            (Kind::Number { min, max, .. }, Value::Number(n)) if n.is_finite() => Some(Value::Number(n.clamp(min, max))),
+            (Kind::Number { min, max, .. }, Value::Number(n)) if n.is_finite() => {
+                Some(Value::Number(n.clamp(min, max)))
+            }
             (Kind::Integer { min, max }, Value::Number(n)) if n.is_finite() => {
                 Some(Value::Number(n.round().clamp(min as f64, max as f64)))
             }
@@ -118,10 +127,13 @@ impl Setting {
             (Kind::Integer { .. } | Kind::Number { .. }, Value::Text(t)) => {
                 self.accept(Value::Number(t.trim().parse().ok()?))
             }
-            (Kind::Choice(options), Value::Text(t)) => {
-                options.iter().find(|o| o.value == t).map(|o| Value::Text(Cow::Borrowed(o.value)))
+            (Kind::Choice(options), Value::Text(t)) => options
+                .iter()
+                .find(|o| o.value == t)
+                .map(|o| Value::Text(Cow::Borrowed(o.value))),
+            (Kind::Color, Value::Color(c)) if c.iter().all(|x| x.is_finite()) => {
+                Some(Value::Color(c))
             }
-            (Kind::Color, Value::Color(c)) if c.iter().all(|x| x.is_finite()) => Some(Value::Color(c)),
             _ => None,
         }
     }
@@ -201,8 +213,22 @@ impl Resolved {
     }
 }
 
-const fn toggle(key: &'static str, label: &'static str, page: &'static str, default: bool, description: &'static str) -> Setting {
-    Setting { key, label, description, page, kind: Kind::Toggle, default: Value::Bool(default), applies: Applies::Rebuild }
+const fn toggle(
+    key: &'static str,
+    label: &'static str,
+    page: &'static str,
+    default: bool,
+    description: &'static str,
+) -> Setting {
+    Setting {
+        key,
+        label,
+        description,
+        page,
+        kind: Kind::Toggle,
+        default: Value::Bool(default),
+        applies: Applies::Rebuild,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -214,7 +240,15 @@ const fn number(
     default: f64,
     description: &'static str,
 ) -> Setting {
-    Setting { key, label, description, page, kind: Kind::Number { min, max, step }, default: Value::Number(default), applies: Applies::Rebuild }
+    Setting {
+        key,
+        label,
+        description,
+        page,
+        kind: Kind::Number { min, max, step },
+        default: Value::Number(default),
+        applies: Applies::Rebuild,
+    }
 }
 
 const fn integer(
@@ -225,7 +259,15 @@ const fn integer(
     default: i64,
     description: &'static str,
 ) -> Setting {
-    Setting { key, label, description, page, kind: Kind::Integer { min, max }, default: Value::Number(default as f64), applies: Applies::Rebuild }
+    Setting {
+        key,
+        label,
+        description,
+        page,
+        kind: Kind::Integer { min, max },
+        default: Value::Number(default as f64),
+        applies: Applies::Rebuild,
+    }
 }
 
 const fn pick(
@@ -236,7 +278,15 @@ const fn pick(
     default: &'static str,
     description: &'static str,
 ) -> Setting {
-    Setting { key, label, description, page, kind: Kind::Choice(options), default: Value::Text(Cow::Borrowed(default)), applies: Applies::Rebuild }
+    Setting {
+        key,
+        label,
+        description,
+        page,
+        kind: Kind::Choice(options),
+        default: Value::Text(Cow::Borrowed(default)),
+        applies: Applies::Rebuild,
+    }
 }
 
 const fn live(mut setting: Setting) -> Setting {
@@ -244,7 +294,12 @@ const fn live(mut setting: Setting) -> Setting {
     setting
 }
 
-const QUALITY_TIERS: &[Choice] = &[choice("low", "Low"), choice("medium", "Medium"), choice("high", "High"), choice("ultra", "Ultra")];
+const QUALITY_TIERS: &[Choice] = &[
+    choice("low", "Low"),
+    choice("medium", "Medium"),
+    choice("high", "High"),
+    choice("ultra", "Ultra"),
+];
 
 /// The renderer: its graph (`helio::RendererConfig`) and its quality.
 pub static RENDERER: Group = Group {
@@ -545,10 +600,21 @@ mod tests {
     fn defaults_are_accepted_by_their_settings() {
         for group in GROUPS {
             for s in group.settings {
-                assert_eq!(s.accept(s.default.clone()).as_ref(), Some(&s.default), "{}.{}", group.key, s.key);
+                assert_eq!(
+                    s.accept(s.default.clone()).as_ref(),
+                    Some(&s.default),
+                    "{}.{}",
+                    group.key,
+                    s.key
+                );
             }
             let keys: std::collections::HashSet<_> = group.settings.iter().map(|s| s.key).collect();
-            assert_eq!(keys.len(), group.settings.len(), "duplicate key in {}", group.key);
+            assert_eq!(
+                keys.len(),
+                group.settings.len(),
+                "duplicate key in {}",
+                group.key
+            );
         }
     }
 

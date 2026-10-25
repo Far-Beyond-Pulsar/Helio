@@ -52,7 +52,12 @@ fn upload<T: bytemuck::Pod>(device: &wgpu::Device, label: &str, data: &[T]) -> w
     })
 }
 
-fn read<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, buf: &wgpu::Buffer, count: usize) -> Vec<T> {
+fn read<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buf: &wgpu::Buffer,
+    count: usize,
+) -> Vec<T> {
     let bytes = (count * std::mem::size_of::<T>()) as u64;
     if bytes == 0 {
         return Vec::new();
@@ -83,9 +88,23 @@ struct Gpu {
 
 fn fetch(device: &wgpu::Device, queue: &wgpu::Queue, pass: &VgBvhPass) -> Gpu {
     let header: GpuBvhHeader = read::<GpuBvhHeader>(device, queue, pass.header_buffer(), 1)[0];
-    let nodes = read::<GpuBvhNode>(device, queue, pass.nodes_buffer(), header.node_count as usize);
-    let items = read::<u32>(device, queue, pass.items_buffer(), header.instance_count as usize);
-    Gpu { header, nodes, items }
+    let nodes = read::<GpuBvhNode>(
+        device,
+        queue,
+        pass.nodes_buffer(),
+        header.node_count as usize,
+    );
+    let items = read::<u32>(
+        device,
+        queue,
+        pass.items_buffer(),
+        header.instance_count as usize,
+    );
+    Gpu {
+        header,
+        nodes,
+        items,
+    }
 }
 
 /// Compares the GPU's output with the reference tree and the validity rules.
@@ -99,13 +118,31 @@ fn assert_matches(
     validate(&gpu.nodes, &gpu.items, &gpu.header, instances, objects)
         .unwrap_or_else(|e| panic!("{label}: GPU tree invalid: {e}"));
     let want = header_of(reference, reference.items.len() as u32);
-    assert_eq!(gpu.header.instance_count, want.instance_count, "{label}: instance_count");
-    assert_eq!(gpu.header.leaf_count, want.leaf_count, "{label}: leaf_count");
-    assert_eq!(gpu.header.node_count, want.node_count, "{label}: node_count");
-    assert_eq!(gpu.header.batch_leaf_count, want.batch_leaf_count, "{label}: batch_leaf_count");
+    assert_eq!(
+        gpu.header.instance_count, want.instance_count,
+        "{label}: instance_count"
+    );
+    assert_eq!(
+        gpu.header.leaf_count, want.leaf_count,
+        "{label}: leaf_count"
+    );
+    assert_eq!(
+        gpu.header.node_count, want.node_count,
+        "{label}: node_count"
+    );
+    assert_eq!(
+        gpu.header.batch_leaf_count, want.batch_leaf_count,
+        "{label}: batch_leaf_count"
+    );
     assert_eq!(gpu.header.root_node, want.root_node, "{label}: root_node");
-    assert_eq!(gpu.header.bounds_min, want.bounds_min, "{label}: bounds_min");
-    assert_eq!(gpu.header.bounds_max, want.bounds_max, "{label}: bounds_max");
+    assert_eq!(
+        gpu.header.bounds_min, want.bounds_min,
+        "{label}: bounds_min"
+    );
+    assert_eq!(
+        gpu.header.bounds_max, want.bounds_max,
+        "{label}: bounds_max"
+    );
     let m = gpu.header.leaf_count as u32;
     assert_eq!(
         gpu.header.dispatch_leaves,
@@ -118,7 +155,11 @@ fn assert_matches(
         "{label}: dispatch_instances"
     );
     assert_eq!(gpu.items, reference.items, "{label}: Morton order");
-    assert_eq!(gpu.nodes.len(), reference.nodes.len(), "{label}: node count");
+    assert_eq!(
+        gpu.nodes.len(),
+        reference.nodes.len(),
+        "{label}: node count"
+    );
     for (i, (g, r)) in gpu.nodes.iter().zip(&reference.nodes).enumerate() {
         assert_eq!(g, r, "{label}: node {i}");
     }
@@ -139,7 +180,13 @@ fn scenario(
     pass.run_for_testing(device, queue, &inst_buf, &obj_buf, BvhMode::Rebuild);
     let mut reference = build(instances, objects, &cfg);
     let gpu = fetch(device, queue, &pass);
-    assert_matches(&format!("{label} rebuild"), &gpu, &reference, instances, objects);
+    assert_matches(
+        &format!("{label} rebuild"),
+        &gpu,
+        &reference,
+        instances,
+        objects,
+    );
     let build_gen = gpu.header.build_generation;
     let refit_gen = gpu.header.refit_generation;
 
@@ -156,15 +203,34 @@ fn scenario(
     pass.run_for_testing(device, queue, &inst_buf, &obj_buf, BvhMode::Refit);
     refit(&mut reference, instances, objects);
     let gpu = fetch(device, queue, &pass);
-    assert_matches(&format!("{label} refit"), &gpu, &reference, instances, objects);
-    assert_eq!(gpu.header.build_generation, build_gen, "{label}: refit must not rebuild");
-    assert_eq!(gpu.header.refit_generation, refit_gen + 1, "{label}: refit generation");
+    assert_matches(
+        &format!("{label} refit"),
+        &gpu,
+        &reference,
+        instances,
+        objects,
+    );
+    assert_eq!(
+        gpu.header.build_generation, build_gen,
+        "{label}: refit must not rebuild"
+    );
+    assert_eq!(
+        gpu.header.refit_generation,
+        refit_gen + 1,
+        "{label}: refit generation"
+    );
 
     // A full rebuild over the moved scene matches a fresh reference build.
     pass.run_for_testing(device, queue, &inst_buf, &obj_buf, BvhMode::Rebuild);
     let fresh = build(instances, objects, &cfg);
     let gpu = fetch(device, queue, &pass);
-    assert_matches(&format!("{label} rebuild 2"), &gpu, &fresh, instances, objects);
+    assert_matches(
+        &format!("{label} rebuild 2"),
+        &gpu,
+        &fresh,
+        instances,
+        objects,
+    );
     assert_eq!(gpu.header.build_generation, build_gen + 1);
 }
 
@@ -178,19 +244,36 @@ fn gpu_matches_reference() {
     // Holes (disabled / dead rows), several workgroups' worth.
     for (n, seed) in [(1usize, 1u64), (2, 2), (3, 3), (50, 4), (700, 5), (6000, 6)] {
         let (instances, mut objects) = random_scene(seed, n, 200.0, 0.2, 3.0);
-        scenario(&device, &queue, &format!("random {n}"), &instances, &mut objects, BvhConfig::default());
+        scenario(
+            &device,
+            &queue,
+            &format!("random {n}"),
+            &instances,
+            &mut objects,
+            BvhConfig::default(),
+        );
     }
 
     // Dense tiny instances: batch leaves.
     let (instances, mut objects) = city_scene(11, 12, 300);
-    scenario(&device, &queue, "city", &instances, &mut objects, BvhConfig::default());
+    scenario(
+        &device,
+        &queue,
+        "city",
+        &instances,
+        &mut objects,
+        BvhConfig::default(),
+    );
     scenario(
         &device,
         &queue,
         "city, batching off",
         &instances,
         &mut objects.clone(),
-        BvhConfig { batch_max_instances: 1, ..Default::default() },
+        BvhConfig {
+            batch_max_instances: 1,
+            ..Default::default()
+        },
     );
     scenario(
         &device,
@@ -198,7 +281,10 @@ fn gpu_matches_reference() {
         "city, batch 16",
         &instances,
         &mut objects.clone(),
-        BvhConfig { batch_max_instances: 16, ..Default::default() },
+        BvhConfig {
+            batch_max_instances: 16,
+            ..Default::default()
+        },
     );
 }
 
@@ -216,11 +302,21 @@ fn gpu_handles_empty_and_all_equal_keys() {
     // Every key equal: the leaf-index tie-break.
     let objects: Vec<_> = (0..500).map(|_| object([1.0, 2.0, 3.0], 1.0)).collect();
     let instances: Vec<_> = (0..500).map(instance).collect();
-    scenario(&device, &queue, "equal keys", &instances, &mut objects.clone(), BvhConfig::default());
+    scenario(
+        &device,
+        &queue,
+        "equal keys",
+        &instances,
+        &mut objects.clone(),
+        BvhConfig::default(),
+    );
 }
 
 fn helio_pass_vg_bvh_test_disabled() -> GpuVgInstance {
-    GpuVgInstance { flags: 0, ..instance(0) }
+    GpuVgInstance {
+        flags: 0,
+        ..instance(0)
+    }
 }
 
 fn scenario_empty(

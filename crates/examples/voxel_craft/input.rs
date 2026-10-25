@@ -91,13 +91,25 @@ impl Input {
 
     /// The hotbar slot (0..9) a number key chose this frame.
     pub fn hotbar_key(&self) -> Option<usize> {
-        [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7, KeyCode::Digit8, KeyCode::Digit9]
-            .iter()
-            .position(|k| self.pressed.contains(k))
+        [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ]
+        .iter()
+        .position(|k| self.pressed.contains(k))
     }
 
     pub fn controls(&self) -> Controls {
-        let axis = |plus: KeyCode, minus: KeyCode| f64::from(i32::from(self.held(plus)) - i32::from(self.held(minus)));
+        let axis = |plus: KeyCode, minus: KeyCode| {
+            f64::from(i32::from(self.held(plus)) - i32::from(self.held(minus)))
+        };
         Controls {
             forward: axis(KeyCode::KeyW, KeyCode::KeyS),
             strafe: axis(KeyCode::KeyD, KeyCode::KeyA),

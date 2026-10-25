@@ -31,7 +31,9 @@ pub struct VoxelMaterialMap {
 
 impl Default for VoxelMaterialMap {
     fn default() -> Self {
-        Self { faces: [[NO_MATERIAL; 4]; SLOTS] }
+        Self {
+            faces: [[NO_MATERIAL; 4]; SLOTS],
+        }
     }
 }
 
@@ -59,8 +61,9 @@ pub struct SceneMaterialInputs<'a> {
 }
 
 /// How a host reads this frame's scene materials from its pass context.
-pub type SceneMaterialSource =
-    Box<dyn for<'b> Fn(&helio_core::PassContext<'b>) -> Option<SceneMaterialInputs<'b>> + Send + Sync>;
+pub type SceneMaterialSource = Box<
+    dyn for<'b> Fn(&helio_core::PassContext<'b>) -> Option<SceneMaterialInputs<'b>> + Send + Sync,
+>;
 
 /// Texture table entries a device's binding arrays hold, or none where it
 /// has no descriptor indexing (mirrors Helio's `MaterialBindingConfig`).
@@ -82,7 +85,11 @@ pub fn texture_capacity(device: &wgpu::Device) -> Option<u32> {
         #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
         const PLATFORM_MAX: u32 = 256;
         let limits = device.limits();
-        Some(PLATFORM_MAX.min(limits.max_sampled_textures_per_shader_stage).min(limits.max_samplers_per_shader_stage))
+        Some(
+            PLATFORM_MAX
+                .min(limits.max_sampled_textures_per_shader_stage)
+                .min(limits.max_samplers_per_shader_stage),
+        )
     }
 }
 
@@ -93,8 +100,14 @@ pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, le
 /// of `capacity` entries, and Helio's specular anti-aliasing, which they
 /// shade normal maps with.
 pub(crate) fn scene_source(draw: &str, capacity: u32) -> String {
-    let real = include_str!("../../shaders/scene_materials.wgsl").replace("MATERIAL_TEXTURES", &format!("{capacity}")) + "\n" + helio_mats::SPECULAR_AA;
-    format!("enable wgpu_binding_array;\n{}", draw.replacen(STUB, &real, 1))
+    let real = include_str!("../../shaders/scene_materials.wgsl")
+        .replace("MATERIAL_TEXTURES", &format!("{capacity}"))
+        + "\n"
+        + helio_mats::SPECULAR_AA;
+    format!(
+        "enable wgpu_binding_array;\n{}",
+        draw.replacen(STUB, &real, 1)
+    )
 }
 
 pub(crate) fn layout_entries(capacity: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
@@ -103,13 +116,21 @@ pub(crate) fn layout_entries(capacity: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
         wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         },
         wgpu::BindGroupLayoutEntry {
             binding: 1,
             visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         },
         wgpu::BindGroupLayoutEntry {

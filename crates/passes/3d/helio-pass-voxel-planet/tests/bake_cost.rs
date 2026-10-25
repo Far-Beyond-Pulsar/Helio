@@ -51,7 +51,14 @@ impl Strokes {
         let ground = planet.surface_point(dir, 0.0);
         let up = dir.normalize();
         let side = up.any_orthonormal_vector();
-        Self { ground, frame: [side, up.cross(side), up], at: [0.0; 2], heading: 0.0, count: 0, next: Box::new(xorshift(0x9e37_79b9_7f4a_7c15)) }
+        Self {
+            ground,
+            frame: [side, up.cross(side), up],
+            at: [0.0; 2],
+            heading: 0.0,
+            count: 0,
+            next: Box::new(xorshift(0x9e37_79b9_7f4a_7c15)),
+        }
     }
     fn unit(&mut self) -> f64 {
         ((self.next)() % 10_001) as f64 / 10_000.0
@@ -70,10 +77,20 @@ impl Strokes {
         }
         self.heading += self.unit() * 0.4 - 0.2;
         let step = radius / 3.0;
-        self.at = [(self.at[0] + self.heading.cos() * step).clamp(-30.0, 30.0), (self.at[1] + self.heading.sin() * step).clamp(-30.0, 30.0)];
+        self.at = [
+            (self.at[0] + self.heading.cos() * step).clamp(-30.0, 30.0),
+            (self.at[1] + self.heading.sin() * step).clamp(-30.0, 30.0),
+        ];
         let [side, fwd, up] = self.frame;
         let centre = self.ground + side * self.at[0] + fwd * self.at[1] + up * lift;
-        Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op, material: 3, height: 0.0 }
+        Brush {
+            center: centre.to_array(),
+            radius,
+            shape: BrushShape::Sphere,
+            op,
+            material: 3,
+            height: 0.0,
+        }
     }
 }
 
@@ -131,8 +148,15 @@ fn bake_cost_against_history() {
                 ms.push(t.elapsed().as_secs_f64() * 1e3);
             }
             ms.sort_by(f64::total_cmp);
-            eprintln!("BAKECOST history {history}, {label}: bake p50 {:.2} ms, max {:.2} ms", ms[3], ms[5]);
+            eprintln!(
+                "BAKECOST history {history}, {label}: bake p50 {:.2} ms, max {:.2} ms",
+                ms[3], ms[5]
+            );
         }
-        eprintln!("BAKECOST history {history}: store fingerprint {:016x}, bricks per level {:?}", fingerprint(&planet.edits().baked), planet.edits().baked.brick_counts());
+        eprintln!(
+            "BAKECOST history {history}: store fingerprint {:016x}, bricks per level {:?}",
+            fingerprint(&planet.edits().baked),
+            planet.edits().baked.brick_counts()
+        );
     }
 }

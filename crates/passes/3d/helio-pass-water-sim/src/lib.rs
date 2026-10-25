@@ -566,7 +566,9 @@ impl WaterSimPass {
                 multiview_mask: None,
             });
         }
-        self.front_per_layer.iter_mut().for_each(|front| *front = true);
+        self.front_per_layer
+            .iter_mut()
+            .for_each(|front| *front = true);
         // Bodies already in the water push it once as it starts.
         encoder.clear_buffer(&self.hitbox_prev_buf, 0, None);
         self.hitbox_prev_shift = [0.0; 3];
@@ -690,10 +692,22 @@ impl RenderPass for WaterSimPass {
                 &self.sim_layer_views_b[0]
             })
         };
-        frame.write(helio_core::ResourceKey::new("water_sim_texture"), view, "WaterSim");
+        frame.write(
+            helio_core::ResourceKey::new("water_sim_texture"),
+            view,
+            "WaterSim",
+        );
         let sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&self.output_sampler) };
-        frame.write(helio_core::ResourceKey::new("water_sim_sampler"), sampler, "WaterSim");
-        if let Some(view) = self.water_output_view.as_ref().filter(|_| self.screen_active) {
+        frame.write(
+            helio_core::ResourceKey::new("water_sim_sampler"),
+            sampler,
+            "WaterSim",
+        );
+        if let Some(view) = self
+            .water_output_view
+            .as_ref()
+            .filter(|_| self.screen_active)
+        {
             let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
             frame.write(helio_core::ResourceKey::new("pre_aa"), view, "WaterSim");
         }
@@ -701,7 +715,11 @@ impl RenderPass for WaterSimPass {
 
     /// Surface reflections march the min-depth pyramid, but only on frames
     /// where the screen-space water path runs (some volume row may be live).
-    fn declare_frame_demands(&mut self, ctx: &PrepareContext, demands: &mut helio_core::FrameDemands) {
+    fn declare_frame_demands(
+        &mut self,
+        ctx: &PrepareContext,
+        demands: &mut helio_core::FrameDemands,
+    ) {
         let volumes = ctx.scene_buffers.get(BufferKey::of("water_volumes"));
         self.volume_liveness.update(ctx.device, ctx.queue, volumes);
         if volumes.is_some_and(|handle| self.volume_liveness.maybe_live(handle)) {
@@ -717,9 +735,12 @@ impl RenderPass for WaterSimPass {
         );
         // Fixed steps on the host's frame clock: none while it is frozen.
         self.step_clock += ctx.time_delta.max(0.0);
-        let steps = ((self.step_clock / SIM_STEP_SECONDS) + 1e-3).floor().max(0.0) as u32;
+        let steps = ((self.step_clock / SIM_STEP_SECONDS) + 1e-3)
+            .floor()
+            .max(0.0) as u32;
         self.steps_this_frame = steps.min(MAX_SIM_STEPS_PER_FRAME);
-        self.step_clock = (self.step_clock - steps as f32 * SIM_STEP_SECONDS).clamp(0.0, SIM_STEP_SECONDS);
+        self.step_clock =
+            (self.step_clock - steps as f32 * SIM_STEP_SECONDS).clamp(0.0, SIM_STEP_SECONDS);
         self.sim_time += self.steps_this_frame as f32 * SIM_STEP_SECONDS;
         let step_dt = SIM_STEP_SECONDS;
         for ci in 0..CASCADE_COUNT {
@@ -744,7 +765,9 @@ impl RenderPass for WaterSimPass {
         // Hitbox rows of a camera-relative frame are relative to its world
         // origin; the previous rows are relative to the one they were
         // captured at.
-        let origin = ctx.world_origin.map_or([0.0; 3], |origin| origin.to_array());
+        let origin = ctx
+            .world_origin
+            .map_or([0.0; 3], |origin| origin.to_array());
         for axis in 0..3 {
             self.hitbox_prev_shift[axis] += origin[axis] - self.hitbox_origin[axis];
         }
@@ -1189,7 +1212,10 @@ impl RenderPass for WaterSimPass {
                     self.caustics_bg_key = Some(new_key);
                 }
 
-                let caustics_view = ctx.registry.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap();
+                let caustics_view = ctx
+                    .registry
+                    .read(helio_core::ResourceKey::new("water_caustics"), "WaterSim")
+                    .unwrap();
                 let cau_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: caustics_view,
                     resolve_target: None,
@@ -1304,8 +1330,11 @@ impl RenderPass for WaterSimPass {
                 };
 
                 // Rebuilt whenever anything it binds changes.
-                let render_bg = self.render_bg
-                    .get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
+                let render_bg = self
+                    .render_bg
+                    .get_or_create(
+                        ctx.device,
+                        &wgpu::BindGroupDescriptor {
                             label: Some("Water Render BG"),
                             layout: &self.render_bgl,
                             entries: &[
@@ -1330,7 +1359,12 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 4,
                                     resource: wgpu::BindingResource::TextureView(
-                                        ctx.registry.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
+                                        ctx.registry
+                                            .read(
+                                                helio_core::ResourceKey::new("water_caustics"),
+                                                "WaterSim",
+                                            )
+                                            .unwrap(),
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -1366,7 +1400,8 @@ impl RenderPass for WaterSimPass {
                                     resource: wgpu::BindingResource::TextureView(&hiz_nearest_view),
                                 },
                             ],
-                        })
+                        },
+                    )
                     .clone();
 
                 let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
@@ -1390,16 +1425,14 @@ impl RenderPass for WaterSimPass {
                 // texture layer selection.
                 {
                     let mut cmds = ctx.graphics_cmds();
-                    let mut pass = cmds.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Water Surface"),
-                            color_attachments: &color_attachments,
-                            depth_stencil_attachment: Some(depth_attachment.clone()),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
+                    let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Water Surface"),
+                        color_attachments: &color_attachments,
+                        depth_stencil_attachment: Some(depth_attachment.clone()),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
                     pass.set_pipeline(&self.surface_pipeline);
                     pass.set_bind_group(0, &render_bg, &[]);
                     // Top face: instance_count = water_volume_count
@@ -1419,8 +1452,11 @@ impl RenderPass for WaterSimPass {
                 // 3. Underwater effect
                 {
                     // Rebuilt whenever anything it binds changes.
-                    let tint_bg = self.underwater_tint_bg
-                        .get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
+                    let tint_bg = self
+                        .underwater_tint_bg
+                        .get_or_create(
+                            ctx.device,
+                            &wgpu::BindGroupDescriptor {
                                 label: Some("Water Underwater Tint BG"),
                                 layout: &self.underwater_tint_bgl,
                                 entries: &[
@@ -1469,11 +1505,17 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 8,
                                         resource: wgpu::BindingResource::TextureView(
-                                            ctx.registry.read(helio_core::ResourceKey::new("water_caustics"), "WaterSim").unwrap(),
+                                            ctx.registry
+                                                .read(
+                                                    helio_core::ResourceKey::new("water_caustics"),
+                                                    "WaterSim",
+                                                )
+                                                .unwrap(),
                                         ),
                                     },
                                 ],
-                            })
+                            },
+                        )
                         .clone();
                     let tint_attachments = [Some(wgpu::RenderPassColorAttachment {
                         view: &self.tint_scratch_view,
@@ -1485,16 +1527,14 @@ impl RenderPass for WaterSimPass {
                         },
                     })];
                     let mut cmds = ctx.graphics_cmds();
-                    let mut tint_pass = cmds.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Water Underwater Tint"),
-                            color_attachments: &tint_attachments,
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
+                    let mut tint_pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Water Underwater Tint"),
+                        color_attachments: &tint_attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
                     tint_pass.set_pipeline(&self.underwater_tint_pipeline);
                     tint_pass.set_bind_group(0, &tint_bg, &[]);
                     tint_pass.draw(0..3, 0..1);
@@ -1527,16 +1567,14 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut blit_pass = cmds.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Water Tint Blit Back"),
-                            color_attachments: &blit_attachments,
-                            depth_stencil_attachment: None,
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
+                    let mut blit_pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Water Tint Blit Back"),
+                        color_attachments: &blit_attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
                     blit_pass.set_pipeline(&self.blit_pipeline);
                     blit_pass.set_bind_group(0, &*scratch_blit_bg, &[]);
                     blit_pass.draw(0..3, 0..1);

@@ -62,7 +62,10 @@ pub struct GpuBvhHeader {
 impl GpuBvhHeader {
     /// What the header holds before the first build.
     pub fn empty() -> Self {
-        Self { root_node: NODE_INVALID, ..Self::zeroed() }
+        Self {
+            root_node: NODE_INVALID,
+            ..Self::zeroed()
+        }
     }
 }
 

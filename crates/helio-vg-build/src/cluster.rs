@@ -37,7 +37,10 @@ pub(crate) fn csr_from_pairs(n: usize, pairs: &[(u32, u32)]) -> Adj {
     for i in 0..n {
         start[i + 1] += start[i];
     }
-    Adj { start, nbr: pairs.iter().map(|p| p.1).collect() }
+    Adj {
+        start,
+        nbr: pairs.iter().map(|p| p.1).collect(),
+    }
 }
 
 fn tri_adjacency(vs: &VertexStore, tris: &[[u32; 3]]) -> Adj {
@@ -46,37 +49,37 @@ fn tri_adjacency(vs: &VertexStore, tris: &[[u32; 3]]) -> Adj {
     let buckets = (tris.len() / (2 << 20)).clamp(1, 16) as u64;
     let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(tris.len() * 3);
     for bucket in 0..buckets {
-    let mut ek: Vec<(u64, u32)> = Vec::with_capacity(tris.len() * 3 / buckets as usize + 16);
-    for (t, tri) in tris.iter().enumerate() {
-        for e in 0..3 {
-            let a = vs.pid[tri[e] as usize];
-            let b = vs.pid[tri[(e + 1) % 3] as usize];
-            let k = edge_key(a, b);
-            if (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % buckets == bucket {
-                ek.push((k, t as u32));
-            }
-        }
-    }
-    ek.sort_unstable();
-    let mut i = 0;
-    while i < ek.len() {
-        let mut j = i + 1;
-        while j < ek.len() && ek[j].0 == ek[i].0 {
-            j += 1;
-        }
-        // Non-manifold edges (>2 triangles) link all pairs, capped.
-        let m = (j - i).min(6);
-        for x in i..i + m {
-            for y in x + 1..i + m {
-                let (a, b) = (ek[x].1, ek[y].1);
-                if a != b {
-                    pairs.push((a, b));
-                    pairs.push((b, a));
+        let mut ek: Vec<(u64, u32)> = Vec::with_capacity(tris.len() * 3 / buckets as usize + 16);
+        for (t, tri) in tris.iter().enumerate() {
+            for e in 0..3 {
+                let a = vs.pid[tri[e] as usize];
+                let b = vs.pid[tri[(e + 1) % 3] as usize];
+                let k = edge_key(a, b);
+                if (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % buckets == bucket {
+                    ek.push((k, t as u32));
                 }
             }
         }
-        i = j;
-    }
+        ek.sort_unstable();
+        let mut i = 0;
+        while i < ek.len() {
+            let mut j = i + 1;
+            while j < ek.len() && ek[j].0 == ek[i].0 {
+                j += 1;
+            }
+            // Non-manifold edges (>2 triangles) link all pairs, capped.
+            let m = (j - i).min(6);
+            for x in i..i + m {
+                for y in x + 1..i + m {
+                    let (a, b) = (ek[x].1, ek[y].1);
+                    if a != b {
+                        pairs.push((a, b));
+                        pairs.push((b, a));
+                    }
+                }
+            }
+            i = j;
+        }
     }
     pairs.sort_unstable();
     pairs.dedup();
@@ -111,7 +114,11 @@ pub fn cluster_tris(vs: &VertexStore, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
     let mut nrm = Vec::with_capacity(n);
     let mut area_sum = 0.0f64;
     for t in tris {
-        let (a, b, c) = (vs.pos[t[0] as usize], vs.pos[t[1] as usize], vs.pos[t[2] as usize]);
+        let (a, b, c) = (
+            vs.pos[t[0] as usize],
+            vs.pos[t[1] as usize],
+            vs.pos[t[2] as usize],
+        );
         let cr = cross(sub(b, a), sub(c, a));
         area_sum += 0.5 * length(cr) as f64;
         nrm.push(normalize(cr));
@@ -120,13 +127,18 @@ pub fn cluster_tris(vs: &VertexStore, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
     let avg_area = (area_sum / n as f64) as f32;
     // Radius of a disc made of a full cluster of average triangles; used to
     // normalize the distance term of the score.
-    let r_est = ((avg_area * MAX_T as f32) / std::f32::consts::PI).sqrt().max(1e-20);
+    let r_est = ((avg_area * MAX_T as f32) / std::f32::consts::PI)
+        .sqrt()
+        .max(1e-20);
 
     let adj = tri_adjacency(vs, tris);
 
     let frame = morton_frame(cent.iter().copied());
-    let mut order: Vec<(u64, u32)> =
-        cent.iter().enumerate().map(|(i, &c)| (morton3(c, frame), i as u32)).collect();
+    let mut order: Vec<(u64, u32)> = cent
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (morton3(c, frame), i as u32))
+        .collect();
     order.sort_unstable();
     let order: Vec<u32> = order.into_iter().map(|o| o.1).collect();
 
@@ -151,14 +163,14 @@ pub fn cluster_tris(vs: &VertexStore, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
         let mut frontier: Vec<u32> = Vec::new();
 
         let add_tri = |t: u32,
-                           cl: &mut Vec<u32>,
-                           nverts: &mut usize,
-                           sum_n: &mut V3,
-                           sum_c: &mut V3,
-                           frontier: &mut Vec<u32>,
-                           assigned: &mut Vec<bool>,
-                           vstamp: &mut Vec<u32>,
-                           fstamp: &mut Vec<u32>| {
+                       cl: &mut Vec<u32>,
+                       nverts: &mut usize,
+                       sum_n: &mut V3,
+                       sum_c: &mut V3,
+                       frontier: &mut Vec<u32>,
+                       assigned: &mut Vec<bool>,
+                       vstamp: &mut Vec<u32>,
+                       fstamp: &mut Vec<u32>| {
             assigned[t as usize] = true;
             cl.push(t);
             for &v in &local[t as usize] {
@@ -194,7 +206,10 @@ pub fn cluster_tris(vs: &VertexStore, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
             let centroid = scale(sum_c, 1.0 / cl.len() as f32);
             let mut best: Option<(f32, u32)> = None;
             for &t in &frontier {
-                let newv = local[t as usize].iter().filter(|&&v| vstamp[v as usize] != cid).count();
+                let newv = local[t as usize]
+                    .iter()
+                    .filter(|&&v| vstamp[v as usize] != cid)
+                    .count();
                 if nverts + newv > MAX_V {
                     continue;
                 }
@@ -229,7 +244,11 @@ pub fn cluster_tris(vs: &VertexStore, tris: &[[u32; 3]]) -> Vec<Vec<u32>> {
 }
 
 fn union_verts(local: &[[u32; 3]], a: &[u32], b: &[u32]) -> usize {
-    let mut v: Vec<u32> = a.iter().chain(b.iter()).flat_map(|&t| local[t as usize]).collect();
+    let mut v: Vec<u32> = a
+        .iter()
+        .chain(b.iter())
+        .flat_map(|&t| local[t as usize])
+        .collect();
     v.sort_unstable();
     v.dedup();
     v.len()
@@ -251,8 +270,9 @@ fn merge_small(
             cl_of[t as usize] = c as u32;
         }
     }
-    let mut small: Vec<usize> =
-        (0..clusters.len()).filter(|&c| clusters[c].len() < MIN_T).collect();
+    let mut small: Vec<usize> = (0..clusters.len())
+        .filter(|&c| clusters[c].len() < MIN_T)
+        .collect();
     small.sort_by_key(|&c| (clusters[c].len(), c));
     for &c in &small {
         if clusters[c].is_empty() || clusters[c].len() >= MIN_T {

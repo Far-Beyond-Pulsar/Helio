@@ -53,19 +53,30 @@ fn pixel_scale(height: u32) -> f32 {
 struct Rng(u64);
 impl Rng {
     fn f(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 40) as f32) / (1u64 << 24) as f32
     }
 }
 
 fn pos_bytes(p: &[V3]) -> Vec<u8> {
-    p.iter().flat_map(|v| v.iter().flat_map(|f| f.to_le_bytes())).collect()
+    p.iter()
+        .flat_map(|v| v.iter().flat_map(|f| f.to_le_bytes()))
+        .collect()
 }
 
 fn noisy_sphere_mesh(subdiv: u32) -> TestMesh {
     let (positions, indices) = measure::noisy_sphere(subdiv);
     let mats = vec![0; indices.len() / 3];
-    TestMesh { attributes: pos_bytes(&positions), positions, stride: 12, indices, mats }
+    TestMesh {
+        attributes: pos_bytes(&positions),
+        positions,
+        stride: 12,
+        indices,
+        mats,
+    }
 }
 
 /// Thin needles with air between them: `n` slender quads (length x width) at
@@ -86,7 +97,11 @@ fn needles(n: usize, radius: f32, length: f32, width: f32, seed: u64) -> TestMes
         };
         let d = unit([r.f() - 0.5, r.f() - 0.5, r.f() - 0.5]);
         let t = unit([r.f() - 0.5, r.f() - 0.5, r.f() - 0.5]);
-        let s = unit([d[1] * t[2] - d[2] * t[1], d[2] * t[0] - d[0] * t[2], d[0] * t[1] - d[1] * t[0]]);
+        let s = unit([
+            d[1] * t[2] - d[2] * t[1],
+            d[2] * t[0] - d[0] * t[2],
+            d[0] * t[1] - d[1] * t[0],
+        ]);
         let b = p.len() as u32;
         for (a, w) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
             p.push([
@@ -98,7 +113,13 @@ fn needles(n: usize, radius: f32, length: f32, width: f32, seed: u64) -> TestMes
         idx.extend([b, b + 1, b + 2, b, b + 2, b + 3]);
     }
     let mats = vec![0; idx.len() / 3];
-    TestMesh { attributes: pos_bytes(&p), positions: p, stride: 12, indices: idx, mats }
+    TestMesh {
+        attributes: pos_bytes(&p),
+        positions: p,
+        stride: 12,
+        indices: idx,
+        mats,
+    }
 }
 
 struct Fixture {
@@ -117,7 +138,12 @@ fn fixtures() -> &'static Vec<Fixture> {
             ("needles", needles(60_000, 3.0, 0.12, 0.008, 11), 3.1),
         ] {
             let bytes = build_vgeo(&mesh.input(), &BuildOptions::default()).unwrap();
-            out.push(Fixture { name, mesh, bytes, radius });
+            out.push(Fixture {
+                name,
+                mesh,
+                bytes,
+                radius,
+            });
         }
         out
     })
@@ -126,7 +152,14 @@ fn fixtures() -> &'static Vec<Fixture> {
 // ── selection ───────────────────────────────────────────────────────────────
 
 fn select(r: &VgeoReader, d: f32, height: u32, tau: f32) -> Vec<SelectedCluster> {
-    r.select_clusters(tau, &Projection { eye: [0.0, 0.0, d], scale: pixel_scale(height) }).unwrap()
+    r.select_clusters(
+        tau,
+        &Projection {
+            eye: [0.0, 0.0, d],
+            scale: pixel_scale(height),
+        },
+    )
+    .unwrap()
 }
 
 fn tri_count(sel: &[SelectedCluster]) -> usize {
@@ -145,10 +178,18 @@ fn root_triangles(r: &VgeoReader) -> usize {
 fn check_selection_bound(foliage: bool) {
     let mut rows = 0;
     let mut floor_limited = Vec::new();
-    for fx in fixtures().iter().filter(|f| (f.name == "needles") == foliage) {
+    for fx in fixtures()
+        .iter()
+        .filter(|f| (f.name == "needles") == foliage)
+    {
         let r = VgeoReader::parse(&fx.bytes).unwrap();
         let floor = root_triangles(&r);
-        println!("{}: {} source triangles, root floor {} triangles", fx.name, fx.mesh.tri_count(), floor);
+        println!(
+            "{}: {} source triangles, root floor {} triangles",
+            fx.name,
+            fx.mesh.tri_count(),
+            floor
+        );
         for &(w, h) in &RESOLUTIONS {
             let frame = 2.0 * f64::from(w) * f64::from(h);
             for &f in &SIZES {
@@ -158,15 +199,26 @@ fn check_selection_bound(foliage: bool) {
                 let strict = 2.0 * disc.min(f64::from(w) * f64::from(h));
                 let allowed = strict.max(floor as f64);
                 rows += 1;
-                assert!(t as f64 <= frame, "{} {w}x{h} size {f}: {t} triangles exceed 2 per frame pixel", fx.name);
-                assert!(t <= fx.mesh.tri_count(), "{}: {t} exceeds the source", fx.name);
+                assert!(
+                    t as f64 <= frame,
+                    "{} {w}x{h} size {f}: {t} triangles exceed 2 per frame pixel",
+                    fx.name
+                );
+                assert!(
+                    t <= fx.mesh.tri_count(),
+                    "{}: {t} exceeds the source",
+                    fx.name
+                );
                 assert!(
                     t as f64 <= allowed,
                     "{} {w}x{h} size {f}: {t} triangles for about {strict:.0} allowed (floor {floor})",
                     fx.name
                 );
                 if t as f64 > strict {
-                    floor_limited.push(format!("{} {w}x{h} size {f}: {t} vs strict {strict:.0}", fx.name));
+                    floor_limited.push(format!(
+                        "{} {w}x{h} size {f}: {t} vs strict {strict:.0}",
+                        fx.name
+                    ));
                 }
             }
         }
@@ -190,7 +242,11 @@ fn selection_is_monotone_in_distance_and_resolution() {
             for &f in &SIZES {
                 let t = tri_count(&select(&r, distance_for(fx.radius, f, h), h, 1.0));
                 // Smaller on screen must not select more (clusters are discrete: 5% slack).
-                assert!(t as f64 <= last as f64 * 1.05 + 130.0, "{} {w}x{h} size {f}: {t} after {last}", fx.name);
+                assert!(
+                    t as f64 <= last as f64 * 1.05 + 130.0,
+                    "{} {w}x{h} size {f}: {t} after {last}",
+                    fx.name
+                );
                 last = t;
             }
         }
@@ -199,14 +255,22 @@ fn selection_is_monotone_in_distance_and_resolution() {
         let mut prev = 0usize;
         for h in [360u32, 720, 1080, 1440, 2160, 4320] {
             let t = tri_count(&select(&r, d, h, 1.0));
-            assert!(t as f64 >= prev as f64 * 0.95, "{}: height {h} selected {t} after {prev}", fx.name);
+            assert!(
+                t as f64 >= prev as f64 * 0.95,
+                "{}: height {h} selected {t} after {prev}",
+                fx.name
+            );
             prev = t;
         }
         // And a larger tolerance never selects more.
         let mut prev = usize::MAX;
         for tau in [0.5f32, 1.0, 2.0, 4.0, 8.0, 16.0, 64.0] {
             let t = tri_count(&select(&r, d, 1080, tau));
-            assert!(t <= prev, "{}: tau {tau} selected {t} after {prev}", fx.name);
+            assert!(
+                t <= prev,
+                "{}: tau {tau} selected {t} after {prev}",
+                fx.name
+            );
             prev = t;
         }
     }
@@ -244,30 +308,71 @@ fn render(tris: &[[V3; 3]], eye_z: f32, scale: f32, w: u32, h: u32, ss: u32) -> 
                 ok = false;
                 break;
             }
-            s[k] = [sw as f32 * 0.5 + v[0] / z * sscale, sh as f32 * 0.5 - v[1] / z * sscale, 1.0 / z];
+            s[k] = [
+                sw as f32 * 0.5 + v[0] / z * sscale,
+                sh as f32 * 0.5 - v[1] / z * sscale,
+                1.0 / z,
+            ];
         }
         if !ok {
             continue;
         }
-        let e1 = [tri[1][0] - tri[0][0], tri[1][1] - tri[0][1], tri[1][2] - tri[0][2]];
-        let e2 = [tri[2][0] - tri[0][0], tri[2][1] - tri[0][1], tri[2][2] - tri[0][2]];
-        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let e1 = [
+            tri[1][0] - tri[0][0],
+            tri[1][1] - tri[0][1],
+            tri[1][2] - tri[0][2],
+        ];
+        let e2 = [
+            tri[2][0] - tri[0][0],
+            tri[2][1] - tri[0][1],
+            tri[2][2] - tri[0][2],
+        ];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
         let nl = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-12);
         let lambert = ((n[0] * light[0] + n[1] * light[1] + n[2] * light[2]) / nl).abs();
         let value = (255.0 * (0.22 + 0.78 * lambert)).clamp(0.0, 255.0) as u8;
-        let min_x = s.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min).floor().max(0.0) as i64;
-        let max_x = s.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max).ceil().min(sw as f32) as i64;
-        let min_y = s.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min).floor().max(0.0) as i64;
-        let max_y = s.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max).ceil().min(sh as f32) as i64;
-        let area = (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[1][1] - s[0][1]) * (s[2][0] - s[0][0]);
+        let min_x = s
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as i64;
+        let max_x = s
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(sw as f32) as i64;
+        let min_y = s
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::INFINITY, f32::min)
+            .floor()
+            .max(0.0) as i64;
+        let max_y = s
+            .iter()
+            .map(|p| p[1])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .min(sh as f32) as i64;
+        let area =
+            (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[1][1] - s[0][1]) * (s[2][0] - s[0][0]);
         if area.abs() < 1.0e-12 {
             continue;
         }
         for y in min_y..max_y {
             for x in min_x..max_x {
                 let p = [x as f32 + 0.5, y as f32 + 0.5];
-                let w0 = ((s[1][0] - p[0]) * (s[2][1] - p[1]) - (s[1][1] - p[1]) * (s[2][0] - p[0])) / area;
-                let w1 = ((s[2][0] - p[0]) * (s[0][1] - p[1]) - (s[2][1] - p[1]) * (s[0][0] - p[0])) / area;
+                let w0 = ((s[1][0] - p[0]) * (s[2][1] - p[1])
+                    - (s[1][1] - p[1]) * (s[2][0] - p[0]))
+                    / area;
+                let w1 = ((s[2][0] - p[0]) * (s[0][1] - p[1])
+                    - (s[2][1] - p[1]) * (s[0][0] - p[0]))
+                    / area;
                 let w2 = 1.0 - w0 - w1;
                 if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                     continue;
@@ -298,7 +403,11 @@ fn render(tris: &[[V3; 3]], eye_z: f32, scale: f32, w: u32, h: u32, ss: u32) -> 
             }
             let bg = 24.0;
             let cov = hit as f32 / (ss * ss) as f32;
-            let c = if hit > 0 { sum as f32 / hit as f32 } else { 0.0 };
+            let c = if hit > 0 {
+                sum as f32 / hit as f32
+            } else {
+                0.0
+            };
             let v = (c * cov + bg * (1.0 - cov)) as u8;
             let o = ((y * w + x) * 3) as usize;
             rgb[o] = (f32::from(v) * 0.95) as u8;
@@ -306,7 +415,12 @@ fn render(tris: &[[V3; 3]], eye_z: f32, scale: f32, w: u32, h: u32, ss: u32) -> 
             rgb[o + 2] = (f32::from(v) * 0.9) as u8;
         }
     }
-    Render { w, h, rgb, coverage: covered as f64 / (sw * sh) as f64 }
+    Render {
+        w,
+        h,
+        rgb,
+        coverage: covered as f64 / (sw * sh) as f64,
+    }
 }
 
 fn cut_triangles(r: &VgeoReader, sel: &[SelectedCluster]) -> Vec<[V3; 3]> {
@@ -314,7 +428,11 @@ fn cut_triangles(r: &VgeoReader, sel: &[SelectedCluster]) -> Vec<[V3; 3]> {
     for s in sel {
         let dec = r.decode(s).unwrap();
         for t in &dec.tris {
-            out.push([dec.positions[t[0] as usize], dec.positions[t[1] as usize], dec.positions[t[2] as usize]]);
+            out.push([
+                dec.positions[t[0] as usize],
+                dec.positions[t[1] as usize],
+                dec.positions[t[2] as usize],
+            ]);
         }
     }
     out
@@ -323,7 +441,13 @@ fn cut_triangles(r: &VgeoReader, sel: &[SelectedCluster]) -> Vec<[V3; 3]> {
 fn mesh_triangles(m: &TestMesh) -> Vec<[V3; 3]> {
     m.indices
         .chunks_exact(3)
-        .map(|t| [m.positions[t[0] as usize], m.positions[t[1] as usize], m.positions[t[2] as usize]])
+        .map(|t| {
+            [
+                m.positions[t[0] as usize],
+                m.positions[t[1] as usize],
+                m.positions[t[2] as usize],
+            ]
+        })
         .collect()
 }
 
@@ -331,7 +455,10 @@ fn check_coverage(foliage: bool) {
     let height = 1080;
     let scale = pixel_scale(height);
     let mut failures = Vec::new();
-    for fx in fixtures().iter().filter(|f| (f.name == "needles") == foliage) {
+    for fx in fixtures()
+        .iter()
+        .filter(|f| (f.name == "needles") == foliage)
+    {
         let r = VgeoReader::parse(&fx.bytes).unwrap();
         let leaf = mesh_triangles(&fx.mesh);
         for &px in &[128.0f32, 64.0, 32.0, 16.0, 8.0] {
@@ -345,7 +472,11 @@ fn check_coverage(foliage: bool) {
             // coverage may change on a solid object. Sparse foliage has no such
             // excuse: its pieces are the coverage.
             let radius_px = f64::from(px) * 0.5;
-            let tolerance = if fx.name == "needles" { 0.25 } else { 0.05 + 2.5 / radius_px };
+            let tolerance = if fx.name == "needles" {
+                0.25
+            } else {
+                0.05 + 2.5 / radius_px
+            };
             println!(
                 "{:>12} {:>5.0} px: {:>7} -> {:>7} tris, coverage {:.4} -> {:.4} (x{:.3}, allowed +-{:.2})",
                 fx.name,
@@ -358,11 +489,18 @@ fn check_coverage(foliage: bool) {
                 tolerance
             );
             if (ratio - 1.0).abs() > tolerance {
-                failures.push(format!("{} at {px} px: coverage x{ratio:.3} (allowed +-{tolerance:.2})", fx.name));
+                failures.push(format!(
+                    "{} at {px} px: coverage x{ratio:.3} (allowed +-{tolerance:.2})",
+                    fx.name
+                ));
             }
         }
     }
-    assert!(failures.is_empty(), "coverage not preserved:\n  {}", failures.join("\n  "));
+    assert!(
+        failures.is_empty(),
+        "coverage not preserved:\n  {}",
+        failures.join("\n  ")
+    );
 }
 
 // ── images for looking at ───────────────────────────────────────────────────
@@ -376,7 +514,11 @@ fn montage(tiles: &[Render], columns: u32, path: &std::path::Path) {
         for y in 0..th {
             for x in 0..tw {
                 let o = ((y * tw + x) * 3) as usize;
-                img.put_pixel(cx + x, cy + y, image::Rgb([t.rgb[o], t.rgb[o + 1], t.rgb[o + 2]]));
+                img.put_pixel(
+                    cx + x,
+                    cy + y,
+                    image::Rgb([t.rgb[o], t.rgb[o + 1], t.rgb[o + 2]]),
+                );
             }
         }
         // Frame between tiles.
@@ -390,7 +532,13 @@ fn montage(tiles: &[Render], columns: u32, path: &std::path::Path) {
     img.save(path).unwrap();
 }
 
-fn lod_montage(name: &str, r: &VgeoReader, leaf: Option<&[[V3; 3]]>, radius: f32, out: &std::path::Path) {
+fn lod_montage(
+    name: &str,
+    r: &VgeoReader,
+    leaf: Option<&[[V3; 3]]>,
+    radius: f32,
+    out: &std::path::Path,
+) {
     let height = 1080;
     let scale = pixel_scale(height);
     let tile = 400u32;
@@ -434,13 +582,28 @@ fn write_lod_montages() {
 
 // ── real cached assets ──────────────────────────────────────────────────────
 
-
 /// Full-detail triangles of a cache (positions only), for rebuilding it with the
 /// current builder.
 fn leaves_of(r: &VgeoReader) -> (Vec<V3>, Vec<u32>) {
-    let roots = r.select_clusters(1e30, &Projection { eye: [0.0; 3], scale: 1.0 }).unwrap();
+    let roots = r
+        .select_clusters(
+            1e30,
+            &Projection {
+                eye: [0.0; 3],
+                scale: 1.0,
+            },
+        )
+        .unwrap();
     let c = roots[0].cluster.sphere;
-    let leaves = r.select_clusters(1e-12, &Projection { eye: [c[0], c[1], c[2]], scale: 1.0 }).unwrap();
+    let leaves = r
+        .select_clusters(
+            1e-12,
+            &Projection {
+                eye: [c[0], c[1], c[2]],
+                scale: 1.0,
+            },
+        )
+        .unwrap();
     let (mut pos, mut idx) = (Vec::new(), Vec::new());
     for s in &leaves {
         let d = r.decode(s).unwrap();
@@ -455,7 +618,9 @@ fn leaves_of(r: &VgeoReader) -> (Vec<V3>, Vec<u32>) {
 #[test]
 #[ignore = "diagnostic: set VG_CACHE_DIR (and VG_LOD_OUT for images)"]
 fn real_cached_assets_ladder_and_images() {
-    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(std::path::PathBuf::from) else { return };
+    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
     let out = out_dir();
     let mut files: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(&dir)
         .unwrap()
@@ -472,7 +637,13 @@ fn real_cached_assets_ladder_and_images() {
             // Rebuild from the cache's full-detail triangles with the current builder.
             let (pos, idx) = leaves_of(&VgeoReader::parse(&bytes).unwrap());
             let attrs = pos_bytes(&pos);
-            let input = MeshInput { positions: &pos, attributes: &attrs, attribute_stride: 12, indices: &idx, tri_material: &[] };
+            let input = MeshInput {
+                positions: &pos,
+                attributes: &attrs,
+                attribute_stride: 12,
+                indices: &idx,
+                tri_material: &[],
+            };
             let t = std::time::Instant::now();
             bytes = build_vgeo(&input, &BuildOptions::default()).unwrap();
             println!("rebuilt {} triangles in {:?}", idx.len() / 3, t.elapsed());
@@ -487,7 +658,11 @@ fn real_cached_assets_ladder_and_images() {
                 hi[k] = hi[k].max(s.cluster.sphere[k] + s.cluster.sphere[3]);
             }
         }
-        let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+        let centre = [
+            (lo[0] + hi[0]) / 2.0,
+            (lo[1] + hi[1]) / 2.0,
+            (lo[2] + hi[2]) / 2.0,
+        ];
         let radius = (0..3).map(|k| (hi[k] - lo[k]) / 2.0).fold(0.0f32, f32::max) * 1.2;
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let source = r.header.asset.triangle_count;
@@ -500,13 +675,22 @@ fn real_cached_assets_ladder_and_images() {
                 let sel = r
                     .select_clusters(
                         1.0,
-                        &Projection { eye: [centre[0], centre[1], centre[2] + d], scale: pixel_scale(h) },
+                        &Projection {
+                            eye: [centre[0], centre[1], centre[2] + d],
+                            scale: pixel_scale(h),
+                        },
                     )
                     .unwrap();
                 let t = tri_count(&sel);
                 let disc = std::f64::consts::PI * (f64::from(f) * f64::from(h) * 0.5).powi(2);
                 let strict = 2.0 * disc.min(f64::from(w) * f64::from(h));
-                let flag = if t as f64 > strict.max(floor as f64) { "  <-- OVER (not explained by the root floor)" } else if t as f64 > strict { "  (root floor)" } else { "" };
+                let flag = if t as f64 > strict.max(floor as f64) {
+                    "  <-- OVER (not explained by the root floor)"
+                } else if t as f64 > strict {
+                    "  (root floor)"
+                } else {
+                    ""
+                };
                 println!("  {w}x{h} size {f:.3}: {t:>9} triangles, strict {strict:>10.0}{flag}");
             }
         }
@@ -518,11 +702,24 @@ fn real_cached_assets_ladder_and_images() {
             let row: Vec<String> = [1.0f32, 2.0, 3.0, 4.0, 6.0]
                 .iter()
                 .map(|&tau| {
-                    let t = tri_count(&r.select_clusters(tau, &Projection { eye: [centre[0], centre[1], centre[2] + d], scale: pixel_scale(1080) }).unwrap());
+                    let t = tri_count(
+                        &r.select_clusters(
+                            tau,
+                            &Projection {
+                                eye: [centre[0], centre[1], centre[2] + d],
+                                scale: pixel_scale(1080),
+                            },
+                        )
+                        .unwrap(),
+                    );
                     format!("tau{tau}:{t}")
                 })
                 .collect();
-            println!("    1080p size {f:.3} (strict {:.0}): {}", 2.0 * disc, row.join("  "));
+            println!(
+                "    1080p size {f:.3} (strict {:.0}): {}",
+                2.0 * disc,
+                row.join("  ")
+            );
         }
         // Montage of the cuts (recentred on the asset).
         let tile = 400u32;
@@ -533,7 +730,13 @@ fn real_cached_assets_ladder_and_images() {
         for px in [512.0f32, 256.0, 128.0, 64.0, 32.0, 16.0, 8.0, 4.0] {
             let d = 2.0 * radius * scale / px;
             let sel = r
-                .select_clusters(1.0, &Projection { eye: [centre[0], centre[1], centre[2] + d], scale })
+                .select_clusters(
+                    1.0,
+                    &Projection {
+                        eye: [centre[0], centre[1], centre[2] + d],
+                        scale,
+                    },
+                )
                 .unwrap();
             let tris: Vec<[V3; 3]> = cut_triangles(&r, &sel)
                 .into_iter()
@@ -572,10 +775,6 @@ fn foliage_lod_coverage_matches_the_full_detail_mesh() {
 
 // ── a forest, the way the demo stacks instances ─────────────────────────────
 
-
-
-
-
 /// A tree cache cooked by the current builder (`cargo vg-stress -- --prepare
 /// --force-recook` writes them to `VG_CACHE_DIR`).
 fn rebuilt_tree(dir: &std::path::Path, _scratch: &std::path::Path, name: &str) -> Vec<u8> {
@@ -586,7 +785,14 @@ fn rebuilt_tree(dir: &std::path::Path, _scratch: &std::path::Path, name: &str) -
 /// ground: (asset index, eye in the asset's space, distance to its sphere's
 /// nearest point). The demo scatters about 2,000 trees of about one tree radius
 /// (6 m) over 250 m: a 42 x 42 tree-radius field that the camera walks into.
-fn forest_view(radius: f32, assets: usize, w: u32, h: u32, cam: [f32; 3], n: usize) -> Vec<(usize, [f32; 3])> {
+fn forest_view(
+    radius: f32,
+    assets: usize,
+    w: u32,
+    h: u32,
+    cam: [f32; 3],
+    n: usize,
+) -> Vec<(usize, [f32; 3])> {
     let mut rng = Rng(5);
     let tan_h = (60f32.to_radians() * 0.5).tan() * w as f32 / h as f32;
     let mut out = Vec::new();
@@ -607,18 +813,40 @@ fn forest_view(radius: f32, assets: usize, w: u32, h: u32, cam: [f32; 3], n: usi
 fn forest_density_is_computed_screen_wide() {
     use helio_vg_format::density::{contribution, solve, STEPS};
     use helio_vg_format::LodTable;
-    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(std::path::PathBuf::from) else { return };
+    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
     let scratch = out_dir();
-    let blobs: Vec<Vec<u8>> = ["3309fbf6647b16c6d5ee7c21bc0699e4", "cc287a2e4ef7133c7e3d7405bcbef51d", "611bb360b577134e28f466b7505aba90", "69cc570cecf3381abcc8506e856a73c6"]
+    let blobs: Vec<Vec<u8>> = [
+        "3309fbf6647b16c6d5ee7c21bc0699e4",
+        "cc287a2e4ef7133c7e3d7405bcbef51d",
+        "611bb360b577134e28f466b7505aba90",
+        "69cc570cecf3381abcc8506e856a73c6",
+    ]
+    .iter()
+    .map(|n| rebuilt_tree(&dir, &scratch, n))
+    .collect();
+    let readers: Vec<VgeoReader> = blobs
         .iter()
-        .map(|n| rebuilt_tree(&dir, &scratch, n))
+        .map(|b| VgeoReader::parse(b).unwrap())
         .collect();
-    let readers: Vec<VgeoReader> = blobs.iter().map(|b| VgeoReader::parse(b).unwrap()).collect();
-    let tables: Vec<(LodTable, [f32; 4])> = readers.iter().map(|r| (LodTable::from_header(&r.header.asset), r.header.asset.bounds)).collect();
+    let tables: Vec<(LodTable, [f32; 4])> = readers
+        .iter()
+        .map(|r| {
+            (
+                LodTable::from_header(&r.header.asset),
+                r.header.asset.bounds,
+            )
+        })
+        .collect();
     let radius = tables[0].1[3];
-    println!("tree radii {:?}", tables.iter().map(|t| t.1[3]).collect::<Vec<_>>());
+    println!(
+        "tree radii {:?}",
+        tables.iter().map(|t| t.1[3]).collect::<Vec<_>>()
+    );
     const TARGET: f64 = 1.5;
-    let (mut worst_tpp, mut worst_predict, mut sum_tpp, mut frames) = (0.0f64, 1.0f64, 0.0f64, 0usize);
+    let (mut worst_tpp, mut worst_predict, mut sum_tpp, mut frames) =
+        (0.0f64, 1.0f64, 0.0f64, 0usize);
     let mut worst_jump = 1.0f32;
     for &(w, h) in &[(1920u32, 1080u32), (3440, 1440)] {
         let px = f64::from(w) * f64::from(h);
@@ -647,7 +875,13 @@ fn forest_density_is_computed_screen_wide() {
             last_g_raw = g;
             let actual: u64 = view
                 .iter()
-                .map(|(a, eye)| tri_count(&readers[*a].select_clusters(g, &Projection { eye: *eye, scale }).unwrap()) as u64)
+                .map(|(a, eye)| {
+                    tri_count(
+                        &readers[*a]
+                            .select_clusters(g, &Projection { eye: *eye, scale })
+                            .unwrap(),
+                    ) as u64
+                })
                 .sum();
             let tpp = actual as f64 / px;
             pending.push_back((predicted as f32, actual as f32));
@@ -677,11 +911,24 @@ fn forest_density_is_computed_screen_wide() {
 #[test]
 #[ignore = "diagnostic: what makes a forest frame expensive"]
 fn forest_spike_anatomy() {
-    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(std::path::PathBuf::from) else { return };
+    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
     let scratch = out_dir();
-    let names = ["3309fbf6647b16c6d5ee7c21bc0699e4", "cc287a2e4ef7133c7e3d7405bcbef51d", "611bb360b577134e28f466b7505aba90", "69cc570cecf3381abcc8506e856a73c6"];
-    let blobs: Vec<Vec<u8>> = names.iter().map(|n| rebuilt_tree(&dir, &scratch, n)).collect();
-    let readers: Vec<VgeoReader> = blobs.iter().map(|b| VgeoReader::parse(b).unwrap()).collect();
+    let names = [
+        "3309fbf6647b16c6d5ee7c21bc0699e4",
+        "cc287a2e4ef7133c7e3d7405bcbef51d",
+        "611bb360b577134e28f466b7505aba90",
+        "69cc570cecf3381abcc8506e856a73c6",
+    ];
+    let blobs: Vec<Vec<u8>> = names
+        .iter()
+        .map(|n| rebuilt_tree(&dir, &scratch, n))
+        .collect();
+    let readers: Vec<VgeoReader> = blobs
+        .iter()
+        .map(|b| VgeoReader::parse(b).unwrap())
+        .collect();
     let radius = 13.5f32;
     let (w, h) = (3440u32, 1440u32);
     let scale = pixel_scale(h);
@@ -693,7 +940,9 @@ fn forest_spike_anatomy() {
             let x = (rng.f() - 0.5) * 42.0 * radius;
             let z = (rng.f() - 0.5) * 42.0 * radius;
             let rel = [x - cam[0], -cam[1], z - cam[2]];
-            if rel[2] < 1.0 || (rel[0] / rel[2]).abs() > 0.57 * w as f32 / h as f32 * 1.05 { continue }
+            if rel[2] < 1.0 || (rel[0] / rel[2]).abs() > 0.57 * w as f32 / h as f32 * 1.05 {
+                continue;
+            }
             let r = &readers[i % 4];
             let eye = [cam[0] - x, cam[1], cam[2] - z];
             let t = tri_count(&r.select_clusters(4.0, &Projection { eye, scale }).unwrap());
@@ -701,7 +950,12 @@ fn forest_spike_anatomy() {
         }
         rows.sort_by_key(|r| std::cmp::Reverse(r.0));
         let total: usize = rows.iter().map(|r| r.0).sum();
-        println!("frame {frame}: {} trees in view, {total} triangles; top:", rows.len());
-        for r in rows.iter().take(6) { println!("   {:>9} tris asset {} at {:.2} radii", r.0, r.1, r.2); }
+        println!(
+            "frame {frame}: {} trees in view, {total} triangles; top:",
+            rows.len()
+        );
+        for r in rows.iter().take(6) {
+            println!("   {:>9} tris asset {} at {:.2} radii", r.0, r.1, r.2);
+        }
     }
 }

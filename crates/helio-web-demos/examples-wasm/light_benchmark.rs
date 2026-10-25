@@ -40,27 +40,18 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let world = &mut scene_db.world;
-        let ground_m = crate::common::spawn_material(world, make_material(
-            [0.4, 0.4, 0.4, 1.0],
-            0.8,
-            0.05,
-            [0.0; 3],
-            0.0,
-        ));
-        let box_m = crate::common::spawn_material(world, make_material(
-            [0.55, 0.52, 0.48, 1.0],
-            0.7,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let light_m = crate::common::spawn_material(world, make_material(
-            [1.0, 1.0, 1.0, 1.0],
-            0.0,
-            0.0,
-            [2.0, 2.0, 2.0],
-            5.0,
-        ));
+        let ground_m = crate::common::spawn_material(
+            world,
+            make_material([0.4, 0.4, 0.4, 1.0], 0.8, 0.05, [0.0; 3], 0.0),
+        );
+        let box_m = crate::common::spawn_material(
+            world,
+            make_material([0.55, 0.52, 0.48, 1.0], 0.7, 0.0, [0.0; 3], 0.0),
+        );
+        let light_m = crate::common::spawn_material(
+            world,
+            make_material([1.0, 1.0, 1.0, 1.0], 0.0, 0.0, [2.0, 2.0, 2.0], 5.0),
+        );
 
         // Ground plane
         let ground = crate::common::spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 64.0));
@@ -73,10 +64,7 @@ impl HelioWasmApp for Demo {
                 let x = -28.0 + ix as f32 * 8.0;
                 let z = -28.0 + iz as f32 * 8.0;
                 let h = 0.5 + (ix * n + iz) as f32 % 3.0;
-                let bm = crate::common::spawn_mesh(world, box_mesh(
-                        [x, h / 2.0, z],
-                        [0.8, h, 0.8],
-                    ));
+                let bm = crate::common::spawn_mesh(world, box_mesh([x, h / 2.0, z], [0.8, h, 0.8]));
                 insert_object(world, bm, box_m, glam::Mat4::IDENTITY, h).unwrap();
             }
         }
@@ -92,21 +80,16 @@ impl HelioWasmApp for Demo {
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
             let bulb = crate::common::spawn_mesh(world, cube_mesh([x, 1.8, z], 0.07));
             insert_object(world, bulb, light_m, glam::Mat4::IDENTITY, 0.07).unwrap();
-            let id = crate::common::spawn_light(world, point_light(
-                    [x, 2.0, z],
-                    [r, g, b],
-                    10.0,
-                    8.0,
-                ));
+            let id =
+                crate::common::spawn_light(world, point_light([x, 2.0, z], [r, g, b], 10.0, 8.0));
             light_ids.push(id);
         }
 
         // Faint directional ambient
-        crate::common::spawn_light(world, directional_light(
-                [0.2, -0.9, 0.4],
-                [0.8, 0.85, 1.0],
-                0.002,
-            ));
+        crate::common::spawn_light(
+            world,
+            directional_light([0.2, -0.9, 0.4], [0.8, 0.85, 1.0], 0.002),
+        );
         renderer.set_ambient([0.1, 0.1, 0.15], 0.01);
         renderer.set_clear_color([0.01, 0.01, 0.02, 1.0]);
 

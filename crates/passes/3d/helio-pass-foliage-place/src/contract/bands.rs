@@ -141,12 +141,16 @@ impl Default for FoliageRange {
 
 /// Share of the tufts drawn at `d` metres (`foliage_keep` in the shaders).
 pub fn keep(bands: &GpuFoliageBands, d: f32) -> f32 {
-    (bands.keep_distance / d.max(1.0e-3)).powf(bands.keep_power).min(1.0)
+    (bands.keep_distance / d.max(1.0e-3))
+        .powf(bands.keep_power)
+        .min(1.0)
 }
 
 /// How much a surviving tuft grows at `d` metres.
 pub fn growth(bands: &GpuFoliageBands, d: f32) -> f32 {
-    keep(bands, d).powf(-bands.growth_power).clamp(1.0, bands.growth_max.max(1.0))
+    keep(bands, d)
+        .powf(-bands.growth_power)
+        .clamp(1.0, bands.growth_max.max(1.0))
 }
 
 /// The band's weight at `d` metres: 1 inside it, fading across its boundaries, 0 past.
@@ -155,7 +159,11 @@ pub fn band_weight(band: &GpuFoliageBand, d: f32) -> f32 {
         let t = ((x - a) / (b - a).max(1.0e-6)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    let fade_in = if band.inner > 0.0 { smooth(band.inner - band.fade_in, band.inner, d) } else { 1.0 };
+    let fade_in = if band.inner > 0.0 {
+        smooth(band.inner - band.fade_in, band.inner, d)
+    } else {
+        1.0
+    };
     fade_in * (1.0 - smooth(band.outer - band.fade_out, band.outer, d))
 }
 
@@ -191,7 +199,11 @@ pub fn plan_bands(range: &FoliageRange) -> GpuFoliageBands {
         let is_last = outer >= table.range || k + 1 == FOLIAGE_MAX_BANDS;
         // The last band fades out at the range over at most half its width, clear of the
         // fade it enters by.
-        let fade_out = if is_last { (0.2 * outer).min(0.5 * (outer - inner)) } else { FOLIAGE_BAND_FADE * outer };
+        let fade_out = if is_last {
+            (0.2 * outer).min(0.5 * (outer - inner))
+        } else {
+            FOLIAGE_BAND_FADE * outer
+        };
         // The density the band's nearest drawn point needs.
         let nearest = (inner - fade_in).max(0.0);
         let share = keep(&table, nearest.max(1.0e-3)).min(1.0);
@@ -202,14 +214,20 @@ pub fn plan_bands(range: &FoliageRange) -> GpuFoliageBands {
         let grid = grid.min((isqrt(crate::MAX_CANDIDATES_PER_TILE) / step).max(1) * step);
         let candidates = grid * grid;
         // The tufts the grid can hold at full density decide the share it achieves.
-        let achieved = (candidates as f32 / (range.tufts_per_m2.max(0.01) * tile * tile)).min(share.max(1.0e-3));
+        let achieved = (candidates as f32 / (range.tufts_per_m2.max(0.01) * tile * tile))
+            .min(share.max(1.0e-3));
         let lod = match k {
             0 => BAND_LOD_BLADES,
             1 => BAND_LOD_TUFT_BLADES,
             _ => BAND_LOD_TUFT,
         };
-        let per_tuft = if lod == BAND_LOD_BLADES { range.blades_per_tuft.max(1.0) * 1.3 } else { 1.0 };
-        let slab = ((candidates as f32 * per_tuft).ceil() as u32).clamp(1, crate::MAX_BLADES_PER_TILE);
+        let per_tuft = if lod == BAND_LOD_BLADES {
+            range.blades_per_tuft.max(1.0) * 1.3
+        } else {
+            1.0
+        };
+        let slab =
+            ((candidates as f32 * per_tuft).ceil() as u32).clamp(1, crate::MAX_BLADES_PER_TILE);
         let slots = FOLIAGE_BAND_TILES * FOLIAGE_BAND_TILES;
         table.bands[k] = GpuFoliageBand {
             slot_base: slot,
@@ -254,12 +272,17 @@ impl GpuFoliageBands {
 
     /// Arena records over every band.
     pub fn records(&self) -> u64 {
-        self.bands().iter().map(|b| u64::from(b.slot_count) * u64::from(b.slab)).sum()
+        self.bands()
+            .iter()
+            .map(|b| u64::from(b.slot_count) * u64::from(b.slab))
+            .sum()
     }
 
     /// The band a slot belongs to.
     pub fn band_of_slot(&self, slot: u32) -> Option<usize> {
-        self.bands().iter().position(|b| slot >= b.slot_base && slot < b.slot_base + b.slot_count)
+        self.bands()
+            .iter()
+            .position(|b| slot >= b.slot_base && slot < b.slot_base + b.slot_count)
     }
 }
 
@@ -280,7 +303,10 @@ mod tests {
 
     #[test]
     fn bands_reach_the_range_with_rings_of_equal_size() {
-        let table = plan_bands(&FoliageRange { range: 250.0, ..FoliageRange::default() });
+        let table = plan_bands(&FoliageRange {
+            range: 250.0,
+            ..FoliageRange::default()
+        });
         let bands = table.bands();
         assert!(bands.len() >= 4, "{} bands", bands.len());
         assert_eq!(bands.last().unwrap().outer, 250.0);
@@ -290,11 +316,19 @@ mod tests {
             assert_eq!(pair[1].fade_in, pair[0].fade_out);
             assert_eq!(pair[1].tile_size, 2.0 * pair[0].tile_size);
             assert_eq!(pair[1].slot_base, pair[0].slot_base + pair[0].slot_count);
-            assert_eq!(pair[1].arena_base, pair[0].arena_base + pair[0].slot_count * pair[0].slab);
+            assert_eq!(
+                pair[1].arena_base,
+                pair[0].arena_base + pair[0].slot_count * pair[0].slab
+            );
         }
         for b in bands {
             // A ring of seven tiles holds the band's reach wherever the eye is in its tile.
-            assert!(b.outer <= 3.0 * b.tile_size, "band reaching {} m over tiles of {} m", b.outer, b.tile_size);
+            assert!(
+                b.outer <= 3.0 * b.tile_size,
+                "band reaching {} m over tiles of {} m",
+                b.outer,
+                b.tile_size
+            );
             assert_eq!(b.candidate_grid % (b.probe_blocks * 4), 0);
             assert!(b.candidate_grid * b.candidate_grid <= crate::MAX_CANDIDATES_PER_TILE);
             assert!(b.share > 0.0 && b.share <= 1.0);
@@ -327,7 +361,12 @@ mod tests {
         // Every band holds the density its nearest drawn point needs.
         for b in table.bands() {
             let nearest = (b.inner - b.fade_in).max(1.0e-3);
-            assert!(b.share + 1.0e-4 >= keep(&table, nearest).min(b.share), "band at {} m holds {}", b.inner, b.share);
+            assert!(
+                b.share + 1.0e-4 >= keep(&table, nearest).min(b.share),
+                "band at {} m holds {}",
+                b.inner,
+                b.share
+            );
         }
         // A tuft drawn in its band at full scale near, gone once its rank is past the share.
         let far = &table.bands()[table.count as usize - 1];

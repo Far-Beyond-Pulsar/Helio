@@ -91,7 +91,10 @@ pub fn build(
         }
     }
     let mut order: Vec<usize> = (0..count).collect();
-    let keys_unsorted: Vec<u32> = spheres.iter().map(|(c, _)| morton(*c, bmin, bmax)).collect();
+    let keys_unsorted: Vec<u32> = spheres
+        .iter()
+        .map(|(c, _)| morton(*c, bmin, bmax))
+        .collect();
     // Stable, like the LSD radix sort.
     order.sort_by_key(|&p| keys_unsorted[p]);
     let items: Vec<u32> = order.iter().map(|&p| rows[p]).collect();
@@ -115,7 +118,9 @@ pub fn build(
             }
             tiny &= 2.0 * r <= cfg.tiny_extent;
         }
-        let longest = (0..3).map(|k| mx[k] - mn[k]).fold(f32::NEG_INFINITY, f32::max);
+        let longest = (0..3)
+            .map(|k| mx[k] - mn[k])
+            .fold(f32::NEG_INFINITY, f32::max);
         let merge = cs >= 2 && n >= 2 && tiny && longest <= cfg.batch_cell_extent;
         if merge {
             leaves.push((start as u32, n as u32));
@@ -147,7 +152,11 @@ pub fn build(
     };
     for ii in 0..m.saturating_sub(1) {
         let i = ii as i32;
-        let d = if delta(i, i + 1) > delta(i, i - 1) { 1 } else { -1 };
+        let d = if delta(i, i + 1) > delta(i, i - 1) {
+            1
+        } else {
+            -1
+        };
         let dmin = delta(i, i - d);
         let mut lmax = 2;
         while delta(i, i + lmax * d) > dmin {
@@ -176,9 +185,16 @@ pub fn build(
         }
         let gamma = i + s * d + d.min(0);
         let (lo, hi) = (i.min(j), i.max(j));
-        let left = if lo == gamma { (m - 1) as u32 + gamma as u32 } else { gamma as u32 };
-        let right =
-            if hi == gamma + 1 { (m - 1) as u32 + (gamma + 1) as u32 } else { (gamma + 1) as u32 };
+        let left = if lo == gamma {
+            (m - 1) as u32 + gamma as u32
+        } else {
+            gamma as u32
+        };
+        let right = if hi == gamma + 1 {
+            (m - 1) as u32 + (gamma + 1) as u32
+        } else {
+            (gamma + 1) as u32
+        };
         nodes[ii].a = left;
         nodes[ii].b = right;
     }

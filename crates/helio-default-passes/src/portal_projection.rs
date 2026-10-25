@@ -135,7 +135,9 @@ impl Upload {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: bytes.max(16),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
     }
@@ -202,12 +204,21 @@ impl SceneDerivation for PortalProjection {
             if rows.generation != self.uploaded {
                 self.views
                     .write(ctx, "Portal Views", bytemuck::cast_slice(&rows.views));
-                self.handles
-                    .write(ctx, "Portal Chain Handles", bytemuck::cast_slice(&rows.handles));
-                self.pool
-                    .write(ctx, "Portal Chain Payload", bytemuck::cast_slice(&rows.pool));
-                self.unmaps
-                    .write(ctx, "Portal Chain Unmap", bytemuck::cast_slice(&rows.unmaps));
+                self.handles.write(
+                    ctx,
+                    "Portal Chain Handles",
+                    bytemuck::cast_slice(&rows.handles),
+                );
+                self.pool.write(
+                    ctx,
+                    "Portal Chain Payload",
+                    bytemuck::cast_slice(&rows.pool),
+                );
+                self.unmaps.write(
+                    ctx,
+                    "Portal Chain Unmap",
+                    bytemuck::cast_slice(&rows.unmaps),
+                );
                 self.uploaded = rows.generation;
             }
             (rows.generation, rows.views.is_empty())
@@ -223,7 +234,8 @@ impl SceneDerivation for PortalProjection {
                 ),
                 (
                     BufferKey::of(PORTAL_CHAIN_HANDLE_BUFFER),
-                    self.handles.handle(PORTAL_CHAIN_HANDLE_ROW_BYTES, generation),
+                    self.handles
+                        .handle(PORTAL_CHAIN_HANDLE_ROW_BYTES, generation),
                 ),
                 (
                     BufferKey::of(PORTAL_CHAIN_PORTAL_POOL_BUFFER),

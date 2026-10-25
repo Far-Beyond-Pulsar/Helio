@@ -47,21 +47,39 @@ fn proxy_levels_are_consistent_cuts() {
         // more than two triangles and (almost) none has one. Cracks between
         // clusters of different depth would show up as open edges.
         let uses = edge_uses(lod);
-        assert!(uses.values().all(|&n| n <= 2), "level {l}: non-manifold proxy edge");
+        assert!(
+            uses.values().all(|&n| n <= 2),
+            "level {l}: non-manifold proxy edge"
+        );
         let open = uses.values().filter(|&&n| n == 1).count();
-        assert_eq!(open, 0, "level {l}: {open} open edges (cracks) of {}", uses.len());
+        assert_eq!(
+            open,
+            0,
+            "level {l}: {open} open edges (cracks) of {}",
+            uses.len()
+        );
         assert_eq!(lod.prim_map.len(), lod.triangle_count());
         assert_eq!(lod.clusters.len(), lod.cluster_pages.len());
         for &m in &lod.prim_map {
             assert!(((m >> VIS_TRI_BITS) as usize) < lod.clusters.len());
             assert!((m & VIS_TRI_MASK) < 128);
         }
-        assert!(lod.indices.iter().all(|&i| (i as usize) < lod.positions.len()));
+        assert!(lod
+            .indices
+            .iter()
+            .all(|&i| (i as usize) < lod.positions.len()));
         // Memory: welding keeps vertices near V = T/2 for a closed mesh.
-        assert!(lod.positions.len() * 10 < lod.triangle_count() * 8, "level {l} is not welded");
+        assert!(
+            lod.positions.len() * 10 < lod.triangle_count() * 8,
+            "level {l} is not welded"
+        );
     }
     // The bounding sphere encloses the unit icosphere.
-    assert!(proxy.bounds[3] >= 0.99 && proxy.bounds[3] < 1.5, "{:?}", proxy.bounds);
+    assert!(
+        proxy.bounds[3] >= 0.99 && proxy.bounds[3] < 1.5,
+        "{:?}",
+        proxy.bounds
+    );
 }
 
 #[test]
@@ -94,17 +112,26 @@ fn proxy_positions_and_triangles_match_the_reader() {
 fn proxy_triangle_cap_skips_the_fine_levels() {
     let (bytes, _) = asset(5);
     let source = VgeoBytes::new(bytes).unwrap();
-    let opts = ProxyOptions { max_triangles_per_lod: 3000, ..ProxyOptions::default() };
+    let opts = ProxyOptions {
+        max_triangles_per_lod: 3000,
+        ..ProxyOptions::default()
+    };
     let proxy = build_proxy(&source, &opts, None).unwrap();
     assert!(proxy.skipped_levels > 0);
     assert!(proxy.lods.iter().all(|l| l.triangle_count() <= 3000));
-    assert!(proxy.lods[0].error > 0.0, "the leaf level should have been skipped");
+    assert!(
+        proxy.lods[0].error > 0.0,
+        "the leaf level should have been skipped"
+    );
 }
 
 /// The trace proxy without UVs: the test assets' attributes are their
 /// positions, not the runtime's 16-byte records ([`ATTR_STRIDE`]).
 fn untextured_trace() -> ProxyOptions {
-    ProxyOptions { uvs: false, ..ProxyOptions::trace() }
+    ProxyOptions {
+        uvs: false,
+        ..ProxyOptions::trace()
+    }
 }
 
 /// f16 bits of `x` (normal numbers, truncated; zero as zero).
@@ -157,17 +184,35 @@ fn trace_proxy_vertices_keep_their_uvs() {
         tri_material: &[],
     };
     let source = VgeoBytes::new(build_vgeo(&input, &BuildOptions::default()).unwrap()).unwrap();
-    for opts in [ProxyOptions::trace(), ProxyOptions { finest_relative_error: 0.08, ..ProxyOptions::trace() }] {
+    for opts in [
+        ProxyOptions::trace(),
+        ProxyOptions {
+            finest_relative_error: 0.08,
+            ..ProxyOptions::trace()
+        },
+    ] {
         let proxy = build_proxy(&source, &opts, None).unwrap();
         let lod = &proxy.lods[0];
         assert_eq!(lod.uvs.len(), lod.positions.len());
         let mut seam = 0;
         for (p, uv) in lod.positions.iter().zip(&lod.uvs) {
-            let u = if (uv[0] - p[0]).abs() < 2e-3 { p[0] } else { p[0] - 0.5 };
-            assert!((uv[0] - u).abs() < 2e-3 && (uv[1] - p[2]).abs() < 2e-3, "vertex at {p:?} has uv {uv:?}");
+            let u = if (uv[0] - p[0]).abs() < 2e-3 {
+                p[0]
+            } else {
+                p[0] - 0.5
+            };
+            assert!(
+                (uv[0] - u).abs() < 2e-3 && (uv[1] - p[2]).abs() < 2e-3,
+                "vertex at {p:?} has uv {uv:?}"
+            );
             seam += usize::from((p[0] - 0.5).abs() < 1e-4);
         }
-        eprintln!("trace proxy at error {}: {} triangles, {} vertices, {seam} on the seam", lod.error, lod.triangle_count(), lod.positions.len());
+        eprintln!(
+            "trace proxy at error {}: {} triangles, {} vertices, {seam} on the seam",
+            lod.error,
+            lod.triangle_count(),
+            lod.positions.len()
+        );
     }
 }
 
@@ -184,13 +229,29 @@ fn trace_proxy_is_one_coarse_closed_cut_within_its_error() {
     // 1 % of the radius, measured around the root cut's bounding box centre
     // (a few percent over the sphere's own radius).
     let bound = ProxyOptions::TRACE_RELATIVE_ERROR * proxy.bounds[3] * 1.05;
-    assert!(lod.error > 0.0 && lod.error <= bound, "error {} over {bound}", lod.error);
-    assert!(lod.triangle_count() * 4 < source_tris, "{} of {source_tris} triangles", lod.triangle_count());
+    assert!(
+        lod.error > 0.0 && lod.error <= bound,
+        "error {} over {bound}",
+        lod.error
+    );
+    assert!(
+        lod.triangle_count() * 4 < source_tris,
+        "{} of {source_tris} triangles",
+        lod.triangle_count()
+    );
     assert!(lod.triangle_count() as u32 <= ProxyOptions::TRACE_MAX_TRIANGLES);
     let open = edge_uses(lod).values().filter(|&&n| n != 2).count();
     assert_eq!(open, 0, "{open} open or non-manifold edges");
-    let off = lod.positions.iter().map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs()).fold(0.0, f32::max);
-    assert!(off <= 2.0 * lod.error + 1e-3, "a vertex {off} off the sphere (error {})", lod.error);
+    let off = lod
+        .positions
+        .iter()
+        .map(|p| ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs())
+        .fold(0.0, f32::max);
+    assert!(
+        off <= 2.0 * lod.error + 1e-3,
+        "a vertex {off} off the sphere (error {})",
+        lod.error
+    );
 }
 
 /// Over the triangle budget, the trace proxy takes the first coarser cut
@@ -201,7 +262,10 @@ fn trace_proxy_coarsens_to_fit_its_triangle_budget() {
     let source = VgeoBytes::new(bytes).unwrap();
     let fine = build_proxy(&source, &untextured_trace(), None).unwrap();
     let budget = fine.lods[0].triangle_count() as u32 / 3;
-    let opts = ProxyOptions { max_triangles_per_lod: budget, ..untextured_trace() };
+    let opts = ProxyOptions {
+        max_triangles_per_lod: budget,
+        ..untextured_trace()
+    };
     let proxy = build_proxy(&source, &opts, None).unwrap();
     assert_eq!(proxy.lods.len(), 1);
     assert!(proxy.skipped_levels > 0);
@@ -219,7 +283,10 @@ fn proxy_pages_are_listed_and_bounded() {
         assert!(!lod.pages.is_empty());
         assert!(lod.pages.windows(2).all(|w| w[0] < w[1]));
         assert!(*lod.pages.last().unwrap() < pages);
-        assert!(lod.cluster_pages.iter().all(|p| lod.pages.binary_search(p).is_ok()));
+        assert!(lod
+            .cluster_pages
+            .iter()
+            .all(|p| lod.pages.binary_search(p).is_ok()));
     }
 }
 
@@ -231,7 +298,10 @@ fn wait_ready(cache: &mut ProxyCache, want: usize) -> Vec<(u64, Arc<ProxyBuild>)
         cache.poll(frame);
         out.extend(cache.take_ready());
         frame += 1;
-        assert!(start.elapsed() < Duration::from_secs(60), "proxy builds never finished");
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "proxy builds never finished"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     out
@@ -245,7 +315,7 @@ fn cache_builds_in_the_background_and_evicts_to_budget() {
     cache.request(1, a.clone(), 1);
     cache.request(2, b.clone(), 1);
     cache.request(1, a.clone(), 1); // duplicate request is a no-op
-    // The call returns immediately: nothing is built on this thread.
+                                    // The call returns immediately: nothing is built on this thread.
     assert!(matches!(cache.state(1), Some(ProxyState::Building)));
     assert_eq!(cache.stats().jobs_started, 0);
     let ready = wait_ready(&mut cache, 2);
@@ -290,8 +360,11 @@ fn cache_builds_in_the_background_and_evicts_to_budget() {
 #[test]
 #[ignore]
 fn real_asset_cut_sizes() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/assets/vg_stress/cache");
-    let Ok(rd) = std::fs::read_dir(&dir) else { return };
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/assets/vg_stress/cache");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let scale = 1080.0 / (2.0 * (60f32.to_radians() * 0.5).tan());
     for e in rd.flatten() {
         let path = e.path();
@@ -299,7 +372,9 @@ fn real_asset_cut_sizes() {
             continue;
         }
         let bytes = std::fs::read(&path).unwrap();
-        let Ok(r) = VgeoReader::parse(&bytes) else { continue };
+        let Ok(r) = VgeoReader::parse(&bytes) else {
+            continue;
+        };
         let tris = r.header.asset.triangle_count;
         if tris < 500_000 {
             continue;
@@ -316,11 +391,25 @@ fn real_asset_cut_sizes() {
                 hi[a] = hi[a].max(s[a] + s[3]);
             }
         }
-        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
-        let rad = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt() / 2.0;
-        let mut line = format!("{} tris {} extent {:.1}:", path.file_name().unwrap().to_string_lossy(), tris, rad * 2.0);
+        let c = [
+            (lo[0] + hi[0]) / 2.0,
+            (lo[1] + hi[1]) / 2.0,
+            (lo[2] + hi[2]) / 2.0,
+        ];
+        let rad = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2))
+            .sqrt()
+            / 2.0;
+        let mut line = format!(
+            "{} tris {} extent {:.1}:",
+            path.file_name().unwrap().to_string_lossy(),
+            tris,
+            rad * 2.0
+        );
         for d in [20.0f32, 50.0, 100.0] {
-            let proj = helio_vg_build::Projection { eye: [c[0] + rad + d, c[1], c[2]], scale };
+            let proj = helio_vg_build::Projection {
+                eye: [c[0] + rad + d, c[1], c[2]],
+                scale,
+            };
             let sel = r.select_clusters(1.0, &proj).unwrap();
             let t: u32 = sel.iter().map(|s| s.cluster.tri_count()).sum();
             line += &format!("  {d} m: {t} tris ({} clusters)", sel.len());

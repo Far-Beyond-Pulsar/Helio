@@ -54,7 +54,10 @@ fn pixels() -> impl Iterator<Item = (u32, u32)> {
 }
 
 fn mean(frame: &Frame, channel: usize) -> f32 {
-    pixels().map(|(x, y)| frame.pixel(x, y)[channel]).sum::<f32>() / (SIZE * SIZE) as f32
+    pixels()
+        .map(|(x, y)| frame.pixel(x, y)[channel])
+        .sum::<f32>()
+        / (SIZE * SIZE) as f32
 }
 
 fn mean_of_scene(scene: &Scene, channel: usize) -> f32 {
@@ -62,12 +65,22 @@ fn mean_of_scene(scene: &Scene, channel: usize) -> f32 {
 }
 
 fn record(rig: &mut Rig, scene: &Scene, elements: &[LensElementComponent]) -> Frame {
-    rig.record(scene, Some(&[stacked(elements)]), (!elements.is_empty()).then_some(elements))
+    rig.record(
+        scene,
+        Some(&[stacked(elements)]),
+        (!elements.is_empty()).then_some(elements),
+    )
 }
 
 /// Mass, centroid and covariance (x, y, xy) of one channel above `floor`
 /// in a window.
-fn moments(frame: &Frame, at: (f32, f32), radius: i32, channel: usize, floor: f32) -> (f32, [f32; 2], [f32; 3]) {
+fn moments(
+    frame: &Frame,
+    at: (f32, f32),
+    radius: i32,
+    channel: usize,
+    floor: f32,
+) -> (f32, [f32; 2], [f32; 3]) {
     let (mut sum, mut sx, mut sy) = (0.0f32, 0.0f32, 0.0f32);
     let mut samples = Vec::new();
     for dy in -radius..=radius {
@@ -96,7 +109,10 @@ fn moments(frame: &Frame, at: (f32, f32), radius: i32, channel: usize, floor: f3
 fn energy_scene() -> Scene {
     patches(
         [0.02, 0.025, 0.03],
-        &[(59, 59, 10, 10, [8.0, 5.0, 3.0]), (50, 66, 6, 6, [2.0, 4.0, 8.0])],
+        &[
+            (59, 59, 10, 10, [8.0, 5.0, 3.0]),
+            (50, 66, 6, 6, [2.0, 4.0, 8.0]),
+        ],
     )
 }
 
@@ -104,7 +120,13 @@ fn energy_scene() -> Scene {
 fn without_aberration_elements_the_stage_is_idle_and_the_image_untouched() {
     let mut rig = Rig::new();
     let scene = Scene::new(
-        |x, y| [x as f32 * 0.37 + 0.1, y as f32 * 3.1 + 0.2, 40.0 + (x ^ y) as f32],
+        |x, y| {
+            [
+                x as f32 * 0.37 + 0.1,
+                y as f32 * 3.1 + 0.2,
+                40.0 + (x ^ y) as f32,
+            ]
+        },
         |_, _| 3.0,
     );
     let color = rig.color_view(&scene);
@@ -115,10 +137,16 @@ fn without_aberration_elements_the_stage_is_idle_and_the_image_untouched() {
     let resolved = rig.resolved();
     assert_eq!(resolved.aberration_flags, 0);
     let args = rig.args();
-    assert!(args[18..].iter().all(|&n| n == 0), "the aberration stages must not dispatch: {args:?}");
+    assert!(
+        args[18..].iter().all(|&n| n == 0),
+        "the aberration stages must not dispatch: {args:?}"
+    );
 
     // Other element kinds do not wake it either.
-    let element = [LensElementComponent::natural_vignette(0.0, LensRegion::FullFrame)];
+    let element = [LensElementComponent::natural_vignette(
+        0.0,
+        LensRegion::FullFrame,
+    )];
     let frame = record(&mut rig, &scene, &element);
     assert_eq!(frame.output, input);
     assert_eq!(rig.resolved().aberration_flags, 0);
@@ -126,16 +154,29 @@ fn without_aberration_elements_the_stage_is_idle_and_the_image_untouched() {
 
     // An aberration element wakes it; with nothing to scatter it still
     // reproduces the image exactly.
-    let element = [LensElementComponent::diffusion(0.0, 0.01, LensRegion::FullFrame)];
+    let element = [LensElementComponent::diffusion(
+        0.0,
+        0.01,
+        LensRegion::FullFrame,
+    )];
     let frame = record(&mut rig, &scene, &element);
     assert_eq!(rig.resolved().aberration_flags, AB_ACTIVE);
     let args = rig.args();
     // A 128-pixel frame has a 64-pixel first level and seven levels in all; the
     // eighth slot stays empty.
-    assert!(args[18..39].iter().all(|&n| n > 0), "the pyramid levels dispatch: {args:?}");
+    assert!(
+        args[18..39].iter().all(|&n| n > 0),
+        "the pyramid levels dispatch: {args:?}"
+    );
     assert_eq!(args[39..42], [0, 0, 0]);
-    assert!(args[42..45].iter().all(|&n| n > 0), "the filters dispatch: {args:?}");
-    assert_eq!(frame.output, input, "a zero-strength element changed the image");
+    assert!(
+        args[42..45].iter().all(|&n| n > 0),
+        "the filters dispatch: {args:?}"
+    );
+    assert_eq!(
+        frame.output, input,
+        "a zero-strength element changed the image"
+    );
 
     // A disabled lens never runs it, even with the element rows present.
     let mut disabled = stacked(&element);
@@ -151,15 +192,36 @@ fn scattering_elements_preserve_mean_radiance() {
     let scene = energy_scene();
     let full = LensRegion::FullFrame;
     let cases: Vec<(&str, LensElementComponent)> = vec![
-        ("diffusion", LensElementComponent::diffusion(0.4, 0.02, full)),
+        (
+            "diffusion",
+            LensElementComponent::diffusion(0.4, 0.02, full),
+        ),
         ("pro-mist", LensElementComponent::pro_mist(0.4, full)),
-        ("black pro-mist", LensElementComponent::black_pro_mist(0.4, full)),
-        ("glimmerglass", LensElementComponent::glimmerglass(0.4, full)),
+        (
+            "black pro-mist",
+            LensElementComponent::black_pro_mist(0.4, full),
+        ),
+        (
+            "glimmerglass",
+            LensElementComponent::glimmerglass(0.4, full),
+        ),
         ("fog", LensElementComponent::fog(0.4, full)),
-        ("spherical glow", LensElementComponent::spherical_glow(0.4, 2.8, 2.0, 0.02, full)),
-        ("star 4", LensElementComponent::star_filter(4, 0.2, 0.3, 0.4, full)),
-        ("star 6", LensElementComponent::star_filter(6, 0.0, 0.3, 0.4, full)),
-        ("star 8", LensElementComponent::star_filter(8, 0.1, 0.3, 0.4, full)),
+        (
+            "spherical glow",
+            LensElementComponent::spherical_glow(0.4, 2.8, 2.0, 0.02, full),
+        ),
+        (
+            "star 4",
+            LensElementComponent::star_filter(4, 0.2, 0.3, 0.4, full),
+        ),
+        (
+            "star 6",
+            LensElementComponent::star_filter(6, 0.0, 0.3, 0.4, full),
+        ),
+        (
+            "star 8",
+            LensElementComponent::star_filter(8, 0.1, 0.3, 0.4, full),
+        ),
         ("halation", LensElementComponent::halation(0.5, 0.03, full)),
         ("smear", LensElementComponent::smear(0.5, 0.05, 0.4, full)),
         ("dirt", LensElementComponent::dirt(0.4, 0.02, 0.0, full)),
@@ -175,8 +237,13 @@ fn scattering_elements_preserve_mean_radiance() {
             );
         }
         // And it did something.
-        let changed = pixels().filter(|&(x, y)| frame.pixel(x, y) != scene.color[(y * SIZE + x) as usize]).count();
-        assert!(changed > 200, "{name} left the image alone ({changed} pixels)");
+        let changed = pixels()
+            .filter(|&(x, y)| frame.pixel(x, y) != scene.color[(y * SIZE + x) as usize])
+            .count();
+        assert!(
+            changed > 200,
+            "{name} left the image alone ({changed} pixels)"
+        );
     }
 }
 
@@ -194,7 +261,10 @@ fn a_stack_of_scatterers_conserves_energy_too() {
     let frame = record(&mut rig, &scene, &elements);
     for channel in 0..3 {
         let (before, after) = (mean_of_scene(&scene, channel), mean(&frame, channel));
-        assert!((after / before - 1.0).abs() < 0.03, "channel {channel}: {before} -> {after}");
+        assert!(
+            (after / before - 1.0).abs() < 0.03,
+            "channel {channel}: {before} -> {after}"
+        );
     }
 }
 
@@ -218,7 +288,9 @@ fn angular_histogram(frame: &Frame, centre: (f32, f32), r0: f32, r1: f32) -> [f3
 /// Peaks of a circular histogram: bins at least `level` of the maximum that
 /// beat their neighbours, as (bin centre angle, height).
 fn peaks(bins: &[f32; 72], level: f32) -> Vec<(f32, f32)> {
-    let smooth: Vec<f32> = (0..72).map(|i| bins[(i + 71) % 72] + bins[i] + bins[(i + 1) % 72]).collect();
+    let smooth: Vec<f32> = (0..72)
+        .map(|i| bins[(i + 71) % 72] + bins[i] + bins[(i + 1) % 72])
+        .collect();
     let max = smooth.iter().cloned().fold(0.0, f32::max);
     (0..72)
         .filter(|&i| {
@@ -235,13 +307,24 @@ fn a_star_filter_with_n_points_makes_n_spikes() {
     let scene = blobs(&[(64.0, 64.0, 60.0)], 1.0);
     for points in [2u32, 4, 6, 8] {
         for rotation in [0.0f32, 0.3] {
-            let element = [LensElementComponent::star_filter(points, rotation, 0.45, 0.5, LensRegion::FullFrame)];
+            let element = [LensElementComponent::star_filter(
+                points,
+                rotation,
+                0.45,
+                0.5,
+                LensRegion::FullFrame,
+            )];
             let frame = record(&mut rig, &scene, &element);
             let found = peaks(&angular_histogram(&frame, (64.0, 64.0), 10.0, 52.0), 0.4);
-            assert_eq!(found.len(), points as usize, "{points} points, rotation {rotation}: {found:?}");
+            assert_eq!(
+                found.len(),
+                points as usize,
+                "{points} points, rotation {rotation}: {found:?}"
+            );
             // Each spike points where it was asked to.
             for k in 0..points {
-                let wanted = (rotation + std::f32::consts::TAU * k as f32 / points as f32).rem_euclid(std::f32::consts::TAU);
+                let wanted = (rotation + std::f32::consts::TAU * k as f32 / points as f32)
+                    .rem_euclid(std::f32::consts::TAU);
                 let nearest = found
                     .iter()
                     .map(|&(a, _)| {
@@ -249,7 +332,10 @@ fn a_star_filter_with_n_points_makes_n_spikes() {
                         d.min(std::f32::consts::TAU - d)
                     })
                     .fold(f32::MAX, f32::min);
-                assert!(nearest < 0.12, "{points} points: no spike near {wanted} (nearest {nearest})");
+                assert!(
+                    nearest < 0.12,
+                    "{points} points: no spike near {wanted} (nearest {nearest})"
+                );
             }
         }
     }
@@ -280,8 +366,14 @@ fn coma_drags_a_tail_away_from_the_axis() {
         let shift = [shifted[0] - centre[0], shifted[1] - centre[1]];
         let along = shift[0] * outward[0] + shift[1] * outward[1];
         let across = shift[0] * -outward[1] + shift[1] * outward[0];
-        assert!(along > 2.0, "({x}, {y}): the tail must lead outward, shifted {shift:?}");
-        assert!(across.abs() < 0.3 * along, "({x}, {y}): the tail must be radial, along {along} across {across}");
+        assert!(
+            along > 2.0,
+            "({x}, {y}): the tail must lead outward, shifted {shift:?}"
+        );
+        assert!(
+            across.abs() < 0.3 * along,
+            "({x}, {y}): the tail must be radial, along {along} across {across}"
+        );
     }
     // On the axis there is no tail.
     let (_, centre, _) = moments(&plain, (64.0, 64.0), 22, 0, 0.0);
@@ -302,18 +394,38 @@ fn astigmatism_turns_the_ellipse_with_its_sign() {
     let spread = |frame: &Frame| {
         let (_, _, [vxx, vyy, vxy]) = moments(frame, at, 22, 1, 0.0);
         // Variance along the radius and across it.
-        let along = vxx * radial[0] * radial[0] + 2.0 * vxy * radial[0] * radial[1] + vyy * radial[1] * radial[1];
-        let across = vxx * radial[1] * radial[1] - 2.0 * vxy * radial[0] * radial[1] + vyy * radial[0] * radial[0];
+        let along = vxx * radial[0] * radial[0]
+            + 2.0 * vxy * radial[0] * radial[1]
+            + vyy * radial[1] * radial[1];
+        let across = vxx * radial[1] * radial[1] - 2.0 * vxy * radial[0] * radial[1]
+            + vyy * radial[0] * radial[0];
         (along, across)
     };
     let (plain_along, plain_across) = spread(&record(&mut rig, &scene, &[]));
-    assert!((plain_along - plain_across).abs() < 0.2, "the source is round");
-    let positive = [LensElementComponent::astigmatism(0.15, 0.2, LensRegion::FullFrame)];
+    assert!(
+        (plain_along - plain_across).abs() < 0.2,
+        "the source is round"
+    );
+    let positive = [LensElementComponent::astigmatism(
+        0.15,
+        0.2,
+        LensRegion::FullFrame,
+    )];
     let (along, across) = spread(&record(&mut rig, &scene, &positive));
-    assert!(along > 2.0 * across && along > 2.0 * plain_along, "positive: along {along} across {across}");
-    let negative = [LensElementComponent::astigmatism(-0.15, 0.2, LensRegion::FullFrame)];
+    assert!(
+        along > 2.0 * across && along > 2.0 * plain_along,
+        "positive: along {along} across {across}"
+    );
+    let negative = [LensElementComponent::astigmatism(
+        -0.15,
+        0.2,
+        LensRegion::FullFrame,
+    )];
     let (along, across) = spread(&record(&mut rig, &scene, &negative));
-    assert!(across > 2.0 * along && across > 2.0 * plain_across, "negative: along {along} across {across}");
+    assert!(
+        across > 2.0 * along && across > 2.0 * plain_across,
+        "negative: along {along} across {across}"
+    );
 }
 
 #[test]
@@ -321,22 +433,42 @@ fn corner_softness_leaves_the_centre_sharp() {
     let mut rig = Rig::new();
     let scene = blobs(&[(64.0, 64.0, 20.0), (116.0, 116.0, 20.0)], 1.2);
     let plain = record(&mut rig, &scene, &[]);
-    let element = [LensElementComponent::corner_softness(0.04, 0.3, LensRegion::FullFrame)];
+    let element = [LensElementComponent::corner_softness(
+        0.04,
+        0.3,
+        LensRegion::FullFrame,
+    )];
     let soft = record(&mut rig, &scene, &element);
-    assert_eq!(soft.pixel(64, 64), plain.pixel(64, 64), "the axis is untouched");
+    assert_eq!(
+        soft.pixel(64, 64),
+        plain.pixel(64, 64),
+        "the axis is untouched"
+    );
     let (peak_plain, peak_soft) = (plain.pixel(116, 116)[0], soft.pixel(116, 116)[0]);
-    assert!(peak_soft < 0.5 * peak_plain, "the corner softens: {peak_plain} -> {peak_soft}");
+    assert!(
+        peak_soft < 0.5 * peak_plain,
+        "the corner softens: {peak_plain} -> {peak_soft}"
+    );
     // Blurring conserves the blob's light.
     let (mass_plain, ..) = moments(&plain, (116.0, 116.0), 11, 0, 0.0);
     let (mass_soft, ..) = moments(&soft, (116.0, 116.0), 11, 0, 0.0);
-    assert!((mass_soft / mass_plain - 1.0).abs() < 0.12, "{mass_plain} -> {mass_soft}");
+    assert!(
+        (mass_soft / mass_plain - 1.0).abs() < 0.12,
+        "{mass_plain} -> {mass_soft}"
+    );
 }
 
 #[test]
 fn spherical_glow_fades_as_the_lens_stops_down() {
     let mut rig = Rig::new();
     let scene = patches([0.0; 3], &[(60, 60, 8, 8, [10.0; 3])]);
-    let element = [LensElementComponent::spherical_glow(0.5, 2.8, 2.0, 0.03, LensRegion::FullFrame)];
+    let element = [LensElementComponent::spherical_glow(
+        0.5,
+        2.8,
+        2.0,
+        0.03,
+        LensRegion::FullFrame,
+    )];
     let halo = |rig: &mut Rig, f_number: f32| {
         let mut lens = stacked(&element);
         lens.f_number = f_number;
@@ -355,7 +487,11 @@ fn spherical_glow_fades_as_the_lens_stops_down() {
     let tiny = halo(&mut rig, 16.0);
     assert!(wide > 1.0, "the wide-open glow shows: {wide}");
     // (2.8 / 5.6)^2 = 1/4 and (2.8 / 16)^2 = 0.03 of the scattered light.
-    assert!((stopped / wide - 0.25).abs() < 0.08, "f/5.6 keeps a quarter: {}", stopped / wide);
+    assert!(
+        (stopped / wide - 0.25).abs() < 0.08,
+        "f/5.6 keeps a quarter: {}",
+        stopped / wide
+    );
     assert!(tiny / wide < 0.08, "f/16 is nearly clean: {}", tiny / wide);
 }
 
@@ -364,11 +500,19 @@ fn smear_spreads_along_its_direction() {
     let mut rig = Rig::new();
     let scene = blobs(&[(64.0, 64.0, 40.0)], 1.0);
     for angle in [0.0f32, std::f32::consts::FRAC_PI_2] {
-        let element = [LensElementComponent::smear(0.8, 0.06, angle, LensRegion::FullFrame)];
+        let element = [LensElementComponent::smear(
+            0.8,
+            0.06,
+            angle,
+            LensRegion::FullFrame,
+        )];
         let frame = record(&mut rig, &scene, &element);
         let (_, _, [vxx, vyy, _]) = moments(&frame, (64.0, 64.0), 30, 0, 0.0);
         let (along, across) = if angle == 0.0 { (vxx, vyy) } else { (vyy, vxx) };
-        assert!(along > 4.0 * across, "angle {angle}: along {along} across {across}");
+        assert!(
+            along > 4.0 * across,
+            "angle {angle}: along {along} across {across}"
+        );
     }
 }
 
@@ -389,12 +533,28 @@ fn black_pro_mist_lifts_the_shadows_less_than_pro_mist() {
         }
         sum / count
     };
-    let pro = record(&mut rig, &scene, &[LensElementComponent::pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)]);
-    let black = record(&mut rig, &scene, &[LensElementComponent::black_pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)]);
+    let pro = record(
+        &mut rig,
+        &scene,
+        &[LensElementComponent::pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)],
+    );
+    let black = record(
+        &mut rig,
+        &scene,
+        &[LensElementComponent::black_pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)],
+    );
     let (pro_far, black_far) = (lift(&pro, false), lift(&black, false));
-    assert!(black_far > 0.0 && pro_far > 1.4 * black_far, "far shadows: pro-mist {pro_far}, black {black_far}");
+    assert!(
+        black_far > 0.0 && pro_far > 1.4 * black_far,
+        "far shadows: pro-mist {pro_far}, black {black_far}"
+    );
     // Beside the highlight the black version keeps its halo.
-    assert!(lift(&black, true) > 0.9 * lift(&pro, true), "near: black {} pro {}", lift(&black, true), lift(&pro, true));
+    assert!(
+        lift(&black, true) > 0.9 * lift(&pro, true),
+        "near: black {} pro {}",
+        lift(&black, true),
+        lift(&pro, true)
+    );
     // Both are the same share of the light, so the totals agree.
     for channel in 0..3 {
         assert!((mean(&pro, channel) / mean(&black, channel) - 1.0).abs() < 0.03);
@@ -405,7 +565,11 @@ fn black_pro_mist_lifts_the_shadows_less_than_pro_mist() {
 fn halation_is_red_dominant() {
     let mut rig = Rig::new();
     let scene = patches([0.0; 3], &[(58, 58, 12, 12, [6.0; 3])]);
-    let element = [LensElementComponent::halation(0.6, 0.03, LensRegion::FullFrame)];
+    let element = [LensElementComponent::halation(
+        0.6,
+        0.03,
+        LensRegion::FullFrame,
+    )];
     let frame = record(&mut rig, &scene, &element);
     let mut halo = [0.0f32; 3];
     for (x, y) in pixels() {
@@ -416,31 +580,54 @@ fn halation_is_red_dominant() {
             }
         }
     }
-    assert!(halo[0] > 2.5 * halo[1] && halo[0] > 6.0 * halo[2], "halo {halo:?}");
+    assert!(
+        halo[0] > 2.5 * halo[1] && halo[0] > 6.0 * halo[2],
+        "halo {halo:?}"
+    );
     assert!(halo[1] > halo[2], "orange before blue: {halo:?}");
     // The patch stays white-ish at its core; each channel's light is conserved.
     for channel in 0..3 {
         let (before, after) = (mean_of_scene(&scene, channel), mean(&frame, channel));
-        assert!((after / before - 1.0).abs() < 0.03, "channel {channel}: {before} -> {after}");
+        assert!(
+            (after / before - 1.0).abs() < 0.03,
+            "channel {channel}: {before} -> {after}"
+        );
     }
     // A custom tint works: a blue halation puts the halo in blue.
-    let element = [LensElementComponent::halation(0.6, 0.03, LensRegion::FullFrame).with_halation_tint([0.0, 0.0, 1.0])];
+    let element = [
+        LensElementComponent::halation(0.6, 0.03, LensRegion::FullFrame)
+            .with_halation_tint([0.0, 0.0, 1.0]),
+    ];
     let frame = record(&mut rig, &scene, &element);
     let blue: f32 = pixels().map(|(x, y)| frame.pixel(x, y)[2]).sum();
     let red: f32 = pixels().map(|(x, y)| frame.pixel(x, y)[0]).sum();
-    assert!((red / blue - 1.0).abs() < 0.03, "totals stay equal: {red} {blue}");
-    assert!(frame.pixel(64, 64)[2] < frame.pixel(64, 64)[0], "the core loses blue to the halo");
+    assert!(
+        (red / blue - 1.0).abs() < 0.03,
+        "totals stay equal: {red} {blue}"
+    );
+    assert!(
+        frame.pixel(64, 64)[2] < frame.pixel(64, 64)[0],
+        "the core loses blue to the halo"
+    );
 }
 
 #[test]
 fn dirt_loses_a_little_light_where_it_covers() {
     let mut rig = Rig::new();
     let scene = energy_scene();
-    let element = [LensElementComponent::dirt(0.3, 0.02, 0.1, LensRegion::FullFrame)];
+    let element = [LensElementComponent::dirt(
+        0.3,
+        0.02,
+        0.1,
+        LensRegion::FullFrame,
+    )];
     let frame = record(&mut rig, &scene, &element);
     for channel in 0..3 {
         let ratio = mean(&frame, channel) / mean_of_scene(&scene, channel);
-        assert!((ratio - 0.9).abs() < 0.03, "channel {channel}: kept {ratio}");
+        assert!(
+            (ratio - 0.9).abs() < 0.03,
+            "channel {channel}: kept {ratio}"
+        );
     }
 }
 
@@ -462,28 +649,54 @@ fn a_mask_region_restricts_an_element_to_the_white_half() {
     let scene = blobs(&[(28.0, 64.0, 30.0), (100.0, 64.0, 30.0)], 2.0);
     let color = rig.color_view(&scene);
     let input = rig.read_texture(&color);
-    let region = LensRegion::MaskChannel { layer: 0, channel: 0, invert: false };
+    let region = LensRegion::MaskChannel {
+        layer: 0,
+        channel: 0,
+        invert: false,
+    };
     let element = [LensElementComponent::diffusion(0.8, 0.04, region)];
     let frame = record(&mut rig, &scene, &element);
     // The black half is exactly the input; the white half changed.
     for (x, y) in pixels().filter(|&(x, _)| x < 56) {
         let i = ((y * SIZE + x) * 4) as usize;
-        assert_eq!(frame.output[i..i + 3], input[i..i + 3], "({x}, {y}) in the black half changed");
+        assert_eq!(
+            frame.output[i..i + 3],
+            input[i..i + 3],
+            "({x}, {y}) in the black half changed"
+        );
     }
-    let (peak_in, peak_out) = (scene.color[(64 * SIZE + 100) as usize][0], frame.pixel(100, 64)[0]);
-    assert!(peak_out < 0.5 * peak_in, "the white half scatters: {peak_in} -> {peak_out}");
+    let (peak_in, peak_out) = (
+        scene.color[(64 * SIZE + 100) as usize][0],
+        frame.pixel(100, 64)[0],
+    );
+    assert!(
+        peak_out < 0.5 * peak_in,
+        "the white half scatters: {peak_in} -> {peak_out}"
+    );
     // Inverted, the roles swap.
-    let region = LensRegion::MaskChannel { layer: 0, channel: 0, invert: true };
+    let region = LensRegion::MaskChannel {
+        layer: 0,
+        channel: 0,
+        invert: true,
+    };
     let element = [LensElementComponent::diffusion(0.8, 0.04, region)];
     let frame = record(&mut rig, &scene, &element);
     for (x, y) in pixels().filter(|&(x, _)| x >= 72) {
         let i = ((y * SIZE + x) * 4) as usize;
-        assert_eq!(frame.output[i..i + 3], input[i..i + 3], "({x}, {y}) in the inverted half changed");
+        assert_eq!(
+            frame.output[i..i + 3],
+            input[i..i + 3],
+            "({x}, {y}) in the inverted half changed"
+        );
     }
     assert!(frame.pixel(28, 64)[0] < 0.5 * scene.color[(64 * SIZE + 28) as usize][0]);
     // Without a mask array bound the region covers nothing.
     rig.masks = None;
-    let region = LensRegion::MaskChannel { layer: 0, channel: 0, invert: false };
+    let region = LensRegion::MaskChannel {
+        layer: 0,
+        channel: 0,
+        invert: false,
+    };
     let element = [LensElementComponent::diffusion(0.8, 0.04, region)];
     let frame = record(&mut rig, &scene, &element);
     assert_eq!(frame.output, input);
@@ -550,11 +763,18 @@ fn a_water_drop_displaces_content_inside_its_footprint_only() {
         0.05,
         0,
         0.0,
-        LensRegion::MaskChannel { layer: 0, channel: 3, invert: false },
+        LensRegion::MaskChannel {
+            layer: 0,
+            channel: 3,
+            invert: false,
+        },
     )];
     let frame = record(&mut rig, &scene, &element);
     let texel = |x: u32, y: u32| {
-        let (mx, my) = ((x as usize * MASK) / SIZE as usize, (y as usize * MASK) / SIZE as usize);
+        let (mx, my) = (
+            (x as usize * MASK) / SIZE as usize,
+            (y as usize * MASK) / SIZE as usize,
+        );
         &mask[(my * MASK + mx) * 4..][..4]
     };
     let mut outside = 0;
@@ -575,7 +795,10 @@ fn a_water_drop_displaces_content_inside_its_footprint_only() {
             })
         });
         if clear {
-            assert_eq!(out, reference, "({x}, {y}) lies outside every drop and must be untouched");
+            assert_eq!(
+                out, reference,
+                "({x}, {y}) lies outside every drop and must be untouched"
+            );
             outside += 1;
             continue;
         }
@@ -598,9 +821,25 @@ fn a_water_drop_displaces_content_inside_its_footprint_only() {
             sized += ((delta - expected).abs() < 0.12 + 0.3 * expected.abs()) as u32;
         }
     }
-    assert!(outside > 5000, "most of the frame is clear glass: {outside}");
-    assert!(right > 30 && left > 30, "the drop's footprint was probed: {right} {left}");
-    assert!(right_ok as f32 > 0.9 * right as f32, "a drop inverts: {right_ok}/{right}");
-    assert!(left_ok as f32 > 0.9 * left as f32, "a drop inverts: {left_ok}/{left}");
-    assert!(sized as f32 > 0.8 * (left + right) as f32, "displacement follows the normal: {sized}/{}", left + right);
+    assert!(
+        outside > 5000,
+        "most of the frame is clear glass: {outside}"
+    );
+    assert!(
+        right > 30 && left > 30,
+        "the drop's footprint was probed: {right} {left}"
+    );
+    assert!(
+        right_ok as f32 > 0.9 * right as f32,
+        "a drop inverts: {right_ok}/{right}"
+    );
+    assert!(
+        left_ok as f32 > 0.9 * left as f32,
+        "a drop inverts: {left_ok}/{left}"
+    );
+    assert!(
+        sized as f32 > 0.8 * (left + right) as f32,
+        "displacement follows the normal: {sized}/{}",
+        left + right
+    );
 }

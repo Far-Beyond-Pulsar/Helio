@@ -28,7 +28,10 @@ fn foliage_globals_field_offsets_match_the_wgsl_mirror() {
     assert_eq!(std::mem::offset_of!(FoliageGlobals, clock), 16);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_quality_scale), 32);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_fade_band), 36);
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, interaction_strength), 40);
+    assert_eq!(
+        std::mem::offset_of!(FoliageGlobals, interaction_strength),
+        40
+    );
 }
 
 #[test]
@@ -67,7 +70,10 @@ fn the_ladder_has_no_vertex_or_index_buffer_and_the_counts_are_pinned() {
     for lod in 0..2 {
         assert_eq!(LOD_VERTEX_COUNTS[lod], 2 * LOD_SEGMENTS[lod] + 1);
     }
-    assert_eq!(LOD_VERTEX_COUNTS[2], 6 * helio_pass_foliage_place::FOLIAGE_MAX_TUFT_BLADES - 2);
+    assert_eq!(
+        LOD_VERTEX_COUNTS[2],
+        6 * helio_pass_foliage_place::FOLIAGE_MAX_TUFT_BLADES - 2
+    );
     assert_eq!(LOD_VERTEX_COUNTS[3], 3 * 5 - 2);
 }
 
@@ -113,7 +119,10 @@ fn visible_blade_halves_cover_every_band() {
     // 16 bits each has to be enough for the bands' slots and their slabs, or the encoding
     // silently aliases.
     let ceiling = VISIBLE_LOCAL_MASK;
-    for quality in [helio_pass_foliage_place::FoliageQuality::Medium, helio_pass_foliage_place::FoliageQuality::Ultra] {
+    for quality in [
+        helio_pass_foliage_place::FoliageQuality::Medium,
+        helio_pass_foliage_place::FoliageQuality::Ultra,
+    ] {
         let bands = helio_pass_foliage_place::plan_bands(&helio_pass_foliage_place::FoliageRange {
             range: quality.range(),
             tufts_per_m2: 12.0,
@@ -121,7 +130,11 @@ fn visible_blade_halves_cover_every_band() {
         });
         assert!(bands.slots() <= ceiling);
         for band in bands.bands() {
-            assert!(band.slab <= ceiling + 1, "{} records a slab exceeds the 16-bit local index", band.slab);
+            assert!(
+                band.slab <= ceiling + 1,
+                "{} records a slab exceeds the 16-bit local index",
+                band.slab
+            );
         }
     }
 }

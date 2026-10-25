@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use crate::{
-    plan_bands, FoliageQuality, FoliageRange, GpuBladeInstance, GpuFoliageBands, GpuFoliageLayer, GpuFoliageTile,
-    GpuFoliageType, GpuGroundArgs, GpuGroundHit, GpuGroundQuery, GpuTileFrame, GroundLink, PlaneGround, TileState,
-    FOLIAGE_BAND_TILES, FOLIAGE_MAX_INTERACTORS, FOLIAGE_TILE_SIZE_METERS, GROUND_ARGS, GROUND_HITS, GROUND_QUERIES,
+    plan_bands, FoliageQuality, FoliageRange, GpuBladeInstance, GpuFoliageBands, GpuFoliageLayer,
+    GpuFoliageTile, GpuFoliageType, GpuGroundArgs, GpuGroundHit, GpuGroundQuery, GpuTileFrame,
+    GroundLink, PlaneGround, TileState, FOLIAGE_BAND_TILES, FOLIAGE_MAX_INTERACTORS,
+    FOLIAGE_TILE_SIZE_METERS, GROUND_ARGS, GROUND_HITS, GROUND_QUERIES,
 };
 use glam::DVec3;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -15,8 +16,9 @@ use wgpu::util::DeviceExt;
 use crate::residency::TileRing;
 use crate::uniforms::{FoliageCullUniforms, PlaceUniforms};
 use crate::{
-    COUNTER_PLACED_BLADES, COUNTER_PLACEMENT_OVERFLOW, COUNTER_VISIBLE_OVERFLOW, DEFAULT_WPO_EXTENT_METERS,
-    FOLIAGE_COUNTER_COUNT, FOLIAGE_LOD_FADE_BAND_METERS, FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY,
+    COUNTER_PLACED_BLADES, COUNTER_PLACEMENT_OVERFLOW, COUNTER_VISIBLE_OVERFLOW,
+    DEFAULT_WPO_EXTENT_METERS, FOLIAGE_COUNTER_COUNT, FOLIAGE_LOD_FADE_BAND_METERS,
+    FOLIAGE_LOD_VERTEX_COUNTS, FOLIAGE_VISIBLE_PER_LOD_CAPACITY,
 };
 
 const TILE_BYTES: u64 = std::mem::size_of::<GpuFoliageTile>() as u64;
@@ -76,7 +78,8 @@ const PLACE_PART: u32 = 1024;
 /// Parts in a frame at most: every queued tile at the largest candidate grid.
 const MAX_PARTS: u32 = 2 * MAX_QUEUED_TILES * crate::MAX_CANDIDATES_PER_TILE.div_ceil(PLACE_PART);
 /// Bytes of a `FoliageInteractorComponent` row, and of a gathered one.
-const SOURCE_INTERACTOR_BYTES: u64 = std::mem::size_of::<crate::components::FoliageInteractorComponent>() as u64;
+const SOURCE_INTERACTOR_BYTES: u64 =
+    std::mem::size_of::<crate::components::FoliageInteractorComponent>() as u64;
 /// Bytes of a gathered interactor (`Interactor` in foliage_interactors.wgsl).
 pub const INTERACTOR_BYTES: u64 = 48;
 
@@ -226,7 +229,14 @@ pub struct FoliagePlacePass {
 impl FoliagePlacePass {
     /// Create the pass for `quality`'s range and the default density.
     pub fn new(device: &wgpu::Device, quality: FoliageQuality) -> Self {
-        Self::new_with(device, quality, FoliageRange { range: quality.range(), ..FoliageRange::default() })
+        Self::new_with(
+            device,
+            quality,
+            FoliageRange {
+                range: quality.range(),
+                ..FoliageRange::default()
+            },
+        )
     }
 
     /// Create the pass and allocate every buffer it will ever use, for the bands reaching
@@ -237,7 +247,11 @@ impl FoliagePlacePass {
     pub fn new_with(device: &wgpu::Device, quality: FoliageQuality, range: FoliageRange) -> Self {
         let cluster_size = quality.cluster_granularity().max(1);
         let range = FoliageRange {
-            range: if range.range.is_finite() && range.range > 0.0 { range.range } else { quality.range() },
+            range: if range.range.is_finite() && range.range > 0.0 {
+                range.range
+            } else {
+                quality.range()
+            },
             tufts_per_m2: if range.tufts_per_m2.is_finite() && range.tufts_per_m2 > 0.0 {
                 range.tufts_per_m2
             } else {
@@ -260,7 +274,10 @@ impl FoliagePlacePass {
             bands
                 .bands()
                 .iter()
-                .map(|b| format!("{:.0}-{:.0} m: {} m tiles, {}² tufts, share {:.2}", b.inner, b.outer, b.tile_size, b.candidate_grid, b.share))
+                .map(|b| format!(
+                    "{:.0}-{:.0} m: {} m tiles, {}² tufts, share {:.2}",
+                    b.inner, b.outer, b.tile_size, b.candidate_grid, b.share
+                ))
                 .collect::<Vec<_>>()
                 .join("; "),
         );
@@ -276,7 +293,11 @@ impl FoliagePlacePass {
         let copy = wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
         let blade_arena = storage("Foliage Blade Arena", records * BLADE_BYTES, copy);
         let tile_table = storage("Foliage Tile Table", total_slots as u64 * TILE_BYTES, copy);
-        let tile_frames = storage("Foliage Tile Frames", total_slots as u64 * FRAME_BYTES, copy);
+        let tile_frames = storage(
+            "Foliage Tile Frames",
+            total_slots as u64 * FRAME_BYTES,
+            copy,
+        );
         let visible_blades = storage(
             "Foliage Visible Blades",
             FOLIAGE_LOD_VERTEX_COUNTS.len() as u64 * FOLIAGE_VISIBLE_PER_LOD_CAPACITY as u64 * 4,
@@ -284,34 +305,98 @@ impl FoliagePlacePass {
         );
         let foliage_indirect = storage(
             "Foliage Indirect Draws",
-            FOLIAGE_LOD_VERTEX_COUNTS.len() as u64 * std::mem::size_of::<wgpu::util::DrawIndirectArgs>() as u64,
+            FOLIAGE_LOD_VERTEX_COUNTS.len() as u64
+                * std::mem::size_of::<wgpu::util::DrawIndirectArgs>() as u64,
             wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
         );
-        let bands_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Foliage Bands"),
-            contents: bytemuck::bytes_of(&bands),
-            usage: wgpu::BufferUsages::UNIFORM,
-        }));
-        let queries = storage("Foliage Ground Queries", QUERY_CAPACITY as u64 * std::mem::size_of::<GpuGroundQuery>() as u64, wgpu::BufferUsages::empty());
-        let hits = storage("Foliage Ground Hits", QUERY_CAPACITY as u64 * std::mem::size_of::<GpuGroundHit>() as u64, wgpu::BufferUsages::empty());
-        let ground_args = storage("Foliage Ground Args", std::mem::size_of::<GpuGroundArgs>() as u64, wgpu::BufferUsages::INDIRECT);
+        let bands_buffer = Arc::new(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Foliage Bands"),
+                contents: bytemuck::bytes_of(&bands),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }),
+        );
+        let queries = storage(
+            "Foliage Ground Queries",
+            QUERY_CAPACITY as u64 * std::mem::size_of::<GpuGroundQuery>() as u64,
+            wgpu::BufferUsages::empty(),
+        );
+        let hits = storage(
+            "Foliage Ground Hits",
+            QUERY_CAPACITY as u64 * std::mem::size_of::<GpuGroundHit>() as u64,
+            wgpu::BufferUsages::empty(),
+        );
+        let ground_args = storage(
+            "Foliage Ground Args",
+            std::mem::size_of::<GpuGroundArgs>() as u64,
+            wgpu::BufferUsages::INDIRECT,
+        );
         let counters = storage("Foliage Counters", FOLIAGE_COUNTER_COUNT as u64 * 4, copy);
-        let interactors = storage("Foliage Interactors", 16 + u64::from(FOLIAGE_MAX_INTERACTORS) * INTERACTOR_BYTES, wgpu::BufferUsages::COPY_DST);
+        let interactors = storage(
+            "Foliage Interactors",
+            16 + u64::from(FOLIAGE_MAX_INTERACTORS) * INTERACTOR_BYTES,
+            wgpu::BufferUsages::COPY_DST,
+        );
 
         let plain = |label: &str, size: u64, usage: wgpu::BufferUsages| {
-            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
         };
-        let placeholder_type = plain("Foliage Type Placeholder", TYPE_BYTES, wgpu::BufferUsages::STORAGE);
-        let placeholder_layer = plain("Foliage Layer Placeholder", LAYER_BYTES, wgpu::BufferUsages::STORAGE);
-        let placeholder_interactor = plain("Foliage Interactor Placeholder", SOURCE_INTERACTOR_BYTES, wgpu::BufferUsages::STORAGE);
-        let gather_uniforms = plain("Foliage Gather Uniforms", 48, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let placeholder_type = plain(
+            "Foliage Type Placeholder",
+            TYPE_BYTES,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let placeholder_layer = plain(
+            "Foliage Layer Placeholder",
+            LAYER_BYTES,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let placeholder_interactor = plain(
+            "Foliage Interactor Placeholder",
+            SOURCE_INTERACTOR_BYTES,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let gather_uniforms = plain(
+            "Foliage Gather Uniforms",
+            48,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
         // Last frame's answered tiles, then this frame's queried ones: (slot, first query).
-        let place_queue = plain("Foliage Place Queue", 2 * MAX_QUEUED_TILES as u64 * 8, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        let place_parts = plain("Foliage Place Parts", u64::from(MAX_PARTS) * 16, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        let place_scratch = plain("Foliage Place Scratch", 2 * MAX_QUEUED_TILES as u64 * 16, wgpu::BufferUsages::STORAGE);
-        let tile_visibility = plain("Foliage Tile Visibility", total_slots as u64 * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        let place_uniforms = plain("Foliage Place Uniforms", std::mem::size_of::<PlaceUniforms>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let cull_uniforms = plain("Foliage Cull Uniforms", std::mem::size_of::<FoliageCullUniforms>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+        let place_queue = plain(
+            "Foliage Place Queue",
+            2 * MAX_QUEUED_TILES as u64 * 8,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let place_parts = plain(
+            "Foliage Place Parts",
+            u64::from(MAX_PARTS) * 16,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let place_scratch = plain(
+            "Foliage Place Scratch",
+            2 * MAX_QUEUED_TILES as u64 * 16,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let tile_visibility = plain(
+            "Foliage Tile Visibility",
+            total_slots as u64 * 4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let place_uniforms = plain(
+            "Foliage Place Uniforms",
+            std::mem::size_of::<PlaceUniforms>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let cull_uniforms = plain(
+            "Foliage Cull Uniforms",
+            std::mem::size_of::<FoliageCullUniforms>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
 
         // ── Placeholders ───────────────────────────────────────────────────────
         //
@@ -322,7 +407,11 @@ impl FoliagePlacePass {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -333,7 +422,10 @@ impl FoliagePlacePass {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let placeholder_hiz = texture("Foliage Placeholder HiZ", wgpu::TextureFormat::R32Float);
-        let placeholder_terrain = texture("Foliage Placeholder Terrain", wgpu::TextureFormat::Rg16Float);
+        let placeholder_terrain = texture(
+            "Foliage Placeholder Terrain",
+            wgpu::TextureFormat::Rg16Float,
+        );
         let placeholder_hiz_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Foliage Placeholder HiZ Sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -372,18 +464,24 @@ impl FoliagePlacePass {
             &[],
         );
 
-        let texture_entry = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-            count: None,
-        };
-        let sampler_entry = |binding: u32, kind: wgpu::SamplerBindingType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Sampler(kind),
-            count: None,
-        };
+        let texture_entry =
+            |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
+        let sampler_entry =
+            |binding: u32, kind: wgpu::SamplerBindingType| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(kind),
+                count: None,
+            };
         let place_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Foliage Place BGL"),
             entries: &[
@@ -434,36 +532,103 @@ impl FoliagePlacePass {
         };
         let gather_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Foliage Interactors BGL"),
-            entries: &[uniform_entry(0), storage_entry(1, true), storage_entry(2, false)],
+            entries: &[
+                uniform_entry(0),
+                storage_entry(1, true),
+                storage_entry(2, false),
+            ],
         });
         let gather_layout = layout("Foliage Interactors PL", &gather_bgl);
         let place_layout = layout("Foliage Place PL", &place_bgl);
         let cull_layout = layout("Foliage Cull PL", &cull_bgl);
-        let pipeline = |label: &str, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str| {
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+        let pipeline = |label: &str,
+                        layout: &wgpu::PipelineLayout,
+                        module: &wgpu::ShaderModule,
+                        entry: &str| {
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
-        let place_reset_pipeline = pipeline("Foliage Place Reset Pipeline", &place_layout, &place_shader, "cs_place_reset");
-        let place_bounds_pipeline = pipeline("Foliage Place Bounds Pipeline", &place_layout, &place_shader, "cs_place_bounds");
-        let place_pipeline = pipeline("Foliage Place Pipeline", &place_layout, &place_shader, "cs_place");
-        let place_finish_pipeline = pipeline("Foliage Place Finish Pipeline", &place_layout, &place_shader, "cs_place_finish");
-        let query_pipeline = pipeline("Foliage Ground Query Pipeline", &place_layout, &place_shader, "cs_query");
-        let ground_plane_pipeline = pipeline("Foliage Plane Ground Pipeline", &place_layout, &place_shader, "cs_ground_plane");
-        let tile_cull_pipeline = pipeline("Foliage Tile Cull Pipeline", &cull_layout, &cull_shader, "cs_tile_cull");
-        let cluster_cull_pipeline = pipeline("Foliage Cluster Cull Pipeline", &cull_layout, &cull_shader, "cs_cluster_cull");
-        let finalize_pipeline = pipeline("Foliage Finalize Pipeline", &cull_layout, &cull_shader, "cs_finalize");
-        let gather_pipeline = pipeline("Foliage Interactors Pipeline", &gather_layout, &gather_shader, "cs_gather");
+        let place_reset_pipeline = pipeline(
+            "Foliage Place Reset Pipeline",
+            &place_layout,
+            &place_shader,
+            "cs_place_reset",
+        );
+        let place_bounds_pipeline = pipeline(
+            "Foliage Place Bounds Pipeline",
+            &place_layout,
+            &place_shader,
+            "cs_place_bounds",
+        );
+        let place_pipeline = pipeline(
+            "Foliage Place Pipeline",
+            &place_layout,
+            &place_shader,
+            "cs_place",
+        );
+        let place_finish_pipeline = pipeline(
+            "Foliage Place Finish Pipeline",
+            &place_layout,
+            &place_shader,
+            "cs_place_finish",
+        );
+        let query_pipeline = pipeline(
+            "Foliage Ground Query Pipeline",
+            &place_layout,
+            &place_shader,
+            "cs_query",
+        );
+        let ground_plane_pipeline = pipeline(
+            "Foliage Plane Ground Pipeline",
+            &place_layout,
+            &place_shader,
+            "cs_ground_plane",
+        );
+        let tile_cull_pipeline = pipeline(
+            "Foliage Tile Cull Pipeline",
+            &cull_layout,
+            &cull_shader,
+            "cs_tile_cull",
+        );
+        let cluster_cull_pipeline = pipeline(
+            "Foliage Cluster Cull Pipeline",
+            &cull_layout,
+            &cull_shader,
+            "cs_cluster_cull",
+        );
+        let finalize_pipeline = pipeline(
+            "Foliage Finalize Pipeline",
+            &cull_layout,
+            &cull_shader,
+            "cs_finalize",
+        );
+        let gather_pipeline = pipeline(
+            "Foliage Interactors Pipeline",
+            &gather_layout,
+            &gather_shader,
+            "cs_gather",
+        );
 
         let rings = bands
             .bands()
             .iter()
-            .map(|b| TileRing::new(b.slot_count, FOLIAGE_BAND_TILES, b.tile_size, BAND_TILES_PER_FRAME))
+            .map(|b| {
+                TileRing::new(
+                    b.slot_count,
+                    FOLIAGE_BAND_TILES,
+                    b.tile_size,
+                    BAND_TILES_PER_FRAME,
+                )
+            })
             .collect();
 
         Self {
@@ -637,9 +802,11 @@ impl FoliagePlacePass {
             ReadbackState::CopySubmitted => {
                 let flag = Arc::new(std::sync::Mutex::new(None));
                 let sink = Arc::clone(&flag);
-                self.counters_readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-                    *sink.lock().unwrap() = Some(result);
-                });
+                self.counters_readback
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        *sink.lock().unwrap() = Some(result);
+                    });
                 self.readback_state = ReadbackState::Mapping(flag);
             }
             ReadbackState::Mapping(flag) => {
@@ -649,7 +816,8 @@ impl FoliagePlacePass {
                         if let Ok(view) = self.counters_readback.slice(..).get_mapped_range() {
                             if let Ok(values) = bytemuck::try_cast_slice::<u8, u32>(&view) {
                                 if values.len() >= FOLIAGE_COUNTER_COUNT {
-                                    self.debug_counters.copy_from_slice(&values[..FOLIAGE_COUNTER_COUNT]);
+                                    self.debug_counters
+                                        .copy_from_slice(&values[..FOLIAGE_COUNTER_COUNT]);
                                 }
                             }
                         }
@@ -682,7 +850,14 @@ impl FoliagePlacePass {
     /// Upload the frames and headers of the slots the rings touched this frame (every
     /// frame when `all_frames`: the origin or the chart moved). Contiguous slots are
     /// coalesced into one write.
-    fn upload_tile_headers(&mut self, ctx: &PrepareContext, generation: u32, chart: u64, world_origin: DVec3, all_frames: bool) {
+    fn upload_tile_headers(
+        &mut self,
+        ctx: &PrepareContext,
+        generation: u32,
+        chart: u64,
+        world_origin: DVec3,
+        all_frames: bool,
+    ) {
         for band in 0..self.rings.len() {
             let b = self.bands.bands[band];
             let mut dirty: Vec<u32> = if all_frames {
@@ -690,7 +865,8 @@ impl FoliagePlacePass {
             } else {
                 self.rings[band].dirty_slots().to_vec()
             };
-            let headers: std::collections::HashSet<u32> = self.rings[band].dirty_slots().iter().copied().collect();
+            let headers: std::collections::HashSet<u32> =
+                self.rings[band].dirty_slots().iter().copied().collect();
             dirty.sort_unstable();
             dirty.dedup();
             let mut index = 0usize;
@@ -703,17 +879,28 @@ impl FoliagePlacePass {
                 let last = dirty[end];
                 self.frame_scratch.clear();
                 for local in start..=last {
-                    let frame = self.rings[band].slot_coord(local).and_then(|coord| self.band_frame(chart, band, coord));
-                    self.frame_scratch.push(frame.map_or(GpuTileFrame::default(), |f| f.gpu(world_origin)));
+                    let frame = self.rings[band]
+                        .slot_coord(local)
+                        .and_then(|coord| self.band_frame(chart, band, coord));
+                    self.frame_scratch
+                        .push(frame.map_or(GpuTileFrame::default(), |f| f.gpu(world_origin)));
                 }
-                ctx.write_buffer(&self.tile_frames, u64::from(b.slot_base + start) * FRAME_BYTES, bytemuck::cast_slice(&self.frame_scratch));
+                ctx.write_buffer(
+                    &self.tile_frames,
+                    u64::from(b.slot_base + start) * FRAME_BYTES,
+                    bytemuck::cast_slice(&self.frame_scratch),
+                );
                 // The headers of the slots the ring changed (a frame rewritten for a moved
                 // origin keeps its tile's header and records).
                 self.header_scratch.clear();
                 let flush = |scratch: &mut Vec<GpuFoliageTile>, next: u32| {
                     if !scratch.is_empty() {
                         let first = b.slot_base + next - scratch.len() as u32;
-                        ctx.write_buffer(&self.tile_table, u64::from(first) * TILE_BYTES, bytemuck::cast_slice(scratch));
+                        ctx.write_buffer(
+                            &self.tile_table,
+                            u64::from(first) * TILE_BYTES,
+                            bytemuck::cast_slice(scratch),
+                        );
                         scratch.clear();
                     }
                 };
@@ -750,8 +937,14 @@ impl FoliagePlacePass {
     fn prepare_cull(&mut self, ctx: &PrepareContext, type_count: u32) -> HelioResult<()> {
         // 2D dispatch grid, the way `vg_cull.wgsl` does it: a large table on a device
         // with a small single-dimension limit must still fit.
-        let max_dispatch = ctx.device.limits().max_compute_workgroups_per_dimension.max(1);
-        let cluster_groups = (self.total_slots as u64 * self.clusters_per_tile as u64).div_ceil(WORKGROUP_SIZE as u64).max(1) as u32;
+        let max_dispatch = ctx
+            .device
+            .limits()
+            .max_compute_workgroups_per_dimension
+            .max(1);
+        let cluster_groups = (self.total_slots as u64 * self.clusters_per_tile as u64)
+            .div_ceil(WORKGROUP_SIZE as u64)
+            .max(1) as u32;
         self.cluster_dispatch_width = cluster_groups.min(max_dispatch).max(1);
         self.cluster_dispatch_height = cluster_groups.div_ceil(self.cluster_dispatch_width);
         self.tile_dispatch_groups = self.total_slots.div_ceil(WORKGROUP_SIZE).max(1);
@@ -851,7 +1044,8 @@ impl RenderPass for FoliagePlacePass {
         let Some(type_handle) = ctx.scene_buffers.get(BufferKey::of("foliage_types")) else {
             return Ok(());
         };
-        self.type_liveness.update(ctx.device, ctx.queue, Some(type_handle));
+        self.type_liveness
+            .update(ctx.device, ctx.queue, Some(type_handle));
         if !self.type_liveness.maybe_live(type_handle) {
             return Ok(());
         }
@@ -911,12 +1105,18 @@ impl RenderPass for FoliagePlacePass {
         // Residency is keyed on (tile_coord, generation): a tile is re-placed whenever the
         // type or layer table's contents, or the chart, change. The records' seed follows
         // the type table alone.
-        let mix = |handle: &helio_core::BufferHandle| handle.epoch ^ handle.content_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mix = |handle: &helio_core::BufferHandle| {
+            handle.epoch
+                ^ handle
+                    .content_generation
+                    .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        };
         let seed_generation = mix(type_handle) as u32;
         let layers = ctx.scene_buffers.get(BufferKey::of("foliage_layers"));
         let generation = (mix(type_handle)
             ^ layers.map_or(0, |h| mix(h).rotate_left(29))
-            ^ chart.id.wrapping_mul(0xc2b2_ae3d_27d4_eb4f).rotate_left(13)) as u32;
+            ^ chart.id.wrapping_mul(0xc2b2_ae3d_27d4_eb4f).rotate_left(13))
+            as u32;
         if chart_changed {
             self.asked.clear();
         }
@@ -926,7 +1126,10 @@ impl RenderPass for FoliagePlacePass {
             let update = ring.update(ring_eye, generation);
             invalidated |= update.invalidated;
             if update.evicted > 0 {
-                log::debug!("foliage ring evicted {} resident tiles to make room", update.evicted);
+                log::debug!(
+                    "foliage ring evicted {} resident tiles to make room",
+                    update.evicted
+                );
             }
         }
 
@@ -958,17 +1161,24 @@ impl RenderPass for FoliagePlacePass {
                     if corner & 2 == 0 { lo.y } else { hi.y },
                     if corner & 4 == 0 { lo.z } else { hi.z },
                 );
-                let Some(at) = self.ground.geometry().locate(chart.id, p) else { continue };
+                let Some(at) = self.ground.geometry().locate(chart.id, p) else {
+                    continue;
+                };
                 range = Some(match range {
                     None => (at, at),
-                    Some((a, b)) => ([a[0].min(at[0]), a[1].min(at[1])], [b[0].max(at[0]), b[1].max(at[1])]),
+                    Some((a, b)) => (
+                        [a[0].min(at[0]), a[1].min(at[1])],
+                        [b[0].max(at[0]), b[1].max(at[1])],
+                    ),
                 });
             }
             if let Some((a, b)) = range {
                 for (band, ring) in self.rings.iter_mut().enumerate() {
                     let size = f64::from(self.bands.bands[band].tile_size);
                     let tile = |v: f64| (v / size).floor() as i32;
-                    for coord in ring.resident_within([tile(a[0]), tile(a[1])], [tile(b[0]), tile(b[1])]) {
+                    for coord in
+                        ring.resident_within([tile(a[0]), tile(a[1])], [tile(b[0]), tile(b[1])])
+                    {
                         ring.refresh(coord);
                     }
                 }
@@ -977,20 +1187,38 @@ impl RenderPass for FoliagePlacePass {
 
         // This frame's questions: each band's entering tiles (budgeted by its ring), then
         // those placed again, nearest band first, while the queries fit.
-        self.upload_tile_headers(ctx, seed_generation, chart.id, world_origin, origin_moved || chart_changed);
+        self.upload_tile_headers(
+            ctx,
+            seed_generation,
+            chart.id,
+            world_origin,
+            origin_moved || chart_changed,
+        );
         self.query_count = 0;
         let mut queued = Vec::new();
         for band in 0..self.rings.len() {
             let b = self.bands.bands[band];
             let cells = b.candidate_grid * b.candidate_grid;
-            let locals: Vec<u32> = self.rings[band].place_queue().iter().chain(self.rings[band].refresh_queue()).copied().collect();
+            let locals: Vec<u32> = self.rings[band]
+                .place_queue()
+                .iter()
+                .chain(self.rings[band].refresh_queue())
+                .copied()
+                .collect();
             for local in locals {
-                let Some(coord) = self.rings[band].slot_coord(local) else { continue };
+                let Some(coord) = self.rings[band].slot_coord(local) else {
+                    continue;
+                };
                 let fits = self.query_count + cells <= QUERY_CAPACITY
                     && (self.place_tile_count + queued.len() as u32) < 2 * MAX_QUEUED_TILES
                     && (queued.len() as u32) < MAX_QUEUED_TILES;
                 if fits {
-                    queued.push(Asked { band, slot: b.slot_base + local, coord, first: self.query_count });
+                    queued.push(Asked {
+                        band,
+                        slot: b.slot_base + local,
+                        coord,
+                        first: self.query_count,
+                    });
                     self.query_count += cells;
                 } else {
                     self.rings[band].refresh(coord);
@@ -1007,9 +1235,12 @@ impl RenderPass for FoliagePlacePass {
                 let mut tiles = Vec::new();
                 for a in &self.asked {
                     let b = self.bands.bands[a.band];
-                    let Some(frame) = self.band_frame(chart.id, a.band, a.coord) else { continue };
+                    let Some(frame) = self.band_frame(chart.id, a.band, a.coord) else {
+                        continue;
+                    };
                     let up = frame.up.normalize_or(DVec3::Y);
-                    let start_height = (eye - frame.origin).dot(up) + f64::from(SEARCH_ABOVE_METRES);
+                    let start_height =
+                        (eye - frame.origin).dot(up) + f64::from(SEARCH_ABOVE_METRES);
                     let blocks = b.probe_blocks.max(1);
                     let per_block = (b.candidate_grid / blocks).pow(2);
                     for block in 0..blocks * blocks {
@@ -1026,16 +1257,23 @@ impl RenderPass for FoliagePlacePass {
                 self.ground.ask(self.batch, tiles);
             }
         }
-        self.queue_scratch.extend(self.asked.iter().map(|a| [a.slot, a.first]));
+        self.queue_scratch
+            .extend(self.asked.iter().map(|a| [a.slot, a.first]));
         if !self.queue_scratch.is_empty() {
-            ctx.write_buffer(&self.place_queue, 0, bytemuck::cast_slice(&self.queue_scratch));
+            ctx.write_buffer(
+                &self.place_queue,
+                0,
+                bytemuck::cast_slice(&self.queue_scratch),
+            );
         }
         // Each tile's candidates in parts of a workgroup each: a frame's few tiles are
         // placed and queried across the GPU, not a workgroup a tile.
         self.parts_scratch.clear();
         let mut part_counts = [0u32; 2];
         for (entry, &[slot, _]) in self.queue_scratch.iter().enumerate() {
-            let Some(band) = self.bands.band_of_slot(slot) else { continue };
+            let Some(band) = self.bands.band_of_slot(slot) else {
+                continue;
+            };
             let cells = self.bands.bands[band].candidate_grid.pow(2);
             let queried = usize::from(entry as u32 >= self.place_tile_count);
             let mut start = 0;
@@ -1048,11 +1286,17 @@ impl RenderPass for FoliagePlacePass {
         }
         [self.place_part_count, self.query_part_count] = part_counts;
         if !self.parts_scratch.is_empty() {
-            ctx.write_buffer(&self.place_parts, 0, bytemuck::cast_slice(&self.parts_scratch));
+            ctx.write_buffer(
+                &self.place_parts,
+                0,
+                bytemuck::cast_slice(&self.parts_scratch),
+            );
         }
 
         let (terrain_origin, terrain_extent, terrain_valid) = match self.terrain_transform {
-            Some((origin, extent)) if ctx.registry.contains("foliage_terrain") => (origin, extent, 1),
+            Some((origin, extent)) if ctx.registry.contains("foliage_terrain") => {
+                (origin, extent, 1)
+            }
             _ => ([0.0, 0.0], 1.0, 0),
         };
         ctx.write_buffer(
@@ -1087,37 +1331,64 @@ impl RenderPass for FoliagePlacePass {
             return Ok(());
         }
 
-        let hiz_view = ctx.registry.get(helio_core::ResourceKey::new("hiz")).unwrap_or(&self.placeholder_hiz);
-        let hiz_sampler = ctx.registry.get(helio_core::ResourceKey::new("hiz_sampler")).unwrap_or(&self.placeholder_hiz_sampler);
-        let type_buffer = ctx.scene_buffers.get(BufferKey::of("foliage_types")).map(|h| &h.buffer).unwrap_or(&self.placeholder_type);
-        let layer_buffer = ctx.scene_buffers.get(BufferKey::of("foliage_layers")).map(|h| &h.buffer).unwrap_or(&self.placeholder_layer);
-        let place_key = (type_buffer.clone(), layer_buffer.clone(), self.placeholder_terrain.clone());
+        let hiz_view = ctx
+            .registry
+            .get(helio_core::ResourceKey::new("hiz"))
+            .unwrap_or(&self.placeholder_hiz);
+        let hiz_sampler = ctx
+            .registry
+            .get(helio_core::ResourceKey::new("hiz_sampler"))
+            .unwrap_or(&self.placeholder_hiz_sampler);
+        let type_buffer = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_types"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.placeholder_type);
+        let layer_buffer = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_layers"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.placeholder_layer);
+        let place_key = (
+            type_buffer.clone(),
+            layer_buffer.clone(),
+            self.placeholder_terrain.clone(),
+        );
         if self.place_bind_group_key.as_ref() != Some(&place_key) {
-            self.place_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Foliage Place BG"),
-                layout: &self.place_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    entry(0, self.place_uniforms.as_entire_binding()),
-                    entry(1, type_buffer.as_entire_binding()),
-                    entry(2, self.tile_table.as_entire_binding()),
-                    entry(3, self.blade_arena.as_entire_binding()),
-                    entry(4, self.place_queue.as_entire_binding()),
-                    entry(5, self.counters.as_entire_binding()),
-                    entry(6, wgpu::BindingResource::TextureView(&self.placeholder_terrain)),
-                    entry(7, wgpu::BindingResource::Sampler(&self.terrain_sampler)),
-                    entry(8, layer_buffer.as_entire_binding()),
-                    entry(9, self.tile_frames.as_entire_binding()),
-                    entry(10, self.queries.as_entire_binding()),
-                    entry(11, self.hits.as_entire_binding()),
-                    entry(12, self.ground_args.as_entire_binding()),
-                    entry(13, self.bands_buffer.as_entire_binding()),
-                    entry(14, self.place_parts.as_entire_binding()),
-                    entry(15, self.place_scratch.as_entire_binding()),
-                ],
-            }));
+            self.place_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Foliage Place BG"),
+                    layout: &self.place_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        entry(0, self.place_uniforms.as_entire_binding()),
+                        entry(1, type_buffer.as_entire_binding()),
+                        entry(2, self.tile_table.as_entire_binding()),
+                        entry(3, self.blade_arena.as_entire_binding()),
+                        entry(4, self.place_queue.as_entire_binding()),
+                        entry(5, self.counters.as_entire_binding()),
+                        entry(
+                            6,
+                            wgpu::BindingResource::TextureView(&self.placeholder_terrain),
+                        ),
+                        entry(7, wgpu::BindingResource::Sampler(&self.terrain_sampler)),
+                        entry(8, layer_buffer.as_entire_binding()),
+                        entry(9, self.tile_frames.as_entire_binding()),
+                        entry(10, self.queries.as_entire_binding()),
+                        entry(11, self.hits.as_entire_binding()),
+                        entry(12, self.ground_args.as_entire_binding()),
+                        entry(13, self.bands_buffer.as_entire_binding()),
+                        entry(14, self.place_parts.as_entire_binding()),
+                        entry(15, self.place_scratch.as_entire_binding()),
+                    ],
+                }));
             self.place_bind_group_key = Some(place_key);
         }
-        let key = (ctx.camera.clone(), hiz_view.clone(), hiz_sampler.clone(), type_buffer.clone());
+        let key = (
+            ctx.camera.clone(),
+            hiz_view.clone(),
+            hiz_sampler.clone(),
+            type_buffer.clone(),
+        );
         if self.cull_bind_group_key.as_ref() != Some(&key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Foliage Cull BG"),
@@ -1161,7 +1432,11 @@ impl RenderPass for FoliagePlacePass {
                 .get(BufferKey::of("foliage_interactors"))
                 .map(|h| &h.buffer)
                 .unwrap_or(&self.placeholder_interactor);
-            if self.gather_bind_group.as_ref().is_none_or(|(key, _)| key != source) {
+            if self
+                .gather_bind_group
+                .as_ref()
+                .is_none_or(|(key, _)| key != source)
+            {
                 let group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Foliage Interactors BG"),
                     layout: &self.gather_pipeline.get_bind_group_layout(0),
@@ -1173,7 +1448,10 @@ impl RenderPass for FoliagePlacePass {
                 });
                 self.gather_bind_group = Some((source.clone(), group));
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Foliage Interactors"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Foliage Interactors"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.gather_pipeline);
             pass.set_bind_group(0, &self.gather_bind_group.as_ref().unwrap().1, &[]);
             pass.dispatch_workgroups(self.gather_rows.div_ceil(WORKGROUP_SIZE), 1, 1);
@@ -1183,7 +1461,10 @@ impl RenderPass for FoliagePlacePass {
             let Some(place_bg) = self.place_bind_group.as_ref() else {
                 return Ok(());
             };
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Foliage Place"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Foliage Place"),
+                timestamp_writes: None,
+            });
             pass.set_bind_group(0, place_bg, &[]);
             // Last frame's tiles from their answers (before this frame's queries take
             // their place in the exchange buffers): their ranges, then their tufts, a
@@ -1208,24 +1489,45 @@ impl RenderPass for FoliagePlacePass {
                 // indirect header writable (one usage per dispatch).
                 if !self.ground.is_external() {
                     pass.set_pipeline(&self.ground_plane_pipeline);
-                    pass.dispatch_workgroups(self.query_count.div_ceil(WORKGROUP_SIZE).max(1), 1, 1);
+                    pass.dispatch_workgroups(
+                        self.query_count.div_ceil(WORKGROUP_SIZE).max(1),
+                        1,
+                        1,
+                    );
                 }
             }
         }
 
         for (label, pipeline, groups) in [
-            ("Foliage Tile Cull", &self.tile_cull_pipeline, [self.tile_dispatch_groups, 1]),
-            ("Foliage Cluster Cull", &self.cluster_cull_pipeline, [self.cluster_dispatch_width, self.cluster_dispatch_height]),
+            (
+                "Foliage Tile Cull",
+                &self.tile_cull_pipeline,
+                [self.tile_dispatch_groups, 1],
+            ),
+            (
+                "Foliage Cluster Cull",
+                &self.cluster_cull_pipeline,
+                [self.cluster_dispatch_width, self.cluster_dispatch_height],
+            ),
             ("Foliage Finalize", &self.finalize_pipeline, [1, 1]),
         ] {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, cull_bg, &[]);
             pass.dispatch_workgroups(groups[0], groups[1], 1);
         }
 
         if matches!(self.readback_state, ReadbackState::Idle) {
-            encoder.copy_buffer_to_buffer(&self.counters, 0, &self.counters_readback, 0, FOLIAGE_COUNTER_COUNT as u64 * 4);
+            encoder.copy_buffer_to_buffer(
+                &self.counters,
+                0,
+                &self.counters_readback,
+                0,
+                FOLIAGE_COUNTER_COUNT as u64 * 4,
+            );
             self.readback_state = ReadbackState::CopySubmitted;
         }
 
@@ -1242,7 +1544,11 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -1251,7 +1557,11 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -1300,16 +1610,33 @@ mod tests {
 
     #[test]
     fn every_preset_plans_bands_that_fit_the_query_budget_and_index_space() {
-        for quality in [FoliageQuality::Low, FoliageQuality::Medium, FoliageQuality::High, FoliageQuality::Ultra] {
-            let bands = plan_bands(&FoliageRange { range: quality.range(), cluster_edge: isqrt(quality.cluster_granularity()), ..FoliageRange::default() });
+        for quality in [
+            FoliageQuality::Low,
+            FoliageQuality::Medium,
+            FoliageQuality::High,
+            FoliageQuality::Ultra,
+        ] {
+            let bands = plan_bands(&FoliageRange {
+                range: quality.range(),
+                cluster_edge: isqrt(quality.cluster_granularity()),
+                ..FoliageRange::default()
+            });
             for b in bands.bands() {
                 // A tile's queries fit one frame's budget, and its records the 16-bit
                 // tile-local index of a visible reference.
-                assert!(b.candidate_grid * b.candidate_grid <= QUERY_CAPACITY, "{quality:?}: {}² candidates", b.candidate_grid);
+                assert!(
+                    b.candidate_grid * b.candidate_grid <= QUERY_CAPACITY,
+                    "{quality:?}: {}² candidates",
+                    b.candidate_grid
+                );
                 assert!(b.slab <= crate::MAX_BLADES_PER_TILE);
             }
             // The arena stays bounded however far the bands reach.
-            assert!(bands.records() * BLADE_BYTES < 96 * 1024 * 1024, "{quality:?}: {} records", bands.records());
+            assert!(
+                bands.records() * BLADE_BYTES < 96 * 1024 * 1024,
+                "{quality:?}: {} records",
+                bands.records()
+            );
         }
     }
 

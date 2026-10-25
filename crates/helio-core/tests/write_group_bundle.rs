@@ -119,8 +119,11 @@ impl RenderPass for StandInGBufferPass {
             orm.clone(),
             emissive.clone(),
         ]);
-        frame.write(helio_core::ResourceKey::new("gbuffer"), 
-            helio_core::ViewGroup::<4> { views: [albedo, normal, orm, emissive] },
+        frame.write(
+            helio_core::ResourceKey::new("gbuffer"),
+            helio_core::ViewGroup::<4> {
+                views: [albedo, normal, orm, emissive],
+            },
             "StandInGBuffer",
         );
     }

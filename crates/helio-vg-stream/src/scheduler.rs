@@ -27,7 +27,12 @@ pub struct SchedulerConfig {
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
-        Self { eviction_grace_frames: 4, request_ttl_frames: 240, retry_after_frames: 240, lookahead: 64 }
+        Self {
+            eviction_grace_frames: 4,
+            request_ttl_frames: 240,
+            retry_after_frames: 240,
+            lookahead: 64,
+        }
     }
 }
 
@@ -193,7 +198,12 @@ impl PageScheduler {
         Some(slot)
     }
 
-    fn acquire_slot(&mut self, frame: u64, root: bool, taken: &[u32]) -> Option<(u32, Option<u32>)> {
+    fn acquire_slot(
+        &mut self,
+        frame: u64,
+        root: bool,
+        taken: &[u32],
+    ) -> Option<(u32, Option<u32>)> {
         if let Some(s) = self.free.pop() {
             return Some((s, None));
         }
@@ -275,7 +285,11 @@ impl PageScheduler {
     }
 
     fn install(&mut self, page: u32, slot: u32, frame: u64) {
-        let deps = self.pages.get(&page).map(|s| s.deps.clone()).unwrap_or_default();
+        let deps = self
+            .pages
+            .get(&page)
+            .map(|s| s.deps.clone())
+            .unwrap_or_default();
         for d in deps {
             self.pages.entry(d).or_default().dependents += 1;
         }
@@ -316,24 +330,40 @@ impl PageScheduler {
         let mut taken: Vec<u32> = Vec::new();
 
         // Roots first.
-        let roots: Vec<u32> = self.roots_pending.iter().copied().take(self.cfg.lookahead).collect();
+        let roots: Vec<u32> = self
+            .roots_pending
+            .iter()
+            .copied()
+            .take(self.cfg.lookahead)
+            .collect();
         let mut root_n = 0;
         for page in roots {
             if root_n >= max_root_uploads {
                 break;
             }
-            if self.pages.get(&page).is_some_and(|s| s.failed_until > frame) {
+            if self
+                .pages
+                .get(&page)
+                .is_some_and(|s| s.failed_until > frame)
+            {
                 continue;
             }
             match fetch(page) {
                 Fetch::Ready(payload) => {
                     let Some((slot, evicted)) = self.acquire_slot(frame, true, &taken) else {
-                        log::warn!("vg-stream: no slot for root page {page}; pool is full of root pages");
+                        log::warn!(
+                            "vg-stream: no slot for root page {page}; pool is full of root pages"
+                        );
                         break;
                     };
                     self.install(page, slot, frame);
                     taken.push(page);
-                    out.push(Upload { page, slot, evicted, payload });
+                    out.push(Upload {
+                        page,
+                        slot,
+                        evicted,
+                        payload,
+                    });
                     root_n += 1;
                 }
                 Fetch::NotYet => {}
@@ -345,7 +375,9 @@ impl PageScheduler {
         let mut cands: Vec<(u32, u64, u32)> = self
             .pages
             .iter()
-            .filter(|(_, s)| s.slot.is_none() && !s.root && s.req_frame.is_some() && s.failed_until <= frame)
+            .filter(|(_, s)| {
+                s.slot.is_none() && !s.root && s.req_frame.is_some() && s.failed_until <= frame
+            })
             .map(|(&p, s)| (s.req_count, s.req_frame.unwrap_or(0), p))
             .collect();
         cands.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
@@ -354,7 +386,9 @@ impl PageScheduler {
             if n >= max_uploads {
                 break;
             }
-            let Some(chain) = self.chain(page, frame) else { continue };
+            let Some(chain) = self.chain(page, frame) else {
+                continue;
+            };
             if n > 0 && n + chain.len() as u32 > max_uploads {
                 continue;
             }
@@ -372,7 +406,12 @@ impl PageScheduler {
                         };
                         self.install(p, slot, frame);
                         taken.push(p);
-                        out.push(Upload { page: p, slot, evicted, payload });
+                        out.push(Upload {
+                            page: p,
+                            slot,
+                            evicted,
+                            payload,
+                        });
                         n += 1;
                     }
                     Fetch::NotYet => continue 'cands,
@@ -401,7 +440,15 @@ mod tests {
     use super::*;
 
     fn sched(slots: u32) -> PageScheduler {
-        PageScheduler::new(SchedulerConfig { eviction_grace_frames: 2, ..Default::default() }, slots, 2, slots)
+        PageScheduler::new(
+            SchedulerConfig {
+                eviction_grace_frames: 2,
+                ..Default::default()
+            },
+            slots,
+            2,
+            slots,
+        )
     }
     fn ready(_: u32) -> Fetch<()> {
         Fetch::Ready(())
@@ -420,7 +467,10 @@ mod tests {
                 s.request(p, 1, f);
             }
             s.plan(f, 8, 8, ready);
-            assert!(s.is_resident(0) && s.is_resident(1), "root evicted at frame {f}");
+            assert!(
+                s.is_resident(0) && s.is_resident(1),
+                "root evicted at frame {f}"
+            );
         }
         assert_eq!(s.stats().resident_pages, 3);
     }
@@ -475,7 +525,13 @@ mod tests {
         let mut s = sched(4);
         s.request(1, 1, 1);
         s.request(2, 1, 1);
-        let up = s.plan(1, 8, 8, |p| if p == 1 { Fetch::<()>::NotYet } else { Fetch::Failed });
+        let up = s.plan(1, 8, 8, |p| {
+            if p == 1 {
+                Fetch::<()>::NotYet
+            } else {
+                Fetch::Failed
+            }
+        });
         assert!(up.is_empty());
         assert_eq!(s.stats().failures, 1);
         // Page 1 stays pending, page 2 is parked until the retry window.
@@ -501,7 +557,15 @@ mod tests {
 
     #[test]
     fn stale_requests_expire() {
-        let mut s = PageScheduler::new(SchedulerConfig { request_ttl_frames: 5, ..Default::default() }, 4, 4, 4);
+        let mut s = PageScheduler::new(
+            SchedulerConfig {
+                request_ttl_frames: 5,
+                ..Default::default()
+            },
+            4,
+            4,
+            4,
+        );
         s.request(1, 1, 1);
         assert!(s.plan(100, 8, 8, ready).is_empty());
     }

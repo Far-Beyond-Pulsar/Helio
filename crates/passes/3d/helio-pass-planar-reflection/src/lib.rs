@@ -78,14 +78,17 @@ impl PlanarReflectionPass {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Planar Trace Pipeline"),
-            layout: Some(&pl),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Planar Trace Pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let bg_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Planar BG0"),
@@ -168,12 +171,18 @@ impl RenderPass for PlanarReflectionPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "PlanarReflection") {
+        let gbuffer = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
+            helio_core::ResourceKey::new("gbuffer"),
+            "PlanarReflection",
+        ) {
             Some(g) => g,
             None => return Ok(()),
         };
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("pre_aa")) {
+        let pre_aa_view = match ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("pre_aa"))
+        {
             Some(v) => v,
             None => return Ok(()),
         };

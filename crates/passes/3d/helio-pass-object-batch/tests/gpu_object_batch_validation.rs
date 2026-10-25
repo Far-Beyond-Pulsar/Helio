@@ -431,11 +431,23 @@ fn large_identical_batch_is_partitioned_without_losing_instances() {
         let &(index_count, first_index, vertex_offset, first_instance, count) = draw;
         assert_eq!(first_instance, next);
         assert!(count > 0 && count <= 4096);
-        assert_eq!(*indirect, (index_count, count, first_index, vertex_offset, first_instance));
+        assert_eq!(
+            *indirect,
+            (
+                index_count,
+                count,
+                first_index,
+                vertex_offset,
+                first_instance
+            )
+        );
         next += count;
     }
     assert_eq!(next, 10_003);
-    assert!(gpu.instances.iter().all(|id| *id == (row.mesh_slot, row.material_slot)));
+    assert!(gpu
+        .instances
+        .iter()
+        .all(|id| *id == (row.mesh_slot, row.material_slot)));
     assert_eq!(gpu.shadow_static_count + gpu.shadow_movable_count, 10_003);
     assert_eq!(gpu.opaque, vec![(0, 0, 0, 3)]);
 }
@@ -480,7 +492,9 @@ fn gpu_object_batch_matches_cpu_reference() {
             let mut flags = 0u32;
             // Same shader class/hash, different raster PSO: leaves must not
             // be merged back into the single-sided opaque segment.
-            if bucket % 3 == 0 { flags |= 5; }
+            if bucket % 3 == 0 {
+                flags |= 5;
+            }
             if bucket % 5 == 0 {
                 flags |= FLAG_TRANSPARENT_ONLY;
             }
@@ -709,8 +723,7 @@ fn readback_grows_past_initial_range_capacity_without_truncating() {
 
         // One opaque material per pipeline hash: every row is its own range.
         const PIPELINES: u32 = 200;
-        let materials: Vec<TestMaterial> =
-            (0..PIPELINES).map(|_| TestMaterial::zeroed()).collect();
+        let materials: Vec<TestMaterial> = (0..PIPELINES).map(|_| TestMaterial::zeroed()).collect();
         let class_and_hash: Vec<(u32, u64)> = (0..PIPELINES).map(|i| (0, i as u64 + 1)).collect();
         let rows: Vec<StaticObjectComponent> = (0..PIPELINES)
             .map(|i| {
@@ -744,7 +757,11 @@ fn readback_grows_past_initial_range_capacity_without_truncating() {
             );
         }
         let ranges = pass.opaque_ranges();
-        assert_eq!(ranges.len() as u32, PIPELINES, "readback never grew to fit every range");
+        assert_eq!(
+            ranges.len() as u32,
+            PIPELINES,
+            "readback never grew to fit every range"
+        );
         let mut hashes: Vec<u64> = ranges.iter().map(|&(_, hash, _, _)| hash).collect();
         hashes.sort_unstable();
         assert_eq!(hashes, (1..=PIPELINES as u64).collect::<Vec<_>>());
@@ -809,7 +826,9 @@ fn instance_prev_transform_is_last_frames_transform() {
             let mut encoder = device.create_command_encoder(&Default::default());
             encoder.copy_buffer_to_buffer(pass.instances_buffer(), 0, &staging, 0, 224);
             queue.submit([encoder.finish()]);
-            staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.unwrap());
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             let words: Vec<f32> =
                 bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
@@ -818,8 +837,16 @@ fn instance_prev_transform_is_last_frames_transform() {
         };
 
         assert_eq!(frame(&row), (1.0, 1.0), "a new object has no motion");
-        let moved = StaticObjectComponent { prev_transform: at(1.0), transform: at(2.0), ..row };
-        assert_eq!(frame(&moved), (2.0, 1.0), "a moving object reports last frame's transform");
+        let moved = StaticObjectComponent {
+            prev_transform: at(1.0),
+            transform: at(2.0),
+            ..row
+        };
+        assert_eq!(
+            frame(&moved),
+            (2.0, 1.0),
+            "a moving object reports last frame's transform"
+        );
         assert_eq!(
             frame(&moved),
             (2.0, 2.0),
@@ -828,7 +855,16 @@ fn instance_prev_transform_is_last_frames_transform() {
 
         // The row is retired and reused by a different object: no inherited motion.
         frame(&dead_row());
-        let replacement = StaticObjectComponent { material_generation: 2, transform: at(9.0), prev_transform: at(9.0), ..row };
-        assert_eq!(frame(&replacement), (9.0, 9.0), "a reused row must not inherit motion");
+        let replacement = StaticObjectComponent {
+            material_generation: 2,
+            transform: at(9.0),
+            prev_transform: at(9.0),
+            ..row
+        };
+        assert_eq!(
+            frame(&replacement),
+            (9.0, 9.0),
+            "a reused row must not inherit motion"
+        );
     });
 }

@@ -93,7 +93,10 @@ impl Pool {
             })
         };
         Self {
-            vertices: buffer("VG ray proxy vertices", u64::from(vertex_capacity) * VERTEX_BYTES),
+            vertices: buffer(
+                "VG ray proxy vertices",
+                u64::from(vertex_capacity) * VERTEX_BYTES,
+            ),
             indices: buffer("VG ray proxy indices", u64::from(index_capacity) * 4),
             vertex_capacity,
             index_capacity,
@@ -153,7 +156,12 @@ impl VgRayProxies {
                 .runtime
                 .assets()
                 .into_iter()
-                .map(|a| ((a.vertex_offset, a.vertex_count), (proxy_key(a.content), a.source)))
+                .map(|a| {
+                    (
+                        (a.vertex_offset, a.vertex_count),
+                        (proxy_key(a.content), a.source),
+                    )
+                })
                 .collect();
             changed = true;
         }
@@ -174,7 +182,9 @@ impl VgRayProxies {
     /// What the mesh with interned vertex range `range` is to the
     /// projection; a VG asset met for the first time starts its build.
     pub(crate) fn lookup(&mut self, range: (u32, u32)) -> Lookup {
-        let Some((key, source)) = self.assets.get(&range) else { return Lookup::Classic };
+        let Some((key, source)) = self.assets.get(&range) else {
+            return Lookup::Classic;
+        };
         if let Some(proxy) = self.proxies.get(key) {
             return Lookup::Proxy(*key, proxy.range);
         }
@@ -187,7 +197,12 @@ impl VgRayProxies {
     /// After a build: the proxies its objects use. The others are dropped.
     pub(crate) fn retain(&mut self, used: &HashSet<u64>) {
         self.live = used.iter().copied().collect();
-        let unused: Vec<u64> = self.proxies.keys().filter(|k| !used.contains(k)).copied().collect();
+        let unused: Vec<u64> = self
+            .proxies
+            .keys()
+            .filter(|k| !used.contains(k))
+            .copied()
+            .collect();
         for key in unused {
             self.proxies.remove(&key);
             self.cache.forget(key);
@@ -200,11 +215,15 @@ impl VgRayProxies {
     }
 
     pub fn stats(&self) -> VgRayStats {
-        let mut stats = VgRayStats { proxies: self.proxies.len() as u32, ..Default::default() };
+        let mut stats = VgRayStats {
+            proxies: self.proxies.len() as u32,
+            ..Default::default()
+        };
         for proxy in self.proxies.values() {
             stats.triangles += u64::from(proxy.range.index_count / 3);
             stats.source_triangles += u64::from(proxy.source_triangles);
-            stats.live_bytes += u64::from(proxy.range.vertex_count) * VERTEX_BYTES + u64::from(proxy.range.index_count) * 4;
+            stats.live_bytes += u64::from(proxy.range.vertex_count) * VERTEX_BYTES
+                + u64::from(proxy.range.index_count) * 4;
         }
         for (key, _) in self.assets.values() {
             match self.cache.state(*key) {
@@ -219,13 +238,25 @@ impl VgRayProxies {
 
     /// Appends finished builds to the pool, growing (and packing) it when
     /// they do not fit.
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, ready: Vec<(u64, Arc<ProxyBuild>)>) {
-        let builds: Vec<(u64, Arc<ProxyBuild>)> = ready.into_iter().filter(|(_, b)| !b.lods.is_empty()).collect();
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        ready: Vec<(u64, Arc<ProxyBuild>)>,
+    ) {
+        let builds: Vec<(u64, Arc<ProxyBuild>)> = ready
+            .into_iter()
+            .filter(|(_, b)| !b.lods.is_empty())
+            .collect();
         let (new_vertices, new_indices) = builds.iter().fold((0u32, 0u32), |(v, i), (_, b)| {
-            (v + b.lods[0].positions.len() as u32, i + b.lods[0].indices.len() as u32)
+            (
+                v + b.lods[0].positions.len() as u32,
+                i + b.lods[0].indices.len() as u32,
+            )
         });
         let fits = self.pool.as_ref().is_some_and(|p| {
-            p.vertex_end + new_vertices <= p.vertex_capacity && p.index_end + new_indices <= p.index_capacity
+            p.vertex_end + new_vertices <= p.vertex_capacity
+                && p.index_end + new_indices <= p.index_capacity
         });
         if !fits {
             self.grow(device, queue, new_vertices, new_indices);
@@ -248,8 +279,16 @@ impl VgRayProxies {
                     [p[0], p[1], p[2], uv[0], uv[1]]
                 })
                 .collect();
-            queue.write_buffer(&pool.vertices, u64::from(range.first_vertex) * VERTEX_BYTES, bytemuck::cast_slice(&vertices));
-            queue.write_buffer(&pool.indices, u64::from(range.first_index) * 4, bytemuck::cast_slice(&lod.indices));
+            queue.write_buffer(
+                &pool.vertices,
+                u64::from(range.first_vertex) * VERTEX_BYTES,
+                bytemuck::cast_slice(&vertices),
+            );
+            queue.write_buffer(
+                &pool.indices,
+                u64::from(range.first_index) * 4,
+                bytemuck::cast_slice(&lod.indices),
+            );
             pool.vertex_end += range.vertex_count;
             pool.index_end += range.index_count;
             log::info!(
@@ -260,20 +299,37 @@ impl VgRayProxies {
                 build.bounds[3],
                 (u64::from(range.vertex_count) * VERTEX_BYTES + u64::from(range.index_count) * 4) / 1024,
             );
-            self.proxies.insert(key, Proxy { range, source_triangles: build.source_triangles });
+            self.proxies.insert(
+                key,
+                Proxy {
+                    range,
+                    source_triangles: build.source_triangles,
+                },
+            );
         }
     }
 
     /// Reallocates the pool at twice what the live proxies and `extra` need,
     /// copying the live proxies in, packed.
-    fn grow(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, extra_vertices: u32, extra_indices: u32) {
+    fn grow(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        extra_vertices: u32,
+        extra_indices: u32,
+    ) {
         let live_vertices: u32 = self.proxies.values().map(|p| p.range.vertex_count).sum();
         let live_indices: u32 = self.proxies.values().map(|p| p.range.index_count).sum();
-        let vertices = (live_vertices + extra_vertices).max(1024).next_power_of_two() * 2;
+        let vertices = (live_vertices + extra_vertices)
+            .max(1024)
+            .next_power_of_two()
+            * 2;
         let indices = (live_indices + extra_indices).max(4096).next_power_of_two() * 2;
         let mut pool = Pool::new(device, vertices, indices);
         if let Some(old) = self.pool.take() {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("VG ray proxy pool growth") });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("VG ray proxy pool growth"),
+            });
             let mut keys: Vec<u64> = self.proxies.keys().copied().collect();
             keys.sort_unstable_by_key(|k| self.proxies[k].range.first_vertex);
             for key in keys {

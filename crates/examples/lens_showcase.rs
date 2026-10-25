@@ -657,8 +657,7 @@ fn capture_all() {
         .unwrap_or_else(|| std::path::PathBuf::from("lens-showcase"));
     std::fs::create_dir_all(&output_dir).expect("create output directory");
 
-    let instance =
-        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
@@ -1220,8 +1219,7 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
 /// Headless check: render the demo offscreen through the same graph and
 /// report scene-referred output statistics. `cargo run --bin lens_flare_demo -- --probe`
 fn probe() {
-    let instance =
-        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()
