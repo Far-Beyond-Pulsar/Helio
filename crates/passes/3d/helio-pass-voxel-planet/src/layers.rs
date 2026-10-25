@@ -12,11 +12,15 @@
 //! coarser than themselves, in any layer, at every level.
 use crate::grid::{Grid, DOMAIN_UNIT};
 use crate::landform::{
-    noise_quantile, LandformConstants, LandformField, LandformVolume, Octave, PackedRule, StackLayer, BASIN, CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION,
-    GRAD_SHIFT, HILLS, LAYERS, OCTAVES, REGION, RIDGE, ROUGHNESS, RULES, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR, STYLE_RULES, WARP, WARP_OCTAVES,
+    noise_quantile, LandformConstants, LandformField, LandformVolume, Octave, PackedRule,
+    StackLayer, BASIN, CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION, GRAD_SHIFT, HILLS, LAYERS,
+    OCTAVES, REGION, RIDGE, ROUGHNESS, RULES, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR,
+    STYLE_RULES, WARP, WARP_OCTAVES,
 };
 use crate::noise::{FINE_ONE, ONE};
-use crate::terrain::{material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainSource, HEIGHT_ONE};
+use crate::terrain::{
+    material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainSource, HEIGHT_ONE,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -127,18 +131,75 @@ impl Layer {
     /// The Earth preset is made of these.
     pub fn new(kind: LayerKind) -> Self {
         use LayerKind::*;
-        let base = Self { kind, ..Self::default() };
+        let base = Self {
+            kind,
+            ..Self::default()
+        };
         match kind {
-            Hills => Self { height_m: 140.0, scale_km: 9.0, ..base },
-            Warp => Self { scale_km: 40.0, ..base },
-            Continents => Self { height_m: 2_400.0, base_m: 180.0, scale_km: 3_000.0, ..base },
-            Mountains => Self { height_m: 2_400.0, scale_km: 20.0, octaves: 7, persistence: 0.47, region_km: 240.0, coverage: 0.45, ..base },
-            Roughness => Self { scale_km: 0.512, octaves: 9, ratio: 0.035, ..base },
-            Erosion => Self { height_m: 40.0, scale_km: 1.6, octaves: 6, ratio: 0.5, ..base },
-            Craters => Self { scale_km: 40.0, octaves: 8, coverage: 0.3, persistence: 1.25, ratio: 0.2, ratio2: 0.3, ratio3: 0.15, ..base },
-            Basins => Self { height_m: 1_200.0, scale_km: 900.0, coverage: 0.3, ..base },
-            Plateau => Self { height_m: 400.0, ..base },
-            Cliffs => Self { height_m: 30.0, scale_km: 25.0, coverage: 0.35, ratio: 0.12, ..base },
+            Hills => Self {
+                height_m: 140.0,
+                scale_km: 9.0,
+                ..base
+            },
+            Warp => Self {
+                scale_km: 40.0,
+                ..base
+            },
+            Continents => Self {
+                height_m: 2_400.0,
+                base_m: 180.0,
+                scale_km: 3_000.0,
+                ..base
+            },
+            Mountains => Self {
+                height_m: 2_400.0,
+                scale_km: 20.0,
+                octaves: 7,
+                persistence: 0.47,
+                region_km: 240.0,
+                coverage: 0.45,
+                ..base
+            },
+            Roughness => Self {
+                scale_km: 0.512,
+                octaves: 9,
+                ratio: 0.035,
+                ..base
+            },
+            Erosion => Self {
+                height_m: 40.0,
+                scale_km: 1.6,
+                octaves: 6,
+                ratio: 0.5,
+                ..base
+            },
+            Craters => Self {
+                scale_km: 40.0,
+                octaves: 8,
+                coverage: 0.3,
+                persistence: 1.25,
+                ratio: 0.2,
+                ratio2: 0.3,
+                ratio3: 0.15,
+                ..base
+            },
+            Basins => Self {
+                height_m: 1_200.0,
+                scale_km: 900.0,
+                coverage: 0.3,
+                ..base
+            },
+            Plateau => Self {
+                height_m: 400.0,
+                ..base
+            },
+            Cliffs => Self {
+                height_m: 30.0,
+                scale_km: 25.0,
+                coverage: 0.35,
+                ratio: 0.12,
+                ..base
+            },
         }
     }
 }
@@ -218,19 +279,39 @@ impl Default for MaterialRule {
 impl MaterialRule {
     /// `material` everywhere (narrow it with the fields).
     pub fn new(material: &str) -> Self {
-        Self { material: material.into(), ..Self::default() }
+        Self {
+            material: material.into(),
+            ..Self::default()
+        }
     }
 
     fn validate(&self, index: usize) -> Result<(), String> {
         let values = [
-            self.min_height_m, self.max_height_m, self.min_slope, self.max_slope, self.min_depth_m, self.max_depth_m, self.min_moisture,
-            self.max_moisture, self.min_erosion, self.max_erosion, self.patch_km, self.patch_share, self.band_m, self.speck_share,
+            self.min_height_m,
+            self.max_height_m,
+            self.min_slope,
+            self.max_slope,
+            self.min_depth_m,
+            self.max_depth_m,
+            self.min_moisture,
+            self.max_moisture,
+            self.min_erosion,
+            self.max_erosion,
+            self.patch_km,
+            self.patch_share,
+            self.band_m,
+            self.speck_share,
         ];
         if values.iter().any(|v| !v.is_finite()) || self.patch_km < 0.0 || self.band_m < 0.0 {
-            return Err(format!("material rule {index} has a non-finite or negative size"));
+            return Err(format!(
+                "material rule {index} has a non-finite or negative size"
+            ));
         }
         if material::from_name(&self.material).is_none() {
-            return Err(format!("material rule {index}: unknown material {:?}", self.material));
+            return Err(format!(
+                "material rule {index}: unknown material {:?}",
+                self.material
+            ));
         }
         Ok(())
     }
@@ -242,17 +323,48 @@ impl MaterialRule {
         let q16 = |v: f64| (v.clamp(0.0, 1.0) * 65_536.0).round() as i32;
         let byte = |v: f64| (v.clamp(-1.0, 1.0) * 127.0).round() as i32;
         let patch = if self.patch_km > 0.0 {
-            let shift = ((self.patch_km * 1_000.0 / DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as i32;
-            (shift, (noise_quantile(1.0 - self.patch_share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32)
+            let shift = ((self.patch_km * 1_000.0 / DOMAIN_UNIT)
+                .log2()
+                .round()
+                .clamp(1.0, 30.0)) as i32;
+            (
+                shift,
+                (noise_quantile(1.0 - self.patch_share.clamp(0.0, 1.0)) * f64::from(ONE)).round()
+                    as i32,
+            )
         } else {
             (0, 0)
         };
-        let speck = if self.speck_share >= 1.0 { 0 } else { ((self.speck_share.max(0.0) * 256.0).round() as i32).clamp(1, 255) };
+        let speck = if self.speck_share >= 1.0 {
+            0
+        } else {
+            ((self.speck_share.max(0.0) * 256.0).round() as i32).clamp(1, 255)
+        };
         PackedRule {
-            head: [material::from_name(&self.material).unwrap_or(material::STONE) as i32, speck, patch.0, patch.1],
-            height_slope: [mm(self.min_height_m), mm(self.max_height_m), eighths(self.min_slope), eighths(self.max_slope)],
-            depth_moisture: [cells(self.min_depth_m), cells(self.max_depth_m), q16(self.min_moisture), q16(self.max_moisture)],
-            surface_bands: [byte(self.min_erosion), byte(self.max_erosion), mm(self.band_m).max(0), i32::from(self.odd_bands)],
+            head: [
+                material::from_name(&self.material).unwrap_or(material::STONE) as i32,
+                speck,
+                patch.0,
+                patch.1,
+            ],
+            height_slope: [
+                mm(self.min_height_m),
+                mm(self.max_height_m),
+                eighths(self.min_slope),
+                eighths(self.max_slope),
+            ],
+            depth_moisture: [
+                cells(self.min_depth_m),
+                cells(self.max_depth_m),
+                q16(self.min_moisture),
+                q16(self.max_moisture),
+            ],
+            surface_bands: [
+                byte(self.min_erosion),
+                byte(self.max_erosion),
+                mm(self.band_m).max(0),
+                i32::from(self.odd_bands),
+            ],
         }
     }
 }
@@ -319,7 +431,13 @@ pub struct Overhangs {
 
 impl Default for Overhangs {
     fn default() -> Self {
-        Self { enabled: true, height_m: 6.0, wavelength_m: 6.0, region_km: 3.0, share: 0.3 }
+        Self {
+            enabled: true,
+            height_m: 6.0,
+            wavelength_m: 6.0,
+            region_km: 3.0,
+            share: 0.3,
+        }
     }
 }
 
@@ -361,10 +479,16 @@ impl TerrainLayers {
             layers: vec![
                 Layer::new(Warp),
                 Layer::new(Continents),
-                Layer { mask: LayerMask::Land, ..Layer::new(Mountains) },
+                Layer {
+                    mask: LayerMask::Land,
+                    ..Layer::new(Mountains)
+                },
                 Layer::new(Erosion),
                 Self::earth_hills(),
-                Layer { mask: LayerMask::AboveDeepSea, ..Layer::new(Roughness) },
+                Layer {
+                    mask: LayerMask::AboveDeepSea,
+                    ..Layer::new(Roughness)
+                },
             ],
             caves: Caves::default(),
             overhangs: Overhangs::default(),
@@ -382,7 +506,12 @@ impl TerrainLayers {
     /// kilometre, so the land near the eye has shape (four octaves at half
     /// persistence left it sloping ~3 %).
     fn earth_hills() -> Layer {
-        Layer { mask: LayerMask::AboveDeepSea, octaves: 5, persistence: 0.6, ..Layer::new(LayerKind::Hills) }
+        Layer {
+            mask: LayerMask::AboveDeepSea,
+            octaves: 5,
+            persistence: 0.6,
+            ..Layer::new(LayerKind::Hills)
+        }
     }
 
     /// A dry world of dunes and mesas, with materials from rules: dune sand
@@ -394,7 +523,10 @@ impl TerrainLayers {
         earth.layers.retain(|l| l.kind != Continents);
         // The desert's hills stay gentle under its dunes.
         for l in earth.layers.iter_mut().filter(|l| l.kind == Hills) {
-            *l = Layer { mask: l.mask, ..Layer::new(Hills) };
+            *l = Layer {
+                mask: l.mask,
+                ..Layer::new(Hills)
+            };
         }
         for l in &mut earth.layers {
             l.mask = LayerMask::Everywhere;
@@ -442,8 +574,21 @@ impl TerrainLayers {
         use LayerKind::*;
         Self {
             layers: vec![
-                Layer { kind: Hills, height_m: 1_500.0, scale_km: 250.0, octaves: 3, persistence: 0.5, ..Layer::default() },
-                Layer { kind: Basins, height_m: 1_200.0, scale_km: 900.0, coverage: 0.3, ..Layer::default() },
+                Layer {
+                    kind: Hills,
+                    height_m: 1_500.0,
+                    scale_km: 250.0,
+                    octaves: 3,
+                    persistence: 0.5,
+                    ..Layer::default()
+                },
+                Layer {
+                    kind: Basins,
+                    height_m: 1_200.0,
+                    scale_km: 900.0,
+                    coverage: 0.3,
+                    ..Layer::default()
+                },
                 Layer {
                     kind: Craters,
                     scale_km: 40.0,
@@ -456,8 +601,14 @@ impl TerrainLayers {
                     ..Layer::default()
                 },
             ],
-            caves: Caves { enabled: false, ..Caves::default() },
-            overhangs: Overhangs { enabled: false, ..Overhangs::default() },
+            caves: Caves {
+                enabled: false,
+                ..Caves::default()
+            },
+            overhangs: Overhangs {
+                enabled: false,
+                ..Overhangs::default()
+            },
             materials: MaterialStyle::Lunar,
             soil_depth_m: 4.0,
             ..Self::earth()
@@ -472,9 +623,19 @@ impl TerrainLayers {
     /// [`Self::flat`] at `height_m` (rounded down to whole voxel layers).
     pub fn flat_at(height_m: f64) -> Self {
         Self {
-            layers: vec![Layer { kind: LayerKind::Plateau, height_m, ..Layer::default() }],
-            caves: Caves { enabled: false, ..Caves::default() },
-            overhangs: Overhangs { enabled: false, ..Overhangs::default() },
+            layers: vec![Layer {
+                kind: LayerKind::Plateau,
+                height_m,
+                ..Layer::default()
+            }],
+            caves: Caves {
+                enabled: false,
+                ..Caves::default()
+            },
+            overhangs: Overhangs {
+                enabled: false,
+                ..Overhangs::default()
+            },
             materials: MaterialStyle::Layered,
             soil_depth_m: 1.0,
             ..Self::earth()
@@ -495,12 +656,28 @@ impl TerrainLayers {
             return Err(format!("a terrain has at most {LAYERS} enabled layers"));
         }
         for (index, l) in enabled.iter().enumerate() {
-            let values = [l.height_m, l.base_m, l.scale_km, l.persistence, l.coverage, l.region_km, l.ratio, l.ratio2, l.ratio3];
+            let values = [
+                l.height_m,
+                l.base_m,
+                l.scale_km,
+                l.persistence,
+                l.coverage,
+                l.region_km,
+                l.ratio,
+                l.ratio2,
+                l.ratio3,
+            ];
             if values.iter().any(|v| !v.is_finite()) {
-                return Err(format!("layer {index} ({:?}) has a non-finite value", l.kind));
+                return Err(format!(
+                    "layer {index} ({:?}) has a non-finite value",
+                    l.kind
+                ));
             }
             if l.kind != LayerKind::Plateau && l.scale_km <= 0.0 {
-                return Err(format!("layer {index} ({:?}) needs a positive scale", l.kind));
+                return Err(format!(
+                    "layer {index} ({:?}) needs a positive scale",
+                    l.kind
+                ));
             }
             if l.height_m.abs() > 1.0e5 || l.base_m.abs() > 1.0e5 || l.scale_km > 1.0e5 {
                 return Err(format!("layer {index} ({:?}) exceeds 100 km", l.kind));
@@ -508,8 +685,13 @@ impl TerrainLayers {
             if l.kind == LayerKind::Warp && index != 0 {
                 return Err("a Warp layer must come first".into());
             }
-            if l.mask != LayerMask::Everywhere && !enabled.iter().any(|o| o.kind == LayerKind::Continents) {
-                return Err(format!("layer {index} ({:?}) is masked by land without a Continents layer", l.kind));
+            if l.mask != LayerMask::Everywhere
+                && !enabled.iter().any(|o| o.kind == LayerKind::Continents)
+            {
+                return Err(format!(
+                    "layer {index} ({:?}) is masked by land without a Continents layer",
+                    l.kind
+                ));
             }
         }
         for kind in [LayerKind::Warp, LayerKind::Continents] {
@@ -519,14 +701,36 @@ impl TerrainLayers {
         }
         let c = &self.caves;
         let o = &self.overhangs;
-        let volume = [c.depth_m, c.share, c.region_km, c.tunnel_radius_m, c.tunnel_wavelength_m, c.cavern_wavelength_m, c.cavern_share, c.cover_m, c.entrance_share, c.entrance_spacing_m, o.height_m, o.wavelength_m, o.region_km, o.share];
+        let volume = [
+            c.depth_m,
+            c.share,
+            c.region_km,
+            c.tunnel_radius_m,
+            c.tunnel_wavelength_m,
+            c.cavern_wavelength_m,
+            c.cavern_share,
+            c.cover_m,
+            c.entrance_share,
+            c.entrance_spacing_m,
+            o.height_m,
+            o.wavelength_m,
+            o.region_km,
+            o.share,
+        ];
         if volume.iter().any(|v| !v.is_finite() || *v < 0.0) {
             return Err("cave and overhang settings must be finite and non-negative".into());
         }
-        if c.region_km <= 0.0 || c.tunnel_wavelength_m <= 0.0 || c.cavern_wavelength_m <= 0.0 || c.entrance_spacing_m <= 0.0 || o.wavelength_m <= 0.0 || o.region_km <= 0.0 {
+        if c.region_km <= 0.0
+            || c.tunnel_wavelength_m <= 0.0
+            || c.cavern_wavelength_m <= 0.0
+            || c.entrance_spacing_m <= 0.0
+            || o.wavelength_m <= 0.0
+            || o.region_km <= 0.0
+        {
             return Err("cave and overhang wavelengths must be positive".into());
         }
-        if !self.snowline_m.is_finite() || !self.soil_depth_m.is_finite() || self.soil_depth_m < 0.0 {
+        if !self.snowline_m.is_finite() || !self.soil_depth_m.is_finite() || self.soil_depth_m < 0.0
+        {
             return Err("snowline and soil depth must be finite (soil depth non-negative)".into());
         }
         for name in [&self.surface, &self.soil, &self.rock] {
@@ -544,7 +748,11 @@ impl TerrainLayers {
     }
 
     /// The interpreter's constants and volumetric terms on `grid`.
-    pub fn compile(&self, grid: &Grid, seed: u32) -> Result<(LandformConstants, LandformVolume), String> {
+    pub fn compile(
+        &self,
+        grid: &Grid,
+        seed: u32,
+    ) -> Result<(LandformConstants, LandformVolume), String> {
         self.validate()?;
         let units = |metres: f64| (metres * f64::from(HEIGHT_ONE)).round() as i32;
         let shift = |metres: f64| ((metres / DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as u32;
@@ -556,7 +764,12 @@ impl TerrainLayers {
         let mut warp = [Octave::default(); WARP_OCTAVES];
         for (index, w) in warp.iter_mut().enumerate() {
             // Zero-amplitude placeholders without a Warp layer.
-            *w = Octave { shift: 20, amplitude: 0, seed: 0, kind: WARP + index as u32 / 2 };
+            *w = Octave {
+                shift: 20,
+                amplitude: 0,
+                seed: 0,
+                kind: WARP + index as u32 / 2,
+            };
         }
         let mut octaves: Vec<Octave> = Vec::new();
         let mut layers = [StackLayer::default(); LAYERS];
@@ -573,7 +786,12 @@ impl TerrainLayers {
             };
             let metres = l.scale_km * 1_000.0;
             let octave = |o: u32| metres / f64::from(1u32 << o);
-            let mut layer = StackLayer { kind: 0, mask, a: 0, b: 0 };
+            let mut layer = StackLayer {
+                kind: 0,
+                mask,
+                a: 0,
+                b: 0,
+            };
             match l.kind {
                 LayerKind::Warp => {
                     // Two octaves per axis, amplitude 15% of the wavelength.
@@ -597,46 +815,88 @@ impl TerrainLayers {
                     layer.b = units(l.base_m);
                     continents = index as i32 + 1;
                     for o in 0..4 {
-                        octaves.push(Octave { shift: shift(octave(o)), amplitude: ONE >> o, seed: next_seed(), kind: tag | CONTINENT });
+                        octaves.push(Octave {
+                            shift: shift(octave(o)),
+                            amplitude: ONE >> o,
+                            seed: next_seed(),
+                            kind: tag | CONTINENT,
+                        });
                     }
                 }
                 LayerKind::Mountains => {
                     layer.kind = StackLayer::MOUNTAINS;
                     // Region mask: two fine octaves; the bias keeps `coverage`.
-                    layer.a = (noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0)) * f64::from(ONE) * 1.2).round() as i32;
+                    layer.a =
+                        (noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0)) * f64::from(ONE) * 1.2)
+                            .round() as i32;
                     let region = l.region_km * 1_000.0;
                     for o in 0..2 {
-                        octaves.push(Octave { shift: shift(region / f64::from(1u32 << o)), amplitude: ONE >> o, seed: next_seed(), kind: tag | REGION });
+                        octaves.push(Octave {
+                            shift: shift(region / f64::from(1u32 << o)),
+                            amplitude: ONE >> o,
+                            seed: next_seed(),
+                            kind: tag | REGION,
+                        });
                     }
                     let mut amplitude = l.height_m;
                     for o in 0..l.octaves.min(12) {
-                        octaves.push(Octave { shift: shift(octave(o)), amplitude: units(amplitude), seed: next_seed(), kind: tag | RIDGE });
+                        octaves.push(Octave {
+                            shift: shift(octave(o)),
+                            amplitude: units(amplitude),
+                            seed: next_seed(),
+                            kind: tag | RIDGE,
+                        });
                         amplitude *= l.persistence;
                     }
                     // The first mountain layer with a bakeable ridge chain
                     // draws coarse levels from its ridge envelope.
-                    if display == 0 && (1..=crate::ridge_envelope::RIDGES as u32).contains(&l.octaves) {
+                    if display == 0
+                        && (1..=crate::ridge_envelope::RIDGES as u32).contains(&l.octaves)
+                    {
                         display = index as i32 + 1;
                     }
                 }
                 LayerKind::Hills | LayerKind::Roughness => {
-                    let (kind, class) = if l.kind == LayerKind::Hills { (StackLayer::HILLS, HILLS) } else { (StackLayer::ROUGHNESS, ROUGHNESS) };
+                    let (kind, class) = if l.kind == LayerKind::Hills {
+                        (StackLayer::HILLS, HILLS)
+                    } else {
+                        (StackLayer::ROUGHNESS, ROUGHNESS)
+                    };
                     layer.kind = kind;
                     let mut amplitude = l.height_m;
                     for o in 0..l.octaves.min(16) {
                         let w = octave(o);
-                        let a = if l.kind == LayerKind::Roughness { w * l.ratio } else { amplitude };
-                        octaves.push(Octave { shift: shift(w), amplitude: units(a), seed: next_seed(), kind: tag | class });
+                        let a = if l.kind == LayerKind::Roughness {
+                            w * l.ratio
+                        } else {
+                            amplitude
+                        };
+                        octaves.push(Octave {
+                            shift: shift(w),
+                            amplitude: units(a),
+                            seed: next_seed(),
+                            kind: tag | class,
+                        });
                         amplitude *= l.persistence;
                     }
                 }
                 LayerKind::Erosion => {
                     layer.kind = StackLayer::EROSION;
-                    layer.a = ((l.ratio.max(0.01) * f64::from(1u32 << GRAD_SHIFT) * DOMAIN_UNIT * 1_000.0).round() as i32).clamp(32, 1 << 26);
+                    layer.a = ((l.ratio.max(0.01)
+                        * f64::from(1u32 << GRAD_SHIFT)
+                        * DOMAIN_UNIT
+                        * 1_000.0)
+                        .round() as i32)
+                        .clamp(32, 1 << 26);
                     let mut amplitude = l.height_m;
                     for o in 0..l.octaves.min(8) {
                         if amplitude > 0.0 && octave(o) > 1.0 {
-                            octaves.push(Octave { shift: shift(octave(o)), amplitude: units(amplitude), seed: next_seed(), kind: tag | EROSION });
+                            octaves.push(Octave {
+                                shift: shift(octave(o)),
+                                amplitude: units(amplitude),
+                                seed: next_seed(),
+                                kind: tag | EROSION,
+                            });
                             erosion_sum += units(amplitude);
                         }
                         amplitude *= l.persistence;
@@ -653,33 +913,55 @@ impl TerrainLayers {
                         if cell < DOMAIN_UNIT * 1024.0 {
                             break;
                         }
-                        let depth = l.ratio.max(0.0) * diameter * (15_000.0 / diameter).min(1.0).powf(0.7);
+                        let depth =
+                            l.ratio.max(0.0) * diameter * (15_000.0 / diameter).min(1.0).powf(0.7);
                         let density = (l.coverage * l.persistence.powi(o as i32)).clamp(0.0, 0.95);
                         // Crater octaves carry their density in the seed's
                         // low 16 bits (the hash seed is the rest).
                         let seed = (next_seed() & !0xffff) | ((density * 65_535.0) as u32 & 0xffff);
-                        octaves.push(Octave { shift: shift(cell), amplitude: units(depth), seed, kind: tag | CRATER });
+                        octaves.push(Octave {
+                            shift: shift(cell),
+                            amplitude: units(depth),
+                            seed,
+                            kind: tag | CRATER,
+                        });
                     }
                 }
                 LayerKind::Basins => {
                     layer.kind = StackLayer::BASINS;
                     layer.a = units(l.height_m.abs());
-                    layer.b = ((noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0)) * f64::from(FINE_ONE)).round()) as i32;
-                    octaves.push(Octave { shift: shift(metres), amplitude: ONE, seed: next_seed(), kind: tag | BASIN });
+                    layer.b = ((noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0))
+                        * f64::from(FINE_ONE))
+                    .round()) as i32;
+                    octaves.push(Octave {
+                        shift: shift(metres),
+                        amplitude: ONE,
+                        seed: next_seed(),
+                        kind: tag | BASIN,
+                    });
                 }
                 LayerKind::Cliffs => {
                     // Whole layers tall, so treads lie on cell boundaries.
                     let layer_mm = grid.layer_mm() as i32;
-                    let step = (units(l.height_m.abs().min(CLIFF_STEP_MAX_M)) / layer_mm).max(1) * layer_mm;
+                    let step = (units(l.height_m.abs().min(CLIFF_STEP_MAX_M)) / layer_mm).max(1)
+                        * layer_mm;
                     let riser = (l.ratio.clamp(1.0 / 1024.0, 1.0) * 1024.0).round() as u32;
                     layer.kind = StackLayer::CLIFFS | (riser << 16);
                     layer.a = step;
-                    layer.b = ((noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0)) * f64::from(FINE_ONE)).round()) as i32;
-                    octaves.push(Octave { shift: shift(metres), amplitude: ONE, seed: next_seed(), kind: tag | BASIN });
+                    layer.b = ((noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0))
+                        * f64::from(FINE_ONE))
+                    .round()) as i32;
+                    octaves.push(Octave {
+                        shift: shift(metres),
+                        amplitude: ONE,
+                        seed: next_seed(),
+                        kind: tag | BASIN,
+                    });
                 }
                 LayerKind::Plateau => {
                     layer.kind = StackLayer::PLATEAU;
-                    layer.a = units(l.height_m).div_euclid(grid.layer_mm() as i32) * grid.layer_mm() as i32;
+                    layer.a = units(l.height_m).div_euclid(grid.layer_mm() as i32)
+                        * grid.layer_mm() as i32;
                 }
             }
             layers[index] = layer;
@@ -689,7 +971,11 @@ impl TerrainLayers {
         // chains keep their order.
         octaves.sort_by(|a, b| b.shift.cmp(&a.shift));
         if WARP_OCTAVES + octaves.len() > OCTAVES {
-            return Err(format!("the layers have {} octaves; at most {}", octaves.len(), OCTAVES - WARP_OCTAVES));
+            return Err(format!(
+                "the layers have {} octaves; at most {}",
+                octaves.len(),
+                OCTAVES - WARP_OCTAVES
+            ));
         }
         let mut table = [Octave::default(); OCTAVES];
         table[..WARP_OCTAVES].copy_from_slice(&warp);
@@ -714,17 +1000,45 @@ impl TerrainLayers {
             *packed = rule.pack(grid);
         }
         let constants = LandformConstants {
-            header: [(WARP_OCTAVES + octaves.len()) as i32, grid.layer_mm() as i32, soil, seed as i32],
-            levels: [shift(moisture / 2.0) as i32, continents, units(self.snowline_m), units(-8.0)],
+            header: [
+                (WARP_OCTAVES + octaves.len()) as i32,
+                grid.layer_mm() as i32,
+                soil,
+                seed as i32,
+            ],
+            levels: [
+                shift(moisture / 2.0) as i32,
+                continents,
+                units(self.snowline_m),
+                units(-8.0),
+            ],
             shape: [display, 16, 0, i32::from(grid.is_plane())],
             style: [style, id(&self.surface), id(&self.soil), id(&self.rock)],
-            stack: [self.layers.iter().filter(|l| l.enabled).count() as i32, erosion_sum.max(1), grid.sphere_constants()[2] as i32, warps],
-            materials: [self.rules.len() as i32, id(&self.rock), octaves.iter().filter(|o| o.class() == EROSION).map(|o| o.shift as i32).max().unwrap_or(-1), 0],
+            stack: [
+                self.layers.iter().filter(|l| l.enabled).count() as i32,
+                erosion_sum.max(1),
+                grid.sphere_constants()[2] as i32,
+                warps,
+            ],
+            materials: [
+                self.rules.len() as i32,
+                id(&self.rock),
+                octaves
+                    .iter()
+                    .filter(|o| o.class() == EROSION)
+                    .map(|o| o.shift as i32)
+                    .max()
+                    .unwrap_or(-1),
+                0,
+            ],
             layers,
             octaves: table,
             rules,
         };
-        Ok((constants, LandformVolume::new(grid, &self.caves, &self.overhangs)))
+        Ok((
+            constants,
+            LandformVolume::new(grid, &self.caves, &self.overhangs),
+        ))
     }
 }
 
@@ -737,7 +1051,12 @@ impl TerrainLayers {
 
     /// A world terrain source using this stack.
     pub fn source(&self, seed: u64) -> TerrainSource {
-        TerrainSource { generator: ID.into(), version: 0, seed, settings: serde_json::to_string(self).expect("terrain layers serialize") }
+        TerrainSource {
+            generator: ID.into(),
+            version: 0,
+            seed,
+            settings: serde_json::to_string(self).expect("terrain layers serialize"),
+        }
     }
 }
 
@@ -754,7 +1073,12 @@ impl TerrainGenerator for LayersGenerator {
             settings_component: Some("VoxelTerrainLayersComponent".into()),
         }
     }
-    fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
+    fn build(
+        &self,
+        grid: &Grid,
+        seed: u64,
+        settings: &str,
+    ) -> Result<Arc<dyn TerrainField>, String> {
         let layers: TerrainLayers = if settings.trim().is_empty() {
             TerrainLayers::default()
         } else {
@@ -773,21 +1097,54 @@ mod tests {
     use glam::IVec3;
 
     fn planet(shape: Shape, radius_m: f64, stack: &TerrainLayers) -> Planet {
-        Planet::new(PlanetRecipe { shape, radius_m, plane_size_m: 4_000.0, terrain: stack.source(7), ..Default::default() }).unwrap()
+        Planet::new(PlanetRecipe {
+            shape,
+            radius_m,
+            plane_size_m: 4_000.0,
+            terrain: stack.source(7),
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     #[test]
     fn flat_ground_is_one_whole_layer_with_its_materials() {
         let grid = Grid::plane(Shape::Plane, 1024.0, 0.1).unwrap();
-        let stack = TerrainLayers { soil_depth_m: 0.5, surface: "Sand".into(), rock: "dark_stone".into(), ..TerrainLayers::flat_at(2.34) };
-        let field = LayersGenerator.build(&grid, 0, &serde_json::to_string(&stack).unwrap()).unwrap();
-        assert_eq!(field.height(crate::terrain::Column { face: crate::grid::PLANE_FACE, i: 0, j: 0, level: 0 }), 2_300);
+        let stack = TerrainLayers {
+            soil_depth_m: 0.5,
+            surface: "Sand".into(),
+            rock: "dark_stone".into(),
+            ..TerrainLayers::flat_at(2.34)
+        };
+        let field = LayersGenerator
+            .build(&grid, 0, &serde_json::to_string(&stack).unwrap())
+            .unwrap();
+        assert_eq!(
+            field.height(crate::terrain::Column {
+                face: crate::grid::PLANE_FACE,
+                i: 0,
+                j: 0,
+                level: 0
+            }),
+            2_300
+        );
         assert_eq!(field.height_range(), (2_300, 2_300));
         assert_eq!(field.bound_margins(), [2; 24]);
-        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 0, 0, 22), material::SAND);
-        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 5, 0, 17), material::DIRT);
-        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 6, 0, 16), material::DARK_STONE);
-        assert!(LayersGenerator.build(&grid, 0, r#"{"rock": "Air"}"#).is_err());
+        assert_eq!(
+            field.ground_material(IVec3::ZERO, 0, 2_300, 0, 0, 22),
+            material::SAND
+        );
+        assert_eq!(
+            field.ground_material(IVec3::ZERO, 0, 2_300, 5, 0, 17),
+            material::DIRT
+        );
+        assert_eq!(
+            field.ground_material(IVec3::ZERO, 0, 2_300, 6, 0, 16),
+            material::DARK_STONE
+        );
+        assert!(LayersGenerator
+            .build(&grid, 0, r#"{"rock": "Air"}"#)
+            .is_err());
     }
 
     /// Craters exist at every size, basins set the surface word, and the
@@ -802,8 +1159,17 @@ mod tests {
             let n = g.cells();
             let (mut lo, mut hi, mut fresh, mut mare) = (i32::MAX, i32::MIN, 0, 0);
             for t in 0..4_000 {
-                let face = if g.is_plane() { crate::grid::PLANE_FACE } else { 2 };
-                let column = crate::terrain::Column { face, i: n / 4 + t * 3, j: n / 2, level: 0 };
+                let face = if g.is_plane() {
+                    crate::grid::PLANE_FACE
+                } else {
+                    2
+                };
+                let column = crate::terrain::Column {
+                    face,
+                    i: n / 4 + t * 3,
+                    j: n / 2,
+                    level: 0,
+                };
                 let h = planet.field().height(column);
                 let s = planet.field().surface(column, h);
                 lo = lo.min(h);
@@ -813,7 +1179,10 @@ mod tests {
             }
             assert!(hi - lo > 1_000, "{shape:?}: relief {lo}..{hi}");
             eprintln!("{shape:?}: relief {lo}..{hi} mm, {fresh} samples on fresh ejecta, {mare} on basins");
-            assert_eq!(planet.field().appearance(), crate::landform::lunar_appearance());
+            assert_eq!(
+                planet.field().appearance(),
+                crate::landform::lunar_appearance()
+            );
         }
     }
 
@@ -823,30 +1192,53 @@ mod tests {
     #[test]
     fn cliffs_step_the_terrain_into_terraces_within_its_bounds() {
         let mut stack = TerrainLayers::earth();
-        stack.layers.push(Layer { coverage: 1.0, ..Layer::new(LayerKind::Cliffs) });
+        stack.layers.push(Layer {
+            coverage: 1.0,
+            ..Layer::new(LayerKind::Cliffs)
+        });
         for shape in [Shape::Sphere, Shape::Plane] {
             let planet = planet(shape, 6_371_000.0, &stack);
             check_field(&planet, 3_000).unwrap_or_else(|e| panic!("{shape:?}: {e}"));
             let g = planet.grid();
             let n = g.cells();
-            let face = if g.is_plane() { crate::grid::PLANE_FACE } else { 2 };
+            let face = if g.is_plane() {
+                crate::grid::PLANE_FACE
+            } else {
+                2
+            };
             let step = (crate::terrain::HEIGHT_ONE as f64 * 30.0) as i32;
             let (mut on_tread, mut samples, mut steep) = (0, 0, 0);
             // Land columns across the face (the ocean floor is flat anyway).
             for t in 0..40_000 {
-                let (i, j) = (((t * 7_919) % 199) * (n / 200), (t.wrapping_mul(104_729) % 197) * (n / 200) + t % 64);
-                let h = planet.field().height(crate::terrain::Column { face: face, i: i, j: j, level: 0 });
+                let (i, j) = (
+                    ((t * 7_919) % 199) * (n / 200),
+                    (t.wrapping_mul(104_729) % 197) * (n / 200) + t % 64,
+                );
+                let h = planet.field().height(crate::terrain::Column {
+                    face: face,
+                    i: i,
+                    j: j,
+                    level: 0,
+                });
                 if h <= 50 * crate::terrain::HEIGHT_ONE {
                     continue;
                 }
-                let h1 = planet.field().height(crate::terrain::Column { face: face, i: i + 1, j: j, level: 0 });
+                let h1 = planet.field().height(crate::terrain::Column {
+                    face: face,
+                    i: i + 1,
+                    j: j,
+                    level: 0,
+                });
                 samples += 1;
                 on_tread += usize::from(h.rem_euclid(step) == 0);
                 steep += usize::from((h1 - h).abs() >= g.layer_mm() as i32 * 2);
             }
             eprintln!("{shape:?}: {on_tread}/{samples} land columns on a tread, {steep} steep");
             assert!(samples > 500, "{shape:?}: {samples} land samples");
-            assert!(on_tread * 2 > samples, "{shape:?}: {on_tread}/{samples} on a tread");
+            assert!(
+                on_tread * 2 > samples,
+                "{shape:?}: {on_tread}/{samples} on a tread"
+            );
             assert!(steep > 0, "{shape:?}: no cliffs");
         }
     }
@@ -879,7 +1271,14 @@ mod tests {
         let mut worst = 0;
         for t in 0..20_000 {
             let (i, j) = (n / 5 + t * 131, n / 3 + t * 17);
-            let h = |d: i32| planet.field().height(crate::terrain::Column { face: 2, i: i + d, j: j, level: 0 });
+            let h = |d: i32| {
+                planet.field().height(crate::terrain::Column {
+                    face: 2,
+                    i: i + d,
+                    j: j,
+                    level: 0,
+                })
+            };
             worst = worst.max((h(0) - 2 * h(1) + h(2)).abs());
         }
         assert!(worst < 100, "worst second difference {worst} mm");
@@ -893,15 +1292,63 @@ mod tests {
         use LayerKind::*;
         let base = TerrainLayers::earth();
         let mut alien = base.clone();
-        alien.layers.insert(3, Layer { kind: Mountains, mask: LayerMask::AboveDeepSea, height_m: 900.0, scale_km: 4.0, octaves: 5, region_km: 60.0, coverage: 0.3, ..Layer::default() });
-        alien.layers.push(Layer { kind: Craters, mask: LayerMask::Land, scale_km: 12.0, octaves: 4, coverage: 0.4, persistence: 1.3, ratio: 0.15, ratio2: 0.4, ratio3: 0.5, ..Layer::default() });
+        alien.layers.insert(
+            3,
+            Layer {
+                kind: Mountains,
+                mask: LayerMask::AboveDeepSea,
+                height_m: 900.0,
+                scale_km: 4.0,
+                octaves: 5,
+                region_km: 60.0,
+                coverage: 0.3,
+                ..Layer::default()
+            },
+        );
+        alien.layers.push(Layer {
+            kind: Craters,
+            mask: LayerMask::Land,
+            scale_km: 12.0,
+            octaves: 4,
+            coverage: 0.4,
+            persistence: 1.3,
+            ratio: 0.15,
+            ratio2: 0.4,
+            ratio3: 0.5,
+            ..Layer::default()
+        });
         alien.layers.retain(|l| l.kind != Roughness);
         let mesa = TerrainLayers {
             layers: vec![
-                Layer { kind: Plateau, height_m: 300.0, ..Layer::default() },
-                Layer { kind: Hills, height_m: 80.0, scale_km: 2.0, octaves: 5, persistence: 0.55, ..Layer::default() },
-                Layer { kind: Basins, height_m: 250.0, scale_km: 20.0, coverage: 0.4, ..Layer::default() },
-                Layer { kind: Erosion, height_m: 15.0, scale_km: 0.8, octaves: 4, persistence: 0.5, ratio: 0.3, ..Layer::default() },
+                Layer {
+                    kind: Plateau,
+                    height_m: 300.0,
+                    ..Layer::default()
+                },
+                Layer {
+                    kind: Hills,
+                    height_m: 80.0,
+                    scale_km: 2.0,
+                    octaves: 5,
+                    persistence: 0.55,
+                    ..Layer::default()
+                },
+                Layer {
+                    kind: Basins,
+                    height_m: 250.0,
+                    scale_km: 20.0,
+                    coverage: 0.4,
+                    ..Layer::default()
+                },
+                Layer {
+                    kind: Erosion,
+                    height_m: 15.0,
+                    scale_km: 0.8,
+                    octaves: 4,
+                    persistence: 0.5,
+                    ratio: 0.3,
+                    ..Layer::default()
+                },
             ],
             materials: MaterialStyle::Layered,
             surface: "Sand".into(),
@@ -912,7 +1359,8 @@ mod tests {
         for (name, stack) in [("alien", alien), ("mesa", mesa)] {
             for shape in [Shape::Sphere, Shape::Plane] {
                 let planet = planet(shape, 2_000_000.0, &stack);
-                let worst = check_field(&planet, 3_000).unwrap_or_else(|e| panic!("{name} {shape:?}: {e}"));
+                let worst =
+                    check_field(&planet, 3_000).unwrap_or_else(|e| panic!("{name} {shape:?}: {e}"));
                 eprintln!("{name} {shape:?}: worst {worst:?}");
             }
         }
@@ -930,18 +1378,32 @@ mod tests {
         for n in 0..4_000 {
             let p = grid.domain_point(2, 1_000 + n * 977, 2_000 + n * 131, 0);
             // A gully floor on a slope: gravel, the first rule.
-            assert_eq!(ground_material(&k, p, gully, 500_000, 0, 4, 5_000), material::GRAVEL);
+            assert_eq!(
+                ground_material(&k, p, gully, 500_000, 0, 4, 5_000),
+                material::GRAVEL
+            );
             // Gentle ground near the surface: sand.
-            assert_eq!(ground_material(&k, p, 0, 500_000, 3, 2, 5_000), material::SAND);
+            assert_eq!(
+                ground_material(&k, p, 0, 500_000, 3, 2, 5_000),
+                material::SAND
+            );
             // Deeper: stone patches, clay bands or the sandstone fallback.
             let deep = id(ground_material(&k, p, 0, 500_000, 40, 2, 4_960 + n % 40));
-            assert!([material::STONE, material::CLAY, material::SANDSTONE].contains(&deep), "{deep}");
+            assert!(
+                [material::STONE, material::CLAY, material::SANDSTONE].contains(&deep),
+                "{deep}"
+            );
             *seen.entry(deep).or_insert(0) += 1;
             // Steep exposed ground: dark stone specks among the others.
-            *seen.entry(1000 + id(ground_material(&k, p, 0, 500_000, 0, 10, 5_000))).or_insert(0) += 1;
+            *seen
+                .entry(1000 + id(ground_material(&k, p, 0, 500_000, 0, 10, 5_000)))
+                .or_insert(0) += 1;
         }
         eprintln!("{seen:?}");
-        assert!(seen.len() >= 5, "patches, bands, fallback and specks all occur: {seen:?}");
+        assert!(
+            seen.len() >= 5,
+            "patches, bands, fallback and specks all occur: {seen:?}"
+        );
         let mut many = TerrainLayers::desert();
         many.rules = vec![MaterialRule::default(); 17];
         assert!(many.compile(&grid, 7).is_err());
@@ -953,15 +1415,59 @@ mod tests {
     fn invalid_stacks_are_rejected() {
         use LayerKind::*;
         let grid = Grid::new(1_000_000.0, 0.1).unwrap();
-        let with = |layers: Vec<Layer>| TerrainLayers { layers, ..TerrainLayers::earth() };
-        let hills = Layer { kind: Hills, ..Layer::default() };
-        assert!(with(vec![hills.clone(); LAYERS + 1]).compile(&grid, 1).is_err());
-        assert!(with(vec![hills.clone(), Layer { kind: Warp, ..Layer::default() }]).compile(&grid, 1).is_err());
-        assert!(with(vec![Layer { mask: LayerMask::Land, ..hills.clone() }]).compile(&grid, 1).is_err());
-        assert!(with(vec![Layer { scale_km: f64::NAN, ..hills.clone() }]).compile(&grid, 1).is_err());
-        assert!(with(vec![Layer { kind: Roughness, octaves: 16, ..Layer::default() }; 4]).compile(&grid, 1).is_err(), "too many octaves");
+        let with = |layers: Vec<Layer>| TerrainLayers {
+            layers,
+            ..TerrainLayers::earth()
+        };
+        let hills = Layer {
+            kind: Hills,
+            ..Layer::default()
+        };
+        assert!(with(vec![hills.clone(); LAYERS + 1])
+            .compile(&grid, 1)
+            .is_err());
+        assert!(with(vec![
+            hills.clone(),
+            Layer {
+                kind: Warp,
+                ..Layer::default()
+            }
+        ])
+        .compile(&grid, 1)
+        .is_err());
+        assert!(with(vec![Layer {
+            mask: LayerMask::Land,
+            ..hills.clone()
+        }])
+        .compile(&grid, 1)
+        .is_err());
+        assert!(with(vec![Layer {
+            scale_km: f64::NAN,
+            ..hills.clone()
+        }])
+        .compile(&grid, 1)
+        .is_err());
+        assert!(
+            with(vec![
+                Layer {
+                    kind: Roughness,
+                    octaves: 16,
+                    ..Layer::default()
+                };
+                4
+            ])
+            .compile(&grid, 1)
+            .is_err(),
+            "too many octaves"
+        );
         // Disabled layers do not count.
-        let mut many = vec![Layer { enabled: false, ..hills.clone() }; LAYERS + 4];
+        let mut many = vec![
+            Layer {
+                enabled: false,
+                ..hills.clone()
+            };
+            LAYERS + 4
+        ];
         many.push(hills);
         assert!(with(many).compile(&grid, 1).is_ok());
     }
@@ -970,7 +1476,11 @@ mod tests {
     #[test]
     fn presets_round_trip_and_empty_settings_are_the_earth() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        for stack in [TerrainLayers::earth(), TerrainLayers::moon(), TerrainLayers::flat()] {
+        for stack in [
+            TerrainLayers::earth(),
+            TerrainLayers::moon(),
+            TerrainLayers::flat(),
+        ] {
             let json = serde_json::to_string(&stack).unwrap();
             assert_eq!(serde_json::from_str::<TerrainLayers>(&json).unwrap(), stack);
         }

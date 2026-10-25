@@ -13,43 +13,33 @@ use super::renderer_impl::{CullStatsReadbackState, Renderer};
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
 use helio_core::temporal::r1_r2_jitter;
 
-/// Fullscreen-triangle shader for the PC mirror: samples the XR swapchain's
-/// 2-layer array texture and draws eye 0 on the left half, eye 1 on the right.
-#[cfg(not(target_arch = "wasm32"))]
-const XR_MIRROR_WGSL: &str = r#"
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-    var out: VsOut;
-    let x = f32(i32(vi) - 1) * 2.0;
-    let y = f32(i32(vi) & 1) * 2.0 - 1.0;
-    out.pos = vec4<f32>(x, -y, 0.0, 1.0);
-    out.uv = vec2<f32>(x * 0.5 + 0.5, y * 0.5 + 0.5);
-    return out;
-}
-
-@group(0) @binding(0) var eye_texture: texture_2d_array<f32>;
-@group(0) @binding(1) var eye_sampler: sampler;
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    var layer: u32 = 0u;
-    var u: f32 = in.uv.x;
-    if (in.uv.x >= 0.5) {
-        layer = 1u;
-        u = (in.uv.x - 0.5) * 2.0;
-    } else {
-        u = in.uv.x * 2.0;
-    }
-    return textureSample(eye_texture, eye_sampler, vec2<f32>(u, in.uv.y), layer);
-}
-"#;
-
 impl Renderer {
+    /// Render and present one app window frame. When an XR session is active,
+    /// Helio renders both eyes, submits them to the headset, and mirrors the
+    /// stereo pair into the app's ordinary window surface.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_window_frame(
+        &mut self,
+        camera: &Camera,
+        surface: &wgpu::Surface<'_>,
+    ) -> HelioResult<()> {
+        if self.xr.is_some() {
+            return self.render_xr_to_surface(Some(surface));
+        }
+
+        let output = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            _ => return Ok(()),
+        };
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        self.render(camera, &view)?;
+        self.queue.present(output);
+        Ok(())
+    }
+
     fn poll_cull_stats_readback(&mut self) {
         if !self.owns_device {
             return;
@@ -324,7 +314,9 @@ impl Renderer {
                         .sample_type(None, Some(self.device.features()))
                         != Some(wgpu::TextureSampleType::Float { filterable: true })
                 {
-                    return Err(helio_core::Error::InvalidPassConfig(format!("SceneDB material texture slot {slot} requires a filterable, single-layer, single-sample 2D texture")));
+                    return Err(helio_core::Error::InvalidPassConfig(format!(
+                        "SceneDB material texture slot {slot} requires a filterable, single-layer, single-sample 2D texture"
+                    )));
                 }
                 *cached = Some((texture.clone(), texture.create_view(&Default::default())));
             } else {
@@ -392,11 +384,23 @@ impl Renderer {
             );
         }
         if let Some(instances) = self.ray_frame.instances(self.frame_count) {
-            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_INSTANCES), instances, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new(helio_core::RAY_INSTANCES),
+                instances,
+                "Renderer",
+            );
         }
         if let Some((vertices, indices)) = self.ray_frame.proxies(self.frame_count) {
-            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_VERTICES), vertices, "Renderer");
-            resource_registry.write(helio_core::ResourceKey::new(helio_core::RAY_PROXY_INDICES), indices, "Renderer");
+            resource_registry.write(
+                helio_core::ResourceKey::new(helio_core::RAY_PROXY_VERTICES),
+                vertices,
+                "Renderer",
+            );
+            resource_registry.write(
+                helio_core::ResourceKey::new(helio_core::RAY_PROXY_INDICES),
+                indices,
+                "Renderer",
+            );
         }
         // Every instance
         // implicitly uses `space_id = 0` (identity) until a real portal/
@@ -846,6 +850,40 @@ impl Renderer {
     }
 
     /// A fallback camera template used when no `xr_camera` was provided.
+    /// Render one headset frame and, when a mirror surface is supplied,
+    /// automatically blit the two eye images side-by-side and present the PC
+    /// window. A temporarily unavailable mirror image never prevents the XR
+    /// frame from being submitted to the headset.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_xr_to_surface(
+        &mut self,
+        mirror_surface: Option<&wgpu::Surface<'_>>,
+    ) -> HelioResult<()> {
+        let output = mirror_surface.and_then(|surface| match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+            _ => {
+                log::debug!("XR mirror surface did not provide a frame; presenting headset only");
+                None
+            }
+        });
+        if let Some(output) = &output {
+            let size = output.texture.size();
+            self.xr_mirror_size = [size.width, size.height];
+        }
+        let mirror_view = output.as_ref().map(|texture| {
+            texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+
+        self.render_xr(mirror_view.as_ref())?;
+        if let Some(output) = output {
+            self.queue.present(output);
+        }
+        Ok(())
+    }
+
     fn default_xr_camera(&self, near: f32, far: f32) -> Camera {
         Camera::perspective_look_at(
             glam::Vec3::new(0.0, 1.6, 0.0),
@@ -865,138 +903,50 @@ impl Renderer {
     fn blit_xr_to_mirror(
         &mut self,
         image_index: u32,
-        mirror: &wgpu::TextureView,
+        mirror_target: &wgpu::TextureView,
     ) -> HelioResult<()> {
-        if self.xr_mirror_sampler.is_none() {
-            self.xr_mirror_sampler = Some(self.device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("XR Mirror Sampler"),
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                ..Default::default()
-            }));
-        }
-        if self.xr_mirror_bgl.is_none() {
-            self.xr_mirror_bgl = Some(self.device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    label: Some("XR Mirror BGL"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                                view_dimension: wgpu::TextureViewDimension::D2Array,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                            count: None,
-                        },
-                    ],
-                },
-            ));
-        }
-        if self.xr_mirror_pipeline.is_none() {
-            let module =
-                helio_core::shader::module(&self.device, "XR Mirror Shader", XR_MIRROR_WGSL);
-            self.xr_mirror_pipeline = Some(helio_core::shader::create_render_pipeline(
-                &self.device,
-                wgpu::RenderPipelineDescriptor {
-                    label: Some("XR Mirror Pipeline"),
-                    layout: Some(&self.device.create_pipeline_layout(
-                        &wgpu::PipelineLayoutDescriptor {
-                            label: Some("XR Mirror PL"),
-                            bind_group_layouts: &[Some(self.xr_mirror_bgl.as_ref().unwrap())],
-                            immediate_size: 0,
-                        },
-                    )),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs_main"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fs_main"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: self.xr_mirror_format.unwrap_or(self.surface_format),
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
-                },
-            ));
-        }
-
-        if self.xr_mirror_bind_group.as_ref().map(|(k, _)| *k) != Some(image_index) {
-            let array_view = {
+        if self.xr_mirror.is_none() {
+            let mirror = {
                 let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
                     invalid_xr(
                         "render_xr() called with no XR swapchain (call Renderer::set_xr_session)",
                     )
                 })?;
-                swapchain.view(image_index).map_err(xr_error)?.clone()
+                super::stereo_mirror::StereoMirror::new(
+                    &self.device,
+                    self.xr_mirror_format.unwrap_or(self.surface_format),
+                    &swapchain.views,
+                )
             };
-            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("XR Mirror BG"),
-                layout: self.xr_mirror_bgl.as_ref().unwrap(),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&array_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(
-                            self.xr_mirror_sampler.as_ref().unwrap(),
-                        ),
-                    },
-                ],
-            });
-            self.xr_mirror_bind_group = Some((image_index, bg));
+            self.xr_mirror = Some(mirror);
         }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("XR Mirror Blit"),
+        let swapchain = self.xr_swapchain.as_ref().ok_or_else(|| {
+            invalid_xr("render_xr() called with no XR swapchain (call Renderer::set_xr_session)")
+        })?;
+        let (frame_count, elapsed) = self
+            .frame_times
+            .iter()
+            .copied()
+            .filter(|delta| delta.is_finite() && *delta > 0.0)
+            .fold((0_u32, 0.0_f32), |(count, total), delta| {
+                (count + 1, total + delta)
             });
-        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: mirror,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("XR Mirror Blit Pass"),
-                color_attachments: &color_attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rp.set_pipeline(self.xr_mirror_pipeline.as_ref().unwrap());
-            rp.set_bind_group(0, &self.xr_mirror_bind_group.as_ref().unwrap().1, &[]);
-            rp.draw(0..3, 0..1);
-        }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let fps = (frame_count > 0).then(|| frame_count as f32 / elapsed.max(f32::EPSILON));
+        let stats = super::stereo_mirror::XrMirrorStats {
+            fps,
+            display_hz: self.xr_display_refresh_rate_hz(),
+            gpu_ms: self.gpu_frame_ms(),
+        };
+        self.xr_mirror.as_mut().unwrap().draw(
+            &self.device,
+            &self.queue,
+            image_index,
+            mirror_target,
+            self.xr_mirror_size,
+            [swapchain.width, swapchain.height],
+            stats,
+        );
         Ok(())
     }
 }

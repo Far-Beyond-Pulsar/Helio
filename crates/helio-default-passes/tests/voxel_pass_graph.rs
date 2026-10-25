@@ -4,10 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder,
-    RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    RendererBuilder, RendererConfig,
 };
-use helio_default_passes::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
+use helio_default_passes::{
+    build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory,
+};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
@@ -28,7 +30,10 @@ impl helio_core::RenderPass for FinalResourceConsumer {
         let texture = ctx.resource_pool.get_texture("pre_aa").unwrap();
         let extent = [texture.width(), texture.height()];
         assert_eq!(extent, self.expected);
-        assert!(ctx.registry.texture_view(helio_core::ResourceKey::new("pre_aa")).is_some());
+        assert!(ctx
+            .registry
+            .texture_view(helio_core::ResourceKey::new("pre_aa"))
+            .is_some());
         self.observed.lock().unwrap().push(extent);
         Ok(())
     }
@@ -54,35 +59,80 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let gpu_context = EngineGpuContext::new(Arc::clone(&device), Arc::clone(&queue));
-        let mut gpu_store =
-            SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
-        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
-        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+        let mut gpu_store = SceneGpuStore::new(
+            &gpu_context,
+            SceneGpuConfig {
+                classes: Vec::new(),
+                tombstone_headroom: 0,
+                max_cells_metadata: 0,
+            },
+        );
+        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(
+            &mut gpu_store,
+            4,
+            &device,
+        );
+        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(
+            &mut gpu_store,
+            16,
+            &device,
+        );
+        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+            &mut gpu_store,
+            16,
+            &device,
+        );
+        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+            &mut gpu_store,
+            16,
+            &device,
+        );
+        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+            &mut gpu_store,
+            16,
+            &device,
+        );
         let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
 
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = Arc::clone(&source);
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
+        let factory: VoxelPassFactory =
+            Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config.enable_foliage = false;
         let observed = Arc::new(Mutex::new(Vec::new()));
         let captured = observed.clone();
         let final_factory: GraphPassFactory = Arc::new(move |_, _, width, height| {
-            Box::new(FinalResourceConsumer { expected: [width, height], observed: captured.clone() })
+            Box::new(FinalResourceConsumer {
+                expected: [width, height],
+                observed: captured.clone(),
+            })
         });
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_lighting_passes(ctx, vec![factory], Vec::new(), vec![final_factory])
+                build_default_graph_external_with_lighting_passes(
+                    ctx,
+                    vec![factory],
+                    Vec::new(),
+                    vec![final_factory],
+                )
             }))
-            .build(Arc::clone(&device), Arc::clone(&queue), 640, 360, config.surface_format);
+            .build(
+                Arc::clone(&device),
+                Arc::clone(&queue),
+                640,
+                360,
+                config.surface_format,
+            );
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Voxel graph smoke target"),
-            size: wgpu::Extent3d { width: 640, height: 360, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 640,
+                height: 360,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -98,7 +148,15 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let eye = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 1.7);
         let up = eye.normalize().as_vec3();
         let forward = (up.any_orthonormal_vector() - up * 0.2).normalize();
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 640.0 / 360.0, 0.05, 40_000_000.0);
+        let camera = Camera::perspective_look_at(
+            Vec3::ZERO,
+            forward,
+            up,
+            std::f32::consts::FRAC_PI_4,
+            640.0 / 360.0,
+            0.05,
+            40_000_000.0,
+        );
         renderer.set_world_origin(Some(eye));
 
         // Without a planet frame the pass is inert.
@@ -112,7 +170,14 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // A host's first eye can be anywhere (an editor camera starts at the
         // planet's centre): nothing to stream there.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        *source.lock().unwrap() = Some(PlanetFrame { eye: glam::DVec3::new(8.0, 6.0, 12.0), planet: planet.clone(), sun: up, picks: None, kept: None, export: None });
+        *source.lock().unwrap() = Some(PlanetFrame {
+            eye: glam::DVec3::new(8.0, 6.0, 12.0),
+            planet: planet.clone(),
+            sun: up,
+            picks: None,
+            kept: None,
+            export: None,
+        });
         for _ in 0..600 {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -120,12 +185,22 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
                 break;
             }
         }
-        assert!(!renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "the centre never settled");
+        assert!(
+            !renderer.find_pass::<ChunkPass>().unwrap().needs_frame(),
+            "the centre never settled"
+        );
 
         // Moved to the surface, it streams the planet around the eye until
         // settled: the plan for the old eye does not settle the new one
         // (hosts stop rendering once settled).
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, picks: None, kept: None, export: None });
+        *source.lock().unwrap() = Some(PlanetFrame {
+            eye,
+            planet: planet.clone(),
+            sun: up,
+            picks: None,
+            kept: None,
+            export: None,
+        });
         let mut frames = 0;
         let started = std::time::Instant::now();
         loop {
@@ -135,7 +210,10 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             if pass.has_world() {
                 frames += 1;
             }
-            assert!(started.elapsed().as_secs() < 300, "residency did not settle");
+            assert!(
+                started.elapsed().as_secs() < 300,
+                "residency did not settle"
+            );
             if !pass.needs_frame() || frames >= 600 {
                 break;
             }
@@ -144,10 +222,16 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         assert!(error.is_none(), "active graph GPU validation: {error:?}");
         let pass = renderer.find_pass::<ChunkPass>().unwrap();
         let stats = pass.stats();
-        assert!(frames < 600, "residency still streaming after {frames} frames: {stats:?}");
+        assert!(
+            frames < 600,
+            "residency still streaming after {frames} frames: {stats:?}"
+        );
         assert!(stats.resident_chunks > 1000, "{stats:?}");
         assert!(pass.settled());
-        eprintln!("VOXEL_GRAPH_SETTLED frames={frames} resident={}", stats.resident_chunks);
+        eprintln!(
+            "VOXEL_GRAPH_SETTLED frames={frames} resident={}",
+            stats.resident_chunks
+        );
         // A still view stays settled: hosts render until it is (the editor
         // viewport goes idle only after its settling frames pass with no
         // request). Periodic counter readbacks used to request frames
@@ -155,7 +239,10 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         for still in 0..120 {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(!renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "a settled still view asked for frame {still}");
+            assert!(
+                !renderer.find_pass::<ChunkPass>().unwrap().needs_frame(),
+                "a settled still view asked for frame {still}"
+            );
         }
 
         // Every debug view the graph advertises (the editor's menu) has a
@@ -165,7 +252,15 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         modes.sort_unstable();
         let unique = modes.len();
         modes.dedup();
-        assert_eq!(modes.len(), unique, "debug modes shared: {:?}", views.iter().map(|v| (v.debug_mode, v.name)).collect::<Vec<_>>());
+        assert_eq!(
+            modes.len(),
+            unique,
+            "debug modes shared: {:?}",
+            views
+                .iter()
+                .map(|v| (v.debug_mode, v.name))
+                .collect::<Vec<_>>()
+        );
         for v in &views {
             let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
             renderer.set_debug_mode(v.debug_mode);
@@ -174,10 +269,22 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             }
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             let error = validation.pop().await;
-            assert!(error.is_none(), "debug view {} ({}): {error:?}", v.debug_mode, v.name);
+            assert!(
+                error.is_none(),
+                "debug view {} ({}): {error:?}",
+                v.debug_mode,
+                v.name
+            );
         }
         renderer.set_debug_mode(0);
-        eprintln!("DEBUG_VIEWS {}", views.iter().map(|v| format!("{}={}", v.debug_mode, v.name)).collect::<Vec<_>>().join(", "));
+        eprintln!(
+            "DEBUG_VIEWS {}",
+            views
+                .iter()
+                .map(|v| format!("{}={}", v.debug_mode, v.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         // Removing the source drops the planet's chunks.
         *source.lock().unwrap() = None;
@@ -188,14 +295,28 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let pass = renderer.find_pass::<ChunkPass>().unwrap();
         assert!(!pass.has_world());
         assert!(!pass.needs_frame());
-        assert!(observed.lock().unwrap().contains(&[config.internal_width(), config.internal_height()]));
+        assert!(observed
+            .lock()
+            .unwrap()
+            .contains(&[config.internal_width(), config.internal_height()]));
 
         // A resize rebuilds the graph; downstream passes see the new size.
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, picks: None, kept: None, export: None });
+        *source.lock().unwrap() = Some(PlanetFrame {
+            eye,
+            planet,
+            sun: up,
+            picks: None,
+            kept: None,
+            export: None,
+        });
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("final consumer resize"),
-            size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 320,
+                height: 180,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -204,13 +325,22 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             view_formats: &[],
         });
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        renderer.render(&camera, &resized.create_view(&Default::default())).unwrap();
+        renderer
+            .render(&camera, &resized.create_view(&Default::default()))
+            .unwrap();
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert!(validation.pop().await.is_none());
-        let resized_config = RendererConfig { width: 320, height: 180, ..config };
+        let resized_config = RendererConfig {
+            width: 320,
+            height: 180,
+            ..config
+        };
         assert_eq!(
             observed.lock().unwrap().last(),
-            Some(&[resized_config.internal_width(), resized_config.internal_height()])
+            Some(&[
+                resized_config.internal_width(),
+                resized_config.internal_height()
+            ])
         );
         assert!(renderer.find_pass::<ChunkPass>().unwrap().has_world());
     });
@@ -242,32 +372,66 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     .unwrap();
     let (device, queue) = (Arc::new(device), Arc::new(queue));
     let gpu_context = EngineGpuContext::new(Arc::clone(&device), Arc::clone(&queue));
-    let mut gpu_store =
-        SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
+    let mut gpu_store = SceneGpuStore::new(
+        &gpu_context,
+        SceneGpuConfig {
+            classes: Vec::new(),
+            tombstone_headroom: 0,
+            max_cells_metadata: 0,
+        },
+    );
     helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        &device,
+    );
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        &device,
+    );
+    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        &device,
+    );
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     let pass_source = Arc::clone(&source);
-    let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
+    let factory: VoxelPassFactory =
+        Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
     config.enable_foliage = false;
     let mut renderer = RendererBuilder::new(config, mirror)
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
         .with_pass_build_context(Box::new(move |ctx| {
-            build_default_graph_external_with_lighting_passes(ctx, vec![factory], Vec::new(), Vec::new())
+            build_default_graph_external_with_lighting_passes(
+                ctx,
+                vec![factory],
+                Vec::new(),
+                Vec::new(),
+            )
         }))
-        .build(Arc::clone(&device), Arc::clone(&queue), width, height, config.surface_format);
+        .build(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            width,
+            height,
+            config.surface_format,
+        );
     renderer.set_editor_mode(true);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("editor overlay target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -275,7 +439,16 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    Some(Editor { device, queue, renderer, source, target, scene, sun: None, air: None })
+    Some(Editor {
+        device,
+        queue,
+        renderer,
+        source,
+        target,
+        scene,
+        sun: None,
+        air: None,
+    })
 }
 
 impl Editor {
@@ -283,27 +456,36 @@ impl Editor {
     /// row (`None` removes it).
     fn set_sky(&mut self, towards: Vec3, air: Option<helio_pass_sky::AtmosphereComponent>) {
         let sun = *self.sun.get_or_insert_with(|| self.scene.world.spawn());
-        self.scene.world.insert(sun, helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
-            position_range: [0.0, 0.0, 0.0, f32::MAX],
-            direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
-            color_intensity: [1.0, 1.0, 1.0, 3.0],
-            shadow_index: u32::MAX,
-            light_type: helio::LightType::Directional as u32,
-            ..Default::default()
-        }));
+        self.scene.world.insert(
+            sun,
+            helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
+                color_intensity: [1.0, 1.0, 1.0, 3.0],
+                shadow_index: u32::MAX,
+                light_type: helio::LightType::Directional as u32,
+                ..Default::default()
+            }),
+        );
         let entity = *self.air.get_or_insert_with(|| self.scene.world.spawn());
         match air {
             Some(air) => self.scene.world.insert(entity, air),
             None => {
-                self.scene.world.remove::<helio_pass_sky::AtmosphereComponent>(entity);
+                self.scene
+                    .world
+                    .remove::<helio_pass_sky::AtmosphereComponent>(entity);
             }
         }
         self.scene.world.flush_gpu_mirror(&self.queue);
     }
 
     fn render(&mut self, camera: &Camera) {
-        self.renderer.render(camera, &self.target.create_view(&Default::default())).unwrap();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.renderer
+            .render(camera, &self.target.create_view(&Default::default()))
+            .unwrap();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
     }
 
     /// Fractions of pixels in the grid's axis colours (red x axis, green z
@@ -322,29 +504,44 @@ impl Editor {
             self.target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size.height) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size.height),
+                },
             },
             size,
         );
         self.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
-        (0..size.height as usize).flat_map(|y| {
-            data[y * row as usize..][..size.width as usize * 4].chunks_exact(4)
-                .map(|px| <[u8; 4]>::try_from(px).unwrap()).collect::<Vec<_>>()
-        }).collect()
+        (0..size.height as usize)
+            .flat_map(|y| {
+                data[y * row as usize..][..size.width as usize * 4]
+                    .chunks_exact(4)
+                    .map(|px| <[u8; 4]>::try_from(px).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     fn overlay_fractions(&self) -> (f64, f64) {
         let pixels = self.rgba();
         let (mut axis, mut grey) = (0usize, 0usize);
         for px in &pixels {
-            let [r,g,b] = [i32::from(px[0]), i32::from(px[1]), i32::from(px[2])];
+            let [r, g, b] = [i32::from(px[0]), i32::from(px[1]), i32::from(px[2])];
             axis += usize::from((r > g + 40 && r > b + 30) || (g > r + 60 && g > b + 60));
             grey += usize::from((r - g).abs() < 12 && (g - b).abs() < 16 && r < 170);
         }
-        (axis as f64 / pixels.len() as f64, grey as f64 / pixels.len() as f64)
+        (
+            axis as f64 / pixels.len() as f64,
+            grey as f64 / pixels.len() as f64,
+        )
     }
 }
 
@@ -354,25 +551,47 @@ impl Editor {
 /// next to the x axis and the view turned the axis' red.
 #[test]
 fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
-    let Some(mut editor) = editor(320, 180) else { return };
+    let Some(mut editor) = editor(320, 180) else {
+        return;
+    };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let ground = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = ground.normalize();
     let forward = up.any_orthonormal_vector().as_vec3();
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), picks: None, kept: None, export: None });
-    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    *editor.source.lock().unwrap() = Some(PlanetFrame {
+        eye: ground,
+        planet: planet.clone(),
+        sun: up.as_vec3(),
+        picks: None,
+        kept: None,
+        export: None,
+    });
+    let validation = editor
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
     // An editor camera held against the ground: a few centimetres of
     // clearance, the smallest near plane and a planetary far plane.
     for step in 0..120 {
         let eye = ground + up * (0.02 + 0.004 * f64::from(step % 10));
         editor.source.lock().unwrap().as_mut().unwrap().eye = eye;
         editor.renderer.set_world_origin(Some(eye));
-        let camera =
-            Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+        let camera = Camera::perspective_look_at(
+            Vec3::ZERO,
+            forward,
+            up.as_vec3(),
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.05,
+            40_000_000.0,
+        );
         editor.render(&camera);
         if step % 20 == 19 {
             let (axis, _) = editor.overlay_fractions();
-            assert!(axis < 0.001, "step {step}: {:.1}% of the view in grid axis colours", axis * 100.0);
+            assert!(
+                axis < 0.001,
+                "step {step}: {:.1}% of the view in grid axis colours",
+                axis * 100.0
+            );
         }
     }
     assert!(pollster::block_on(validation.pop()).is_none());
@@ -382,12 +601,23 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     *editor.source.lock().unwrap() = None;
     editor.renderer.set_world_origin(None);
     let eye = Vec3::new(3.0, 6.0, 3.0);
-    let camera = Camera::perspective_look_at(eye, Vec3::ZERO, Vec3::Y, std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1, 1000.0);
+    let camera = Camera::perspective_look_at(
+        eye,
+        Vec3::ZERO,
+        Vec3::Y,
+        std::f32::consts::FRAC_PI_4,
+        16.0 / 9.0,
+        0.1,
+        1000.0,
+    );
     for _ in 0..4 {
         editor.render(&camera);
     }
     let (axis, grey) = editor.overlay_fractions();
-    assert!(axis > 0.001 && grey > 0.01, "grid missing: axis {axis:.4}, lines {grey:.4}");
+    assert!(
+        axis > 0.001 && grey > 0.01,
+        "grid missing: axis {axis:.4}, lines {grey:.4}"
+    );
 }
 
 const EARTH_RADIUS: f64 = 6_360_000.0;
@@ -399,7 +629,9 @@ fn earth_air() -> helio_pass_sky::AtmosphereComponent {
 }
 
 fn mean_rgb(pixels: &[[u8; 4]]) -> [f64; 3] {
-    std::array::from_fn(|c| pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64)
+    std::array::from_fn(|c| {
+        pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64
+    })
 }
 
 fn capture(editor: &Editor, name: &str, pixels: &[[u8; 4]]) {
@@ -407,8 +639,14 @@ fn capture(editor: &Editor, name: &str, pixels: &[[u8; 4]]) {
         std::fs::create_dir_all(&output).unwrap();
         let size = editor.target.size();
         let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
-        image::save_buffer(std::path::Path::new(&output).join(format!("{name}.png")),
-            &bytes, size.width, size.height, image::ColorType::Rgba8).unwrap();
+        image::save_buffer(
+            std::path::Path::new(&output).join(format!("{name}.png")),
+            &bytes,
+            size.width,
+            size.height,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
     }
 }
 
@@ -417,39 +655,103 @@ fn capture(editor: &Editor, name: &str, pixels: &[[u8; 4]]) {
 /// scene's directional light; the world origin is the eye.
 #[test]
 fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
-    let Some(mut editor) = editor(256, 144) else { return };
+    let Some(mut editor) = editor(256, 144) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
-    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let validation = editor
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
     let altitude = EARTH_RADIUS + 3_000.0;
     let cases = [
-        (glam::DVec3::Y * altitude, Vec3::new(0.6, 0.8, 0.0), Vec3::Y, Vec3::new(0.4, 0.8, 0.2)),
-        (glam::DVec3::X * altitude, Vec3::new(0.8, -0.6, 0.0), Vec3::X, Vec3::new(0.8, -0.4, 0.2)),
+        (
+            glam::DVec3::Y * altitude,
+            Vec3::new(0.6, 0.8, 0.0),
+            Vec3::Y,
+            Vec3::new(0.4, 0.8, 0.2),
+        ),
+        (
+            glam::DVec3::X * altitude,
+            Vec3::new(0.8, -0.6, 0.0),
+            Vec3::X,
+            Vec3::new(0.8, -0.4, 0.2),
+        ),
     ];
     let mut means = Vec::new();
     for (eye, forward, up, sun) in cases {
         editor.set_sky(sun.normalize(), Some(earth_air()));
         editor.renderer.set_world_origin(Some(eye));
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
-        for _ in 0..8 { editor.render(&camera); }
+        let camera = Camera::perspective_look_at(
+            Vec3::ZERO,
+            forward,
+            up,
+            std::f32::consts::FRAC_PI_4,
+            16.0 / 9.0,
+            0.05,
+            40_000_000.0,
+        );
+        for _ in 0..8 {
+            editor.render(&camera);
+        }
         let pixels = editor.rgba();
-        capture(&editor, if up == Vec3::Y { "rotated_y" } else { "rotated_x" }, &pixels);
+        capture(
+            &editor,
+            if up == Vec3::Y {
+                "rotated_y"
+            } else {
+                "rotated_x"
+            },
+            &pixels,
+        );
         let mean = mean_rgb(&pixels);
         eprintln!("ATMOSPHERE_ROTATED mean {mean:?}");
         means.push(mean);
     }
-    assert!(means[0][2] > means[0][0] + 10.0, "day sky must be blue: {means:?}");
-    for c in 0..3 { assert!((means[0][c] - means[1][c]).abs() < 6.0, "rotated sky mismatch: {means:?}"); }
+    assert!(
+        means[0][2] > means[0][0] + 10.0,
+        "day sky must be blue: {means:?}"
+    );
+    for c in 0..3 {
+        assert!(
+            (means[0][c] - means[1][c]).abs() < 6.0,
+            "rotated sky mismatch: {means:?}"
+        );
+    }
     editor.renderer.set_render_size(320, 180);
     editor.target = editor.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("resized atmosphere"), size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
-        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        label: Some("resized atmosphere"),
+        size: wgpu::Extent3d {
+            width: 320,
+            height: 180,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[],
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
     });
-    let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(0.8,-0.6,0.0), Vec3::X, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
-    for _ in 0..8 { editor.render(&camera); }
+    let camera = Camera::perspective_look_at(
+        Vec3::ZERO,
+        Vec3::new(0.8, -0.6, 0.0),
+        Vec3::X,
+        std::f32::consts::FRAC_PI_4,
+        16.0 / 9.0,
+        0.05,
+        40_000_000.0,
+    );
+    for _ in 0..8 {
+        editor.render(&camera);
+    }
     let mean = mean_rgb(&editor.rgba());
-    for c in 0..3 { assert!((mean[c] - means[1][c]).abs() < 6.0, "sky reset during resize: {mean:?} vs {:?}", means[1]); }
+    for c in 0..3 {
+        assert!(
+            (mean[c] - means[1][c]).abs() < 6.0,
+            "sky reset during resize: {mean:?} vs {:?}",
+            means[1]
+        );
+    }
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 
@@ -458,7 +760,9 @@ fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
 #[test]
 fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
     const SIZE: u32 = 513;
-    let Some(mut editor) = editor(SIZE, SIZE) else { return };
+    let Some(mut editor) = editor(SIZE, SIZE) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
     editor.renderer.set_tsr_quality(None);
     editor.renderer.set_jitter_enabled(false);
@@ -477,9 +781,18 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
         let half_fov_tan = outer_angle.tan() * 1.25;
         editor.set_sky(up, Some(earth_air()));
         editor.renderer.set_world_origin(Some(eye));
-        let camera = Camera::perspective_look_at(Vec3::ZERO, -up, up.any_orthonormal_vector(),
-            (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 400_000_000.0);
-        for _ in 0..4 { editor.render(&camera); }
+        let camera = Camera::perspective_look_at(
+            Vec3::ZERO,
+            -up,
+            up.any_orthonormal_vector(),
+            (2.0 * half_fov_tan.atan()) as f32,
+            1.0,
+            0.05,
+            400_000_000.0,
+        );
+        for _ in 0..4 {
+            editor.render(&camera);
+        }
         let pixels = editor.rgba();
         capture(&editor, case, &pixels);
         let mut outside = 0;
@@ -507,10 +820,15 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
         }
         eprintln!("ORBITAL_ATMOSPHERE {case}: outside={outside_bright}/{outside}, limb sectors={sectors:?}");
         assert!(outside > 10_000);
-        assert_eq!(outside_bright, 0, "{case}: light leaks outside the atmosphere");
+        assert_eq!(
+            outside_bright, 0,
+            "{case}: light leaks outside the atmosphere"
+        );
         for (sector, [count, bright]) in sectors.into_iter().enumerate() {
-            assert!(count > 3 && bright * 10 >= count * 9,
-                "{case}: dark limb sector {sector}: {bright}/{count}");
+            assert!(
+                count > 3 && bright * 10 >= count * 9,
+                "{case}: dark limb sector {sector}: {bright}/{count}"
+            );
         }
     }
 }
@@ -521,20 +839,40 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
 #[test]
 fn terminator_is_smooth_and_the_night_side_is_dark() {
     const SIZE: u32 = 513;
-    let Some(mut editor) = editor(SIZE, SIZE) else { return };
+    let Some(mut editor) = editor(SIZE, SIZE) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
     editor.renderer.set_tsr_quality(None);
     editor.renderer.set_jitter_enabled(false);
     let radius = EARTH_RADIUS;
     let distance = radius * 1.5;
     let half_fov_tan = (((radius + AIR_THICKNESS) / distance).asin()).tan() * 1.25;
-    editor.renderer.set_world_origin(Some(glam::DVec3::Y * distance));
-    let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
-        (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 40_000_000.0);
+    editor
+        .renderer
+        .set_world_origin(Some(glam::DVec3::Y * distance));
+    let camera = Camera::perspective_look_at(
+        Vec3::ZERO,
+        -Vec3::Y,
+        Vec3::Z,
+        (2.0 * half_fov_tan.atan()) as f32,
+        1.0,
+        0.05,
+        40_000_000.0,
+    );
     let mut means = Vec::new();
-    for (case, elevation) in [("twilight_before", -0.005), ("twilight", 0.0), ("twilight_after", 0.005)] {
-        editor.set_sky(Vec3::new(1.0, elevation, 0.0).normalize(), Some(earth_air()));
-        for _ in 0..4 { editor.render(&camera); }
+    for (case, elevation) in [
+        ("twilight_before", -0.005),
+        ("twilight", 0.0),
+        ("twilight_after", 0.005),
+    ] {
+        editor.set_sky(
+            Vec3::new(1.0, elevation, 0.0).normalize(),
+            Some(earth_air()),
+        );
+        for _ in 0..4 {
+            editor.render(&camera);
+        }
         let pixels = editor.rgba();
         capture(&editor, case, &pixels);
         let mut sides = [Vec::new(), Vec::new()];
@@ -545,19 +883,31 @@ fn terminator_is_smooth_and_the_night_side_is_dark() {
                 let tan_theta = nx.hypot(ny) * half_fov_tan;
                 let impact = distance * tan_theta / (1.0 + tan_theta * tan_theta).sqrt();
                 if impact > radius + 3_000.0 && impact < radius + 18_000.0 && nx.abs() > 0.3 {
-                    sides[usize::from(nx > 0.0)].push(f64::from(pixels[(y * SIZE + x) as usize][2]));
+                    sides[usize::from(nx > 0.0)]
+                        .push(f64::from(pixels[(y * SIZE + x) as usize][2]));
                 }
             }
         }
         let side_means = sides.map(|v| v.iter().sum::<f64>() / v.len() as f64);
         eprintln!("TWILIGHT_ATMOSPHERE {case}: blue={side_means:?}");
-        let (lit, dark) = (side_means[0].max(side_means[1]), side_means[0].min(side_means[1]));
-        assert!(lit > dark + 20.0, "{case}: no day side on the limb: {side_means:?}");
+        let (lit, dark) = (
+            side_means[0].max(side_means[1]),
+            side_means[0].min(side_means[1]),
+        );
+        assert!(
+            lit > dark + 20.0,
+            "{case}: no day side on the limb: {side_means:?}"
+        );
         assert!(dark < 8.0, "{case}: the night side glows: {side_means:?}");
         means.push(side_means);
     }
     for pair in means.windows(2) {
-        for c in 0..2 { assert!((pair[0][c] - pair[1][c]).abs() < 10.0, "abrupt twilight switch: {means:?}"); }
+        for c in 0..2 {
+            assert!(
+                (pair[0][c] - pair[1][c]).abs() < 10.0,
+                "abrupt twilight switch: {means:?}"
+            );
+        }
     }
 }
 
@@ -566,21 +916,43 @@ fn terminator_is_smooth_and_the_night_side_is_dark() {
 /// and darker ground below it, and nothing once the atmosphere row is gone.
 #[test]
 fn atmosphere_over_flat_ground_without_a_planet() {
-    let Some(mut editor) = editor(256, 144) else { return };
+    let Some(mut editor) = editor(256, 144) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
     editor.renderer.set_tsr_quality(None);
     editor.renderer.set_jitter_enabled(false);
-    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let validation = editor
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
     let sun = Vec3::new(0.3, 0.6, 0.2).normalize();
     editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth()));
     let eye = Vec3::new(0.0, 2.0, 0.0);
-    let up_camera = Camera::perspective_look_at(eye, eye + Vec3::new(-0.3, 1.0, 0.1),
-        Vec3::Z, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.1, 10_000.0);
-    for _ in 0..4 { editor.render(&up_camera); }
+    let up_camera = Camera::perspective_look_at(
+        eye,
+        eye + Vec3::new(-0.3, 1.0, 0.1),
+        Vec3::Z,
+        std::f32::consts::FRAC_PI_4,
+        16.0 / 9.0,
+        0.1,
+        10_000.0,
+    );
+    for _ in 0..4 {
+        editor.render(&up_camera);
+    }
     let zenith = mean_rgb(&editor.rgba());
-    let level_camera = Camera::perspective_look_at(eye, Vec3::new(-10.0, 2.0, 3.0),
-        Vec3::Y, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.1, 10_000.0);
-    for _ in 0..4 { editor.render(&level_camera); }
+    let level_camera = Camera::perspective_look_at(
+        eye,
+        Vec3::new(-10.0, 2.0, 3.0),
+        Vec3::Y,
+        std::f32::consts::FRAC_PI_4,
+        16.0 / 9.0,
+        0.1,
+        10_000.0,
+    );
+    for _ in 0..4 {
+        editor.render(&level_camera);
+    }
     let pixels = editor.rgba();
     capture(&editor, "flat_horizon", &pixels);
     let width = editor.target.size().width as usize;
@@ -589,13 +961,24 @@ fn atmosphere_over_flat_ground_without_a_planet() {
     let (above, below) = (row_mean(rows / 2 - 6), row_mean(rows / 2 + 12));
     let sum = |c: [f64; 3]| c[0] + c[1] + c[2];
     eprintln!("FLAT_ATMOSPHERE zenith {zenith:?} above horizon {above:?} below {below:?}");
-    assert!(zenith[2] > zenith[0] + 15.0, "zenith must be blue: {zenith:?}");
-    assert!(sum(above) > sum(zenith), "horizon must be brighter than the zenith");
+    assert!(
+        zenith[2] > zenith[0] + 15.0,
+        "zenith must be blue: {zenith:?}"
+    );
+    assert!(
+        sum(above) > sum(zenith),
+        "horizon must be brighter than the zenith"
+    );
     assert!(sum(above) > sum(below), "ground must be below the horizon");
     editor.set_sky(sun, None);
-    for _ in 0..4 { editor.render(&up_camera); }
+    for _ in 0..4 {
+        editor.render(&up_camera);
+    }
     let removed = mean_rgb(&editor.rgba());
-    assert!(removed.iter().all(|&c| c < 2.0), "atmosphere left behind after removal: {removed:?}");
+    assert!(
+        removed.iter().all(|&c| c < 2.0),
+        "atmosphere left behind after removal: {removed:?}"
+    );
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 
@@ -603,60 +986,138 @@ fn atmosphere_over_flat_ground_without_a_planet() {
 /// Discarding colour history must show that edit without rebuilding chunks.
 #[test]
 fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
-    let Some(mut editor) = editor(128, 72) else { return };
+    let Some(mut editor) = editor(128, 72) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
-    editor.renderer.set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Native));
+    editor
+        .renderer
+        .set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Native));
     editor.renderer.set_jitter_enabled(false);
     editor.renderer.set_ambient([1.0; 3], 1.0);
-    let planet = Arc::new(Planet::new(PlanetRecipe {
-        shape: helio_pass_voxel_planet::grid::Shape::Plane,
-        plane_size_m: 1024.0,
-        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat().source(7),
-        ..Default::default()
-    }).unwrap());
+    let planet = Arc::new(
+        Planet::new(PlanetRecipe {
+            shape: helio_pass_voxel_planet::grid::Shape::Plane,
+            plane_size_m: 1024.0,
+            terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat().source(7),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
     let eye = glam::DVec3::Y * 20.0;
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, picks: None, kept: None, export: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame {
+        eye,
+        planet,
+        sun: Vec3::Y,
+        picks: None,
+        kept: None,
+        export: None,
+    });
     editor.renderer.set_world_origin(Some(eye));
-    let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
-        std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 1000.0);
+    let camera = Camera::perspective_look_at(
+        Vec3::ZERO,
+        -Vec3::Y,
+        Vec3::Z,
+        std::f32::consts::FRAC_PI_4,
+        16.0 / 9.0,
+        0.05,
+        1000.0,
+    );
     let started = std::time::Instant::now();
     let mut frames = 0;
     while frames < 2000 && started.elapsed().as_secs() < 300 {
         editor.render(&camera);
         let pass = editor.renderer.find_pass::<ChunkPass>().unwrap();
-        if pass.settled() { break; }
-        if pass.has_world() { frames += 1; }
+        if pass.settled() {
+            break;
+        }
+        if pass.has_world() {
+            frames += 1;
+        }
     }
     assert!(editor.renderer.find_pass::<ChunkPass>().unwrap().settled());
-    for _ in 0..16 { editor.render(&camera); }
+    for _ in 0..16 {
+        editor.render(&camera);
+    }
     let before = editor.rgba();
-    let chunks = editor.renderer.find_pass::<ChunkPass>().unwrap().stats().resident_chunks;
-    let mean = |pixels: &[[u8;4]], channel| pixels.iter().map(|p| f64::from(p[channel])).sum::<f64>() / pixels.len() as f64;
+    let chunks = editor
+        .renderer
+        .find_pass::<ChunkPass>()
+        .unwrap()
+        .stats()
+        .resident_chunks;
+    let mean = |pixels: &[[u8; 4]], channel| {
+        pixels.iter().map(|p| f64::from(p[channel])).sum::<f64>() / pixels.len() as f64
+    };
     let mut appearance = helio_pass_voxel_planet::engine::TerrainAppearance::default();
-    appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches = Some([[0.85, 0.03, 0.03]; 3]);
+    appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches =
+        Some([[0.85, 0.03, 0.03]; 3]);
     appearance.detail = [0.0; 4];
-    assert!(editor.renderer.find_pass_mut::<ChunkPass>().unwrap().set_appearance(Some(appearance)));
-    editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();
+    assert!(editor
+        .renderer
+        .find_pass_mut::<ChunkPass>()
+        .unwrap()
+        .set_appearance(Some(appearance)));
+    editor
+        .renderer
+        .find_pass_mut::<helio_pass_tsr::TsrPass>()
+        .unwrap()
+        .reset_history();
     editor.render(&camera);
     let after = editor.rgba();
-    eprintln!("appearance before {:?}, after {:?}", [mean(&before,0),mean(&before,1)], [mean(&after,0),mean(&after,1)]);
+    eprintln!(
+        "appearance before {:?}, after {:?}",
+        [mean(&before, 0), mean(&before, 1)],
+        [mean(&after, 0), mean(&after, 1)]
+    );
     assert!(mean(&after, 0) > mean(&after, 1) + 20.0);
     assert!(mean(&after, 0) > mean(&before, 0) + 20.0);
-    assert_eq!(editor.renderer.find_pass::<ChunkPass>().unwrap().stats().resident_chunks, chunks);
-    assert!(!editor.renderer.find_pass_mut::<ChunkPass>().unwrap().set_appearance(Some(appearance)));
-    assert!(editor.renderer.find_pass_mut::<ChunkPass>().unwrap().set_appearance(None));
-    editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();
+    assert_eq!(
+        editor
+            .renderer
+            .find_pass::<ChunkPass>()
+            .unwrap()
+            .stats()
+            .resident_chunks,
+        chunks
+    );
+    assert!(!editor
+        .renderer
+        .find_pass_mut::<ChunkPass>()
+        .unwrap()
+        .set_appearance(Some(appearance)));
+    assert!(editor
+        .renderer
+        .find_pass_mut::<ChunkPass>()
+        .unwrap()
+        .set_appearance(None));
+    editor
+        .renderer
+        .find_pass_mut::<helio_pass_tsr::TsrPass>()
+        .unwrap()
+        .reset_history();
     editor.render(&camera);
     let restored = editor.rgba();
     assert!(mean(&restored, 1) > mean(&restored, 0));
-    editor.renderer.set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Quality));
+    editor
+        .renderer
+        .set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Quality));
     editor.render(&camera);
-    assert_eq!(editor.renderer.renderer_config().tsr_quality, Some(helio_pass_tsr::TsrQuality::Quality));
-    assert!(editor.renderer.find_pass::<helio_pass_tsr::TsrPass>().is_some());
+    assert_eq!(
+        editor.renderer.renderer_config().tsr_quality,
+        Some(helio_pass_tsr::TsrQuality::Quality)
+    );
+    assert!(editor
+        .renderer
+        .find_pass::<helio_pass_tsr::TsrPass>()
+        .is_some());
     editor.renderer.set_tsr_quality(None);
     editor.render(&camera);
     assert_eq!(editor.renderer.renderer_config().tsr_quality, None);
-    assert!(editor.renderer.find_pass::<helio_pass_tsr::TsrPass>().is_none());
+    assert!(editor
+        .renderer
+        .find_pass::<helio_pass_tsr::TsrPass>()
+        .is_none());
 }
 
 /// Terrain under an atmosphere, from standing height to high above it, under
@@ -664,42 +1125,92 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
 /// spreading through temporal history, or a missing sky).
 #[test]
 fn terrain_under_an_atmosphere_is_lit_at_every_height() {
-    let Some(mut editor) = editor(320, 180) else { return };
+    let Some(mut editor) = editor(320, 180) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let radius = planet.grid().radius();
-    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let validation = editor
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
     let dir = glam::DVec3::new(0.2, 1.0, 0.3);
     let up = planet.surface_point(dir, 0.0).normalize();
     // High, and low ahead of the camera (the sun's disk in view).
-    for (case, sun) in [("high", (up + up.any_orthonormal_vector() * 0.6).normalize().as_vec3()),
-        ("low", (up.any_orthonormal_vector() + up * 0.08).normalize().as_vec3())] {
-    editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)));
-    for height in [2.0, 25.0, 300.0, 20_000.0] {
-        let eye = planet.surface_point(dir, height);
-        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, picks: None, kept: None, export: None });
-        editor.renderer.set_world_origin(Some(eye));
-        let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
-        let started = std::time::Instant::now();
-        loop {
-            editor.render(&camera);
-            let settled = editor.renderer.find_pass::<ChunkPass>().unwrap().settled();
-            if settled || started.elapsed().as_secs() > 120 { break; }
+    for (case, sun) in [
+        (
+            "high",
+            (up + up.any_orthonormal_vector() * 0.6)
+                .normalize()
+                .as_vec3(),
+        ),
+        (
+            "low",
+            (up.any_orthonormal_vector() + up * 0.08)
+                .normalize()
+                .as_vec3(),
+        ),
+    ] {
+        editor.set_sky(
+            sun,
+            Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)),
+        );
+        for height in [2.0, 25.0, 300.0, 20_000.0] {
+            let eye = planet.surface_point(dir, height);
+            *editor.source.lock().unwrap() = Some(PlanetFrame {
+                eye,
+                planet: planet.clone(),
+                sun,
+                picks: None,
+                kept: None,
+                export: None,
+            });
+            editor.renderer.set_world_origin(Some(eye));
+            let forward = (up.any_orthonormal_vector() - up * 0.2)
+                .normalize()
+                .as_vec3();
+            let camera = Camera::perspective_look_at(
+                Vec3::ZERO,
+                forward,
+                up.as_vec3(),
+                std::f32::consts::FRAC_PI_4,
+                16.0 / 9.0,
+                0.05,
+                40_000_000.0,
+            );
+            let started = std::time::Instant::now();
+            loop {
+                editor.render(&camera);
+                let settled = editor.renderer.find_pass::<ChunkPass>().unwrap().settled();
+                if settled || started.elapsed().as_secs() > 120 {
+                    break;
+                }
+            }
+            for _ in 0..8 {
+                editor.render(&camera);
+            }
+            let pixels = editor.rgba();
+            capture(&editor, &format!("terrain_{case}_{height}"), &pixels);
+            let mean = mean_rgb(&pixels);
+            eprintln!("TERRAIN_ATMOSPHERE {case} sun, {height} m: mean {mean:?}");
+            // Backlit ground under a low sun is dark, but the sky around the sun
+            // is not; under a high sun the lit ground fills the view.
+            let brightest = pixels
+                .iter()
+                .map(|p| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]))
+                .max()
+                .unwrap();
+            assert!(
+                brightest > 90,
+                "{case} sun, {height} m: the view is black: {mean:?}"
+            );
+            if case == "high" {
+                assert!(
+                    mean.iter().sum::<f64>() > 60.0,
+                    "{height} m: sunlit terrain too dark: {mean:?}"
+                );
+            }
         }
-        for _ in 0..8 { editor.render(&camera); }
-        let pixels = editor.rgba();
-        capture(&editor, &format!("terrain_{case}_{height}"), &pixels);
-        let mean = mean_rgb(&pixels);
-        eprintln!("TERRAIN_ATMOSPHERE {case} sun, {height} m: mean {mean:?}");
-        // Backlit ground under a low sun is dark, but the sky around the sun
-        // is not; under a high sun the lit ground fills the view.
-        let brightest = pixels.iter().map(|p| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])).max().unwrap();
-        assert!(brightest > 90, "{case} sun, {height} m: the view is black: {mean:?}");
-        if case == "high" {
-            assert!(mean.iter().sum::<f64>() > 60.0, "{height} m: sunlit terrain too dark: {mean:?}");
-        }
-    }
     }
     assert!(pollster::block_on(validation.pop()).is_none());
 }
@@ -714,7 +1225,9 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     use helio_pass_voxel_planet::chunks::KeptChunks;
     use helio_pass_voxel_planet::engine::KeptExport;
     use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape};
-    let Some(mut editor) = editor(160, 90) else { return };
+    let Some(mut editor) = editor(160, 90) else {
+        return;
+    };
     editor.renderer.set_editor_mode(false);
     let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = glam::DVec3::new(0.2, 1.0, 0.3);
@@ -725,15 +1238,39 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     for k in 0..300 {
         let (a, b) = (f64::from(k % 20) - 9.5, f64::from(k / 20) - 7.0);
         let center = ground + side * (a * 2.0) + fwd * (b * 2.0 + 20.0) + up * 2.0;
-        planet.apply(Brush { center: center.to_array(), radius: 4.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        planet
+            .apply(Brush {
+                center: center.to_array(),
+                radius: 4.0,
+                shape: BrushShape::Sphere,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 0.0,
+            })
+            .unwrap();
     }
     let planet = Arc::new(planet);
     let eye = ground + up * 6.0;
     editor.renderer.set_world_origin(Some(eye));
     let forward = (fwd - up * 0.3).normalize().as_vec3();
-    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+    let camera = Camera::perspective_look_at(
+        Vec3::ZERO,
+        forward,
+        up.as_vec3(),
+        std::f32::consts::FRAC_PI_4,
+        16.0 / 9.0,
+        0.05,
+        40_000_000.0,
+    );
     let frame = |planet: &Arc<Planet>, kept: Option<Arc<KeptChunks>>, export| {
-        Some(PlanetFrame { eye, planet: planet.clone(), sun: up.as_vec3(), picks: None, kept, export })
+        Some(PlanetFrame {
+            eye,
+            planet: planet.clone(),
+            sun: up.as_vec3(),
+            picks: None,
+            kept,
+            export,
+        })
     };
     // Settled, it counts the edited chunks restored and generated.
     let settle = |editor: &mut Editor| {
@@ -747,10 +1284,15 @@ fn saved_edited_chunks_come_back_through_the_frame() {
             if pass.has_world() && !pass.needs_frame() {
                 return (restored, generated);
             }
-            assert!(started.elapsed().as_secs() < 300, "residency did not settle");
+            assert!(
+                started.elapsed().as_secs() < 300,
+                "residency did not settle"
+            );
         }
     };
-    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let validation = editor
+        .device
+        .push_error_scope(wgpu::ErrorFilter::Validation);
     let export = Arc::new(Mutex::new(KeptExport::default()));
     *editor.source.lock().unwrap() = frame(&planet, None, Some(export.clone()));
     let (_, edited) = settle(&mut editor);
@@ -759,7 +1301,14 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     export.lock().unwrap().wanted = true;
     let mut frames = 0;
     let (shown, kept) = loop {
-        assert!(editor.renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "an export waits for frames");
+        assert!(
+            editor
+                .renderer
+                .find_pass::<ChunkPass>()
+                .unwrap()
+                .needs_frame(),
+            "an export waits for frames"
+        );
         editor.render(&camera);
         frames += 1;
         if let Some(answer) = export.lock().unwrap().answer.take() {
@@ -772,7 +1321,8 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     let bytes = kept.to_bytes();
 
     // Loaded: a planet from the edit snapshot, a new world with the chunks.
-    let loaded = Arc::new(Planet::from_snapshot(PlanetRecipe::default(), &planet.snapshot()).unwrap());
+    let loaded =
+        Arc::new(Planet::from_snapshot(PlanetRecipe::default(), &planet.snapshot()).unwrap());
     let chunks = Arc::new(KeptChunks::from_bytes(&bytes).unwrap());
     *editor.source.lock().unwrap() = None;
     editor.render(&camera);
@@ -781,15 +1331,32 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     let pass = editor.renderer.find_pass::<ChunkPass>().unwrap();
     assert_eq!(pass.kept_loaded(), Some(&Ok(kept.len())));
     eprintln!("KEPT_THROUGH_FRAME {} chunks ({} KiB) after {frames} frames; loaded: {restored} restored, {generated} generated ({edited} generated before)", kept.len(), bytes.len() / 1024);
-    assert!(restored > 50 && generated * 4 < restored, "{restored} restored, {generated} generated");
+    assert!(
+        restored > 50 && generated * 4 < restored,
+        "{restored} restored, {generated} generated"
+    );
 
     // Another history: refused, generated as before.
     let mut other = (*loaded).clone();
-    other.apply(Brush { center: ground.to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    other
+        .apply(Brush {
+            center: ground.to_array(),
+            radius: 1.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     *editor.source.lock().unwrap() = None;
     editor.render(&camera);
     *editor.source.lock().unwrap() = frame(&Arc::new(other), Some(chunks), None);
     editor.render(&camera);
-    assert!(editor.renderer.find_pass::<ChunkPass>().unwrap().kept_loaded().is_some_and(|r| r.is_err()));
+    assert!(editor
+        .renderer
+        .find_pass::<ChunkPass>()
+        .unwrap()
+        .kept_loaded()
+        .is_some_and(|r| r.is_err()));
     assert!(pollster::block_on(validation.pop()).is_none());
 }

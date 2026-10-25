@@ -33,15 +33,16 @@ impl RadiantTemplate {
         let max_tex_str = max_textures.to_string();
         // Specular anti-aliasing for the shaders that opt in (the mesh
         // material shaders).
-        let src = helio_core::shader::resolve_with(&self.wgsl_source, &[crate::SPECULAR_AA_SNIPPET])
-            .replace(
-                "binding_array<texture_2d<f32>, 256>",
-                &format!("binding_array<texture_2d<f32>, {max_tex_str}>"),
-            )
-            .replace(
-                "binding_array<sampler, 256>",
-                &format!("binding_array<sampler, {max_tex_str}>"),
-            );
+        let src =
+            helio_core::shader::resolve_with(&self.wgsl_source, &[crate::SPECULAR_AA_SNIPPET])
+                .replace(
+                    "binding_array<texture_2d<f32>, 256>",
+                    &format!("binding_array<texture_2d<f32>, {max_tex_str}>"),
+                )
+                .replace(
+                    "binding_array<sampler, 256>",
+                    &format!("binding_array<sampler, {max_tex_str}>"),
+                );
 
         // wgpu's Naga requires `enable wgpu_binding_array;` for binding_array
         // support.  Browser WebGPU (Chrome's Tint) does not recognise this
@@ -142,7 +143,12 @@ impl RadiantTemplate {
     /// declares `radiant_eval_surface` and the override markers like the
     /// G-buffer's does: this template's surface function and `graph_wgsl` go
     /// into `base` instead of into the G-buffer shader.
-    pub fn build_shader_source_on(&self, base: &str, graph_wgsl: &str, max_textures: usize) -> String {
+    pub fn build_shader_source_on(
+        &self,
+        base: &str,
+        graph_wgsl: &str,
+        max_textures: usize,
+    ) -> String {
         let composed = match self.surface_override() {
             Some(surface) => compose_fn_override(base, &surface, "fn radiant_eval_surface"),
             None => base.to_string(),

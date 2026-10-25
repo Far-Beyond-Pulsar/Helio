@@ -40,7 +40,10 @@ impl VignettingLut {
 }
 
 /// Bake the vignetting table at the reference wavelength.
-pub fn bake_vignetting(rx: &Prescription, config: &BakeConfig) -> Result<VignettingLut, OpticsError> {
+pub fn bake_vignetting(
+    rx: &Prescription,
+    config: &BakeConfig,
+) -> Result<VignettingLut, OpticsError> {
     let n_field = config.field_samples.max(2);
     let f_numbers = config.resolved_f_numbers(rx.f_number);
     let grid = pupil_grid(config.pupil_samples);
@@ -64,7 +67,13 @@ pub fn bake_vignetting(rx: &Prescription, config: &BakeConfig) -> Result<Vignett
                 Some(field) => {
                     let passed = grid
                         .iter()
-                        .filter(|uv| tracer.aim(*field, **uv).ok().and_then(|r| tracer.trace(r).ok()).is_some())
+                        .filter(|uv| {
+                            tracer
+                                .aim(*field, **uv)
+                                .ok()
+                                .and_then(|r| tracer.trace(r).ok())
+                                .is_some()
+                        })
                         .count();
                     let frac = passed as f64 / grid.len() as f64;
                     if i == 0 {

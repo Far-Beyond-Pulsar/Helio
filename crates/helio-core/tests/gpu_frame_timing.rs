@@ -65,7 +65,10 @@ fn whole_frame_timestamp_spans_both_encoders_and_nested_scopes() {
         let names: Vec<&str> = snapshot.passes.iter().map(|p| p.name).collect();
         assert_eq!(names, ["inner", "__graph_frame"]);
         assert_eq!(snapshot.passes[0].gpu_ms, Some(inner as f32 / 1_000_000.0));
-        assert_eq!(snapshot.passes[1].cpu_ms, None, "the outer scope is not a render pass");
+        assert_eq!(
+            snapshot.passes[1].cpu_ms, None,
+            "the outer scope is not a render pass"
+        );
         assert_eq!(snapshot.passes[1].gpu_ms, Some(outer as f32 / 1_000_000.0));
     });
 }

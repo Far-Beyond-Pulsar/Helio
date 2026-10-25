@@ -38,7 +38,12 @@ impl RefView {
         view[12] = -eye[0];
         view[13] = -eye[1];
         view[14] = -eye[2];
-        Self { view, proj_y: 1.0 / (fov_y * 0.5).tan(), near, screen_height }
+        Self {
+            view,
+            proj_y: 1.0 / (fov_y * 0.5).tan(),
+            near,
+            screen_height,
+        }
     }
 
     /// Camera position in world space (`-R^T t` of the view matrix).
@@ -177,7 +182,13 @@ pub fn choose_bin(
 
 /// Cone test (`cutoff = cos(half-angle)`, see the crate docs). `axis` is the
 /// world space unit axis.
-pub fn cone_culled(cam: [f32; 3], center: [f32; 3], radius: f32, axis: [f32; 3], cutoff: f32) -> bool {
+pub fn cone_culled(
+    cam: [f32; 3],
+    center: [f32; 3],
+    radius: f32,
+    axis: [f32; 3],
+    cutoff: f32,
+) -> bool {
     helio_vg_format::cone_culled(cam, center, radius, axis, cutoff)
 }
 
@@ -246,7 +257,12 @@ pub struct RefSelection {
 
 /// Traversal by the same rules as the GPU (entry test, residency, cut), for
 /// one instance with no frustum/occlusion/cone culling.
-pub fn select_clusters(asset: &RefAsset<'_>, v: &RefView, tau: f32, inst: &RefInstance) -> RefSelection {
+pub fn select_clusters(
+    asset: &RefAsset<'_>,
+    v: &RefView,
+    tau: f32,
+    inst: &RefInstance,
+) -> RefSelection {
     select_clusters_ex(asset, v, tau, inst, false)
 }
 
@@ -288,10 +304,13 @@ pub fn select_clusters_ex(
                 if !kids {
                     let s = instance_project(v, inst, c.self_error, c.sphere);
                     if s > tau_i {
-                        out.requested_pages.insert(asset.group_refs[c.group_id as usize].page_id);
+                        out.requested_pages
+                            .insert(asset.group_refs[c.group_id as usize].page_id);
                     }
                 }
-                if cut_draws(v, tau, inst, &c, kids) && !(apply_cone && cluster_cone_culled(v, inst, &c)) {
+                if cut_draws(v, tau, inst, &c, kids)
+                    && !(apply_cone && cluster_cone_culled(v, inst, &c))
+                {
                     out.drawn.push(helio_vg_format::cluster_slot(pool, local));
                 }
             }

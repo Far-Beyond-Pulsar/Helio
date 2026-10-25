@@ -49,7 +49,9 @@ fn devices_are_created_while_instance_threads_exit() {
                 while !stop.load(Ordering::Relaxed) {
                     std::thread::spawn(|| {
                         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
-                        drop(pollster::block_on(instance.request_adapter(&Default::default())));
+                        drop(pollster::block_on(
+                            instance.request_adapter(&Default::default()),
+                        ));
                     })
                     .join()
                     .unwrap();
@@ -62,12 +64,14 @@ fn devices_are_created_while_instance_threads_exit() {
 
     let start = Instant::now();
     while CREATED.load(Ordering::Relaxed) < 40 && start.elapsed() < Duration::from_secs(10) {
-        let gpu = pollster::block_on(adapter.request_device(&Default::default()))
-            .expect("device");
+        let gpu = pollster::block_on(adapter.request_device(&Default::default())).expect("device");
         drop(gpu);
         CREATED.fetch_add(1, Ordering::Relaxed);
     }
     stop.store(true, Ordering::Relaxed);
     let exited: usize = exits.into_iter().map(|t| t.join().unwrap()).sum();
-    assert!(exited > 0, "no instance thread exited while devices were created");
+    assert!(
+        exited > 0,
+        "no instance thread exited while devices were created"
+    );
 }

@@ -8,11 +8,15 @@
 //! [`crate::GiResolvePass`]; on a frame without a TLAS or its rows it
 //! leaves the hits as they are.
 
-use crate::{buffer, storage, uniform, FRAME_BYTES, GI_FRAME, GI_HITS, GI_LIGHT, GI_RAYS, GI_SUN, MAX_RAYS};
+use crate::{
+    buffer, storage, uniform, FRAME_BYTES, GI_FRAME, GI_HITS, GI_LIGHT, GI_RAYS, GI_SUN, MAX_RAYS,
+};
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
-use helio_pass_shadow_matrix::{SUN_OCCLUSION_FRAME, SUN_OCCLUSION_FRAME_BYTES, SUN_OCCLUSION_MAPS, SUN_OCCLUSION_SNIPPET};
+use helio_pass_shadow_matrix::{
+    SUN_OCCLUSION_FRAME, SUN_OCCLUSION_FRAME_BYTES, SUN_OCCLUSION_MAPS, SUN_OCCLUSION_SNIPPET,
+};
 
 /// The scene's point and spot lights a hit chooses from: the first so many
 /// live ones (`gi_gather_lights`).
@@ -67,7 +71,11 @@ impl GiMeshTracePass {
     /// The tracer, on a device with hardware ray queries (none without:
     /// the probes then see only the other tracers' geometry).
     pub fn new(device: &wgpu::Device) -> Option<Self> {
-        if !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) || device.limits().max_tlas_instance_count == 0 {
+        if !device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            || device.limits().max_tlas_instance_count == 0
+        {
             return None;
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -82,7 +90,9 @@ impl GiMeshTracePass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                    ty: wgpu::BindingType::AccelerationStructure {
+                        vertex_return: false,
+                    },
                     count: None,
                 },
                 storage(7, true),
@@ -106,7 +116,11 @@ impl GiMeshTracePass {
         });
         let gather_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI mesh lights"),
-            entries: &[uniform(5, std::mem::size_of::<GpuTrace>() as u64), storage(10, true), storage(13, false)],
+            entries: &[
+                uniform(5, std::mem::size_of::<GpuTrace>() as u64),
+                storage(10, true),
+                storage(13, false),
+            ],
         });
         let binding = helio_mats::MaterialBindingConfig::for_device(device);
         let materials_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -124,30 +138,41 @@ impl GiMeshTracePass {
             bind_group_layouts: &[Some(&layout), Some(&materials_layout)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(device, wgpu::ComputePipelineDescriptor {
-            label: Some("gi_mesh_trace"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("gi_mesh_trace"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let gather_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("GI mesh lights"),
-            bind_group_layouts: &[Some(&gather_layout)],
-            immediate_size: 0,
-        });
-        let gather = helio_core::shader::create_compute_pipeline(device, wgpu::ComputePipelineDescriptor {
-            label: Some("gi_gather_lights"),
-            layout: Some(&gather_pipeline_layout),
-            module: &module,
-            entry_point: Some("gi_gather_lights"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("gi_mesh_trace"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("gi_mesh_trace"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let gather_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("GI mesh lights"),
+                bind_group_layouts: &[Some(&gather_layout)],
+                immediate_size: 0,
+            });
+        let gather = helio_core::shader::create_compute_pipeline(
+            device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("gi_gather_lights"),
+                layout: Some(&gather_pipeline_layout),
+                module: &module,
+                entry_point: Some("gi_gather_lights"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let maps = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("GI no sun occlusion"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -155,14 +180,26 @@ impl GiMeshTracePass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let maps = maps.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
+        let maps = maps.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let uniform_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
         // No material table: rows shorter than one material (each row reads
         // as no row: opaque) and a white texture in every slot.
-        let no_rows = buffer(device, "GI mesh no materials", 16, wgpu::BufferUsages::STORAGE);
+        let no_rows = buffer(
+            device,
+            "GI mesh no materials",
+            16,
+            wgpu::BufferUsages::STORAGE,
+        );
         let white = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("GI mesh no material texture"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -179,7 +216,12 @@ impl GiMeshTracePass {
             &materials_layout,
             binding,
             &no_rows,
-            helio_mats::MaterialTextureBindings { material_textures: &no_rows, texture_views: &views, samplers: &samplers, version: 0 },
+            helio_mats::MaterialTextureBindings {
+                material_textures: &no_rows,
+                texture_views: &views,
+                samplers: &samplers,
+                version: 0,
+            },
         );
         Some(Self {
             layout,
@@ -190,11 +232,39 @@ impl GiMeshTracePass {
             pipeline,
             gather_layout,
             gather,
-            local_lights: buffer(device, "GI mesh local lights", LOCAL_LIGHTS_BYTES, wgpu::BufferUsages::STORAGE),
-            trace: buffer(device, "GI mesh trace", std::mem::size_of::<GpuTrace>() as u64, uniform_usage),
-            no_occlusion: (buffer(device, "GI no sun occlusion", SUN_OCCLUSION_FRAME_BYTES, uniform_usage), maps),
-            no_lights: buffer(device, "GI mesh no lights", 128, wgpu::BufferUsages::STORAGE),
-            no_proxies: buffer(device, "GI mesh no proxies", 16, wgpu::BufferUsages::STORAGE),
+            local_lights: buffer(
+                device,
+                "GI mesh local lights",
+                LOCAL_LIGHTS_BYTES,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            trace: buffer(
+                device,
+                "GI mesh trace",
+                std::mem::size_of::<GpuTrace>() as u64,
+                uniform_usage,
+            ),
+            no_occlusion: (
+                buffer(
+                    device,
+                    "GI no sun occlusion",
+                    SUN_OCCLUSION_FRAME_BYTES,
+                    uniform_usage,
+                ),
+                maps,
+            ),
+            no_lights: buffer(
+                device,
+                "GI mesh no lights",
+                128,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            no_proxies: buffer(
+                device,
+                "GI mesh no proxies",
+                16,
+                wgpu::BufferUsages::STORAGE,
+            ),
         })
     }
 
@@ -215,7 +285,12 @@ impl GiMeshTracePass {
     /// The bindings of a material table for [`Self::record`]: `rows` the
     /// scene's `materials` (`GpuMaterial` rows), `textures` its texture
     /// metadata and table (as many slots as `MaterialBindingConfig::for_device`).
-    pub fn materials(&self, device: &wgpu::Device, rows: &wgpu::Buffer, textures: helio_mats::MaterialTextureBindings<'_>) -> wgpu::BindGroup {
+    pub fn materials(
+        &self,
+        device: &wgpu::Device,
+        rows: &wgpu::Buffer,
+        textures: helio_mats::MaterialTextureBindings<'_>,
+    ) -> wgpu::BindGroup {
         Self::materials_group(device, &self.materials_layout, self.binding, rows, textures)
     }
 
@@ -245,13 +320,21 @@ impl GiMeshTracePass {
     ) {
         let (lights, count) = lights.unwrap_or((&self.no_lights, 0));
         let count = count.min((lights.size() / 128) as u32);
-        let (occlusion_frame, occlusion_maps) = occlusion.unwrap_or((&self.no_occlusion.0, &self.no_occlusion.1));
-        let (proxy_vertices, proxy_indices) = proxies.unwrap_or((&self.no_proxies, &self.no_proxies));
+        let (occlusion_frame, occlusion_maps) =
+            occlusion.unwrap_or((&self.no_occlusion.0, &self.no_occlusion.1));
+        let (proxy_vertices, proxy_indices) =
+            proxies.unwrap_or((&self.no_proxies, &self.no_proxies));
         let materials = materials.unwrap_or(&self.no_materials);
-        let trace = GpuTrace { eye: [eye[0], eye[1], eye[2], 0.0], info: [count, seed, 0, 0] };
+        let trace = GpuTrace {
+            eye: [eye[0], eye[1], eye[2], 0.0],
+            info: [count, seed, 0, 0],
+        };
         helio_core::upload::write_buffer(queue, &self.trace, 0, bytemuck::bytes_of(&trace));
         fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-            wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+            wgpu::BindGroupEntry {
+                binding,
+                resource: buffer.as_entire_binding(),
+            }
         }
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GI mesh rays"),
@@ -263,12 +346,18 @@ impl GiMeshTracePass {
                 entry(3, sun),
                 entry(4, light),
                 entry(5, &self.trace),
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::AccelerationStructure(tlas) },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::AccelerationStructure(tlas),
+                },
                 entry(7, instances),
                 entry(8, vertices),
                 entry(9, indices),
                 entry(11, occlusion_frame),
-                wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(occlusion_maps) },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(occlusion_maps),
+                },
                 entry(13, &self.local_lights),
                 entry(14, proxy_vertices),
                 entry(15, proxy_indices),
@@ -277,9 +366,16 @@ impl GiMeshTracePass {
         let gather = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GI mesh lights"),
             layout: &self.gather_layout,
-            entries: &[entry(5, &self.trace), entry(10, lights), entry(13, &self.local_lights)],
+            entries: &[
+                entry(5, &self.trace),
+                entry(10, lights),
+                entry(13, &self.local_lights),
+            ],
         });
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI mesh rays"), timestamp_writes: None });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("GI mesh rays"),
+            timestamp_writes: None,
+        });
         pass.set_bind_group(0, Some(&gather), &[]);
         pass.set_pipeline(&self.gather);
         pass.dispatch_workgroups(1, 1, 1);
@@ -333,45 +429,93 @@ impl RenderPass for GiMeshTracePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let binding = |name: &str| ctx.registry.buffer_binding(name);
-        let (Some(frame), Some(rays), Some(hits), Some(sun), Some(light)) = (binding(GI_FRAME), binding(GI_RAYS), binding(GI_HITS), binding(GI_SUN), binding(GI_LIGHT)) else {
+        let (Some(frame), Some(rays), Some(hits), Some(sun), Some(light)) = (
+            binding(GI_FRAME),
+            binding(GI_RAYS),
+            binding(GI_HITS),
+            binding(GI_SUN),
+            binding(GI_LIGHT),
+        ) else {
             return Ok(());
         };
-        let Some(tlas) = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment()).and_then(|e| e.tlas) else {
+        let Some(tlas) = ctx
+            .registry
+            .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment())
+            .and_then(|e| e.tlas)
+        else {
             return Ok(());
         };
-        let Some(instances) = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(helio_core::RAY_INSTANCES)) else {
+        let Some(instances) = ctx
+            .registry
+            .get::<&wgpu::Buffer>(ResourceKey::new(helio_core::RAY_INSTANCES))
+        else {
             return Ok(());
         };
-        let pool = |name: &'static str| ctx.scene_buffers.get(helio_core::BufferKey::of(name)).map(|h| h.buffer.clone());
-        let (Some(vertices), Some(indices)) = (pool("builtin_mesh_vertex"), pool("builtin_mesh_index")) else {
+        let pool = |name: &'static str| {
+            ctx.scene_buffers
+                .get(helio_core::BufferKey::of(name))
+                .map(|h| h.buffer.clone())
+        };
+        let (Some(vertices), Some(indices)) =
+            (pool("builtin_mesh_vertex"), pool("builtin_mesh_index"))
+        else {
             return Ok(());
         };
         let lights = pool("scene_lights");
         let proxy = |name: &'static str| ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(name));
-        let proxies = proxy(helio_core::RAY_PROXY_VERTICES).zip(proxy(helio_core::RAY_PROXY_INDICES));
+        let proxies =
+            proxy(helio_core::RAY_PROXY_VERTICES).zip(proxy(helio_core::RAY_PROXY_INDICES));
         // The material table, its bind group kept while it stays the same.
         let rows = pool("materials");
-        let textures = ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures());
+        let textures = ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(
+            helio_core::resource_keys::material_textures(),
+        );
         match (rows, textures) {
             (Some(rows), Some(textures)) => {
                 let key = (rows, textures.material_textures.clone(), textures.version);
                 if self.materials.as_ref().is_none_or(|(k, _)| *k != key) {
-                    let group = Self::materials_group(ctx.device, &self.materials_layout, self.binding, &key.0, textures);
+                    let group = Self::materials_group(
+                        ctx.device,
+                        &self.materials_layout,
+                        self.binding,
+                        &key.0,
+                        textures,
+                    );
                     self.materials = Some((key, group));
                 }
             }
             _ => self.materials = None,
         }
-        let occlusion = match (binding(SUN_OCCLUSION_FRAME), ctx.registry.texture_binding(SUN_OCCLUSION_MAPS)) {
+        let occlusion = match (
+            binding(SUN_OCCLUSION_FRAME),
+            ctx.registry.texture_binding(SUN_OCCLUSION_MAPS),
+        ) {
             (Some(frame), Some(maps)) => Some((frame, maps)),
             _ => None,
         };
         let camera = ctx.camera_data;
-        let eye = [camera.position_near[0], camera.position_near[1], camera.position_near[2]];
+        let eye = [
+            camera.position_near[0],
+            camera.position_near[1],
+            camera.position_near[2],
+        ];
         let seed = (ctx.frame_num as u32).wrapping_mul(0x9e37_79b9);
         let mut cmds = ctx.graphics_cmds();
         let materials = self.materials.as_ref().map(|(_, group)| group);
-        self.record(ctx.device, ctx.queue, &mut cmds, [frame, rays, hits, sun, light], tlas, eye, [instances, &vertices, &indices], proxies, materials, lights.as_ref().map(|l| (l, u32::MAX)), occlusion, seed);
+        self.record(
+            ctx.device,
+            ctx.queue,
+            &mut cmds,
+            [frame, rays, hits, sun, light],
+            tlas,
+            eye,
+            [instances, &vertices, &indices],
+            proxies,
+            materials,
+            lights.as_ref().map(|l| (l, u32::MAX)),
+            occlusion,
+            seed,
+        );
         Ok(())
     }
 }

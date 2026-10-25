@@ -18,7 +18,10 @@ pub struct Ground {
 /// The terrain's top block of column `(i, j)` of `face`.
 pub fn ground(planet: &Planet, face: u8, i: i32, j: i32) -> Option<Ground> {
     let cell = Cell::new(face, i, j, planet.terrain_top(face, i, j) - 1);
-    Some(Ground { cell, material: planet.terrain_material(cell) })
+    Some(Ground {
+        cell,
+        material: planet.terrain_material(cell),
+    })
 }
 
 /// Heights of the ground around a column, for slope tests: the largest

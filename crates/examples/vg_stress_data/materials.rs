@@ -87,7 +87,10 @@ impl Mat {
     /// The material of tree `tree_id`'s glTF slot `slot`.
     pub fn tree_slot(tree_id: &str, slot: &str) -> Option<Mat> {
         let ti = catalog::TREES.iter().position(|t| t.id == tree_id)?;
-        let si = catalog::TREES[ti].slots.iter().position(|s| s.name == slot)?;
+        let si = catalog::TREES[ti]
+            .slots
+            .iter()
+            .position(|s| s.name == slot)?;
         Some(Mat::Tree(ti as u8, si as u8))
     }
 
@@ -177,7 +180,11 @@ impl Mat {
             Mat::StatueLimestone => s([0.70, 0.64, 0.52, 1.0], 0.0, 0.55),
             Mat::Tree(..) => {
                 let (_, slot) = self.tree_part().unwrap();
-                s([slot.fallback[0], slot.fallback[1], slot.fallback[2], 1.0], 0.0, 0.85)
+                s(
+                    [slot.fallback[0], slot.fallback[1], slot.fallback[2], 1.0],
+                    0.0,
+                    0.85,
+                )
             }
         }
     }

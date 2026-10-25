@@ -36,7 +36,10 @@ pub fn load(world: &mut World) -> Palette {
             let [r, g, b] = block.linear_colour();
             let (emissive, strength) = block.emission().unwrap_or(([0.0; 3], 0.0));
             let entity = world.spawn();
-            world.insert(entity, MaterialComponent::new([r, g, b, 1.0], block.roughness(), 0.0, emissive, strength));
+            world.insert(
+                entity,
+                MaterialComponent::new([r, g, b, 1.0], block.roughness(), 0.0, emissive, strength),
+            );
             (block, entity)
         })
         .collect();

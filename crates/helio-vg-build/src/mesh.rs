@@ -42,7 +42,9 @@ pub enum BuildError {
     FileTooLarge,
     /// The DAG could not be reduced below [`crate::MAX_ROOT_PAGES`] root pages
     /// (geometry that does not simplify): the asset must not be pinned.
-    RootTooLarge { pages: u32 },
+    RootTooLarge {
+        pages: u32,
+    },
 }
 
 impl fmt::Display for BuildError {

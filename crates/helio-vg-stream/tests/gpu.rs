@@ -19,7 +19,8 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let limits = adapter.limits();
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_limits: wgpu::Limits {
-            max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.min(16),
+            max_storage_buffers_per_shader_stage:
+                limits.max_storage_buffers_per_shader_stage.min(16),
             max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
             max_buffer_size: limits.max_buffer_size,
             ..wgpu::Limits::default()
@@ -29,7 +30,13 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     .ok()
 }
 
-fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, offset: u64, len: u64) -> Vec<u8> {
+fn read_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Buffer,
+    offset: u64,
+    len: u64,
+) -> Vec<u8> {
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: len,
@@ -39,9 +46,17 @@ fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, o
     let mut enc = device.create_command_encoder(&Default::default());
     enc.copy_buffer_to_buffer(src, offset, &staging, 0, len);
     queue.submit(Some(enc.finish()));
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let out = staging.slice(..).get_mapped_range().expect("range").to_vec();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let out = staging
+        .slice(..)
+        .get_mapped_range()
+        .expect("range")
+        .to_vec();
     staging.unmap();
     out
 }
@@ -68,7 +83,12 @@ fn streams_requested_pages_through_the_gpu() {
     let mut store = VgAssetStore::new(
         &device,
         &queue,
-        VgStreamConfig { budget_mb: 4, initial_slots: 4, grow_chunk_slots: 4, ..Default::default() },
+        VgStreamConfig {
+            budget_mb: 4,
+            initial_slots: 4,
+            grow_chunk_slots: 4,
+            ..Default::default()
+        },
     );
     let src = Arc::new(FakeSource::new(42, PAGES, ROOTS));
     let h = store.register(src).expect("register");
@@ -94,7 +114,10 @@ fn streams_requested_pages_through_the_gpu() {
             u64::from(slot) * u64::from(PAGE_BYTES),
             u64::from(PAGE_BYTES),
         );
-        assert_eq!(bytes, FakeSource::new(42, PAGES, ROOTS).read_page(local).unwrap());
+        assert_eq!(
+            bytes,
+            FakeSource::new(42, PAGES, ROOTS).read_page(local).unwrap()
+        );
     }
 
     // Shader: every page resolves a slot or appends a request.
@@ -138,7 +161,10 @@ fn streams_requested_pages_through_the_gpu() {
     let out_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &out_layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: out.as_entire_binding() }],
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: out.as_entire_binding(),
+        }],
     });
 
     let run = |store: &mut VgAssetStore| -> Vec<u32> {
@@ -162,7 +188,9 @@ fn streams_requested_pages_through_the_gpu() {
         let expect = store.page_slot(base + i).unwrap_or(PAGE_NOT_RESIDENT);
         assert_eq!(first[i as usize], expect, "page {i} slot as seen by shader");
     }
-    assert!(first[ROOTS as usize..].iter().all(|&s| s == PAGE_NOT_RESIDENT));
+    assert!(first[ROOTS as usize..]
+        .iter()
+        .all(|&s| s == PAGE_NOT_RESIDENT));
 
     // Feedback arrives asynchronously; keep stepping until every page streams in
     // (pool limit is 32 slots, the asset has 12 pages).
@@ -175,7 +203,10 @@ fn streams_requested_pages_through_the_gpu() {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(last.iter().all(|&s| s != PAGE_NOT_RESIDENT), "pages never streamed in: {last:?}");
+    assert!(
+        last.iter().all(|&s| s != PAGE_NOT_RESIDENT),
+        "pages never streamed in: {last:?}"
+    );
 
     // Residency table on the GPU agrees with the CPU view; slots are distinct.
     let table: Vec<u32> = bytemuck::pod_collect_to_vec(&read_buffer(
@@ -195,7 +226,10 @@ fn streams_requested_pages_through_the_gpu() {
     let s = store.stats();
     assert_eq!(s.resident_pages, PAGES);
     assert!(s.pool_buffer_bytes >= u64::from(PAGES) * u64::from(PAGE_BYTES));
-    assert!(store.bind_version() > 7, "pool growth must bump a buffer version");
+    assert!(
+        store.bind_version() > 7,
+        "pool growth must bump a buffer version"
+    );
 
     // Release frees the table entries.
     store.release(h);

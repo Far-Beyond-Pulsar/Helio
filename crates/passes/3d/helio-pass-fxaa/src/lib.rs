@@ -30,7 +30,11 @@ impl FxaaPass {
     ///
     /// `target_format` — the format of `ctx.target` (e.g. `Bgra8UnormSrgb`).
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let shader = helio_core::shader::module(device, "FXAA Shader", helio_core::include_wgsl!("../shaders/fxaa.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "FXAA Shader",
+            helio_core::include_wgsl!("../shaders/fxaa.wgsl"),
+        );
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("FXAA Sampler"),
@@ -72,34 +76,37 @@ impl FxaaPass {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("FXAA Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("FXAA Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
             color_input: "pre_aa",
@@ -129,9 +136,15 @@ impl RenderPass for FxaaPass {
         builder.read(self.color_input);
         // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
         // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" { builder.read("pre_aa"); }
+        if self.color_input == "fogged_hdr" {
+            builder.read("pre_aa");
+        }
         if let Some(format) = self.intermediate_format {
-            builder.write_color_raw("fxaa_color", format, helio_core::graph::ResourceSize::MatchSurface);
+            builder.write_color_raw(
+                "fxaa_color",
+                format,
+                helio_core::graph::ResourceSize::MatchSurface,
+            );
         }
     }
 
@@ -144,9 +157,11 @@ impl RenderPass for FxaaPass {
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let target = if self.intermediate_format.is_some() {
             resources.get(helio_core::ResourceKey::new("fxaa_color"))?
-        } else { target };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        } else {
+            target
+        };
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -166,9 +181,14 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx.registry.read(helio_core::ResourceKey::new(self.color_input), "FXAA").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
-        })?;
+        let input_view = ctx
+            .registry
+            .read(helio_core::ResourceKey::new(self.color_input), "FXAA")
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "FXAA requires published pre_aa input".to_string(),
+                )
+            })?;
         if self.bind_group_key.as_ref() != Some(input_view) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("FXAA BG"),
@@ -201,5 +221,3 @@ impl RenderPass for FxaaPass {
         self.bind_group_key = None;
     }
 }
-
-

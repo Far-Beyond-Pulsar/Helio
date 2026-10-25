@@ -45,9 +45,19 @@ impl BenchConfig {
             .position(|a| a == "--instance-bench")
             .and_then(|i| args.get(i + 1))
             .and_then(|v| v.parse::<u32>().ok());
-        let instances = from_arg.or_else(|| std::env::var("VG_STRESS_INSTANCES").ok()?.trim().parse().ok())?;
+        let instances = from_arg.or_else(|| {
+            std::env::var("VG_STRESS_INSTANCES")
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        })?;
         let env = |k: &str| std::env::var(k).ok().map(|v| v.trim().to_string());
-        let asset = match env("VG_STRESS_BENCH_ASSET").as_deref().map(str::to_lowercase).as_deref() {
+        let asset = match env("VG_STRESS_BENCH_ASSET")
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref()
+        {
             Some("lucy") => BenchAsset::Lucy,
             Some("pine") => BenchAsset::Pine,
             _ => BenchAsset::Thai,
@@ -55,10 +65,18 @@ impl BenchConfig {
         Some(Self {
             instances: instances.max(1),
             asset,
-            spacing: env("VG_STRESS_BENCH_SPACING").and_then(|v| v.parse().ok()).unwrap_or(3.2),
-            classic: env("VG_STRESS_BENCH_CLASSIC").and_then(|v| v.parse().ok()).unwrap_or(0),
-            seed: env("VG_STRESS_BENCH_SEED").and_then(|v| v.parse().ok()).unwrap_or(0x9e37_79b9_7f4a_7c15),
-            mem_limit_gb: env("VG_STRESS_BENCH_MEM_GB").and_then(|v| v.parse().ok()).unwrap_or(14.0),
+            spacing: env("VG_STRESS_BENCH_SPACING")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3.2),
+            classic: env("VG_STRESS_BENCH_CLASSIC")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            seed: env("VG_STRESS_BENCH_SEED")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0x9e37_79b9_7f4a_7c15),
+            mem_limit_gb: env("VG_STRESS_BENCH_MEM_GB")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(14.0),
         })
     }
 
@@ -120,7 +138,10 @@ impl BenchConfig {
         let inside = cam([0.0, 1.7, 0.0], [0.0, 1.7, -60.0]);
         let list = [
             ("bench-far", far.clone()),
-            ("bench-away", cam([-h - 10.0, 3.0, 0.0], [-h - 200.0, 3.0, 0.0])),
+            (
+                "bench-away",
+                cam([-h - 10.0, 3.0, 0.0], [-h - 200.0, 3.0, 0.0]),
+            ),
             ("bench-edge", cam([-h - 5.0, 2.0, 0.0], [h, 2.0, 0.0])),
             ("bench-inside", inside.clone()),
             ("bench-far-move", far),
@@ -140,7 +161,12 @@ impl BenchConfig {
 }
 
 fn cam(pos: [f32; 3], look: [f32; 3]) -> CameraSpec {
-    CameraSpec { position: Some(pos), look_at: Some(look), fov_deg: Some(50.0), ..Default::default() }
+    CameraSpec {
+        position: Some(pos),
+        look_at: Some(look),
+        fov_deg: Some(50.0),
+        ..Default::default()
+    }
 }
 
 struct Rng(u64);
@@ -155,7 +181,12 @@ impl Rng {
 
 /// Grid transform of classic instance `i` (a flat quad lying on the ground).
 pub fn classic_transform(i: u32, side: u32, spacing: f32, origin: glam::Vec3) -> glam::Mat4 {
-    let p = origin + glam::Vec3::new((i % side) as f32 * spacing, 0.0, (i / side) as f32 * spacing);
+    let p = origin
+        + glam::Vec3::new(
+            (i % side) as f32 * spacing,
+            0.0,
+            (i / side) as f32 * spacing,
+        );
     glam::Mat4::from_translation(p)
 }
 

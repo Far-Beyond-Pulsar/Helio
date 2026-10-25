@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder,
-    RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    RendererBuilder, RendererConfig,
 };
 use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_vg_cull::VgCullEarlyPass;
@@ -37,13 +37,31 @@ fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
 
 fn mirror(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> GpuMirrorHandle {
     let gpu_context = EngineGpuContext::new(Arc::clone(device), Arc::clone(queue));
-    let mut gpu_store =
-        SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
+    let mut gpu_store = SceneGpuStore::new(
+        &gpu_context,
+        SceneGpuConfig {
+            classes: Vec::new(),
+            tombstone_headroom: 0,
+            max_cells_metadata: 0,
+        },
+    );
     helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        device,
+    );
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        device,
+    );
+    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        device,
+    );
     GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(queue))
 }
 
@@ -61,14 +79,24 @@ fn build(
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
         .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-        .build(Arc::clone(device), Arc::clone(queue), 320, 180, config.surface_format)
+        .build(
+            Arc::clone(device),
+            Arc::clone(queue),
+            320,
+            180,
+            config.surface_format,
+        )
 }
 
 fn target(device: &wgpu::Device) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("vg graph smoke target"),
-            size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 320,
+                height: 180,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -134,9 +162,15 @@ fn vg_debug_view_env_var_selects_the_initial_debug_mode() {
     let config = || RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
 
     std::env::set_var(ENV_VAR, "lod");
-    assert_eq!(config().with_virtual_geometry(&runtime).debug_mode, VgDebugView::LodLevel.id());
+    assert_eq!(
+        config().with_virtual_geometry(&runtime).debug_mode,
+        VgDebugView::LodLevel.id()
+    );
     std::env::set_var(ENV_VAR, "21");
-    assert_eq!(config().with_virtual_geometry(&runtime).debug_mode, VgDebugView::ClusterId.id());
+    assert_eq!(
+        config().with_virtual_geometry(&runtime).debug_mode,
+        VgDebugView::ClusterId.id()
+    );
     std::env::set_var(ENV_VAR, "not a view");
     assert_eq!(config().with_virtual_geometry(&runtime).debug_mode, 0);
     // An explicit mode wins over the environment.
@@ -171,7 +205,9 @@ fn the_chain_registers_every_vg_debug_view_with_its_category() {
         let found = found.unwrap_or_else(|| panic!("{view:?} is not registered"));
         assert_eq!(found.name, view.name());
         assert!(
-            categories.iter().any(|(mode, category)| *mode == view.id() && *category == "Virtual Geometry"),
+            categories
+                .iter()
+                .any(|(mode, category)| *mode == view.id() && *category == "Virtual Geometry"),
             "{view:?} has no Virtual Geometry category"
         );
     }

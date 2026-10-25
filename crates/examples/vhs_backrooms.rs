@@ -1455,27 +1455,19 @@ impl ApplicationHandler for App {
                             &mut state.scene_db.world,
                             dt,
                         );
-                        // Headset path: render_xr() polls session events, locates the
-                        // per-eye poses, uploads the stereo camera and renders both
-                        // eyes. The mirror surface (if any) receives both eye buffers
-                        // side by side via the renderer's mirror blit.
-                        let mirror = match &state.surface {
-                            Some(surface) => match surface.get_current_texture() {
-                                wgpu::CurrentSurfaceTexture::Success(texture)
-                                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
-                                _ => None,
-                            },
-                            None => None,
-                        };
-                        let mirror_view = mirror.as_ref().map(|t| {
-                            t.texture
-                                .create_view(&wgpu::TextureViewDescriptor::default())
-                        });
-                        if let Err(e) = renderer.render_xr(mirror_view.as_ref()) {
-                            log::error!("[XR] render_xr error: {e:?}");
-                        }
-                        if let Some(output) = mirror {
-                            state.queue.present(output);
+                        if let Some(surface) = state.surface.as_ref() {
+                            let camera = Camera::perspective_look_at(
+                                glam::Vec3::new(0.0, 1.6, 0.0),
+                                glam::Vec3::new(0.0, 1.6, -1.0),
+                                glam::Vec3::Y,
+                                std::f32::consts::FRAC_PI_4,
+                                1.0,
+                                0.1,
+                                200.0,
+                            );
+                            if let Err(e) = renderer.render_window_frame(&camera, surface) {
+                                log::error!("[XR] render error: {e:?}");
+                            }
                         }
                     }
                     state.mouse_delta = (0.0, 0.0);

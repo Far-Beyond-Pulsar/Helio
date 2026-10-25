@@ -29,26 +29,53 @@ impl TestMesh {
 }
 
 fn pos_attrs(p: &[[f32; 3]]) -> Vec<u8> {
-    p.iter().flat_map(|v| v.iter().flat_map(|f| f.to_le_bytes())).collect()
+    p.iter()
+        .flat_map(|v| v.iter().flat_map(|f| f.to_le_bytes()))
+        .collect()
 }
 
 /// Closed manifold sphere with `20 * 4^subdiv` triangles; attribute = position.
 pub fn icosphere(subdiv: u32) -> TestMesh {
     let t = (1.0 + 5.0f32.sqrt()) / 2.0;
     let mut p: Vec<[f32; 3]> = vec![
-        [-1.0, t, 0.0], [1.0, t, 0.0], [-1.0, -t, 0.0], [1.0, -t, 0.0],
-        [0.0, -1.0, t], [0.0, 1.0, t], [0.0, -1.0, -t], [0.0, 1.0, -t],
-        [t, 0.0, -1.0], [t, 0.0, 1.0], [-t, 0.0, -1.0], [-t, 0.0, 1.0],
+        [-1.0, t, 0.0],
+        [1.0, t, 0.0],
+        [-1.0, -t, 0.0],
+        [1.0, -t, 0.0],
+        [0.0, -1.0, t],
+        [0.0, 1.0, t],
+        [0.0, -1.0, -t],
+        [0.0, 1.0, -t],
+        [t, 0.0, -1.0],
+        [t, 0.0, 1.0],
+        [-t, 0.0, -1.0],
+        [-t, 0.0, 1.0],
     ];
     for v in p.iter_mut() {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         *v = [v[0] / l, v[1] / l, v[2] / l];
     }
     let mut idx: Vec<[u32; 3]> = vec![
-        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
     ];
     for _ in 0..subdiv {
         let mut cache: HashMap<(u32, u32), u32> = HashMap::new();
@@ -56,7 +83,11 @@ pub fn icosphere(subdiv: u32) -> TestMesh {
             let k = (a.min(b), a.max(b));
             *cache.entry(k).or_insert_with(|| {
                 let (pa, pb) = (p[a as usize], p[b as usize]);
-                let m = [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0, (pa[2] + pb[2]) / 2.0];
+                let m = [
+                    (pa[0] + pb[0]) / 2.0,
+                    (pa[1] + pb[1]) / 2.0,
+                    (pa[2] + pb[2]) / 2.0,
+                ];
                 let l = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
                 p.push([m[0] / l, m[1] / l, m[2] / l]);
                 (p.len() - 1) as u32
@@ -64,7 +95,11 @@ pub fn icosphere(subdiv: u32) -> TestMesh {
         };
         let mut next = Vec::new();
         for t in &idx {
-            let (a, b, c) = (mid(t[0], t[1], &mut p), mid(t[1], t[2], &mut p), mid(t[2], t[0], &mut p));
+            let (a, b, c) = (
+                mid(t[0], t[1], &mut p),
+                mid(t[1], t[2], &mut p),
+                mid(t[2], t[0], &mut p),
+            );
             next.extend([[t[0], a, c], [t[1], b, a], [t[2], c, b], [a, b, c]]);
         }
         idx = next;
@@ -106,7 +141,13 @@ pub fn torus(nu: u32, nv: u32) -> TestMesh {
             mats.extend([m, m]);
         }
     }
-    TestMesh { positions, attributes: attrs, stride: 8, indices, mats }
+    TestMesh {
+        positions,
+        attributes: attrs,
+        stride: 8,
+        indices,
+        mats,
+    }
 }
 
 /// Open `n x n` quad grid (heightfield), attribute = position.
@@ -128,7 +169,13 @@ pub fn grid(n: u32) -> TestMesh {
     }
     let attributes = pos_attrs(&p);
     let tris = indices.len() / 3;
-    TestMesh { positions: p, attributes, stride: 12, indices, mats: vec![0; tris] }
+    TestMesh {
+        positions: p,
+        attributes,
+        stride: 12,
+        indices,
+        mats: vec![0; tris],
+    }
 }
 
 /// Quantize like the writer does (must stay in sync with `Lattice::quantize`).
@@ -154,7 +201,10 @@ pub fn open_edges(tris: &[[Lat; 3]]) -> HashSet<(Lat, Lat)> {
             }
         }
     }
-    dir.keys().filter(|&&(a, b)| !dir.contains_key(&(b, a))).copied().collect()
+    dir.keys()
+        .filter(|&&(a, b)| !dir.contains_key(&(b, a)))
+        .copied()
+        .collect()
 }
 
 pub fn cut_tris(r: &VgeoReader, tau: f32, proj: &Projection) -> (usize, Vec<[Lat; 3]>) {
@@ -163,7 +213,11 @@ pub fn cut_tris(r: &VgeoReader, tau: f32, proj: &Projection) -> (usize, Vec<[Lat
     for s in &sel {
         let d = r.decode(s).unwrap();
         for t in &d.tris {
-            out.push([d.lattice[t[0] as usize], d.lattice[t[1] as usize], d.lattice[t[2] as usize]]);
+            out.push([
+                d.lattice[t[0] as usize],
+                d.lattice[t[1] as usize],
+                d.lattice[t[2] as usize],
+            ]);
         }
     }
     (sel.len(), out)

@@ -23,7 +23,9 @@ mod support;
 #[test]
 fn screen_size_tracks_graph_resolution_across_resize() {
     pollster::block_on(async {
-        let Some((device, queue)) = support::request_test_device("OcclusionCull Resize Contract").await else {
+        let Some((device, queue)) =
+            support::request_test_device("OcclusionCull Resize Contract").await
+        else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: occlusion-cull resize contract");
             return;
         };

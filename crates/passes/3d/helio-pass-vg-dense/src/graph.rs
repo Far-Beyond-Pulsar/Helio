@@ -32,8 +32,8 @@ use crate::common::GpuScopes;
 use crate::mask_union::MaskUnion;
 use crate::stats_readback::StatsReadback;
 use crate::{
-    pixels_per_unit_from_proj, rt_available, AutoPolicy, DenseConfig, DenseError, DenseFrame, DenseNonRtInputs,
-    DenseNonRtPass, RtEnv, RtTier, RtTierConfig, Tier3Backend, Tier3Selector,
+    pixels_per_unit_from_proj, rt_available, AutoPolicy, DenseConfig, DenseError, DenseFrame,
+    DenseNonRtInputs, DenseNonRtPass, RtEnv, RtTier, RtTierConfig, Tier3Backend, Tier3Selector,
 };
 
 /// [`VgDenseFrameData`] after Tier 3.
@@ -119,7 +119,9 @@ impl VgDensePass {
     /// by some backend (RT if chosen, else the peel), so nothing is ever a hole.
     /// `ForceNonRtFallback` always engages the peel.
     fn engage(&mut self, mode: VgMode, rt_choice: bool, engaged_prev: bool, tile_fallback: bool) {
-        let Some(runtime) = self.runtime.clone() else { return };
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
         let active = self.frame < self.active_until;
         let probe = !active && self.frame % IDLE_PROBE_STRIDE == 0;
         let (engaged_next, backend) = match mode {
@@ -158,7 +160,8 @@ impl VgDensePass {
         device: &wgpu::Device,
         mode: Box<dyn Fn() -> VgMode + Send + Sync>,
     ) -> Result<Self, DenseError> {
-        let cfg = DenseConfig::for_workgroup_storage(device.limits().max_compute_workgroup_storage_size);
+        let cfg =
+            DenseConfig::for_workgroup_storage(device.limits().max_compute_workgroup_storage_size);
         Ok(Self {
             cfg,
             nonrt: DenseNonRtPass::new(device, cfg)?,
@@ -287,7 +290,11 @@ impl RenderPass for VgDensePass {
         let frame = DenseFrame {
             view_proj: column_major(&cam.view_proj),
             inv_view_proj: column_major(&cam.inv_view_proj),
-            camera_pos: [cam.position_near[0], cam.position_near[1], cam.position_near[2]],
+            camera_pos: [
+                cam.position_near[0],
+                cam.position_near[1],
+                cam.position_near[2],
+            ],
             viewport: [ctx.width, ctx.height],
             visible_capacity: 0,
             ray_t: [cam.position_near[3], 1.0e30],
@@ -312,9 +319,18 @@ impl RenderPass for VgDensePass {
         }
         // A depth peel that overflowed its per-tile cluster lists is losing
         // geometry: prefer RT (the mask size alone may undercount the need).
-        let overflowing = self.runtime.as_ref().is_some_and(|r| r.tier3_stats().bin_overflow > 0);
-        let dense_for_policy = if overflowing { prep.dense_tiles.max(tiles_total) } else { prep.dense_tiles };
-        self.backend = self.selector.select(mode, true, prep.rt_ready, dense_for_policy, tiles_total);
+        let overflowing = self
+            .runtime
+            .as_ref()
+            .is_some_and(|r| r.tier3_stats().bin_overflow > 0);
+        let dense_for_policy = if overflowing {
+            prep.dense_tiles.max(tiles_total)
+        } else {
+            prep.dense_tiles
+        };
+        self.backend =
+            self.selector
+                .select(mode, true, prep.rt_ready, dense_for_policy, tiles_total);
         if self.backend != Tier3Backend::Rt && prep.dense_tiles > 0 && !prep.rt_ready {
             tier.note_incomplete(&runtime);
         }
@@ -332,7 +348,8 @@ impl RenderPass for VgDensePass {
         let Some(cull) = registry.get::<VgCullFrameData<'_>>(ResourceKey::new(KEY_CULL)) else {
             return Ok(());
         };
-        let Some(raster) = registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER)) else {
+        let Some(raster) = registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER))
+        else {
             return Ok(());
         };
         let mut backend = self.backend;
@@ -344,7 +361,11 @@ impl RenderPass for VgDensePass {
         let frame = DenseFrame {
             view_proj: column_major(&cam.view_proj),
             inv_view_proj: column_major(&cam.inv_view_proj),
-            camera_pos: [cam.position_near[0], cam.position_near[1], cam.position_near[2]],
+            camera_pos: [
+                cam.position_near[0],
+                cam.position_near[1],
+                cam.position_near[2],
+            ],
             viewport: [raster.width, raster.height],
             visible_capacity: cull.bin_capacity * BIN_COUNT,
             ray_t: [cam.position_near[3], 1.0e30],
@@ -361,8 +382,11 @@ impl RenderPass for VgDensePass {
         // Alpha-masked clusters (cull bins 6 and 7) need the material tables: the
         // masked peel evaluates the alpha test per fragment.
         let masked_tables = match (
-            ctx.scene_buffers.get(helio_core::BufferKey::of("materials")),
-            registry.get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures()),
+            ctx.scene_buffers
+                .get(helio_core::BufferKey::of("materials")),
+            registry.get::<helio_mats::MaterialTextureBindings<'_>>(
+                helio_core::resource_keys::material_textures(),
+            ),
         ) {
             (Some(materials), Some(textures)) => Some((materials, textures)),
             _ => None,
@@ -375,21 +399,35 @@ impl RenderPass for VgDensePass {
         self.nonrt.set_masked(None);
         let mut rec = ctx.graphics_cmds();
         let scopes_on = ctx.gpu_scopes_enabled();
-        let mut scope_fn = |rec: &mut helio_core::CommandRecorder<'_>, name: &'static str, begin: bool| {
-            if begin {
-                ctx.begin_gpu_scope(rec, name);
-            } else {
-                ctx.end_gpu_scope(rec, name);
-            }
+        let mut scope_fn =
+            |rec: &mut helio_core::CommandRecorder<'_>, name: &'static str, begin: bool| {
+                if begin {
+                    ctx.begin_gpu_scope(rec, name);
+                } else {
+                    ctx.end_gpu_scope(rec, name);
+                }
+            };
+        let mut scopes = if scopes_on {
+            GpuScopes::new(&mut scope_fn)
+        } else {
+            GpuScopes::none()
         };
-        let mut scopes = if scopes_on { GpuScopes::new(&mut scope_fn) } else { GpuScopes::none() };
         // Tiles to resolve: this frame's classification, the mask the cull routed
         // clusters by, and the footprint of the dense-bin clusters (see
         // mask_union.rs).
         let union_mask: wgpu::Buffer = {
             let last = inputs.dense_mask.unwrap_or(raster.dense_mask);
             self.mask_union
-                .record(device, queue, &mut rec, &frame, &nonrt_inputs, raster.dense_mask, last, &mut scopes)
+                .record(
+                    device,
+                    queue,
+                    &mut rec,
+                    &frame,
+                    &nonrt_inputs,
+                    raster.dense_mask,
+                    last,
+                    &mut scopes,
+                )
                 .clone()
         };
         nonrt_inputs.tile_mask = &union_mask;
@@ -398,9 +436,24 @@ impl RenderPass for VgDensePass {
             // Cheap front half first: compaction + args give tile_slot and
             // the bin ranges, which the candidate collection needs whichever
             // backend draws.
-            self.nonrt.record_setup_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
+            self.nonrt.record_setup_scoped(
+                device,
+                queue,
+                &mut rec,
+                &frame,
+                &nonrt_inputs,
+                &mut scopes,
+            );
             if let (Some(tier), Some(dense)) = (self.tier.as_mut(), self.nonrt.buffers()) {
-                tier.record_collect(device, queue, &mut rec, dense, &nonrt_inputs, inputs.instance_count, &mut scopes);
+                tier.record_collect(
+                    device,
+                    queue,
+                    &mut rec,
+                    dense,
+                    &nonrt_inputs,
+                    inputs.instance_count,
+                    &mut scopes,
+                );
             }
             if self.learn_only {
                 // Nothing is diverted yet: Tier 2 draws everything.
@@ -421,12 +474,27 @@ impl RenderPass for VgDensePass {
                 }
             }
             if backend == Tier3Backend::NonRt && !self.learn_only {
-                self.nonrt.record_work_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
+                self.nonrt.record_work_scoped(
+                    device,
+                    queue,
+                    &mut rec,
+                    &frame,
+                    &nonrt_inputs,
+                    &mut scopes,
+                );
             }
         } else if self.learn_only {
-            self.nonrt.record_setup_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
+            self.nonrt.record_setup_scoped(
+                device,
+                queue,
+                &mut rec,
+                &frame,
+                &nonrt_inputs,
+                &mut scopes,
+            );
         } else {
-            self.nonrt.record_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
+            self.nonrt
+                .record_scoped(device, queue, &mut rec, &frame, &nonrt_inputs, &mut scopes);
         }
         {
             let counters = match backend {
@@ -440,12 +508,17 @@ impl RenderPass for VgDensePass {
         drop(rec);
 
         let published = match backend {
-            Tier3Backend::Rt => self.tier.as_ref().and_then(|t| t.outputs()).map(|(key, bary, visible)| Published {
-                key,
-                mask: union_mask.clone(),
-                bary: Some(bary),
-                visible: Some(visible),
-            }),
+            Tier3Backend::Rt => {
+                self.tier
+                    .as_ref()
+                    .and_then(|t| t.outputs())
+                    .map(|(key, bary, visible)| Published {
+                        key,
+                        mask: union_mask.clone(),
+                        bary: Some(bary),
+                        visible: Some(visible),
+                    })
+            }
             _ => self.nonrt.buffers().map(|b| Published {
                 key: b.dense_key.clone(),
                 mask: union_mask.clone(),
@@ -487,7 +560,13 @@ impl RenderPass for VgDensePass {
                 ResourceKey::new(KEY_DENSE),
                 // RT owns visibility inside the resolved dense tiles. The resolve
                 // replaces raster there; outside them, raster remains authoritative.
-                VgDenseFrameData { dense_key, tile_mask, rt_bary, rt_visible, merge: self.backend != Tier3Backend::Rt },
+                VgDenseFrameData {
+                    dense_key,
+                    tile_mask,
+                    rt_bary,
+                    rt_visible,
+                    merge: self.backend != Tier3Backend::Rt,
+                },
                 "VgDense",
             );
         }

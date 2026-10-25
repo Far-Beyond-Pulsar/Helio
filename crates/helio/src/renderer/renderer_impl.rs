@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -10,6 +10,8 @@ use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
 
 use super::builder::SceneDbHandle;
 use super::config::{RenderMode, RendererConfig};
+#[cfg(not(target_arch = "wasm32"))]
+use super::stereo_mirror::StereoMirror;
 
 /// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<
@@ -226,18 +228,13 @@ pub struct Renderer {
     #[cfg(not(target_arch = "wasm32"))]
     /// PC mirror blit: samples the acquired XR swapchain image (2-layer array)
     /// and draws both eyes side-by-side to the mirror window surface.
-    pub(crate) xr_mirror_pipeline: Option<wgpu::RenderPipeline>,
+    pub(crate) xr_mirror: Option<StereoMirror>,
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) xr_mirror_bgl: Option<wgpu::BindGroupLayout>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) xr_mirror_sampler: Option<wgpu::Sampler>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) xr_mirror_bind_group: Option<(u32, wgpu::BindGroup)>,
-    #[cfg(not(target_arch = "wasm32"))]
-    /// Colour format of the PC mirror window surface; the blit pipeline's color
-    /// target must match it (usually Bgra8UnormSrgb on Windows), not the XR
-    /// swapchain format. Set via [`Renderer::set_xr_mirror_format`].
+    /// Colour format of the PC mirror window surface.
     pub(crate) xr_mirror_format: Option<wgpu::TextureFormat>,
+    /// Pixel size of the current app window mirror target.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) xr_mirror_size: [u32; 2],
 }
 
 impl Renderer {
@@ -275,10 +272,9 @@ impl Renderer {
                 }
             });
         let previous_projection = match (self.previous_world_origin, self.world_origin) {
-            (Some(previous), Some(current)) => helio_core::temporal::rebase_previous_projection(
-                prev_view_proj,
-                current - previous,
-            ),
+            (Some(previous), Some(current)) => {
+                helio_core::temporal::rebase_previous_projection(prev_view_proj, current - previous)
+            }
             (None, None) => prev_view_proj,
             // Switching coordinate spaces invalidates the old projection.
             _ => camera.proj * camera.view,
@@ -292,7 +288,8 @@ impl Renderer {
             self.frame_count as u32,
             camera.jitter,
             previous_projection,
-        ).with_view_id(camera.view_id);
+        )
+        .with_view_id(camera.view_id);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
@@ -749,7 +746,6 @@ impl Renderer {
         }
     }
 
-
     pub fn output_width(&self) -> u32 {
         self.output_width
     }
@@ -804,6 +800,33 @@ impl Renderer {
         self.xr_swapchain = swapchain;
     }
 
+    /// Install a fully bootstrapped Helio XR runtime and return its input
+    /// actions. The renderer must have been built with the runtime's device;
+    /// construct `RendererConfig` from `runtime.eye_extent()` and the XR
+    /// swapchain format before creating the renderer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn install_xr_runtime(
+        &mut self,
+        runtime: helio_xr::XrRuntime,
+    ) -> helio_core::Result<helio_xr::XrInput> {
+        if !Arc::ptr_eq(&self.device, &runtime.device) {
+            return Err(helio_core::Error::InvalidPassConfig(
+                "XR runtime and renderer must share the same wgpu device".into(),
+            ));
+        }
+
+        let helio_xr::XrRuntime {
+            instance,
+            session,
+            swapchain,
+            input,
+            ..
+        } = runtime;
+        self.set_xr_session(Some(instance), Some(session), Some(swapchain));
+        self.set_jitter_enabled(false);
+        Ok(input)
+    }
+
     /// Predicted display time of the most recent XR frame, used to locate
     /// controller poses (see `helio_xr::XrInput::grip_pose_matrices`) at the
     /// same instant the eye views were located. `None` in desktop mode or
@@ -828,10 +851,7 @@ impl Renderer {
     /// query [`Self::xr_display_refresh_rate_hz`] on subsequent frames to see
     /// which rate the runtime actually adopted.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn request_xr_display_refresh_rate_hz(
-        &self,
-        requested_hz: f32,
-    ) -> helio_xr::Result<bool> {
+    pub fn request_xr_display_refresh_rate_hz(&self, requested_hz: f32) -> helio_xr::Result<bool> {
         match self.xr.as_ref() {
             Some(session) => session.request_display_refresh_rate_hz(requested_hz),
             None => Ok(false),
@@ -854,8 +874,7 @@ impl Renderer {
     pub fn set_xr_mirror_format(&mut self, format: wgpu::TextureFormat) {
         if self.xr_mirror_format != Some(format) {
             self.xr_mirror_format = Some(format);
-            // The pipeline is keyed on the format; drop it so it is rebuilt.
-            self.xr_mirror_pipeline = None;
+            self.xr_mirror = None;
         }
     }
 
@@ -920,7 +939,15 @@ mod camera_identity_tests {
     use glam::{Mat4, Vec3};
 
     fn camera() -> crate::Camera {
-        crate::Camera::perspective_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y, 1.0, 16.0 / 9.0, 0.1, 100.0)
+        crate::Camera::perspective_look_at(
+            Vec3::new(0.0, 2.0, 5.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            1.0,
+            16.0 / 9.0,
+            0.1,
+            100.0,
+        )
     }
 
     #[test]

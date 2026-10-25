@@ -20,16 +20,29 @@ fn cached_assets_root_and_total_pages() {
             continue;
         }
         let mut header = [0u8; std::mem::size_of::<VgeoHeader>()];
-        if File::open(&path).and_then(|mut f| f.read_exact(&mut header)).is_err() {
+        if File::open(&path)
+            .and_then(|mut f| f.read_exact(&mut header))
+            .is_err()
+        {
             continue;
         }
         let h: VgeoHeader = *bytemuck::from_bytes(&header);
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        rows.push((h.asset.root_page_count, h.asset.page_count, h.asset.triangle_count, h.version, size, path));
+        rows.push((
+            h.asset.root_page_count,
+            h.asset.page_count,
+            h.asset.triangle_count,
+            h.version,
+            size,
+            path,
+        ));
     }
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let (mut roots, mut pages, mut bytes) = (0u64, 0u64, 0u64);
-    println!("{:>8} {:>8} {:>7} {:>11} {:>4} {:>8}  file", "roots", "pages", "root%", "tris", "ver", "MiB");
+    println!(
+        "{:>8} {:>8} {:>7} {:>11} {:>4} {:>8}  file",
+        "roots", "pages", "root%", "tris", "ver", "MiB"
+    );
     for (r, p, t, v, size, path) in &rows {
         roots += u64::from(*r);
         pages += u64::from(*p);
@@ -59,7 +72,9 @@ fn cached_assets_root_and_total_pages() {
 #[ignore = "diagnostic: set VG_CACHE_DIR"]
 fn file_backed_reader_matches_memory_reader() {
     use helio_vg_stream::{VgeoBytes, VgeoSource};
-    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(PathBuf::from) else { return };
+    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(PathBuf::from) else {
+        return;
+    };
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -76,7 +91,12 @@ fn file_backed_reader_matches_memory_reader() {
         assert_eq!(mem.page_deps().unwrap(), disk.page_deps().unwrap());
         assert_eq!(mem.quant().step, disk.quant().step);
         for p in 0..mem.header().asset.page_count {
-            assert_eq!(mem.read_page(p).unwrap(), disk.read_page(p).unwrap(), "page {p} of {}", path.display());
+            assert_eq!(
+                mem.read_page(p).unwrap(),
+                disk.read_page(p).unwrap(),
+                "page {p} of {}",
+                path.display()
+            );
         }
         println!("ok {}", path.file_name().unwrap().to_string_lossy());
     }
@@ -88,16 +108,31 @@ fn file_backed_reader_matches_memory_reader() {
 #[ignore = "diagnostic: set VG_CACHE_DIR"]
 fn cached_assets_single_root_leaf() {
     use helio_vg_stream::{VgeoBytes, VgeoSource};
-    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(PathBuf::from) else { return };
+    let Some(dir) = std::env::var_os("VG_CACHE_DIR").map(PathBuf::from) else {
+        return;
+    };
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
-        if e.path().extension().and_then(|x| x.to_str()) != Some("vgeo") || e.metadata().unwrap().len() > 2_000_000_000 {
+        if e.path().extension().and_then(|x| x.to_str()) != Some("vgeo")
+            || e.metadata().unwrap().len() > 2_000_000_000
+        {
             continue;
         }
         let src = VgeoBytes::open(&e.path()).unwrap();
         let (nodes, refs) = (src.hierarchy().unwrap(), src.group_refs().unwrap());
         let root = src.header().asset.root_node;
         let leaf = helio_vg_format::root_leaves(&nodes, root);
-        let count = leaf.as_ref().map(|l| l.iter().map(|&x| refs[x as usize].cluster_count()).collect::<Vec<_>>());
-        println!("{} tris {:>10} nodes {:>6} single_root_leaf {:?} roots {:?}", e.file_name().to_string_lossy(), src.header().asset.triangle_count, nodes.len(), leaf, count);
+        let count = leaf.as_ref().map(|l| {
+            l.iter()
+                .map(|&x| refs[x as usize].cluster_count())
+                .collect::<Vec<_>>()
+        });
+        println!(
+            "{} tris {:>10} nodes {:>6} single_root_leaf {:?} roots {:?}",
+            e.file_name().to_string_lossy(),
+            src.header().asset.triangle_count,
+            nodes.len(),
+            leaf,
+            count
+        );
     }
 }

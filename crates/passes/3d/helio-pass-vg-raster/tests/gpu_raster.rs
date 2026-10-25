@@ -38,7 +38,12 @@ fn gpu() -> Option<Gpu> {
         return None;
     }
     let opt = optional_features() & adapter.features();
-    let features = want | if supports_int64_atomics(opt) { opt } else { wgpu::Features::empty() };
+    let features = want
+        | if supports_int64_atomics(opt) {
+            opt
+        } else {
+            wgpu::Features::empty()
+        };
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("vg-raster test"),
         required_features: features,
@@ -47,7 +52,11 @@ fn gpu() -> Option<Gpu> {
     }))
     .ok()?;
     device.on_uncaptured_error(std::sync::Arc::new(|e| panic!("wgpu error: {e:?}")));
-    Some(Gpu { int64: supports_int64_atomics(device.features()), device, queue })
+    Some(Gpu {
+        int64: supports_int64_atomics(device.features()),
+        device,
+        queue,
+    })
 }
 
 /// A flat n x n grid of CCW (as seen from +Z) triangles on plane z, spanning
@@ -56,7 +65,11 @@ fn grid(x0: f32, y0: f32, size: f32, z: f32, n: usize) -> (Vec<[f32; 3]>, Vec<[u
     let mut pos = Vec::new();
     for j in 0..=n {
         for i in 0..=n {
-            pos.push([x0 + size * i as f32 / n as f32, y0 + size * j as f32 / n as f32, z]);
+            pos.push([
+                x0 + size * i as f32 / n as f32,
+                y0 + size * j as f32 / n as f32,
+                z,
+            ]);
         }
     }
     let at = |i: usize, j: usize| (j * (n + 1) + i) as u8;
@@ -70,12 +83,18 @@ fn grid(x0: f32, y0: f32, size: f32, z: f32, n: usize) -> (Vec<[f32; 3]>, Vec<[u
     (pos, tris)
 }
 
-fn buffer_init<T: bytemuck::Pod>(g: &Gpu, label: &str, data: &[T], usage: wgpu::BufferUsages) -> wgpu::Buffer {
-    g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents: bytemuck::cast_slice(data),
-        usage,
-    })
+fn buffer_init<T: bytemuck::Pod>(
+    g: &Gpu,
+    label: &str,
+    data: &[T],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    g.device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(data),
+            usage,
+        })
 }
 
 fn read_buffer(g: &Gpu, src: &wgpu::Buffer, size: u64) -> Vec<u8> {
@@ -93,7 +112,8 @@ fn read_buffer(g: &Gpu, src: &wgpu::Buffer, size: u64) -> Vec<u8> {
 
 fn map(g: &Gpu, rb: &wgpu::Buffer) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    rb.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+    rb.slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
     g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
     let v = rb.slice(..).get_mapped_range().unwrap().to_vec();
@@ -111,12 +131,25 @@ fn read_texture(g: &Gpu, tex: &wgpu::Texture, aspect: wgpu::TextureAspect) -> Ve
     });
     let mut enc = g.device.create_command_encoder(&Default::default());
     enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect },
+        wgpu::TexelCopyTextureInfo {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect,
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &rb,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(H) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bpr),
+                rows_per_image: Some(H),
+            },
         },
-        wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
     );
     g.queue.submit([enc.finish()]);
     bytemuck::cast_slice(&map(g, &rb)).to_vec()
@@ -147,9 +180,25 @@ fn scene() -> Scene {
 
     let view = Mat4::IDENTITY;
     let proj = helio_core::depth::perspective(std::f32::consts::FRAC_PI_2, 1.0, 0.1);
-    let camera = GpuCameraUniforms::new(view, proj, Vec3::ZERO, 0.1, 1000.0, 0, [0.0, 0.0], proj * view);
+    let camera = GpuCameraUniforms::new(
+        view,
+        proj,
+        Vec3::ZERO,
+        0.1,
+        1000.0,
+        0,
+        [0.0, 0.0],
+        proj * view,
+    );
     let built = pool.build();
-    Scene { pool, built, camera, sw_first: 1, sw_count: 2, hw_tris: 32 }
+    Scene {
+        pool,
+        built,
+        camera,
+        sw_first: 1,
+        sw_count: 2,
+        hw_tris: 32,
+    }
 }
 
 struct Resources {
@@ -171,7 +220,12 @@ fn resources(g: &Gpu, s: &Scene) -> Resources {
         pages.push(0);
     }
     pages.extend_from_slice(&[0u8; 16]);
-    let inst = GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row: 0 };
+    let inst = GpuVgInstance {
+        asset_slot: 0,
+        flags: INST_ENABLED,
+        lod_error_scale: 1.0,
+        object_row: 0,
+    };
     let mut object = [0f32; 63];
     object[4..20].copy_from_slice(&Mat4::IDENTITY.to_cols_array());
     let mut hw = [DrawIndirectArgs::default(); 4];
@@ -189,8 +243,22 @@ fn resources(g: &Gpu, s: &Scene) -> Resources {
         instances: buffer_init(g, "instances", &[inst], st),
         objects: buffer_init(g, "objects", &object, st),
         hw_indirect: buffer_init(g, "hw indirect", &hw, wgpu::BufferUsages::INDIRECT),
-        sw_meta: buffer_init(g, "sw meta", &[SwMeta { first: s.sw_first, count: s.sw_count, _pad: [0; 2] }], st),
-        sw_dispatch: buffer_init(g, "sw dispatch", &sw_dispatch_args(s.sw_count), wgpu::BufferUsages::INDIRECT),
+        sw_meta: buffer_init(
+            g,
+            "sw meta",
+            &[SwMeta {
+                first: s.sw_first,
+                count: s.sw_count,
+                _pad: [0; 2],
+            }],
+            st,
+        ),
+        sw_dispatch: buffer_init(
+            g,
+            "sw dispatch",
+            &sw_dispatch_args(s.sw_count),
+            wgpu::BufferUsages::INDIRECT,
+        ),
     }
 }
 
@@ -269,7 +337,9 @@ fn run(g: &Gpu, s: &Scene, force_fallback: bool, thresholds: (u32, u32)) -> Outp
     g.queue.submit([enc.finish()]);
 
     let tiles = (targets.tiles_x * targets.tiles_y) as u64;
-    let u32s = |b: &wgpu::Buffer, n: u64| -> Vec<u32> { bytemuck::cast_slice(&read_buffer(g, b, n * 4)).to_vec() };
+    let u32s = |b: &wgpu::Buffer, n: u64| -> Vec<u32> {
+        bytemuck::cast_slice(&read_buffer(g, b, n * 4)).to_vec()
+    };
     Output {
         vis: read_texture(g, &targets.vis, wgpu::TextureAspect::All),
         depth: read_texture(g, &targets.depth, wgpu::TextureAspect::DepthOnly)
@@ -298,14 +368,33 @@ fn check_tier1(s: &Scene, o: &Output) {
             mismatch += 1;
         }
         if got {
-            assert_eq!(helio_vg_format::vis_cluster(o.vis[i]), 0, "Tier 1 drew a non-HW cluster");
-            assert!(o.depth[i] > 0.0, "pixel {} ({},{}) vis {:#x} depth {} fallback {}", i, i % 64, i / 64, o.vis[i], o.depth[i], o.fallback);
+            assert_eq!(
+                helio_vg_format::vis_cluster(o.vis[i]),
+                0,
+                "Tier 1 drew a non-HW cluster"
+            );
+            assert!(
+                o.depth[i] > 0.0,
+                "pixel {} ({},{}) vis {:#x} depth {} fallback {}",
+                i,
+                i % 64,
+                i / 64,
+                o.vis[i],
+                o.depth[i],
+                o.fallback
+            );
         } else {
-            assert_eq!(o.depth[i], 0.0, "depth must stay cleared where nothing was drawn");
+            assert_eq!(
+                o.depth[i], 0.0,
+                "depth must stay cleared where nothing was drawn"
+            );
         }
     }
     assert!(covered > 600, "HW footprint unexpectedly small: {covered}");
-    assert!(mismatch * 100 <= covered, "Tier 1 differs from the reference at {mismatch}/{covered} pixels");
+    assert!(
+        mismatch * 100 <= covered,
+        "Tier 1 differs from the reference at {mismatch}/{covered} pixels"
+    );
 }
 
 fn check_tier2(s: &Scene, o: &Output) {
@@ -318,20 +407,38 @@ fn check_tier2(s: &Scene, o: &Output) {
         if (a == 0) != (b == 0) || (a != 0 && (a as u32 != b as u32)) {
             mismatch += 1;
         } else if a != 0 {
-            let (da, db) = (f32::from_bits((a >> 32) as u32), f32::from_bits((b >> 32) as u32));
+            let (da, db) = (
+                f32::from_bits((a >> 32) as u32),
+                f32::from_bits((b >> 32) as u32),
+            );
             assert!((da - db).abs() <= 1e-5 * da.max(1e-3), "depth {da} vs {db}");
         }
     }
-    assert!(mismatch * 100 <= covered as u32 * 1, "Tier 2 differs from the reference at {mismatch}/{covered} pixels");
+    assert!(
+        mismatch * 100 <= covered as u32 * 1,
+        "Tier 2 differs from the reference at {mismatch}/{covered} pixels"
+    );
     assert_eq!(o.stats[stat::BIN_OVERFLOW], 0);
     assert_eq!(o.stats[stat::CLIPPED_TRIS], 0);
     // Where B (nearer) and C overlap, B wins: B has ids with cluster 1.
-    let b_wins = o.keys.iter().filter(|&&k| k != 0 && helio_vg_format::vis_cluster(k as u32) == 1).count();
-    let c_wins = o.keys.iter().filter(|&&k| k != 0 && helio_vg_format::vis_cluster(k as u32) == 2).count();
+    let b_wins = o
+        .keys
+        .iter()
+        .filter(|&&k| k != 0 && helio_vg_format::vis_cluster(k as u32) == 1)
+        .count();
+    let c_wins = o
+        .keys
+        .iter()
+        .filter(|&&k| k != 0 && helio_vg_format::vis_cluster(k as u32) == 2)
+        .count();
     assert!(b_wins > 200 && c_wins > 20, "B {b_wins} C {c_wins}");
     // Tile triangle counters match the reference exactly (hit counts may differ at edges).
     for t in 0..(o.tile_counters.len() / 2) {
-        assert_eq!(o.tile_counters[t * 2], r.tile_counters[t * 2], "tile {t} triangle count");
+        assert_eq!(
+            o.tile_counters[t * 2],
+            r.tile_counters[t * 2],
+            "tile {t} triangle count"
+        );
     }
     let (gh, rh): (u32, u32) = (
         o.tile_counters.iter().skip(1).step_by(2).sum(),
@@ -341,10 +448,19 @@ fn check_tier2(s: &Scene, o: &Output) {
 }
 
 fn check_classify(o: &Output, thresholds: (u32, u32)) {
-    let want = reference::classify(&o.tile_counters, &vec![0; o.mask.len()], thresholds.0, thresholds.1, 0.5);
+    let want = reference::classify(
+        &o.tile_counters,
+        &vec![0; o.mask.len()],
+        thresholds.0,
+        thresholds.1,
+        0.5,
+    );
     assert_eq!(o.mask, want, "dense mask");
     let count = want.iter().sum::<u32>();
-    assert!(count > 0 && (count as usize) < want.len(), "test thresholds should split the tiles: {count}");
+    assert!(
+        count > 0 && (count as usize) < want.len(),
+        "test thresholds should split the tiles: {count}"
+    );
     assert_eq!(o.dense_args[3], count);
     assert_eq!(o.dense_args[0], count.min(65535));
     assert_eq!(o.dense_args[1], 1);
@@ -375,8 +491,16 @@ fn raster_matches_reference() {
         check_tier2(&s, &atomic);
         check_classify(&atomic, thr);
         // Both kernels produce the same keys.
-        let diff = atomic.keys.iter().zip(&fallback.keys).filter(|(a, b)| a != b).count();
-        assert_eq!(diff, 0, "atomic and tiled kernels disagree at {diff} pixels");
+        let diff = atomic
+            .keys
+            .iter()
+            .zip(&fallback.keys)
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            diff, 0,
+            "atomic and tiled kernels disagree at {diff} pixels"
+        );
     } else {
         eprintln!("64-bit atomics unavailable on this adapter: atomic kernel not exercised");
     }
@@ -390,7 +514,12 @@ fn dense_mask_has_hysteresis_across_frames() {
     // Threshold just above the A-only hit level: only the overlap tiles are dense.
     let raster = VgRaster::new(
         &g.device,
-        VgRasterConfig { force_tile_fallback: true, dense_tri_threshold: u32::MAX, dense_hit_threshold: 300, ..Default::default() },
+        VgRasterConfig {
+            force_tile_fallback: true,
+            dense_tri_threshold: u32::MAX,
+            dense_hit_threshold: 300,
+            ..Default::default()
+        },
     );
     let mut targets = VgTargets::new(&g.device, W, H, &raster);
     let r = resources(&g, &s);
@@ -417,7 +546,9 @@ fn dense_mask_has_hysteresis_across_frames() {
         let mut enc = g.device.create_command_encoder(&Default::default());
         raster.encode(&g.device, &g.queue, &mut enc, &mut targets, &inputs);
         g.queue.submit([enc.finish()]);
-        let m: Vec<u32> = bytemuck::cast_slice(&read_buffer(&g, targets.dense_mask_last_frame(), tiles * 4)).to_vec();
+        let m: Vec<u32> =
+            bytemuck::cast_slice(&read_buffer(&g, targets.dense_mask_last_frame(), tiles * 4))
+                .to_vec();
         dense.push(m.iter().sum::<u32>());
     }
     // Static scene: the classification is stable frame to frame.
@@ -425,4 +556,3 @@ fn dense_mask_has_hysteresis_across_frames() {
     assert_eq!(dense[0], dense[1]);
     assert_eq!(dense[1], dense[2]);
 }
-

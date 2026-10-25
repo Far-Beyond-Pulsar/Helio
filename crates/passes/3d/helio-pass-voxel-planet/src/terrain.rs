@@ -152,14 +152,40 @@ pub mod material {
 
     /// Names of the solid materials, in id order after air.
     pub const NAMES: [&str; COUNT as usize - 1] = [
-        "Grass", "Dirt", "Stone", "Sand", "Snow", "Water", "Gravel", "Sandstone", "DarkStone", "Wood", "Leaves", "Clay",
-        "Brick", "Planks", "Cobble", "Regolith", "Mare", "Ejecta", "Boulder", "Basalt", "Anorthosite",
+        "Grass",
+        "Dirt",
+        "Stone",
+        "Sand",
+        "Snow",
+        "Water",
+        "Gravel",
+        "Sandstone",
+        "DarkStone",
+        "Wood",
+        "Leaves",
+        "Clay",
+        "Brick",
+        "Planks",
+        "Cobble",
+        "Regolith",
+        "Mare",
+        "Ejecta",
+        "Boulder",
+        "Basalt",
+        "Anorthosite",
     ];
 
     /// The material id of a name in [`NAMES`] (ignoring case and `_`).
     pub fn from_name(name: &str) -> Option<u32> {
-        let key: String = name.chars().filter(|c| *c != '_').collect::<String>().to_ascii_lowercase();
-        NAMES.iter().position(|n| n.to_ascii_lowercase() == key).map(|i| i as u32 + 1)
+        let key: String = name
+            .chars()
+            .filter(|c| *c != '_')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        NAMES
+            .iter()
+            .position(|n| n.to_ascii_lowercase() == key)
+            .map(|i| i as u32 + 1)
     }
 }
 
@@ -201,7 +227,15 @@ pub trait TerrainField: Send + Sync + 'static {
     /// ground slope in eighths of a cell per cell (`Planet::material_slope`),
     /// and `layer` the cell's layer index (0 is the layer just above the
     /// datum); `p` is the cell's volume point.
-    fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
+    fn ground_material(
+        &self,
+        p: IVec3,
+        surface: u32,
+        top_height: i32,
+        depth: i32,
+        slope: i32,
+        layer: i32,
+    ) -> u32;
     /// Surface word (8 bits) of `column`, whose height is `height`
     /// (`terrain_surface` in WGSL, stored per column cell at generation):
     /// inputs of the materials besides height. 0 when the program has none.
@@ -245,7 +279,16 @@ pub trait TerrainField: Send + Sync + 'static {
     /// [`Self::lean_offset`] under the cell (`height` without lean). The
     /// cell is solid where it is positive; outside [`Self::extent`] its sign
     /// must be [`terrain_kind`]'s (`terrain_density` in WGSL).
-    fn density(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, _height: i32, _lean_height: i32, k: i32) -> i32 {
+    fn density(
+        &self,
+        _p: IVec3,
+        _q: IVec3,
+        _level: u32,
+        top: i32,
+        _height: i32,
+        _lean_height: i32,
+        k: i32,
+    ) -> i32 {
         heightfield_density(top, k)
     }
     /// Largest depth (mm) below the surface and height above it at which
@@ -295,7 +338,15 @@ pub struct MaterialAppearance {
 
 impl Default for MaterialAppearance {
     fn default() -> Self {
-        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None, transmission: 0.0, emission: 0.0 }
+        Self {
+            colour: [1.0, 0.0, 1.0, 0.9],
+            patches: None,
+            lip: None,
+            fleck: None,
+            speck_host: None,
+            transmission: 0.0,
+            emission: 0.0,
+        }
     }
 }
 
@@ -320,27 +371,51 @@ impl Default for TerrainAppearance {
         use crate::terrain::material::*;
         // Air and unused slots are magenta (a missing material shows).
         let colours: [[u8; 3]; COUNT as usize] = [
-            [200, 0, 200], [106, 126, 68], [128, 96, 66], [133, 139, 142],
-            [203, 188, 151], [217, 228, 236], [28, 72, 92], [116, 111, 102],
-            [185, 142, 104], [82, 88, 95], [101, 75, 53], [59, 102, 52],
-            [155, 113, 89], [148, 77, 63], [158, 119, 79], [121, 126, 130],
-            [142, 140, 135], [84, 84, 86], [196, 194, 188], [112, 110, 106],
-            [58, 59, 63], [168, 166, 158],
+            [200, 0, 200],
+            [106, 126, 68],
+            [128, 96, 66],
+            [133, 139, 142],
+            [203, 188, 151],
+            [217, 228, 236],
+            [28, 72, 92],
+            [116, 111, 102],
+            [185, 142, 104],
+            [82, 88, 95],
+            [101, 75, 53],
+            [59, 102, 52],
+            [155, 113, 89],
+            [148, 77, 63],
+            [158, 119, 79],
+            [121, 126, 130],
+            [142, 140, 135],
+            [84, 84, 86],
+            [196, 194, 188],
+            [112, 110, 106],
+            [58, 59, 63],
+            [168, 166, 158],
         ];
         let roughness = [
-            0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86, 0.85,
-            0.95, 0.95, 0.93, 0.85, 0.8, 0.85,
+            0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86,
+            0.85, 0.95, 0.95, 0.93, 0.85, 0.8, 0.85,
         ];
         let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
-        let mut materials: [MaterialAppearance; MATERIALS] = std::array::from_fn(|i| match colours.get(i) {
-            Some(&c) => {
-                let [r, g, b] = unit(c);
-                MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
-            }
-            None => MaterialAppearance::default(),
-        });
+        let mut materials: [MaterialAppearance; MATERIALS] =
+            std::array::from_fn(|i| match colours.get(i) {
+                Some(&c) => {
+                    let [r, g, b] = unit(c);
+                    MaterialAppearance {
+                        colour: [r, g, b, roughness[i]],
+                        ..Default::default()
+                    }
+                }
+                None => MaterialAppearance::default(),
+            });
         let turf = &mut materials[GRASS as usize];
-        turf.patches = Some([unit([160, 150, 96]), unit([106, 126, 68]), unit([62, 98, 56])]);
+        turf.patches = Some([
+            unit([160, 150, 96]),
+            unit([106, 126, 68]),
+            unit([62, 98, 56]),
+        ]);
         turf.lip = Some(DIRT as u8);
         for speck in [DIRT, SAND] {
             materials[speck as usize].speck_host = Some(GRASS as u8);
@@ -349,22 +424,42 @@ impl Default for TerrainAppearance {
             materials[rock as usize].fleck = Some((DIRT as u8, 0.125));
         }
         // Weathered and fresh stone: lichen-warm, the rock's grey, darker.
-        materials[STONE as usize].patches = Some([unit([160, 157, 149]), unit([133, 139, 142]), unit([98, 104, 110])]);
+        materials[STONE as usize].patches = Some([
+            unit([160, 157, 149]),
+            unit([133, 139, 142]),
+            unit([98, 104, 110]),
+        ]);
         // Dark stone alternates with stone in 4.5 m strata on cliffs: a shade
         // darker, not a band of another colour (zebra stripes on outcrops).
-        materials[DARK_STONE as usize].patches = Some([unit([140, 138, 131]), unit([110, 115, 119]), unit([82, 87, 94])]);
+        materials[DARK_STONE as usize].patches = Some([
+            unit([140, 138, 131]),
+            unit([110, 115, 119]),
+            unit([82, 87, 94]),
+        ]);
         // Lunar ground varies in maturity (fresh is brighter); fresh ejecta
         // and boulders thin out into the regolith around them.
-        materials[REGOLITH as usize].patches = Some([unit([158, 156, 150]), unit([142, 140, 135]), unit([118, 117, 113])]);
-        materials[MARE as usize].patches = Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
-        materials[BOULDER as usize].patches = Some([unit([130, 128, 123]), unit([112, 110, 106]), unit([90, 89, 86])]);
+        materials[REGOLITH as usize].patches = Some([
+            unit([158, 156, 150]),
+            unit([142, 140, 135]),
+            unit([118, 117, 113]),
+        ]);
+        materials[MARE as usize].patches =
+            Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
+        materials[BOULDER as usize].patches = Some([
+            unit([130, 128, 123]),
+            unit([112, 110, 106]),
+            unit([90, 89, 86]),
+        ]);
         materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
         // A cell of leaves (a cluster with gaps) passes about two thirds of
         // the light on it.
         materials[LEAVES as usize].transmission = 0.65;
         // Voxels a pixel wide or more are lit by their own faces: slopes read
         // as their steps (no step softness).
-        Self { materials, detail: [0.3, 0.4, 0.08, 0.0] }
+        Self {
+            materials,
+            detail: [0.3, 0.4, 0.08, 0.0],
+        }
     }
 }
 
@@ -387,7 +482,12 @@ pub trait TerrainGenerator: Send + Sync + 'static {
     fn info(&self) -> GeneratorInfo;
     /// The field of `grid` for `seed` and `settings` (JSON; empty means
     /// the generator's defaults).
-    fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String>;
+    fn build(
+        &self,
+        grid: &Grid,
+        seed: u64,
+        settings: &str,
+    ) -> Result<Arc<dyn TerrainField>, String>;
 }
 
 /// The generator a world uses: its id, version, seed and settings.
@@ -433,9 +533,14 @@ pub fn register(generator: Arc<dyn TerrainGenerator>) -> Result<(), String> {
     if info.id.is_empty() || info.version == 0 {
         return Err("a terrain generator needs an id and a nonzero version".into());
     }
-    let mut map = registry().write().map_err(|_| "terrain registry poisoned")?;
+    let mut map = registry()
+        .write()
+        .map_err(|_| "terrain registry poisoned")?;
     if map.contains_key(&info.id) {
-        return Err(format!("terrain generator {} is already registered", info.id));
+        return Err(format!(
+            "terrain generator {} is already registered",
+            info.id
+        ));
     }
     map.insert(info.id, generator);
     Ok(())
@@ -450,20 +555,30 @@ pub fn find(id: &str, version: u32) -> Option<Arc<dyn TerrainGenerator>> {
 
 /// Every registered generator, by name.
 pub fn generators() -> Vec<GeneratorInfo> {
-    let mut list: Vec<_> = registry().read().map(|map| map.values().map(|g| g.info()).collect()).unwrap_or_default();
+    let mut list: Vec<_> = registry()
+        .read()
+        .map(|map| map.values().map(|g| g.info()).collect())
+        .unwrap_or_default();
     list.sort_by(|a, b| a.name.cmp(&b.name));
     list
 }
 
 /// Build the field of `source` for `grid`.
 pub fn build(source: &TerrainSource, grid: &Grid) -> Result<Arc<dyn TerrainField>, String> {
-    let generator = find(&source.generator, source.version)
-        .ok_or_else(|| format!("unknown terrain generator {} v{}", source.generator, source.version))?;
+    let generator = find(&source.generator, source.version).ok_or_else(|| {
+        format!(
+            "unknown terrain generator {} v{}",
+            source.generator, source.version
+        )
+    })?;
     let field = generator.build(grid, source.seed, &source.settings)?;
     let (lo, hi) = field.height_range();
     let program = field.program();
     if lo > hi || program.constants.len() > MAX_CONSTANT_BYTES || program.key.is_empty() {
-        return Err(format!("terrain generator {} built an invalid field", source.generator));
+        return Err(format!(
+            "terrain generator {} built an invalid field",
+            source.generator
+        ));
     }
     Ok(field)
 }
@@ -495,7 +610,16 @@ pub fn heightfield_density(top: i32, k: i32) -> i32 {
 /// Generated kind of a level cell before edits, volumetric terms included
 /// (the GPU's per-cell generation rule), in the column of field height
 /// `height` (mm).
-pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, height: i32) -> u32 {
+pub fn generated_kind(
+    grid: &Grid,
+    field: &dyn TerrainField,
+    face: u8,
+    i: i32,
+    j: i32,
+    k: i32,
+    level: u32,
+    height: i32,
+) -> u32 {
     let top = top_cells(grid, height, level);
     let p = grid.domain_point(face, i, j, level);
     let (below, above) = field.extent(p, level);
@@ -503,7 +627,17 @@ pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j
         return terrain_kind(top, k);
     }
     let lean = lean_height(grid, field, face, i, j, k, level, height);
-    u32::from(field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, lean, k) > 0)
+    u32::from(
+        field.density(
+            p,
+            grid.volume_point(face, i, j, k, level),
+            level,
+            top,
+            height,
+            lean,
+            k,
+        ) > 0,
+    )
 }
 
 /// Height (mm) of the heightfield displaced by the field's lean under cell
@@ -516,7 +650,16 @@ pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j
 /// at the node's cell), so neighbouring columns agree; a column needs the
 /// 8x8 nodes from `div_floor(8 ci - reach, spacing)`, which the GPU's 64
 /// lanes evaluate once per column.
-pub fn lean_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, height: i32) -> i32 {
+pub fn lean_height(
+    grid: &Grid,
+    field: &dyn TerrainField,
+    face: u8,
+    i: i32,
+    j: i32,
+    k: i32,
+    level: u32,
+    height: i32,
+) -> i32 {
     let (reach, spacing) = field.lean(level);
     if reach == 0 {
         return height;
@@ -529,27 +672,50 @@ pub fn lean_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i
     let last = (grid.cells() >> level) - 1;
     let (node_i, node_j) = lattice_origin(i, j, reach, spacing);
     let node = |n: i32, m: i32| {
-        let (ni, nj) = (((node_i + n) * spacing).clamp(0, last), ((node_j + m) * spacing).clamp(0, last));
+        let (ni, nj) = (
+            ((node_i + n) * spacing).clamp(0, last),
+            ((node_j + m) * spacing).clamp(0, last),
+        );
         lattice_height(field, face, ni, nj, level)
     };
     // Q8 cell positions overflow i32 at planet-scale indices. The GPU mirror
     // computes them in wrapping i32 and only the small difference from the
     // lattice origin matters, so wrap here too: bit-identical, never a panic.
     let origin = |n: i32| n.wrapping_mul(spacing).wrapping_mul(256);
-    let sample = |x: i32, y: i32| lattice_bilinear(x.wrapping_sub(origin(node_i)), y.wrapping_sub(origin(node_j)), spacing, &node);
-    let (x, y) = (i.wrapping_mul(256).wrapping_add(128), j.wrapping_mul(256).wrapping_add(128));
-    sample(x.wrapping_add(ox), y.wrapping_add(oy)).wrapping_add(height).wrapping_sub(sample(x, y))
+    let sample = |x: i32, y: i32| {
+        lattice_bilinear(
+            x.wrapping_sub(origin(node_i)),
+            y.wrapping_sub(origin(node_j)),
+            spacing,
+            &node,
+        )
+    };
+    let (x, y) = (
+        i.wrapping_mul(256).wrapping_add(128),
+        j.wrapping_mul(256).wrapping_add(128),
+    );
+    sample(x.wrapping_add(ox), y.wrapping_add(oy))
+        .wrapping_add(height)
+        .wrapping_sub(sample(x, y))
 }
 
 /// First node of the lean lattice a column of 8x8 cells reads: the nodes
 /// from `div_floor(8 ci - reach, spacing)` cover the column and its reach.
 fn lattice_origin(i: i32, j: i32, reach: i32, spacing: i32) -> (i32, i32) {
-    (((i >> 3) * 8 - reach).div_euclid(spacing), ((j >> 3) * 8 - reach).div_euclid(spacing))
+    (
+        ((i >> 3) * 8 - reach).div_euclid(spacing),
+        ((j >> 3) * 8 - reach).div_euclid(spacing),
+    )
 }
 
 /// Bilinear height of the lean lattice at `(x, y)` (Q8 level cells from
 /// node (0, 0)), nodes `0..8` per axis.
-pub(crate) fn lattice_bilinear(x: i32, y: i32, spacing: i32, node: &dyn Fn(i32, i32) -> i32) -> i32 {
+pub(crate) fn lattice_bilinear(
+    x: i32,
+    y: i32,
+    spacing: i32,
+    node: &dyn Fn(i32, i32) -> i32,
+) -> i32 {
     let step = spacing * 256;
     let ni = x.div_euclid(step).clamp(0, 6);
     let nj = y.div_euclid(step).clamp(0, 6);
@@ -572,7 +738,13 @@ fn lattice_height(field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32
     thread_local! {
         static CACHE: RefCell<HashMap<(usize, u8, i32, i32, u32), i32>> = RefCell::new(HashMap::new());
     }
-    let key = (field as *const dyn TerrainField as *const () as usize, face, i, j, level);
+    let key = (
+        field as *const dyn TerrainField as *const () as usize,
+        face,
+        i,
+        j,
+        level,
+    );
     if let Some(h) = CACHE.with(|c| c.borrow().get(&key).copied()) {
         return h;
     }
@@ -591,7 +763,15 @@ fn lattice_height(field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32
 /// generated solid cell, edits excluded. Equals `top` outside the field's
 /// volumetric extent; material depth counts from it.
 /// `height` is the column's field height (mm).
-pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, height: i32) -> i32 {
+pub fn generated_top(
+    grid: &Grid,
+    field: &dyn TerrainField,
+    face: u8,
+    i: i32,
+    j: i32,
+    level: u32,
+    height: i32,
+) -> i32 {
     let top = top_cells(grid, height, level);
     let p = grid.domain_point(face, i, j, level);
     let (below, above) = field.extent(p, level);
@@ -602,7 +782,15 @@ pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j:
         .rev()
         .find(|&k| {
             let lean = lean_height(grid, field, face, i, j, k, level, height);
-            field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, lean, k) > 0
+            field.density(
+                p,
+                grid.volume_point(face, i, j, k, level),
+                level,
+                top,
+                height,
+                lean,
+                k,
+            ) > 0
         })
         .map_or(top - below, |k| k + 1)
 }
@@ -627,11 +815,17 @@ pub fn check_field(planet: &Planet, samples: u32) -> Result<Vec<i32>, String> {
     for _ in 0..samples {
         let level = 1 + (next() % u64::from(grid.levels() - 1)) as u32;
         let cells = (grid.cells() >> level).max(1) as u64;
-        let face = if grid.is_plane() { PLANE_FACE } else { (next() % 6) as u8 };
+        let face = if grid.is_plane() {
+            PLANE_FACE
+        } else {
+            (next() % 6) as u8
+        };
         let (i, j) = ((next() % cells) as i32, (next() % cells) as i32);
         let height = planet.column_height(face, i, j, level);
         if height < lo || height > hi {
-            return Err(format!("level {level} column ({face}, {i}, {j}): height {height} outside {lo}..={hi}"));
+            return Err(format!(
+                "level {level} column ({face}, {i}, {j}): height {height} outside {lo}..={hi}"
+            ));
         }
         let top = top_cells(&grid, height, level);
         for _ in 0..6 {
@@ -663,7 +857,10 @@ mod tests {
         assert!(ids.contains(&crate::layers::ID.to_string()));
         assert!(register(Arc::new(crate::layers::LayersGenerator)).is_err());
         let grid = Grid::plane(crate::grid::Shape::Plane, 1024.0, 0.1).unwrap();
-        let unknown = TerrainSource { generator: "example.none".into(), ..TerrainSource::default() };
+        let unknown = TerrainSource {
+            generator: "example.none".into(),
+            ..TerrainSource::default()
+        };
         assert!(build(&unknown, &grid).is_err());
     }
 }

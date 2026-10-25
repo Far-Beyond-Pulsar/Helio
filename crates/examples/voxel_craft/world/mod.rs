@@ -29,7 +29,13 @@ pub struct World {
 impl World {
     pub fn new(planet: Planet) -> Self {
         let snapshot = Arc::new(planet.clone());
-        Self { snapshot, worker: Worker::spawn(planet), next_ticket: 1, pending: HashMap::new(), snapshot_ticket: 0 }
+        Self {
+            snapshot,
+            worker: Worker::spawn(planet),
+            next_ticket: 1,
+            pending: HashMap::new(),
+            snapshot_ticket: 0,
+        }
     }
 
     /// The latest finished planet, for drawing and for queries.
@@ -105,14 +111,21 @@ impl World {
             let cell = self.cell_at(origin + direction * t);
             if cell != previous {
                 if self.pending.get(&cell).is_some_and(|(_, b)| b.is_some()) {
-                    return Some(RayHit { cell, previous, distance: t, normal: self.face_normal(previous, cell) });
+                    return Some(RayHit {
+                        cell,
+                        previous,
+                        distance: t,
+                        normal: self.face_normal(previous, cell),
+                    });
                 }
                 previous = cell;
             }
             t += step;
         }
         match hit {
-            Some(h) if matches!(self.pending.get(&h.cell), Some((_, None))) => self.raycast_past(origin, direction, max, h.distance),
+            Some(h) if matches!(self.pending.get(&h.cell), Some((_, None))) => {
+                self.raycast_past(origin, direction, max, h.distance)
+            }
             other => other,
         }
     }
@@ -123,10 +136,12 @@ impl World {
         if start >= max {
             return None;
         }
-        self.snapshot.raycast(origin + direction * start, direction, max - start).map(|mut h| {
-            h.distance += start;
-            h
-        })
+        self.snapshot
+            .raycast(origin + direction * start, direction, max - start)
+            .map(|mut h| {
+                h.distance += start;
+                h
+            })
     }
 
     fn face_normal(&self, from: Cell, to: Cell) -> DVec3 {

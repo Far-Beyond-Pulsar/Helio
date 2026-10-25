@@ -46,7 +46,10 @@ pub fn is_heavy(file_triangles: u64) -> bool {
 /// explicit override, only floored at 0.25 GB); otherwise 60% of the memory
 /// that is free right now, clamped to 2..24 GiB (8 GiB if unknown).
 pub fn budget_bytes(env: Option<&str>, available: Option<u64>) -> u64 {
-    if let Some(gb) = env.and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0) {
+    if let Some(gb) = env
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+    {
         return ((gb * GIB as f64) as u64).max(GIB / 4);
     }
     match available {
@@ -151,7 +154,11 @@ impl Drop for Permit<'_> {
 
 impl CookGate {
     pub fn new(budget: u64) -> Self {
-        Self { state: Mutex::new(GateState::default()), changed: Condvar::new(), budget }
+        Self {
+            state: Mutex::new(GateState::default()),
+            changed: Condvar::new(),
+            budget,
+        }
     }
 
     pub fn budget(&self) -> u64 {
@@ -171,14 +178,22 @@ impl CookGate {
 
     pub fn try_acquire(&self, bytes: u64, heavy: bool) -> Option<Permit<'_>> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        self.admit(&mut s, bytes, heavy).map(|charged| Permit { gate: self, bytes: charged, heavy })
+        self.admit(&mut s, bytes, heavy).map(|charged| Permit {
+            gate: self,
+            bytes: charged,
+            heavy,
+        })
     }
 
     pub fn acquire(&self, bytes: u64, heavy: bool) -> Permit<'_> {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             if let Some(charged) = self.admit(&mut s, bytes, heavy) {
-                return Permit { gate: self, bytes: charged, heavy };
+                return Permit {
+                    gate: self,
+                    bytes: charged,
+                    heavy,
+                };
             }
             s = self.changed.wait(s).unwrap_or_else(|e| e.into_inner());
         }
@@ -217,16 +232,18 @@ pub fn run_jobs<J: Send>(
     std::thread::scope(|scope| {
         for n in 0..workers.max(1).min(total) {
             let (queue, finished) = (&queue, &finished);
-            let _ = std::thread::Builder::new().name(format!("vg-cook-{n}")).spawn_scoped(scope, move || {
-                loop {
-                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
-                    let Some((cost, job)) = next else { break };
-                    let _permit = gate.acquire(cost.peak_bytes, cost.heavy);
-                    // A panicking cook must not wedge the others or the count.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)));
-                    finished.fetch_add(1, Ordering::Relaxed);
-                }
-            });
+            let _ = std::thread::Builder::new()
+                .name(format!("vg-cook-{n}"))
+                .spawn_scoped(scope, move || {
+                    loop {
+                        let next = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+                        let Some((cost, job)) = next else { break };
+                        let _permit = gate.acquire(cost.peak_bytes, cost.heavy);
+                        // A panicking cook must not wedge the others or the count.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)));
+                        finished.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
         }
         while finished.load(Ordering::Relaxed) < total {
             std::thread::sleep(Duration::from_millis(250));
@@ -249,8 +266,9 @@ pub fn format_duration(seconds: f64) -> String {
 /// Remaining seconds from the throughput so far; `None` until something has
 /// finished (a half-cooked asset says nothing reliable about the rest).
 pub fn eta_seconds(done_triangles: u64, total_triangles: u64, elapsed: f64) -> Option<f64> {
-    (done_triangles > 0 && elapsed > 0.0)
-        .then(|| total_triangles.saturating_sub(done_triangles) as f64 * elapsed / done_triangles as f64)
+    (done_triangles > 0 && elapsed > 0.0).then(|| {
+        total_triangles.saturating_sub(done_triangles) as f64 * elapsed / done_triangles as f64
+    })
 }
 
 pub fn millions(t: u64) -> String {
@@ -293,7 +311,9 @@ fn temp_path(path: &Path) -> PathBuf {
 /// Remove temp files a killed run left behind (older than ten minutes, so a
 /// second running instance is not disturbed).
 pub fn clean_stale_temp_files(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "tmp")
@@ -320,7 +340,8 @@ pub fn force_recook() -> bool {
     static FORCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FORCE.get_or_init(|| {
         let on = std::env::args().skip(1).any(|a| a == "--force-recook")
-            || std::env::var("VG_STRESS_FORCE_RECOOK").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false"));
+            || std::env::var("VG_STRESS_FORCE_RECOOK")
+                .is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false"));
         if on {
             println!("[Museum cook] --force-recook: every .vgeo cache is ignored and cooked again");
         }
@@ -330,7 +351,8 @@ pub fn force_recook() -> bool {
 
 /// Assets already cooked again in this run under [`force_recook`].
 fn recooked() -> &'static Mutex<std::collections::HashSet<u128>> {
-    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<u128>>> = std::sync::OnceLock::new();
+    static SET: std::sync::OnceLock<Mutex<std::collections::HashSet<u128>>> =
+        std::sync::OnceLock::new();
     SET.get_or_init(Default::default)
 }
 
@@ -348,8 +370,9 @@ fn read_vgeo_with(cache: &Path, content: u128, force: bool) -> Option<Arc<VgeoBy
     // File-backed: the header is read now, pages as the streamer asks for them.
     // (Reading the whole file held ~4 GB of RAM for this scene.)
     let source = VgeoBytes::open(&vgeo_path(cache, content)).ok()?;
-    (source.header().content_id == content_words(content) && helio_vg_build::is_current_cook(&source.header()))
-        .then(|| Arc::new(source))
+    (source.header().content_id == content_words(content)
+        && helio_vg_build::is_current_cook(&source.header()))
+    .then(|| Arc::new(source))
 }
 
 // ── cooking ──────────────────────────────────────────────────────────────────
@@ -358,7 +381,11 @@ pub fn stable_content_id(vertices: &[PackedVertex], indices: &[u32]) -> u128 {
     let mut low = 0xcbf29ce484222325u64;
     let mut high = 0x84222325cbf29ce4u64;
     let bytes = bytemuck::cast_slice::<PackedVertex, u8>(vertices);
-    for byte in bytes.iter().copied().chain(bytemuck::cast_slice::<u32, u8>(indices).iter().copied()) {
+    for byte in bytes
+        .iter()
+        .copied()
+        .chain(bytemuck::cast_slice::<u32, u8>(indices).iter().copied())
+    {
         low = (low ^ u64::from(byte)).wrapping_mul(0x100000001b3);
         high = (high ^ u64::from(byte).rotate_left(1)).wrapping_mul(0x9e3779b185ebca87);
     }
@@ -369,7 +396,11 @@ pub fn pack_vgeo_attributes(vertices: &[PackedVertex]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(vertices.len() * helio_vg_format::ATTR_STRIDE as usize);
     for vertex in vertices {
         let tangent = (vertex.tangent & 0x00ff_ffff)
-            | ((if vertex.bitangent_sign < 0.0 { 0x81u32 } else { 0x7fu32 }) << 24);
+            | ((if vertex.bitangent_sign < 0.0 {
+                0x81u32
+            } else {
+                0x7fu32
+            }) << 24);
         bytes.extend_from_slice(&vertex.normal.to_le_bytes());
         bytes.extend_from_slice(&tangent.to_le_bytes());
         for uv in [vertex.tex_coords0, vertex.tex_coords1] {
@@ -402,7 +433,10 @@ pub fn load_or_build_vgeo_cache(
     };
     let bytes = helio_vg_build::build_vgeo(
         &mesh,
-        &BuildOptions { content_id: content_words(content_id), resident_levels: 2 },
+        &BuildOptions {
+            content_id: content_words(content_id),
+            resident_levels: 2,
+        },
     )
     .map_err(|error| error.to_string())?;
     drop((positions, attributes));
@@ -421,7 +455,10 @@ pub fn load_or_build_vgeo_cache(
 pub fn placeholder_mesh(ordinal: u32) -> MeshUpload {
     let mut vertex = PackedVertex::default();
     vertex.tex_coords0 = [ordinal as f32, 0.0];
-    MeshUpload { vertices: vec![vertex; 3], indices: vec![0, 1, 2] }
+    MeshUpload {
+        vertices: vec![vertex; 3],
+        indices: vec![0, 1, 2],
+    }
 }
 
 #[cfg(test)]
@@ -454,7 +491,10 @@ mod tests {
     fn gate_bounds_concurrent_memory() {
         let gate = CookGate::new(1000 * MIB);
         let a = gate.try_acquire(600 * MIB, false).expect("first fits");
-        assert!(gate.try_acquire(600 * MIB, false).is_none(), "second would exceed the budget");
+        assert!(
+            gate.try_acquire(600 * MIB, false).is_none(),
+            "second would exceed the budget"
+        );
         let b = gate.try_acquire(400 * MIB, false).expect("exactly fits");
         assert_eq!(gate.in_use(), (1000 * MIB, 2));
         drop(a);
@@ -467,11 +507,19 @@ mod tests {
     fn oversized_job_runs_alone_and_blocks_others() {
         let gate = CookGate::new(1000 * MIB);
         let small = gate.try_acquire(10 * MIB, false).unwrap();
-        assert!(gate.try_acquire(5000 * MIB, false).is_none(), "must wait for an empty gate");
+        assert!(
+            gate.try_acquire(5000 * MIB, false).is_none(),
+            "must wait for an empty gate"
+        );
         drop(small);
-        let big = gate.try_acquire(5000 * MIB, false).expect("alone, charged at most the budget");
+        let big = gate
+            .try_acquire(5000 * MIB, false)
+            .expect("alone, charged at most the budget");
         assert_eq!(gate.in_use().0, 1000 * MIB);
-        assert!(gate.try_acquire(1, false).is_none(), "nothing runs beside an over-budget job");
+        assert!(
+            gate.try_acquire(1, false).is_none(),
+            "nothing runs beside an over-budget job"
+        );
         drop(big);
     }
 
@@ -479,8 +527,13 @@ mod tests {
     fn only_one_heavy_cook_at_a_time() {
         let gate = CookGate::new(100 * GIB);
         let heavy = gate.try_acquire(GIB, true).unwrap();
-        assert!(gate.try_acquire(GIB, true).is_none(), "second 10M+ cook must wait despite free memory");
-        let light = gate.try_acquire(GIB, false).expect("light jobs are not blocked");
+        assert!(
+            gate.try_acquire(GIB, true).is_none(),
+            "second 10M+ cook must wait despite free memory"
+        );
+        let light = gate
+            .try_acquire(GIB, false)
+            .expect("light jobs are not blocked");
         drop(heavy);
         let heavy2 = gate.try_acquire(GIB, true).expect("heavy slot freed");
         drop((light, heavy2));
@@ -495,7 +548,15 @@ mod tests {
         let now = AtomicU64::new(0);
         let jobs: Vec<(JobCost, u64)> = [60u64, 10, 30, 20, 50, 40]
             .iter()
-            .map(|&mb| (JobCost { peak_bytes: mb * MIB, heavy: false }, mb))
+            .map(|&mb| {
+                (
+                    JobCost {
+                        peak_bytes: mb * MIB,
+                        heavy: false,
+                    },
+                    mb,
+                )
+            })
             .collect();
         run_jobs(
             jobs,
@@ -510,7 +571,11 @@ mod tests {
             },
             &mut || {},
         );
-        assert!(peak.load(Ordering::SeqCst) <= 100, "peak {} MiB", peak.load(Ordering::SeqCst));
+        assert!(
+            peak.load(Ordering::SeqCst) <= 100,
+            "peak {} MiB",
+            peak.load(Ordering::SeqCst)
+        );
         let order = order.into_inner().unwrap();
         assert_eq!(order.len(), 6);
         // Dequeued in ascending order (the first started is the smallest).
@@ -522,7 +587,17 @@ mod tests {
     fn scheduler_survives_a_panicking_job() {
         let gate = CookGate::new(GIB);
         let done = AtomicUsize::new(0);
-        let jobs: Vec<(JobCost, u32)> = (0..4).map(|n| (JobCost { peak_bytes: MIB, heavy: false }, n)).collect();
+        let jobs: Vec<(JobCost, u32)> = (0..4)
+            .map(|n| {
+                (
+                    JobCost {
+                        peak_bytes: MIB,
+                        heavy: false,
+                    },
+                    n,
+                )
+            })
+            .collect();
         run_jobs(
             jobs,
             &gate,
@@ -574,7 +649,10 @@ mod tests {
         std::fs::create_dir(&blocked).unwrap();
         assert!(write_atomic(&blocked, b"x").is_err());
         assert!(blocked.is_dir());
-        assert!(std::fs::read_dir(&dir).unwrap().flatten().all(|e| e.path().extension().is_none_or(|x| x != "tmp")));
+        assert!(std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .all(|e| e.path().extension().is_none_or(|x| x != "tmp")));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -634,10 +712,19 @@ mod tests {
         load_or_build_vgeo_cache(content, &vertices, &indices, &dir).unwrap();
         // As if a new run: nothing cooked yet.
         recooked().lock().unwrap().remove(&content);
-        assert!(read_vgeo_with(&dir, content, false).is_some(), "valid cache is used normally");
-        assert!(read_vgeo_with(&dir, content, true).is_none(), "forced: the valid cache is ignored");
+        assert!(
+            read_vgeo_with(&dir, content, false).is_some(),
+            "valid cache is used normally"
+        );
+        assert!(
+            read_vgeo_with(&dir, content, true).is_none(),
+            "forced: the valid cache is ignored"
+        );
         // Cooking again writes it and marks it done; it is read back normally afterwards.
-        let before = std::fs::metadata(vgeo_path(&dir, content)).unwrap().modified().unwrap();
+        let before = std::fs::metadata(vgeo_path(&dir, content))
+            .unwrap()
+            .modified()
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let (_, hit) = {
             // The forced run misses the cache, so the build path runs and rewrites the file.
@@ -645,12 +732,25 @@ mod tests {
             let bytes_before = std::fs::read(vgeo_path(&dir, content)).unwrap();
             std::fs::remove_file(vgeo_path(&dir, content)).unwrap();
             let r = load_or_build_vgeo_cache(content, &vertices, &indices, &dir).unwrap();
-            assert_eq!(std::fs::read(vgeo_path(&dir, content)).unwrap(), bytes_before, "recook is deterministic");
+            assert_eq!(
+                std::fs::read(vgeo_path(&dir, content)).unwrap(),
+                bytes_before,
+                "recook is deterministic"
+            );
             r
         };
         assert!(!hit);
-        assert!(std::fs::metadata(vgeo_path(&dir, content)).unwrap().modified().unwrap() >= before);
-        assert!(read_vgeo_with(&dir, content, true).is_some(), "cooked this run: read back normally");
+        assert!(
+            std::fs::metadata(vgeo_path(&dir, content))
+                .unwrap()
+                .modified()
+                .unwrap()
+                >= before
+        );
+        assert!(
+            read_vgeo_with(&dir, content, true).is_some(),
+            "cooked this run: read back normally"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -660,6 +760,9 @@ mod tests {
         let b = placeholder_mesh(2);
         assert_eq!(a.indices.len(), 3);
         assert!(a.vertices.iter().all(|v| v.position == [0.0; 3]));
-        assert_ne!(bytemuck::cast_slice::<_, u8>(&a.vertices), bytemuck::cast_slice::<_, u8>(&b.vertices));
+        assert_ne!(
+            bytemuck::cast_slice::<_, u8>(&a.vertices),
+            bytemuck::cast_slice::<_, u8>(&b.vertices)
+        );
     }
 }

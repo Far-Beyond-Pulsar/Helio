@@ -232,10 +232,23 @@ struct Content {
 }
 
 impl Content {
-    const DETAIL: Self =
-        Self { brightness: 1.0, bar: None, bar_width: 0.0, pan: 0.0, foliage: false, masked: false, motion_vectors: false };
-    const FOLIAGE: Self = Self { foliage: true, ..Self::DETAIL };
-    const FOLIAGE_MASKED: Self = Self { masked: true, ..Self::FOLIAGE };
+    const DETAIL: Self = Self {
+        brightness: 1.0,
+        bar: None,
+        bar_width: 0.0,
+        pan: 0.0,
+        foliage: false,
+        masked: false,
+        motion_vectors: false,
+    };
+    const FOLIAGE: Self = Self {
+        foliage: true,
+        ..Self::DETAIL
+    };
+    const FOLIAGE_MASKED: Self = Self {
+        masked: true,
+        ..Self::FOLIAGE
+    };
 }
 
 struct Input {
@@ -248,13 +261,27 @@ struct Input {
 }
 
 impl helio_core::SceneInput for Input {
-    fn device(&self) -> &Arc<wgpu::Device> { &self.device }
-    fn queue(&self) -> &Arc<wgpu::Queue> { &self.queue }
-    fn frame_count(&self) -> u64 { self.frame }
-    fn camera(&self) -> &wgpu::Buffer { &self.camera }
-    fn camera_data(&self) -> &helio_core::GpuCameraUniforms { &self.camera_data }
-    fn camera_generation(&self) -> u64 { 0 }
-    fn scene_buffers(&self) -> &helio_core::SceneBufferProjection { &self.projection }
+    fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+    fn queue(&self) -> &Arc<wgpu::Queue> {
+        &self.queue
+    }
+    fn frame_count(&self) -> u64 {
+        self.frame
+    }
+    fn camera(&self) -> &wgpu::Buffer {
+        &self.camera
+    }
+    fn camera_data(&self) -> &helio_core::GpuCameraUniforms {
+        &self.camera_data
+    }
+    fn camera_generation(&self) -> u64 {
+        0
+    }
+    fn scene_buffers(&self) -> &helio_core::SceneBufferProjection {
+        &self.projection
+    }
 }
 
 /// Fixtures create their own devices; several waiting on the GPU at once
@@ -272,7 +299,11 @@ struct Serial(Option<std::sync::MutexGuard<'static, ()>>);
 impl Serial {
     fn take() -> Self {
         let held = SERIAL_HELD.with(|n| n.replace(n.get() + 1));
-        Self((held == 0).then(|| GPU_SERIAL.lock().unwrap_or_else(|poison| poison.into_inner())))
+        Self((held == 0).then(|| {
+            GPU_SERIAL
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+        }))
     }
 }
 
@@ -328,8 +359,7 @@ fn luma(rgba: &[f32; 4]) -> f32 {
 impl Fixture {
     fn new(quality: TsrQuality, output: [u32; 2]) -> Option<Self> {
         let serial = Serial::take();
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
             eprintln!("SKIP: no GPU adapter for TSR quality metrics");
             return None;
@@ -343,7 +373,11 @@ impl Fixture {
         let texture = |size: [u32; 2], format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("TSR quality fixture"),
-                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -367,7 +401,11 @@ impl Fixture {
             wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
         let depth_view = depth.create_view(&Default::default());
-        let reference_depth = texture(output, wgpu::TextureFormat::Depth32Float, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let reference_depth = texture(
+            output,
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
         // A plane 3 m in front of the camera fills the frame; the foliage's
         // leaf blocks stand 1 m in front of it.
         let proj = helio_core::depth::orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 10.0);
@@ -393,7 +431,10 @@ impl Fixture {
                 module: &module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::TextureFormat::Rgba16Float.into()), Some(wgpu::TextureFormat::Rgba16Float.into())],
+                targets: &[
+                    Some(wgpu::TextureFormat::Rgba16Float.into()),
+                    Some(wgpu::TextureFormat::Rgba16Float.into()),
+                ],
             }),
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -416,7 +457,10 @@ impl Fixture {
         let scene_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &scene_pipeline.get_bind_group_layout(0),
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: scene_uniform.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scene_uniform.as_entire_binding(),
+            }],
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TSR fixture cameras"),
@@ -427,8 +471,15 @@ impl Fixture {
 
         let mut graph = helio_core::RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(
-            TsrPass::new(&device, internal[0], internal[1], output[0], output[1],
-                wgpu::TextureFormat::Rgba16Float, quality)
+            TsrPass::new(
+                &device,
+                internal[0],
+                internal[1],
+                output[0],
+                output[1],
+                wgpu::TextureFormat::Rgba16Float,
+                quality,
+            )
             .with_intermediate_output()
             .with_stochastic_mask()
             .with_motion_vectors(),
@@ -468,41 +519,94 @@ impl Fixture {
         })
     }
 
-    fn device(&self) -> &wgpu::Device { &self.input.device }
-    fn queue(&self) -> &wgpu::Queue { &self.input.queue }
+    fn device(&self) -> &wgpu::Device {
+        &self.input.device
+    }
+    fn queue(&self) -> &wgpu::Queue {
+        &self.input.queue
+    }
 
     fn view(pan: f32) -> Mat4 {
-        glam::camera::rh::view::look_at_mat4(Vec3::new(pan, 0.0, 3.0), Vec3::new(pan, 0.0, 0.0), Vec3::Y)
+        glam::camera::rh::view::look_at_mat4(
+            Vec3::new(pan, 0.0, 3.0),
+            Vec3::new(pan, 0.0, 0.0),
+            Vec3::Y,
+        )
     }
 
     /// Draws `content` into `view`, `depth` and `motion` (the bar's motion
     /// vectors, `bar_shift` world units since `prev_view_proj`'s frame).
     #[allow(clippy::too_many_arguments)]
-    fn draw_scene(&self, view: &wgpu::TextureView, depth: &wgpu::TextureView, motion: &wgpu::TextureView,
-        inv_view_proj: Mat4, prev_view_proj: Mat4, bar_shift: f32, content: Content, size: [u32; 2], samples: f32) {
-        let scene = if content.foliage { 2.0 } else if content.bar.is_some() { 1.0 } else { 0.0 };
+    fn draw_scene(
+        &self,
+        view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        motion: &wgpu::TextureView,
+        inv_view_proj: Mat4,
+        prev_view_proj: Mat4,
+        bar_shift: f32,
+        content: Content,
+        size: [u32; 2],
+        samples: f32,
+    ) {
+        let scene = if content.foliage {
+            2.0
+        } else if content.bar.is_some() {
+            1.0
+        } else {
+            0.0
+        };
         let uniform = SceneUniform {
             inv_view_proj: inv_view_proj.to_cols_array(),
-            params: [content.brightness, content.bar.unwrap_or(0.0), scene, samples],
-            frame_size: [size[0] as f32, size[1] as f32, world_per_pixel(self.output), content.bar_width],
-            extra: [self.input.frame as f32, self.plane_depths[0], self.plane_depths[1], self.plane_depths[2]],
+            params: [
+                content.brightness,
+                content.bar.unwrap_or(0.0),
+                scene,
+                samples,
+            ],
+            frame_size: [
+                size[0] as f32,
+                size[1] as f32,
+                world_per_pixel(self.output),
+                content.bar_width,
+            ],
+            extra: [
+                self.input.frame as f32,
+                self.plane_depths[0],
+                self.plane_depths[1],
+                self.plane_depths[2],
+            ],
             prev_view_proj: prev_view_proj.to_cols_array(),
-            motion: [bar_shift, if content.motion_vectors { 1.0 } else { 0.0 }, 0.0, 0.0],
+            motion: [
+                bar_shift,
+                if content.motion_vectors { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         };
-        self.queue().write_buffer(&self.scene_uniform, 0, bytemuck::bytes_of(&uniform));
+        self.queue()
+            .write_buffer(&self.scene_uniform, 0, bytemuck::bytes_of(&uniform));
         let mut encoder = self.device().create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TSR fixture scene"),
-                color_attachments: &[view, motion].map(|view| Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                })),
+                color_attachments: &[view, motion].map(|view| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })
+                }),
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
@@ -520,7 +624,10 @@ impl Fixture {
         let frame = self.input.frame;
         // The renderer's own sequence, starting where its frame cursor does.
         let jitter = helio_core::temporal::r1_r2_jitter(frame + 1);
-        let ndc = [jitter[0] * 2.0 / self.internal[0] as f32, jitter[1] * 2.0 / self.internal[1] as f32];
+        let ndc = [
+            jitter[0] * 2.0 / self.internal[0] as f32,
+            jitter[1] * 2.0 / self.internal[1] as f32,
+        ];
         let view = Self::view(content.pan);
         let proj = Mat4::from_translation(Vec3::new(ndc[0], ndc[1], 0.0))
             * helio_core::depth::orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 10.0);
@@ -528,19 +635,46 @@ impl Fixture {
         let previous = self.previous_view_proj.unwrap_or(view_proj);
         self.previous_view_proj = Some(view_proj);
         let camera = helio_core::GpuCameraUniforms::new(
-            view, proj, Vec3::new(content.pan, 0.0, 3.0), 0.1, 10.0, frame as u32, ndc, previous,
+            view,
+            proj,
+            Vec3::new(content.pan, 0.0, 3.0),
+            0.1,
+            10.0,
+            frame as u32,
+            ndc,
+            previous,
         );
-        self.queue().write_buffer(&self.input.camera, 0, bytemuck::cast_slice(&[camera, camera]));
+        self.queue().write_buffer(
+            &self.input.camera,
+            0,
+            bytemuck::cast_slice(&[camera, camera]),
+        );
         self.input.camera_data = camera;
         let bar = content.bar.unwrap_or(0.0);
-        let bar_shift = self.bar_shift_override.take().unwrap_or(bar - self.previous_bar.unwrap_or(bar));
+        let bar_shift = self
+            .bar_shift_override
+            .take()
+            .unwrap_or(bar - self.previous_bar.unwrap_or(bar));
         self.previous_bar = Some(bar);
-        self.draw_scene(&self.color_view, &self.depth_view, &self.motion_view, view_proj.inverse(), previous, bar_shift,
-            content, self.internal, 1.0);
+        self.draw_scene(
+            &self.color_view,
+            &self.depth_view,
+            &self.motion_view,
+            view_proj.inverse(),
+            previous,
+            bar_shift,
+            content,
+            self.internal,
+            1.0,
+        );
 
         let mut registry = helio_core::ResourceRegistry::empty();
         // The whole of the foliage's lighting is sampled stochastically.
-        let marked = if content.foliage && content.masked { 1.0 } else { 0.0 };
+        let marked = if content.foliage && content.masked {
+            1.0
+        } else {
+            0.0
+        };
         let mut encoder = self.device().create_command_encoder(&Default::default());
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("TSR fixture stochastic mask"),
@@ -549,18 +683,40 @@ impl Fixture {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color { r: marked, g: 0.0, b: 0.0, a: 0.0 }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: marked,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
             ..Default::default()
         });
         self.queue().submit([encoder.finish()]);
-        registry.write(helio_core::ResourceKey::new("pre_aa"), &self.color_view, "Fixture");
-        registry.write(helio_core::ResourceKey::new(STOCHASTIC_MASK), &self.mask_view, "Fixture");
-        registry.write(helio_core::ResourceKey::new(MOTION_VECTORS), &self.motion_view, "Fixture");
+        registry.write(
+            helio_core::ResourceKey::new("pre_aa"),
+            &self.color_view,
+            "Fixture",
+        );
+        registry.write(
+            helio_core::ResourceKey::new(STOCHASTIC_MASK),
+            &self.mask_view,
+            "Fixture",
+        );
+        registry.write(
+            helio_core::ResourceKey::new(MOTION_VECTORS),
+            &self.motion_view,
+            "Fixture",
+        );
         self.graph
-            .execute_with_registry(&self.input, &self.target_view, &self.depth_view, &mut registry)
+            .execute_with_registry(
+                &self.input,
+                &self.target_view,
+                &self.depth_view,
+                &mut registry,
+            )
             .unwrap();
         self.input.frame += 1;
         let output = &self.graph.find_pass::<TsrPass>().unwrap().output_texture;
@@ -571,8 +727,17 @@ impl Fixture {
     fn reference(&self, content: Content) -> Vec<f32> {
         let proj = helio_core::depth::orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 10.0);
         let view_proj = proj * Self::view(content.pan);
-        self.draw_scene(&self.reference_view, &self.reference_depth_view, &self.reference_motion_view, view_proj.inverse(),
-            view_proj, 0.0, content, self.output, 8.0);
+        self.draw_scene(
+            &self.reference_view,
+            &self.reference_depth_view,
+            &self.reference_motion_view,
+            view_proj.inverse(),
+            view_proj,
+            0.0,
+            content,
+            self.output,
+            8.0,
+        );
         self.read(&self.reference).iter().map(luma).collect()
     }
 
@@ -590,14 +755,22 @@ impl Fixture {
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(stride), rows_per_image: Some(size.height) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(size.height),
+                },
             },
             size,
         );
         self.queue().submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        self.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         rx.recv().unwrap().unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
         let mut texels = Vec::with_capacity((size.width * size.height) as usize);
@@ -646,14 +819,24 @@ fn still_metrics(quality: TsrQuality, content: Content) -> Option<StillMetrics> 
     let edges: Vec<bool> = (0..truth.len())
         .map(|i| {
             let (x, y) = ((i % 128) as i32, (i / 128) as i32);
-            let at = |dx: i32, dy: i32| truth[((y + dy).clamp(0, 127) * 128 + (x + dx).clamp(0, 127)) as usize];
-            (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))).any(|(dx, dy)| (at(dx, dy) - truth[i]).abs() > 0.02)
+            let at = |dx: i32, dy: i32| {
+                truth[((y + dy).clamp(0, 127) * 128 + (x + dx).clamp(0, 127)) as usize]
+            };
+            (-1..=1)
+                .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                .any(|(dx, dy)| (at(dx, dy) - truth[i]).abs() > 0.02)
         })
         .collect();
     let edge_count = edges.iter().filter(|e| **e).count() as f32;
     let mut previous: Option<(Vec<f32>, Vec<f32>)> = None;
-    let mut metrics =
-        StillMetrics { flicker: 0.0, edge_flicker: 0.0, input_flicker: 0.0, error: 0.0, display_flicker: 0.0, changing: 0.0 };
+    let mut metrics = StillMetrics {
+        flicker: 0.0,
+        edge_flicker: 0.0,
+        input_flicker: 0.0,
+        error: 0.0,
+        display_flicker: 0.0,
+        changing: 0.0,
+    };
     let mut average = vec![0.0; truth.len()];
     const WARMUP: usize = 64;
     const MEASURED: usize = 64;
@@ -663,12 +846,24 @@ fn still_metrics(quality: TsrQuality, content: Content) -> Option<StillMetrics> 
         if frame >= WARMUP {
             let (last_output, last_input) = previous.as_ref().unwrap();
             metrics.flicker += mean_abs_difference(&output, last_output) / MEASURED as f32;
-            let changes: Vec<f32> = output.iter().zip(last_output).map(|(a, b)| (display(*a) - display(*b)).abs()).collect();
-            metrics.display_flicker += changes.iter().sum::<f32>() / changes.len() as f32 / MEASURED as f32;
-            metrics.changing += changes.iter().filter(|c| **c > 0.02).count() as f32 / changes.len() as f32 / MEASURED as f32;
+            let changes: Vec<f32> = output
+                .iter()
+                .zip(last_output)
+                .map(|(a, b)| (display(*a) - display(*b)).abs())
+                .collect();
+            metrics.display_flicker +=
+                changes.iter().sum::<f32>() / changes.len() as f32 / MEASURED as f32;
+            metrics.changing += changes.iter().filter(|c| **c > 0.02).count() as f32
+                / changes.len() as f32
+                / MEASURED as f32;
             metrics.input_flicker += mean_abs_difference(&input, last_input) / MEASURED as f32;
-            let edge_change: f32 = output.iter().zip(last_output).zip(&edges)
-                .filter(|(_, e)| **e).map(|((a, b), _)| (a - b).abs()).sum();
+            let edge_change: f32 = output
+                .iter()
+                .zip(last_output)
+                .zip(&edges)
+                .filter(|(_, e)| **e)
+                .map(|((a, b), _)| (a - b).abs())
+                .sum();
             metrics.edge_flicker += edge_change / edge_count / MEASURED as f32;
             for (a, o) in average.iter_mut().zip(&output) {
                 *a += o / MEASURED as f32;
@@ -694,8 +889,15 @@ fn still_metrics(quality: TsrQuality, content: Content) -> Option<StillMetrics> 
 /// projection is not old light, and with stochastic lighting (whose sample
 /// pattern is the same for the whole frame) two histories of different
 /// lengths average its cycle differently, a few percent either way.
-fn light_switch_frames(quality: TsrQuality, content: Content, factor: f32) -> Option<(Option<usize>, f32)> {
-    let switched = Content { brightness: factor, ..content };
+fn light_switch_frames(
+    quality: TsrQuality,
+    content: Content,
+    factor: f32,
+) -> Option<(Option<usize>, f32)> {
+    let switched = Content {
+        brightness: factor,
+        ..content
+    };
     let mut always = Fixture::new(quality, [128, 128])?;
     let mut fixture = Fixture::new(quality, [128, 128])?;
     let mut old = vec![0.0; 128 * 128];
@@ -734,7 +936,12 @@ fn light_switch_frames(quality: TsrQuality, content: Content, factor: f32) -> Op
 /// contrast, and more than 1.5 px away from either of its edges; and the
 /// mean |L - truth| over the frame, which also catches an edge smeared by
 /// resampling.
-fn trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_motion: bool) -> Option<(f32, f32)> {
+fn trail_pixels(
+    quality: TsrQuality,
+    width: f32,
+    speed: f32,
+    camera_motion: bool,
+) -> Option<(f32, f32)> {
     let mut fixture = Fixture::new(quality, [128, 128])?;
     let px = world_per_pixel(fixture.output);
     let mut trails = 0.0;
@@ -746,9 +953,18 @@ fn trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_motion: bool
         // The bar starts near the left edge; camera motion moves the camera
         // left so the world-fixed bar travels right on screen.
         let content = if camera_motion {
-            Content { bar: Some(-0.8), bar_width: width, pan: -travelled, ..Content::DETAIL }
+            Content {
+                bar: Some(-0.8),
+                bar_width: width,
+                pan: -travelled,
+                ..Content::DETAIL
+            }
         } else {
-            Content { bar: Some(-0.8 + travelled), bar_width: width, ..Content::DETAIL }
+            Content {
+                bar: Some(-0.8 + travelled),
+                bar_width: width,
+                ..Content::DETAIL
+            }
         };
         let output = fixture.frame(content);
         if frame < FRAMES - MEASURED {
@@ -788,8 +1004,13 @@ const EMISSIVE_BAR: f32 = 30.0;
 /// same pass shown the foliage alone, in lockstep (same camera, input and
 /// jitter but for the bar). Under that, a fresh pixel's stochastic lighting
 /// differs from the converged one's by up to about 2.
-fn emissive_trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_motion: bool, motion_vectors: bool)
-    -> Option<f32> {
+fn emissive_trail_pixels(
+    quality: TsrQuality,
+    width: f32,
+    speed: f32,
+    camera_motion: bool,
+    motion_vectors: bool,
+) -> Option<f32> {
     let mut fixture = Fixture::new(quality, [128, 128])?;
     let mut plain = Fixture::new(quality, [128, 128])?;
     let px = world_per_pixel(fixture.output);
@@ -803,8 +1024,16 @@ fn emissive_trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_mot
         } else {
             (-0.8 + frame as f32 * speed * px, 0.0)
         };
-        let foliage = Content { pan, ..Content::FOLIAGE };
-        let output = fixture.frame(Content { bar: Some(bar), bar_width: width, motion_vectors, ..foliage });
+        let foliage = Content {
+            pan,
+            ..Content::FOLIAGE
+        };
+        let output = fixture.frame(Content {
+            bar: Some(bar),
+            bar_width: width,
+            motion_vectors,
+            ..foliage
+        });
         let without = plain.frame(foliage);
         if frame < FRAMES - MEASURED {
             continue;
@@ -812,7 +1041,10 @@ fn emissive_trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_mot
         // Screen-space left edge of the bar, in output pixels.
         let left = (bar - pan + 1.0) / px;
         let right = left + width;
-        let count = output.iter().zip(&without).enumerate()
+        let count = output
+            .iter()
+            .zip(&without)
+            .enumerate()
             .filter(|(i, (o, w))| {
                 let x = (i % 128) as f32 + 0.5;
                 (x < left - 1.5 || x > right + 1.5) && *o - *w > 0.1 * EMISSIVE_BAR
@@ -852,11 +1084,21 @@ fn emissive_trail_pixels(quality: TsrQuality, width: f32, speed: f32, camera_mot
 #[test]
 fn still_jittered_wires_do_not_flicker() {
     for quality in [TsrQuality::Native, TsrQuality::Quality] {
-        let Some(m) = still_metrics(quality, Content::DETAIL) else { return };
+        let Some(m) = still_metrics(quality, Content::DETAIL) else {
+            return;
+        };
         eprintln!("TSR {quality:?}: still flicker {:.5} (edges {:.5}, input {:.5}) mean |dL|/frame, error vs truth {:.5}",
             m.flicker, m.edge_flicker, m.input_flicker, m.error);
-        assert!(m.flicker < 0.001, "{quality:?}: converged still image flickers: {:.5} mean |dL| per frame", m.flicker);
-        assert!(m.error < 0.023, "{quality:?}: converged image strays from ground truth (blur?): {:.5}", m.error);
+        assert!(
+            m.flicker < 0.001,
+            "{quality:?}: converged still image flickers: {:.5} mean |dL| per frame",
+            m.flicker
+        );
+        assert!(
+            m.error < 0.023,
+            "{quality:?}: converged image strays from ground truth (blur?): {:.5}",
+            m.error
+        );
     }
 }
 
@@ -868,21 +1110,42 @@ fn still_jittered_wires_do_not_flicker() {
 /// help.
 #[test]
 fn still_foliage_does_not_shimmer() {
-    for quality in [TsrQuality::Native, TsrQuality::Quality, TsrQuality::Balanced] {
-        let Some(plain) = still_metrics(quality, Content::FOLIAGE) else { return };
-        let Some(masked) = still_metrics(quality, Content::FOLIAGE_MASKED) else { return };
+    for quality in [
+        TsrQuality::Native,
+        TsrQuality::Quality,
+        TsrQuality::Balanced,
+    ] {
+        let Some(plain) = still_metrics(quality, Content::FOLIAGE) else {
+            return;
+        };
+        let Some(masked) = still_metrics(quality, Content::FOLIAGE_MASKED) else {
+            return;
+        };
         for (m, mask) in [(&plain, "unmasked"), (&masked, "masked")] {
             eprintln!("TSR {quality:?} {mask}: foliage flicker {:.5} (input {:.5}) mean |dL|/frame, display {:.5}, \
                 {:.2} % changing >2 %, error vs truth {:.5}",
                 m.flicker, m.input_flicker, m.display_flicker, m.changing * 100.0, m.error);
-            assert!(m.changing < 0.005, "{quality:?} {mask}: {:.2} % of foliage pixels change by over 2 % a frame",
-                m.changing * 100.0);
-            assert!(m.display_flicker < 0.002, "{quality:?} {mask}: foliage shimmers: {:.5} mean |dT| per frame",
-                m.display_flicker);
-            assert!(m.error < 0.19, "{quality:?} {mask}: foliage strays from ground truth (blur?): {:.5}", m.error);
+            assert!(
+                m.changing < 0.005,
+                "{quality:?} {mask}: {:.2} % of foliage pixels change by over 2 % a frame",
+                m.changing * 100.0
+            );
+            assert!(
+                m.display_flicker < 0.002,
+                "{quality:?} {mask}: foliage shimmers: {:.5} mean |dT| per frame",
+                m.display_flicker
+            );
+            assert!(
+                m.error < 0.19,
+                "{quality:?} {mask}: foliage strays from ground truth (blur?): {:.5}",
+                m.error
+            );
         }
-        assert!(masked.changing <= plain.changing + 0.0005 && masked.display_flicker <= plain.display_flicker * 1.05,
-            "{quality:?}: the stochastic mask made foliage less stable");
+        assert!(
+            masked.changing <= plain.changing + 0.0005
+                && masked.display_flicker <= plain.display_flicker * 1.05,
+            "{quality:?}: the stochastic mask made foliage less stable"
+        );
     }
 }
 
@@ -891,7 +1154,9 @@ fn light_switch_without_motion_does_not_ghost() {
     for content in [Content::DETAIL, Content::FOLIAGE, Content::FOLIAGE_MASKED] {
         for quality in [TsrQuality::Native, TsrQuality::Quality] {
             for factor in [0.2, 5.0] {
-                let Some((frames, stale)) = light_switch_frames(quality, content, factor) else { return };
+                let Some((frames, stale)) = light_switch_frames(quality, content, factor) else {
+                    return;
+                };
                 let name = match (content.foliage, content.masked) {
                     (false, _) => "detail",
                     (true, false) => "foliage",
@@ -911,12 +1176,20 @@ fn light_switch_without_motion_does_not_ghost() {
 fn moving_edges_leave_no_trails() {
     for quality in [TsrQuality::Native, TsrQuality::Quality] {
         for (width, camera_motion) in [(6.0, false), (6.0, true), (0.5, false), (0.5, true)] {
-            let Some((trails, error)) = trail_pixels(quality, width, 1.5, camera_motion) else { return };
+            let Some((trails, error)) = trail_pixels(quality, width, 1.5, camera_motion) else {
+                return;
+            };
             let motion = if camera_motion { "camera" } else { "object" };
             eprintln!("TSR {quality:?}: {width} px {motion} motion trail {trails:.1} px/frame, error vs truth {error:.5}");
             // A 128-row image: 4 pixels is a stray pixel, not a trail.
-            assert!(trails <= 4.0, "{quality:?}: {width} px bar under {motion} motion trails {trails:.1} px per frame");
-            assert!(error < 0.01, "{quality:?}: {width} px bar under {motion} motion: error {error:.5} vs truth");
+            assert!(
+                trails <= 4.0,
+                "{quality:?}: {width} px bar under {motion} motion trails {trails:.1} px per frame"
+            );
+            assert!(
+                error < 0.01,
+                "{quality:?}: {width} px bar under {motion} motion: error {error:.5} vs truth"
+            );
         }
     }
 }
@@ -931,15 +1204,27 @@ fn moving_edges_leave_no_trails() {
 #[test]
 fn emissive_object_over_foliage_leaves_no_trail() {
     for quality in [TsrQuality::Native, TsrQuality::Balanced] {
-        for (speed, camera_motion, motion_vectors) in
-            [(1.0, false, true), (2.0, false, true), (2.0, true, true), (4.0, true, true), (2.0, true, false)] {
-            let Some(trails) = emissive_trail_pixels(quality, 6.0, speed, camera_motion, motion_vectors) else { return };
+        for (speed, camera_motion, motion_vectors) in [
+            (1.0, false, true),
+            (2.0, false, true),
+            (2.0, true, true),
+            (4.0, true, true),
+            (2.0, true, false),
+        ] {
+            let Some(trails) =
+                emissive_trail_pixels(quality, 6.0, speed, camera_motion, motion_vectors)
+            else {
+                return;
+            };
             let motion = if camera_motion { "parallax" } else { "object" };
             let vectors = if motion_vectors { "with" } else { "without" };
             eprintln!("TSR {quality:?}: emissive bar over foliage, {motion} motion at {speed} px/frame {vectors} motion \
                 vectors, trails {trails:.1} px/frame");
-            assert!(trails <= 4.0, "{quality:?}: emissive bar, {motion} motion at {speed} px/frame {vectors} motion \
-                vectors, trails {trails:.1} px per frame");
+            assert!(
+                trails <= 4.0,
+                "{quality:?}: emissive bar, {motion} motion at {speed} px/frame {vectors} motion \
+                vectors, trails {trails:.1} px per frame"
+            );
         }
     }
 }
@@ -951,22 +1236,37 @@ fn emissive_object_over_foliage_leaves_no_trail() {
 /// frame, and stay finite.
 #[test]
 fn non_finite_motion_vectors_read_as_none() {
-    let Some(mut fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
-    let Some(mut reference) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
+    let Some(mut fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else {
+        return;
+    };
+    let Some(mut reference) = Fixture::new(TsrQuality::Balanced, [128, 128]) else {
+        return;
+    };
     let px = world_per_pixel(fixture.output);
-    let content = |frame: usize| Content { bar: Some(-0.8 + frame as f32 * px), bar_width: 6.0, motion_vectors: true, ..Content::FOLIAGE };
+    let content = |frame: usize| Content {
+        bar: Some(-0.8 + frame as f32 * px),
+        bar_width: 6.0,
+        motion_vectors: true,
+        ..Content::FOLIAGE
+    };
     let (mut output, mut expected) = (Vec::new(), Vec::new());
     for frame in 0..32 {
         if frame == 16 {
             fixture.bar_shift_override = Some(f32::NAN);
         }
         output = fixture.frame(content(frame));
-        expected = reference.frame(Content { motion_vectors: frame != 16, ..content(frame) });
+        expected = reference.frame(Content {
+            motion_vectors: frame != 16,
+            ..content(frame)
+        });
     }
     let non_finite = output.iter().filter(|v| !v.is_finite()).count();
     assert_eq!(non_finite, 0, "{non_finite} pixels non-finite");
     let difference = mean_abs_difference(&output, &expected);
-    assert!(difference < 1.0e-4, "mean difference from a run without the frame's vectors {difference}");
+    assert!(
+        difference < 1.0e-4,
+        "mean difference from a run without the frame's vectors {difference}"
+    );
 }
 
 /// A frame whose input holds NaN, then one holding infinities (a lighting
@@ -975,15 +1275,25 @@ fn non_finite_motion_vectors_read_as_none() {
 /// matches a run that never saw them.
 #[test]
 fn a_non_finite_frame_does_not_stick() {
-    let Some(mut fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
-    let Some(mut clean) = Fixture::new(TsrQuality::Balanced, [128, 128]) else { return };
+    let Some(mut fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else {
+        return;
+    };
+    let Some(mut clean) = Fixture::new(TsrQuality::Balanced, [128, 128]) else {
+        return;
+    };
     for _ in 0..16 {
         fixture.frame(Content::DETAIL);
         clean.frame(Content::DETAIL);
     }
-    fixture.frame(Content { brightness: f32::NAN, ..Content::DETAIL });
+    fixture.frame(Content {
+        brightness: f32::NAN,
+        ..Content::DETAIL
+    });
     clean.frame(Content::DETAIL);
-    fixture.frame(Content { brightness: f32::INFINITY, ..Content::DETAIL });
+    fixture.frame(Content {
+        brightness: f32::INFINITY,
+        ..Content::DETAIL
+    });
     clean.frame(Content::DETAIL);
     let (mut output, mut expected) = (Vec::new(), Vec::new());
     for _ in 0..48 {
@@ -993,5 +1303,8 @@ fn a_non_finite_frame_does_not_stick() {
     let non_finite = output.iter().filter(|v| !v.is_finite()).count();
     assert_eq!(non_finite, 0, "{non_finite} pixels still non-finite");
     let difference = mean_abs_difference(&output, &expected);
-    assert!(difference < 0.01, "mean difference from a clean run {difference}");
+    assert!(
+        difference < 0.01,
+        "mean difference from a clean run {difference}"
+    );
 }

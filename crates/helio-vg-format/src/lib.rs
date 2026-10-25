@@ -111,7 +111,12 @@ pub struct VgAssetReadyRow {
 }
 pub const VG_ASSET_READY_FLAG_READY: u32 = 1;
 impl VgAssetReadyRow {
-    pub const PADDING: Self = Self { vertex_offset: u32::MAX, vertex_count: 0, asset_slot: 0, flags: 0 };
+    pub const PADDING: Self = Self {
+        vertex_offset: u32::MAX,
+        vertex_count: 0,
+        asset_slot: 0,
+        flags: 0,
+    };
 }
 
 /// Shared position/index/attribute decode. Needs `vg_page_pool` and
@@ -128,8 +133,8 @@ pub fn decode_bindings_wgsl(group: u32, pool_binding: u32, quant_binding: u32) -
     )
 }
 
-pub mod density;
 pub mod debug_view;
+pub mod density;
 pub mod testing;
 
 /// `.vgeo` / page identification.
@@ -210,12 +215,21 @@ pub fn pack_cone(axis: [f32; 3], cutoff: f32) -> u32 {
     snorm8(axis[0]) | (snorm8(axis[1]) << 8) | (snorm8(axis[2]) << 16) | (snorm8(cutoff) << 24)
 }
 pub fn unpack_cone(c: u32) -> ([f32; 3], f32) {
-    ([unsnorm8(c), unsnorm8(c >> 8), unsnorm8(c >> 16)], unsnorm8(c >> 24))
+    (
+        [unsnorm8(c), unsnorm8(c >> 8), unsnorm8(c >> 16)],
+        unsnorm8(c >> 24),
+    )
 }
 
 /// Backface cone test shared by the CPU reference and the shader: `axis` is
 /// the unit world-space axis, `cutoff = cos(half-angle)`.
-pub fn cone_culled(cam: [f32; 3], center: [f32; 3], radius: f32, axis: [f32; 3], cutoff: f32) -> bool {
+pub fn cone_culled(
+    cam: [f32; 3],
+    center: [f32; 3],
+    radius: f32,
+    axis: [f32; 3],
+    cutoff: f32,
+) -> bool {
     if cutoff >= 0.9999 {
         return false;
     }
@@ -250,7 +264,6 @@ impl Default for GpuHierarchyNode {
         }
     }
 }
-
 
 /// Error at or above which a parent error means "no parent" (root clusters).
 pub const ROOT_PARENT_ERROR: f32 = 1.0e30;
@@ -296,8 +309,13 @@ pub fn root_leaves(nodes: &[GpuHierarchyNode], root_node: u32) -> Option<Vec<u32
 /// 0 = unused. More leaves than that store none (no early-out for the asset).
 pub const MAX_ROOT_LEAVES: usize = 3;
 
-pub fn gpu_header_with_root_leaves(mut header: GpuAssetHeader, nodes: &[GpuHierarchyNode]) -> GpuAssetHeader {
-    let leaves = root_leaves(nodes, header.root_node).filter(|l| l.len() <= MAX_ROOT_LEAVES).unwrap_or_default();
+pub fn gpu_header_with_root_leaves(
+    mut header: GpuAssetHeader,
+    nodes: &[GpuHierarchyNode],
+) -> GpuAssetHeader {
+    let leaves = root_leaves(nodes, header.root_node)
+        .filter(|l| l.len() <= MAX_ROOT_LEAVES)
+        .unwrap_or_default();
     let word = |i: usize| leaves.get(i).map_or(0, |l| l + 1);
     header.cluster_count = word(0);
     header.root_page_count = word(1);
@@ -317,7 +335,10 @@ pub struct GpuGroupRef {
 impl GpuGroupRef {
     pub fn new(page_id: u32, first: u32, count: u32) -> Self {
         debug_assert!(first <= 0xffff && count <= 0xffff);
-        Self { page_id, first_cluster_count: (first & 0xffff) | (count << 16) }
+        Self {
+            page_id,
+            first_cluster_count: (first & 0xffff) | (count << 16),
+        }
     }
     pub fn first_cluster(&self) -> u32 {
         self.first_cluster_count & 0xffff
@@ -378,7 +399,10 @@ impl LodTable {
         for (k, v) in q.iter_mut().enumerate() {
             *v = (h.lod_table[k / 4] >> ((k % 4) * 8)) as u8;
         }
-        Self { error_max: h.lod_error_max, q }
+        Self {
+            error_max: h.lod_error_max,
+            q,
+        }
     }
 
     pub fn words(&self) -> [u32; LOD_TABLE_WORDS] {
@@ -395,7 +419,11 @@ impl LodTable {
         if !(self.error_max > 0.0) || !e.is_finite() {
             return 0.0;
         }
-        let x = if e <= 0.0 { 31.0 } else { (2.0 * (self.error_max / e).log2()).clamp(0.0, 31.0) };
+        let x = if e <= 0.0 {
+            31.0
+        } else {
+            (2.0 * (self.error_max / e).log2()).clamp(0.0, 31.0)
+        };
         let k = x.floor() as usize;
         let t = x - k as f32;
         let a = f32::from(self.q[k]);
@@ -453,8 +481,8 @@ impl GpuVgInstance {
         TierLock::from_bits(self.flags >> INST_TIER_SHIFT)
     }
     pub fn with_tier_lock(mut self, tier: TierLock) -> Self {
-        self.flags =
-            (self.flags & !(INST_TIER_MASK << INST_TIER_SHIFT)) | ((tier as u32) << INST_TIER_SHIFT);
+        self.flags = (self.flags & !(INST_TIER_MASK << INST_TIER_SHIFT))
+            | ((tier as u32) << INST_TIER_SHIFT);
         self
     }
 }
@@ -560,7 +588,13 @@ mod tests {
         let mut leaves = root_leaves(&nodes, 0).unwrap();
         leaves.sort();
         assert_eq!(leaves, vec![2, 9]);
-        let h = gpu_header_with_root_leaves(GpuAssetHeader { root_node: 0, ..Default::default() }, &nodes);
+        let h = gpu_header_with_root_leaves(
+            GpuAssetHeader {
+                root_node: 0,
+                ..Default::default()
+            },
+            &nodes,
+        );
         assert_eq!((h.cluster_count, h.root_page_count, h.flags), (10, 3, 0)); // discovery order
         assert!(root_leaves(&[GpuHierarchyNode::default()], 0).is_none());
     }
@@ -591,28 +625,56 @@ mod tests {
                 let a = vgd_attr(5u, b, t.x);
                 vg_page_pool[0] = u32(p.x + a.uv0.x);
             }}",
-            decode_bindings_wgsl(0, 0, 1).replace("var<storage, read> vg_page_pool", "var<storage, read_write> vg_page_pool")
+            decode_bindings_wgsl(0, 0, 1).replace(
+                "var<storage, read> vg_page_pool",
+                "var<storage, read_write> vg_page_pool"
+            )
         );
-        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .expect("validate");
+        let module = naga::front::wgsl::parse_str(&src)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("validate");
         // cos(half-angle) convention: a cluster whose normals all point along
         // +Z within 30 degrees is culled only from behind the cone's horizon.
         let cut = 30f32.to_radians().cos();
         let axis = [0.0, 0.0, 1.0];
         // Camera far behind (looking along +Z toward the cluster): back-facing.
-        assert!(cone_culled([0.0, 0.0, -10.0], [0.0, 0.0, 0.0], 1.0, axis, cut));
+        assert!(cone_culled(
+            [0.0, 0.0, -10.0],
+            [0.0, 0.0, 0.0],
+            1.0,
+            axis,
+            cut
+        ));
         // Camera in front: front-facing, never culled.
-        assert!(!cone_culled([0.0, 0.0, 10.0], [0.0, 0.0, 0.0], 1.0, axis, cut));
+        assert!(!cone_culled(
+            [0.0, 0.0, 10.0],
+            [0.0, 0.0, 0.0],
+            1.0,
+            axis,
+            cut
+        ));
         // Camera to the side inside the 60-degree-from-horizon band: not culled.
-        assert!(!cone_culled([10.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.0, axis, cut));
+        assert!(!cone_culled(
+            [10.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            0.0,
+            axis,
+            cut
+        ));
     }
 
     #[test]
     fn vis_and_key_round_trip() {
         let id = vis_pack(MAX_VISIBLE_CLUSTERS - 1, 127);
-        assert_eq!((vis_cluster(id), vis_tri(id)), (MAX_VISIBLE_CLUSTERS - 1, 127));
+        assert_eq!(
+            (vis_cluster(id), vis_tri(id)),
+            (MAX_VISIBLE_CLUSTERS - 1, 127)
+        );
         let key = raster_key(0.25, id);
         assert_eq!((raster_key_depth(key), raster_key_id(key)), (0.25, id));
         // Reversed-Z: nearer (larger) depth wins an unsigned compare.
@@ -627,9 +689,14 @@ mod tests {
             counts_material: GpuCluster::pack_counts(128, 97, 513),
             ..Default::default()
         };
-        assert_eq!((c.tri_count(), c.vert_count(), c.material_slot()), (128, 97, 513));
+        assert_eq!(
+            (c.tri_count(), c.vert_count(), c.material_slot()),
+            (128, 97, 513)
+        );
         let (a, cut) = unpack_cone(pack_cone([0.0, -1.0, 0.5], 0.75));
-        assert!(a[0] == 0.0 && a[1] == -1.0 && (a[2] - 0.5).abs() < 0.01 && (cut - 0.75).abs() < 0.01);
+        assert!(
+            a[0] == 0.0 && a[1] == -1.0 && (a[2] - 0.5).abs() < 0.01 && (cut - 0.75).abs() < 0.01
+        );
         let g = GpuGroupRef::new(9, 3, 8);
         assert_eq!((g.page_id, g.first_cluster(), g.cluster_count()), (9, 3, 8));
         let i = GpuVgInstance::default().with_tier_lock(TierLock::SwRaster);
@@ -659,7 +726,10 @@ mod tests {
             layouter[handle].size as usize
         };
         assert_eq!(size_of_struct("VgCluster"), size_of::<GpuCluster>());
-        assert_eq!(size_of_struct("VgHierarchyNode"), size_of::<GpuHierarchyNode>());
+        assert_eq!(
+            size_of_struct("VgHierarchyNode"),
+            size_of::<GpuHierarchyNode>()
+        );
         assert_eq!(size_of_struct("VgGroupRef"), size_of::<GpuGroupRef>());
         assert_eq!(size_of_struct("VgAssetHeader"), size_of::<GpuAssetHeader>());
         assert_eq!(size_of_struct("VgInstance"), size_of::<GpuVgInstance>());

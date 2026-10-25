@@ -275,7 +275,9 @@ pub fn locate_texture_file(
     texture_index: usize,
     base_dir: &Path,
 ) -> Option<PathBuf> {
-    let image = scene.images.get(scene.textures.get(texture_index)?.image_index)?;
+    let image = scene
+        .images
+        .get(scene.textures.get(texture_index)?.image_index)?;
     match &image.source {
         ImageSource::Uri(path) => resolve_image_path(path, base_dir).ok(),
         ImageSource::Embedded { .. } => None,

@@ -52,7 +52,10 @@ mod world;
 mod xr;
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,voxel_craft=info")).init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,voxel_craft=info"),
+    )
+    .init();
     let event_loop = winit::event_loop::EventLoop::new().expect("event loop");
     let mut app = app::App::default();
     event_loop.run_app(&mut app).expect("run");

@@ -492,8 +492,11 @@ impl TlasManager {
 
     /// Optional per-instance visibility masks. Missing entries retain all bits.
     pub fn build_masked(
-        &mut self, encoder: &mut wgpu::CommandEncoder, instances: &[TlasInstanceInput],
-        blas_manager: &BlasManager, masks: &[u8],
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        instances: &[TlasInstanceInput],
+        blas_manager: &BlasManager,
+        masks: &[u8],
     ) -> Result<(), AccelerationError> {
         if !self.rt_available {
             return Err(AccelerationError::Unsupported);
@@ -570,7 +573,12 @@ impl TlasManager {
                 continue;
             }
             if let Some(blas) = blas_manager.get_blas(input.mesh_id) {
-                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, mask(masks, i)));
+                tlas[i] = Some(wgpu::TlasInstance::new(
+                    blas,
+                    input.transform,
+                    0,
+                    mask(masks, i),
+                ));
             }
         }
         for i in count as usize..self.populated_slots {
@@ -705,7 +713,10 @@ impl FrameAcceleration {
         let with_tlas = |buffer: Option<&wgpu::Buffer>| rays.tlas.and(buffer).cloned();
         self.transmission = with_tlas(rays.transmission);
         self.instances = with_tlas(rays.instances);
-        self.proxies = rays.tlas.and(rays.proxies).map(|p| (p.vertices.clone(), p.indices.clone()));
+        self.proxies = rays
+            .tlas
+            .and(rays.proxies)
+            .map(|p| (p.vertices.clone(), p.indices.clone()));
     }
     pub fn transmission(&self, frame: u64) -> Option<&wgpu::Buffer> {
         self.tlas(frame).and(self.transmission.as_ref())
@@ -715,7 +726,9 @@ impl FrameAcceleration {
     }
     /// The proxy pool's vertices and indices.
     pub fn proxies(&self, frame: u64) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
-        self.tlas(frame).and(self.proxies.as_ref()).map(|(p, i)| (p, i))
+        self.tlas(frame)
+            .and(self.proxies.as_ref())
+            .map(|(p, i)| (p, i))
     }
     pub fn tlas(&self, frame: u64) -> Option<&wgpu::Tlas> {
         self.frame

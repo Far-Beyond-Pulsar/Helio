@@ -24,7 +24,11 @@ pub fn dot(a: V3, b: V3) -> f32 {
 }
 #[inline]
 pub fn cross(a: V3, b: V3) -> V3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 #[inline]
 pub fn length(a: V3) -> f32 {
@@ -49,7 +53,11 @@ pub fn normalize(a: V3) -> V3 {
 /// that compare equal as floats are equal as keys (the DAG welds by position).
 #[inline]
 pub fn pos_key(p: V3) -> [u32; 3] {
-    [(p[0] + 0.0).to_bits(), (p[1] + 0.0).to_bits(), (p[2] + 0.0).to_bits()]
+    [
+        (p[0] + 0.0).to_bits(),
+        (p[1] + 0.0).to_bits(),
+        (p[2] + 0.0).to_bits(),
+    ]
 }
 
 #[inline]
@@ -84,7 +92,10 @@ pub fn sphere_union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 /// Does `outer` contain `inner`, allowing a relative tolerance for float noise.
 pub fn sphere_contains(outer: [f32; 4], inner: [f32; 4], tol: f32) -> bool {
-    let d = dist([outer[0], outer[1], outer[2]], [inner[0], inner[1], inner[2]]);
+    let d = dist(
+        [outer[0], outer[1], outer[2]],
+        [inner[0], inner[1], inner[2]],
+    );
     d + inner[3] <= outer[3] * (1.0 + tol) + tol * 1e-3
 }
 

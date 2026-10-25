@@ -106,10 +106,18 @@ impl CameraSpec {
                         self.pitch_deg.unwrap_or(0.0).to_radians(),
                     );
                     position
-                        + glam::Vec3::new(yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos())
+                        + glam::Vec3::new(
+                            yaw.sin() * pitch.cos(),
+                            pitch.sin(),
+                            -yaw.cos() * pitch.cos(),
+                        )
                 }
             };
-            return Pose { position, target, fov_deg: self.fov_deg.unwrap_or(DEFAULT_FOV_DEG) };
+            return Pose {
+                position,
+                target,
+                fov_deg: self.fov_deg.unwrap_or(DEFAULT_FOV_DEG),
+            };
         }
         let t = frame as f32 / self.fps();
         self.pose_at(t)
@@ -124,12 +132,14 @@ impl CameraSpec {
         let span = (keys[i + 1].t - keys[i].t).max(1e-6);
         let u = ((t - keys[i].t) / span).clamp(0.0, 1.0);
         let at = |j: isize| &keys[j.clamp(0, last as isize) as usize];
-        let (a, b, c, d) = (at(i as isize - 1), at(i as isize), at(i as isize + 1), at(i as isize + 2));
+        let (a, b, c, d) = (
+            at(i as isize - 1),
+            at(i as isize),
+            at(i as isize + 1),
+            at(i as isize + 2),
+        );
         let v = |f: &dyn Fn(&Keyframe) -> [f32; 3]| {
-            catmull_rom(
-                [a, b, c, d].map(|k| glam::Vec3::from_array(f(k))),
-                u,
-            )
+            catmull_rom([a, b, c, d].map(|k| glam::Vec3::from_array(f(k))), u)
         };
         let fov = |k: &Keyframe| k.fov_deg.or(self.fov_deg).unwrap_or(DEFAULT_FOV_DEG);
         Pose {
@@ -181,14 +191,22 @@ pub struct SunSpec {
 
 impl Default for SunSpec {
     fn default() -> Self {
-        Self { azimuth_deg: 215.0, elevation_deg: 48.0, color: [1.0, 0.94, 0.82], intensity: 3.0 }
+        Self {
+            azimuth_deg: 215.0,
+            elevation_deg: 48.0,
+            color: [1.0, 0.94, 0.82],
+            intensity: 3.0,
+        }
     }
 }
 
 impl SunSpec {
     /// The direction the light travels (what `directional_light` takes).
     pub fn direction(&self) -> [f32; 3] {
-        let (az, el) = (self.azimuth_deg.to_radians(), self.elevation_deg.to_radians());
+        let (az, el) = (
+            self.azimuth_deg.to_radians(),
+            self.elevation_deg.to_radians(),
+        );
         [-(el.cos() * az.sin()), -el.sin(), -(el.cos() * az.cos())]
     }
 }
@@ -202,7 +220,10 @@ pub struct AmbientSpec {
 
 impl Default for AmbientSpec {
     fn default() -> Self {
-        Self { color: [1.0, 0.95, 0.85], intensity: 0.05 }
+        Self {
+            color: [1.0, 0.95, 0.85],
+            intensity: 0.05,
+        }
     }
 }
 
@@ -229,7 +250,14 @@ pub struct LensSpec {
 
 impl Default for LensSpec {
     fn default() -> Self {
-        Self { f_number: 2.0, focal_length_mm: None, focus_target: None, focus_distance_m: None, max_coc_px: None, aperture_blades: Some(7) }
+        Self {
+            f_number: 2.0,
+            focal_length_mm: None,
+            focus_target: None,
+            focus_distance_m: None,
+            max_coc_px: None,
+            aperture_blades: Some(7),
+        }
     }
 }
 
@@ -299,7 +327,10 @@ pub fn parse_shots(text: &str) -> Result<Vec<Shot>, String> {
             return Err(format!("duplicate shot name {:?}", shot.name));
         }
         if shot.camera.position.is_none() && !shot.camera.is_path() {
-            return Err(format!("shot {}: camera needs `position` or >= 2 `keyframes`", shot.name));
+            return Err(format!(
+                "shot {}: camera needs `position` or >= 2 `keyframes`",
+                shot.name
+            ));
         }
         if shot.camera.is_path() && shot.camera.keyframes.windows(2).any(|w| w[1].t <= w[0].t) {
             return Err(format!("shot {}: keyframe times must increase", shot.name));
@@ -326,7 +357,12 @@ pub fn parse_resolution(text: &str) -> Option<(u32, u32)> {
 // ── the built-in shot list ───────────────────────────────────────────────────
 
 fn fixed(position: [f32; 3], look_at: [f32; 3], fov: f32) -> CameraSpec {
-    CameraSpec { position: Some(position), look_at: Some(look_at), fov_deg: Some(fov), ..Default::default() }
+    CameraSpec {
+        position: Some(position),
+        look_at: Some(look_at),
+        fov_deg: Some(fov),
+        ..Default::default()
+    }
 }
 
 /// The overview pose shared by every `dbg-*` shot.
@@ -339,11 +375,21 @@ const LUCY_DIR: [f32; 3] = [-0.69, 0.06, 0.72];
 const FOREST: ([f32; 3], [f32; 3], f32) = ([-22.0, 2.0, 30.0], [-70.0, 8.0, 8.0], 58.0);
 
 fn golden_sun() -> SunSpec {
-    SunSpec { azimuth_deg: 250.0, elevation_deg: 11.0, color: [1.0, 0.66, 0.36], intensity: 4.5 }
+    SunSpec {
+        azimuth_deg: 250.0,
+        elevation_deg: 11.0,
+        color: [1.0, 0.66, 0.36],
+        intensity: 4.5,
+    }
 }
 
 fn golden_fog() -> FogSpec {
-    FogSpec { density: 0.0045, albedo: [0.95, 0.80, 0.62], anisotropy: 0.6, ..FogSpec::default() }
+    FogSpec {
+        density: 0.0045,
+        albedo: [0.95, 0.80, 0.62],
+        anisotropy: 0.6,
+        ..FogSpec::default()
+    }
 }
 
 fn from_lucy(distance: f32) -> CameraSpec {
@@ -363,7 +409,12 @@ fn from_lucy_ladder(distance: f32) -> CameraSpec {
 }
 
 fn flythrough_path() -> CameraSpec {
-    let key = |t: f32, p: [f32; 3], l: [f32; 3]| Keyframe { t, position: p, look_at: l, fov_deg: Some(60.0) };
+    let key = |t: f32, p: [f32; 3], l: [f32; 3]| Keyframe {
+        t,
+        position: p,
+        look_at: l,
+        fov_deg: Some(60.0),
+    };
     CameraSpec {
         keyframes: vec![
             key(0.0, [0.0, 2.6, 76.0], [0.0, 4.0, 40.0]),
@@ -383,14 +434,27 @@ fn flythrough_path() -> CameraSpec {
 const HERO: [u32; 2] = [2560, 1440];
 
 fn hero_lens(f_number: f32, focal_mm: Option<f32>, target: [f32; 3]) -> Option<LensSpec> {
-    Some(LensSpec { f_number, focal_length_mm: focal_mm, focus_target: Some(target), ..Default::default() })
+    Some(LensSpec {
+        f_number,
+        focal_length_mm: focal_mm,
+        focus_target: Some(target),
+        ..Default::default()
+    })
 }
 
 pub fn default_shots() -> Vec<Shot> {
     let mut shots = Vec::new();
-    let ambient = Some(AmbientSpec { color: [0.80, 0.84, 1.0], intensity: 0.30 });
+    let ambient = Some(AmbientSpec {
+        color: [0.80, 0.84, 1.0],
+        intensity: 0.30,
+    });
     // A beauty shot: sun, fog, post volumes, depth of field, 1440p.
-    let beauty = |name: &str, camera: CameraSpec, sun: SunSpec, fog: Option<FogSpec>, clear: [f32; 3], lens: Option<LensSpec>| Shot {
+    let beauty = |name: &str,
+                  camera: CameraSpec,
+                  sun: SunSpec,
+                  fog: Option<FogSpec>,
+                  clear: [f32; 3],
+                  lens: Option<LensSpec>| Shot {
         name: name.into(),
         camera,
         sun: Some(sun),
@@ -403,7 +467,12 @@ pub fn default_shots() -> Vec<Shot> {
         resolution: Some(HERO),
         ..Default::default()
     };
-    let noon = |az: f32, el: f32| SunSpec { azimuth_deg: az, elevation_deg: el, color: [1.0, 0.88, 0.70], intensity: 4.0 };
+    let noon = |az: f32, el: f32| SunSpec {
+        azimuth_deg: az,
+        elevation_deg: el,
+        color: [1.0, 0.88, 0.70],
+        intensity: 4.0,
+    };
 
     shots.push(beauty(
         "hero-temple-fog",
@@ -417,19 +486,39 @@ pub fn default_shots() -> Vec<Shot> {
         "hero-courtyard-statues",
         fixed([-2.0, 1.8, 40.0], [13.1, 1.8, 25.8], 40.0),
         noon(40.0, 26.0),
-        Some(FogSpec { density: 0.006, shafts: false, ..golden_fog() }),
+        Some(FogSpec {
+            density: 0.006,
+            shafts: false,
+            ..golden_fog()
+        }),
         [0.55, 0.65, 0.85],
         hero_lens(2.0, Some(85.0), [13.1, 1.7, 25.8]),
     ));
     shots.push(beauty(
         "hero-forest-dusk",
         fixed([-22.0, 2.0, 30.0], [-70.0, 8.0, 8.0], 58.0),
-        SunSpec { azimuth_deg: 270.0, elevation_deg: 5.0, color: [1.0, 0.42, 0.22], intensity: 3.5 },
-        Some(FogSpec { density: 0.0055, albedo: [0.90, 0.72, 0.66], ..golden_fog() }),
+        SunSpec {
+            azimuth_deg: 270.0,
+            elevation_deg: 5.0,
+            color: [1.0, 0.42, 0.22],
+            intensity: 3.5,
+        },
+        Some(FogSpec {
+            density: 0.0055,
+            albedo: [0.90, 0.72, 0.66],
+            ..golden_fog()
+        }),
         [0.75, 0.42, 0.34],
         hero_lens(4.0, None, [-70.0, 8.0, 8.0]),
     ));
-    shots.push(beauty("statue-lucy-closeup", from_lucy(4.5), noon(300.0, 30.0), None, [0.45, 0.55, 0.75], hero_lens(2.0, Some(85.0), [13.1, 1.7, 25.8])));
+    shots.push(beauty(
+        "statue-lucy-closeup",
+        from_lucy(4.5),
+        noon(300.0, 30.0),
+        None,
+        [0.45, 0.55, 0.75],
+        hero_lens(2.0, Some(85.0), [13.1, 1.7, 25.8]),
+    ));
     shots.push(beauty(
         "statue-thai-closeup",
         fixed([19.1, 2.4, 38.5], [19.1, 2.4, 33.1], 45.0),
@@ -442,7 +531,11 @@ pub fn default_shots() -> Vec<Shot> {
         "trees-canopy-closeup",
         fixed([40.0, 9.0, 44.0], [27.0, 11.0, 30.0], 55.0),
         golden_sun(),
-        Some(FogSpec { density: 0.004, shafts: false, ..golden_fog() }),
+        Some(FogSpec {
+            density: 0.004,
+            shafts: false,
+            ..golden_fog()
+        }),
         [0.55, 0.65, 0.85],
         hero_lens(2.8, None, [27.0, 11.0, 30.0]),
     ));
@@ -450,8 +543,18 @@ pub fn default_shots() -> Vec<Shot> {
     shots.push(beauty(
         "hero-colonnade-sunshafts",
         fixed([16.0, 1.7, 23.0], [3.0, 2.8, 19.0], 50.0),
-        SunSpec { azimuth_deg: 325.0, elevation_deg: 8.0, color: [1.0, 0.78, 0.5], intensity: 6.0 },
-        Some(FogSpec { density: 0.020, albedo: [0.95, 0.88, 0.75], anisotropy: 0.72, ..FogSpec::default() }),
+        SunSpec {
+            azimuth_deg: 325.0,
+            elevation_deg: 8.0,
+            color: [1.0, 0.78, 0.5],
+            intensity: 6.0,
+        },
+        Some(FogSpec {
+            density: 0.020,
+            albedo: [0.95, 0.88, 0.75],
+            anisotropy: 0.72,
+            ..FogSpec::default()
+        }),
         [0.9, 0.7, 0.5],
         hero_lens(2.0, Some(85.0), [7.0, 2.4, 20.6]),
     ));
@@ -459,7 +562,11 @@ pub fn default_shots() -> Vec<Shot> {
         "hero-lucy-portrait",
         from_lucy(2.1).with_look([13.1, 2.0, 25.8]),
         noon(300.0, 28.0),
-        Some(FogSpec { density: 0.004, shafts: false, ..golden_fog() }),
+        Some(FogSpec {
+            density: 0.004,
+            shafts: false,
+            ..golden_fog()
+        }),
         [0.5, 0.58, 0.72],
         hero_lens(1.6, Some(100.0), [13.1, 2.0, 25.8]),
     ));
@@ -478,7 +585,11 @@ pub fn default_shots() -> Vec<Shot> {
             &format!("hero-dragon-court-rack-focus-{suffix}"),
             fixed([17.8, 1.4, 47.0], [13.4, 1.1, 37.0], 45.0),
             noon(30.0, 28.0),
-            Some(FogSpec { density: 0.008, shafts: false, ..golden_fog() }),
+            Some(FogSpec {
+                density: 0.008,
+                shafts: false,
+                ..golden_fog()
+            }),
             [0.5, 0.58, 0.72],
             hero_lens(1.8, Some(85.0), focus),
         ));
@@ -487,15 +598,29 @@ pub fn default_shots() -> Vec<Shot> {
         "hero-pine-bokeh",
         fixed([20.0, 1.6, 36.0], [27.0, 3.0, 30.0], 40.0),
         golden_sun(),
-        Some(FogSpec { density: 0.006, shafts: false, ..golden_fog() }),
+        Some(FogSpec {
+            density: 0.006,
+            shafts: false,
+            ..golden_fog()
+        }),
         [0.6, 0.6, 0.65],
         hero_lens(1.4, Some(135.0), [27.0, 2.2, 30.0]),
     ));
     shots.push(beauty(
         "hero-interior-hall-dust",
         fixed([0.0, 1.7, 15.5], [0.0, 3.0, 40.0], 60.0),
-        SunSpec { azimuth_deg: 15.0, elevation_deg: 12.0, color: [1.0, 0.85, 0.62], intensity: 6.0 },
-        Some(FogSpec { density: 0.016, albedo: [0.95, 0.9, 0.8], anisotropy: 0.7, ..FogSpec::default() }),
+        SunSpec {
+            azimuth_deg: 15.0,
+            elevation_deg: 12.0,
+            color: [1.0, 0.85, 0.62],
+            intensity: 6.0,
+        },
+        Some(FogSpec {
+            density: 0.016,
+            albedo: [0.95, 0.9, 0.8],
+            anisotropy: 0.7,
+            ..FogSpec::default()
+        }),
         [0.85, 0.75, 0.6],
         hero_lens(2.8, Some(35.0), [0.0, 2.0, 34.0]),
     ));
@@ -523,12 +648,21 @@ pub fn default_shots() -> Vec<Shot> {
         ("dbg-material-bin", "material"),
         ("dbg-classic-vs-vg-mask", "mask"),
     ] {
-        shots.push(Shot { name: name.into(), camera: overview(), debug_view: Some(view.into()), ..Default::default() });
+        shots.push(Shot {
+            name: name.into(),
+            camera: overview(),
+            debug_view: Some(view.into()),
+            ..Default::default()
+        });
     }
 
     // Distance ladder on Lucy, same direction.
     for (label, distance) in [("3m", 3.0), ("12m", 12.0), ("48m", 48.0), ("150m", 150.0)] {
-        for (suffix, view) in [("normal", None), ("triangles", Some("triangle")), ("clusters", Some("cluster"))] {
+        for (suffix, view) in [
+            ("normal", None),
+            ("triangles", Some("triangle")),
+            ("clusters", Some("cluster")),
+        ] {
             shots.push(Shot {
                 name: format!("lucy-{label}-{suffix}"),
                 camera: from_lucy_ladder(distance),
@@ -539,7 +673,13 @@ pub fn default_shots() -> Vec<Shot> {
     }
 
     // Tau ladder on one close shot.
-    for (label, tau) in [("0p5", 0.5), ("1", 1.0), ("4", 4.0), ("16", 16.0), ("64", 64.0)] {
+    for (label, tau) in [
+        ("0p5", 0.5),
+        ("1", 1.0),
+        ("4", 4.0),
+        ("16", 16.0),
+        ("64", 64.0),
+    ] {
         for (suffix, view) in [("", None), ("-triangles", Some("triangle"))] {
             shots.push(Shot {
                 name: format!("tau-{label}{suffix}"),
@@ -552,7 +692,12 @@ pub fn default_shots() -> Vec<Shot> {
     }
 
     // Tier 3 comparison on a dense forest view.
-    for (label, mode, rt) in [("off", "hw", false), ("tier2", "tier2", false), ("on-peel", "nonrt", false), ("on-rt", "auto", true)] {
+    for (label, mode, rt) in [
+        ("off", "hw", false),
+        ("tier2", "tier2", false),
+        ("on-peel", "nonrt", false),
+        ("on-rt", "auto", true),
+    ] {
         for (suffix, view) in [("", None), ("-dense-overlap", Some("dense_overlap"))] {
             shots.push(Shot {
                 name: format!("tier3-{label}{suffix}"),
@@ -571,10 +716,17 @@ pub fn default_shots() -> Vec<Shot> {
         name: "flythrough".into(),
         camera: flythrough_path(),
         sun: Some(golden_sun()),
-        fog: Some(FogSpec { density: 0.006, shafts: false, ..golden_fog() }),
+        fog: Some(FogSpec {
+            density: 0.006,
+            shafts: false,
+            ..golden_fog()
+        }),
         clear_color: Some([0.8, 0.6, 0.45]),
         ambient,
-        lens: Some(LensSpec { f_number: 4.0, ..Default::default() }),
+        lens: Some(LensSpec {
+            f_number: 4.0,
+            ..Default::default()
+        }),
         post: true,
         resolution: Some([1280, 720]),
         format: Some("jpg".into()),
@@ -629,19 +781,28 @@ impl Options {
             .iter()
             .position(|a| a == "--capture")
             .and_then(|i| args.get(i + 1).cloned())
-            .or_else(|| args.iter().find_map(|a| a.strip_prefix("--capture=").map(String::from)))
+            .or_else(|| {
+                args.iter()
+                    .find_map(|a| a.strip_prefix("--capture=").map(String::from))
+            })
             .or_else(|| env("VG_STRESS_CAPTURE"))
             .filter(|d| !d.trim().is_empty())?;
         Some(Self {
             dir: PathBuf::from(dir),
-            size: env("VG_STRESS_CAPTURE_RES").and_then(|r| parse_resolution(&r)).unwrap_or((1600, 900)),
+            size: env("VG_STRESS_CAPTURE_RES")
+                .and_then(|r| parse_resolution(&r))
+                .unwrap_or((1600, 900)),
             only: env("VG_STRESS_CAPTURE_ONLY")
-                .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
 }
-
 
 // ── the post stack: grading volumes + lens ───────────────────────────────────
 
@@ -649,7 +810,10 @@ impl Options {
 /// (unbound) and a warmer, slightly darker one inside the temple, blended by
 /// position. Weight 0 switches the stack off without touching the world.
 pub struct PostStack {
-    volumes: Vec<(pulsar_scenedb::Entity, helio_pass_postprocess::PostProcessVolumeDescriptor)>,
+    volumes: Vec<(
+        pulsar_scenedb::Entity,
+        helio_pass_postprocess::PostProcessVolumeDescriptor,
+    )>,
 }
 
 impl PostStack {
@@ -701,7 +865,12 @@ impl PostStack {
         };
         let volumes = [outdoors, indoors]
             .into_iter()
-            .map(|d| (super::v3_demo_common::spawn_post_process_volume(world, d.clone()), d))
+            .map(|d| {
+                (
+                    super::v3_demo_common::spawn_post_process_volume(world, d.clone()),
+                    d,
+                )
+            })
             .collect();
         let stack = Self { volumes };
         stack.set_on(world, false);
@@ -712,13 +881,20 @@ impl PostStack {
         for (entity, descriptor) in &self.volumes {
             let mut d = descriptor.clone();
             d.blend_weight = if on { 1.0 } else { 0.0 };
-            world.insert(*entity, helio_pass_postprocess::PostProcessVolumeComponent::from(d.to_gpu()));
+            world.insert(
+                *entity,
+                helio_pass_postprocess::PostProcessVolumeComponent::from(d.to_gpu()),
+            );
         }
     }
 }
 
 /// The lens row for `spec` looking from `pose` (focus follows the shot).
-pub fn lens_component(spec: &LensSpec, pose: &Pose, aspect: f32) -> (helio_pass_lens::LensComponent, f32) {
+pub fn lens_component(
+    spec: &LensSpec,
+    pose: &Pose,
+    aspect: f32,
+) -> (helio_pass_lens::LensComponent, f32) {
     let mut lens = helio_pass_lens::LensComponent::new(0);
     let sensor_h = lens.sensor_width_mm / aspect;
     let fov_deg = match spec.focal_length_mm {
@@ -751,7 +927,10 @@ const DT: f32 = 1.0 / 60.0;
 const READY_FRAMES: u32 = 120;
 
 enum Phase {
-    Waiting { ready_frames: u32, started: std::time::Instant },
+    Waiting {
+        ready_frames: u32,
+        started: std::time::Instant,
+    },
     Shot(ShotRun),
     Done,
 }
@@ -796,13 +975,25 @@ impl Capture {
         let shots: Vec<Shot> = if options.only.is_empty() {
             shots
         } else {
-            shots.into_iter().filter(|s| options.only.iter().any(|o| s.name.contains(o.as_str()))).collect()
+            shots
+                .into_iter()
+                .filter(|s| options.only.iter().any(|o| s.name.contains(o.as_str())))
+                .collect()
         };
-        println!("[Capture] {} shots -> {} at {}x{}", shots.len(), options.dir.display(), options.size.0, options.size.1);
+        println!(
+            "[Capture] {} shots -> {} at {}x{}",
+            shots.len(),
+            options.dir.display(),
+            options.size.0,
+            options.size.1
+        );
         Self {
             options,
             shots,
-            phase: Phase::Waiting { ready_frames: 0, started: std::time::Instant::now() },
+            phase: Phase::Waiting {
+                ready_frames: 0,
+                started: std::time::Instant::now(),
+            },
             target: None,
             readback: None,
             index: Vec::new(),
@@ -812,7 +1003,12 @@ impl Capture {
             bytes_written: 0,
             default_ambient: AmbientSpec::default(),
             default_clear: [0.018, 0.022, 0.035, 1.0],
-            default_sun: SunSpec { azimuth_deg: 0.0, elevation_deg: 0.0, color: [1.0, 0.94, 0.82], intensity: 3.0 },
+            default_sun: SunSpec {
+                azimuth_deg: 0.0,
+                elevation_deg: 0.0,
+                color: [1.0, 0.94, 0.82],
+                intensity: 3.0,
+            },
             moving: false,
             samples: Vec::new(),
             bvh_modes: [0; 3],
@@ -830,7 +1026,11 @@ impl Capture {
         }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("VG museum capture target"),
-            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -870,10 +1070,20 @@ impl Capture {
                     fov_deg: 50.0,
                 });
                 self.render(s, pose, size);
-                let visible = s.targets.lock().map(|t| (t.visible, t.targets.len())).unwrap_or((0, 0));
+                let visible = s
+                    .targets
+                    .lock()
+                    .map(|t| (t.visible, t.targets.len()))
+                    .unwrap_or((0, 0));
                 let loader_done = s.loader.is_none();
                 let ready = loader_done && visible.0 == visible.1 && visible.1 > 0;
-                let Phase::Waiting { ready_frames, started } = &mut self.phase else { unreachable!() };
+                let Phase::Waiting {
+                    ready_frames,
+                    started,
+                } = &mut self.phase
+                else {
+                    unreachable!()
+                };
                 *ready_frames = if ready { *ready_frames + 1 } else { 0 };
                 if s.frames % 120 == 0 {
                     println!(
@@ -921,13 +1131,18 @@ impl Capture {
             let shot = &self.shots[index];
             if shot.requires_rt && !self.rt_hardware {
                 eprintln!("[Capture] skip {}: no ray-query hardware", shot.name);
-                self.index.push(serde_json::json!({"name": shot.name, "skipped": "no ray-query hardware"}));
+                self.index.push(
+                    serde_json::json!({"name": shot.name, "skipped": "no ray-query hardware"}),
+                );
                 index += 1;
                 continue;
             }
             if let Some(v) = &shot.debug_view {
                 if resolve_view(v, &s.debug_views).is_none() {
-                    eprintln!("[Capture] skip {}: debug view {v:?} is not available on this device", shot.name);
+                    eprintln!(
+                        "[Capture] skip {}: debug view {v:?} is not available on this device",
+                        shot.name
+                    );
                     self.index.push(serde_json::json!({"name": shot.name, "skipped": format!("debug view {v} unavailable")}));
                     index += 1;
                     continue;
@@ -940,7 +1155,10 @@ impl Capture {
             return;
         }
         let shot = self.shots[index].clone();
-        let size = shot.resolution.map(|r| (r[0], r[1])).unwrap_or(self.options.size);
+        let size = shot
+            .resolution
+            .map(|r| (r[0], r[1]))
+            .unwrap_or(self.options.size);
         let frames = shot.camera.frame_count();
         self.moving = s.bench.is_some() && shot.name.contains("-move");
         self.samples.clear();
@@ -949,7 +1167,16 @@ impl Capture {
             .targets
             .lock()
             .map_or((0, 0), |t| (t.derive_calls, t.derive_rebuilds));
-        println!("[Capture] shot {}/{}: {} ({} frame{}, {}x{})", index + 1, self.shots.len(), shot.name, frames, if frames == 1 { "" } else { "s" }, size.0, size.1);
+        println!(
+            "[Capture] shot {}/{}: {} ({} frame{}, {}x{})",
+            index + 1,
+            self.shots.len(),
+            shot.name,
+            frames,
+            if frames == 1 { "" } else { "s" },
+            size.0,
+            size.1
+        );
         self.phase = Phase::Shot(ShotRun {
             index,
             frame: 0,
@@ -965,7 +1192,11 @@ impl Capture {
 
     fn apply(&mut self, s: &mut AppState, shot: &Shot, size: (u32, u32)) {
         // View.
-        let mode = shot.debug_view.as_deref().and_then(|v| resolve_view(v, &s.debug_views)).unwrap_or(0);
+        let mode = shot
+            .debug_view
+            .as_deref()
+            .and_then(|v| resolve_view(v, &s.debug_views))
+            .unwrap_or(0);
         s.renderer.set_debug_mode(mode);
         // VG.
         let current = s.runtime.settings();
@@ -976,9 +1207,18 @@ impl Capture {
             _ => helio_vg_format::VgMode::Auto,
         };
         s.tau = shot.tau_px.unwrap_or(1.0).clamp(TAU_RANGE.0, TAU_RANGE.1);
-        s.runtime.set_settings(VgRuntimeSettings { mode: vg_mode, tau_px: s.tau, tier3: matches!(shot.mode.as_deref(), Some("nonrt") | Some("auto")), ..current });
+        s.runtime.set_settings(VgRuntimeSettings {
+            mode: vg_mode,
+            tau_px: s.tau,
+            tier3: matches!(shot.mode.as_deref(), Some("nonrt") | Some("auto")),
+            ..current
+        });
         // Lighting.
-        let sun = shot.sun.clone().unwrap_or_else(|| SunSpec { azimuth_deg: 215.0, elevation_deg: 48.0, ..SunSpec::default() });
+        let sun = shot.sun.clone().unwrap_or_else(|| SunSpec {
+            azimuth_deg: 215.0,
+            elevation_deg: 48.0,
+            ..SunSpec::default()
+        });
         let mut light = super::directional_light(sun.direction(), sun.color, sun.intensity);
         if shot.fog.as_ref().is_some_and(|f| f.enabled && f.shafts) {
             light = super::v3_demo_common::volumetric_light(light, 0);
@@ -986,9 +1226,14 @@ impl Capture {
         if let Some(id) = s.sun_light {
             super::v3_demo_common::update_light(&mut s.scene_db.world, id, light);
         }
-        let ambient = shot.ambient.clone().unwrap_or_else(|| self.default_ambient.clone());
+        let ambient = shot
+            .ambient
+            .clone()
+            .unwrap_or_else(|| self.default_ambient.clone());
         s.renderer.set_ambient(ambient.color, ambient.intensity);
-        let clear = shot.clear_color.map_or(self.default_clear, |c| [c[0], c[1], c[2], 1.0]);
+        let clear = shot
+            .clear_color
+            .map_or(self.default_clear, |c| [c[0], c[1], c[2], 1.0]);
         s.renderer.set_clear_color(clear);
         // Fog.
         if let Some(entity) = s.fog_entity {
@@ -1027,9 +1272,17 @@ impl Capture {
             None => (helio_pass_lens::LensComponent::new(0), pose.fov_deg),
         };
         lens.enabled = shot.lens.is_some() as u32;
-        self.last_lens = Some((lens.focal_length_mm, lens.f_number, lens.focus_distance_m, lens.enabled != 0));
+        self.last_lens = Some((
+            lens.focal_length_mm,
+            lens.f_number,
+            lens.focus_distance_m,
+            lens.enabled != 0,
+        ));
         super::v3_demo_common::set_camera_lens(&mut s.scene_db.world, lens);
-        Pose { fov_deg: fov, ..pose }
+        Pose {
+            fov_deg: fov,
+            ..pose
+        }
     }
 
     fn render(&mut self, s: &mut AppState, pose: Pose, size: (u32, u32)) {
@@ -1074,14 +1327,20 @@ impl Capture {
             }
             let private = super::vg_stress_bench::private_bytes();
             if private as f64 > bench.cfg.mem_limit_gb * 1e9 {
-                eprintln!("[Bench] private memory {:.2} GB exceeds the {} GB guard; stopping", private as f64 / 1e9, bench.cfg.mem_limit_gb);
+                eprintln!(
+                    "[Bench] private memory {:.2} GB exceeds the {} GB guard; stopping",
+                    private as f64 / 1e9,
+                    bench.cfg.mem_limit_gb
+                );
                 std::process::exit(3);
             }
         }
     }
 
     fn step_shot(&mut self, s: &mut AppState) -> bool {
-        let Phase::Shot(run) = &mut self.phase else { return false };
+        let Phase::Shot(run) = &mut self.phase else {
+            return false;
+        };
         let index = run.index;
         let shot = self.shots[index].clone();
         let size = run.size;
@@ -1089,14 +1348,19 @@ impl Capture {
             run.applied = true;
             self.apply(s, &shot, size);
         }
-        let Phase::Shot(run) = &mut self.phase else { return false };
+        let Phase::Shot(run) = &mut self.phase else {
+            return false;
+        };
         let (frame_now, settle_now) = (run.frame, run.settle);
         let pose = shot.camera.pose(frame_now);
         let pose = self.lensed(s, &shot, pose, size);
         let total_settle = if frame_now == 0 { settle_now } else { 2 };
         // Settle frames (the first frame of a sequence only; later frames follow the path).
         let mut gpu_window: BTreeMap<&'static str, (f64, u32)> = BTreeMap::new();
-        let mut last_generation = match &self.phase { Phase::Shot(r) => r.last_generation, _ => 0 };
+        let mut last_generation = match &self.phase {
+            Phase::Shot(r) => r.last_generation,
+            _ => 0,
+        };
         for i in 0..total_settle.max(1) {
             self.render(s, pose, size);
             if i + 30 >= total_settle {
@@ -1118,7 +1382,9 @@ impl Capture {
                 }
             }
         }
-        let Phase::Shot(run) = &mut self.phase else { return false };
+        let Phase::Shot(run) = &mut self.phase else {
+            return false;
+        };
         run.last_generation = last_generation;
         for (k, v) in gpu_window {
             let e = run.gpu.entry(k).or_insert((0.0, 0));
@@ -1133,7 +1399,10 @@ impl Capture {
         let path = if frames == 1 {
             self.options.dir.join(format!("{}.{ext}", shot.name))
         } else {
-            self.options.dir.join(&shot.name).join(format!("{frame:04}.{ext}"))
+            self.options
+                .dir
+                .join(&shot.name)
+                .join(format!("{frame:04}.{ext}"))
         };
         let quality = shot.jpeg_quality.unwrap_or(92).clamp(30, 100);
         match self.save_image(s, &path, size, jpg.then_some(quality)) {
@@ -1143,7 +1412,9 @@ impl Capture {
                 s.loading_errors += 1;
             }
         }
-        let Phase::Shot(run) = &mut self.phase else { return false };
+        let Phase::Shot(run) = &mut self.phase else {
+            return false;
+        };
         run.frame += 1;
         if frames > 1 && run.frame % 30 == 0 {
             println!("[Capture]   {} frame {}/{}", shot.name, run.frame, frames);
@@ -1161,7 +1432,10 @@ impl Capture {
         let elapsed = run.started.elapsed().as_secs_f32();
         let stats = self.stats_json(s, &shot, pose_of(&shot, frames), size, frames, gpu, elapsed);
         let json_path = self.options.dir.join(format!("{}.json", shot.name));
-        if let Err(e) = std::fs::write(&json_path, serde_json::to_vec_pretty(&stats).unwrap_or_default()) {
+        if let Err(e) = std::fs::write(
+            &json_path,
+            serde_json::to_vec_pretty(&stats).unwrap_or_default(),
+        ) {
             eprintln!("[Capture] {}: {e}", json_path.display());
         }
         self.index.push(serde_json::json!({
@@ -1187,7 +1461,9 @@ impl Capture {
         gpu: BTreeMap<&str, f64>,
         seconds: f32,
     ) -> serde_json::Value {
-        let cull = s.renderer.find_pass::<helio_pass_vg_cull::VgCullEarlyPass>();
+        let cull = s
+            .renderer
+            .find_pass::<helio_pass_vg_cull::VgCullEarlyPass>();
         let stats = cull.and_then(|p| p.stats_snapshot());
         let (hw, sw, dense) = stats.map_or((0, 0, 0), |st| st.tier_split());
         let pool = s.runtime.with_store(|store| store.stats());
@@ -1267,19 +1543,24 @@ impl Capture {
 
     /// The instance-benchmark section of the stats JSON (`null` outside the benchmark).
     fn bench_json(&self, s: &AppState) -> serde_json::Value {
-        let Some(b) = &s.bench else { return serde_json::Value::Null };
+        let Some(b) = &s.bench else {
+            return serde_json::Value::Null;
+        };
         let tail = |pick: fn(&(f32, f32)) -> f32| {
             let n = self.samples.len();
             let from = n.saturating_sub(40);
             self.samples[from..].iter().map(pick).collect::<Vec<_>>()
         };
-        let (calls, rebuilds, visible, derive_gpu_bytes) = s
-            .targets
-            .lock()
-            .map_or((0, 0, 0, 0), |t| (t.derive_calls, t.derive_rebuilds, t.visible, t.gpu_bytes));
+        let (calls, rebuilds, visible, derive_gpu_bytes) =
+            s.targets.lock().map_or((0, 0, 0, 0), |t| {
+                (t.derive_calls, t.derive_rebuilds, t.visible, t.gpu_bytes)
+            });
         let instances = b.cfg.instances.max(1) as f64;
         let objects = b.spawned_objects.max(1) as f64;
-        let bvh_scratch = s.renderer.find_pass::<helio_pass_vg_bvh::VgBvhPass>().map_or(0, |p| p.scratch_bytes());
+        let bvh_scratch = s
+            .renderer
+            .find_pass::<helio_pass_vg_bvh::VgBvhPass>()
+            .map_or(0, |p| p.scratch_bytes());
         let private = super::vg_stress_bench::private_bytes();
         serde_json::json!({
             "instances": b.cfg.instances,
@@ -1316,7 +1597,13 @@ impl Capture {
         })
     }
 
-    fn save_image(&mut self, s: &AppState, path: &Path, size: (u32, u32), jpeg_quality: Option<u8>) -> Result<u64, String> {
+    fn save_image(
+        &mut self,
+        s: &AppState,
+        path: &Path,
+        size: (u32, u32),
+        jpeg_quality: Option<u8>,
+    ) -> Result<u64, String> {
         let (texture, _, _) = self.target.as_ref().ok_or("no target")?;
         let (buffer, _) = self.readback.as_ref().ok_or("no readback buffer")?;
         let row = padded_row(size.0);
@@ -1325,15 +1612,30 @@ impl Capture {
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size.1) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size.1),
+                },
             },
-            wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
         );
         s.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        s.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        s.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| e.to_string())?;
         let rgb = {
-            let mapped = buffer.slice(..).get_mapped_range().map_err(|e| format!("{e:?}"))?;
+            let mapped = buffer
+                .slice(..)
+                .get_mapped_range()
+                .map_err(|e| format!("{e:?}"))?;
             rgba_rows_to_rgb(&mapped, size, row as usize)
         };
         buffer.unmap();
@@ -1342,8 +1644,12 @@ impl Capture {
         }
         let mut out = Vec::new();
         match jpeg_quality {
-            Some(q) => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q)
-                .encode(&rgb, size.0, size.1, image::ExtendedColorType::Rgb8),
+            Some(q) => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, q).encode(
+                &rgb,
+                size.0,
+                size.1,
+                image::ExtendedColorType::Rgb8,
+            ),
             None => {
                 use image::ImageEncoder;
                 image::codecs::png::PngEncoder::new_with_quality(
@@ -1413,7 +1719,10 @@ pub fn resolve_view(name: &str, views: &[helio_core::DebugViewDescriptor]) -> Op
             .find(|v| v.name.to_ascii_lowercase().contains("wire"))
             .map(|v| v.debug_mode),
         other => debug_view::parse(other).map(|v| v.id()).or_else(|| {
-            views.iter().find(|v| v.name.eq_ignore_ascii_case(other)).map(|v| v.debug_mode)
+            views
+                .iter()
+                .find(|v| v.name.eq_ignore_ascii_case(other))
+                .map(|v| v.debug_mode)
         }),
     }?;
     (id == 0 || views.iter().any(|v| v.debug_mode == id)).then_some(id)
@@ -1424,7 +1733,13 @@ mod tests {
     use super::*;
 
     fn views() -> Vec<helio_core::DebugViewDescriptor> {
-        [0, 4, 22, 20, 21, 100, 102, 112].map(|m| helio_core::DebugViewDescriptor { name: "x", debug_mode: m, description: "" }).to_vec()
+        [0, 4, 22, 20, 21, 100, 102, 112]
+            .map(|m| helio_core::DebugViewDescriptor {
+                name: "x",
+                debug_mode: m,
+                description: "",
+            })
+            .to_vec()
     }
 
     #[test]
@@ -1434,31 +1749,86 @@ mod tests {
         let unique: std::collections::HashSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "duplicate names");
         for needed in [
-            "hero-temple-fog", "hero-courtyard-statues", "hero-forest-dusk", "statue-lucy-closeup",
-            "statue-thai-closeup", "trees-canopy-closeup", "dbg-normal", "dbg-albedo", "dbg-lighting-only",
-            "dbg-triangle-id", "dbg-cluster-id", "dbg-lod-level", "dbg-detail-vs-root", "dbg-triangle-size",
-            "dbg-raster-tier", "dbg-sw-overdraw", "dbg-dense-overlap", "dbg-dense-mask", "dbg-page-residency",
-            "dbg-culling-survival", "dbg-error-vs-tau", "dbg-instance-id", "dbg-barycentrics", "dbg-material-bin",
-            "dbg-classic-vs-vg-mask", "hero-colonnade-sunshafts", "hero-lucy-portrait", "hero-thai-pedestal", "hero-dragon-court-rack-focus-a", "hero-dragon-court-rack-focus-b", "hero-pine-bokeh", "hero-interior-hall-dust", "lucy-3m-normal", "lucy-3m-triangles", "lucy-3m-clusters", "lucy-12m-normal",
-            "lucy-48m-clusters", "lucy-150m-triangles", "tau-0p5", "tau-1", "tau-4", "tau-16", "tau-64",
-            "tau-4-triangles", "tau-64-triangles", "tier3-off", "tier3-on-peel", "tier3-on-rt", "flythrough",
+            "hero-temple-fog",
+            "hero-courtyard-statues",
+            "hero-forest-dusk",
+            "statue-lucy-closeup",
+            "statue-thai-closeup",
+            "trees-canopy-closeup",
+            "dbg-normal",
+            "dbg-albedo",
+            "dbg-lighting-only",
+            "dbg-triangle-id",
+            "dbg-cluster-id",
+            "dbg-lod-level",
+            "dbg-detail-vs-root",
+            "dbg-triangle-size",
+            "dbg-raster-tier",
+            "dbg-sw-overdraw",
+            "dbg-dense-overlap",
+            "dbg-dense-mask",
+            "dbg-page-residency",
+            "dbg-culling-survival",
+            "dbg-error-vs-tau",
+            "dbg-instance-id",
+            "dbg-barycentrics",
+            "dbg-material-bin",
+            "dbg-classic-vs-vg-mask",
+            "hero-colonnade-sunshafts",
+            "hero-lucy-portrait",
+            "hero-thai-pedestal",
+            "hero-dragon-court-rack-focus-a",
+            "hero-dragon-court-rack-focus-b",
+            "hero-pine-bokeh",
+            "hero-interior-hall-dust",
+            "lucy-3m-normal",
+            "lucy-3m-triangles",
+            "lucy-3m-clusters",
+            "lucy-12m-normal",
+            "lucy-48m-clusters",
+            "lucy-150m-triangles",
+            "tau-0p5",
+            "tau-1",
+            "tau-4",
+            "tau-16",
+            "tau-64",
+            "tau-4-triangles",
+            "tau-64-triangles",
+            "tier3-off",
+            "tier3-on-peel",
+            "tier3-on-rt",
+            "flythrough",
             "flythrough-debug",
         ] {
             assert!(names.contains(&needed), "missing {needed}");
         }
         // The debug gallery shares ONE pose so the images line up.
-        let dbg: Vec<_> = shots.iter().filter(|s| s.name.starts_with("dbg-")).collect();
+        let dbg: Vec<_> = shots
+            .iter()
+            .filter(|s| s.name.starts_with("dbg-"))
+            .collect();
         assert!(dbg.iter().all(|s| s.camera == dbg[0].camera));
         // Every default shot is valid and every view resolves.
         let text = serde_json::to_string(&shots).unwrap();
         assert_eq!(parse_shots(&text).unwrap(), shots);
         // Debug views stay clean: no lens, no fog, no grading.
         for shot in shots.iter().filter(|s| s.debug_view.is_some()) {
-            assert!(shot.lens.is_none() && shot.fog.is_none() && !shot.post, "{}", shot.name);
+            assert!(
+                shot.lens.is_none() && shot.fog.is_none() && !shot.post,
+                "{}",
+                shot.name
+            );
         }
         // Hero shots use the full stack and focus on a subject.
         for shot in shots.iter().filter(|s| s.name.starts_with("hero-")) {
-            assert!(shot.lens.as_ref().is_some_and(|l| l.focus_target.is_some() && l.f_number <= 4.0) && shot.post, "{}", shot.name);
+            assert!(
+                shot.lens
+                    .as_ref()
+                    .is_some_and(|l| l.focus_target.is_some() && l.f_number <= 4.0)
+                    && shot.post,
+                "{}",
+                shot.name
+            );
         }
     }
 
@@ -1466,23 +1836,39 @@ mod tests {
     fn committed_shots_json_matches_the_built_in_list() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vg_stress/shots.json");
         let text = std::fs::read_to_string(&path).expect("shots.json is committed");
-        assert_eq!(parse_shots(&text).unwrap(), default_shots(), "regenerate with the ignored write_shots_json test");
+        assert_eq!(
+            parse_shots(&text).unwrap(),
+            default_shots(),
+            "regenerate with the ignored write_shots_json test"
+        );
     }
 
     #[test]
     #[ignore = "regenerates assets/vg_stress/shots.json from the built-in list"]
     fn write_shots_json() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vg_stress/shots.json");
-        std::fs::write(path, serde_json::to_string_pretty(&serde_json::json!({ "shots": default_shots() })).unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&serde_json::json!({ "shots": default_shots() })).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
     fn parsing_accepts_both_forms_and_rejects_bad_shots() {
         let one = r#"{"name":"a","camera":{"position":[0,1,2],"yaw_deg":90}}"#;
         assert_eq!(parse_shots(&format!("[{one}]")).unwrap().len(), 1);
-        assert_eq!(parse_shots(&format!("{{\"shots\":[{one}]}}")).unwrap().len(), 1);
+        assert_eq!(
+            parse_shots(&format!("{{\"shots\":[{one}]}}"))
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(parse_shots(&format!("[{one},{one}]")).is_err(), "duplicate");
-        assert!(parse_shots(r#"[{"name":"a/b","camera":{"position":[0,0,0]}}]"#).is_err(), "path in name");
+        assert!(
+            parse_shots(r#"[{"name":"a/b","camera":{"position":[0,0,0]}}]"#).is_err(),
+            "path in name"
+        );
         assert!(parse_shots(r#"[{"name":"a"}]"#).is_err(), "no camera");
         assert!(parse_shots(r#"[{"name":"a","camera":{"keyframes":[{"t":1,"position":[0,0,0],"look_at":[0,0,1]},{"t":1,"position":[0,0,0],"look_at":[0,0,1]}]}}]"#).is_err());
         assert!(parse_shots("not json").is_err());
@@ -1490,17 +1876,36 @@ mod tests {
 
     #[test]
     fn fixed_camera_yaw_zero_looks_down_negative_z() {
-        let c = CameraSpec { position: Some([1.0, 2.0, 3.0]), yaw_deg: Some(0.0), pitch_deg: Some(0.0), ..Default::default() };
+        let c = CameraSpec {
+            position: Some([1.0, 2.0, 3.0]),
+            yaw_deg: Some(0.0),
+            pitch_deg: Some(0.0),
+            ..Default::default()
+        };
         let p = c.pose(0);
         assert!((p.target - glam::Vec3::new(1.0, 2.0, 2.0)).length() < 1e-5);
-        let c = CameraSpec { position: Some([0.0; 3]), yaw_deg: Some(90.0), ..Default::default() };
+        let c = CameraSpec {
+            position: Some([0.0; 3]),
+            yaw_deg: Some(90.0),
+            ..Default::default()
+        };
         assert!((c.pose(0).target - glam::Vec3::X).length() < 1e-5);
         assert_eq!(c.frame_count(), 1);
     }
 
     fn path() -> CameraSpec {
-        let k = |t, x| Keyframe { t, position: [x, 0.0, 0.0], look_at: [x, 0.0, -1.0], fov_deg: Some(40.0 + x) };
-        CameraSpec { keyframes: vec![k(0.0, 0.0), k(1.0, 10.0), k(2.0, 20.0), k(3.0, 40.0)], duration_s: Some(3.0), fps: Some(10.0), ..Default::default() }
+        let k = |t, x| Keyframe {
+            t,
+            position: [x, 0.0, 0.0],
+            look_at: [x, 0.0, -1.0],
+            fov_deg: Some(40.0 + x),
+        };
+        CameraSpec {
+            keyframes: vec![k(0.0, 0.0), k(1.0, 10.0), k(2.0, 20.0), k(3.0, 40.0)],
+            duration_s: Some(3.0),
+            fps: Some(10.0),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1514,7 +1919,10 @@ mod tests {
         assert!(xs.windows(2).all(|w| w[1] > w[0]), "monotonic: {xs:?}");
         // No velocity jump across a key: per-frame steps change gradually.
         let steps: Vec<f32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
-        assert!(steps.windows(2).all(|w| (w[1] - w[0]).abs() < 0.5), "{steps:?}");
+        assert!(
+            steps.windows(2).all(|w| (w[1] - w[0]).abs() < 0.5),
+            "{steps:?}"
+        );
         // FOV interpolates with the keys; beyond the range it clamps.
         assert!((c.pose_at(0.5).fov_deg - 45.0).abs() < 1e-3);
         assert_eq!(c.pose_at(99.0).position.x, 40.0);
@@ -1529,7 +1937,10 @@ mod tests {
         assert_eq!(parse_resolution("huge"), None);
         let none = |_: &str| None;
         assert!(Options::from_sources(&[], &none).is_none());
-        let o = Options::from_sources(&["--capture".into(), "out".into()], &|k| (k == "VG_STRESS_CAPTURE_RES").then(|| "720p".to_string())).unwrap();
+        let o = Options::from_sources(&["--capture".into(), "out".into()], &|k| {
+            (k == "VG_STRESS_CAPTURE_RES").then(|| "720p".to_string())
+        })
+        .unwrap();
         assert_eq!((o.dir, o.size), (PathBuf::from("out"), (1280, 720)));
         let o = Options::from_sources(&[], &|k| match k {
             "VG_STRESS_CAPTURE" => Some("d".into()),
@@ -1558,11 +1969,21 @@ mod tests {
     fn rows_are_unpadded_and_sun_points_down() {
         assert_eq!(padded_row(1920), 7680);
         assert_eq!(padded_row(100), 512);
-        let mapped = [1u8, 2, 3, 255, 4, 5, 6, 255, 9, 9, 9, 9, 7, 8, 9, 255, 1, 1, 1, 255, 9, 9, 9, 9];
+        let mapped = [
+            1u8, 2, 3, 255, 4, 5, 6, 255, 9, 9, 9, 9, 7, 8, 9, 255, 1, 1, 1, 255, 9, 9, 9, 9,
+        ];
         let rgb = rgba_rows_to_rgb(&mapped, (2, 2), 12);
         assert_eq!(rgb, [1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 1, 1]);
-        let d = SunSpec { elevation_deg: 30.0, azimuth_deg: 90.0, ..Default::default() }.direction();
-        assert!(d[1] < 0.0 && d[0] < 0.0, "sun in +X travels toward -X: {d:?}");
+        let d = SunSpec {
+            elevation_deg: 30.0,
+            azimuth_deg: 90.0,
+            ..Default::default()
+        }
+        .direction();
+        assert!(
+            d[1] < 0.0 && d[0] < 0.0,
+            "sun in +X travels toward -X: {d:?}"
+        );
     }
 }
 
@@ -1572,19 +1993,38 @@ mod lens_tests {
 
     #[test]
     fn focus_distance_and_field_of_view_follow_the_shot() {
-        let pose = Pose { position: glam::Vec3::new(0.0, 0.0, 10.0), target: glam::Vec3::ZERO, fov_deg: 50.0 };
-        let spec = LensSpec { focus_target: Some([0.0, 0.0, 4.0]), ..Default::default() };
+        let pose = Pose {
+            position: glam::Vec3::new(0.0, 0.0, 10.0),
+            target: glam::Vec3::ZERO,
+            fov_deg: 50.0,
+        };
+        let spec = LensSpec {
+            focus_target: Some([0.0, 0.0, 4.0]),
+            ..Default::default()
+        };
         let (lens, fov) = lens_component(&spec, &pose, 16.0 / 9.0);
         assert!((lens.focus_distance_m - 6.0).abs() < 1e-4);
-        assert!((fov - 50.0).abs() < 1e-4, "no focal override keeps the camera fov");
+        assert!(
+            (fov - 50.0).abs() < 1e-4,
+            "no focal override keeps the camera fov"
+        );
         // Without a target the look_at distance is the focus; the focal length matches the fov.
         let (lens, _) = lens_component(&LensSpec::default(), &pose, 16.0 / 9.0);
         assert!((lens.focus_distance_m - 10.0).abs() < 1e-4);
         let sensor_h = 36.0 / (16.0 / 9.0);
-        assert!(((2.0 * (sensor_h / (2.0 * lens.focal_length_mm)).atan()).to_degrees() - 50.0).abs() < 1e-3);
+        assert!(
+            ((2.0 * (sensor_h / (2.0 * lens.focal_length_mm)).atan()).to_degrees() - 50.0).abs()
+                < 1e-3
+        );
         // A focal-length override sets the field of view: 135 mm is much narrower than 35 mm.
-        let long = LensSpec { focal_length_mm: Some(135.0), ..Default::default() };
-        let wide = LensSpec { focal_length_mm: Some(35.0), ..Default::default() };
+        let long = LensSpec {
+            focal_length_mm: Some(135.0),
+            ..Default::default()
+        };
+        let wide = LensSpec {
+            focal_length_mm: Some(35.0),
+            ..Default::default()
+        };
         let (_, f_long) = lens_component(&long, &pose, 16.0 / 9.0);
         let (_, f_wide) = lens_component(&wide, &pose, 16.0 / 9.0);
         assert!(f_long < 10.0 && f_wide > 30.0, "{f_long} {f_wide}");
@@ -1597,10 +2037,24 @@ mod placement_dump {
     #[ignore]
     fn print_statue_placements() {
         use crate::vg_stress_data::{dims::Dims, layout::museum_layout_with};
-        let layout = museum_layout_with(&Dims::load(), &crate::vg_stress_prep::catalog::Config::default());
+        let layout = museum_layout_with(
+            &Dims::load(),
+            &crate::vg_stress_prep::catalog::Config::default(),
+        );
         for p in &layout.placements {
-            if p.virtual_geometry && !p.asset.contains('#') && (p.asset.contains("lucy") || p.asset.contains("thai") || p.asset.contains("dragon")) {
-                eprintln!("{} pos {:.1?} rot {:.0?} scale {:.2?}", p.asset.rsplit('/').next().unwrap(), p.position, p.rotation, p.scale);
+            if p.virtual_geometry
+                && !p.asset.contains('#')
+                && (p.asset.contains("lucy")
+                    || p.asset.contains("thai")
+                    || p.asset.contains("dragon"))
+            {
+                eprintln!(
+                    "{} pos {:.1?} rot {:.0?} scale {:.2?}",
+                    p.asset.rsplit('/').next().unwrap(),
+                    p.position,
+                    p.rotation,
+                    p.scale
+                );
             }
         }
     }
@@ -1630,7 +2084,10 @@ pub fn set_interactive_post(s: &mut AppState, level: u8) {
         super::v3_demo_common::set_volumetric_quality(&mut s.scene_db.world, 1, 200.0);
         s.fog_entity = Some(super::v3_demo_common::spawn_global_fog(
             &mut s.scene_db.world,
-            super::v3_demo_common::GlobalFogComponent { enabled: 0, ..Default::default() },
+            super::v3_demo_common::GlobalFogComponent {
+                enabled: 0,
+                ..Default::default()
+            },
         ));
     }
     if let Some(entity) = s.fog_entity {
@@ -1644,22 +2101,42 @@ pub fn set_interactive_post(s: &mut AppState, level: u8) {
         s.scene_db.world.insert(entity, component);
     }
     s.post_level = level;
-    println!("[Museum] post stack: {}", ["off", "standard (grading, bloom, vignette)", "cinematic (+ depth of field, autofocus centre, haze)"][level as usize]);
+    println!(
+        "[Museum] post stack: {}",
+        [
+            "off",
+            "standard (grading, bloom, vignette)",
+            "cinematic (+ depth of field, autofocus centre, haze)"
+        ][level as usize]
+    );
 }
 
 /// One index entry per `<name>.json` stats file in `dir`.
 fn scan_stats(dir: &Path) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") || path.file_stem().is_some_and(|s| s == "index") {
+        if path.extension().is_none_or(|e| e != "json")
+            || path.file_stem().is_some_and(|s| s == "index")
+        {
             continue;
         }
-        let Some(stats) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else { continue };
-        let Some(name) = stats["name"].as_str() else { continue };
+        let Some(stats) = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        else {
+            continue;
+        };
+        let Some(name) = stats["name"].as_str() else {
+            continue;
+        };
         let frames = stats["frames"].as_u64().unwrap_or(1);
-        let ext = ["png", "jpg"].into_iter().find(|e| dir.join(format!("{name}.{e}")).exists());
+        let ext = ["png", "jpg"]
+            .into_iter()
+            .find(|e| dir.join(format!("{name}.{e}")).exists());
         out.push(serde_json::json!({
             "name": name,
             "image": ext.map_or_else(|| format!("{name}/"), |e| format!("{name}.{e}")),
@@ -1675,7 +2152,9 @@ fn scan_stats(dir: &Path) -> Vec<serde_json::Value> {
 }
 
 fn dir_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
     entries
         .flatten()
         .map(|e| match e.metadata() {
@@ -1689,8 +2168,15 @@ fn dir_bytes(dir: &Path) -> u64 {
 /// Distribution of the Tier 2 per-tile counters of the last frame (calibration).
 /// Blocks on the GPU; capture mode only.
 fn tile_density_json(s: &AppState) -> serde_json::Value {
-    let Some(pass) = s.renderer.find_pass::<helio_pass_vg_raster::VgRasterEarlyPass>() else { return serde_json::Value::Null };
-    let Some((counters, tiles)) = pass.shared().tile_counters_blocking(&s.device, &s.queue) else { return serde_json::Value::Null };
+    let Some(pass) = s
+        .renderer
+        .find_pass::<helio_pass_vg_raster::VgRasterEarlyPass>()
+    else {
+        return serde_json::Value::Null;
+    };
+    let Some((counters, tiles)) = pass.shared().tile_counters_blocking(&s.device, &s.queue) else {
+        return serde_json::Value::Null;
+    };
     let n = counters.len().max(1);
     let mut tris: Vec<u32> = counters.iter().map(|c| c[0]).collect();
     let mut hits: Vec<u32> = counters.iter().map(|c| c[1]).collect();

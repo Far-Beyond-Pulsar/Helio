@@ -599,7 +599,9 @@ impl AppState {
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Some(acceleration) = &mut self.acceleration {
-            acceleration.prepare(&self.scene_db.world).expect("cathedral RT geometry");
+            acceleration
+                .prepare(&self.scene_db.world)
+                .expect("cathedral RT geometry");
             renderer.set_ray_tracing_frame(acceleration.frame());
         }
         if let Err(e) = renderer.render(&camera, &view) {

@@ -5,7 +5,8 @@ use helio_pass_vg_raster::shaders;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 fn validate(label: &str, src: &str, caps: Capabilities) -> Result<naga::Module, String> {
-    let module = naga::front::wgsl::parse_str(src).map_err(|e| format!("{label}: parse: {}", e.emit_to_string(src)))?;
+    let module = naga::front::wgsl::parse_str(src)
+        .map_err(|e| format!("{label}: parse: {}", e.emit_to_string(src)))?;
     Validator::new(ValidationFlags::all(), caps)
         .validate(&module)
         .map_err(|e| format!("{label}: validate: {e:?}"))?;
@@ -55,10 +56,22 @@ fn entry_points_exist() {
         ("vg_tile_raster", vec!["tile_raster_main"]),
         ("vg_tile_classify", vec!["classify_main", "dense_args_main"]),
         ("vg_dense_count", vec!["dense_count_main"]),
-        ("vg_hw_raster_masked (bindless)", vec!["vs_masked", "fs_masked"]),
-        ("vg_hw_raster_masked (expanded)", vec!["vs_masked", "fs_masked"]),
-        ("vg_sw_raster_masked (bindless)", vec!["sw_raster_masked_main"]),
-        ("vg_sw_raster_masked (expanded)", vec!["sw_raster_masked_main"]),
+        (
+            "vg_hw_raster_masked (bindless)",
+            vec!["vs_masked", "fs_masked"],
+        ),
+        (
+            "vg_hw_raster_masked (expanded)",
+            vec!["vs_masked", "fs_masked"],
+        ),
+        (
+            "vg_sw_raster_masked (bindless)",
+            vec!["sw_raster_masked_main"],
+        ),
+        (
+            "vg_sw_raster_masked (expanded)",
+            vec!["sw_raster_masked_main"],
+        ),
     ];
     for (label, src) in shaders::all_sources() {
         let m = validate(label, &src, Capabilities::all()).unwrap();
@@ -82,11 +95,24 @@ fn abi_struct_sizes_match() {
     let mut layouter = naga::proc::Layouter::default();
     layouter.update(module.to_ctx()).unwrap();
     let size = |name: &str| {
-        let (h, _) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some(name)).unwrap();
+        let (h, _) = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some(name))
+            .unwrap();
         layouter[h].size as usize
     };
-    assert_eq!(size("VgVisibleCluster"), std::mem::size_of::<helio_vg_format::GpuVisibleCluster>());
+    assert_eq!(
+        size("VgVisibleCluster"),
+        std::mem::size_of::<helio_vg_format::GpuVisibleCluster>()
+    );
     assert_eq!(size("VgObject") as u64, OBJECT_STRIDE);
-    assert_eq!(size("VgRasterParams"), std::mem::size_of::<VgRasterParams>());
-    assert_eq!(size("VgCamera"), std::mem::size_of::<helio_core::GpuCameraUniforms>());
+    assert_eq!(
+        size("VgRasterParams"),
+        std::mem::size_of::<VgRasterParams>()
+    );
+    assert_eq!(
+        size("VgCamera"),
+        std::mem::size_of::<helio_core::GpuCameraUniforms>()
+    );
 }

@@ -35,7 +35,11 @@ pub struct Blueprint {
 
 impl Blueprint {
     pub fn new(half_x: i32, half_z: i32) -> Self {
-        Self { stamp: Stamp::new(), half: [half_x, half_z], height: 0 }
+        Self {
+            stamp: Stamp::new(),
+            half: [half_x, half_z],
+            height: 0,
+        }
     }
 
     pub fn set(&mut self, at: [i32; 3], block: Block) {
@@ -62,7 +66,9 @@ impl Blueprint {
 
     /// The blocks it holds solid (each read at its centre cell).
     pub fn solid_blocks(&self) -> Vec<[i32; 3]> {
-        let (Ok(parts), Some((lo, hi))) = (self.stamp.compile(), self.stamp.bounds()) else { return Vec::new() };
+        let (Ok(parts), Some((lo, hi))) = (self.stamp.compile(), self.stamp.bounds()) else {
+            return Vec::new();
+        };
         let n = cells_a_block();
         let (lo, hi) = (lo.map(|v| v.div_euclid(n)), hi.map(|v| v.div_euclid(n)));
         let mut out = Vec::new();
@@ -83,9 +89,13 @@ impl Blueprint {
         self.height = self.height.max(a[1].max(b[1]) + 1);
         let (lo, hi) = cells(a, b);
         let n = cells_a_block() - 1;
-        self.stamp.fill(lo, [hi[0], hi[1], lo[2] + n], block.material());
-        self.stamp.fill([lo[0], lo[1], hi[2] - n], hi, block.material());
-        self.stamp.fill(lo, [lo[0] + n, hi[1], hi[2]], block.material());
-        self.stamp.fill([hi[0] - n, lo[1], lo[2]], hi, block.material());
+        self.stamp
+            .fill(lo, [hi[0], hi[1], lo[2] + n], block.material());
+        self.stamp
+            .fill([lo[0], lo[1], hi[2] - n], hi, block.material());
+        self.stamp
+            .fill(lo, [lo[0] + n, hi[1], hi[2]], block.material());
+        self.stamp
+            .fill([hi[0] - n, lo[1], lo[2]], hi, block.material());
     }
 }

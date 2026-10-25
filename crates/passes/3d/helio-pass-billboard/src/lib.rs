@@ -78,7 +78,11 @@ impl BillboardPass {
         camera_buf: &wgpu::Buffer,
         target_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = helio_core::shader::module(device, "Billboard Shader", helio_core::include_wgsl!("../shaders/billboard.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Billboard Shader",
+            helio_core::include_wgsl!("../shaders/billboard.wgsl"),
+        );
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Billboard Globals"),
@@ -269,77 +273,80 @@ impl BillboardPass {
         });
 
         // ── Render pipeline ───────────────────────────────────────────────────
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Billboard Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                // Slot 0 only: the quad's per-vertex position/uv. Billboard
-                // instance data (world_pos/scale_flags/color) is read from
-                // the storage buffer bound at bind_group_0 binding 2
-                // (`instances[instance_index]` in the shader) -- there is no
-                // `@location`-based per-instance vertex input in `vs_main`
-                // (only `@builtin(vertex_index)`/`@builtin(instance_index)`),
-                // so a second, `Instance`-stepped vertex buffer slot here was
-                // stale: it made this pipeline require a vertex buffer at
-                // index 1 that `execute()` correctly never had a reason to
-                // bind, since nothing reads it.
-                buffers: &[
-                    // Slot 0: per-vertex quad data  (stride 16)
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: 16,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 0,
-                                shader_location: 0,
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Billboard Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    // Slot 0 only: the quad's per-vertex position/uv. Billboard
+                    // instance data (world_pos/scale_flags/color) is read from
+                    // the storage buffer bound at bind_group_0 binding 2
+                    // (`instances[instance_index]` in the shader) -- there is no
+                    // `@location`-based per-instance vertex input in `vs_main`
+                    // (only `@builtin(vertex_index)`/`@builtin(instance_index)`),
+                    // so a second, `Instance`-stepped vertex buffer slot here was
+                    // stale: it made this pipeline require a vertex buffer at
+                    // index 1 that `execute()` correctly never had a reason to
+                    // bind, since nothing reads it.
+                    buffers: &[
+                        // Slot 0: per-vertex quad data  (stride 16)
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 8,
+                                    shader_location: 1,
+                                },
+                            ],
+                        }),
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
                             },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 8,
-                                shader_location: 1,
-                            },
-                        ],
-                    }),
-                ],
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None, // billboards are always camera-facing
+                    ..Default::default()
+                },
+                // Depth read-only: billboards depth-test against scene geometry but don't write depth.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None, // billboards are always camera-facing
-                ..Default::default()
-            },
-            // Depth read-only: billboards depth-test against scene geometry but don't write depth.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         Self {
             pipeline,
@@ -450,12 +457,7 @@ impl RenderPass for BillboardPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "pre_aa",
-            "full_res_depth",
-            "billboards",
-            "depth",
-        ]
+        &["pre_aa", "full_res_depth", "billboards", "depth"]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -489,7 +491,11 @@ impl RenderPass for BillboardPass {
                     0 => MAX_BILLBOARDS,
                     rows => rows.min(MAX_BILLBOARDS),
                 };
-                self.instance_count = if self.liveness.maybe_live(handle) { rows } else { 0 };
+                self.instance_count = if self.liveness.maybe_live(handle) {
+                    rows
+                } else {
+                    0
+                };
                 if self.scene_binding_epoch != Some(handle.epoch) {
                     self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Billboard SceneDB BG0"),
@@ -521,7 +527,9 @@ impl RenderPass for BillboardPass {
             delta_time: 0.0,
             ambient_intensity: 1.0,
             _pad: 0.0,
-            world_origin: ctx.world_origin.map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
+            world_origin: ctx
+                .world_origin
+                .map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -552,10 +560,12 @@ impl RenderPass for BillboardPass {
         let depth_view = if self.occluded_by_geometry && pre_aa.is_some() {
             depth
         } else {
-            resources.get(helio_core::ResourceKey::new("full_res_depth")).unwrap_or(depth)
+            resources
+                .get(helio_core::ResourceKey::new("full_res_depth"))
+                .unwrap_or(depth)
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -594,5 +604,3 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 }
-
-

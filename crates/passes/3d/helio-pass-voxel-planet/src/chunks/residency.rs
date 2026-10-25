@@ -193,7 +193,9 @@ impl Planner {
     /// layers) as their footprints' estimate.
     pub fn new(grid: &Grid, range: (i32, i32), config: PlanConfig, edits: Arc<EditView>) -> Self {
         let level = grid.levels() - 1;
-        let occluder = (!grid.is_plane()).then(|| grid.radius() + f64::from(range.0) * f64::from(grid.layer_mm()) * 1e-3).filter(|r| *r > 0.0);
+        let occluder = (!grid.is_plane())
+            .then(|| grid.radius() + f64::from(range.0) * f64::from(grid.layer_mm()) * 1e-3)
+            .filter(|r| *r > 0.0);
         let mut planner = Self {
             nodes: FxHashMap::default(),
             footprints: FxHashMap::default(),
@@ -216,10 +218,17 @@ impl Planner {
         let level = self.root_level;
         let n = tiles_at(grid, level);
         let layers = ((self.range.0 >> level) - 1, (self.range.1 >> level) + 1);
-        let ranges = Ranges { volume: layers, surface: layers };
+        let ranges = Ranges {
+            volume: layers,
+            surface: layers,
+        };
         // Base layers the roots span: the centre (or the lowest ground)
         // to the highest ground, widened by the edits'.
-        let bottom = if grid.is_plane() { self.range.0 } else { -(grid.radius() / grid.voxel_size()).ceil() as i32 };
+        let bottom = if grid.is_plane() {
+            self.range.0
+        } else {
+            -(grid.radius() / grid.voxel_size()).ceil() as i32
+        };
         let (mut lo, mut hi) = (bottom.min(self.range.0), self.range.1);
         for fb in self.edits.faces.iter().filter(|fb| fb.op() <= 1) {
             lo = lo.min(fb.k_lo.div_euclid(2));
@@ -234,8 +243,20 @@ impl Planner {
         for &face in grid.faces() {
             for cx in 0..n {
                 for cy in 0..n {
-                    let fp = Footprint { face, level, cx, cy };
-                    self.footprints.entry(fp).or_insert(Fp { ranges, exact: false, quarters: [None; 4], guess: 0, used: 0, class: None });
+                    let fp = Footprint {
+                        face,
+                        level,
+                        cx,
+                        cy,
+                    };
+                    self.footprints.entry(fp).or_insert(Fp {
+                        ranges,
+                        exact: false,
+                        quarters: [None; 4],
+                        guess: 0,
+                        used: 0,
+                        class: None,
+                    });
                     self.roots.extend((cz(lo)..=cz(hi)).map(|z| fp.node(z)));
                 }
             }
@@ -249,7 +270,10 @@ impl Planner {
     /// What `key` holds, from its footprint (which must exist).
     fn kind(&mut self, key: NodeKey) -> Kind {
         let edits = &self.edits;
-        let fp = self.footprints.get_mut(&key.footprint()).expect("a visited node's footprint");
+        let fp = self
+            .footprints
+            .get_mut(&key.footprint())
+            .expect("a visited node's footprint");
         if fp.class.as_ref().is_none_or(|(v, _)| *v != edits.version) {
             fp.class = Some((edits.version, edits.classify(key.footprint(), fp.ranges)));
         }
@@ -263,12 +287,34 @@ impl Planner {
     /// walls tens of metres over the plain beside them), else from its
     /// ranges.
     fn estimate_children(&mut self, key: NodeKey, frame: u64) {
-        let Some(parent) = self.footprints.get(&key.footprint()) else { return };
-        let (whole, quarters, guess) = (parent.ranges, parent.quarters, if parent.exact { 1 } else { parent.guess.saturating_add(1) });
+        let Some(parent) = self.footprints.get(&key.footprint()) else {
+            return;
+        };
+        let (whole, quarters, guess) = (
+            parent.ranges,
+            parent.quarters,
+            if parent.exact {
+                1
+            } else {
+                parent.guess.saturating_add(1)
+            },
+        );
         for (q, (a, b)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
             let ranges = quarters[q].unwrap_or(whole).child();
-            let fp = Footprint { face: key.face, level: key.level - 1, cx: key.cx * 2 + a, cy: key.cy * 2 + b };
-            let entry = self.footprints.entry(fp).or_insert(Fp { ranges, exact: false, quarters: [None; 4], guess, used: frame, class: None });
+            let fp = Footprint {
+                face: key.face,
+                level: key.level - 1,
+                cx: key.cx * 2 + a,
+                cy: key.cy * 2 + b,
+            };
+            let entry = self.footprints.entry(fp).or_insert(Fp {
+                ranges,
+                exact: false,
+                quarters: [None; 4],
+                guess,
+                used: frame,
+                class: None,
+            });
             entry.used = frame;
             if !entry.exact && entry.ranges != ranges {
                 entry.ranges = ranges;
@@ -279,7 +325,9 @@ impl Planner {
     }
 
     fn guess_of(&self, key: NodeKey) -> u8 {
-        self.footprints.get(&key.footprint()).map_or(0, |f| if f.exact { 0 } else { f.guess })
+        self.footprints
+            .get(&key.footprint())
+            .map_or(0, |f| if f.exact { 0 } else { f.guess })
     }
 
     /// Whether layers `layers` of `fp` cannot be seen from `eye`: below
@@ -289,7 +337,9 @@ impl Planner {
     /// top.
     fn beyond(&self, grid: &Grid, fp: Footprint, layers: (i32, i32), eye: &Eye) -> bool {
         let distance = tile_distance(grid, fp, layers, eye);
-        let Some(r) = self.occluder else { return distance > self.config.max_distance };
+        let Some(r) = self.occluder else {
+            return distance > self.config.max_distance;
+        };
         let over = |radius: f64| (radius * radius - r * r).max(0.0).sqrt();
         let e = eye.position.length();
         if e <= r {
@@ -308,13 +358,25 @@ impl Planner {
     /// Cells of `fp`'s layers `layers` project this many times
     /// `lod_pixels` from the nearest of `eyes`.
     fn error_box(&self, grid: &Grid, fp: Footprint, layers: (i32, i32), eyes: &[Eye]) -> f64 {
-        let distance = eyes.iter().map(|e| tile_distance(grid, fp, layers, e)).fold(f64::INFINITY, f64::min);
-        grid.level_size(fp.level) / distance.max(1e-3) / (self.config.pixel_angle * self.config.lod_pixels)
+        let distance = eyes
+            .iter()
+            .map(|e| tile_distance(grid, fp, layers, e))
+            .fold(f64::INFINITY, f64::min);
+        grid.level_size(fp.level)
+            / distance.max(1e-3)
+            / (self.config.pixel_angle * self.config.lod_pixels)
     }
 
     /// How many times `lod_pixels` the cells of `fp`'s layers `layers` may
     /// cover where the eye's motion (`velocity`) sweeps their image.
-    fn motion_allowance(&self, grid: &Grid, fp: Footprint, layers: (i32, i32), eye: &Eye, velocity: DVec3) -> f64 {
+    fn motion_allowance(
+        &self,
+        grid: &Grid,
+        fp: Footprint,
+        layers: (i32, i32),
+        eye: &Eye,
+        velocity: DVec3,
+    ) -> f64 {
         if self.config.motion_flow <= 0.0 {
             return 1.0;
         }
@@ -330,8 +392,17 @@ impl Planner {
     /// node generated).
     fn band_of(&mut self, key: NodeKey) -> (i32, i32) {
         let _ = self.kind(key);
-        let class = &self.footprints[&key.footprint()].class.as_ref().expect("classified above").1;
-        class.mixed.iter().find(|(a, b)| (*a..=*b).contains(&key.cz)).copied().unwrap_or((key.cz, key.cz))
+        let class = &self.footprints[&key.footprint()]
+            .class
+            .as_ref()
+            .expect("classified above")
+            .1;
+        class
+            .mixed
+            .iter()
+            .find(|(a, b)| (*a..=*b).contains(&key.cz))
+            .copied()
+            .unwrap_or((key.cz, key.cz))
     }
 
     /// The layers (level cells) the chunks of nodes `members` (a band)
@@ -342,7 +413,11 @@ impl Planner {
         for m in members {
             match self.nodes.get(m) {
                 Some(n) if n.generated && n.empty => {}
-                Some(Node { generated: true, occupied: Some(o), .. }) => occupied = Some(occupied.map_or(*o, |a| (a.0.min(o.0), a.1.max(o.1)))),
+                Some(Node {
+                    generated: true,
+                    occupied: Some(o),
+                    ..
+                }) => occupied = Some(occupied.map_or(*o, |a| (a.0.min(o.0), a.1.max(o.1)))),
                 _ => return None,
             }
         }
@@ -355,7 +430,19 @@ impl Planner {
     /// nodes under the eye when it is far too coarse, are queued in
     /// `wanted`).
     #[allow(clippy::too_many_arguments)]
-    fn decide(&mut self, grid: &Grid, key: NodeKey, band: (i32, i32), eyes: &[Eye; 2], velocity: DVec3, view: Option<View>, guarded: f64, frame: u64, tiles: &[i32], wanted: &mut Vec<(f64, NodeKey)>) -> Decision {
+    fn decide(
+        &mut self,
+        grid: &Grid,
+        key: NodeKey,
+        band: (i32, i32),
+        eyes: &[Eye; 2],
+        velocity: DVec3,
+        view: Option<View>,
+        guarded: f64,
+        frame: u64,
+        tiles: &[i32],
+        wanted: &mut Vec<(f64, NodeKey)>,
+    ) -> Decision {
         let fp = key.footprint();
         // Refinement measures to the band's chunks, air over its ground
         // included (under a hovering eye, more than its cells' own distance
@@ -364,7 +451,9 @@ impl Planner {
         let members: Vec<NodeKey> = (band.0..=band.1).map(|cz| fp.node(cz)).collect();
         let error = self.error_box(grid, fp, layers, eyes);
         let now = self.error_box(grid, fp, layers, &eyes[..1]);
-        let cells = self.occupied_of(&members).map(|o| self.error_box(grid, fp, o, &eyes[..1]));
+        let cells = self
+            .occupied_of(&members)
+            .map(|o| self.error_box(grid, fp, o, &eyes[..1]));
         // In view: the band's nearest point within the cone (generous for
         // its extent: anything beside it is near it).
         let cone = |cos_half: f64| -> bool {
@@ -377,17 +466,41 @@ impl Planner {
         let seen = cone(view.map_or(-1.0, |v| v.cos_half));
         let motion = self.motion_allowance(grid, fp, layers, &eyes[0], velocity);
         // Met by rays lately (or no ray report yet): as fine as wanted.
-        let met = !self.rays || self.config.unseen_pixels <= 1.0 || members.iter().any(|m| self.seen.get(m).is_some_and(|&f| f + self.config.seen_frames >= frame));
-        let refined = members.iter().any(|m| self.nodes.get(m).is_some_and(|n| n.refined));
+        let met = !self.rays
+            || self.config.unseen_pixels <= 1.0
+            || members.iter().any(|m| {
+                self.seen
+                    .get(m)
+                    .is_some_and(|&f| f + self.config.seen_frames >= frame)
+            });
+        let refined = members
+            .iter()
+            .any(|m| self.nodes.get(m).is_some_and(|n| n.refined));
         // Rays not meeting a band only keep it from refining: a refined
         // band they stop meeting (its children hidden) stays refined, or its
         // coarser cells, poking out, would be met and refine it again.
         let unmet = !met && !refined;
-        let allowance = motion * if !seen && !cone(guarded) { self.config.offscreen_pixels } else if unmet { self.config.unseen_pixels } else { 1.0 };
+        let allowance = motion
+            * if !seen && !cone(guarded) {
+                self.config.offscreen_pixels
+            } else if unmet {
+                self.config.unseen_pixels
+            } else {
+                1.0
+            };
         // Bands in view first, by what they need now.
-        let priority = if seen { now / allowance * 1e6 } else { now / allowance };
+        let priority = if seen {
+            now / allowance * 1e6
+        } else {
+            now / allowance
+        };
         let wanted_error = error / allowance;
-        let finer = key.level > 0 && if refined { wanted_error > self.config.coarsen } else { wanted_error > 1.0 };
+        let finer = key.level > 0
+            && if refined {
+                wanted_error > self.config.coarsen
+            } else {
+                wanted_error > 1.0
+            };
         // Children wait for their footprint's measured ranges unless the
         // band is far too coarse (an eye that dropped from orbit) and a
         // measured ancestor is near: then they come estimated.
@@ -427,12 +540,17 @@ impl Planner {
                 let below: Vec<NodeKey> = at.children(tiles[at.level as usize - 1]).collect();
                 let mut next = None;
                 for c in below {
-                    if self.kind(c) == Kind::Mixed && next.is_none_or(|n: NodeKey| near(&c) < near(&n)) {
+                    if self.kind(c) == Kind::Mixed
+                        && next.is_none_or(|n: NodeKey| near(&c) < near(&n))
+                    {
                         next = Some(c);
                     }
                 }
                 let Some(next) = next else { break };
-                if next.level == 0 || self.guess_of(next) >= GUESS_LEVELS || self.error(grid, next, eyes) <= 1.0 {
+                if next.level == 0
+                    || self.guess_of(next) >= GUESS_LEVELS
+                    || self.error(grid, next, eyes) <= 1.0
+                {
                     break;
                 }
                 self.estimate_children(next, frame);
@@ -449,7 +567,15 @@ impl Planner {
                 at = next;
             }
         }
-        Decision { error, seen, allowance, ready, exact, guess, cells }
+        Decision {
+            error,
+            seen,
+            allowance,
+            ready,
+            exact,
+            guess,
+            cells,
+        }
     }
 
     /// Whether `kind` at `key` must be generated before it is drawn: Mixed,
@@ -457,16 +583,34 @@ impl Planner {
     fn needs_data(&self, grid: &Grid, key: NodeKey, kind: Kind, eye: &Eye) -> bool {
         match kind {
             Kind::Mixed => true,
-            Kind::Buried => self.nodes.get(&key).is_some_and(|n| n.reached) || tile_distance(grid, key.footprint(), key.layers(), eye) < self.config.near_cells * grid.level_size(key.level),
+            Kind::Buried => {
+                self.nodes.get(&key).is_some_and(|n| n.reached)
+                    || tile_distance(grid, key.footprint(), key.layers(), eye)
+                        < self.config.near_cells * grid.level_size(key.level)
+            }
             Kind::Empty | Kind::Solid => false,
         }
     }
 
     /// Visit the octree from the roots for an eye at `eye` moving at
     /// `velocity`.
-    pub fn plan(&mut self, grid: &Grid, eye: DVec3, velocity: DVec3, view: Option<View>, frame: u64) -> Plan {
-        let eyes = [Eye::new(grid, eye), Eye::new(grid, eye + velocity * self.config.prefetch_seconds)];
-        let guarded = view.map_or(-1.0, |v| (v.cos_half.clamp(-1.0, 1.0).acos() + self.config.view_guard).min(std::f64::consts::PI).cos());
+    pub fn plan(
+        &mut self,
+        grid: &Grid,
+        eye: DVec3,
+        velocity: DVec3,
+        view: Option<View>,
+        frame: u64,
+    ) -> Plan {
+        let eyes = [
+            Eye::new(grid, eye),
+            Eye::new(grid, eye + velocity * self.config.prefetch_seconds),
+        ];
+        let guarded = view.map_or(-1.0, |v| {
+            (v.cos_half.clamp(-1.0, 1.0).acos() + self.config.view_guard)
+                .min(std::f64::consts::PI)
+                .cos()
+        });
         let tiles: Vec<i32> = (0..=self.root_level).map(|l| tiles_at(grid, l)).collect();
         let mut drawn_in_view = 0usize;
         let mut plan = Plan::default();
@@ -523,7 +667,18 @@ impl Planner {
             let d = match groups.get(&(key.footprint(), band.0)) {
                 Some(d) => *d,
                 None => {
-                    let d = self.decide(grid, key, band, &eyes, velocity, view, guarded, frame, &tiles, &mut wanted);
+                    let d = self.decide(
+                        grid,
+                        key,
+                        band,
+                        &eyes,
+                        velocity,
+                        view,
+                        guarded,
+                        frame,
+                        &tiles,
+                        &mut wanted,
+                    );
                     groups.insert((key.footprint(), band.0), d);
                     d
                 }
@@ -531,11 +686,25 @@ impl Planner {
             let (error, seen, allowance, ready) = (d.error, d.seen, d.allowance, d.ready);
             let shows = seen && !hidden;
             let (exact, guess) = (d.exact, d.guess);
-            let children: Vec<NodeKey> = if ready { key.children(tiles[key.level as usize - 1]).collect() } else { Vec::new() };
+            let children: Vec<NodeKey> = if ready {
+                key.children(tiles[key.level as usize - 1]).collect()
+            } else {
+                Vec::new()
+            };
             // A switch shows where the last plan drew the side it leaves.
             let last = self.last_plan;
-            let shown = |nodes: &FxHashMap<NodeKey, Node>, k: &NodeKey| last != 0 && nodes.get(k).is_some_and(|n| n.drawn == last);
-            if shows && node.refined != ready && if ready { shown(&self.nodes, &key) } else { key.children(tiles[key.level as usize - 1]).any(|c| shown(&self.nodes, &c)) } {
+            let shown = |nodes: &FxHashMap<NodeKey, Node>, k: &NodeKey| {
+                last != 0 && nodes.get(k).is_some_and(|n| n.drawn == last)
+            };
+            if shows
+                && node.refined != ready
+                && if ready {
+                    shown(&self.nodes, &key)
+                } else {
+                    key.children(tiles[key.level as usize - 1])
+                        .any(|c| shown(&self.nodes, &c))
+                }
+            {
                 plan.switches += 1;
                 plan.switch_px = plan.switch_px.max(d.cells.unwrap_or(0.0));
             }
@@ -547,8 +716,17 @@ impl Planner {
                 if cells > plan.worst_px {
                     plan.worst_px = cells;
                     let below: Vec<NodeKey> = key.children(tiles[key.level as usize - 1]).collect();
-                    let generated = below.iter().filter(|c| self.nodes.get(c).is_some_and(|n| n.generated)).count();
-                    plan.worst = Some(Worst { key, exact, guess, children: below.len(), generated });
+                    let generated = below
+                        .iter()
+                        .filter(|c| self.nodes.get(c).is_some_and(|n| n.generated))
+                        .count();
+                    plan.worst = Some(Worst {
+                        key,
+                        exact,
+                        guess,
+                        children: below.len(),
+                        generated,
+                    });
                 }
             }
             let n = self.nodes.get_mut(&key).unwrap();
@@ -628,14 +806,20 @@ impl Planner {
             }
             Event::Edited(face, boxes) => {
                 for (k, n) in self.nodes.iter_mut() {
-                    if n.generated && n.empty && k.face == face && boxes.iter().any(|b| b.contains(k)) {
+                    if n.generated
+                        && n.empty
+                        && k.face == face
+                        && boxes.iter().any(|b| b.contains(k))
+                    {
                         n.generated = false;
                         n.empty = false;
                     }
                 }
             }
             Event::Measured(fp, quarters) => {
-                if let (Some(f), Some(ranges)) = (self.footprints.get_mut(&fp), Ranges::hull(&quarters)) {
+                if let (Some(f), Some(ranges)) =
+                    (self.footprints.get_mut(&fp), Ranges::hull(&quarters))
+                {
                     if f.ranges != ranges || !f.exact {
                         f.class = None;
                     }
@@ -669,13 +853,27 @@ impl Planner {
     /// it may still be fading out).
     pub fn evict(&mut self, frame: u64, need: usize) -> Vec<NodeKey> {
         let keep = self.config.keep_frames;
-        self.nodes.retain(|_, n| (n.generated && !n.empty) || n.used + keep >= frame);
+        self.nodes
+            .retain(|_, n| (n.generated && !n.empty) || n.used + keep >= frame);
         let mut evicted = Vec::new();
         let idle = IDLE_FRAMES.max(self.config.release_frames);
-        let released = if self.config.release_frames > 0 { self.nodes.values().filter(|n| n.generated && !n.empty && n.used + idle < frame).count().min(MAX_RELEASE) } else { 0 };
+        let released = if self.config.release_frames > 0 {
+            self.nodes
+                .values()
+                .filter(|n| n.generated && !n.empty && n.used + idle < frame)
+                .count()
+                .min(MAX_RELEASE)
+        } else {
+            0
+        };
         let need = need.max(released);
         if need > 0 {
-            let mut old: Vec<(u64, NodeKey)> = self.nodes.iter().filter(|(_, n)| n.generated && !n.empty && n.used + IDLE_FRAMES < frame).map(|(k, n)| (n.used, *k)).collect();
+            let mut old: Vec<(u64, NodeKey)> = self
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.generated && !n.empty && n.used + IDLE_FRAMES < frame)
+                .map(|(k, n)| (n.used, *k))
+                .collect();
             if old.len() > need {
                 old.select_nth_unstable_by_key(need, |o| o.0);
                 old.truncate(need);
@@ -685,9 +883,15 @@ impl Planner {
                 evicted.push(key);
             }
         }
-        let held: FxHashSet<Footprint> = self.nodes.iter().filter(|(_, n)| n.generated).map(|(k, _)| k.footprint()).collect();
+        let held: FxHashSet<Footprint> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.generated)
+            .map(|(k, _)| k.footprint())
+            .collect();
         let root = self.root_level;
-        self.footprints.retain(|fp, f| fp.level == root || f.used + keep >= frame || held.contains(fp));
+        self.footprints
+            .retain(|fp, f| fp.level == root || f.used + keep >= frame || held.contains(fp));
         let seen_keep = self.config.seen_frames;
         if self.seen.len() > 4 * self.nodes.len().max(4096) {
             self.seen.retain(|_, f| *f + seen_keep >= frame);
@@ -732,7 +936,10 @@ pub struct NodeBox {
 
 impl NodeBox {
     pub fn contains(&self, k: &NodeKey) -> bool {
-        k.level == self.level && (self.x[0]..=self.x[1]).contains(&k.cx) && (self.y[0]..=self.y[1]).contains(&k.cy) && (self.z[0]..=self.z[1]).contains(&k.cz)
+        k.level == self.level
+            && (self.x[0]..=self.x[1]).contains(&k.cx)
+            && (self.y[0]..=self.y[1]).contains(&k.cy)
+            && (self.z[0]..=self.z[1]).contains(&k.cz)
     }
 }
 
@@ -818,27 +1025,82 @@ impl Worker {
                     let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);
                     let evicted = planner.evict(job.frame, job.need);
                     let now: FxHashMap<NodeKey, Kind> = plan.drawn.iter().copied().collect();
-                    let added = plan.drawn.iter().filter(|(k, kind)| drawn.get(k) != Some(kind)).copied().collect();
-                    let removed = drawn.iter().filter(|(k, kind)| now.get(k) != Some(kind)).map(|(k, _)| *k).collect();
+                    let added = plan
+                        .drawn
+                        .iter()
+                        .filter(|(k, kind)| drawn.get(k) != Some(kind))
+                        .copied()
+                        .collect();
+                    let removed = drawn
+                        .iter()
+                        .filter(|(k, kind)| now.get(k) != Some(kind))
+                        .map(|(k, _)| *k)
+                        .collect();
                     drawn = now;
-                    if outbox.send(Planned { plan, added, removed, evicted, made_for: PlannedFor { events_seen: job.events_seen, reports_seen: job.reports_seen, eye: job.eye, view: job.view, edits: planner.edits.version }, frame: job.frame, ms: started.elapsed().as_secs_f64() * 1e3 }).is_err() {
+                    if outbox
+                        .send(Planned {
+                            plan,
+                            added,
+                            removed,
+                            evicted,
+                            made_for: PlannedFor {
+                                events_seen: job.events_seen,
+                                reports_seen: job.reports_seen,
+                                eye: job.eye,
+                                view: job.view,
+                                edits: planner.edits.version,
+                            },
+                            frame: job.frame,
+                            ms: started.elapsed().as_secs_f64() * 1e3,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
             .expect("chunk residency thread");
-        Self { jobs, results: std::sync::Mutex::new(results), busy: false, events_sent: 0, reports_sent: 0 }
+        Self {
+            jobs,
+            results: std::sync::Mutex::new(results),
+            busy: false,
+            events_sent: 0,
+            reports_sent: 0,
+        }
     }
 
     /// Plan for this eye with these events (`reports` frames of ray
     /// reports among them; and edits, when they changed) unless a plan is
     /// under way (then they stay with the caller).
     #[allow(clippy::too_many_arguments)]
-    pub fn submit(&mut self, eye: DVec3, velocity: DVec3, view: Option<View>, frame: u64, events: &mut Vec<Event>, reports: &mut u64, need: usize, edits: &mut Option<Arc<EditView>>) {
+    pub fn submit(
+        &mut self,
+        eye: DVec3,
+        velocity: DVec3,
+        view: Option<View>,
+        frame: u64,
+        events: &mut Vec<Event>,
+        reports: &mut u64,
+        need: usize,
+        edits: &mut Option<Arc<EditView>>,
+    ) {
         if !self.busy {
             self.events_sent += events.iter().filter(|e| e.structural()).count() as u64;
             self.reports_sent += std::mem::take(reports);
-            self.busy = self.jobs.send(Job { events_seen: self.events_sent, reports_seen: self.reports_sent, eye, velocity, view, frame, events: std::mem::take(events), need, edits: edits.take() }).is_ok();
+            self.busy = self
+                .jobs
+                .send(Job {
+                    events_seen: self.events_sent,
+                    reports_seen: self.reports_sent,
+                    eye,
+                    velocity,
+                    view,
+                    frame,
+                    events: std::mem::take(events),
+                    need,
+                    edits: edits.take(),
+                })
+                .is_ok();
         }
     }
 
@@ -908,20 +1170,46 @@ mod tests {
     }
 
     fn no_edits(grid: &Grid) -> Arc<EditView> {
-        Arc::new(EditView { grid: *grid, faces: Vec::new(), index: Default::default(), recent_index: Default::default(), large_faces: 0, large_brushes: 0, large_prefix: 0, recent_counts: Vec::new(), baked: Default::default(), bricks: Default::default(), version: 0, volume_depth: 0 })
+        Arc::new(EditView {
+            grid: *grid,
+            faces: Vec::new(),
+            index: Default::default(),
+            recent_index: Default::default(),
+            large_faces: 0,
+            large_brushes: 0,
+            large_prefix: 0,
+            recent_counts: Vec::new(),
+            baked: Default::default(),
+            bricks: Default::default(),
+            version: 0,
+            volume_depth: 0,
+        })
     }
 
     /// An Earth whose ground lies between -200 and 200 m.
     fn setup() -> (Grid, DVec3, Planner) {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let eye = grid.position(2, [f64::from(grid.cells()) * 0.47, f64::from(grid.cells()) * 0.53, 20.0]);
+        let eye = grid.position(
+            2,
+            [
+                f64::from(grid.cells()) * 0.47,
+                f64::from(grid.cells()) * 0.53,
+                20.0,
+            ],
+        );
         let planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
         (grid, eye, planner)
     }
 
     /// Generate every request as if the budget were unlimited, measuring
     /// each footprint at the ground band (-20..20 m).
-    fn settle(grid: &Grid, eye: DVec3, view: Option<View>, planner: &mut Planner, frame: &mut u64) -> Plan {
+    fn settle(
+        grid: &Grid,
+        eye: DVec3,
+        view: Option<View>,
+        planner: &mut Planner,
+        frame: &mut u64,
+    ) -> Plan {
         loop {
             *frame += 1;
             let plan = planner.plan(grid, eye, DVec3::ZERO, view, *frame);
@@ -931,7 +1219,16 @@ mod tests {
             for k in plan.requests {
                 planner.apply(Event::Generated(k), *frame);
                 let band = ((-200 >> k.level) - 1, (200 >> k.level) + 1);
-                planner.apply(Event::Measured(k.footprint(), [Some(Ranges { volume: band, surface: band }); 4]), *frame);
+                planner.apply(
+                    Event::Measured(
+                        k.footprint(),
+                        [Some(Ranges {
+                            volume: band,
+                            surface: band,
+                        }); 4],
+                    ),
+                    *frame,
+                );
             }
         }
     }
@@ -953,11 +1250,17 @@ mod tests {
         let (grid, eye, mut planner) = setup();
         let mut frame = 0;
         let plan = settle(&grid, eye, None, &mut planner, &mut frame);
-        assert!(plan.drawn.iter().any(|(k, kind)| k.level == 0 && *kind == Kind::Mixed));
+        assert!(plan
+            .drawn
+            .iter()
+            .any(|(k, kind)| k.level == 0 && *kind == Kind::Mixed));
         assert_eq!(plan.coarse_share, 0.0);
         assert_covers_once(&grid, &plan);
         // Uniform nodes are never refined: the planet's core is drawn coarse.
-        assert!(plan.drawn.iter().any(|(k, kind)| *kind == Kind::Solid && k.level > 10));
+        assert!(plan
+            .drawn
+            .iter()
+            .any(|(k, kind)| *kind == Kind::Solid && k.level > 10));
     }
 
     /// A footprint's band switches levels as one: every node of a drawn
@@ -968,7 +1271,11 @@ mod tests {
     fn a_band_switches_levels_as_one() {
         let (grid, eye, mut planner) = setup();
         let mut frame = 0;
-        for eye in [eye, eye + eye.normalize() * 3_000.0, eye + eye.normalize() * 60_000.0] {
+        for eye in [
+            eye,
+            eye + eye.normalize() * 3_000.0,
+            eye + eye.normalize() * 60_000.0,
+        ] {
             let plan = settle(&grid, eye, None, &mut planner, &mut frame);
             let drawn: FxHashSet<NodeKey> = plan.drawn.iter().map(|d| d.0).collect();
             for &(k, kind) in &plan.drawn {
@@ -978,7 +1285,10 @@ mod tests {
                 let band = planner.band_of(k);
                 for cz in band.0..=band.1 {
                     let m = k.footprint().node(cz);
-                    assert!(drawn.contains(&m) || planner.nodes.get(&m).is_some_and(|n| n.empty), "{k:?} drawn, {m:?} of its band {band:?} not");
+                    assert!(
+                        drawn.contains(&m) || planner.nodes.get(&m).is_some_and(|n| n.empty),
+                        "{k:?} drawn, {m:?} of its band {band:?} not"
+                    );
                 }
             }
         }
@@ -991,10 +1301,28 @@ mod tests {
         let (grid, eye, mut planner) = setup();
         let mut frame = 0;
         let low = settle(&grid, eye, None, &mut planner, &mut frame);
-        let finest = |p: &Plan| p.drawn.iter().filter(|(_, kind)| *kind == Kind::Mixed).map(|(k, _)| k.level).min().unwrap();
+        let finest = |p: &Plan| {
+            p.drawn
+                .iter()
+                .filter(|(_, kind)| *kind == Kind::Mixed)
+                .map(|(k, _)| k.level)
+                .min()
+                .unwrap()
+        };
         let (_, _, mut high_planner) = setup();
-        let high = settle(&grid, eye + eye.normalize() * 2_000.0, None, &mut high_planner, &mut frame);
-        assert!(finest(&low) == 0 && finest(&high) >= 3, "{} {}", finest(&low), finest(&high));
+        let high = settle(
+            &grid,
+            eye + eye.normalize() * 2_000.0,
+            None,
+            &mut high_planner,
+            &mut frame,
+        );
+        assert!(
+            finest(&low) == 0 && finest(&high) >= 3,
+            "{} {}",
+            finest(&low),
+            finest(&high)
+        );
     }
 
     #[test]
@@ -1006,7 +1334,12 @@ mod tests {
         // drawn again until they come back.
         frame += 1;
         let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
-        let child = plan.drawn.iter().find(|(k, kind)| k.level == 0 && *kind == Kind::Mixed).unwrap().0;
+        let child = plan
+            .drawn
+            .iter()
+            .find(|(k, kind)| k.level == 0 && *kind == Kind::Mixed)
+            .unwrap()
+            .0;
         let parent = child.parent();
         planner.apply(Event::Stale(child), frame);
         frame += 1;
@@ -1032,8 +1365,15 @@ mod tests {
         planner.plan(&grid, far, DVec3::ZERO, None, frame);
         frame += IDLE_FRAMES + 1;
         planner.plan(&grid, far, DVec3::ZERO, None, frame);
-        assert!(planner.evict(frame, 0).is_empty(), "nothing evicted without pressure");
-        let fine = planner.nodes.iter().filter(|(k, n)| k.level == 0 && n.generated).count();
+        assert!(
+            planner.evict(frame, 0).is_empty(),
+            "nothing evicted without pressure"
+        );
+        let fine = planner
+            .nodes
+            .iter()
+            .filter(|(k, n)| k.level == 0 && n.generated)
+            .count();
         assert!(fine > 0, "the first eye's fine nodes are still resident");
         let evicted = planner.evict(frame, fine);
         assert_eq!(evicted.len(), fine);
@@ -1048,7 +1388,15 @@ mod tests {
     fn nodes_the_cut_left_are_released_by_age() {
         let (grid, eye, _) = setup();
         let release = 200;
-        let mut planner = Planner::new(&grid, (-2000, 2000), PlanConfig { release_frames: release, ..config() }, no_edits(&grid));
+        let mut planner = Planner::new(
+            &grid,
+            (-2000, 2000),
+            PlanConfig {
+                release_frames: release,
+                ..config()
+            },
+            no_edits(&grid),
+        );
         let resident = |p: &Planner| p.nodes.values().filter(|n| n.generated && !n.empty).count();
         let mut frame = 0;
         settle(&grid, eye, None, &mut planner, &mut frame);
@@ -1057,7 +1405,10 @@ mod tests {
         let before = resident(&planner);
         frame += 1;
         planner.plan(&grid, far, DVec3::ZERO, None, frame);
-        assert!(planner.evict(frame, 0).is_empty(), "nothing released before {release} frames");
+        assert!(
+            planner.evict(frame, 0).is_empty(),
+            "nothing released before {release} frames"
+        );
         frame += release;
         planner.plan(&grid, far, DVec3::ZERO, None, frame);
         let mut released = Vec::new();
@@ -1071,15 +1422,24 @@ mod tests {
         }
         let drawn: FxHashSet<NodeKey> = here.drawn.iter().map(|d| d.0).collect();
         assert!(released.iter().all(|k| !drawn.contains(k)));
-        assert!(released.iter().any(|k| k.level == 0), "the first eye's fine nodes released");
+        assert!(
+            released.iter().any(|k| k.level == 0),
+            "the first eye's fine nodes released"
+        );
         let (_, _, mut fresh) = setup();
         let mut fresh_frame = 0;
         settle(&grid, far, None, &mut fresh, &mut fresh_frame);
         // What is left the plan visits (a band refined in passing may stay
         // refined), within a fifth of a fresh cut's.
-        assert!(planner.nodes.values().all(|n| !n.generated || n.empty || n.used + release >= frame));
+        assert!(planner
+            .nodes
+            .values()
+            .all(|n| !n.generated || n.empty || n.used + release >= frame));
         let (left, wanted) = (resident(&planner), resident(&fresh));
-        assert!(left * 5 <= wanted * 6, "{before} resident, {left} after release, {wanted} fresh");
+        assert!(
+            left * 5 <= wanted * 6,
+            "{before} resident, {left} after release, {wanted} fresh"
+        );
     }
 
     /// In view but met by no ray: a level coarser; met: as fine as wanted.
@@ -1088,17 +1448,42 @@ mod tests {
         let (grid, eye, _) = setup();
         let up = eye.normalize();
         let forward = (up.any_orthonormal_vector() - up * 0.3).normalize();
-        let view = Some(View { forward, cos_half: 0.6f64.cos() });
+        let view = Some(View {
+            forward,
+            cos_half: 0.6f64.cos(),
+        });
         let cut = |seen: bool| {
-            let mut planner = Planner::new(&grid, (-2000, 2000), PlanConfig { unseen_pixels: 2.0, ..config() }, no_edits(&grid));
+            let mut planner = Planner::new(
+                &grid,
+                (-2000, 2000),
+                PlanConfig {
+                    unseen_pixels: 2.0,
+                    ..config()
+                },
+                no_edits(&grid),
+            );
             let mut frame = 0;
             // One ray report somewhere else: rays are on, nothing here met.
-            planner.apply(Event::Seen(NodeKey { face: 0, level: 0, cx: 0, cy: 0, cz: 0 }), 0);
+            planner.apply(
+                Event::Seen(NodeKey {
+                    face: 0,
+                    level: 0,
+                    cx: 0,
+                    cy: 0,
+                    cz: 0,
+                }),
+                0,
+            );
             loop {
                 frame += 1;
                 if seen {
                     // Every drawn node met (a clear view).
-                    let drawn: Vec<NodeKey> = planner.plan(&grid, eye, DVec3::ZERO, view, frame).drawn.iter().map(|d| d.0).collect();
+                    let drawn: Vec<NodeKey> = planner
+                        .plan(&grid, eye, DVec3::ZERO, view, frame)
+                        .drawn
+                        .iter()
+                        .map(|d| d.0)
+                        .collect();
                     for k in drawn {
                         planner.apply(Event::Seen(k), frame);
                     }
@@ -1110,14 +1495,28 @@ mod tests {
                 for k in plan.requests {
                     planner.apply(Event::Generated(k), frame);
                     let band = ((-200 >> k.level) - 1, (200 >> k.level) + 1);
-                    planner.apply(Event::Measured(k.footprint(), [Some(Ranges { volume: band, surface: band }); 4]), frame);
+                    planner.apply(
+                        Event::Measured(
+                            k.footprint(),
+                            [Some(Ranges {
+                                volume: band,
+                                surface: band,
+                            }); 4],
+                        ),
+                        frame,
+                    );
                 }
             }
         };
         let (met, unmet) = (cut(true), cut(false));
         let mixed = |p: &Plan| p.drawn.iter().filter(|d| d.1 == Kind::Mixed).count();
         // In view only (out of view is a level coarser either way).
-        assert!(mixed(&unmet) * 4 < mixed(&met) * 3, "{} {}", mixed(&unmet), mixed(&met));
+        assert!(
+            mixed(&unmet) * 4 < mixed(&met) * 3,
+            "{} {}",
+            mixed(&unmet),
+            mixed(&met)
+        );
         assert_eq!(met.coarse_share, 0.0);
     }
 
@@ -1129,7 +1528,10 @@ mod tests {
     #[test]
     fn the_worst_cell_is_measured_to_the_cells_drawn() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let at = [f64::from(grid.cells()) * 0.47, f64::from(grid.cells()) * 0.53];
+        let at = [
+            f64::from(grid.cells()) * 0.47,
+            f64::from(grid.cells()) * 0.53,
+        ];
         let eye = grid.position(2, [at[0], at[1], 200.0]);
         let mut planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
         let mut frame = 0;
@@ -1143,12 +1545,27 @@ mod tests {
             for k in plan.requests {
                 planner.apply(Event::Generated(k), frame);
                 let band = ((-10 >> k.level) - 1, (10 >> k.level) + 1);
-                planner.apply(Event::Measured(k.footprint(), [Some(Ranges { volume: band, surface: band }); 4]), frame);
+                planner.apply(
+                    Event::Measured(
+                        k.footprint(),
+                        [Some(Ranges {
+                            volume: band,
+                            surface: band,
+                        }); 4],
+                    ),
+                    frame,
+                );
             }
         }
         // The level-2 node holding the eye, its children dropped.
         let tiles: Vec<i32> = (0..grid.levels()).map(|l| tiles_at(&grid, l)).collect();
-        let held = NodeKey { face: 2, level: 2, cx: (at[0] as i32 >> 2) / CHUNK, cy: (at[1] as i32 >> 2) / CHUNK, cz: 0 };
+        let held = NodeKey {
+            face: 2,
+            level: 2,
+            cx: (at[0] as i32 >> 2) / CHUNK,
+            cy: (at[1] as i32 >> 2) / CHUNK,
+            cz: 0,
+        };
         assert!(held.layers().1 << 2 > 200, "the eye is inside {held:?}");
         for child in held.children(tiles[1]) {
             planner.apply(Event::Stale(child), frame);
@@ -1156,7 +1573,10 @@ mod tests {
         frame += 1;
         let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
         assert!(plan.drawn.iter().any(|d| d.0 == held), "{held:?} drawn");
-        assert!(plan.requests.iter().any(|k| k.level == 1), "its children wanted");
+        assert!(
+            plan.requests.iter().any(|k| k.level == 1),
+            "its children wanted"
+        );
         assert_eq!(plan.worst_px, 0.0, "no cells known");
         // Its band's chunks back, the ground's top 8 m over the plain.
         planner.apply(Event::Occupied(held, (0, 20)), frame);
@@ -1164,7 +1584,11 @@ mod tests {
         frame += 1;
         let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
         let cells_px = grid.level_size(2) / 12.0 / config().pixel_angle;
-        assert!(plan.worst_px > cells_px * 0.9 && plan.worst_px < cells_px * 1.1, "worst {} px, its cells' {cells_px:.1}", plan.worst_px);
+        assert!(
+            plan.worst_px > cells_px * 0.9 && plan.worst_px < cells_px * 1.1,
+            "worst {} px, its cells' {cells_px:.1}",
+            plan.worst_px
+        );
     }
 
     /// A measured footprint's children are estimated from the quarter of
@@ -1173,14 +1597,59 @@ mod tests {
     #[test]
     fn children_are_estimated_from_their_quarter() {
         let (grid, _, mut planner) = setup();
-        let key = NodeKey { face: 2, level: 6, cx: 10, cy: 12, cz: 0 };
-        planner.footprints.insert(key.footprint(), Fp { ranges: Ranges { volume: (0, 0), surface: (0, 0) }, exact: false, quarters: [None; 4], guess: 0, used: 0, class: None });
-        let plain = Ranges { volume: (-3, 2), surface: (-2, 2) };
-        let wall = Ranges { volume: (-3, 40), surface: (-2, 40) };
-        planner.apply(Event::Measured(key.footprint(), [Some(plain), Some(plain), Some(wall), None]), 1);
-        assert_eq!(planner.footprints[&key.footprint()].ranges, Ranges { volume: (-3, 40), surface: (-2, 40) });
+        let key = NodeKey {
+            face: 2,
+            level: 6,
+            cx: 10,
+            cy: 12,
+            cz: 0,
+        };
+        planner.footprints.insert(
+            key.footprint(),
+            Fp {
+                ranges: Ranges {
+                    volume: (0, 0),
+                    surface: (0, 0),
+                },
+                exact: false,
+                quarters: [None; 4],
+                guess: 0,
+                used: 0,
+                class: None,
+            },
+        );
+        let plain = Ranges {
+            volume: (-3, 2),
+            surface: (-2, 2),
+        };
+        let wall = Ranges {
+            volume: (-3, 40),
+            surface: (-2, 40),
+        };
+        planner.apply(
+            Event::Measured(
+                key.footprint(),
+                [Some(plain), Some(plain), Some(wall), None],
+            ),
+            1,
+        );
+        assert_eq!(
+            planner.footprints[&key.footprint()].ranges,
+            Ranges {
+                volume: (-3, 40),
+                surface: (-2, 40)
+            }
+        );
         planner.estimate_children(key, 1);
-        let child = |a: i32, b: i32| planner.footprints[&Footprint { face: 2, level: 5, cx: 20 + a, cy: 24 + b }].ranges;
+        let child = |a: i32, b: i32| {
+            planner.footprints[&Footprint {
+                face: 2,
+                level: 5,
+                cx: 20 + a,
+                cy: 24 + b,
+            }]
+                .ranges
+        };
         assert_eq!(child(0, 0), plain.child());
         assert_eq!(child(1, 0), plain.child());
         assert_eq!(child(0, 1), wall.child());
@@ -1194,10 +1663,21 @@ mod tests {
         let (grid, eye, mut planner) = setup();
         let mut frame = 0;
         settle(&grid, eye, None, &mut planner, &mut frame);
-        let ahead = (grid.position(2, [f64::from(grid.cells()) * 0.47 + 2000.0, f64::from(grid.cells()) * 0.53, 20.0]) - eye).normalize();
+        let ahead = (grid.position(
+            2,
+            [
+                f64::from(grid.cells()) * 0.47 + 2000.0,
+                f64::from(grid.cells()) * 0.53,
+                20.0,
+            ],
+        ) - eye)
+            .normalize();
         frame += 1;
         let plan = planner.plan(&grid, eye, ahead * 400.0, None, frame);
-        assert!(plan.requests.iter().any(|k| k.level == 0), "nothing requested ahead");
+        assert!(
+            plan.requests.iter().any(|k| k.level == 0),
+            "nothing requested ahead"
+        );
     }
 
     /// A climb faster than the plan: from the ground to orbit in one plan,
@@ -1208,7 +1688,13 @@ mod tests {
         let mut frame = 0;
         settle(&grid, eye, None, &mut planner, &mut frame);
         frame += 1;
-        let plan = planner.plan(&grid, eye.normalize() * (grid.radius() + 400_000.0), DVec3::ZERO, None, frame);
+        let plan = planner.plan(
+            &grid,
+            eye.normalize() * (grid.radius() + 400_000.0),
+            DVec3::ZERO,
+            None,
+            frame,
+        );
         assert_covers_once(&grid, &plan);
         assert!(!plan.drawn.is_empty());
     }

@@ -38,7 +38,12 @@ fn gpu() -> Option<Gpu> {
         return None;
     }
     let opt = optional_features() & adapter.features();
-    let mut features = want | if supports_int64_atomics(opt) { opt } else { wgpu::Features::empty() };
+    let mut features = want
+        | if supports_int64_atomics(opt) {
+            opt
+        } else {
+            wgpu::Features::empty()
+        };
     if adapter.features().contains(BINDLESS_MATERIAL_FEATURES) {
         features |= BINDLESS_MATERIAL_FEATURES;
     }
@@ -50,20 +55,31 @@ fn gpu() -> Option<Gpu> {
     }))
     .ok()?;
     device.on_uncaptured_error(std::sync::Arc::new(|e| panic!("wgpu error: {e:?}")));
-    Some(Gpu { int64: supports_int64_atomics(device.features()), device, queue })
+    Some(Gpu {
+        int64: supports_int64_atomics(device.features()),
+        device,
+        queue,
+    })
 }
 
-fn buffer_init<T: bytemuck::Pod>(g: &Gpu, label: &str, data: &[T], usage: wgpu::BufferUsages) -> wgpu::Buffer {
-    g.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents: bytemuck::cast_slice(data),
-        usage,
-    })
+fn buffer_init<T: bytemuck::Pod>(
+    g: &Gpu,
+    label: &str,
+    data: &[T],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    g.device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(data),
+            usage,
+        })
 }
 
 fn map(g: &Gpu, rb: &wgpu::Buffer) -> Vec<u8> {
     let (tx, rx) = std::sync::mpsc::channel();
-    rb.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+    rb.slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
     g.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
     let v = rb.slice(..).get_mapped_range().unwrap().to_vec();
@@ -102,9 +118,17 @@ fn read_vis(g: &Gpu, tex: &wgpu::Texture) -> Vec<u32> {
         },
         wgpu::TexelCopyBufferInfo {
             buffer: &rb,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(H) },
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bpr),
+                rows_per_image: Some(H),
+            },
         },
-        wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
     );
     g.queue.submit([enc.finish()]);
     bytemuck::cast_slice(&map(g, &rb)).to_vec()
@@ -112,7 +136,14 @@ fn read_vis(g: &Gpu, tex: &wgpu::Texture) -> Vec<u32> {
 
 /// A flat n x n grid of triangles on plane z, spanning [x0, x0+size] x [y0, y0+size].
 /// Counter-clockwise as seen from +Z unless `flip`. uv = (x - x0, y - y0) / size.
-fn grid(x0: f32, y0: f32, size: f32, z: f32, n: usize, flip: bool) -> (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u8; 3]>) {
+fn grid(
+    x0: f32,
+    y0: f32,
+    size: f32,
+    z: f32,
+    n: usize,
+    flip: bool,
+) -> (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u8; 3]>) {
     let mut pos = Vec::new();
     let mut uv = Vec::new();
     for j in 0..=n {
@@ -126,7 +157,10 @@ fn grid(x0: f32, y0: f32, size: f32, z: f32, n: usize, flip: bool) -> (Vec<[f32;
     let mut tris = Vec::new();
     for j in 0..n {
         for i in 0..n {
-            for t in [[at(i, j), at(i + 1, j), at(i, j + 1)], [at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]] {
+            for t in [
+                [at(i, j), at(i + 1, j), at(i, j + 1)],
+                [at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)],
+            ] {
                 tris.push(if flip { [t[0], t[2], t[1]] } else { t });
             }
         }
@@ -148,7 +182,11 @@ fn alpha_resources(g: &Gpu, double_sided: bool) -> Alpha {
     let make_texture = |w: u32, h: u32, texels: &[u8]| {
         let t = g.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("alpha texture"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -157,10 +195,23 @@ fn alpha_resources(g: &Gpu, double_sided: bool) -> Alpha {
             view_formats: &[],
         });
         g.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &t,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             texels,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         t
     };
@@ -174,7 +225,13 @@ fn alpha_resources(g: &Gpu, double_sided: bool) -> Alpha {
     let checker_tex = make_texture(CHECKS, CHECKS, &checker);
     let white_tex = make_texture(1, 1, &[255, 255, 255, 255]);
     let views: Vec<wgpu::TextureView> = (0..binding.max_textures)
-        .map(|i| if i == 0 { checker_tex.create_view(&Default::default()) } else { white_tex.create_view(&Default::default()) })
+        .map(|i| {
+            if i == 0 {
+                checker_tex.create_view(&Default::default())
+            } else {
+                white_tex.create_view(&Default::default())
+            }
+        })
         .collect();
     let nearest = g.device.create_sampler(&wgpu::SamplerDescriptor {
         mag_filter: wgpu::FilterMode::Nearest,
@@ -183,12 +240,14 @@ fn alpha_resources(g: &Gpu, double_sided: bool) -> Alpha {
         ..Default::default()
     });
     let samplers: Vec<wgpu::Sampler> = (0..binding.max_textures)
-        .map(|_| g.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        }))
+        .map(|_| {
+            g.device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            })
+        })
         .collect();
     drop(nearest);
 
@@ -202,7 +261,12 @@ fn alpha_resources(g: &Gpu, double_sided: bool) -> Alpha {
     material[13] = u32::MAX;
     material[14] = u32::MAX;
     material[15] = u32::MAX;
-    material[18] = helio_mats::FLAG_ALPHA_TEST | if double_sided { helio_mats::FLAG_DOUBLE_SIDED } else { 0 };
+    material[18] = helio_mats::FLAG_ALPHA_TEST
+        | if double_sided {
+            helio_mats::FLAG_DOUBLE_SIDED
+        } else {
+            0
+        };
     // MaterialTextureData single row with params.w = -1: texture ids come
     // straight from the GpuMaterial, cutoff 0.5.
     let mut tex_data = [0u32; 88];
@@ -227,8 +291,20 @@ fn scene(flip: bool) -> Scene {
     pool.push_with_uvs(&p, &t, 0, 0, &uv);
     let view = Mat4::IDENTITY;
     let proj = helio_core::depth::perspective(std::f32::consts::FRAC_PI_2, 1.0, 0.1);
-    let camera = GpuCameraUniforms::new(view, proj, Vec3::ZERO, 0.1, 1000.0, 0, [0.0, 0.0], proj * view);
-    Scene { camera, built: pool.build() }
+    let camera = GpuCameraUniforms::new(
+        view,
+        proj,
+        Vec3::ZERO,
+        0.1,
+        1000.0,
+        0,
+        [0.0, 0.0],
+        proj * view,
+    );
+    Scene {
+        camera,
+        built: pool.build(),
+    }
 }
 
 /// Expected alpha-kept mask per pixel (`Some`), or `None` for pixels too close
@@ -263,14 +339,24 @@ fn run(g: &Gpu, s: &Scene, alpha: &Alpha, software: bool) -> Run {
         pages.push(0);
     }
     pages.extend_from_slice(&[0u8; 16]);
-    let inst = GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row: 0 };
+    let inst = GpuVgInstance {
+        asset_slot: 0,
+        flags: INST_ENABLED,
+        lod_error_scale: 1.0,
+        object_row: 0,
+    };
     // static_objects row 0: transform identity; word 2 = material slot 0.
     let mut object = [0f32; 63];
     object[4..20].copy_from_slice(&Mat4::IDENTITY.to_cols_array());
     // Indirect: 4 opaque HW draws (empty) + the masked draw at offset 64.
     let mut hw = [DrawIndirectArgs::default(); 5];
     if !software {
-        hw[4] = DrawIndirectArgs { vertex_count: 384, instance_count: 1, first_vertex: 0, first_instance: 0 };
+        hw[4] = DrawIndirectArgs {
+            vertex_count: 384,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        };
     }
     let sw_count = u32::from(software);
     // sw_meta words: [0,1] opaque software bin (empty), [2,3] masked.
@@ -323,7 +409,8 @@ fn run(g: &Gpu, s: &Scene, alpha: &Alpha, software: bool) -> Run {
     raster.encode(&g.device, &g.queue, &mut enc, &mut targets, &inputs);
     g.queue.submit([enc.finish()]);
 
-    let keys: Vec<u32> = bytemuck::cast_slice(&read_buffer(g, &targets.sw_keys, (W * H * 8) as u64)).to_vec();
+    let keys: Vec<u32> =
+        bytemuck::cast_slice(&read_buffer(g, &targets.sw_keys, (W * H * 8) as u64)).to_vec();
     Run {
         vis: read_vis(g, &targets.vis),
         sw_keys: keys.chunks(2).map(|c| [c[0], c[1]]).collect(),
@@ -336,11 +423,24 @@ fn check(label: &str, covered: impl Fn(u32, u32) -> bool, keep_all: bool, none_k
     let mut judged = 0;
     for py in 0..H {
         for px in 0..W {
-            let Some(want) = expected(px, py) else { continue };
+            let Some(want) = expected(px, py) else {
+                continue;
+            };
             judged += 1;
             let got = covered(px, py);
-            let want = if none_kept { false } else if keep_all { true } else { want };
-            assert_eq!(got, want, "{label}: pixel ({px},{py}) expected {}", if want { "kept" } else { "background" });
+            let want = if none_kept {
+                false
+            } else if keep_all {
+                true
+            } else {
+                want
+            };
+            assert_eq!(
+                got,
+                want,
+                "{label}: pixel ({px},{py}) expected {}",
+                if want { "kept" } else { "background" }
+            );
             if got {
                 kept += 1;
             } else {
@@ -350,7 +450,10 @@ fn check(label: &str, covered: impl Fn(u32, u32) -> bool, keep_all: bool, none_k
     }
     eprintln!("{label}: judged {judged}, kept {kept}, discarded {dropped}");
     if !none_kept && !keep_all {
-        assert!(kept > 200 && dropped > 200, "{label}: the checkerboard must keep and discard many pixels");
+        assert!(
+            kept > 200 && dropped > 200,
+            "{label}: the checkerboard must keep and discard many pixels"
+        );
     }
 }
 
@@ -361,7 +464,12 @@ fn hardware_masked_discards_checker_holes() {
     let s = scene(false);
     let alpha = alpha_resources(&g, true);
     let r = run(&g, &s, &alpha, false);
-    check("hw masked", |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY, false, false);
+    check(
+        "hw masked",
+        |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY,
+        false,
+        false,
+    );
     // The software output stays empty.
     assert!(r.sw_keys.iter().all(|k| k[1] == 0));
 }
@@ -374,15 +482,30 @@ fn hardware_masked_two_sided_keeps_back_faces_and_single_sided_drops_them() {
     // Two-sided: the back face is shaded, with the same checker holes.
     let two = alpha_resources(&g, true);
     let r = run(&g, &back, &two, false);
-    check("hw masked back, two-sided", |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY, false, false);
+    check(
+        "hw masked back, two-sided",
+        |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY,
+        false,
+        false,
+    );
     // Single-sided: the back face of the same quad is discarded entirely.
     let one = alpha_resources(&g, false);
     let r = run(&g, &back, &one, false);
-    check("hw masked back, single-sided", |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY, false, true);
+    check(
+        "hw masked back, single-sided",
+        |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY,
+        false,
+        true,
+    );
     // Single-sided front face behaves like two-sided.
     let front = scene(false);
     let r = run(&g, &front, &one, false);
-    check("hw masked front, single-sided", |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY, false, false);
+    check(
+        "hw masked front, single-sided",
+        |x, y| r.vis[(y * W + x) as usize] != VIS_EMPTY,
+        false,
+        false,
+    );
 }
 
 #[test]
@@ -390,13 +513,20 @@ fn software_masked_discards_checker_holes() {
     let _lock = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(g) = gpu() else { return };
     if !g.int64 {
-        eprintln!("skipping: no 64-bit atomics (the cull routes masked clusters to the hardware bin)");
+        eprintln!(
+            "skipping: no 64-bit atomics (the cull routes masked clusters to the hardware bin)"
+        );
         return;
     }
     let alpha = alpha_resources(&g, true);
     let s = scene(false);
     let r = run(&g, &s, &alpha, true);
-    check("sw masked", |x, y| r.sw_keys[(y * W + x) as usize][1] != 0, false, false);
+    check(
+        "sw masked",
+        |x, y| r.sw_keys[(y * W + x) as usize][1] != 0,
+        false,
+        false,
+    );
     // Nothing from Tier 1.
     assert!(r.vis.iter().all(|v| *v == VIS_EMPTY));
     // The surviving key carries the masked cluster's id (visible index 0).
@@ -407,7 +537,17 @@ fn software_masked_discards_checker_holes() {
     let back = scene(true);
     let one = alpha_resources(&g, false);
     let r = run(&g, &back, &one, true);
-    check("sw masked back, single-sided", |x, y| r.sw_keys[(y * W + x) as usize][1] != 0, false, true);
+    check(
+        "sw masked back, single-sided",
+        |x, y| r.sw_keys[(y * W + x) as usize][1] != 0,
+        false,
+        true,
+    );
     let r = run(&g, &back, &alpha, true);
-    check("sw masked back, two-sided", |x, y| r.sw_keys[(y * W + x) as usize][1] != 0, false, false);
+    check(
+        "sw masked back, two-sided",
+        |x, y| r.sw_keys[(y * W + x) as usize][1] != 0,
+        false,
+        false,
+    );
 }

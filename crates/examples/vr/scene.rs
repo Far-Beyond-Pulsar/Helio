@@ -101,9 +101,16 @@ fn insert_box_mesh(world: &mut World, half: Vec3) -> Entity {
     spawn_mesh(world, box_mesh([0.0, 0.0, 0.0], [half.x, half.y, half.z]))
 }
 
-/// Insert an object at a world-space position, ignoring errors.
+/// Insert an object at a world-space position and report malformed scene setup.
 fn place(world: &mut World, mesh: Entity, material: Entity, pos: Vec3, radius: f32) {
-    let _ = spawn_object(world, mesh, material, Mat4::from_translation(pos), radius);
+    if let Err(error) = spawn_object(world, mesh, material, Mat4::from_translation(pos), radius) {
+        log::error!(
+            "VR scene object creation failed (mesh {}, material {}, position {:?}): {error}",
+            mesh.index(),
+            material.index(),
+            pos
+        );
+    }
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -659,8 +666,8 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
         spawn_material(world, make_material(c, rough, metal, em, strength))
     };
 
-    let concrete = mat([0.38, 0.38, 0.40, 1.0], 0.92, 0.0, [0.0; 3], 0.0);
-    let dark_trim = mat([0.09, 0.10, 0.12, 1.0], 0.55, 0.0, [0.0; 3], 0.0);
+    let concrete = mat([0.24, 0.29, 0.34, 1.0], 0.88, 0.12, [0.0; 3], 0.0);
+    let dark_trim = mat([0.035, 0.055, 0.075, 1.0], 0.48, 0.25, [0.0; 3], 0.0);
     let mirror = mat([0.95, 0.96, 0.98, 1.0], 0.04, 1.0, [0.0; 3], 0.0);
     let gold = mat([1.0, 0.78, 0.34, 1.0], 0.28, 1.0, [0.0; 3], 0.0);
     let copper = mat([0.95, 0.55, 0.42, 1.0], 0.16, 1.0, [0.0; 3], 0.0);
@@ -670,6 +677,8 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
     let emissive_warm = mat([0.06, 0.04, 0.02, 1.0], 0.6, 0.0, [1.0, 0.62, 0.22], 7.0);
     let emissive_white = mat([0.05, 0.05, 0.05, 1.0], 0.6, 0.0, [0.7, 0.7, 0.7], 3.0);
     let steel = mat([0.55, 0.57, 0.60, 1.0], 0.35, 0.75, [0.0; 3], 0.0);
+    let wall_glow = mat([0.025, 0.08, 0.10, 1.0], 0.42, 0.2, [0.02, 0.55, 0.8], 3.0);
+    let warm_signal = mat([0.12, 0.045, 0.018, 1.0], 0.5, 0.1, [1.0, 0.24, 0.035], 4.0);
 
     let mats = Mats {
         dark_trim,
@@ -690,6 +699,10 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
 
     let floor_mesh = insert_box_mesh(world, floor_half);
     let wall_mesh = insert_box_mesh(world, wall_half);
+    let wall_panel_mesh = insert_box_mesh(world, Vec3::new(0.035, 0.64, 2.55));
+    let kick_mesh = insert_box_mesh(world, Vec3::new(0.055, 0.22, BAY_LENGTH * 0.46));
+    let pilaster_mesh = insert_box_mesh(world, Vec3::new(0.09, 1.45, 0.12));
+    let route_mesh = insert_box_mesh(world, Vec3::new(0.035, 0.012, BAY_LENGTH * 0.43));
 
     for bay in 0..BAY_COUNT {
         let z = bay_centre_z(bay);
@@ -716,6 +729,47 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
                 wall_half.length(),
             );
         }
+
+        // Recessed light wells and durable lower kick plates make the shell read
+        // as a room from both eyes, even when an exhibit's local lighting is dim.
+        for side in [-1.0_f32, 1.0] {
+            place(
+                world,
+                wall_panel_mesh,
+                if bay % 2 == 0 { dark_trim } else { concrete },
+                Vec3::new(side * (HALL_HALF_WIDTH - 0.045), 1.65, z),
+                2.63,
+            );
+            place(
+                world,
+                kick_mesh,
+                if bay % 2 == 0 { steel } else { dark_trim },
+                Vec3::new(side * (HALL_HALF_WIDTH - 0.02), 0.22, z),
+                3.69,
+            );
+            // Tall luminous pilasters frame each bay and give a clear visual
+            // rhythm for orientation while walking through the exhibits.
+            let edge_z = z + BAY_LENGTH * 0.47;
+            place(
+                world,
+                pilaster_mesh,
+                wall_glow,
+                Vec3::new(side * (HALL_HALF_WIDTH - 0.12), 1.5, edge_z),
+                1.46,
+            );
+        }
+
+        // A thin illuminated route stripe anchors the floor in stereo and
+        // gives the long corridor a legible path through the showcases.
+        for side in [-1.0_f32, 1.0] {
+            place(
+                world,
+                route_mesh,
+                if bay % 2 == 0 { wall_glow } else { warm_signal },
+                Vec3::new(side * 1.58, 0.012, z),
+                3.45,
+            );
+        }
     }
 
     // Mirrored end cap, so the corridor terminates in geometry rather than in the void
@@ -732,6 +786,62 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
             bay_centre_z(BAY_COUNT - 1) - BAY_LENGTH * 0.5,
         ),
         end_half.length(),
+    );
+
+    // The last bay terminates in a readable focal installation: an open
+    // instrument arch around a floating energy core. The center is elevated
+    // above head level to preserve a comfortable clear walking lane.
+    let portal_z = bay_centre_z(BAY_COUNT - 1) - 1.7;
+    let portal_post = insert_box_mesh(world, Vec3::new(0.22, 1.42, 0.24));
+    let portal_inlay = insert_box_mesh(world, Vec3::new(0.035, 1.12, 0.025));
+    let portal_lintel = insert_box_mesh(world, Vec3::new(1.72, 0.2, 0.24));
+    let portal_cap = insert_box_mesh(world, Vec3::new(1.95, 0.07, 0.33));
+    for side in [-1.0_f32, 1.0] {
+        place(
+            world,
+            portal_post,
+            gold,
+            Vec3::new(side * 1.62, 1.42, portal_z),
+            1.46,
+        );
+        place(
+            world,
+            portal_inlay,
+            wall_glow,
+            Vec3::new(side * 1.62, 1.42, portal_z + 0.255),
+            1.13,
+        );
+    }
+    place(
+        world,
+        portal_lintel,
+        steel,
+        Vec3::new(0.0, 2.78, portal_z),
+        1.75,
+    );
+    place(
+        world,
+        portal_cap,
+        warm_signal,
+        Vec3::new(0.0, 2.97, portal_z),
+        1.96,
+    );
+    let core_mesh = spawn_mesh(world, sphere_mesh([0.0, 0.0, 0.0], 0.62));
+    place(
+        world,
+        core_mesh,
+        emissive_cyan,
+        Vec3::new(0.0, 1.92, portal_z),
+        0.63,
+    );
+    let core_halo = insert_box_mesh(world, Vec3::new(0.82, 0.025, 0.025));
+    for angle in [0.0_f32, 0.7, 1.4, 2.1] {
+        let p = Vec3::new(angle.cos() * 0.87, 1.92 + angle.sin() * 0.87, portal_z);
+        place(world, core_halo, gold, p, 0.88);
+    }
+    spawn_light(
+        world,
+        point_light([0.0, 2.0, portal_z], [0.05, 0.65, 1.0], 16.0, 7.0),
     );
 
     // ── Shared exhibit meshes ────────────────────────────────────────────────

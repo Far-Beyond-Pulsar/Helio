@@ -80,7 +80,11 @@ impl Preset {
             // Earth's air with fair-weather cumulus.
             Preset::Earth => {
                 let sky = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
-                Some(if clouds { sky.with_clouds(CloudLayer::cumulus()) } else { sky })
+                Some(if clouds {
+                    sky.with_clouds(CloudLayer::cumulus())
+                } else {
+                    sky
+                })
             }
             // Dusty air: more and redder aerosols, a sandy ground bouncing
             // light into it, a few high clouds.
@@ -94,7 +98,13 @@ impl Preset {
                     ..earth
                 }
                 .around_planet([0.0; 3], radius);
-                let high = CloudLayer { bottom_km: 4.5, top_km: 6.0, coverage: 0.2, kind: 0.4, ..CloudLayer::cumulus() };
+                let high = CloudLayer {
+                    bottom_km: 4.5,
+                    top_km: 6.0,
+                    coverage: 0.2,
+                    kind: 0.4,
+                    ..CloudLayer::cumulus()
+                };
                 Some(if clouds { sky.with_clouds(high) } else { sky })
             }
         }
@@ -109,9 +119,22 @@ impl Preset {
         }
         let haze = match self {
             Preset::Moon => return None,
-            Preset::Earth => GlobalFogComponent { mode: 1, extinction: 0.0006, height_falloff: 0.004, anisotropy: 0.6, ..Default::default() },
+            Preset::Earth => GlobalFogComponent {
+                mode: 1,
+                extinction: 0.0006,
+                height_falloff: 0.004,
+                anisotropy: 0.6,
+                ..Default::default()
+            },
             // Dust: thicker, warm, hugging the ground.
-            Preset::Desert => GlobalFogComponent { mode: 1, extinction: 0.0012, height_falloff: 0.003, anisotropy: 0.7, albedo: [0.95, 0.84, 0.68], ..Default::default() },
+            Preset::Desert => GlobalFogComponent {
+                mode: 1,
+                extinction: 0.0012,
+                height_falloff: 0.003,
+                anisotropy: 0.7,
+                albedo: [0.95, 0.84, 0.68],
+                ..Default::default()
+            },
         };
         Some(haze.around_planet([0.0; 3], radius))
     }
@@ -153,7 +176,11 @@ impl Preset {
             return None;
         }
         match self {
-            Preset::Earth => Some(helio_pass_voxel_planet::meadow::meadow().with_tall_stands().with_wind([1.0, 0.35], 4.5, 0.8)),
+            Preset::Earth => Some(
+                helio_pass_voxel_planet::meadow::meadow()
+                    .with_tall_stands()
+                    .with_wind([1.0, 0.35], 4.5, 0.8),
+            ),
             Preset::Moon | Preset::Desert => None,
         }
     }

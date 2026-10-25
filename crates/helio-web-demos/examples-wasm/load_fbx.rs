@@ -39,51 +39,33 @@ impl HelioWasmApp for Demo {
         let world = &mut scene_db.world;
         // Runtime file I/O is not available on WASM.
         // Build a simple showcase stage as a stand-in for the loaded FBX.
-        let floor_m = crate::common::spawn_material(world, make_material(
-            [0.07, 0.08, 0.10, 1.0],
-            0.16,
-            0.02,
-            [0.0; 3],
-            0.0,
-        ));
-        let pedestal_m = crate::common::spawn_material(world, make_material(
-            [0.11, 0.12, 0.15, 1.0],
-            0.28,
-            0.04,
-            [0.0; 3],
-            0.0,
-        ));
-        let backdrop_m = crate::common::spawn_material(world, make_material(
-            [0.04, 0.05, 0.08, 1.0],
-            0.82,
-            0.0,
-            [0.04, 0.06, 0.12],
-            0.03,
-        ));
-        let cube_mat = crate::common::spawn_material(world, make_material(
-            [0.55, 0.52, 0.5, 1.0],
-            0.6,
-            0.1,
-            [0.0; 3],
-            0.0,
-        ));
-        let text_m = crate::common::spawn_material(world, make_material(
-            [0.9, 0.8, 0.2, 1.0],
-            0.1,
-            0.0,
-            [0.9, 0.8, 0.1],
-            2.0,
-        ));
+        let floor_m = crate::common::spawn_material(
+            world,
+            make_material([0.07, 0.08, 0.10, 1.0], 0.16, 0.02, [0.0; 3], 0.0),
+        );
+        let pedestal_m = crate::common::spawn_material(
+            world,
+            make_material([0.11, 0.12, 0.15, 1.0], 0.28, 0.04, [0.0; 3], 0.0),
+        );
+        let backdrop_m = crate::common::spawn_material(
+            world,
+            make_material([0.04, 0.05, 0.08, 1.0], 0.82, 0.0, [0.04, 0.06, 0.12], 0.03),
+        );
+        let cube_mat = crate::common::spawn_material(
+            world,
+            make_material([0.55, 0.52, 0.5, 1.0], 0.6, 0.1, [0.0; 3], 0.0),
+        );
+        let text_m = crate::common::spawn_material(
+            world,
+            make_material([0.9, 0.8, 0.2, 1.0], 0.1, 0.0, [0.9, 0.8, 0.1], 2.0),
+        );
 
         // Floor
         let floor = crate::common::spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 20.0));
         insert_object(world, floor, floor_m, glam::Mat4::IDENTITY, 20.0).unwrap();
 
         // Pedestal
-        let ped = crate::common::spawn_mesh(world, box_mesh(
-                [0.0, 0.3, 0.0],
-                [2.5, 0.3, 2.5],
-            ));
+        let ped = crate::common::spawn_mesh(world, box_mesh([0.0, 0.3, 0.0], [2.5, 0.3, 2.5]));
         insert_object(world, ped, pedestal_m, glam::Mat4::IDENTITY, 2.5).unwrap();
 
         // Placeholder "model" — stacked boxes suggesting a figure
@@ -97,17 +79,11 @@ impl HelioWasmApp for Demo {
         }
 
         // "FBX N/A" sign (emissive slab)
-        let sign = crate::common::spawn_mesh(world, box_mesh(
-                [0.0, 2.2, -4.5],
-                [1.8, 0.4, 0.06],
-            ));
+        let sign = crate::common::spawn_mesh(world, box_mesh([0.0, 2.2, -4.5], [1.8, 0.4, 0.06]));
         insert_object(world, sign, text_m, glam::Mat4::IDENTITY, 1.8).unwrap();
 
         // Backdrop
-        let back = crate::common::spawn_mesh(world, box_mesh(
-                [0.0, 4.0, -9.5],
-                [10.0, 4.0, 0.1],
-            ));
+        let back = crate::common::spawn_mesh(world, box_mesh([0.0, 4.0, -9.5], [10.0, 4.0, 0.1]));
         insert_object(world, back, backdrop_m, glam::Mat4::IDENTITY, 10.0).unwrap();
 
         // Three-point lighting (same as native showcase)
@@ -116,7 +92,9 @@ impl HelioWasmApp for Demo {
         let key = focus + Vec3::new(r * 0.22, r * 0.34, r * 0.24);
         let fill = focus + Vec3::new(-r * 0.26, r * 0.14, r * 0.28);
         let rim = focus + Vec3::new(-r * 0.30, r * 0.22, -r * 0.32);
-        crate::common::spawn_light(world, spot_light(
+        crate::common::spawn_light(
+            world,
+            spot_light(
                 key.to_array(),
                 (focus - key).normalize().to_array(),
                 [1.0, 0.80, 0.62],
@@ -124,8 +102,11 @@ impl HelioWasmApp for Demo {
                 r * 0.62,
                 0.20,
                 0.38,
-            ));
-        crate::common::spawn_light(world, spot_light(
+            ),
+        );
+        crate::common::spawn_light(
+            world,
+            spot_light(
                 fill.to_array(),
                 (focus - fill).normalize().to_array(),
                 [0.52, 0.66, 1.0],
@@ -133,8 +114,11 @@ impl HelioWasmApp for Demo {
                 r * 0.59,
                 0.28,
                 0.46,
-            ));
-        crate::common::spawn_light(world, spot_light(
+            ),
+        );
+        crate::common::spawn_light(
+            world,
+            spot_light(
                 rim.to_array(),
                 (focus - rim).normalize().to_array(),
                 [0.36, 0.55, 1.0],
@@ -142,12 +126,12 @@ impl HelioWasmApp for Demo {
                 r * 0.57,
                 0.22,
                 0.40,
-            ));
-        crate::common::spawn_light(world, directional_light(
-                [0.15, -1.0, 0.1],
-                [0.07, 0.09, 0.14],
-                0.3,
-            ));
+            ),
+        );
+        crate::common::spawn_light(
+            world,
+            directional_light([0.15, -1.0, 0.1], [0.07, 0.09, 0.14], 0.3),
+        );
         renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
         renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
 

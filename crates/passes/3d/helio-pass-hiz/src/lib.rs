@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_core::ResourceRegistry;
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Marker opting a shader into [`HIZ`]. Must appear in the source.
 pub const HIZ_MARKER: &str = "//!use helio_hiz";
@@ -166,7 +166,11 @@ impl HiZBuildPass {
         }));
 
         // Phase 2: mip-chain downsampling pipeline
-        let mip_shader = helio_core::shader::module(device, "HiZ Build Shader", helio_core::include_wgsl!("../shaders/hiz_build.wgsl"));
+        let mip_shader = helio_core::shader::module(
+            device,
+            "HiZ Build Shader",
+            helio_core::include_wgsl!("../shaders/hiz_build.wgsl"),
+        );
 
         let mip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HiZ Mip BGL"),
@@ -210,24 +214,30 @@ impl HiZBuildPass {
             immediate_size: 0,
         });
 
-        let mip_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("HiZ Mip Pipeline"),
-            layout: Some(&mip_pl),
-            module: &mip_shader,
-            entry_point: Some("main_farthest"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let mip_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("HiZ Mip Pipeline"),
+                layout: Some(&mip_pl),
+                module: &mip_shader,
+                entry_point: Some("main_farthest"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         // Same module and layout as the farthest chain — only the reduction differs.
-        let nearest_mip_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("HiZ Nearest Mip Pipeline"),
-            layout: Some(&mip_pl),
-            module: &mip_shader,
-            entry_point: Some("main_nearest"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let nearest_mip_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("HiZ Nearest Mip Pipeline"),
+                layout: Some(&mip_pl),
+                module: &mip_shader,
+                entry_point: Some("main_nearest"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let (depth_copy_buffer, depth_copy_bytes_per_row) =
             create_depth_copy_buffer(device, width, height);
@@ -238,7 +248,11 @@ impl HiZBuildPass {
                  culling and SSR use a conservative far-depth fallback"
             );
         }
-        let fallback_shader = helio_core::shader::module(device, "HiZ Far Depth Fallback Shader", helio_core::include_wgsl!("../shaders/hiz_far_depth_fallback.wgsl"));
+        let fallback_shader = helio_core::shader::module(
+            device,
+            "HiZ Far Depth Fallback Shader",
+            helio_core::include_wgsl!("../shaders/hiz_far_depth_fallback.wgsl"),
+        );
         let fallback_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HiZ Far Depth Fallback BGL"),
             entries: &[
@@ -269,14 +283,17 @@ impl HiZBuildPass {
             bind_group_layouts: &[Some(&fallback_bgl)],
             immediate_size: 0,
         });
-        let fallback_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("HiZ Far Depth Fallback Pipeline"),
-            layout: Some(&fallback_layout),
-            module: &fallback_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let fallback_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("HiZ Far Depth Fallback Pipeline"),
+                layout: Some(&fallback_layout),
+                module: &fallback_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         // Mip uniforms and bind groups are built lazily from the graph-owned texture.
         // Mip uniforms and dispatch groups are built once here (width/height-dependent).
@@ -437,11 +454,7 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[
-            "hiz",
-            "hiz_nearest",
-            "hiz_sampler",
-        ]
+        &["hiz", "hiz_nearest", "hiz_sampler"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -766,7 +779,11 @@ impl RenderPass for HiZBuildPass {
         // The graph routes "hiz" texture view via pre_pass_actions before execute().
         // We only need to publish the sampler (not owned by the graph).
         let hiz_sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&*self.hiz_sampler) };
-        frame.write(helio_core::ResourceKey::new("hiz_sampler"), hiz_sampler, "HiZBuild");
+        frame.write(
+            helio_core::ResourceKey::new("hiz_sampler"),
+            hiz_sampler,
+            "HiZBuild",
+        );
     }
 }
 
@@ -775,7 +792,11 @@ mod tests {
     use super::{DepthInputs, PyramidSource};
 
     fn inputs(camera_generation: u64, scene_signature: u64, draw_signature: u64) -> DepthInputs {
-        DepthInputs { camera_generation, scene_signature, draw_signature }
+        DepthInputs {
+            camera_generation,
+            scene_signature,
+            draw_signature,
+        }
     }
 
     /// Runs `frames` frames at `current`, returning which of them rebuilt.
@@ -787,7 +808,10 @@ mod tests {
     fn static_view_rebuilds_until_the_pyramid_holds_its_own_depth() {
         let mut source = PyramidSource::default();
         // Frame 0 copies a depth nothing drew; frame 1 copies frame 0's.
-        assert_eq!(run(&mut source, inputs(1, 7, 3), 4), [true, true, false, false]);
+        assert_eq!(
+            run(&mut source, inputs(1, 7, 3), 4),
+            [true, true, false, false]
+        );
     }
 
     /// Objects present before the first frame, camera never moves: the draw
@@ -799,10 +823,16 @@ mod tests {
         let mut source = PyramidSource::default();
         let nothing_drawn = inputs(1, 7, 0);
         let drawn = inputs(1, 7, 42);
-        assert_eq!(run(&mut source, nothing_drawn, 5), [true, true, false, false, false]);
+        assert_eq!(
+            run(&mut source, nothing_drawn, 5),
+            [true, true, false, false, false]
+        );
         // First frame drawing the scene still copies the previous, empty
         // depth; the next copies the drawn one; then it is reused.
-        assert_eq!(run(&mut source, drawn, 5), [true, true, false, false, false]);
+        assert_eq!(
+            run(&mut source, drawn, 5),
+            [true, true, false, false, false]
+        );
     }
 
     /// A change is seen by the frame that copies the depth drawn BEFORE it,
@@ -813,7 +843,11 @@ mod tests {
         for changed in [inputs(2, 7, 42), inputs(1, 8, 42), inputs(1, 7, 43)] {
             let mut source = PyramidSource::default();
             run(&mut source, inputs(1, 7, 42), 4);
-            assert_eq!(run(&mut source, changed, 4), [true, true, false, false], "{changed:?}");
+            assert_eq!(
+                run(&mut source, changed, 4),
+                [true, true, false, false],
+                "{changed:?}"
+            );
         }
     }
 

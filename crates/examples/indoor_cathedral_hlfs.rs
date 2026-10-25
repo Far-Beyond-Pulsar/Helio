@@ -311,15 +311,32 @@ impl ApplicationHandler for App {
                     .expect("HLFS pass")
                     .set_config(device, config);
             });
-            eprintln!("Interactive HLFS configuration: {:?}",
-                renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
-            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
-        } else if device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            eprintln!(
+                "Interactive HLFS configuration: {:?}",
+                renderer
+                    .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
+                    .unwrap()
+                    .config()
+            );
+            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(
+                device.clone(),
+                queue.clone(),
+            ))
+        } else if device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off")
         {
             // No ray-traced shadows: the meshes for the GI probes alone.
-            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()))
-        } else { None };
+            Some(
+                helio_default_passes::ray_tracing::SceneDbRayTracing::partial(
+                    device.clone(),
+                    queue.clone(),
+                ),
+            )
+        } else {
+            None
+        };
         renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
@@ -676,8 +693,14 @@ impl AppState {
             }
         }
 
-        flicker_lights(&mut self.scene_db.world, &self.chandelier_light_ids, &self.candle_light_ids,
-            self.large, time, self.ray_traced);
+        flicker_lights(
+            &mut self.scene_db.world,
+            &self.chandelier_light_ids,
+            &self.candle_light_ids,
+            self.large,
+            time,
+            self.ray_traced,
+        );
 
         // Scene state is persistent — no per-frame setup needed.
 

@@ -14,8 +14,8 @@
 mod asset;
 pub mod buffers;
 mod compile;
-pub mod layout;
 pub mod core_nodes;
+pub mod layout;
 mod pins;
 mod probe;
 mod registry;
@@ -33,7 +33,6 @@ pub use pins::{PinDesc, PinKind, PinShape, PinType};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 pub use registry::{
     BuildEnv, BuildFn, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc,
-    ParamType, PinTable,
-    PinsFn,
+    ParamType, PinTable, PinsFn,
 };
 pub use validate::{validate, Diagnostic, Plan, Severity, Validation};

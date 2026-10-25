@@ -76,7 +76,10 @@ fn nothing_in_the_workspace_references_libhelio() {
         // This test's own source (the string literal "libhelio" appears
         // throughout its doc comments and assertions) is exempt from
         // scanning itself.
-        if path.file_name().is_some_and(|n| n == "no_libhelio_crate.rs") {
+        if path
+            .file_name()
+            .is_some_and(|n| n == "no_libhelio_crate.rs")
+        {
             continue;
         }
         let Ok(source) = std::fs::read_to_string(path) else {
@@ -86,7 +89,12 @@ fn nothing_in_the_workspace_references_libhelio() {
             let rel = path.strip_prefix(&root).unwrap_or(path);
             for (line_no, line) in source.lines().enumerate() {
                 if line.contains("libhelio") {
-                    hits.push(format!("{}:{}: {}", rel.display(), line_no + 1, line.trim()));
+                    hits.push(format!(
+                        "{}:{}: {}",
+                        rel.display(),
+                        line_no + 1,
+                        line.trim()
+                    ));
                 }
             }
         }

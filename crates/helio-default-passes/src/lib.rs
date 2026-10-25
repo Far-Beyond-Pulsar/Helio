@@ -1,18 +1,20 @@
 use std::sync::Arc;
 
 mod background;
+pub mod environment_join;
 pub mod graph_nodes;
 pub mod graphs;
-pub mod pipelines;
-pub mod environment_join;
-pub mod portal_projection;
 pub mod hierarchy_resolve;
+pub mod pipelines;
+pub mod portal_projection;
 pub mod ray_proxies;
 pub mod ray_tracing;
-mod texture_means;
 pub mod scene_join;
+mod texture_means;
 pub mod virtual_geometry;
-pub use virtual_geometry::{virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass};
+pub use virtual_geometry::{
+    virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
+};
 
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
@@ -48,17 +50,17 @@ use helio_pass_postprocess::{
 };
 use helio_pass_shadow::ShadowPass;
 
+use helio_pass_gi::{GiConfig, GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
-use helio_pass_gi::{GiConfig, GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
 
 use background::BackgroundPass;
-use helio_pass_ssr::SsrPass;
-use helio_pass_tsr::TsrPass;
 use helio_pass_sprite_batch::SpriteBatchPass;
 use helio_pass_sprite_cull::SpriteCullPass;
+use helio_pass_ssr::SsrPass;
+use helio_pass_tsr::TsrPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_water_sim::WaterSimPass;
 
@@ -67,9 +69,7 @@ use helio_core::RenderGraph;
 /// An application-provided pass factory reused on graph resize. The builder
 /// chooses its stage; scene data and backend selection remain with the caller.
 pub type GraphPassFactory = Arc<
-    dyn Fn(&wgpu::Device, &wgpu::Queue, u32, u32) -> Box<dyn helio_core::RenderPass>
-        + Send
-        + Sync,
+    dyn Fn(&wgpu::Device, &wgpu::Queue, u32, u32) -> Box<dyn helio_core::RenderPass> + Send + Sync,
 >;
 
 /// Factory for format-independent voxel passes in the GBuffer stage.
@@ -85,8 +85,10 @@ fn scene_buffer_or_dummy(
     label: &str,
     fallback_size: u64,
 ) -> pulsar_scenedb::gpu::BufferHandle {
-    scene_db.store().resolve_buffer_handle(key).unwrap_or_else(|| {
-        pulsar_scenedb::gpu::BufferHandle {
+    scene_db
+        .store()
+        .resolve_buffer_handle(key)
+        .unwrap_or_else(|| pulsar_scenedb::gpu::BufferHandle {
             buffer: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: fallback_size.max(4),
@@ -96,8 +98,7 @@ fn scene_buffer_or_dummy(
             epoch: 0,
             row_bytes: 0,
             content_generation: 0,
-        }
-    })
+        })
 }
 
 /// Create a new graph, honouring the caller's device ownership.
@@ -288,13 +289,18 @@ fn add_common_early_passes(
     // a SceneDB lookup of a key nothing registers: a 64-byte dummy that held
     // one matrix, with nothing publishing it, so no raster shadow rendered.)
     let shadow_face_slots = helio_pass_shadow_matrix::MAX_SHADOW_FACES as u32;
-    let shadow_budget = config.shadow_budget.validate().expect("invalid renderer shadow budget");
+    let shadow_budget = config
+        .shadow_budget
+        .validate()
+        .expect("invalid renderer shadow budget");
     let shadow_atlas_size = shadow_budget.atlas_size(device.limits().max_texture_dimension_2d);
     let shadow_matrices_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Matrices"),
         size: u64::from(shadow_face_slots)
             * std::mem::size_of::<helio_pass_shadow_matrix::GpuShadowMatrix>() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
@@ -329,15 +335,18 @@ fn add_common_early_passes(
         mapped_at_creation: false,
     });
 
-    graph.add_pass(Box::new(ShadowMatrixPass::new(
-        device,
-        &lights_buf.buffer,
-        &shadow_matrices_buf,
-        camera_buf,
-        &shadow_dirty_buf,
-        &shadow_hashes_buf,
-        shadow_atlas_size,
-    ).with_budget(shadow_budget, h)));
+    graph.add_pass(Box::new(
+        ShadowMatrixPass::new(
+            device,
+            &lights_buf.buffer,
+            &shadow_matrices_buf,
+            camera_buf,
+            &shadow_dirty_buf,
+            &shadow_hashes_buf,
+            shadow_atlas_size,
+        )
+        .with_budget(shadow_budget, h),
+    ));
 
     let shadow_dirty_pass = ShadowDirtyPass::new(device, Arc::clone(&shadow_dirty_buf));
     let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
@@ -346,7 +355,12 @@ fn add_common_early_passes(
     graph.add_pass(Box::new(shadow_dirty_pass));
 
     graph.add_pass(Box::new(ShadowPass::new_tiled(
-        device, queue, face_dirty_buf, face_geom_count_buf, face_pages_buf, shadow_atlas_size,
+        device,
+        queue,
+        face_dirty_buf,
+        face_geom_count_buf,
+        face_pages_buf,
+        shadow_atlas_size,
     )));
 
     // The black background the sky (the atmosphere composite) and every
@@ -361,8 +375,7 @@ fn add_common_early_passes(
         cull_stats_buf.clone(),
     )));
     graph.add_pass(Box::new(hiz_pass));
-    let occlusion_cull =
-        OcclusionCullPass::new(device, hiz_sampler, w, h, cull_stats_buf.clone());
+    let occlusion_cull = OcclusionCullPass::new(device, hiz_sampler, w, h, cull_stats_buf.clone());
     // Static occlusion needs no wiring here: after a bake with a PVS,
     // BakeInjectPass publishes `baked_pvs` and the cull uploads it itself.
     graph.add_pass(Box::new(occlusion_cull));
@@ -405,8 +418,21 @@ fn add_gi_tracers(
     let mesh_rays = GiMeshTracePass::new(device);
     let gi = voxel || mesh_rays.is_some();
     if gi {
-        let finest_spacing = config.gi_probe_spacing.map_or(if voxel { helio_pass_gi::DEFAULT_FINEST_SPACING } else { 0.5 }, f64::from);
-        graph.add_pass(Box::new(GiPass::new(device, GiConfig { finest_spacing, needs_tlas: !voxel })));
+        let finest_spacing = config.gi_probe_spacing.map_or(
+            if voxel {
+                helio_pass_gi::DEFAULT_FINEST_SPACING
+            } else {
+                0.5
+            },
+            f64::from,
+        );
+        graph.add_pass(Box::new(GiPass::new(
+            device,
+            GiConfig {
+                finest_spacing,
+                needs_tlas: !voxel,
+            },
+        )));
     }
     for factory in voxel_passes {
         graph.add_pass(factory(device, queue, iw, ih));
@@ -431,7 +457,6 @@ fn add_geometry_passes(
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
     _scene_db: helio::SceneDbHandle,
 ) {
-
     // Foliage placement is a compute pass and must be added *before* GBufferPass, not
     // between it and FoliageGBufferPass. It is deliberately not `chain_transparent` (it
     // records on the main encoder so it reads this frame's Hi-Z rather than last
@@ -536,7 +561,10 @@ fn add_late_passes(
     // aerial perspective over geometry, the clouds in front of both. Before
     // the overlays (billboards, coronas, debug draw), which are not seen
     // through the air.
-    graph.add_pass(Box::new(AtmosphereCompositePass::new(device, config.surface_format)));
+    graph.add_pass(Box::new(AtmosphereCompositePass::new(
+        device,
+        config.surface_format,
+    )));
     let lights_buf = scene_buffer_or_dummy(
         &_scene_db,
         device,
@@ -681,15 +709,23 @@ fn add_final_passes(
 pub(crate) fn foliage_passes(
     device: &wgpu::Device,
     config: &RendererConfig,
-) -> (FoliagePlacePass, helio_pass_foliage_gbuffer::FoliageBoxesPass, FoliageGBufferPass) {
+) -> (
+    FoliagePlacePass,
+    helio_pass_foliage_gbuffer::FoliageBoxesPass,
+    FoliageGBufferPass,
+) {
     let defaults = helio_pass_foliage_place::FoliageRange::default();
     let place = FoliagePlacePass::new_with(
         device,
         config.foliage_quality,
         helio_pass_foliage_place::FoliageRange {
-            range: config.foliage_range.unwrap_or(config.foliage_quality.range()),
+            range: config
+                .foliage_range
+                .unwrap_or(config.foliage_quality.range()),
             tufts_per_m2: config.foliage_tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
-            blades_per_tuft: config.foliage_blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
+            blades_per_tuft: config
+                .foliage_blades_per_tuft
+                .unwrap_or(defaults.blades_per_tuft),
             ..defaults
         },
     );
@@ -1095,7 +1131,10 @@ fn build_default_graph_internal_with_lens_user(
     // Lighting and everything drawn into it stay scene-linear FP16 until
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
-    let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let lighting_config = RendererConfig {
+        surface_format: FOGGED_HDR_FORMAT,
+        ..config
+    };
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -1110,13 +1149,22 @@ fn build_default_graph_internal_with_lens_user(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    add_geometry_passes(
+        &mut graph,
+        device,
+        camera_buf,
+        &config,
+        &perf,
+        scene_db.clone(),
+    );
 
     let voxel = !voxel_passes.is_empty();
     let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &voxel_passes);
     // Foliage grows on the voxel terrain when there is one: its pass answers the
     // placement's ground queries (`helio_pass_voxel_planet::chunks::ground`).
-    let voxel_ground = graph.find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>().map(|p| p.foliage_ground());
+    let voxel_ground = graph
+        .find_pass::<helio_pass_voxel_planet::chunks::pass::ChunkPass>()
+        .map(|p| p.foliage_ground());
     if let (Some(ground), Some(place)) = (voxel_ground, graph.find_pass_mut::<FoliagePlacePass>()) {
         place.set_ground(ground);
     }
@@ -1195,9 +1243,21 @@ fn build_default_graph_internal_with_lens_user(
     let aa = match config.tsr_quality {
         Some(quality) => {
             // The G-buffer passes write motion vectors: moving objects reproject with themselves.
-            let tsr = TsrPass::new(device, iw, ih, config.width, config.height, config.surface_format, quality)
-                .with_motion_vectors();
-            SceneAa::Tsr(if voxel { tsr.with_stochastic_mask() } else { tsr })
+            let tsr = TsrPass::new(
+                device,
+                iw,
+                ih,
+                config.width,
+                config.height,
+                config.surface_format,
+                quality,
+            )
+            .with_motion_vectors();
+            SceneAa::Tsr(if voxel {
+                tsr.with_stochastic_mask()
+            } else {
+                tsr
+            })
         }
         None => SceneAa::Fxaa,
     };
@@ -1205,8 +1265,16 @@ fn build_default_graph_internal_with_lens_user(
     // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
     // resources at execute time, so no buffers are passed in here.
     let transparent = helio_pass_transparent::TransparentPass::new(device, FOGGED_HDR_FORMAT);
-    let resolved =
-        add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), aa, iw, ih, lens_user);
+    let resolved = add_scene_linear_chain(
+        &mut graph,
+        device,
+        FOGGED_HDR_FORMAT,
+        Some(transparent),
+        aa,
+        iw,
+        ih,
+        lens_user,
+    );
 
     let pp = PostProcessPass::new_with_user_effects(
         device,
@@ -1352,7 +1420,10 @@ fn build_fxaa_graph_internal(
     // Lighting and everything drawn into it stay scene-linear FP16 until
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
-    let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let lighting_config = RendererConfig {
+        surface_format: FOGGED_HDR_FORMAT,
+        ..config
+    };
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -1367,7 +1438,14 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    add_geometry_passes(
+        &mut graph,
+        device,
+        camera_buf,
+        &config,
+        &perf,
+        scene_db.clone(),
+    );
     let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
@@ -1420,18 +1498,30 @@ fn build_fxaa_graph_internal(
     // TSR provides temporal super-resolution upscaling with its own temporal AA.
     // When TSR is not configured, skip temporal accumulation (render at native res).
     let aa = match config.tsr_quality {
-        Some(quality) => SceneAa::Tsr(TsrPass::new(
-            device,
-            iw,
-            ih,
-            config.width,
-            config.height,
-            config.surface_format,
-            quality,
-        ).with_motion_vectors()),
+        Some(quality) => SceneAa::Tsr(
+            TsrPass::new(
+                device,
+                iw,
+                ih,
+                config.width,
+                config.height,
+                config.surface_format,
+                quality,
+            )
+            .with_motion_vectors(),
+        ),
         None => SceneAa::None,
     };
-    let resolved = add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, None, aa, iw, ih, None);
+    let resolved = add_scene_linear_chain(
+        &mut graph,
+        device,
+        FOGGED_HDR_FORMAT,
+        None,
+        aa,
+        iw,
+        ih,
+        None,
+    );
 
     graph.add_pass(Box::new(
         PostProcessPass::new_with_user_effects(
@@ -1511,7 +1601,14 @@ fn build_hlfs_graph_internal(
         scene_db.clone(),
     );
 
-    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    add_geometry_passes(
+        &mut graph,
+        device,
+        camera_buf,
+        &config,
+        &perf,
+        scene_db.clone(),
+    );
     let gi = add_gi_tracers(&mut graph, device, queue, iw, ih, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
@@ -1528,7 +1625,11 @@ fn build_hlfs_graph_internal(
     graph.add_pass(Box::new(hlfs_pass));
     if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
         graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
-        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(device, camera_buf, lighting_format)));
+        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(
+            device,
+            camera_buf,
+            lighting_format,
+        )));
     }
 
     let lighting_config = RendererConfig {
@@ -1553,24 +1654,38 @@ fn build_hlfs_graph_internal(
     // Blend transparent surfaces in the same linear HDR format as HLFS, over
     // the fogged opaque image.
     let mut transparent = helio_pass_transparent::TransparentPass::new(device, lighting_format);
-    if config.tsr_quality.is_some() { transparent = transparent.with_reactive_mask(); }
+    if config.tsr_quality.is_some() {
+        transparent = transparent.with_reactive_mask();
+    }
 
     // TSR provides temporal super-resolution upscaling with its own temporal AA.
     // When TSR is not configured, skip temporal accumulation (render at native res).
     let aa = match config.tsr_quality {
-        Some(quality) => SceneAa::Tsr(TsrPass::new(
-            device,
-            iw,
-            ih,
-            config.width,
-            config.height,
-            config.surface_format,
-            quality,
-        ).with_transparency_reactivity().with_motion_vectors()),
+        Some(quality) => SceneAa::Tsr(
+            TsrPass::new(
+                device,
+                iw,
+                ih,
+                config.width,
+                config.height,
+                config.surface_format,
+                quality,
+            )
+            .with_transparency_reactivity()
+            .with_motion_vectors(),
+        ),
         None => SceneAa::None,
     };
-    let resolved =
-        add_scene_linear_chain(&mut graph, device, lighting_format, Some(transparent), aa, iw, ih, None);
+    let resolved = add_scene_linear_chain(
+        &mut graph,
+        device,
+        lighting_format,
+        Some(transparent),
+        aa,
+        iw,
+        ih,
+        None,
+    );
 
     graph.add_pass(Box::new(
         PostProcessPass::new_with_user_effects(
@@ -1759,7 +1874,14 @@ fn build_fxaa_hlfs_graph_internal(
         scene_db.clone(),
     );
 
-    add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+    add_geometry_passes(
+        &mut graph,
+        device,
+        camera_buf,
+        &config,
+        &perf,
+        scene_db.clone(),
+    );
     let gi = add_gi_tracers(&mut graph, device, queue, w, h, &config, &[]);
 
     // Decal pass — reads SceneDB's `"decals"` buffer directly at execute time.
@@ -1776,7 +1898,11 @@ fn build_fxaa_hlfs_graph_internal(
     graph.add_pass(Box::new(hlfs_pass));
     if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
         graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, w, h)));
-        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(device, camera_buf, lighting_format)));
+        graph.add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(
+            device,
+            camera_buf,
+            lighting_format,
+        )));
     }
 
     let lighting_config = RendererConfig {
@@ -1802,17 +1928,27 @@ fn build_fxaa_hlfs_graph_internal(
     // before anti-aliasing and tonemapping, alongside the opaque lighting.
     let transparent = helio_pass_transparent::TransparentPass::new(device, lighting_format);
     let resolved = add_scene_linear_chain(
-        &mut graph, device, lighting_format, Some(transparent), SceneAa::Fxaa, w, h, None,
+        &mut graph,
+        device,
+        lighting_format,
+        Some(transparent),
+        SceneAa::Fxaa,
+        w,
+        h,
+        None,
     );
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device,
-        queue,
-        config.width,
-        config.height,
-        config.surface_format,
-        None,
-    ).with_color_input(resolved)));
+    graph.add_pass(Box::new(
+        PostProcessPass::new_with_user_effects(
+            device,
+            queue,
+            config.width,
+            config.height,
+            config.surface_format,
+            None,
+        )
+        .with_color_input(resolved),
+    ));
 
     add_final_passes(
         &mut graph,
@@ -2037,7 +2173,10 @@ fn build_forward_graph_internal(
     // Lighting and everything drawn into it stay scene-linear FP16 until
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
-    let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let lighting_config = RendererConfig {
+        surface_format: FOGGED_HDR_FORMAT,
+        ..config
+    };
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -2053,7 +2192,14 @@ fn build_forward_graph_internal(
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
-    add_forward_geometry_passes(&mut graph, device, camera_buf, &lighting_config, &perf, true);
+    add_forward_geometry_passes(
+        &mut graph,
+        device,
+        camera_buf,
+        &lighting_config,
+        &perf,
+        true,
+    );
 
     add_late_passes(
         &mut graph,
@@ -2074,17 +2220,27 @@ fn build_forward_graph_internal(
     // resources at execute time, so no buffers are passed in here.
     let transparent = helio_pass_transparent::TransparentPass::new(device, FOGGED_HDR_FORMAT);
     let resolved = add_scene_linear_chain(
-        &mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), SceneAa::Fxaa, iw, ih, None,
+        &mut graph,
+        device,
+        FOGGED_HDR_FORMAT,
+        Some(transparent),
+        SceneAa::Fxaa,
+        iw,
+        ih,
+        None,
     );
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device,
-        queue,
-        config.width,
-        config.height,
-        config.surface_format,
-        None,
-    ).with_color_input(resolved)));
+    graph.add_pass(Box::new(
+        PostProcessPass::new_with_user_effects(
+            device,
+            queue,
+            config.width,
+            config.height,
+            config.surface_format,
+            None,
+        )
+        .with_color_input(resolved),
+    ));
 
     add_final_passes(
         &mut graph,
@@ -2130,8 +2286,13 @@ pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneM
     Box::new(|ctx| {
         let textures = ctx
             .registry
-            .read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "VoxelPlanet")?;
-        let materials = ctx.scene_buffers.get(pulsar_scenedb::gpu::BufferKey::of("materials"))?;
+            .read::<helio_mats::MaterialTextureBindings<'_>>(
+                helio_core::resource_keys::material_textures(),
+                "VoxelPlanet",
+            )?;
+        let materials = ctx
+            .scene_buffers
+            .get(pulsar_scenedb::gpu::BufferKey::of("materials"))?;
         Some(SceneMaterialInputs {
             materials: &materials.buffer,
             texture_views: textures.texture_views,

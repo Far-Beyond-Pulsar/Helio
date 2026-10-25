@@ -37,41 +37,26 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let world = &mut scene_db.world;
-        let basalt_m = crate::common::spawn_material(world, make_material(
-            [0.08, 0.07, 0.07, 1.0],
-            0.95,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let rock_m = crate::common::spawn_material(world, make_material(
-            [0.14, 0.10, 0.09, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let lava_m = crate::common::spawn_material(world, make_material(
-            [0.2, 0.05, 0.01, 1.0],
-            1.0,
-            0.0,
-            [1.0, 0.2, 0.0],
-            12.0,
-        ));
-        let lava_hot_m = crate::common::spawn_material(world, make_material(
-            [0.3, 0.1, 0.02, 1.0],
-            1.0,
-            0.0,
-            [1.5, 0.5, 0.05],
-            20.0,
-        ));
-        let ash_m = crate::common::spawn_material(world, make_material(
-            [0.22, 0.20, 0.18, 1.0],
-            0.99,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let basalt_m = crate::common::spawn_material(
+            world,
+            make_material([0.08, 0.07, 0.07, 1.0], 0.95, 0.0, [0.0; 3], 0.0),
+        );
+        let rock_m = crate::common::spawn_material(
+            world,
+            make_material([0.14, 0.10, 0.09, 1.0], 0.9, 0.0, [0.0; 3], 0.0),
+        );
+        let lava_m = crate::common::spawn_material(
+            world,
+            make_material([0.2, 0.05, 0.01, 1.0], 1.0, 0.0, [1.0, 0.2, 0.0], 12.0),
+        );
+        let lava_hot_m = crate::common::spawn_material(
+            world,
+            make_material([0.3, 0.1, 0.02, 1.0], 1.0, 0.0, [1.5, 0.5, 0.05], 20.0),
+        );
+        let ash_m = crate::common::spawn_material(
+            world,
+            make_material([0.22, 0.20, 0.18, 1.0], 0.99, 0.0, [0.0; 3], 0.0),
+        );
 
         // Lava plain (ground)
         let ground = crate::common::spawn_mesh(world, plane_mesh([0.0, 0.0, 0.0], 80.0));
@@ -94,10 +79,8 @@ impl HelioWasmApp for Demo {
         }
 
         // Lava lake (inside crater)
-        let lava_lake = crate::common::spawn_mesh(world, box_mesh(
-                [0.0, 0.3, 0.0],
-                [14.0, 0.3, 14.0],
-            ));
+        let lava_lake =
+            crate::common::spawn_mesh(world, box_mesh([0.0, 0.3, 0.0], [14.0, 0.3, 14.0]));
         insert_object(world, lava_lake, lava_m, glam::Mat4::IDENTITY, 14.0).unwrap();
 
         // Hot lava vents
@@ -125,14 +108,7 @@ impl HelioWasmApp for Demo {
         ];
         for (pos, size) in flow_data {
             let f = crate::common::spawn_mesh(world, box_mesh(*pos, *size));
-            insert_object(
-                world,
-                f,
-                lava_m,
-                glam::Mat4::IDENTITY,
-                size[0].max(size[2]),
-            )
-            .unwrap();
+            insert_object(world, f, lava_m, glam::Mat4::IDENTITY, size[0].max(size[2])).unwrap();
         }
 
         // Ash dunes in the distance
@@ -144,53 +120,37 @@ impl HelioWasmApp for Demo {
         ];
         for (pos, size) in ash_dunes {
             let d = crate::common::spawn_mesh(world, box_mesh(*pos, *size));
-            insert_object(
-                world,
-                d,
-                ash_m,
-                glam::Mat4::IDENTITY,
-                size[0].max(size[2]),
-            )
-            .unwrap();
+            insert_object(world, d, ash_m, glam::Mat4::IDENTITY, size[0].max(size[2])).unwrap();
         }
 
         // Lava lights
         let mut lava_lights = Vec::new();
         for &pos in vent_positions {
-            let id = crate::common::spawn_light(world, point_light(
-                    [pos[0], pos[1] + 0.5, pos[2]],
-                    [1.0, 0.3, 0.02],
-                    8.0,
-                    10.0,
-                ));
+            let id = crate::common::spawn_light(
+                world,
+                point_light([pos[0], pos[1] + 0.5, pos[2]], [1.0, 0.3, 0.02], 8.0, 10.0),
+            );
             lava_lights.push(id);
         }
         // Central lava lake glow
-        let central = crate::common::spawn_light(world, point_light(
-                [0.0, 2.0, 0.0],
-                [1.0, 0.2, 0.0],
-                100.0,
-                40.0,
-            ));
+        let central = crate::common::spawn_light(
+            world,
+            point_light([0.0, 2.0, 0.0], [1.0, 0.2, 0.0], 100.0, 40.0),
+        );
         lava_lights.push(central);
         // Flow lights
         for (pos, _) in flow_data {
-            let id = crate::common::spawn_light(world, point_light(
-                    *pos,
-                    [1.0, 0.25, 0.01],
-                    15.0,
-                    12.0,
-                ));
+            let id =
+                crate::common::spawn_light(world, point_light(*pos, [1.0, 0.25, 0.01], 15.0, 12.0));
             lava_lights.push(id);
         }
 
         // Night sky with red-orange glow from below
         let moon = Vec3::new(0.3, -0.9, 0.4).normalize();
-        crate::common::spawn_light(world, directional_light(
-                [moon.x, moon.y, moon.z],
-                [0.25, 0.3, 0.5],
-                0.002,
-            ));
+        crate::common::spawn_light(
+            world,
+            directional_light([moon.x, moon.y, moon.z], [0.25, 0.3, 0.5], 0.002),
+        );
         renderer.set_ambient([0.15, 0.06, 0.02], 0.04);
         renderer.set_clear_color([0.06, 0.02, 0.01, 1.0]);
 

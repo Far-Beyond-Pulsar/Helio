@@ -73,7 +73,11 @@ impl TestPage {
             }
         }
         let ext = (0..3).map(|i| (hi[i] - lo[i]) as f64).fold(0.0, f64::max);
-        let step = if ext > 0.0 { (ext * (1.0 + 1e-6) / LATTICE_MAX as f64) as f32 } else { 1.0 };
+        let step = if ext > 0.0 {
+            (ext * (1.0 + 1e-6) / LATTICE_MAX as f64) as f32
+        } else {
+            1.0
+        };
         let quant = GpuAssetQuant { origin: lo, step };
 
         let n = clusters.len();
@@ -90,7 +94,8 @@ impl TestPage {
                 .map(|p| {
                     let mut q = [0u32; 3];
                     for i in 0..3 {
-                        let v = ((p[i] as f64 - quant.origin[i] as f64) / quant.step as f64).round();
+                        let v =
+                            ((p[i] as f64 - quant.origin[i] as f64) / quant.step as f64).round();
                         q[i] = v.clamp(0.0, LATTICE_MAX as f64) as u32;
                     }
                     q
@@ -104,7 +109,9 @@ impl TestPage {
                     mx[i] = mx[i].max(p[i]);
                 }
             }
-            let bits: Vec<u32> = (0..3).map(|i| 32 - (mx[i] - mn[i]).leading_zeros()).collect();
+            let bits: Vec<u32> = (0..3)
+                .map(|i| 32 - (mx[i] - mn[i]).leading_zeros())
+                .collect();
             let per = (bits[0] + bits[1] + bits[2]) as usize;
             let mut words = vec![0u32; POS_BLOCK_HEADER_WORDS + (per * q.len() + 31) / 32];
             words[0..3].copy_from_slice(&mn);
@@ -112,7 +119,12 @@ impl TestPage {
             let mut bp = 0;
             for p in &q {
                 for i in 0..3 {
-                    put_bits(&mut words[POS_BLOCK_HEADER_WORDS..], bp, p[i] - mn[i], bits[i]);
+                    put_bits(
+                        &mut words[POS_BLOCK_HEADER_WORDS..],
+                        bp,
+                        p[i] - mn[i],
+                        bits[i],
+                    );
                     bp += bits[i] as usize;
                 }
             }
@@ -135,7 +147,10 @@ impl TestPage {
         let attr_off = pos_off + pos_blocks.iter().map(|b| b.len() * 4).sum::<usize>();
         let idx_off = attr_off + attr_blocks.iter().map(|b| b.len()).sum::<usize>();
         let end = idx_off + idx_blocks.iter().map(|b| b.len()).sum::<usize>();
-        assert!(end <= PAGE_BYTES as usize, "test page overflows {PAGE_BYTES} bytes");
+        assert!(
+            end <= PAGE_BYTES as usize,
+            "test page overflows {PAGE_BYTES} bytes"
+        );
 
         let mut page = vec![0u8; PAGE_BYTES as usize];
         let hdr = PageHeader {
@@ -164,7 +179,11 @@ impl TestPage {
                 cone: pack_cone([0.0, 0.0, 1.0], 1.0),
                 self_error: 0.0,
                 parent_error: f32::INFINITY,
-                counts_material: GpuCluster::pack_counts(c.tris.len() as u32, c.positions.len() as u32, c.material),
+                counts_material: GpuCluster::pack_counts(
+                    c.tris.len() as u32,
+                    c.positions.len() as u32,
+                    c.material,
+                ),
                 vertex_offset: po as u32,
                 index_offset: io as u32,
                 group_id: NODE_INVALID,
@@ -179,7 +198,13 @@ impl TestPage {
         }
         // The page is placed in pool slot `pool_slot`: callers upload `bytes`
         // at `pool_slot * PAGE_BYTES` (use `pool()` for a ready buffer image).
-        Self { bytes: page, quant, pool_slot, slots, decoded }
+        Self {
+            bytes: page,
+            quant,
+            pool_slot,
+            slots,
+            decoded,
+        }
     }
 
     /// Byte image of a pool whose slot `pool_slot` holds this page.

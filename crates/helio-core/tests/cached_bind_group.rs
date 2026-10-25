@@ -84,5 +84,8 @@ fn reused_until_a_bound_resource_or_the_layout_changes() {
 
     cache.clear();
     assert!(cache.get().is_none());
-    assert!(group(&mut cache, &device, &layout_b, &buffer_b) != relaid, "cleared: rebuilt");
+    assert!(
+        group(&mut cache, &device, &layout_b, &buffer_b) != relaid,
+        "cleared: rebuilt"
+    );
 }

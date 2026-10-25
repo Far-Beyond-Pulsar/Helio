@@ -19,7 +19,8 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let limits = adapter.limits();
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_limits: wgpu::Limits {
-            max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.min(16),
+            max_storage_buffers_per_shader_stage:
+                limits.max_storage_buffers_per_shader_stage.min(16),
             max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
             max_buffer_size: limits.max_buffer_size,
             ..wgpu::Limits::default()
@@ -29,7 +30,13 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     .ok()
 }
 
-fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, offset: u64, len: u64) -> Vec<u8> {
+fn read_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Buffer,
+    offset: u64,
+    len: u64,
+) -> Vec<u8> {
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: len,
@@ -39,9 +46,17 @@ fn read_buffer(device: &wgpu::Device, queue: &wgpu::Queue, src: &wgpu::Buffer, o
     let mut enc = device.create_command_encoder(&Default::default());
     enc.copy_buffer_to_buffer(src, offset, &staging, 0, len);
     queue.submit(Some(enc.finish()));
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let out = staging.slice(..).get_mapped_range().expect("range").to_vec();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let out = staging
+        .slice(..)
+        .get_mapped_range()
+        .expect("range")
+        .to_vec();
     staging.unmap();
     out
 }
@@ -52,7 +67,11 @@ fn storage(device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8], rw: bool) -
         size: (bytes.len() as u64).max(16).next_multiple_of(4),
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
-            | if rw { wgpu::BufferUsages::COPY_SRC } else { wgpu::BufferUsages::empty() },
+            | if rw {
+                wgpu::BufferUsages::COPY_SRC
+            } else {
+                wgpu::BufferUsages::empty()
+            },
         mapped_at_creation: false,
     });
     queue.write_buffer(&b, 0, bytes);
@@ -68,7 +87,11 @@ fn sphere_asset() -> Vec<u8> {
             let a = std::f32::consts::TAU * i as f32 / nu as f32;
             let b = std::f32::consts::TAU * j as f32 / nv as f32;
             let r = 1.0 + 0.4 * b.cos();
-            pos.push([r * a.cos() * 3.0 + 10.0, 0.4 * b.sin() - 2.0, r * a.sin() * 3.0]);
+            pos.push([
+                r * a.cos() * 3.0 + 10.0,
+                0.4 * b.sin() - 2.0,
+                r * a.sin() * 3.0,
+            ]);
         }
     }
     let at = |i: u32, j: u32| (j % nv) * nu + (i % nu);
@@ -94,7 +117,10 @@ fn sphere_asset() -> Vec<u8> {
             indices: &idx,
             tri_material: &mats,
         },
-        &BuildOptions { content_id: [11, 13], resident_levels: 2 },
+        &BuildOptions {
+            content_id: [11, 13],
+            resident_levels: 2,
+        },
     )
     .unwrap()
 }
@@ -143,14 +169,24 @@ fn shared_gpu_decode_matches_the_builders_cpu_decoder_for_every_vertex() {
     }
     let quant = src.quant();
     // Jobs and expected values.
-    let (mut jobs, mut exp_q, mut exp_pos, mut exp_tri, mut exp_attr): (Vec<[u32; 4]>, Vec<[u32; 3]>, Vec<[f32; 3]>, Vec<[u32; 4]>, Vec<[f32; 4]>) =
-        Default::default();
+    let (mut jobs, mut exp_q, mut exp_pos, mut exp_tri, mut exp_attr): (
+        Vec<[u32; 4]>,
+        Vec<[u32; 3]>,
+        Vec<[f32; 3]>,
+        Vec<[u32; 4]>,
+        Vec<[f32; 4]>,
+    ) = Default::default();
     for p in 0..pages {
         let page = r.page(p).unwrap();
         for i in 0..page.header.cluster_count {
             let d = page.decode_cluster(i).unwrap();
             let c = page.cluster(i).unwrap();
-            jobs.push([cluster_slot(p, i), exp_q.len() as u32, 0, exp_tri.len() as u32]);
+            jobs.push([
+                cluster_slot(p, i),
+                exp_q.len() as u32,
+                0,
+                exp_tri.len() as u32,
+            ]);
             for (v, q) in d.lattice.iter().enumerate() {
                 exp_q.push(*q);
                 exp_pos.push(d.positions[v]);
@@ -206,7 +242,10 @@ fn shared_gpu_decode_matches_the_builders_cpu_decoder_for_every_vertex() {
         },
         ..ro(binding)
     };
-    let l0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries: &[ro(0), ro(1)] });
+    let l0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[ro(0), ro(1)],
+    });
     let l1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: None,
         entries: &[ro(0), rw(1), rw(2), rw(3), rw(4)],
@@ -225,7 +264,10 @@ fn shared_gpu_decode_matches_the_builders_cpu_decoder_for_every_vertex() {
         cache: None,
     });
     fn e(b: u32, buf: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-        wgpu::BindGroupEntry { binding: b, resource: buf.as_entire_binding() }
+        wgpu::BindGroupEntry {
+            binding: b,
+            resource: buf.as_entire_binding(),
+        }
     }
     let bg0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
@@ -235,7 +277,13 @@ fn shared_gpu_decode_matches_the_builders_cpu_decoder_for_every_vertex() {
     let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &l1,
-        entries: &[e(0, &jobs_buf), e(1, &out_pos), e(2, &out_q), e(3, &out_tri), e(4, &out_attr)],
+        entries: &[
+            e(0, &jobs_buf),
+            e(1, &out_pos),
+            e(2, &out_q),
+            e(3, &out_tri),
+            e(4, &out_attr),
+        ],
     });
     let mut enc = device.create_command_encoder(&Default::default());
     {
@@ -247,21 +295,57 @@ fn shared_gpu_decode_matches_the_builders_cpu_decoder_for_every_vertex() {
     }
     queue.submit(Some(enc.finish()));
 
-    let got_q: Vec<[u32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(&device, &queue, &out_q, 0, exp_q.len() as u64 * 16));
-    let got_pos: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(&device, &queue, &out_pos, 0, exp_q.len() as u64 * 16));
-    let got_tri: Vec<[u32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(&device, &queue, &out_tri, 0, exp_tri.len() as u64 * 16));
-    let got_attr: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(&device, &queue, &out_attr, 0, exp_q.len() as u64 * 16));
+    let got_q: Vec<[u32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(
+        &device,
+        &queue,
+        &out_q,
+        0,
+        exp_q.len() as u64 * 16,
+    ));
+    let got_pos: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(
+        &device,
+        &queue,
+        &out_pos,
+        0,
+        exp_q.len() as u64 * 16,
+    ));
+    let got_tri: Vec<[u32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(
+        &device,
+        &queue,
+        &out_tri,
+        0,
+        exp_tri.len() as u64 * 16,
+    ));
+    let got_attr: Vec<[f32; 4]> = bytemuck::pod_collect_to_vec(&read_buffer(
+        &device,
+        &queue,
+        &out_attr,
+        0,
+        exp_q.len() as u64 * 16,
+    ));
     assert!(exp_q.len() > 1000);
     for i in 0..exp_q.len() {
         assert_eq!(got_q[i][..3], exp_q[i], "lattice coordinate of vertex {i}");
         for a in 0..3 {
             let tol = 4.0 * f32::EPSILON * exp_pos[i][a].abs().max(1.0);
-            assert!((got_pos[i][a] - exp_pos[i][a]).abs() <= tol, "position {i}.{a}: {} vs {}", got_pos[i][a], exp_pos[i][a]);
+            assert!(
+                (got_pos[i][a] - exp_pos[i][a]).abs() <= tol,
+                "position {i}.{a}: {} vs {}",
+                got_pos[i][a],
+                exp_pos[i][a]
+            );
         }
         for a in 0..3 {
-            assert!((got_attr[i][a] - exp_attr[i][a]).abs() < 1e-6, "normal {i}.{a}");
+            assert!(
+                (got_attr[i][a] - exp_attr[i][a]).abs() < 1e-6,
+                "normal {i}.{a}"
+            );
         }
-        assert!((got_attr[i][3] - exp_attr[i][3]).abs() < 1e-6 * exp_attr[i][3].abs().max(1.0) || exp_attr[i][3].is_nan(), "uv {i}");
+        assert!(
+            (got_attr[i][3] - exp_attr[i][3]).abs() < 1e-6 * exp_attr[i][3].abs().max(1.0)
+                || exp_attr[i][3].is_nan(),
+            "uv {i}"
+        );
     }
     assert_eq!(got_tri, exp_tri, "triangle indices + material");
 }
@@ -271,11 +355,19 @@ fn half_to_f32(h: u16) -> f32 {
     let v = if e == 0 {
         (m as f32) * 2f32.powi(-24)
     } else if e == 31 {
-        if m == 0 { f32::INFINITY } else { f32::NAN }
+        if m == 0 {
+            f32::INFINITY
+        } else {
+            f32::NAN
+        }
     } else {
         (1.0 + m as f32 / 1024.0) * 2f32.powi(e - 15)
     };
-    if s == 1 { -v } else { v }
+    if s == 1 {
+        -v
+    } else {
+        v
+    }
 }
 
 #[test]
@@ -286,13 +378,35 @@ fn store_uploads_asset_quant_and_publishes_asset_ready_rows() {
     };
     let bytes = sphere_asset();
     let r = VgeoReader::parse(&bytes).unwrap();
-    let mut store = VgAssetStore::new(&device, &queue, VgStreamConfig { budget_mb: 64, ..Default::default() });
-    let h = store.register(Arc::new(VgeoBytes::new(bytes.clone()).unwrap())).unwrap();
+    let mut store = VgAssetStore::new(
+        &device,
+        &queue,
+        VgStreamConfig {
+            budget_mb: 64,
+            ..Default::default()
+        },
+    );
+    let h = store
+        .register(Arc::new(VgeoBytes::new(bytes.clone()).unwrap()))
+        .unwrap();
     let content = r.header.content_id;
-    let mapping = [([99u64, 99], 5000u32, 10u32), (content, 300, 8100), ([1, 2], 40, 3)];
+    let mapping = [
+        ([99u64, 99], 5000u32, 10u32),
+        (content, 300, 8100),
+        ([1, 2], 40, 3),
+    ];
     let rows = store.asset_ready_rows(&mapping, 4);
     assert_eq!(rows.len(), 4);
-    assert_eq!(rows[0], VgAssetReadyRow { vertex_offset: 300, vertex_count: 8100, asset_slot: h.slot(), flags: 0 }, "registered but not ready");
+    assert_eq!(
+        rows[0],
+        VgAssetReadyRow {
+            vertex_offset: 300,
+            vertex_count: 8100,
+            asset_slot: h.slot(),
+            flags: 0
+        },
+        "registered but not ready"
+    );
     assert!(rows[1..].iter().all(|x| *x == VgAssetReadyRow::PADDING));
     for _ in 0..2000 {
         store.update();
@@ -306,9 +420,14 @@ fn store_uploads_asset_quant_and_publishes_asset_ready_rows() {
     assert_eq!(rows[0].flags, VG_ASSET_READY_FLAG_READY);
     assert_eq!(rows.len(), 1);
     // Sorted by vertex_offset even when the mapping is not.
-    let h2 = store.register(Arc::new(helio_vg_stream::testing::FakeSource::new(5, 4, 1))).unwrap();
+    let h2 = store
+        .register(Arc::new(helio_vg_stream::testing::FakeSource::new(5, 4, 1)))
+        .unwrap();
     let rows = store.asset_ready_rows(&[(content, 900, 1), ([5, 0], 100, 1)], 0);
-    assert_eq!(rows.iter().map(|x| x.vertex_offset).collect::<Vec<_>>(), vec![100, 900]);
+    assert_eq!(
+        rows.iter().map(|x| x.vertex_offset).collect::<Vec<_>>(),
+        vec![100, 900]
+    );
     assert_eq!(rows[0].asset_slot, h2.slot());
 
     // The quant table row on the GPU equals the file's meta block.

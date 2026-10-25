@@ -116,7 +116,11 @@ impl DenseConfig {
         if self.nominal_layers == 0 || self.max_layers < self.nominal_layers {
             return Err("need 1 <= nominal_layers <= max_layers".into());
         }
-        if self.slab_tris == 0 || self.cluster_cap == 0 || self.max_dense_slots == 0 || self.list_pool == 0 {
+        if self.slab_tris == 0
+            || self.cluster_cap == 0
+            || self.max_dense_slots == 0
+            || self.list_pool == 0
+        {
             return Err("slab_tris, cluster_cap and max_dense_slots must be nonzero".into());
         }
         // Histogram counts are u16 halves of u32 words.
@@ -199,16 +203,42 @@ pub fn args_source(cfg: &DenseConfig) -> String {
 
 /// Cluster-to-tile binning (`bin`).
 pub fn bin_source(cfg: &DenseConfig) -> String {
-    let bin = format!("const BIN_DENSE_BIN: u32 = {}u;
-", helio_pass_vg_cull::BIN_DENSE);
-    assemble(&[&cfg.prelude(), &bin, helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, BIN])
+    let bin = format!(
+        "const BIN_DENSE_BIN: u32 = {}u;
+",
+        helio_pass_vg_cull::BIN_DENSE
+    );
+    assemble(&[
+        &cfg.prelude(),
+        &bin,
+        helio_vg_format::WGSL,
+        COMMON,
+        &decode_bindings(),
+        helio_vg_format::DECODE_WGSL,
+        INPUTS,
+        BOUNDS,
+        BIN,
+    ])
 }
 
 /// Tile footprint of the dense-bin clusters (`footprint_args`, `footprint`).
 pub fn footprint_source(cfg: &DenseConfig) -> String {
-    let bin = format!("const FP_DENSE_BIN: u32 = {}u;
-", helio_pass_vg_cull::BIN_DENSE);
-    assemble(&[&cfg.prelude(), &bin, helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, FOOTPRINT])
+    let bin = format!(
+        "const FP_DENSE_BIN: u32 = {}u;
+",
+        helio_pass_vg_cull::BIN_DENSE
+    );
+    assemble(&[
+        &cfg.prelude(),
+        &bin,
+        helio_vg_format::WGSL,
+        COMMON,
+        &decode_bindings(),
+        helio_vg_format::DECODE_WGSL,
+        INPUTS,
+        BOUNDS,
+        FOOTPRINT,
+    ])
 }
 
 /// Dense-instance candidate collection for the ray-traced backend (`collect`).
@@ -220,12 +250,30 @@ const BIN_SW_BIN: u32 = {}u;
         helio_pass_vg_cull::BIN_DENSE,
         helio_pass_vg_cull::BIN_SW
     );
-    assemble(&[&cfg.prelude(), &bin, helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, BOUNDS, COLLECT])
+    assemble(&[
+        &cfg.prelude(),
+        &bin,
+        helio_vg_format::WGSL,
+        COMMON,
+        &decode_bindings(),
+        helio_vg_format::DECODE_WGSL,
+        INPUTS,
+        BOUNDS,
+        COLLECT,
+    ])
 }
 
 /// Depth peel (`peel`): the opaque variant of `peel.wgsl`.
 pub fn peel_source(cfg: &DenseConfig) -> String {
-    assemble(&[&cfg.prelude(), helio_vg_format::WGSL, COMMON, &decode_bindings(), helio_vg_format::DECODE_WGSL, INPUTS, &peel_variant(false)])
+    assemble(&[
+        &cfg.prelude(),
+        helio_vg_format::WGSL,
+        COMMON,
+        &decode_bindings(),
+        helio_vg_format::DECODE_WGSL,
+        INPUTS,
+        &peel_variant(false),
+    ])
 }
 
 /// Keep the lines of one variant of a marked shader: `//@M ` lines only in the
@@ -277,7 +325,12 @@ pub fn peel_masked_source(cfg: &DenseConfig, binding: helio_mats::MaterialBindin
 pub fn rt_source(cfg: &DenseConfig) -> String {
     // `enable` directives must precede every declaration.
     let mut s = String::from("enable wgpu_ray_query;\n");
-    s.push_str(&assemble(&[&cfg.prelude(), helio_vg_format::WGSL, COMMON, RT]));
+    s.push_str(&assemble(&[
+        &cfg.prelude(),
+        helio_vg_format::WGSL,
+        COMMON,
+        RT,
+    ]));
     s
 }
 
@@ -290,8 +343,26 @@ pub fn validation_sources(cfg: &DenseConfig) -> Vec<(&'static str, String)> {
         ("collect", collect_source(cfg)),
         ("footprint", footprint_source(cfg)),
         ("peel", peel_source(cfg)),
-        ("peel_masked (bindless)", peel_masked_source(cfg, helio_mats::MaterialBindingConfig { mode: helio_mats::MaterialBindingMode::BindingArray, max_textures: 256 })),
-        ("peel_masked (expanded)", peel_masked_source(cfg, helio_mats::MaterialBindingConfig { mode: helio_mats::MaterialBindingMode::Expanded, max_textures: 11 })),
+        (
+            "peel_masked (bindless)",
+            peel_masked_source(
+                cfg,
+                helio_mats::MaterialBindingConfig {
+                    mode: helio_mats::MaterialBindingMode::BindingArray,
+                    max_textures: 256,
+                },
+            ),
+        ),
+        (
+            "peel_masked (expanded)",
+            peel_masked_source(
+                cfg,
+                helio_mats::MaterialBindingConfig {
+                    mode: helio_mats::MaterialBindingMode::Expanded,
+                    max_textures: 11,
+                },
+            ),
+        ),
         ("rt", rt_source(cfg)),
     ]
 }

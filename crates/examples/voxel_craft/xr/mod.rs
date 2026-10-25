@@ -3,7 +3,6 @@
 //! for each draw. Owning the frame here also lets gameplay use this frame's poses.
 
 mod input;
-mod mirror;
 pub mod rig;
 
 use crate::gfx::Gpu;
@@ -26,7 +25,7 @@ struct Pending {
 
 pub struct Runtime {
     // Drop references to external images and action spaces before their owners.
-    mirror: mirror::Mirror,
+    mirror: helio::StereoMirror,
     input: input::Input,
     swapchain: XrSwapchain,
     session: XrSession,
@@ -107,7 +106,7 @@ fn init(window: Arc<Window>) -> Result<(Gpu, Runtime)> {
         .alpha_modes
         .first()
         .ok_or_else(|| XrError::Platform("mirror has no alpha mode".into()))?;
-    let mirror = mirror::Mirror::new(&device, surface_format, &swapchain.views);
+    let mirror = helio::StereoMirror::new(&device, surface_format, &swapchain.views);
     log::info!(
         "[XR] Voxel Craft ready: {}x{} per eye on {}",
         session.width,
@@ -141,6 +140,9 @@ impl Runtime {
     }
     pub fn format(&self) -> wgpu::TextureFormat {
         self.swapchain.format
+    }
+    pub fn display_refresh_rate_hz(&self) -> Option<f32> {
+        self.session.display_refresh_rate_hz()
     }
 
     pub fn begin(&mut self) -> Result<Begin> {
@@ -218,6 +220,7 @@ impl Runtime {
         world_from_stage: DMat4,
         origin: DVec3,
         mirror: Option<(&wgpu::TextureView, [u32; 2])>,
+        stats: helio::XrMirrorStats,
         mut draw_eye: impl FnMut(usize, &Camera, &wgpu::TextureView) -> helio_core::Result<()>,
     ) -> Result<()> {
         let Some(frame) = self.pending.take() else {
@@ -246,7 +249,7 @@ impl Runtime {
             }
             if let Some((view, size)) = mirror {
                 self.mirror
-                    .draw(device, queue, image, view, size, self.size());
+                    .draw(device, queue, image, view, size, self.size(), stats);
             }
             Ok(())
         })();

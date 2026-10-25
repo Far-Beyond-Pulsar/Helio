@@ -29,6 +29,7 @@ pub mod error;
 pub mod graphics;
 pub mod input;
 pub mod instance;
+pub mod runtime;
 pub mod session;
 pub mod swapchain;
 
@@ -39,6 +40,7 @@ pub use graphics::WgpuGraphics;
 pub use input::{ControllerState, XrInput};
 pub use instance::XrInstance;
 pub use openxr::Time;
+pub use runtime::XrRuntime;
 pub use session::{LocatedViews, SessionEvent, XrSession};
 pub use swapchain::XrSwapchain;
 

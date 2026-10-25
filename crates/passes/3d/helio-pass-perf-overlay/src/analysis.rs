@@ -66,18 +66,16 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             return Ok(());
         }
 
-        let color_texture = if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
-            pre_aa
-        } else {
-            ctx.target
-        };
+        let color_texture =
+            if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
+                pre_aa
+            } else {
+                ctx.target
+            };
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-            ctx.compute_cmds().clear_buffer(
-                &shared.pass_overdraw_buf,
-                0,
-                None,
-            );
+            ctx.compute_cmds()
+                .clear_buffer(&shared.pass_overdraw_buf, 0, None);
             let mut runtime = shared.runtime.lock().unwrap();
             runtime.frame_num = ctx.frame_num;
             runtime.snapshot_valid = false;
@@ -85,30 +83,33 @@ impl RenderPass for PerfOverlayAnalyzerPass {
 
         let mut runtime = shared.runtime.lock().unwrap();
         if runtime.snapshot_valid {
-            let color_compare_bg = self.color_compare_bg.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
-                label: Some("PerfOverlay Color Compare BG"),
-                layout: &shared.color_compare_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: shared.color_compare_params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(
-                            &shared.color_snapshot_prev_view,
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(color_texture),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: shared.pass_overdraw_buf.as_entire_binding(),
-                    },
-                ],
-            });
+            let color_compare_bg = self.color_compare_bg.get_or_create(
+                ctx.device,
+                &wgpu::BindGroupDescriptor {
+                    label: Some("PerfOverlay Color Compare BG"),
+                    layout: &shared.color_compare_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: shared.color_compare_params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &shared.color_snapshot_prev_view,
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(color_texture),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: shared.pass_overdraw_buf.as_entire_binding(),
+                        },
+                    ],
+                },
+            );
 
             let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PerfOverlay Color Compare"),
@@ -124,20 +125,25 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         }
         drop(runtime);
 
-        let blit_bg = self.blit_bg.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
-            label: Some("PerfOverlay Blit BG"),
-            layout: &shared.blit_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(color_texture),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shared.color_snapshot_prev_view),
-                },
-            ],
-        });
+        let blit_bg = self.blit_bg.get_or_create(
+            ctx.device,
+            &wgpu::BindGroupDescriptor {
+                label: Some("PerfOverlay Blit BG"),
+                layout: &shared.blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(color_texture),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(
+                            &shared.color_snapshot_prev_view,
+                        ),
+                    },
+                ],
+            },
+        );
 
         let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("PerfOverlay Blit Color"),
@@ -265,42 +271,48 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
         }
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
-            ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
-            ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
+            ctx.registry
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+            ctx.registry
+                .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
-            let cost_compute_bg = self.cost_compute_bg.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
-                label: Some("PerfOverlay Cost Compute BG"),
-                layout: &shared.cost_compute_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: shared.cost_compute_params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(gbuffer.views[2]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(ctx.depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: tile_light_counts.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: shared.shader_cost_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: shared.material_timing_buf.as_entire_binding(),
-                    },
-                ],
-            });
+            let cost_compute_bg = self.cost_compute_bg.get_or_create(
+                ctx.device,
+                &wgpu::BindGroupDescriptor {
+                    label: Some("PerfOverlay Cost Compute BG"),
+                    layout: &shared.cost_compute_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: shared.cost_compute_params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(gbuffer.views[2]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: tile_light_counts.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: shared.shader_cost_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: shared.material_timing_buf.as_entire_binding(),
+                        },
+                    ],
+                },
+            );
 
             if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-                ctx.graphics_cmds().clear_buffer(&shared.shader_cost_buf, 0, None);
+                ctx.graphics_cmds()
+                    .clear_buffer(&shared.shader_cost_buf, 0, None);
                 shared.runtime.lock().unwrap().frame_num = ctx.frame_num;
             }
 

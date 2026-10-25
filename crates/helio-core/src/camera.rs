@@ -90,7 +90,8 @@ mod tests {
         for target in [Vec3::new(0.0, 24.0, 0.0), Vec3::new(90.0, -8.0, 110.0)] {
             let view = glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
             let proj = crate::depth::perspective(0.85, 16.0 / 9.0, 0.1);
-            let camera = GpuCameraUniforms::new(view, proj, eye, 0.1, 350.0, 0, [0.0; 2], proj * view);
+            let camera =
+                GpuCameraUniforms::new(view, proj, eye, 0.1, 350.0, 0, [0.0; 2], proj * view);
             let forward = Vec3::from_slice(&camera.forward_far);
             assert!(forward.distance((target - eye).normalize()) < 1e-5);
             // A centre-ray view depth must also equal its world-space distance.

@@ -154,7 +154,12 @@ fn validate_page(bytes: &[u8], local: u32) -> Result<(), String> {
 
 impl StoreCore {
     pub fn new(cfg: VgStreamConfig, slot_limit: u32) -> Self {
-        let sched = PageScheduler::new(cfg.scheduler, cfg.initial_slots, cfg.grow_chunk_slots, slot_limit);
+        let sched = PageScheduler::new(
+            cfg.scheduler,
+            cfg.initial_slots,
+            cfg.grow_chunk_slots,
+            slot_limit,
+        );
         Self {
             cfg,
             frame: 0,
@@ -177,7 +182,10 @@ impl StoreCore {
         self.assets.get(slot as usize).and_then(|a| a.as_ref())
     }
     pub fn assets(&self) -> impl Iterator<Item = (u32, &AssetEntry)> {
-        self.assets.iter().enumerate().filter_map(|(i, a)| a.as_ref().map(|a| (i as u32, a)))
+        self.assets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| a.as_ref().map(|a| (i as u32, a)))
     }
     pub fn slot_of_content(&self, content: [u64; 2]) -> Option<u32> {
         self.by_content.get(&content).copied()
@@ -189,7 +197,11 @@ impl StoreCore {
     /// `vertex_offset`, padded with [`VgAssetReadyRow::PADDING`] to at least
     /// `min_rows` (and one) rows. Unregistered contents are skipped; an asset
     /// is flagged ready once its root pages are resident.
-    pub fn asset_ready_rows(&self, mapping: &[([u64; 2], u32, u32)], min_rows: usize) -> Vec<VgAssetReadyRow> {
+    pub fn asset_ready_rows(
+        &self,
+        mapping: &[([u64; 2], u32, u32)],
+        min_rows: usize,
+    ) -> Vec<VgAssetReadyRow> {
         let mut rows: Vec<VgAssetReadyRow> = mapping
             .iter()
             .filter_map(|&(content, vertex_offset, vertex_count)| {
@@ -198,7 +210,11 @@ impl StoreCore {
                     vertex_offset,
                     vertex_count,
                     asset_slot: slot,
-                    flags: if self.is_ready(slot) { VG_ASSET_READY_FLAG_READY } else { 0 },
+                    flags: if self.is_ready(slot) {
+                        VG_ASSET_READY_FLAG_READY
+                    } else {
+                        0
+                    },
                 })
             })
             .collect();
@@ -233,7 +249,9 @@ impl StoreCore {
     /// every frame while the pages are wanted keeps them from being evicted.
     pub fn request_local_pages(&mut self, asset_slot: u32, locals: &[u32]) {
         let frame = self.frame;
-        let Some(base) = self.asset(asset_slot).map(|a| (a.pages.start, a.pages.len)) else { return };
+        let Some(base) = self.asset(asset_slot).map(|a| (a.pages.start, a.pages.len)) else {
+            return;
+        };
         for &l in locals {
             if l < base.1 {
                 self.sched.request(base.0 + l, 1, frame);
@@ -242,8 +260,12 @@ impl StoreCore {
     }
 
     /// The asset's source, content id and lattice (for proxy builds).
-    pub fn asset_source(&self, asset_slot: u32) -> Option<(Arc<dyn VgeoSource>, [u64; 2], GpuAssetQuant)> {
-        self.asset(asset_slot).map(|a| (a.source.clone(), a.content, a.quant))
+    pub fn asset_source(
+        &self,
+        asset_slot: u32,
+    ) -> Option<(Arc<dyn VgeoSource>, [u64; 2], GpuAssetQuant)> {
+        self.asset(asset_slot)
+            .map(|a| (a.source.clone(), a.content, a.quant))
     }
 
     pub fn scheduler_stats(&self) -> SchedulerStats {
@@ -279,33 +301,51 @@ impl StoreCore {
         let nodes = source.hierarchy().map_err(VgStreamError::Source)?;
         let refs = source.group_refs().map_err(VgStreamError::Source)?;
         if nodes.len() != a.node_count as usize || refs.len() != a.group_count as usize {
-            return Err(VgStreamError::Invalid("section lengths disagree with the header".into()));
+            return Err(VgStreamError::Invalid(
+                "section lengths disagree with the header".into(),
+            ));
         }
         if a.node_count == 0 || a.root_node >= a.node_count {
-            return Err(VgStreamError::Invalid("empty hierarchy or bad root node".into()));
+            return Err(VgStreamError::Invalid(
+                "empty hierarchy or bad root node".into(),
+            ));
         }
         if refs.iter().any(|r| r.page_id >= a.page_count) {
-            return Err(VgStreamError::Invalid("group ref names a page past page_count".into()));
+            return Err(VgStreamError::Invalid(
+                "group ref names a page past page_count".into(),
+            ));
         }
         let root_pages = source.root_pages();
-        if root_pages.iter().any(|&p| p >= a.page_count) || root_pages.len() != a.root_page_count as usize {
-            return Err(VgStreamError::Invalid("root pages inconsistent with the header".into()));
+        if root_pages.iter().any(|&p| p >= a.page_count)
+            || root_pages.len() != a.root_page_count as usize
+        {
+            return Err(VgStreamError::Invalid(
+                "root pages inconsistent with the header".into(),
+            ));
         }
         let quant = source.quant();
         let page_deps = source.page_deps().map_err(VgStreamError::Source)?;
-        if page_deps.len() != a.page_count as usize || page_deps.iter().flatten().any(|&d| d >= a.page_count) {
-            return Err(VgStreamError::Invalid("page dependency table inconsistent with the header".into()));
+        if page_deps.len() != a.page_count as usize
+            || page_deps.iter().flatten().any(|&d| d >= a.page_count)
+        {
+            return Err(VgStreamError::Invalid(
+                "page dependency table inconsistent with the header".into(),
+            ));
         }
         let needed = self.sched.pinned_roots() + root_pages.len() as u32;
         if needed > self.sched.slot_limit() {
-            return Err(VgStreamError::Budget { needed_slots: needed, limit_slots: self.sched.slot_limit() });
+            return Err(VgStreamError::Budget {
+                needed_slots: needed,
+                limit_slots: self.sched.slot_limit(),
+            });
         }
 
         let node_r = self.node_alloc.alloc(a.node_count);
         let ref_r = self.ref_alloc.alloc(a.group_count);
         let page_r = self.page_alloc.alloc(a.page_count);
         if self.table.len() < self.page_alloc.capacity() as usize {
-            self.table.resize(self.page_alloc.capacity() as usize, PAGE_NOT_RESIDENT);
+            self.table
+                .resize(self.page_alloc.capacity() as usize, PAGE_NOT_RESIDENT);
         }
         let slot = self.free_slots.pop().unwrap_or_else(|| {
             self.assets.push(None);
@@ -315,7 +355,10 @@ impl StoreCore {
             self.asset_slot_capacity = (self.assets.len() as u32).next_power_of_two();
         }
         for (p, d) in page_deps.iter().enumerate() {
-            self.sched.set_deps(page_r.start + p as u32, d.iter().map(|&x| page_r.start + x).collect());
+            self.sched.set_deps(
+                page_r.start + p as u32,
+                d.iter().map(|&x| page_r.start + x).collect(),
+            );
         }
         for &p in &root_pages {
             self.sched.pin_root(page_r.start + p);
@@ -370,7 +413,11 @@ impl StoreCore {
         self.page_alloc.free(a.pages);
         self.free_slots.push(slot);
         self.table_version += 1;
-        Released { freed: true, slot, table_writes }
+        Released {
+            freed: true,
+            slot,
+            table_writes,
+        }
     }
 
     fn locate(&self, global: u32) -> Option<(u32, u32)> {
@@ -402,7 +449,13 @@ impl StoreCore {
         let async_loads = self.cfg.async_loads;
         let (max_up, max_root) = (self.cfg.uploads_per_frame, self.cfg.root_uploads_per_frame);
 
-        let Self { sched, caches, by_page_base, assets, .. } = self;
+        let Self {
+            sched,
+            caches,
+            by_page_base,
+            assets,
+            ..
+        } = self;
         let uploads = sched.plan(frame, max_up, max_root, |global| {
             let Some((&base, &slot)) = by_page_base.range(..=global).next_back() else {
                 return Fetch::Failed;
@@ -434,7 +487,9 @@ impl StoreCore {
                     }
                 };
             }
-            let pf = entry.prefetch.get_or_insert_with(|| entry.residency.prefetch());
+            let pf = entry
+                .prefetch
+                .get_or_insert_with(|| entry.residency.prefetch());
             if !pf.is_ready() {
                 return Fetch::NotYet;
             }
@@ -462,7 +517,11 @@ impl StoreCore {
         let mut ready_changed = Vec::new();
         for (slot, a) in self.assets.iter_mut().enumerate() {
             let Some(a) = a else { continue };
-            if !a.ready && a.root_pages.iter().all(|&p| self.sched.is_resident(a.pages.start + p)) {
+            if !a.ready
+                && a.root_pages
+                    .iter()
+                    .all(|&p| self.sched.is_resident(a.pages.start + p))
+            {
                 a.ready = true;
                 ready_changed.push((slot as u32, true));
             }
@@ -470,7 +529,11 @@ impl StoreCore {
         if !table_writes.is_empty() {
             self.table_version += 1;
         }
-        UpdateOps { uploads, table_writes, ready_changed }
+        UpdateOps {
+            uploads,
+            table_writes,
+            ready_changed,
+        }
     }
 }
 
@@ -481,7 +544,12 @@ mod tests {
     use crate::source::testing::FakeSource;
 
     fn cfg(budget_slots: u32) -> VgStreamConfig {
-        VgStreamConfig { async_loads: false, initial_slots: budget_slots, grow_chunk_slots: budget_slots, ..Default::default() }
+        VgStreamConfig {
+            async_loads: false,
+            initial_slots: budget_slots,
+            grow_chunk_slots: budget_slots,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -531,12 +599,19 @@ mod tests {
         let root = r.page_base;
         for round in 0..30u32 {
             let want = r.page_base + 1 + (round % 8);
-            c.ingest(&Feedback { requests: vec![want], used: vec![], overflowed: false });
+            c.ingest(&Feedback {
+                requests: vec![want],
+                used: vec![],
+                overflowed: false,
+            });
             let ops = c.update();
             for _ in 0..6 {
                 c.update();
             }
-            assert!(c.table()[root as usize] != PAGE_NOT_RESIDENT, "root evicted");
+            assert!(
+                c.table()[root as usize] != PAGE_NOT_RESIDENT,
+                "root evicted"
+            );
             assert!(c.scheduler_stats().resident_pages <= 3);
             for u in &ops.uploads {
                 assert_eq!(c.table()[u.page as usize], u.slot);
@@ -552,7 +627,11 @@ mod tests {
         bad.fail_page = Some(2);
         let r = c.register(Arc::new(bad)).unwrap();
         c.update();
-        c.ingest(&Feedback { requests: vec![900, r.page_base + 2], used: vec![901], overflowed: false });
+        c.ingest(&Feedback {
+            requests: vec![900, r.page_base + 2],
+            used: vec![901],
+            overflowed: false,
+        });
         let ops = c.update();
         assert!(ops.uploads.is_empty());
         assert_eq!(c.scheduler_stats().failures, 1);
@@ -569,7 +648,13 @@ mod tests {
 
     #[test]
     fn async_loads_converge() {
-        let mut c = StoreCore::new(VgStreamConfig { async_loads: true, ..cfg(4) }, 4);
+        let mut c = StoreCore::new(
+            VgStreamConfig {
+                async_loads: true,
+                ..cfg(4)
+            },
+            4,
+        );
         let r = c.register(Arc::new(FakeSource::new(11, 4, 2))).unwrap();
         for _ in 0..2000 {
             c.update();

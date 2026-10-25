@@ -43,7 +43,10 @@ pub fn entry(ty: PinType, name: &str) -> Option<String> {
 
 /// The buffer a node names, if it is a buffer node with a valid parameter.
 pub fn buffer_of(node: &NodeInstance) -> Option<(PinType, String)> {
-    node.params.get("buffer").and_then(Value::as_str).and_then(parse_entry)
+    node.params
+        .get("buffer")
+        .and_then(Value::as_str)
+        .and_then(parse_entry)
 }
 
 /// Every buffer the generated nodes read or write, as `(type, name)` sorted by type
@@ -97,16 +100,27 @@ struct SetSite {
 /// producer of the Set it reads.
 pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
     if !asset.nodes.iter().any(is_buffer_node) {
-        return Flattened { asset: asset.clone(), diagnostics: Vec::new() };
+        return Flattened {
+            asset: asset.clone(),
+            diagnostics: Vec::new(),
+        };
     }
 
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut diagnose = |severity: Severity, node: Option<&str>, message: String| {
-        diagnostics.push(Diagnostic { severity, node: node.map(str::to_owned), message });
+        diagnostics.push(Diagnostic {
+            severity,
+            node: node.map(str::to_owned),
+            message,
+        });
     };
 
-    let index: HashMap<&str, usize> =
-        asset.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = asset
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
     let buffer_nodes: HashMap<usize, (PinType, String)> = asset
         .nodes
         .iter()
@@ -124,12 +138,15 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
             parsed.map(|buffer| (i, buffer))
         })
         .collect();
-    let real: Vec<usize> =
-        (0..asset.nodes.len()).filter(|i| !is_buffer_node(&asset.nodes[*i])).collect();
+    let real: Vec<usize> = (0..asset.nodes.len())
+        .filter(|i| !is_buffer_node(&asset.nodes[*i]))
+        .collect();
 
     // Pins of the real nodes, to find input pins and which are history.
     let pins_of = |node: usize| {
-        registry.get(&asset.nodes[node].kind).map(|d| d.pins(&asset.nodes[node].params))
+        registry
+            .get(&asset.nodes[node].kind)
+            .map(|d| d.pins(&asset.nodes[node].params))
     };
     let input_pin = |node: usize, name: &str| {
         pins_of(node).and_then(|pins| pins.inputs.into_iter().find(|p| p.name == name))
@@ -142,9 +159,10 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
     // between real nodes, history wires aside.
     let mut ordering: Vec<(usize, usize)> = Vec::new();
     for connection in &asset.connections {
-        let (Some(&from), Some(&to)) =
-            (index.get(connection.from.node.as_str()), index.get(connection.to.node.as_str()))
-        else {
+        let (Some(&from), Some(&to)) = (
+            index.get(connection.from.node.as_str()),
+            index.get(connection.to.node.as_str()),
+        ) else {
             continue;
         };
         if buffer_nodes.contains_key(&from) || buffer_nodes.contains_key(&to) || from == to {
@@ -165,12 +183,15 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
     let mut sets: HashMap<String, Vec<SetSite>> = HashMap::new();
     let mut fed_sets: HashSet<usize> = HashSet::new();
     for connection in &asset.connections {
-        let (Some(&from), Some(&to)) =
-            (index.get(connection.from.node.as_str()), index.get(connection.to.node.as_str()))
-        else {
+        let (Some(&from), Some(&to)) = (
+            index.get(connection.from.node.as_str()),
+            index.get(connection.to.node.as_str()),
+        ) else {
             continue;
         };
-        let Some((ty, name)) = buffer_nodes.get(&to).filter(|_| asset.nodes[to].kind == BUFFER_SET)
+        let Some((ty, name)) = buffer_nodes
+            .get(&to)
+            .filter(|_| asset.nodes[to].kind == BUFFER_SET)
         else {
             continue;
         };
@@ -221,12 +242,15 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
     // Gets: wire each consumer to the Set it reads.
     let mut resolved: Vec<Connection> = Vec::new();
     for connection in &asset.connections {
-        let (Some(&from), Some(&to)) =
-            (index.get(connection.from.node.as_str()), index.get(connection.to.node.as_str()))
-        else {
+        let (Some(&from), Some(&to)) = (
+            index.get(connection.from.node.as_str()),
+            index.get(connection.to.node.as_str()),
+        ) else {
             continue;
         };
-        let Some((ty, name)) = buffer_nodes.get(&from).filter(|_| asset.nodes[from].kind == BUFFER_GET)
+        let Some((ty, name)) = buffer_nodes
+            .get(&from)
+            .filter(|_| asset.nodes[from].kind == BUFFER_GET)
         else {
             continue;
         };
@@ -258,7 +282,10 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
         let pick = if consumer.history {
             candidates.iter().max_by_key(|site| site.rank)
         } else {
-            candidates.iter().filter(|site| site.rank < consumer_rank).max_by_key(|site| site.rank)
+            candidates
+                .iter()
+                .filter(|site| site.rank < consumer_rank)
+                .max_by_key(|site| site.rank)
         };
         match pick {
             Some(site) => resolved.push(Connection {
@@ -287,7 +314,9 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
     flat.nodes.retain(|n| !is_buffer_node(n));
     flat.connections.retain(|c| {
         let touches_buffer = |pin: &PinRef| {
-            index.get(pin.node.as_str()).is_some_and(|i| buffer_nodes.contains_key(i))
+            index
+                .get(pin.node.as_str())
+                .is_some_and(|i| buffer_nodes.contains_key(i))
                 || asset
                     .nodes
                     .iter()
@@ -296,7 +325,10 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
         !touches_buffer(&c.from) && !touches_buffer(&c.to)
     });
     flat.connections.extend(resolved);
-    Flattened { asset: flat, diagnostics }
+    Flattened {
+        asset: flat,
+        diagnostics,
+    }
 }
 
 #[cfg(test)]
@@ -323,7 +355,10 @@ mod tests {
     }
 
     fn wire(a: &str, ap: &str, b: &str, bp: &str) -> Connection {
-        Connection { from: PinRef::new(a, ap), to: PinRef::new(b, bp) }
+        Connection {
+            from: PinRef::new(a, ap),
+            to: PinRef::new(b, bp),
+        }
     }
 
     /// A pass that reads and writes `pre_aa`.
@@ -331,11 +366,11 @@ mod tests {
         let mut registry = NodeRegistry::with_core();
         registry.register(
             NodeDescriptor::new("t.pass", "Pass", "Test", "", |_| Ok(())).with_pins(
-                vec![PinDesc::flow("in"), PinDesc::resource(PinType::TEXTURE, "pre_aa")],
                 vec![
-                    PinDesc::flow("out"),
-                    helio_graph_asset_output("pre_aa"),
+                    PinDesc::flow("in"),
+                    PinDesc::resource(PinType::TEXTURE, "pre_aa"),
                 ],
+                vec![PinDesc::flow("out"), helio_graph_asset_output("pre_aa")],
             ),
         );
         registry
@@ -376,10 +411,19 @@ mod tests {
     #[test]
     fn a_get_reads_the_latest_set_before_its_consumer() {
         let flat = flatten(&chain(), &registry());
-        assert!(flat.diagnostics.iter().all(|d| d.severity != Severity::Error), "{:?}", flat.diagnostics);
+        assert!(
+            flat.diagnostics
+                .iter()
+                .all(|d| d.severity != Severity::Error),
+            "{:?}",
+            flat.diagnostics
+        );
         assert!(flat.asset.nodes.iter().all(|n| !is_buffer_node(n)));
         // b reads what a set; a reads nothing (host-less read before any set: warned).
-        assert!(flat.asset.connections.contains(&wire("a", "out_pre_aa", "b", "pre_aa")));
+        assert!(flat
+            .asset
+            .connections
+            .contains(&wire("a", "out_pre_aa", "b", "pre_aa")));
         assert!(!flat
             .asset
             .connections
@@ -388,7 +432,8 @@ mod tests {
         assert!(flat
             .diagnostics
             .iter()
-            .any(|d| d.severity == Severity::Warning && d.message.contains("before anything sets it")));
+            .any(|d| d.severity == Severity::Warning
+                && d.message.contains("before anything sets it")));
     }
 
     #[test]
@@ -398,8 +443,14 @@ mod tests {
         asset.nodes.retain(|n| n.id != "set_a");
         asset.connections.retain(|c| c.to.node != "set_a");
         let flat = flatten(&asset, &registry());
-        assert!(!flat.asset.connections.contains(&wire("b", "out_pre_aa", "a", "pre_aa")));
-        assert!(!flat.asset.connections.contains(&wire("b", "out_pre_aa", "b", "pre_aa")));
+        assert!(!flat
+            .asset
+            .connections
+            .contains(&wire("b", "out_pre_aa", "a", "pre_aa")));
+        assert!(!flat
+            .asset
+            .connections
+            .contains(&wire("b", "out_pre_aa", "b", "pre_aa")));
     }
 
     #[test]
@@ -407,14 +458,19 @@ mod tests {
         let mut asset = chain();
         asset.nodes[5] = buffer("get_b", BUFFER_GET, "buf:pre_aa");
         let flat = flatten(&asset, &registry());
-        assert!(flat.diagnostics.iter().any(|d| d.severity == Severity::Error));
+        assert!(flat
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error));
     }
 
     #[test]
     fn graphs_without_buffer_nodes_pass_through() {
         let mut asset = chain();
         asset.nodes.retain(|n| !is_buffer_node(n));
-        asset.connections.retain(|c| !c.from.node.starts_with("get") && !c.to.node.starts_with("set"));
+        asset
+            .connections
+            .retain(|c| !c.from.node.starts_with("get") && !c.to.node.starts_with("set"));
         let flat = flatten(&asset, &registry());
         assert_eq!(flat.asset, asset);
         assert!(flat.diagnostics.is_empty());
@@ -422,10 +478,16 @@ mod tests {
 
     #[test]
     fn entries_round_trip() {
-        assert_eq!(parse_entry("ptex:history"), Some((PinType::PERSISTENT_TEXTURE, "history".into())));
+        assert_eq!(
+            parse_entry("ptex:history"),
+            Some((PinType::PERSISTENT_TEXTURE, "history".into()))
+        );
         assert_eq!(parse_entry("nope:x"), None);
         assert_eq!(parse_entry("tex:"), None);
-        assert_eq!(entry(PinType::BUFFER, "object_batch").as_deref(), Some("buf:object_batch"));
+        assert_eq!(
+            entry(PinType::BUFFER, "object_batch").as_deref(),
+            Some("buf:object_batch")
+        );
         assert_eq!(entry(PinType::FLOW, "x"), None);
     }
 }

@@ -145,26 +145,59 @@ impl Block {
     /// and lush patch colours over the land.
     fn colours(self) -> ([u8; 3], Option<[[u8; 3]; 3]>) {
         match self {
-            Block::Grass => ([74, 104, 50], Some([[128, 128, 72], [74, 104, 50], [48, 84, 42]])),
-            Block::Dirt => ([116, 86, 60], Some([[130, 100, 72], [116, 86, 60], [92, 68, 50]])),
-            Block::Stone => ([128, 130, 130], Some([[156, 152, 142], [128, 130, 130], [98, 102, 106]])),
-            Block::Sand => ([212, 194, 150], Some([[224, 208, 164], [212, 194, 150], [192, 172, 130]])),
+            Block::Grass => (
+                [74, 104, 50],
+                Some([[128, 128, 72], [74, 104, 50], [48, 84, 42]]),
+            ),
+            Block::Dirt => (
+                [116, 86, 60],
+                Some([[130, 100, 72], [116, 86, 60], [92, 68, 50]]),
+            ),
+            Block::Stone => (
+                [128, 130, 130],
+                Some([[156, 152, 142], [128, 130, 130], [98, 102, 106]]),
+            ),
+            Block::Sand => (
+                [212, 194, 150],
+                Some([[224, 208, 164], [212, 194, 150], [192, 172, 130]]),
+            ),
             Block::Snow => ([234, 240, 246], None),
-            Block::Gravel => ([124, 120, 114], Some([[142, 138, 130], [124, 120, 114], [98, 96, 92]])),
-            Block::Sandstone => ([206, 176, 128], Some([[218, 190, 142], [206, 176, 128], [182, 150, 106]])),
-            Block::Andesite => ([104, 108, 112], Some([[126, 124, 120], [104, 108, 112], [80, 84, 90]])),
+            Block::Gravel => (
+                [124, 120, 114],
+                Some([[142, 138, 130], [124, 120, 114], [98, 96, 92]]),
+            ),
+            Block::Sandstone => (
+                [206, 176, 128],
+                Some([[218, 190, 142], [206, 176, 128], [182, 150, 106]]),
+            ),
+            Block::Andesite => (
+                [104, 108, 112],
+                Some([[126, 124, 120], [104, 108, 112], [80, 84, 90]]),
+            ),
             Block::OakLog => ([98, 74, 52], None),
-            Block::OakLeaves => ([52, 86, 40], Some([[86, 110, 48], [52, 86, 40], [36, 68, 34]])),
+            Block::OakLeaves => (
+                [52, 86, 40],
+                Some([[86, 110, 48], [52, 86, 40], [36, 68, 34]]),
+            ),
             Block::Clay => ([160, 142, 130], None),
             Block::Bricks => ([152, 74, 58], None),
             Block::OakPlanks => ([172, 132, 86], None),
             Block::Cobblestone => ([118, 118, 116], None),
             Block::BirchLog => ([218, 214, 202], None),
-            Block::BirchLeaves => ([96, 124, 54], Some([[130, 138, 60], [96, 124, 54], [68, 104, 46]])),
+            Block::BirchLeaves => (
+                [96, 124, 54],
+                Some([[130, 138, 60], [96, 124, 54], [68, 104, 46]]),
+            ),
             Block::SpruceLog => ([80, 58, 42], None),
-            Block::SpruceLeaves => ([38, 68, 46], Some([[60, 86, 52], [38, 68, 46], [28, 54, 40]])),
+            Block::SpruceLeaves => (
+                [38, 68, 46],
+                Some([[60, 86, 52], [38, 68, 46], [28, 54, 40]]),
+            ),
             Block::JungleLog => ([112, 90, 62], None),
-            Block::JungleLeaves => ([48, 108, 40], Some([[84, 132, 46], [48, 108, 40], [32, 88, 34]])),
+            Block::JungleLeaves => (
+                [48, 108, 40],
+                Some([[84, 132, 46], [48, 108, 40], [32, 88, 34]]),
+            ),
             Block::Cactus => ([70, 118, 58], None),
             Block::Glowstone => ([242, 204, 124], None),
             Block::StoneBricks => ([132, 132, 130], None),
@@ -183,7 +216,10 @@ impl Block {
         let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
         let (colour, patches) = self.colours();
         let [r, g, b] = unit(colour);
-        let leaves = matches!(self, Block::OakLeaves | Block::BirchLeaves | Block::SpruceLeaves | Block::JungleLeaves);
+        let leaves = matches!(
+            self,
+            Block::OakLeaves | Block::BirchLeaves | Block::SpruceLeaves | Block::JungleLeaves
+        );
         MaterialAppearance {
             colour: [r, g, b, self.roughness()],
             patches: patches.map(|p| p.map(unit)),
@@ -212,7 +248,11 @@ impl Block {
             Block::Snow => 0.7,
             Block::Glowstone => 0.35,
             Block::Sand | Block::Dirt | Block::Gravel | Block::Clay => 0.95,
-            Block::Stone | Block::Andesite | Block::Cobblestone | Block::StoneBricks | Block::Bricks => 0.88,
+            Block::Stone
+            | Block::Andesite
+            | Block::Cobblestone
+            | Block::StoneBricks
+            | Block::Bricks => 0.88,
             _ => 0.82,
         }
     }

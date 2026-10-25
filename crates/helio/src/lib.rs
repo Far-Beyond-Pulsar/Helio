@@ -5,6 +5,8 @@
 //! transient render products; it does not own a typed scene container.
 
 mod camera;
+#[cfg(not(target_arch = "wasm32"))]
+mod graphics_context;
 mod material;
 mod quark_commands;
 mod renderer;
@@ -13,6 +15,32 @@ mod renderer;
 #[cfg(target_arch = "wasm32")]
 mod wasm_cpp_alloc;
 
+pub use camera::Camera;
+/// Unified window, WGPU, and optional OpenXR startup (native targets only).
+#[cfg(not(target_arch = "wasm32"))]
+pub use graphics_context::{
+    HelioGraphicsConfig, HelioGraphicsContext, HelioGraphicsMode, HelioXrInput,
+};
+#[cfg(feature = "bake")]
+pub use helio_bake::{
+    AoConfig, BakeConfig, BakeMesh, BakeRequest, BakedData, LightSource, LightSourceKind,
+    LightmapConfig, ProbeConfig, ProbeSpec, SceneGeometry,
+};
+pub use helio_core::{wgpu_instance_descriptor, MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use helio_core::{
+    Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
+    GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
+    RenderPassTiming, RenderTimingSnapshot, Result,
+};
+pub use helio_mats::GpuMaterial;
+pub use helio_mats::{
+    MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
+    EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
+};
+pub use helio_pass_forward_lit::{GpuLight, LightType};
+pub use helio_pass_object_batch::{
+    DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData, INSTANCE_FLAG_MOVABLE,
+};
 /// Portal pair math and SceneDB GPU contracts owned by the portal passes.
 pub use helio_pass_portal_cull::{
     crossing_detected, plane_signed_distance, portal_pose_facing, GpuPortalView, PortalPair,
@@ -20,47 +48,28 @@ pub use helio_pass_portal_cull::{
     PortalProjectionKey, ProjectionError, RuntimePortalKey, MAX_PORTAL_CHAINS,
 };
 pub use helio_pass_portal_instances::PortalDebugText;
+pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
+pub use helio_pass_shadow_matrix::ShadowQuality;
+pub use helio_pass_sky::CloudLayer;
 pub use helio_pass_tsr::TsrQuality;
-pub use helio_mats::{
-    MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
-    EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
-};
-pub use helio_core::{wgpu_instance_descriptor, MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use helio_settings;
+/// Ids, names and keys of the virtual-geometry debug views.
+pub use helio_vg_format::debug_view as vg_debug_view;
+/// Reusable OpenXR runtime bootstrap (native targets only).
+#[cfg(not(target_arch = "wasm32"))]
+pub use helio_xr::XrRuntime;
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
     ray_queries_usable, recommended_instance_flags, required_experimental_features,
-    required_wgpu_features, required_wgpu_limits, usable_adapter_features,
-    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex,
-    GraphRebuilder,
-    IntoGraph, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory,
-    PipelineInfo, PipelineOrigin, RenderPipelineRegistry, RenderMode, Renderer,
-    RendererBuilder, RendererConfig, SceneDbHandle, TsrSetting,
+    required_wgpu_features, required_wgpu_limits, usable_adapter_features, BillboardInstance,
+    DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GraphRebuilder, IntoGraph,
+    PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory, PipelineInfo,
+    PipelineOrigin, RenderMode, RenderPipelineRegistry, Renderer, RendererBuilder, RendererConfig,
+    SceneDbHandle, StereoMirror, TsrSetting, XrMirrorStats,
 };
-pub use helio_settings;
-pub use camera::Camera;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use renderer::{ReloadMode, ShaderReloadStatus};
-#[cfg(feature = "bake")]
-pub use helio_bake::{
-    AoConfig, BakeConfig, BakeMesh, BakeRequest, BakedData, LightSource, LightSourceKind,
-    LightmapConfig, ProbeConfig, ProbeSpec, SceneGeometry,
-};
-/// Ids, names and keys of the virtual-geometry debug views.
-pub use helio_vg_format::debug_view as vg_debug_view;
-pub use helio_core::{
-    Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
-    GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
-    RenderPassTiming, RenderTimingSnapshot, Result,
-};
-pub use helio_pass_forward_lit::{GpuLight, LightType};
-pub use helio_pass_object_batch::{
-    DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData, INSTANCE_FLAG_MOVABLE,
-};
-pub use helio_mats::GpuMaterial;
-pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
-pub use helio_pass_shadow_matrix::ShadowQuality;
-pub use helio_pass_sky::CloudLayer;
 
 /// Project a SceneDB world into the [`SceneGeometry`] a bake reads
 /// (Helio#256): every drawn object (`StaticObjectComponent` and the
@@ -95,7 +104,11 @@ pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> SceneGeometry {
             indices: mesh.indices.clone(),
         };
         let transform = glam::Mat4::from_cols_array_2d(&object.transform);
-        scene.add_mesh(mesh_upload_to_bake(&upload, transform, Some(object.mesh_slot)));
+        scene.add_mesh(mesh_upload_to_bake(
+            &upload,
+            transform,
+            Some(object.mesh_slot),
+        ));
     }
     for (_, light) in world.query::<&LightComponent>() {
         let light = GpuLight::from(*light);
@@ -118,7 +131,10 @@ pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> SceneGeometry {
                 inner_angle: light.inner_angle.clamp(-1.0, 1.0).acos(),
                 outer_angle: light.direction_outer[3].clamp(-1.0, 1.0).acos(),
             },
-            _ => LightSourceKind::Point { position: [x, y, z], range },
+            _ => LightSourceKind::Point {
+                position: [x, y, z],
+                range,
+            },
         };
         scene.add_light(LightSource {
             kind,
@@ -245,7 +261,10 @@ mod bake_scene_tests {
     use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
 
     fn vertex(position: [f32; 3]) -> PackedVertex {
-        PackedVertex { position, ..Default::default() }
+        PackedVertex {
+            position,
+            ..Default::default()
+        }
     }
 
     /// Helio#256: the bake input comes from SceneDB rows, in world space,
@@ -257,7 +276,11 @@ mod bake_scene_tests {
         world.insert(
             mesh,
             MeshComponent {
-                vertices: vec![vertex([0.0, 0.0, 0.0]), vertex([1.0, 0.0, 0.0]), vertex([0.0, 1.0, 0.0])],
+                vertices: vec![
+                    vertex([0.0, 0.0, 0.0]),
+                    vertex([1.0, 0.0, 0.0]),
+                    vertex([0.0, 1.0, 0.0]),
+                ],
                 indices: vec![0, 1, 2],
             },
         );
@@ -290,15 +313,30 @@ mod bake_scene_tests {
         let sun_entity = world.spawn();
         world.insert(sun_entity, LightComponent::from(sun));
         let vacant = world.spawn();
-        world.insert(vacant, LightComponent::from(GpuLight { color_intensity: [0.0; 4], ..GpuLight::default() }));
+        world.insert(
+            vacant,
+            LightComponent::from(GpuLight {
+                color_intensity: [0.0; 4],
+                ..GpuLight::default()
+            }),
+        );
 
         let scene = bake_scene_from_world(&world);
         assert_eq!(scene.meshes.len(), 1, "stale object rows are skipped");
-        assert_eq!(scene.meshes[0].positions[1], [11.0, 0.0, 0.0], "positions are world space");
+        assert_eq!(
+            scene.meshes[0].positions[1],
+            [11.0, 0.0, 0.0],
+            "positions are world space"
+        );
         assert_eq!(scene.meshes[0].indices, vec![0, 1, 2]);
         assert_eq!(scene.lights.len(), 1, "dark rows are not lights");
-        assert!(matches!(scene.lights[0].kind, LightSourceKind::Directional { direction } if direction == [0.0, -1.0, 0.0]));
+        assert!(
+            matches!(scene.lights[0].kind, LightSourceKind::Directional { direction } if direction == [0.0, -1.0, 0.0])
+        );
         assert_eq!(scene.lights[0].intensity, 3.0);
-        assert!(!scene.lights[0].casts_shadows, "GpuLight::default() requests no shadow");
+        assert!(
+            !scene.lights[0].casts_shadows,
+            "GpuLight::default() requests no shadow"
+        );
     }
 }

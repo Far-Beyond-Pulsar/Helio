@@ -136,7 +136,9 @@ impl Grid {
     /// level hierarchy allows (within ~0.7 %). The planet radius is exact.
     pub fn new(radius: f64, voxel_size: f64) -> Result<Self, String> {
         if !(radius.is_finite() && radius >= 1_000.0 && radius <= 50_000_000.0) {
-            return Err(format!("planet radius {radius} m is outside 1 km..50 000 km"));
+            return Err(format!(
+                "planet radius {radius} m is outside 1 km..50 000 km"
+            ));
         }
         if !(voxel_size.is_finite() && voxel_size >= 0.01 && voxel_size <= 64.0) {
             return Err(format!("voxel size {voxel_size} m is outside 0.01..64 m"));
@@ -181,7 +183,10 @@ impl Grid {
             Shape::Sphere => return Err("a sphere needs Grid::new".into()),
             Shape::Plane => {
                 if !(size.is_finite() && size >= voxel_size * 64.0 && size <= reference_edge) {
-                    return Err(format!("plane size {size} m is outside {:.1} m..{reference_edge:.0} m", voxel_size * 64.0));
+                    return Err(format!(
+                        "plane size {size} m is outside {:.1} m..{reference_edge:.0} m",
+                        voxel_size * 64.0
+                    ));
                 }
                 size
             }
@@ -189,7 +194,9 @@ impl Grid {
         };
         let (mut cells, mut levels) = edge_cells(edge, voxel_size);
         // Round the infinite plane down so its reference domain stays within 2^27 cells.
-        while shape == Shape::InfinitePlane && (cells as f64 * voxel_size / REFERENCE_VOXEL) > INFINITE_PLANE_REFERENCE_CELLS as f64 {
+        while shape == Shape::InfinitePlane
+            && (cells as f64 * voxel_size / REFERENCE_VOXEL) > INFINITE_PLANE_REFERENCE_CELLS as f64
+        {
             let unit = 1i64 << (levels - 1 + COLUMN_LEVEL_BITS);
             cells -= unit;
             if cells <= 0 {
@@ -369,8 +376,14 @@ impl Grid {
     }
     /// Canonical cell containing `p` and its continuous coordinates.
     pub fn locate(&self, p: DVec3) -> (Cell, [f64; 3]) {
-        let face = if self.is_plane() { PLANE_FACE } else { face_of(p) };
-        let c = self.face_coords(face, p).expect("point is in its face hemisphere");
+        let face = if self.is_plane() {
+            PLANE_FACE
+        } else {
+            face_of(p)
+        };
+        let c = self
+            .face_coords(face, p)
+            .expect("point is in its face hemisphere");
         let last = self.cells - 1;
         let cell = Cell::new(
             face,
@@ -391,7 +404,9 @@ impl Grid {
             1 => next.j += step,
             _ => next.k += step,
         }
-        if self.is_plane() || ((0..self.cells).contains(&next.i) && (0..self.cells).contains(&next.j)) {
+        if self.is_plane()
+            || ((0..self.cells).contains(&next.i) && (0..self.cells).contains(&next.j))
+        {
             // A plane has no neighbouring face: indices past its edge are
             // outside the world.
             return next;
@@ -430,7 +445,12 @@ impl Grid {
             shift += 1;
         }
         let radius = (self.reference_cells as f64 * 16.0 / std::f64::consts::PI).round() as u32;
-        [((1u64 << (30 + shift)) / reference) as u32, shift, radius, 0]
+        [
+            ((1u64 << (30 + shift)) / reference) as u32,
+            shift,
+            radius,
+            0,
+        ]
     }
 
     /// Constants of [`volume_point`]: `(inv, shift, layer_q16)`. On a sphere
@@ -460,7 +480,12 @@ impl Grid {
         if self.is_plane() {
             // Linear: two half cells per cell, scaled, four domain units each.
             return VolumeMap {
-                bounds: VolumeBounds { across: 8.0 * scale, up: 2.0 * layer, layers: f64::INFINITY, bend: 0.0 },
+                bounds: VolumeBounds {
+                    across: 8.0 * scale,
+                    up: 2.0 * layer,
+                    layers: f64::INFINITY,
+                    bend: 0.0,
+                },
                 plane: true,
                 scale,
                 origin: f64::from(self.origin_index()),
@@ -547,12 +572,23 @@ impl VolumePoints {
         if self.plane {
             return plane_domain_point(self.origin, self.scale, i, j, level);
         }
-        sphere_point(domain_point(self.reference, self.scale, face, i, j, level), self.sphere)
+        sphere_point(
+            domain_point(self.reference, self.scale, face, i, j, level),
+            self.sphere,
+        )
     }
     /// The volume point of level cell `k` over a [`Self::column`] point.
     #[inline]
     pub fn at(&self, column: IVec3, k: i32, level: u32) -> IVec3 {
-        volume_point(column, self.plane, k, level, self.inv, self.shift, self.layer_q16)
+        volume_point(
+            column,
+            self.plane,
+            k,
+            level,
+            self.inv,
+            self.shift,
+            self.layer_q16,
+        )
     }
     /// The volume points over a [`Self::column`] point as a line in the
     /// cell's height `h` (half base layers, [`crate::edits::center_half`]):
@@ -564,7 +600,11 @@ impl VolumePoints {
         let p = column.as_dvec3();
         if self.plane {
             let rise = f64::from(self.layer_q16) / 65_536.0;
-            return (DVec3::new(p.x, 0.0, p.z), DVec3::new(0.0, rise, 0.0), 2f64.powi(29) / rise.max(f64::MIN_POSITIVE));
+            return (
+                DVec3::new(p.x, 0.0, p.z),
+                DVec3::new(0.0, rise, 0.0),
+                2f64.powi(29) / rise.max(f64::MIN_POSITIVE),
+            );
         }
         if column.abs().max_element() >= 1 << 30 {
             return (p, DVec3::ZERO, 0.0);
@@ -614,7 +654,9 @@ impl VolumeMap {
             return DVec3::new(u, h * self.layer, -v);
         }
         let [n, a, b] = face_axes(face);
-        let cube = n * self.reference + a * (2.0 * p[0] * self.scale - self.reference) + b * (2.0 * p[1] * self.scale - self.reference);
+        let cube = n * self.reference
+            + a * (2.0 * p[0] * self.scale - self.reference)
+            + b * (2.0 * p[1] * self.scale - self.reference);
         // `tan_quarter`: x - x (1 - x^2) (a + b x^2), odd.
         const A: f64 = 230_426_967.0 / 1_073_741_824.0;
         const B: f64 = 53_687_091.0 / 1_073_741_824.0;
@@ -672,7 +714,11 @@ fn tan_quarter(x: i32) -> i32 {
     let x2 = mul_shr(ax, ax, 30);
     let poly = 230_426_967u32 + mul_shr(53_687_091, x2, 30);
     let m = (ax - mul_shr(ax, mul_shr(Q30 - x2, poly, 30), 30)) as i32;
-    if x < 0 { -m } else { m }
+    if x < 0 {
+        -m
+    } else {
+        m
+    }
 }
 
 /// `1 / sqrt(d)` in Q30 for `d` in `[1, 3]` (Q30): Newton from a linear
@@ -697,21 +743,30 @@ pub fn sphere_point(cube: IVec3, [inv, shift, radius, _]: [u32; 4]) -> IVec3 {
         let x = mul_shr(c.unsigned_abs(), inv, shift).min(Q30) as i32;
         tan_quarter(if c < 0 { -x } else { x })
     });
-    let d = t.iter().fold(0u32, |sum, &v| sum + mul_shr(v.unsigned_abs(), v.unsigned_abs(), 30));
+    let d = t.iter().fold(0u32, |sum, &v| {
+        sum + mul_shr(v.unsigned_abs(), v.unsigned_abs(), 30)
+    });
     let r = rsqrt_q30(d);
     // Direction in Q31, then rounded to whole domain units.
     IVec3::from_array(t.map(|v| {
         let m = ((mul_shr(mul_shr(v.unsigned_abs(), r, 29), radius, 30) + 1) >> 1) as i32;
-        if v < 0 { -m } else { m }
+        if v < 0 {
+            -m
+        } else {
+            m
+        }
     }))
 }
-
 
 /// `p * r >> 30` for a signed component and a signed Q30 ratio.
 #[inline]
 fn scale_component(p: i32, ratio: i32) -> i32 {
     let m = mul_shr(p.unsigned_abs(), ratio.unsigned_abs(), 30) as i32;
-    if (p < 0) != (ratio < 0) { -m } else { m }
+    if (p < 0) != (ratio < 0) {
+        -m
+    } else {
+        m
+    }
 }
 
 /// Seamless 3D domain point of a level cell centre (half reference cells).
@@ -720,7 +775,15 @@ fn scale_component(p: i32, ratio: i32) -> i32 {
 /// plane the height is the vertical axis. Volumetric terrain (caves,
 /// overhangs) samples 3D noise here. Mirrored by `volume_point` in WGSL.
 #[allow(clippy::too_many_arguments)]
-pub fn volume_point(p: IVec3, plane: bool, k: i32, level: u32, inv: u32, shift: u32, layer_q16: u32) -> IVec3 {
+pub fn volume_point(
+    p: IVec3,
+    plane: bool,
+    k: i32,
+    level: u32,
+    inv: u32,
+    shift: u32,
+    layer_q16: u32,
+) -> IVec3 {
     // Cell centre height in half base layers.
     let h = (k << (level + 1)).wrapping_add(1 << level);
     if plane {
@@ -731,7 +794,11 @@ pub fn volume_point(p: IVec3, plane: bool, k: i32, level: u32, inv: u32, shift: 
     // steps at Earth radius (|p| ~ 2^27), stair-stepping caves.
     let r = mul_shr(h.unsigned_abs(), inv, shift) as i32;
     let ratio = if h < 0 { -r } else { r };
-    p + IVec3::new(scale_component(p.x, ratio), scale_component(p.y, ratio), scale_component(p.z, ratio))
+    p + IVec3::new(
+        scale_component(p.x, ratio),
+        scale_component(p.y, ratio),
+        scale_component(p.z, ratio),
+    )
 }
 
 /// Domain point of a plane level cell centre, in domain units (1.25 cm)
@@ -740,9 +807,16 @@ pub fn volume_point(p: IVec3, plane: bool, k: i32, level: u32, inv: u32, shift: 
 pub fn plane_domain_point(origin: i32, scale: u32, i: i32, j: i32, level: u32) -> IVec3 {
     let half = 1i32 << level;
     let scaled = |x: i32| {
-        let x = x.wrapping_shl(level + 1).wrapping_add(half).wrapping_sub(origin << 1);
+        let x = x
+            .wrapping_shl(level + 1)
+            .wrapping_add(half)
+            .wrapping_sub(origin << 1);
         let m = (mul_q24(x.unsigned_abs(), scale) << 2) as i32;
-        if x < 0 { -m } else { m }
+        if x < 0 {
+            -m
+        } else {
+            m
+        }
     };
     IVec3::new(scaled(i), 0, -scaled(j))
 }
@@ -763,28 +837,52 @@ mod tests {
         let plane = Grid::plane(Shape::Plane, 4096.0, 0.1).unwrap();
         for grid in [earth(), Grid::new(1_737_000.0, 0.5).unwrap(), plane] {
             let map = grid.volume_map();
-            let VolumeBounds { across, up, layers, bend } = map.bounds;
+            let VolumeBounds {
+                across,
+                up,
+                layers,
+                bend,
+            } = map.bounds;
             let n = grid.cells();
             let mut seed = 3u64;
             let mut next = |m: i64| {
-                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
                 ((seed >> 33) as i64).rem_euclid(m)
             };
             let (mut error, mut moved, mut bent) = (0.0f64, 0.0f64, 0.0f64);
             for _ in 0..20_000 {
-                let face = if grid.is_plane() { PLANE_FACE } else { next(6) as u8 };
-                let (i, j, k) = (next(i64::from(n)) as i32, next(i64::from(n)) as i32, next(4_000_000) as i32 - 3_000_000);
-                let centre = |i: i32, j: i32, k: i32| [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5];
-                let off = map.point(face, centre(i, j, k)).distance(grid.volume_point(face, i, j, k, 0).as_dvec3());
+                let face = if grid.is_plane() {
+                    PLANE_FACE
+                } else {
+                    next(6) as u8
+                };
+                let (i, j, k) = (
+                    next(i64::from(n)) as i32,
+                    next(i64::from(n)) as i32,
+                    next(4_000_000) as i32 - 3_000_000,
+                );
+                let centre = |i: i32, j: i32, k: i32| {
+                    [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5]
+                };
+                let off = map
+                    .point(face, centre(i, j, k))
+                    .distance(grid.volume_point(face, i, j, k, 0).as_dvec3());
                 error = error.max(off / (1.0 + f64::from(k.unsigned_abs()) / layers));
                 // Two positions up to `reach` cells apart, and the midpoint
                 // of an axis-aligned segment against its ends.
                 let reach = [1.0, 30.0, 1_000.0, 40_000.0][next(4) as usize];
                 let mut off = || (next(2_000_001) as f64 / 1e6 - 1.0) * reach;
                 let a = centre(i, j, k);
-                let b = [(a[0] + off()).clamp(0.0, f64::from(n)), (a[1] + off()).clamp(0.0, f64::from(n)), a[2] + off()];
+                let b = [
+                    (a[0] + off()).clamp(0.0, f64::from(n)),
+                    (a[1] + off()).clamp(0.0, f64::from(n)),
+                    a[2] + off(),
+                ];
                 let lift = 1.0 + a[2].abs().max(b[2].abs()) / layers;
-                let allowed = across * lift * ((b[0] - a[0]).abs() + (b[1] - a[1]).abs()) + up * (b[2] - a[2]).abs();
+                let allowed = across * lift * ((b[0] - a[0]).abs() + (b[1] - a[1]).abs())
+                    + up * (b[2] - a[2]).abs();
                 moved = moved.max(map.point(face, a).distance(map.point(face, b)) - allowed);
                 let axis = next(2) as usize;
                 let mut c = a;
@@ -795,7 +893,10 @@ mod tests {
                 let s = (c[axis] - a[axis]).abs();
                 bent = bent.max(map.point(face, mid).distance(ends) - bend * s * s * lift);
             }
-            assert!(error <= VOLUME_MAP_ERROR, "the map is {error} units off the volume points");
+            assert!(
+                error <= VOLUME_MAP_ERROR,
+                "the map is {error} units off the volume points"
+            );
             assert!(moved <= 1e-3, "the map moved {moved} units past its bound");
             assert!(bent <= 1e-3, "the map bent {bent} units past its bound");
         }
@@ -813,7 +914,8 @@ mod tests {
             let dir = DVec3::new(0.3, 0.8, -0.2).normalize();
             let c = grid.locate(dir * 6_371_000.0).0;
             let r = reference.locate(grid.cell_center(c)).0;
-            let d = grid.domain_point(c.face, c.i, c.j, 0) - reference.domain_point(r.face, r.i, r.j, 0);
+            let d = grid.domain_point(c.face, c.i, c.j, 0)
+                - reference.domain_point(r.face, r.i, r.j, 0);
             assert!(d.abs().max_element() <= 4 * step as i32 + 8, "{d}");
             assert_eq!(grid.cells() % (1 << (grid.levels() + 2)), 0);
         }
@@ -824,7 +926,14 @@ mod tests {
         let grid = earth();
         let n = grid.cells();
         for face in 0..6u8 {
-            for &(i, j) in &[(0, 0), (n - 1, 0), (0, n - 1), (n - 1, n - 1), (n / 2, n / 3), (7, n - 8)] {
+            for &(i, j) in &[
+                (0, 0),
+                (n - 1, 0),
+                (0, n - 1),
+                (n - 1, n - 1),
+                (n / 2, n / 3),
+                (7, n - 8),
+            ] {
                 for &k in &[-100_000, -1, 0, 1, 90_000] {
                     let cell = Cell::new(face, i, j, k);
                     assert_eq!(grid.locate(grid.cell_center(cell)).0, cell);
@@ -868,19 +977,32 @@ mod tests {
         let radius = f64::from(grid.sphere_constants()[2]);
         let mut worst_radius = 0f64;
         let (mut shortest, mut longest) = (f64::MAX, 0f64);
-        for (i, j) in [(n / 2, n / 2), (n / 7, n / 3), (3, 5), (n - 2, n - 3), (n / 2, 1), (n - 1, n / 2)] {
+        for (i, j) in [
+            (n / 2, n / 2),
+            (n / 7, n / 3),
+            (3, 5),
+            (n - 2, n - 3),
+            (n / 2, 1),
+            (n - 1, n / 2),
+        ] {
             for face in 0..6u8 {
                 let p = grid.domain_point(face, i, j, 0);
-                worst_radius = worst_radius.max((f64::from(p.as_dvec3().length() as f32) - radius).abs() / radius);
+                worst_radius = worst_radius
+                    .max((f64::from(p.as_dvec3().length() as f32) - radius).abs() / radius);
                 if i + 1 < n {
-                    let step = (grid.domain_point(face, i + 1, j, 0) - p).as_dvec3().length();
+                    let step = (grid.domain_point(face, i + 1, j, 0) - p)
+                        .as_dvec3()
+                        .length();
                     shortest = shortest.min(step);
                     longest = longest.max(step);
                 }
             }
         }
         assert!(worst_radius < 1e-7, "radius error {worst_radius}");
-        assert!(shortest > 5.4 && longest < 8.6, "cell steps {shortest} .. {longest}");
+        assert!(
+            shortest > 5.4 && longest < 8.6,
+            "cell steps {shortest} .. {longest}"
+        );
         // Neighbours across a cube edge are one cell apart.
         let a = grid.domain_point(4, n - 1, n / 2, 0);
         let edge = grid.neighbour(Cell::new(4, n - 1, n / 2, 0), 0, 1);
@@ -909,39 +1031,66 @@ mod tests {
         let c = n / 2;
         let step = grid.volume_point(2, c, c, 1, 0) - grid.volume_point(2, c, c, 0, 0);
         let expected = 8.0;
-        assert!((f64::from(step.length_squared()).sqrt() - expected).abs() < 0.6, "{step}");
+        assert!(
+            (f64::from(step.length_squared()).sqrt() - expected).abs() < 0.6,
+            "{step}"
+        );
         let core = grid.volume_point(2, c, c, -(grid.radius() / grid.voxel_size()) as i32, 0);
         // inv carries 24 bits: |p| ~ 2^27 units lands within ~16 (0.8 m).
-        assert!(core.abs().max_element() < 96, "the planet centre maps near the origin: {core}");
+        assert!(
+            core.abs().max_element() < 96,
+            "the planet centre maps near the origin: {core}"
+        );
         let plane = Grid::plane(Shape::Plane, 4_000.0, 0.5).unwrap();
         let p = plane.volume_point(PLANE_FACE, 10, 10, 4, 0);
-        assert_eq!(p.y, 180, "plane height in domain units: (4.5 * 0.5 m) / 0.0125 m");
+        assert_eq!(
+            p.y, 180,
+            "plane height in domain units: (4.5 * 0.5 m) / 0.0125 m"
+        );
     }
 
     #[test]
     fn plane_grids_locate_cell_centres_and_keep_exact_layers() {
-        for (shape, size, voxel) in [(Shape::Plane, 4_000.0, 0.1), (Shape::Plane, 900.0, 0.7), (Shape::InfinitePlane, 0.0, 0.1), (Shape::InfinitePlane, 0.0, 1.0)] {
+        for (shape, size, voxel) in [
+            (Shape::Plane, 4_000.0, 0.1),
+            (Shape::Plane, 900.0, 0.7),
+            (Shape::InfinitePlane, 0.0, 0.1),
+            (Shape::InfinitePlane, 0.0, 1.0),
+        ] {
             let grid = Grid::plane(shape, size, voxel).unwrap();
             assert_eq!(grid.faces(), &[PLANE_FACE]);
             assert!((grid.voxel_size() - voxel).abs() < 1e-12);
             assert_eq!(grid.cells() % (1 << (grid.levels() + 2)), 0);
             if shape == Shape::InfinitePlane {
-                assert!(f64::from(grid.cells()) * voxel > 10_000_000.0, "{}", grid.cells());
+                assert!(
+                    f64::from(grid.cells()) * voxel > 10_000_000.0,
+                    "{}",
+                    grid.cells()
+                );
                 assert!(grid.reference_cells() <= 1 << 27);
             } else {
-                assert!((f64::from(grid.cells()) * voxel - size).abs() <= voxel * f64::from(8u32 << grid.levels()));
+                assert!(
+                    (f64::from(grid.cells()) * voxel - size).abs()
+                        <= voxel * f64::from(8u32 << grid.levels())
+                );
             }
             let n = grid.cells();
             for &(i, j) in &[(0, 0), (n - 1, n - 1), (n / 2, n / 2 - 1), (7, n - 8)] {
                 for &k in &[-3_000, -1, 0, 1, 40_000] {
                     let cell = Cell::new(PLANE_FACE, i, j, k);
                     assert_eq!(grid.locate(grid.cell_center(cell)).0, cell);
-                    assert!((grid.height(grid.cell_center(cell)) - (f64::from(k) + 0.5) * voxel).abs() < 1e-6);
+                    assert!(
+                        (grid.height(grid.cell_center(cell)) - (f64::from(k) + 0.5) * voxel).abs()
+                            < 1e-6
+                    );
                 }
             }
             // The origin sits on a cell corner; the domain is symmetric.
             let c = grid.origin_index();
-            assert_eq!(grid.locate(DVec3::new(0.01, 0.01, -0.01)).0, Cell::new(PLANE_FACE, c, c, 0));
+            assert_eq!(
+                grid.locate(DVec3::new(0.01, 0.01, -0.01)).0,
+                Cell::new(PLANE_FACE, c, c, 0)
+            );
             let a = grid.domain_point(PLANE_FACE, c, c, 0);
             let b = grid.domain_point(PLANE_FACE, c - 1, c - 1, 0);
             assert_eq!(a, -b);

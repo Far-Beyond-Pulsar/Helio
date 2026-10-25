@@ -19,13 +19,15 @@
 //! glass or as opaque) still refuses them.
 use crate::ray_proxies::{Lookup, VgRayProxies, VgRayStats};
 use helio_core::{
-    BlasGeometry, BlasManager, Movability, RayInstance, TlasInstanceInput, TlasManager, RAY_INSTANCE_MASKED,
-    RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED,
+    BlasGeometry, BlasManager, Movability, RayInstance, TlasInstanceInput, TlasManager,
+    RAY_INSTANCE_MASKED, RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED,
 };
 use helio_pass_gbuffer::{
     MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent,
 };
-use pulsar_scenedb::{ChangeCursor, ChangeRead, ComponentChange, ComponentChangeKind, Entity, World};
+use pulsar_scenedb::{
+    ChangeCursor, ChangeRead, ComponentChange, ComponentChangeKind, Entity, World,
+};
 use std::{
     collections::{HashMap, HashSet},
     hash::Hasher,
@@ -106,7 +108,9 @@ fn casts_shadow(object: &StaticObjectComponent) -> bool {
 /// Row-major 3x4 TLAS transform of an object's column-major world matrix.
 fn tlas_transform(object: &StaticObjectComponent) -> [f32; 12] {
     let m = object.transform().to_cols_array();
-    [m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14]]
+    [
+        m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14],
+    ]
 }
 
 pub struct SceneDbRayTracing {
@@ -207,7 +211,9 @@ impl SceneDbRayTracing {
 
     /// The virtual-geometry proxies' counters (zero without them).
     pub fn vg_stats(&self) -> VgRayStats {
-        self.vg.as_ref().map_or_else(VgRayStats::default, VgRayProxies::stats)
+        self.vg
+            .as_ref()
+            .map_or_else(VgRayStats::default, VgRayProxies::stats)
     }
 
     /// Call after flushing the World GPU mirror and before rendering. The World
@@ -231,7 +237,11 @@ impl SceneDbRayTracing {
             self.cursors = None;
         }
         // Proxies that arrived or went change the instances: rebuild.
-        if self.vg.as_mut().is_some_and(|vg| vg.poll(&self.device, &self.queue)) {
+        if self
+            .vg
+            .as_mut()
+            .is_some_and(|vg| vg.poll(&self.device, &self.queue))
+        {
             self.cursors = None;
         }
         let result = match self.update(world) {
@@ -321,7 +331,10 @@ impl SceneDbRayTracing {
                 (None, Some(object)) if !self.projects(object) => {}
                 // One left out moved, or went.
                 (None, object)
-                    if self.skipped.get(&change.entity).is_some_and(|key| object.is_none_or(|o| CasterKey::of(o) == *key)) => {}
+                    if self
+                        .skipped
+                        .get(&change.entity)
+                        .is_some_and(|key| object.is_none_or(|o| CasterKey::of(o) == *key)) => {}
                 (Some(slot), Some(object))
                     if self.projects(object) && CasterKey::of(object) == self.casters[slot].1 =>
                 {
@@ -342,7 +355,12 @@ impl SceneDbRayTracing {
                     label: Some("SceneDB RT acceleration update"),
                 });
             self.tlas
-                .build_masked(&mut encoder, &self.instances, &self.blas, &self.shadow_masks)
+                .build_masked(
+                    &mut encoder,
+                    &self.instances,
+                    &self.blas,
+                    &self.shadow_masks,
+                )
                 .map_err(|e| rt_error(&e.to_string()))?;
             self.queue.submit([encoder.finish()]);
         }
@@ -426,7 +444,8 @@ impl SceneDbRayTracing {
                         && if masked {
                             self.partial && transmission.is_none()
                         } else {
-                            material.flags & helio_mats::FLAG_ALPHA_BLEND == 0 || transmission.is_some()
+                            material.flags & helio_mats::FLAG_ALPHA_BLEND == 0
+                                || transmission.is_some()
                         };
                     let rgb = transmission.map_or([0.0; 3], |value| value.0);
                     if !rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
@@ -437,8 +456,12 @@ impl SceneDbRayTracing {
                     let texture = (material.tex_base_color != helio_mats::GpuMaterial::NO_TEXTURE)
                         .then(|| world.gpu_mirror().and_then(|m| m.texture_store()))
                         .flatten()
-                        .and_then(|store| store.read().ok()?.texture(material.tex_base_color).cloned());
-                    let mean = texture.and_then(|t| self.texture_means.mean(&t)).unwrap_or([1.0; 3]);
+                        .and_then(|store| {
+                            store.read().ok()?.texture(material.tex_base_color).cloned()
+                        });
+                    let mean = texture
+                        .and_then(|t| self.texture_means.mean(&t))
+                        .unwrap_or([1.0; 3]);
                     let [r, g, b, _] = material.base_color;
                     let [r, g, b] = [r * mean[0], g * mean[1], b * mean[2]];
                     let [er, eg, eb, strength] = material.emissive;
@@ -448,7 +471,8 @@ impl SceneDbRayTracing {
                         rgb,
                         transmits: transmission.is_some(),
                         supported,
-                        flags: if masked { RAY_INSTANCE_MASKED } else { 0 } | if two_sided { RAY_INSTANCE_TWO_SIDED } else { 0 },
+                        flags: if masked { RAY_INSTANCE_MASKED } else { 0 }
+                            | if two_sided { RAY_INSTANCE_TWO_SIDED } else { 0 },
                         base_color: [r, g, b, 1.0],
                         emissive: [er * strength, eg * strength, eb * strength, 0.0],
                     };
@@ -506,15 +530,20 @@ impl SceneDbRayTracing {
                         Some(id) => *id,
                         None => {
                             let id = self.next_geometry_id;
-                            self.next_geometry_id = id.checked_add(1).ok_or_else(|| error("BLAS identity exhausted"))?;
+                            self.next_geometry_id = id
+                                .checked_add(1)
+                                .ok_or_else(|| error("BLAS identity exhausted"))?;
                             self.proxy_ids.insert((key, opaque), id);
                             id
                         }
                     };
                     proxies_used.insert(key);
                     if live.insert(id) {
-                        let (vertices, proxy_indices) =
-                            self.vg.as_ref().and_then(VgRayProxies::buffers).ok_or_else(|| error("missing proxy pool"))?;
+                        let (vertices, proxy_indices) = self
+                            .vg
+                            .as_ref()
+                            .and_then(VgRayProxies::buffers)
+                            .ok_or_else(|| error("missing proxy pool"))?;
                         self.blas
                             .build_from_buffers_with_opacity(
                                 id,
@@ -533,7 +562,12 @@ impl SceneDbRayTracing {
                             )
                             .map_err(|e| error(&e.to_string()))?;
                     }
-                    (id, range.first_index, range.first_vertex, RAY_INSTANCE_PROXY)
+                    (
+                        id,
+                        range.first_index,
+                        range.first_vertex,
+                        RAY_INSTANCE_PROXY,
+                    )
                 }
                 Lookup::Classic => {
                     // A mesh can be instanced with both opaque and non-opaque materials.
@@ -584,7 +618,8 @@ impl SceneDbRayTracing {
                                         .buffer,
                                     first_vertex: vertex_range.offset,
                                     vertex_count: vertex_range.count,
-                                    vertex_stride: std::mem::size_of::<helio_core::PackedVertex>() as u64,
+                                    vertex_stride: std::mem::size_of::<helio_core::PackedVertex>()
+                                        as u64,
                                     indices: Some(
                                         &indices
                                             .as_ref()
@@ -625,7 +660,17 @@ impl SceneDbRayTracing {
         self.proxy_ids.retain(|_, id| live.contains(id));
         self.blas.retain(|id| live.contains(&id));
         self.geometry_ids.retain(|_, id| live.contains(id));
-        self.shadow_masks = self.casters.iter().map(|(_,key)| if key.flags & helio_pass_object_batch::INSTANCE_FLAG_MOVABLE != 0 {2} else {1}).collect();
+        self.shadow_masks = self
+            .casters
+            .iter()
+            .map(|(_, key)| {
+                if key.flags & helio_pass_object_batch::INSTANCE_FLAG_MOVABLE != 0 {
+                    2
+                } else {
+                    1
+                }
+            })
+            .collect();
         self.tlas
             .build_masked(&mut encoder, &instances, &self.blas, &self.shadow_masks)
             .map_err(|e| error(&e.to_string()))?;
@@ -660,7 +705,11 @@ impl SceneDbRayTracing {
         self.has_transmission = has_transmission;
         // The instances' surfaces, a row each (at least one: a binding).
         let size = (instance_rows.len().max(1) * std::mem::size_of::<RayInstance>()) as u64;
-        if self.instances_buffer.as_ref().is_none_or(|buffer| buffer.size() < size) {
+        if self
+            .instances_buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.size() < size)
+        {
             self.instances_buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("SceneDB RT instance surfaces"),
                 size: size.next_power_of_two(),
@@ -670,7 +719,11 @@ impl SceneDbRayTracing {
             self.instance_rows.clear();
         }
         if self.instance_rows != instance_rows && !instance_rows.is_empty() {
-            self.queue.write_buffer(self.instances_buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(&instance_rows));
+            self.queue.write_buffer(
+                self.instances_buffer.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&instance_rows),
+            );
         }
         self.instance_rows = instance_rows;
         self.instances = instances;

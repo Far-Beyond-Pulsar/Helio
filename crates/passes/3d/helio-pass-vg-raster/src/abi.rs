@@ -9,7 +9,10 @@ pub const HW_BIN_CAPS: [u32; 4] = [32, 64, 96, 128];
 
 /// Index of the Tier 1 bin a cluster with `tris` triangles belongs to.
 pub fn hw_bin_for_tris(tris: u32) -> usize {
-    HW_BIN_CAPS.iter().position(|&c| tris <= c).unwrap_or(HW_BIN_CAPS.len() - 1)
+    HW_BIN_CAPS
+        .iter()
+        .position(|&c| tris <= c)
+        .unwrap_or(HW_BIN_CAPS.len() - 1)
 }
 
 /// Value the vis target is cleared to: "no Tier 1 geometry here".
@@ -50,7 +53,11 @@ pub const SW_DISPATCH_ROW: u32 = helio_vg_format::SW_GROUP_WIDTH;
 /// `DispatchIndirect` args for `count` software clusters (T5 computes this on
 /// the GPU; this is the CPU equivalent used by tests).
 pub fn sw_dispatch_args(count: u32) -> [u32; 3] {
-    [count.min(SW_DISPATCH_ROW), count.div_ceil(SW_DISPATCH_ROW).max(1), 1]
+    [
+        count.min(SW_DISPATCH_ROW),
+        count.div_ceil(SW_DISPATCH_ROW).max(1),
+        1,
+    ]
 }
 
 /// Uniform block shared by all raster kernels. 32 bytes.

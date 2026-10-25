@@ -28,7 +28,10 @@ impl TsrSetting {
     }
 
     /// The preset to render with, given the scene's preference.
-    pub fn resolve(self, scene: Option<helio_pass_tsr::TsrQuality>) -> Option<helio_pass_tsr::TsrQuality> {
+    pub fn resolve(
+        self,
+        scene: Option<helio_pass_tsr::TsrQuality>,
+    ) -> Option<helio_pass_tsr::TsrQuality> {
         match self {
             Self::Auto => scene,
             Self::Off => None,
@@ -64,13 +67,22 @@ impl RendererConfig {
         };
         self.shadow_quality = tier(
             settings.text("shadow_quality"),
-            [ShadowQuality::Low, ShadowQuality::Medium, ShadowQuality::High, ShadowQuality::Ultra],
+            [
+                ShadowQuality::Low,
+                ShadowQuality::Medium,
+                ShadowQuality::High,
+                ShadowQuality::Ultra,
+            ],
         );
         let budget = &mut self.shadow_budget;
         budget.memory_bytes = (settings.number("shadow_memory_mb") * 1024.0 * 1024.0) as u64;
-        budget.max_resolution = settings.text("shadow_max_resolution").parse().unwrap_or(budget.max_resolution);
+        budget.max_resolution = settings
+            .text("shadow_max_resolution")
+            .parse()
+            .unwrap_or(budget.max_resolution);
         budget.updates_per_frame = settings.number("shadow_updates_per_frame") as u32;
-        budget.update_texels_per_frame = (settings.number("shadow_update_megatexels") * 1024.0 * 1024.0) as u32;
+        budget.update_texels_per_frame =
+            (settings.number("shadow_update_megatexels") * 1024.0 * 1024.0) as u32;
         budget.max_distance = f("shadow_max_distance");
         budget.fade_frames = settings.number("shadow_fade_frames") as u32;
         budget.hysteresis = f("shadow_hysteresis");
@@ -82,11 +94,18 @@ impl RendererConfig {
         self.enable_foliage = settings.bool("foliage");
         self.foliage_quality = tier(
             settings.text("foliage_quality"),
-            [FoliageQuality::Low, FoliageQuality::Medium, FoliageQuality::High, FoliageQuality::Ultra],
+            [
+                FoliageQuality::Low,
+                FoliageQuality::Medium,
+                FoliageQuality::High,
+                FoliageQuality::Ultra,
+            ],
         );
         self.foliage_range = settings.optional("foliage_range").map(|m| m as f32);
         self.foliage_tufts_per_m2 = settings.optional("foliage_tufts_per_m2").map(|n| n as f32);
-        self.foliage_blades_per_tuft = settings.optional("foliage_blades_per_tuft").map(|n| n as f32);
+        self.foliage_blades_per_tuft = settings
+            .optional("foliage_blades_per_tuft")
+            .map(|n| n as f32);
         self.hdr_output_mode = match settings.text("hdr_output_mode") {
             "hdr10" => HdrOutputMode::Hdr10,
             "scrgb" => HdrOutputMode::ScRgb,
@@ -115,21 +134,29 @@ mod tests {
         let config = || RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         let configured = config().with_settings(&helio_settings::RENDERER.defaults());
         assert_eq!(format!("{configured:?}"), format!("{:?}", config()));
-        assert_eq!(TsrSetting::from_settings(&helio_settings::RENDERER.defaults()), TsrSetting::Auto);
+        assert_eq!(
+            TsrSetting::from_settings(&helio_settings::RENDERER.defaults()),
+            TsrSetting::Auto
+        );
     }
 
     #[test]
     fn every_choice_maps() {
         for setting in helio_settings::RENDERER.settings {
-            let helio_settings::Kind::Choice(options) = setting.kind else { continue };
+            let helio_settings::Kind::Choice(options) = setting.kind else {
+                continue;
+            };
             for option in options {
-                let settings = helio_settings::RENDERER
-                    .resolve(|key| (key == setting.key).then(|| helio_settings::Value::Text(option.value.into())));
+                let settings = helio_settings::RENDERER.resolve(|key| {
+                    (key == setting.key).then(|| helio_settings::Value::Text(option.value.into()))
+                });
                 assert_eq!(settings.text(setting.key), option.value);
                 // Only the default option may land on the default config.
-                let configured = RendererConfig::new(8, 8, wgpu::TextureFormat::Rgba8Unorm).with_settings(&settings);
+                let configured = RendererConfig::new(8, 8, wgpu::TextureFormat::Rgba8Unorm)
+                    .with_settings(&settings);
                 let default = RendererConfig::new(8, 8, wgpu::TextureFormat::Rgba8Unorm);
-                let is_default = setting.default == helio_settings::Value::Text(option.value.into());
+                let is_default =
+                    setting.default == helio_settings::Value::Text(option.value.into());
                 let unchanged = format!("{configured:?}") == format!("{default:?}");
                 // `tsr_quality` is resolved by the host, not the config.
                 if setting.key != "tsr_quality" {

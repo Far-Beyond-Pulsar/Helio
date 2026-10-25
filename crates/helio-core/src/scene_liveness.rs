@@ -55,7 +55,13 @@ impl SceneBufferLiveness {
     /// `BufferHandle::row_bytes` long; a buffer without a row stride is
     /// passed as one slice.
     pub fn with_row_predicate(row_is_live: fn(&[u8]) -> bool) -> Self {
-        Self { staging: None, slot: MapSlot::default(), in_flight: None, known: None, row_is_live }
+        Self {
+            staging: None,
+            slot: MapSlot::default(),
+            in_flight: None,
+            known: None,
+            row_is_live,
+        }
     }
 
     /// Harvests a finished readback and starts one for new contents. Never
@@ -68,13 +74,23 @@ impl SceneBufferLiveness {
         handle: Option<&BufferHandle>,
     ) {
         if let Some((copied, row_bytes)) = self.in_flight {
-            let result = self.slot.lock().expect("scene liveness slot poisoned").take();
+            let result = self
+                .slot
+                .lock()
+                .expect("scene liveness slot poisoned")
+                .take();
             if let Some(result) = result {
                 self.in_flight = None;
                 if result.is_ok() {
-                    let staging = self.staging.as_ref().expect("in-flight readback has staging");
+                    let staging = self
+                        .staging
+                        .as_ref()
+                        .expect("in-flight readback has staging");
                     let live = {
-                        let bytes = staging.slice(..).get_mapped_range().expect("mapped staging");
+                        let bytes = staging
+                            .slice(..)
+                            .get_mapped_range()
+                            .expect("mapped staging");
                         if row_bytes == 0 {
                             (self.row_is_live)(&bytes)
                         } else {
@@ -100,7 +116,11 @@ impl SceneBufferLiveness {
             return;
         }
 
-        if self.staging.as_ref().is_none_or(|staging| staging.size() != size) {
+        if self
+            .staging
+            .as_ref()
+            .is_none_or(|staging| staging.size() != size)
+        {
             self.staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("SceneDB Liveness Readback"),
                 size,
@@ -115,9 +135,11 @@ impl SceneBufferLiveness {
         encoder.copy_buffer_to_buffer(&handle.buffer, 0, staging, 0, size);
         queue.submit([encoder.finish()]);
         let slot = Arc::clone(&self.slot);
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            *slot.lock().expect("scene liveness slot poisoned") = Some(result);
-        });
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                *slot.lock().expect("scene liveness slot poisoned") = Some(result);
+            });
         self.in_flight = Some((key, handle.row_bytes));
     }
 

@@ -228,8 +228,10 @@ impl Profiler {
     /// - `name`: Pass name for debugging
     pub fn begin_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
-            self.gpu
-                .begin_pass(&mut crate::cmd::CommandRecorder::from_encoder(encoder), name);
+            self.gpu.begin_pass(
+                &mut crate::cmd::CommandRecorder::from_encoder(encoder),
+                name,
+            );
         }
     }
 
@@ -249,20 +251,30 @@ impl Profiler {
     /// - `name`: Pass name for debugging
     pub fn end_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
-            self.gpu
-                .end_pass(&mut crate::cmd::CommandRecorder::from_encoder(encoder), name);
+            self.gpu.end_pass(
+                &mut crate::cmd::CommandRecorder::from_encoder(encoder),
+                name,
+            );
         }
     }
 
     /// [`Self::begin_gpu_pass`] on a pass's command stream.
-    pub(crate) fn begin_gpu_pass_cmds(&mut self, cmds: &mut crate::cmd::CommandRecorder<'_>, name: &'static str) {
+    pub(crate) fn begin_gpu_pass_cmds(
+        &mut self,
+        cmds: &mut crate::cmd::CommandRecorder<'_>,
+        name: &'static str,
+    ) {
         if self.enabled {
             self.gpu.begin_pass(cmds, name);
         }
     }
 
     /// [`Self::end_gpu_pass`] on a pass's command stream.
-    pub(crate) fn end_gpu_pass_cmds(&mut self, cmds: &mut crate::cmd::CommandRecorder<'_>, name: &'static str) {
+    pub(crate) fn end_gpu_pass_cmds(
+        &mut self,
+        cmds: &mut crate::cmd::CommandRecorder<'_>,
+        name: &'static str,
+    ) {
         if self.enabled {
             self.gpu.end_pass(cmds, name);
         }
@@ -424,7 +436,12 @@ impl Profiler {
         // are essential for explaining queue backpressure and must not vanish
         // from the exported snapshot.
         for timing in gpu_timings {
-            if !self.snapshot.passes.iter().any(|pass| pass.name == timing.name) {
+            if !self
+                .snapshot
+                .passes
+                .iter()
+                .any(|pass| pass.name == timing.name)
+            {
                 self.snapshot.passes.push(RenderPassTiming {
                     name: timing.name,
                     cpu_ms: None,
@@ -439,9 +456,7 @@ impl Profiler {
             .map(|t| t.duration_ns as f32 / 1_000_000.0);
         let graph_gpu_ms: f32 = gpu_timings
             .iter()
-            .filter(|timing| {
-                timing.name == "__graph_compute" || timing.name == "__graph_graphics"
-            })
+            .filter(|timing| timing.name == "__graph_compute" || timing.name == "__graph_graphics")
             .map(|timing| timing.duration_ns as f32 / 1_000_000.0)
             .sum();
         if graph_gpu_ms > 0.0 {
@@ -518,7 +533,9 @@ impl Profiler {
             println!(
                 "  {:<30} {:>8.2}ms",
                 "TOTAL GPU",
-                self.gpu_frame_ms.map(f64::from).unwrap_or(total_gpu as f64 / 1_000_000.0)
+                self.gpu_frame_ms
+                    .map(f64::from)
+                    .unwrap_or(total_gpu as f64 / 1_000_000.0)
             );
         }
 
@@ -588,7 +605,11 @@ impl Profiler {
 
         // Graph envelopes contain the pass scopes. Do not count both in the
         // aggregate exported to Pulsar's overlay/flame-graph consumers.
-        (pass_timings, total_cpu_ms, self.gpu_frame_ms.unwrap_or(total_gpu_ms))
+        (
+            pass_timings,
+            total_cpu_ms,
+            self.gpu_frame_ms.unwrap_or(total_gpu_ms),
+        )
     }
 }
 
@@ -652,15 +673,24 @@ mod tests {
     fn dual_encoder_scopes_and_repeated_labels_export_once() {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(crate::wgpu_instance_descriptor());
-            let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false,
-            }).await.expect("GPU required for timestamp regression test");
-            let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: adapter.limits(), ..Default::default()
-            }).await.unwrap();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                    apply_limit_buckets: false,
+                })
+                .await
+                .expect("GPU required for timestamp regression test");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features: wgpu::Features::TIMESTAMP_QUERY
+                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
             let mut profiler = Profiler::new(&device, &queue);
             let profiler_id = profiler.instance_id();
             assert_ne!(profiler_id, 0);
@@ -669,7 +699,9 @@ mod tests {
             let mut graphics = device.create_command_encoder(&Default::default());
             let mut compute = device.create_command_encoder(&Default::default());
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: 1024 * 1024, usage: wgpu::BufferUsages::COPY_DST,
+                label: None,
+                size: 1024 * 1024,
+                usage: wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             profiler.begin_gpu_pass(&mut graphics, "__graph_graphics");
@@ -686,15 +718,33 @@ mod tests {
             profiler.resolve_gpu_queries(&mut graphics, 7);
             queue.submit([compute.finish(), graphics.finish()]);
             profiler.read_gpu_timestamps_blocking(&device);
-            profiler.update_snapshot(8, ["compute_on_graphics", "compute_on_graphics"].into_iter());
+            profiler.update_snapshot(
+                8,
+                ["compute_on_graphics", "compute_on_graphics"].into_iter(),
+            );
             let snapshot = profiler.timing_snapshot();
             assert_eq!(snapshot.gpu_frame_index, Some(7));
             assert_eq!(snapshot.gpu_lag_frames, Some(1));
             assert_eq!(snapshot.query_overflows, 0);
-            assert_eq!(snapshot.passes.iter().filter(|p| p.name == "compute_on_graphics").count(), 1);
-            let span: f32 = snapshot.passes.iter().filter(|p| p.name.starts_with("__graph_"))
-                .map(|p| p.gpu_ms.unwrap()).sum();
-            let pass = snapshot.passes.iter().find(|p| p.name == "compute_on_graphics").unwrap();
+            assert_eq!(
+                snapshot
+                    .passes
+                    .iter()
+                    .filter(|p| p.name == "compute_on_graphics")
+                    .count(),
+                1
+            );
+            let span: f32 = snapshot
+                .passes
+                .iter()
+                .filter(|p| p.name.starts_with("__graph_"))
+                .map(|p| p.gpu_ms.unwrap())
+                .sum();
+            let pass = snapshot
+                .passes
+                .iter()
+                .find(|p| p.name == "compute_on_graphics")
+                .unwrap();
             assert!(pass.gpu_ms.unwrap() > 0.0);
             assert!(span >= pass.gpu_ms.unwrap());
             assert_eq!(snapshot.total_gpu_ms, Some(span));

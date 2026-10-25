@@ -22,7 +22,14 @@ pub struct RangeAlloc {
 
 impl RangeAlloc {
     pub fn new(capacity: u32) -> Self {
-        let free = if capacity > 0 { vec![Range { start: 0, len: capacity }] } else { vec![] };
+        let free = if capacity > 0 {
+            vec![Range {
+                start: 0,
+                len: capacity,
+            }]
+        } else {
+            vec![]
+        };
         Self { capacity, free }
     }
 
@@ -43,9 +50,15 @@ impl RangeAlloc {
                 if r.len == len {
                     self.free.remove(i);
                 } else {
-                    self.free[i] = Range { start: r.start + len, len: r.len - len };
+                    self.free[i] = Range {
+                        start: r.start + len,
+                        len: r.len - len,
+                    };
                 }
-                return Range { start: r.start, len };
+                return Range {
+                    start: r.start,
+                    len,
+                };
             }
             let new_cap = (self.capacity.max(1) * 2).max(self.capacity + len);
             self.grow_to(new_cap);
@@ -56,7 +69,10 @@ impl RangeAlloc {
         if new_cap <= self.capacity {
             return;
         }
-        let added = Range { start: self.capacity, len: new_cap - self.capacity };
+        let added = Range {
+            start: self.capacity,
+            len: new_cap - self.capacity,
+        };
         self.capacity = new_cap;
         self.insert_free(added);
     }

@@ -78,14 +78,17 @@ impl TextureMeans {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(device, wgpu::ComputePipelineDescriptor {
-            label: Some("texture_mean"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("texture_mean"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("texture_mean"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("texture_mean"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         Self {
             layout,
             pipeline,
@@ -104,8 +107,13 @@ impl TextureMeans {
             return Some(*mean);
         }
         let measurable = texture.dimension() == wgpu::TextureDimension::D2
-            && texture.usage().contains(wgpu::TextureUsages::TEXTURE_BINDING)
-            && matches!(texture.format().sample_type(None, None), Some(wgpu::TextureSampleType::Float { .. }));
+            && texture
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            && matches!(
+                texture.format().sample_type(None, None),
+                Some(wgpu::TextureSampleType::Float { .. })
+            );
         if measurable && !self.in_flight.contains(texture) && !self.queued.contains(texture) {
             self.queued.push(texture.clone());
         }
@@ -143,9 +151,14 @@ impl TextureMeans {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("texture means") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("texture means"),
+        });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("texture means"), timestamp_writes: None });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("texture means"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.pipeline);
             for (k, texture) in batch.iter().enumerate() {
                 let view = texture.create_view(&wgpu::TextureViewDescriptor {
@@ -160,7 +173,10 @@ impl TextureMeans {
                     label: Some("texture mean"),
                     layout: &self.layout,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -182,24 +198,33 @@ impl TextureMeans {
         }
         let arrived = self.arrived.clone();
         let mapped = readback.clone();
-        readback.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let mut means = Vec::with_capacity(batch.len());
-            if result.is_ok() {
-                let data = mapped.slice(..).get_mapped_range().unwrap();
-                for (k, texture) in batch.into_iter().enumerate() {
-                    let at = k * STRIDE as usize;
-                    let v: &[f32] = bytemuck::cast_slice(&data[at..at + 12]);
-                    let mean = [v[0], v[1], v[2]];
-                    means.push((texture, if mean.iter().all(|c| c.is_finite()) { mean } else { [1.0; 3] }));
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let mut means = Vec::with_capacity(batch.len());
+                if result.is_ok() {
+                    let data = mapped.slice(..).get_mapped_range().unwrap();
+                    for (k, texture) in batch.into_iter().enumerate() {
+                        let at = k * STRIDE as usize;
+                        let v: &[f32] = bytemuck::cast_slice(&data[at..at + 12]);
+                        let mean = [v[0], v[1], v[2]];
+                        means.push((
+                            texture,
+                            if mean.iter().all(|c| c.is_finite()) {
+                                mean
+                            } else {
+                                [1.0; 3]
+                            },
+                        ));
+                    }
+                    drop(data);
+                    mapped.unmap();
+                } else {
+                    // Failed: white, as before measuring.
+                    means.extend(batch.into_iter().map(|t| (t, [1.0; 3])));
                 }
-                drop(data);
-                mapped.unmap();
-            } else {
-                // Failed: white, as before measuring.
-                means.extend(batch.into_iter().map(|t| (t, [1.0; 3])));
-            }
-            arrived.lock().unwrap().extend(means);
-        });
+                arrived.lock().unwrap().extend(means);
+            });
     }
 }
 
@@ -213,14 +238,23 @@ mod tests {
     #[test]
     fn means_are_linear_averages_of_the_coarsest_mip() {
         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else { return };
-        let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let texels: [u8; 16] = [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255];
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            return;
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let texels: [u8; 16] = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
         let texture = device.create_texture_with_data(
             &queue,
             &wgpu::TextureDescriptor {
                 label: None,
-                size: wgpu::Extent3d { width: 2, height: 2, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 2,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,

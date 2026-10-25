@@ -15,27 +15,27 @@
 //!   residency, drawing and lighting, and the Helio pass.
 //! * `engine` — what hosts share with the pass (frames, picks) and the
 //!   terrain half of the shaders, checked against the CPU field.
+#[cfg(feature = "engine")]
+pub mod chunks;
 pub mod edit_store;
 pub mod edits;
+#[cfg(feature = "engine")]
+pub mod engine;
 pub mod feature_recipe;
 pub mod features;
 pub mod flora;
-pub mod snapshot;
-pub mod stamp;
 pub mod grid;
-pub mod record;
 pub mod landform;
 pub mod layers;
-pub mod noise;
-pub mod planet;
-mod ridge_envelope;
-pub mod terrain;
-#[cfg(feature = "engine")]
-pub mod engine;
-#[cfg(feature = "engine")]
-pub mod chunks;
 #[cfg(feature = "engine")]
 pub mod meadow;
+pub mod noise;
+pub mod planet;
+pub mod record;
+mod ridge_envelope;
+pub mod snapshot;
+pub mod stamp;
+pub mod terrain;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

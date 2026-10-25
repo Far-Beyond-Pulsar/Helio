@@ -32,7 +32,11 @@ pub enum BundledLens {
 }
 
 impl BundledLens {
-    pub const ALL: [Self; 3] = [Self::ThinLens50F2, Self::CookeTriplet50F5, Self::DoubleGauss50F2];
+    pub const ALL: [Self; 3] = [
+        Self::ThinLens50F2,
+        Self::CookeTriplet50F5,
+        Self::DoubleGauss50F2,
+    ];
 
     /// The layer of the bundled [`crate::PrescriptionBank`], for
     /// `LensElementComponent::prescription`.
@@ -211,5 +215,8 @@ pub fn bundled_mask_layers() -> Vec<Vec<u8>> {
 /// The bundled iris shapes as coverage images of [`APERTURE_SHAPE_SIZE`], in
 /// [`BundledAperture`] order.
 pub fn bundled_aperture_layers() -> Vec<Vec<u8>> {
-    BundledAperture::ALL.iter().map(|shape| shape.coverage(APERTURE_SHAPE_SIZE)).collect()
+    BundledAperture::ALL
+        .iter()
+        .map(|shape| shape.coverage(APERTURE_SHAPE_SIZE))
+        .collect()
 }

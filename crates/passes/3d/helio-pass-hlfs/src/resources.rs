@@ -96,7 +96,11 @@ impl Targets {
                 device,
                 "HLFS weighted reservoir history",
                 if config.temporal_resampling { sw } else { 1 },
-                if config.temporal_resampling { sh * config.samples_per_pixel } else { 1 },
+                if config.temporal_resampling {
+                    sh * config.samples_per_pixel
+                } else {
+                    1
+                },
                 wgpu::TextureFormat::Rgba32Uint,
                 true,
             ),

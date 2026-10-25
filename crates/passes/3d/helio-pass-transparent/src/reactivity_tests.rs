@@ -3,8 +3,7 @@ use super::*;
 #[test]
 fn graph_routed_coverage_is_attached_and_cleared_without_draws() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let pass = TransparentPass::new(&device, wgpu::TextureFormat::Rgba16Float)
@@ -116,8 +115,7 @@ fn graph_routed_coverage_is_attached_and_cleared_without_draws() {
 #[test]
 fn production_pipelines_accept_coverage_and_legacy_templates() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, _) = adapter.request_device(&Default::default()).await.unwrap();
         for coverage in [false, true] {

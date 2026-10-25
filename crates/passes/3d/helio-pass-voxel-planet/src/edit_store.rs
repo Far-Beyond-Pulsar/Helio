@@ -100,7 +100,9 @@ impl CellEdit {
         if counts[0] >= 4 {
             return Self::UNCHANGED;
         }
-        let state = (1..4u16).max_by_key(|&s| (counts[s as usize], 4 - s)).expect("three states");
+        let state = (1..4u16)
+            .max_by_key(|&s| (counts[s as usize], 4 - s))
+            .expect("three states");
         if state == 1 {
             return Self::AIR;
         }
@@ -127,7 +129,9 @@ pub struct Brick {
 
 impl Default for Brick {
     fn default() -> Self {
-        Self { cells: [CellEdit::UNCHANGED; BRICK_CELLS] }
+        Self {
+            cells: [CellEdit::UNCHANGED; BRICK_CELLS],
+        }
     }
 }
 
@@ -152,14 +156,31 @@ pub struct BrickKey {
 
 impl BrickKey {
     pub fn of_cell(face: u8, level: u32, i: i32, j: i32, k: i32) -> Self {
-        Self { face, level: level as u8, bi: i.div_euclid(BRICK), bj: j.div_euclid(BRICK), bk: k.div_euclid(BRICK) }
+        Self {
+            face,
+            level: level as u8,
+            bi: i.div_euclid(BRICK),
+            bj: j.div_euclid(BRICK),
+            bk: k.div_euclid(BRICK),
+        }
     }
     pub fn parent(self) -> Self {
-        Self { face: self.face, level: self.level + 1, bi: self.bi.div_euclid(2), bj: self.bj.div_euclid(2), bk: self.bk.div_euclid(2) }
+        Self {
+            face: self.face,
+            level: self.level + 1,
+            bi: self.bi.div_euclid(2),
+            bj: self.bj.div_euclid(2),
+            bk: self.bk.div_euclid(2),
+        }
     }
     /// The column holding this brick.
     pub fn column(self) -> ColumnKey {
-        ColumnKey { face: self.face, level: self.level, ci: self.bi, cj: self.bj }
+        ColumnKey {
+            face: self.face,
+            level: self.level,
+            ci: self.bi,
+            cj: self.bj,
+        }
     }
 }
 
@@ -180,7 +201,9 @@ const SHARDS: usize = 64;
 
 fn shard_of(key: &ColumnKey) -> usize {
     // Neighbouring columns land in different shards.
-    let h = (key.ci as u32).wrapping_mul(0x9e37_79b1) ^ (key.cj as u32).wrapping_mul(0x85eb_ca77) ^ (u32::from(key.level) << 3 | u32::from(key.face));
+    let h = (key.ci as u32).wrapping_mul(0x9e37_79b1)
+        ^ (key.cj as u32).wrapping_mul(0x85eb_ca77)
+        ^ (u32::from(key.level) << 3 | u32::from(key.face));
     (h.rotate_left(7) as usize) % SHARDS
 }
 
@@ -203,8 +226,15 @@ impl StoreUndo {
         self.columns
             .iter()
             .filter_map(|(key, before)| {
-                let heights = before.iter().chain(now.column(key)).flat_map(|c| c.iter().map(|(bk, _)| *bk));
-                heights.fold(None, |span: Option<[i32; 2]>, bk| Some(span.map_or([bk, bk], |[lo, hi]| [lo.min(bk), hi.max(bk)]))).map(|span| (*key, span))
+                let heights = before
+                    .iter()
+                    .chain(now.column(key))
+                    .flat_map(|c| c.iter().map(|(bk, _)| *bk));
+                heights
+                    .fold(None, |span: Option<[i32; 2]>, bk| {
+                        Some(span.map_or([bk, bk], |[lo, hi]| [lo.min(bk), hi.max(bk)]))
+                    })
+                    .map(|span| (*key, span))
             })
             .collect()
     }
@@ -223,7 +253,11 @@ pub struct EditStore {
 
 impl Default for EditStore {
     fn default() -> Self {
-        Self { shards: (0..SHARDS).map(|_| Arc::new(Shard::default())).collect(), counts: Vec::new(), recording: None }
+        Self {
+            shards: (0..SHARDS).map(|_| Arc::new(Shard::default())).collect(),
+            counts: Vec::new(),
+            recording: None,
+        }
     }
 }
 
@@ -241,22 +275,43 @@ impl EditStore {
     }
     pub fn brick(&self, key: &BrickKey) -> Option<&Arc<Brick>> {
         let column = self.column(&key.column())?;
-        column.binary_search_by_key(&key.bk, |(bk, _)| *bk).ok().map(|at| &column[at].1)
+        column
+            .binary_search_by_key(&key.bk, |(bk, _)| *bk)
+            .ok()
+            .map(|at| &column[at].1)
     }
     /// The baked edit of a level cell.
     pub fn cell(&self, face: u8, level: u32, i: i32, j: i32, k: i32) -> CellEdit {
-        self.brick(&BrickKey::of_cell(face, level, i, j, k)).map_or(CellEdit::UNCHANGED, |b| b.cells[Brick::index(i, j, k)])
+        self.brick(&BrickKey::of_cell(face, level, i, j, k))
+            .map_or(CellEdit::UNCHANGED, |b| b.cells[Brick::index(i, j, k)])
     }
     /// Every stored brick (any order).
     pub fn bricks(&self) -> impl Iterator<Item = (BrickKey, &Arc<Brick>)> + '_ {
-        self.shards.iter().flat_map(|shard| shard.iter()).flat_map(|(c, column)| {
-            column.iter().map(move |(bk, brick)| (BrickKey { face: c.face, level: c.level, bi: c.ci, bj: c.cj, bk: *bk }, brick))
-        })
+        self.shards
+            .iter()
+            .flat_map(|shard| shard.iter())
+            .flat_map(|(c, column)| {
+                column.iter().map(move |(bk, brick)| {
+                    (
+                        BrickKey {
+                            face: c.face,
+                            level: c.level,
+                            bi: c.ci,
+                            bj: c.cj,
+                            bk: *bk,
+                        },
+                        brick,
+                    )
+                })
+            })
     }
 
     /// Store a brick (`None` or an unchanged brick removes it).
     pub fn set(&mut self, key: BrickKey, brick: Option<Brick>) {
-        self.set_column(key.column(), vec![(key.bk, brick.filter(|b| !b.is_unchanged()).map(Arc::new))]);
+        self.set_column(
+            key.column(),
+            vec![(key.bk, brick.filter(|b| !b.is_unchanged()).map(Arc::new))],
+        );
     }
 
     /// Store bricks of one column by height (`None` removes one; none may
@@ -264,7 +319,9 @@ impl EditStore {
     fn set_column(&mut self, column_key: ColumnKey, bricks: Vec<(i32, Option<Arc<Brick>>)>) {
         let shard = Arc::make_mut(&mut self.shards[shard_of(&column_key)]);
         if let Some(recording) = &mut self.recording {
-            recording.entry(column_key).or_insert_with(|| shard.get(&column_key).cloned());
+            recording
+                .entry(column_key)
+                .or_insert_with(|| shard.get(&column_key).cloned());
         }
         let level = column_key.level as usize;
         if self.counts.len() <= level {
@@ -297,7 +354,12 @@ impl EditStore {
     /// What changed since [`Self::begin_record`], to undo it with
     /// [`Self::restore`].
     pub fn end_record(&mut self) -> StoreUndo {
-        let mut columns: Vec<_> = self.recording.take().unwrap_or_default().into_iter().collect();
+        let mut columns: Vec<_> = self
+            .recording
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         columns.sort_unstable_by_key(|(key, _)| *key);
         StoreUndo { columns }
     }
@@ -326,7 +388,10 @@ impl EditStore {
         let ci = i64::from(fb.center[0]) / 2;
         let cj = i64::from(fb.center[1]) / 2;
         let (k0, k1) = (i64::from(fb.k_lo) / 2 - 1, i64::from(fb.k_hi) / 2 + 1);
-        let ([i0, i1], [j0, j1]) = (clamp_to_face(grid, 0, ci - r, ci + r), clamp_to_face(grid, 0, cj - r, cj + r));
+        let ([i0, i1], [j0, j1]) = (
+            clamp_to_face(grid, 0, ci - r, ci + r),
+            clamp_to_face(grid, 0, cj - r, cj + r),
+        );
         self.bake_box(grid, fb, op, 0, [i0, j0, k0], [i1, j1, k1])
     }
 
@@ -341,18 +406,34 @@ impl EditStore {
         let (ci0, ci1) = ((ci - r).div_euclid(b), (ci + r).div_euclid(b));
         let (cj0, cj1) = ((cj - r).div_euclid(b), (cj + r).div_euclid(b));
         let (k0, k1) = (i64::from(fb.k_lo) / 2 - 1, i64::from(fb.k_hi) / 2 + 1);
-        let in_range = |c: &ColumnKey| c.face == face && c.level == 0 && (ci0..=ci1).contains(&i64::from(c.ci)) && (cj0..=cj1).contains(&i64::from(c.cj));
+        let in_range = |c: &ColumnKey| {
+            c.face == face
+                && c.level == 0
+                && (ci0..=ci1).contains(&i64::from(c.ci))
+                && (cj0..=cj1).contains(&i64::from(c.cj))
+        };
         // The stored columns in the brush's rectangle: looked up when the
         // rectangle is smaller than the store, else found by a scan.
         let stored: usize = self.shards.iter().map(|s| s.len()).sum();
         let area = (ci1 - ci0 + 1).saturating_mul(cj1 - cj0 + 1);
         let columns: Vec<ColumnKey> = if (area as u64) < stored as u64 {
             (ci0..=ci1)
-                .flat_map(|i| (cj0..=cj1).map(move |j| ColumnKey { face, level: 0, ci: i as i32, cj: j as i32 }))
+                .flat_map(|i| {
+                    (cj0..=cj1).map(move |j| ColumnKey {
+                        face,
+                        level: 0,
+                        ci: i as i32,
+                        cj: j as i32,
+                    })
+                })
                 .filter(|c| self.column(c).is_some())
                 .collect()
         } else {
-            self.shards.iter().flat_map(|s| s.keys().copied()).filter(in_range).collect()
+            self.shards
+                .iter()
+                .flat_map(|s| s.keys().copied())
+                .filter(in_range)
+                .collect()
         };
         // Every cell of the stored bricks in the band, culled with the
         // brush's own bounds; whole bricks it holds need no cell tests (a
@@ -360,12 +441,23 @@ impl EditStore {
         let stacks: Vec<Stack> = columns
             .iter()
             .filter_map(|column| {
-                let bricks: Vec<StackBrick> = self.column(column)?
+                let bricks: Vec<StackBrick> = self
+                    .column(column)?
                     .iter()
                     .filter(|(bk, _)| i64::from(*bk) * b <= k1 && i64::from(*bk) * b + b > k0)
-                    .map(|&(bk, _)| StackBrick { bk, z: [0, b], cull: true })
+                    .map(|&(bk, _)| StackBrick {
+                        bk,
+                        z: [0, b],
+                        cull: true,
+                    })
                     .collect();
-                (!bricks.is_empty()).then_some(Stack { bi: column.ci, bj: column.cj, x: [0, b], y: [0, b], bricks })
+                (!bricks.is_empty()).then_some(Stack {
+                    bi: column.ci,
+                    bj: column.cj,
+                    x: [0, b],
+                    y: [0, b],
+                    bricks,
+                })
             })
             .collect();
         self.bake_stacks(&Footprint::new(grid, fb), 0, &stacks, op)
@@ -375,30 +467,68 @@ impl EditStore {
     /// cells it spans at most `BAKE_RADIUS_HALF` half cells of; coarser ones
     /// follow by majority). Each cell of `level` whose centre it holds takes
     /// the brush after its baked edit. Returns the bricks it changed.
-    pub fn bake_at(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32) -> Vec<BrickKey> {
+    pub fn bake_at(
+        &mut self,
+        grid: &Grid,
+        fb: &FaceBrush,
+        op: BrushOp,
+        level: u32,
+    ) -> Vec<BrickKey> {
         let r = (fb.extent_cells() >> level) + 1;
         let ci = (i64::from(fb.center[0]) / 2) >> level;
         let cj = (i64::from(fb.center[1]) / 2) >> level;
-        let (k0, k1) = ((i64::from(fb.k_lo) / 2 >> level) - 1, (i64::from(fb.k_hi) / 2 >> level) + 1);
-        let ([i0, i1], [j0, j1]) = (clamp_to_face(grid, level, ci - r, ci + r), clamp_to_face(grid, level, cj - r, cj + r));
+        let (k0, k1) = (
+            (i64::from(fb.k_lo) / 2 >> level) - 1,
+            (i64::from(fb.k_hi) / 2 >> level) + 1,
+        );
+        let ([i0, i1], [j0, j1]) = (
+            clamp_to_face(grid, level, ci - r, ci + r),
+            clamp_to_face(grid, level, cj - r, cj + r),
+        );
         self.bake_box(grid, fb, op, level, [i0, j0, k0], [i1, j1, k1])
     }
 
     /// Bake `fb` into every cell of `level` inside the inclusive cell box
     /// `[lo, hi]` whose centre it holds. Returns the bricks it changed.
     #[allow(clippy::too_many_arguments)]
-    fn bake_box(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, lo: [i64; 3], hi: [i64; 3]) -> Vec<BrickKey> {
+    fn bake_box(
+        &mut self,
+        grid: &Grid,
+        fb: &FaceBrush,
+        op: BrushOp,
+        level: u32,
+        lo: [i64; 3],
+        hi: [i64; 3],
+    ) -> Vec<BrickKey> {
         let b = i64::from(BRICK);
         // The box's cells of brick coordinate `v` on `axis`, in brick cells.
-        let clip = |axis: usize, v: i64| [(lo[axis] - v * b).clamp(0, b), (hi[axis] + 1 - v * b).clamp(0, b)];
+        let clip = |axis: usize, v: i64| {
+            [
+                (lo[axis] - v * b).clamp(0, b),
+                (hi[axis] + 1 - v * b).clamp(0, b),
+            ]
+        };
         let (blo, bhi) = (lo.map(|v| v.div_euclid(b)), hi.map(|v| v.div_euclid(b)));
         let mut stacks = Vec::new();
         for bj in blo[1]..=bhi[1] {
             for bi in blo[0]..=bhi[0] {
-                let bricks: Vec<StackBrick> = (blo[2]..=bhi[2]).map(|bk| StackBrick { bk: bk as i32, z: clip(2, bk), cull: false }).filter(|s| s.z[0] < s.z[1]).collect();
+                let bricks: Vec<StackBrick> = (blo[2]..=bhi[2])
+                    .map(|bk| StackBrick {
+                        bk: bk as i32,
+                        z: clip(2, bk),
+                        cull: false,
+                    })
+                    .filter(|s| s.z[0] < s.z[1])
+                    .collect();
                 let (x, y) = (clip(0, bi), clip(1, bj));
                 if x[0] < x[1] && y[0] < y[1] && !bricks.is_empty() {
-                    stacks.push(Stack { bi: bi as i32, bj: bj as i32, x, y, bricks });
+                    stacks.push(Stack {
+                        bi: bi as i32,
+                        bj: bj as i32,
+                        x,
+                        y,
+                        bricks,
+                    });
                 }
             }
         }
@@ -408,19 +538,34 @@ impl EditStore {
     /// Apply a brush to the cells of each stack it holds (the stacks built
     /// side by side); bricks it holds no cell of are left alone. Returns the
     /// bricks it reached.
-    fn bake_stacks(&mut self, footprint: &Footprint, level: u32, stacks: &[Stack], op: BrushOp) -> Vec<BrickKey> {
+    fn bake_stacks(
+        &mut self,
+        footprint: &Footprint,
+        level: u32,
+        stacks: &[Stack],
+        op: BrushOp,
+    ) -> Vec<BrickKey> {
         let material = footprint.fb.material();
         let face = footprint.fb.face();
         let store = &*self;
         let built = par_map(stacks, 1, |stack| {
-            let column = ColumnKey { face, level: level as u8, ci: stack.bi, cj: stack.bj };
+            let column = ColumnKey {
+                face,
+                level: level as u8,
+                ci: stack.bi,
+                cj: stack.bj,
+            };
             let stored = store.column(&column);
             let mut bricks = Vec::new();
             for (s, mask) in stack.bricks.iter().zip(footprint.held(level, stack)) {
                 if mask == [0; 8] {
                     continue;
                 }
-                let old = stored.and_then(|c| c.binary_search_by_key(&s.bk, |(bk, _)| *bk).ok().map(|at| &c[at].1));
+                let old = stored.and_then(|c| {
+                    c.binary_search_by_key(&s.bk, |(bk, _)| *bk)
+                        .ok()
+                        .map(|at| &c[at].1)
+                });
                 let mut brick = old.map_or_else(Brick::default, |b| (**b).clone());
                 for (z, &bits) in mask.iter().enumerate() {
                     let mut bits = bits;
@@ -439,7 +584,13 @@ impl EditStore {
             if bricks.is_empty() {
                 continue;
             }
-            changed.extend(bricks.iter().map(|(bk, _)| BrickKey { face, level: level as u8, bi: column.ci, bj: column.cj, bk: *bk }));
+            changed.extend(bricks.iter().map(|(bk, _)| BrickKey {
+                face,
+                level: level as u8,
+                bi: column.ci,
+                bj: column.cj,
+                bk: *bk,
+            }));
             self.set_column(column, bricks);
         }
         changed
@@ -469,7 +620,9 @@ impl EditStore {
             let store = &*self;
             let built = par_map(&targets, COARSE_PER_TASK, |&key| {
                 let brick = store.coarsen(key);
-                let same = store.brick(&key).map_or(brick.is_unchanged(), |old| **old == brick);
+                let same = store
+                    .brick(&key)
+                    .map_or(brick.is_unchanged(), |old| **old == brick);
                 (key, (!same).then_some(brick))
             });
             let mut next = std::mem::take(&mut changed_at[level]);
@@ -496,7 +649,13 @@ impl EditStore {
         // cells whose coordinates have bit 2 set as `c` has.
         let children: [Option<&Arc<Brick>>; 8] = std::array::from_fn(|c| {
             let at = |v: i32, bit: usize| v * 2 + ((c >> bit) & 1) as i32;
-            self.brick(&BrickKey { face: key.face, level: key.level - 1, bi: at(key.bi, 0), bj: at(key.bj, 1), bk: at(key.bk, 2) })
+            self.brick(&BrickKey {
+                face: key.face,
+                level: key.level - 1,
+                bi: at(key.bi, 0),
+                bj: at(key.bj, 1),
+                bk: at(key.bk, 2),
+            })
         });
         for z in 0..BRICK {
             for y in 0..BRICK {
@@ -515,7 +674,11 @@ impl EditStore {
                     // majority of unchanged children means the cell's own
                     // edit came at this level.
                     let majority = CellEdit::majority(cell);
-                    out.cells[index] = if majority.is_unchanged() { own.map_or(CellEdit::UNCHANGED, |b| b.cells[index]) } else { majority };
+                    out.cells[index] = if majority.is_unchanged() {
+                        own.map_or(CellEdit::UNCHANGED, |b| b.cells[index])
+                    } else {
+                        majority
+                    };
                 }
             }
         }
@@ -525,9 +688,17 @@ impl EditStore {
     /// One above the highest baked solid cell of level column (i, j), if
     /// any.
     pub fn solid_top(&self, face: u8, level: u32, i: i32, j: i32) -> Option<i32> {
-        let key = ColumnKey { face, level: level as u8, ci: i.div_euclid(BRICK), cj: j.div_euclid(BRICK) };
+        let key = ColumnKey {
+            face,
+            level: level as u8,
+            ci: i.div_euclid(BRICK),
+            cj: j.div_euclid(BRICK),
+        };
         self.column(&key)?.iter().rev().find_map(|(bk, brick)| {
-            (0..BRICK).rev().find(|&z| brick.cells[Brick::index(i, j, z)].state() == CellEdit::SOLID).map(|z| bk * BRICK + z + 1)
+            (0..BRICK)
+                .rev()
+                .find(|&z| brick.cells[Brick::index(i, j, z)].state() == CellEdit::SOLID)
+                .map(|z| bk * BRICK + z + 1)
         })
     }
 }
@@ -577,7 +748,11 @@ enum ColumnTest {
     /// A ball: cell heights (half base layers) in `inner` are certainly
     /// inside it, outside `outer` certainly not; between (everywhere past
     /// the line's bound), the exact test over the column's domain point.
-    Ball { point: IVec3, inner: [f64; 2], outer: [f64; 2] },
+    Ball {
+        point: IVec3,
+        inner: [f64; 2],
+        outer: [f64; 2],
+    },
 }
 
 /// Which cells of a face's bricks a brush holds, exactly as
@@ -593,14 +768,21 @@ struct Footprint<'a> {
 
 impl<'a> Footprint<'a> {
     fn new(grid: &'a Grid, fb: &'a FaceBrush) -> Self {
-        Self { fb, grid, map: grid.volume_map(), points: grid.volume_points() }
+        Self {
+            fb,
+            grid,
+            map: grid.volume_map(),
+            points: grid.volume_points(),
+        }
     }
 
     /// The cells of each brick of `stack` (cells of `level`) the brush
     /// holds.
     fn held(&self, level: u32, stack: &Stack) -> Vec<Mask> {
         let mut masks = vec![[0u64; 8]; stack.bricks.len()];
-        let row = (stack.y[0]..stack.y[1]).fold(0u64, |row, y| row | ((1u64 << (stack.x[1] - stack.x[0])) - 1) << (stack.x[0] + 8 * y));
+        let row = (stack.y[0]..stack.y[1]).fold(0u64, |row, y| {
+            row | ((1u64 << (stack.x[1] - stack.x[0])) - 1) << (stack.x[0] + 8 * y)
+        });
         // Bricks to test cell by cell, and their cells' lowest and highest.
         let mut tested = vec![true; stack.bricks.len()];
         let mut span: Option<[i32; 2]> = None;
@@ -617,7 +799,10 @@ impl<'a> Footprint<'a> {
                 }
             }
             if *tested {
-                let (lo, hi) = (s.bk * BRICK + s.z[0] as i32, s.bk * BRICK + s.z[1] as i32 - 1);
+                let (lo, hi) = (
+                    s.bk * BRICK + s.z[0] as i32,
+                    s.bk * BRICK + s.z[1] as i32 - 1,
+                );
                 span = Some(span.map_or([lo, hi], |[a, b]| [a.min(lo), b.max(hi)]));
             }
         }
@@ -631,7 +816,12 @@ impl<'a> Footprint<'a> {
                     continue;
                 }
                 let bit = 1u64 << (x + 8 * y);
-                for ((mask, s), _) in masks.iter_mut().zip(&stack.bricks).zip(&tested).filter(|(_, tested)| **tested) {
+                for ((mask, s), _) in masks
+                    .iter_mut()
+                    .zip(&stack.bricks)
+                    .zip(&tested)
+                    .filter(|(_, tested)| **tested)
+                {
                     for z in s.z[0]..s.z[1] {
                         if self.holds(&test, face, i, j, s.bk * BRICK + z as i32, level) {
                             mask[z as usize] |= bit;
@@ -647,11 +837,21 @@ impl<'a> Footprint<'a> {
     /// test.
     #[inline]
     fn holds(&self, test: &ColumnTest, face: u8, i: i32, j: i32, k: i32, level: u32) -> bool {
-        let centre = [center_half(i, level), center_half(j, level), center_half(k, level)];
+        let centre = [
+            center_half(i, level),
+            center_half(j, level),
+            center_half(k, level),
+        ];
         match *test {
             ColumnTest::Empty => false,
-            ColumnTest::Exact => self.fb.contains(centre, || self.points.point(face, i, j, k, level)),
-            ColumnTest::Ball { point, inner, outer } => {
+            ColumnTest::Exact => self
+                .fb
+                .contains(centre, || self.points.point(face, i, j, k, level)),
+            ColumnTest::Ball {
+                point,
+                inner,
+                outer,
+            } => {
                 let h = f64::from(centre[2]);
                 if inner[0] <= h && h <= inner[1] {
                     true
@@ -674,10 +874,15 @@ impl<'a> Footprint<'a> {
         let (base, rise, limit) = self.points.line(point);
         // Heights of the span's ends, unwrapped: within the bound (and far
         // from wrapping), every height between lies on the line.
-        let reach = span.map(|k| ((i64::from(k) << (level + 1)) + (1i64 << level)).unsigned_abs() as f64);
+        let reach =
+            span.map(|k| ((i64::from(k) << (level + 1)) + (1i64 << level)).unsigned_abs() as f64);
         let a = rise.length_squared();
         if reach[0].max(reach[1]) > limit.min(2f64.powi(30)) || a == 0.0 {
-            return ColumnTest::Ball { point, inner: [f64::INFINITY, f64::NEG_INFINITY], outer: [f64::NEG_INFINITY, f64::INFINITY] };
+            return ColumnTest::Ball {
+                point,
+                inner: [f64::INFINITY, f64::NEG_INFINITY],
+                outer: [f64::NEG_INFINITY, f64::INFINITY],
+            };
         }
         // Heights where the line is within `radius` of the centre: the
         // roots of |d + rise h|^2 = radius^2.
@@ -694,7 +899,11 @@ impl<'a> Footprint<'a> {
         let r = f64::from(ball[3].unsigned_abs());
         match within(r + COLUMN_MARGIN) {
             None => ColumnTest::Empty,
-            Some(outer) => ColumnTest::Ball { point, inner: within(r - COLUMN_MARGIN).unwrap_or([f64::INFINITY, f64::NEG_INFINITY]), outer },
+            Some(outer) => ColumnTest::Ball {
+                point,
+                inner: within(r - COLUMN_MARGIN).unwrap_or([f64::INFINITY, f64::NEG_INFINITY]),
+                outer,
+            },
         }
     }
 }
@@ -704,7 +913,11 @@ const COARSE_PER_TASK: usize = 4;
 
 /// `f` of every item in order, on the thread pool in runs of at least
 /// `per_task` items.
-fn par_map<T: Sync, R: Send>(items: &[T], per_task: usize, f: impl Fn(&T) -> R + Sync + Send) -> Vec<R> {
+fn par_map<T: Sync, R: Send>(
+    items: &[T],
+    per_task: usize,
+    f: impl Fn(&T) -> R + Sync + Send,
+) -> Vec<R> {
     use rayon::prelude::*;
     if items.len() <= per_task {
         return items.iter().map(f).collect();
@@ -750,14 +963,24 @@ mod tests {
             seqs.extend(next);
         }
         for seq in &seqs {
-            let edit = seq.iter().fold(CellEdit::UNCHANGED, |e, &(op, m)| e.then(op, m));
+            let edit = seq
+                .iter()
+                .fold(CellEdit::UNCHANGED, |e, &(op, m)| e.then(op, m));
             for kind in [0, 1] {
-                assert_eq!(edit.apply(kind, 0), replay(seq, kind), "{seq:?} over kind {kind}");
+                assert_eq!(
+                    edit.apply(kind, 0),
+                    replay(seq, kind),
+                    "{seq:?} over kind {kind}"
+                );
             }
             // Splitting the sequence anywhere and composing the halves agrees.
             for cut in 0..=seq.len() {
-                let a = seq[..cut].iter().fold(CellEdit::UNCHANGED, |e, &(op, m)| e.then(op, m));
-                let b = seq[cut..].iter().fold(CellEdit::UNCHANGED, |e, &(op, m)| e.then(op, m));
+                let a = seq[..cut]
+                    .iter()
+                    .fold(CellEdit::UNCHANGED, |e, &(op, m)| e.then(op, m));
+                let b = seq[cut..]
+                    .iter()
+                    .fold(CellEdit::UNCHANGED, |e, &(op, m)| e.then(op, m));
                 assert_eq!(a.then_edit(b), edit, "{seq:?} cut at {cut}");
             }
         }
@@ -768,36 +991,75 @@ mod tests {
         let u = CellEdit::UNCHANGED;
         let a = CellEdit::AIR;
         let s = CellEdit::solid(3);
-        assert_eq!(CellEdit::majority([a, a, a, a, u, u, u, u]), u, "half unchanged stays unchanged");
+        assert_eq!(
+            CellEdit::majority([a, a, a, a, u, u, u, u]),
+            u,
+            "half unchanged stays unchanged"
+        );
         assert_eq!(CellEdit::majority([a, a, a, a, a, u, u, u]), a);
-        assert_eq!(CellEdit::majority([a, a, a, s, s, s, u, u]), a, "air wins ties");
-        assert_eq!(CellEdit::majority([s, s, s, s, s, CellEdit::solid(4), u, u]), s);
+        assert_eq!(
+            CellEdit::majority([a, a, a, s, s, s, u, u]),
+            a,
+            "air wins ties"
+        );
+        assert_eq!(
+            CellEdit::majority([s, s, s, s, s, CellEdit::solid(4), u, u]),
+            s
+        );
     }
 
     /// Cell by cell over the box a bake visits, with the containment test
     /// generation uses: what [`EditStore::bake`] (`base`) and
     /// [`EditStore::bake_at`] must produce.
-    fn bake_cell_by_cell(store: &mut EditStore, grid: &Grid, fb: &FaceBrush, op: BrushOp, level: u32, base: bool) -> Vec<BrickKey> {
+    fn bake_cell_by_cell(
+        store: &mut EditStore,
+        grid: &Grid,
+        fb: &FaceBrush,
+        op: BrushOp,
+        level: u32,
+        base: bool,
+    ) -> Vec<BrickKey> {
         let face = fb.face();
-        let r = if base { fb.extent_cells() } else { (fb.extent_cells() >> level) + 1 };
+        let r = if base {
+            fb.extent_cells()
+        } else {
+            (fb.extent_cells() >> level) + 1
+        };
         let ci = (i64::from(fb.center[0]) / 2) >> level;
         let cj = (i64::from(fb.center[1]) / 2) >> level;
         let n = i64::from(grid.cells() >> level);
-        let clamp = |lo: i64, hi: i64| if grid.shape() == crate::grid::Shape::InfinitePlane { (lo, hi) } else { (lo.max(0), hi.min(n - 1)) };
+        let clamp = |lo: i64, hi: i64| {
+            if grid.shape() == crate::grid::Shape::InfinitePlane {
+                (lo, hi)
+            } else {
+                (lo.max(0), hi.min(n - 1))
+            }
+        };
         let (i0, i1) = clamp(ci - r, ci + r);
         let (j0, j1) = clamp(cj - r, cj + r);
-        let (k0, k1) = ((i64::from(fb.k_lo) / 2 >> level) - 1, (i64::from(fb.k_hi) / 2 >> level) + 1);
+        let (k0, k1) = (
+            (i64::from(fb.k_lo) / 2 >> level) - 1,
+            (i64::from(fb.k_hi) / 2 >> level) + 1,
+        );
         let mut touched: FxHashMap<BrickKey, Brick> = FxHashMap::default();
         for k in k0..=k1 {
             for j in j0..=j1 {
                 for i in i0..=i1 {
                     let (i, j, k) = (i as i32, j as i32, k as i32);
-                    let centre = [center_half(i, level), center_half(j, level), center_half(k, level)];
+                    let centre = [
+                        center_half(i, level),
+                        center_half(j, level),
+                        center_half(k, level),
+                    ];
                     if !fb.contains(centre, || grid.volume_point(face, i, j, k, level)) {
                         continue;
                     }
                     let key = BrickKey::of_cell(face, level, i, j, k);
-                    let brick = touched.entry(key).or_insert_with(|| store.brick(&key).map_or_else(Brick::default, |b| (**b).clone()));
+                    let brick = touched.entry(key).or_insert_with(|| {
+                        store
+                            .brick(&key)
+                            .map_or_else(Brick::default, |b| (**b).clone())
+                    });
                     let cell = &mut brick.cells[Brick::index(i, j, k)];
                     *cell = cell.then(op, fb.material());
                 }
@@ -812,7 +1074,12 @@ mod tests {
 
     /// Cell by cell over the stored base bricks in reach the brush's bounds
     /// do not cull: what [`EditStore::apply_over`] must produce.
-    fn apply_over_cell_by_cell(store: &mut EditStore, grid: &Grid, fb: &FaceBrush, op: BrushOp) -> Vec<BrickKey> {
+    fn apply_over_cell_by_cell(
+        store: &mut EditStore,
+        grid: &Grid,
+        fb: &FaceBrush,
+        op: BrushOp,
+    ) -> Vec<BrickKey> {
         let face = fb.face();
         let (r, b) = (fb.extent_cells(), i64::from(BRICK));
         let (ci, cj) = (i64::from(fb.center[0]) / 2, i64::from(fb.center[1]) / 2);
@@ -822,24 +1089,36 @@ mod tests {
             .bricks()
             .map(|(key, _)| key)
             .filter(|key| key.face == face && key.level == 0)
-            .filter(|key| ((ci - r).div_euclid(b)..=(ci + r).div_euclid(b)).contains(&i64::from(key.bi)))
-            .filter(|key| ((cj - r).div_euclid(b)..=(cj + r).div_euclid(b)).contains(&i64::from(key.bj)))
+            .filter(|key| {
+                ((ci - r).div_euclid(b)..=(ci + r).div_euclid(b)).contains(&i64::from(key.bi))
+            })
+            .filter(|key| {
+                ((cj - r).div_euclid(b)..=(cj + r).div_euclid(b)).contains(&i64::from(key.bj))
+            })
             .filter(|key| i64::from(key.bk) * b <= k1 && i64::from(key.bk) * b + b > k0)
             .collect();
         let mut changed = Vec::new();
         for key in keys {
             let mut brick = (**store.brick(&key).unwrap()).clone();
-            let whole = meets(fb, Cube::brick([key.bi.into(), key.bj.into(), key.bk.into()], 0), grid, &map);
+            let whole = meets(
+                fb,
+                Cube::brick([key.bi.into(), key.bj.into(), key.bk.into()], 0),
+                grid,
+                &map,
+            );
             let mut any = false;
             for z in 0..BRICK {
                 for y in 0..BRICK {
                     for x in 0..BRICK {
-                        let (i, j, k) = (key.bi * BRICK + x, key.bj * BRICK + y, key.bk * BRICK + z);
+                        let (i, j, k) =
+                            (key.bi * BRICK + x, key.bj * BRICK + y, key.bk * BRICK + z);
                         let centre = [center_half(i, 0), center_half(j, 0), center_half(k, 0)];
                         let held = match whole {
                             Meets::Outside => false,
                             Meets::Contains => true,
-                            Meets::Crosses => fb.contains(centre, || grid.volume_point(face, i, j, k, 0)),
+                            Meets::Crosses => {
+                                fb.contains(centre, || grid.volume_point(face, i, j, k, 0))
+                            }
                         };
                         if held {
                             let cell = &mut brick.cells[Brick::index(i, j, k)];
@@ -858,7 +1137,10 @@ mod tests {
     }
 
     fn sorted(store: &EditStore) -> Vec<(BrickKey, Brick)> {
-        let mut bricks: Vec<_> = store.bricks().map(|(key, brick)| (key, (**brick).clone())).collect();
+        let mut bricks: Vec<_> = store
+            .bricks()
+            .map(|(key, brick)| (key, (**brick).clone()))
+            .collect();
         bricks.sort_unstable_by_key(|(key, _)| *key);
         bricks
     }
@@ -895,18 +1177,53 @@ mod tests {
                 // the time at a face edge or corner.
                 let face = faces[brush_index % faces.len().min(2)];
                 let edge = brush_index % 4 < 2;
-                let spot = |v: f64| if edge { v * 6.0 - 3.0 } else { n * 0.37 + v * 40.0 };
-                let (fi, fj) = (spot(next()), if brush_index % 4 == 0 { spot(next()) } else { n * 0.37 + next() * 40.0 });
+                let spot = |v: f64| {
+                    if edge {
+                        v * 6.0 - 3.0
+                    } else {
+                        n * 0.37 + v * 40.0
+                    }
+                };
+                let (fi, fj) = (
+                    spot(next()),
+                    if brush_index % 4 == 0 {
+                        spot(next())
+                    } else {
+                        n * 0.37 + next() * 40.0
+                    },
+                );
                 let centre = grid.position(face, [fi, fj, next() * 20.0 - 10.0]);
-                let radius = [0.05, 0.3, 0.8, 1.6, 3.2, 4.0, 6.0][brush_index % 7] * (0.75 + 0.5 * next()) * (s / 0.1).sqrt();
-                let shape = if brush_index % 5 == 3 { BrushShape::Cube } else { BrushShape::Sphere };
+                let radius = [0.05, 0.3, 0.8, 1.6, 3.2, 4.0, 6.0][brush_index % 7]
+                    * (0.75 + 0.5 * next())
+                    * (s / 0.1).sqrt();
+                let shape = if brush_index % 5 == 3 {
+                    BrushShape::Cube
+                } else {
+                    BrushShape::Sphere
+                };
                 let op = [BrushOp::Remove, BrushOp::Add, BrushOp::Paint][brush_index % 3];
-                let height = if shape == BrushShape::Cube && brush_index % 2 == 0 { radius * 0.4 } else { 0.0 };
-                let brush = Brush { center: centre.to_array(), radius, shape, op, material: 1 + brush_index as u32, height };
-                let Ok(resolved) = brush.resolve(grid) else { continue };
+                let height = if shape == BrushShape::Cube && brush_index % 2 == 0 {
+                    radius * 0.4
+                } else {
+                    0.0
+                };
+                let brush = Brush {
+                    center: centre.to_array(),
+                    radius,
+                    shape,
+                    op,
+                    material: 1 + brush_index as u32,
+                    height,
+                };
+                let Ok(resolved) = brush.resolve(grid) else {
+                    continue;
+                };
                 for fb in &resolved {
                     let (mut a, mut b) = if fb.radius_half <= crate::planet::BAKE_RADIUS_HALF {
-                        (fast.bake(grid, fb, op), bake_cell_by_cell(&mut exact, grid, fb, op, 0, true))
+                        (
+                            fast.bake(grid, fb, op),
+                            bake_cell_by_cell(&mut exact, grid, fb, op, 0, true),
+                        )
                     } else {
                         let level = crate::planet::bake_level(fb);
                         let mut a = fast.apply_over(grid, fb, op);
@@ -917,11 +1234,20 @@ mod tests {
                     };
                     a.sort_unstable();
                     b.sort_unstable();
-                    assert_eq!(a, b, "grid {g}, brush {brush_index} {brush:?}: bricks reached");
-                    assert!(sorted(&fast) == sorted(&exact), "grid {g}, brush {brush_index} {brush:?}: baked cells differ");
+                    assert_eq!(
+                        a, b,
+                        "grid {g}, brush {brush_index} {brush:?}: bricks reached"
+                    );
+                    assert!(
+                        sorted(&fast) == sorted(&exact),
+                        "grid {g}, brush {brush_index} {brush:?}: baked cells differ"
+                    );
                 }
             }
-            assert!(fast.brick_counts().iter().sum::<usize>() > 0, "grid {g} baked nothing");
+            assert!(
+                fast.brick_counts().iter().sum::<usize>() > 0,
+                "grid {g} baked nothing"
+            );
         }
     }
 }

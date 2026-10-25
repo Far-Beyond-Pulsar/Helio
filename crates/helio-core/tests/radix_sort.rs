@@ -18,17 +18,33 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) as u32
     }
 }
 
-fn sort_on_gpu(device: &wgpu::Device, queue: &wgpu::Queue, sort: &RadixSort, keys: &[u32], capacity: u32) -> (Vec<u32>, Vec<u32>) {
-    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+fn sort_on_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    sort: &RadixSort,
+    keys: &[u32],
+    capacity: u32,
+) -> (Vec<u32>, Vec<u32>) {
+    let usage =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     let mut padded = keys.to_vec();
     padded.resize(capacity as usize, 0xdead_beef);
     let indices: Vec<u32> = (0..capacity).collect();
-    let buffer = |label, data: &[u32]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(data), usage });
+    let buffer = |label, data: &[u32]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(data),
+            usage,
+        })
+    };
     let keys_a = buffer("keys a", &padded);
     let keys_b = buffer("keys b", &vec![0; capacity as usize]);
     let indices_a = buffer("indices a", &indices);
@@ -41,14 +57,27 @@ fn sort_on_gpu(device: &wgpu::Device, queue: &wgpu::Queue, sort: &RadixSort, key
         contents: bytemuck::cast_slice(&[blocks, 1, 1]),
         usage: wgpu::BufferUsages::INDIRECT,
     });
-    let binds = sort.bind(device, &frame, [&keys_a, &keys_b], [&indices_a, &indices_b], capacity);
+    let binds = sort.bind(
+        device,
+        &frame,
+        [&keys_a, &keys_b],
+        [&indices_a, &indices_b],
+        capacity,
+    );
     let mut encoder = device.create_command_encoder(&Default::default());
     {
         let mut pass = ComputeCmds::from_wgpu(encoder.begin_compute_pass(&Default::default()));
         sort.record(&mut pass, &binds, &dispatch, 0);
     }
     let bytes = u64::from(count.max(1)) * 4;
-    let read = |label| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let read = |label| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
     let (out_keys, out_indices) = (read("out keys"), read("out indices"));
     encoder.copy_buffer_to_buffer(&keys_a, 0, &out_keys, 0, bytes);
     encoder.copy_buffer_to_buffer(&indices_a, 0, &out_indices, 0, bytes);
@@ -73,9 +102,23 @@ fn sorts_stably_like_the_cpu() {
     let cases: Vec<(&str, Vec<u32>, u32)> = vec![
         ("empty", vec![], 256),
         ("one", vec![42], 256),
-        ("partial block, few distinct keys", (0..1000).map(|_| rng.next() % 7).collect(), 1024),
-        ("full blocks, duplicates in every digit", (0..4096).map(|_| (rng.next() % 64) * 0x0101_0101).collect(), 4096),
-        ("full-range keys", (0..70_001).map(|_| rng.next() ^ (rng.next() << 16)).collect(), 70_400),
+        (
+            "partial block, few distinct keys",
+            (0..1000).map(|_| rng.next() % 7).collect(),
+            1024,
+        ),
+        (
+            "full blocks, duplicates in every digit",
+            (0..4096).map(|_| (rng.next() % 64) * 0x0101_0101).collect(),
+            4096,
+        ),
+        (
+            "full-range keys",
+            (0..70_001)
+                .map(|_| rng.next() ^ (rng.next() << 16))
+                .collect(),
+            70_400,
+        ),
         ("all equal", vec![0xabcd_ef01; 3000], 3072),
     ];
     for (name, keys, capacity) in cases {
@@ -84,6 +127,9 @@ fn sorts_stably_like_the_cpu() {
         expected.sort_by_key(|p| p.0); // stable
         let (want_keys, want_indices): (Vec<u32>, Vec<u32>) = expected.into_iter().unzip();
         assert_eq!(got_keys, want_keys, "{name}: keys");
-        assert_eq!(got_indices, want_indices, "{name}: input order of equal keys");
+        assert_eq!(
+            got_indices, want_indices,
+            "{name}: input order of equal keys"
+        );
     }
 }

@@ -22,9 +22,7 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
         (sum / weight) as f32
     }
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(
-            helio_core::wgpu_instance_descriptor().with_env(),
-        );
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
@@ -34,7 +32,9 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Exposure reduction test shader"),
             source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(&shader_source).into_owned().into(),
+                helio_core::shader::resolve(&shader_source)
+                    .into_owned()
+                    .into(),
             ),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -119,7 +119,8 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
                     for x in (0..width).step_by(4) {
                         let i = ((y * width + x) * 4) as usize;
                         let rgb = [pixels[i] as f64, pixels[i + 1] as f64, pixels[i + 2] as f64];
-                        let luminance = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255.0;
+                        let luminance =
+                            (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255.0;
                         logs.push(luminance.max(0.00001).log2());
                     }
                 }
@@ -128,18 +129,27 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
             // Geometry everywhere (reversed Z: sky is depth 0).
             let depth = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Exposure reduction test depth"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
             let depth_view = depth.create_view(&Default::default());
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Exposure reduction test input"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -180,10 +190,24 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
                 label: Some("Exposure reduction test bindings"),
                 layout: &layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_view) },
-                    wgpu::BindGroupEntry { binding: 11, resource: output.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 15, resource: partials.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(
+                            &texture.create_view(&Default::default()),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: output.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: partials.as_entire_binding(),
+                    },
                 ],
             });
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -192,7 +216,10 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.5), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.5),
+                        store: wgpu::StoreOp::Store,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -208,12 +235,17 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
             encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 4);
             queue.submit([encoder.finish()]);
             let (tx, rx) = std::sync::mpsc::channel();
-            readback.slice(..).map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+            readback
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             rx.recv().unwrap().unwrap();
             let bytes = readback.slice(..).get_mapped_range().unwrap();
             let actual = f32::from_le_bytes(bytes[..4].try_into().unwrap());
-            assert!((actual - expected).abs() < 0.0005, "{width}x{height}: {actual} vs {expected}");
+            assert!(
+                (actual - expected).abs() < 0.0005,
+                "{width}x{height}: {actual} vs {expected}"
+            );
             drop(bytes);
             readback.unmap();
         }

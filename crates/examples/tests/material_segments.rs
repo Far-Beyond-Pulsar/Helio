@@ -74,8 +74,7 @@ fn spawn_box(scene_db: &mut SceneDb, material: Entity, translation: Vec3, graph:
 
 #[test]
 fn objects_keep_their_material_while_other_objects_change_theirs() {
-    let instance =
-        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;

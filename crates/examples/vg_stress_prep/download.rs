@@ -12,7 +12,8 @@ use std::{
 pub const MAX_ATTEMPTS: u32 = 6;
 
 /// Identifies this engine to servers (Poly Haven asks API clients to do so).
-pub const USER_AGENT: &str = "PulsarEngine-Helio-vg_stress/1.0 (+https://github.com/Far-Beyond-Pulsar)";
+pub const USER_AGENT: &str =
+    "PulsarEngine-Helio-vg_stress/1.0 (+https://github.com/Far-Beyond-Pulsar)";
 
 /// Which digest a download is checked against. Stanford archives are pinned by
 /// SHA-256; Poly Haven publishes MD5 (and sizes) for every file.
@@ -81,7 +82,10 @@ fn hash_file(path: &Path, kind: Checksum, progress: &dyn Fn(&str)) -> Result<Str
 }
 
 fn file_name(p: &Path) -> String {
-    p.file_name().unwrap_or_default().to_string_lossy().to_string()
+    p.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
 }
 
 fn marker(dest: &Path, kind: Checksum) -> PathBuf {
@@ -183,7 +187,9 @@ fn attempt(
         if done > size {
             drop(file);
             let _ = std::fs::remove_file(part_path);
-            return Ok(Outcome::Retry("server sent more than the expected size".into()));
+            return Ok(Outcome::Retry(
+                "server sent more than the expected size".into(),
+            ));
         }
         if last.elapsed() >= Duration::from_secs(2) {
             last = std::time::Instant::now();
@@ -198,7 +204,9 @@ fn attempt(
     if done == size {
         Ok(Outcome::Complete)
     } else {
-        Ok(Outcome::Retry(format!("connection ended at {done}/{size} bytes")))
+        Ok(Outcome::Retry(format!(
+            "connection ended at {done}/{size} bytes"
+        )))
     }
 }
 
@@ -212,7 +220,14 @@ pub fn fetch(
     backoff: Duration,
     progress: &dyn Fn(&str),
 ) -> Result<(), String> {
-    fetch_checked(urls, dest, size, Checksum::Sha256(sha256), backoff, progress)
+    fetch_checked(
+        urls,
+        dest,
+        size,
+        Checksum::Sha256(sha256),
+        backoff,
+        progress,
+    )
 }
 
 /// [`fetch`] with a choice of digest.
@@ -259,7 +274,10 @@ pub fn fetch_checked(
                     }
                     let _ = std::fs::remove_file(&part_path);
                     hash_failures += 1;
-                    last_error = format!("{label}: {} mismatch (got {hash}, expected {sha256})", kind.name());
+                    last_error = format!(
+                        "{label}: {} mismatch (got {hash}, expected {sha256})",
+                        kind.name()
+                    );
                     if hash_failures >= 2 {
                         return Err(last_error);
                     }
@@ -284,7 +302,11 @@ mod tests {
 
     /// Serves `body` for any path. `cut_first`: the first request sends only
     /// half the body then closes. `fail_first`: first request gets a 503.
-    fn serve(body: Vec<u8>, cut_first: bool, fail_first: bool) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
+    fn serve(
+        body: Vec<u8>,
+        cut_first: bool,
+        fail_first: bool,
+    ) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/file.bin", listener.local_addr().unwrap());
         let hits = Arc::new(AtomicUsize::new(0));
@@ -307,7 +329,9 @@ mod tests {
                 }
                 r.lock().unwrap().push(format!("{range:?}"));
                 if fail_first && n == 0 {
-                    let _ = s.write_all(b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    let _ = s.write_all(
+                        b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
                     continue;
                 }
                 let start = range.unwrap_or(0).min(body.len());
@@ -315,7 +339,10 @@ mod tests {
                 let head = if range.is_some() {
                     format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n", part.len(), start, body.len() - 1, body.len())
                 } else {
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", part.len())
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        part.len()
+                    )
                 };
                 let _ = s.write_all(head.as_bytes());
                 if cut_first && n == 0 {
@@ -330,7 +357,10 @@ mod tests {
     }
 
     fn hash(b: &[u8]) -> String {
-        Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+        Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect()
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -350,10 +380,26 @@ mod tests {
         let (url, _, _) = serve(b.clone(), false, false);
         let d = tmp("ok");
         let dest = d.join("f.bin");
-        fetch(&[&url], &dest, b.len() as u64, &hash(&b), Duration::from_millis(1), &|_| {}).unwrap();
+        fetch(
+            &[&url],
+            &dest,
+            b.len() as u64,
+            &hash(&b),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b);
         // Second call is a verified no-op (server not contacted again).
-        fetch(&[&url], &dest, b.len() as u64, &hash(&b), Duration::from_millis(1), &|_| {}).unwrap();
+        fetch(
+            &[&url],
+            &dest,
+            b.len() as u64,
+            &hash(&b),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap();
     }
 
     #[test]
@@ -362,7 +408,15 @@ mod tests {
         let (url, hits, ranges) = serve(b.clone(), true, false);
         let d = tmp("resume");
         let dest = d.join("f.bin");
-        fetch(&[&url], &dest, b.len() as u64, &hash(&b), Duration::from_millis(1), &|_| {}).unwrap();
+        fetch(
+            &[&url],
+            &dest,
+            b.len() as u64,
+            &hash(&b),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b);
         assert!(hits.load(Ordering::SeqCst) >= 2);
         let r = ranges.lock().unwrap();
@@ -371,7 +425,15 @@ mod tests {
 
         let (url, hits, _) = serve(b.clone(), false, true);
         let dest = d.join("g.bin");
-        fetch(&[&url], &dest, b.len() as u64, &hash(&b), Duration::from_millis(1), &|_| {}).unwrap();
+        fetch(
+            &[&url],
+            &dest,
+            b.len() as u64,
+            &hash(&b),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 2, "503 then success");
     }
 
@@ -381,8 +443,15 @@ mod tests {
         let (url, _, _) = serve(b.clone(), false, false);
         let d = tmp("bad");
         let dest = d.join("f.bin");
-        let err = fetch(&[&url], &dest, b.len() as u64, &hash(b"other"), Duration::from_millis(1), &|_| {})
-            .unwrap_err();
+        let err = fetch(
+            &[&url],
+            &dest,
+            b.len() as u64,
+            &hash(b"other"),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap_err();
         assert!(err.contains("SHA-256 mismatch"), "{err}");
         assert!(!dest.exists() && !part(&dest).exists());
     }
@@ -404,12 +473,22 @@ mod tests {
                         break;
                     }
                 }
-                let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = s.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
             }
         });
         let d = tmp("mirror");
         let dest = d.join("f.bin");
-        fetch(&[&bad, &good], &dest, b.len() as u64, &hash(&b), Duration::from_millis(1), &|_| {}).unwrap();
+        fetch(
+            &[&bad, &good],
+            &dest,
+            b.len() as u64,
+            &hash(&b),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b);
     }
 
@@ -420,7 +499,15 @@ mod tests {
         let dest = d.join("f.bin");
         std::fs::write(&dest, &b).unwrap();
         // No reachable URL: succeeds purely on the local file's hash.
-        fetch(&["http://127.0.0.1:1/none"], &dest, b.len() as u64, &hash(&b), Duration::from_millis(1), &|_| {}).unwrap();
+        fetch(
+            &["http://127.0.0.1:1/none"],
+            &dest,
+            b.len() as u64,
+            &hash(&b),
+            Duration::from_millis(1),
+            &|_| {},
+        )
+        .unwrap();
         assert!(marker(&dest, Checksum::Sha256("")).exists());
     }
 }

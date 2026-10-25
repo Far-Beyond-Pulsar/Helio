@@ -81,7 +81,8 @@ pub fn missing_models(assets: &Path) -> Vec<&'static Model> {
     MODELS
         .iter()
         .filter(|m| {
-            !glb_path(assets, m).is_file() || manifest.get(m.name).map(String::as_str) != Some(m.recipe().as_str())
+            !glb_path(assets, m).is_file()
+                || manifest.get(m.name).map(String::as_str) != Some(m.recipe().as_str())
         })
         .collect()
 }
@@ -125,7 +126,11 @@ impl Lock {
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
         let mut announced = false;
         loop {
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
                 Ok(_) => return Ok(Lock(path)),
                 Err(_) => {
                     let age = std::fs::metadata(&path)
@@ -268,7 +273,12 @@ fn provision_polyhaven(
 }
 
 /// Stanford scans: download, then convert to GLB. Returns the errors.
-fn provision_scans(assets: &Path, mut todo: Vec<&'static Model>, progress: Progress, lock: &Lock) -> Vec<String> {
+fn provision_scans(
+    assets: &Path,
+    mut todo: Vec<&'static Model>,
+    progress: Progress,
+    lock: &Lock,
+) -> Vec<String> {
     progress(LICENCE_NOTICE);
     let source_dir = assets.join("source");
     let throttled = Throttle::new(progress, lock);
@@ -306,9 +316,21 @@ fn provision_scans(assets: &Path, mut todo: Vec<&'static Model>, progress: Progr
             .iter()
             .any(|s| s.file == m.archive && source_dir.join(s.file).is_file())
             && source_dir.join(m.archive).metadata().is_ok()
-            && errors.lock().unwrap().iter().all(|e| !e.contains(m.archive))
+            && errors
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|e| !e.contains(m.archive))
     });
-    todo.sort_by_key(|m| std::cmp::Reverse(source_dir.join(m.archive).metadata().map(|x| x.len()).unwrap_or(0)));
+    todo.sort_by_key(|m| {
+        std::cmp::Reverse(
+            source_dir
+                .join(m.archive)
+                .metadata()
+                .map(|x| x.len())
+                .unwrap_or(0),
+        )
+    });
     let next = AtomicUsize::new(0);
     let done = Mutex::new(read_manifest(assets));
     std::thread::scope(|scope| {
@@ -320,7 +342,8 @@ fn provision_scans(assets: &Path, mut todo: Vec<&'static Model>, progress: Progr
                     Ok(()) => {
                         let mut d = done.lock().unwrap();
                         d.insert(model.name.to_string(), model.recipe());
-                        let _ = std::fs::write(manifest_path(assets), serde_json_lite::write_map(&d));
+                        let _ =
+                            std::fs::write(manifest_path(assets), serde_json_lite::write_map(&d));
                     }
                     Err(e) => errors.lock().unwrap().push(e),
                 }
@@ -418,4 +441,3 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
-

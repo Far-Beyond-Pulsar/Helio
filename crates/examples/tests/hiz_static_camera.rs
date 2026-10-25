@@ -30,8 +30,7 @@ struct Harness {
 impl Harness {
     /// `None` when no GPU adapter is available.
     fn new(populate: impl FnOnce(&mut SceneDb)) -> Option<(Self, SceneDb)> {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: helio::required_wgpu_features(

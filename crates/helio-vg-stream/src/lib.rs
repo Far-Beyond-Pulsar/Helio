@@ -31,13 +31,11 @@ pub mod scheduler;
 pub mod source;
 pub mod store;
 
-pub use crate::core::{
-    PageBytes, StoreCore, VgStreamConfig, VgStreamError, PAGE_NOT_RESIDENT,
-};
+pub use crate::core::{PageBytes, StoreCore, VgStreamConfig, VgStreamError, PAGE_NOT_RESIDENT};
 pub use feedback::{Feedback, FeedbackLayout};
 pub use proxy::{
-    build_proxy, error_ladder, proxy_key, ProxyBuild, ProxyCache, ProxyCacheStats, ProxyLodCpu, ProxyOptions,
-    ProxyState,
+    build_proxy, error_ladder, proxy_key, ProxyBuild, ProxyCache, ProxyCacheStats, ProxyLodCpu,
+    ProxyOptions, ProxyState,
 };
 pub use runtime::{content_words, VgAssetInfo, VgRuntime, VgRuntimeSettings, VgTier3Stats};
 pub use scheduler::{Fetch, PageScheduler, SchedulerConfig, SchedulerStats};
@@ -63,13 +61,31 @@ pub fn bindings_wgsl(group: u32, first_binding: u32, include_feedback: bool) -> 
     let mut s = String::new();
     s += &format!("{} var<storage, read> vg_page_pool: array<u32>;\n", b(0));
     s += &format!("{} var<storage, read> vg_residency: array<u32>;\n", b(1));
-    s += &format!("{} var<storage, read> vg_nodes: array<VgHierarchyNode>;\n", b(2));
-    s += &format!("{} var<storage, read> vg_group_refs: array<VgGroupRef>;\n", b(3));
-    s += &format!("{} var<storage, read> vg_asset_headers: array<VgAssetHeader>;\n", b(4));
-    s += &format!("{} var<storage, read> vg_asset_bases: array<vec4<u32>>;\n", b(5));
-    s += &format!("{} var<storage, read> vg_asset_quant: array<vec4<f32>>;\n", b(6));
+    s += &format!(
+        "{} var<storage, read> vg_nodes: array<VgHierarchyNode>;\n",
+        b(2)
+    );
+    s += &format!(
+        "{} var<storage, read> vg_group_refs: array<VgGroupRef>;\n",
+        b(3)
+    );
+    s += &format!(
+        "{} var<storage, read> vg_asset_headers: array<VgAssetHeader>;\n",
+        b(4)
+    );
+    s += &format!(
+        "{} var<storage, read> vg_asset_bases: array<vec4<u32>>;\n",
+        b(5)
+    );
+    s += &format!(
+        "{} var<storage, read> vg_asset_quant: array<vec4<f32>>;\n",
+        b(6)
+    );
     if include_feedback {
-        s += &format!("{} var<storage, read_write> vg_feedback: array<atomic<u32>>;\n", b(7));
+        s += &format!(
+            "{} var<storage, read_write> vg_feedback: array<atomic<u32>>;\n",
+            b(7)
+        );
     }
     s
 }
@@ -93,10 +109,14 @@ mod tests {
     use super::*;
 
     fn validate(src: &str) -> naga::Module {
-        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
-        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{e:?}"));
+        let module = naga::front::wgsl::parse_str(src)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{e:?}"));
         module
     }
 

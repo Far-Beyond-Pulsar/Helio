@@ -137,11 +137,17 @@ impl<'a> ObjectBatchFrameData<'a> {
 
     /// [`Self::all_draws`] for `shadow_static_indirect`.
     pub fn shadow_static_draws(&self) -> (u32, Option<crate::GpuDrawCount<'a>>) {
-        self.bounded(self.shadow_static_count_slot(), self.readback_shadow_static_draw_count)
+        self.bounded(
+            self.shadow_static_count_slot(),
+            self.readback_shadow_static_draw_count,
+        )
     }
     /// [`Self::all_draws`] for `shadow_movable_indirect`.
     pub fn shadow_movable_draws(&self) -> (u32, Option<crate::GpuDrawCount<'a>>) {
-        self.bounded(self.shadow_movable_count_slot(), self.readback_shadow_movable_draw_count)
+        self.bounded(
+            self.shadow_movable_count_slot(),
+            self.readback_shadow_movable_draw_count,
+        )
     }
     /// [`Self::all_draws`] for `shadow_transmissive_indirect`.
     pub fn shadow_transmissive_draws(&self) -> (u32, Option<crate::GpuDrawCount<'a>>) {

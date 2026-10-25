@@ -13,8 +13,7 @@ fn translated_origin_prepare_preserves_history_and_rejects_invalid_views() {
 
 fn run_depth_history_fixture(translated_origin: bool) {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("SKIP: no GPU adapter for TSR depth-history fixture");
             return;
@@ -123,9 +122,21 @@ fn run_depth_history_fixture(translated_origin: bool) {
         // The fixture never executes, so the resolve always writes
         // histories[0] and reads histories[1].
         let create_bind = |pass: &TsrPass| {
-            make_resolve_bg(&device, &pass.bgl, &pass.histories[1], &pass.histories[0], &current_view, &depth_view,
-                &coverage_view, &pass.reactivity_fallback_view, &pass.motion_fallback_view, &pass.nearest,
-                &pass.linear_sampler, &cameras, &pass.uniform_buf)
+            make_resolve_bg(
+                &device,
+                &pass.bgl,
+                &pass.histories[1],
+                &pass.histories[0],
+                &current_view,
+                &depth_view,
+                &coverage_view,
+                &pass.reactivity_fallback_view,
+                &pass.motion_fallback_view,
+                &pass.nearest,
+                &pass.linear_sampler,
+                &cameras,
+                &pass.uniform_buf,
+            )
         };
         let mut bind = create_bind(&pass);
         let probe = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -174,7 +185,9 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&pass.histories[0].depth_coarse_view),
+                        resource: wgpu::BindingResource::TextureView(
+                            &pass.histories[0].depth_coarse_view,
+                        ),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -263,7 +276,12 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 flags,
                 previous_jitter_uv: [0.0; 2],
                 _pad: [0.0; 2],
-                reprojection: Reprojection::new(camera.view_proj, [0.0; 3], camera.prev_view_proj, identity),
+                reprojection: Reprojection::new(
+                    camera.view_proj,
+                    [0.0; 3],
+                    camera.prev_view_proj,
+                    identity,
+                ),
             };
             queue.write_buffer(&pass.uniform_buf, 0, bytemuck::bytes_of(&uniform));
             let mut raster_depth = 0.5;
@@ -513,7 +531,13 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     multiview_mask: None,
                 });
             }
-            dispatch_resolve(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), &pass.pipeline, &bind, 64, 8);
+            dispatch_resolve(
+                &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
+                &pass.pipeline,
+                &bind,
+                64,
+                8,
+            );
             {
                 let mut compute = encoder.begin_compute_pass(&Default::default());
                 compute.set_pipeline(&pipeline);
@@ -632,12 +656,35 @@ fn seed_history(queue: &wgpu::Queue, pass: &TsrPass, depth: f32) {
             depth_coarse.extend([half(depth), half(depth), half(luma.ln()), half(luma.ln())]);
         }
     }
-    let extent = wgpu::Extent3d { width: 64, height: 8, depth_or_array_layers: 1 };
-    let layout = wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(64 * 8), rows_per_image: Some(8) };
+    let extent = wgpu::Extent3d {
+        width: 64,
+        height: 8,
+        depth_or_array_layers: 1,
+    };
+    let layout = wgpu::TexelCopyBufferLayout {
+        offset: 0,
+        bytes_per_row: Some(64 * 8),
+        rows_per_image: Some(8),
+    };
     let history = &pass.histories[1];
-    queue.write_texture(history.state.as_image_copy(), bytemuck::cast_slice(&state), layout, extent);
-    queue.write_texture(history.noise.as_image_copy(), bytemuck::cast_slice(&noise), layout, extent);
-    queue.write_texture(history.depth_coarse.as_image_copy(), bytemuck::cast_slice(&depth_coarse), layout, extent);
+    queue.write_texture(
+        history.state.as_image_copy(),
+        bytemuck::cast_slice(&state),
+        layout,
+        extent,
+    );
+    queue.write_texture(
+        history.noise.as_image_copy(),
+        bytemuck::cast_slice(&noise),
+        layout,
+        extent,
+    );
+    queue.write_texture(
+        history.depth_coarse.as_image_copy(),
+        bytemuck::cast_slice(&depth_coarse),
+        layout,
+        extent,
+    );
 }
 
 #[test]

@@ -281,18 +281,30 @@ mod tests {
 
     #[test]
     fn type_names_match_by_crate_prefix_only() {
-        assert!(type_in_crate("helio_pass_fxaa::FxaaPass", "helio_pass_fxaa"));
-        assert!(type_in_crate("helio_pass_fxaa::a::b::Pass<T>", "helio_pass_fxaa"));
+        assert!(type_in_crate(
+            "helio_pass_fxaa::FxaaPass",
+            "helio_pass_fxaa"
+        ));
+        assert!(type_in_crate(
+            "helio_pass_fxaa::a::b::Pass<T>",
+            "helio_pass_fxaa"
+        ));
         // A crate whose name merely starts with another's is not that crate.
         assert!(!type_in_crate("helio_pass_fxaa2::Pass", "helio_pass_fxaa"));
         assert!(!type_in_crate("helio_pass_fxaa", "helio_pass_fxaa"));
-        assert!(!type_in_crate("other::helio_pass_fxaa::Pass", "helio_pass_fxaa"));
+        assert!(!type_in_crate(
+            "other::helio_pass_fxaa::Pass",
+            "helio_pass_fxaa"
+        ));
     }
 
     #[test]
     fn type_name_of_matches_the_std_path() {
         assert_eq!(type_name_of::<A>(), std::any::type_name::<A>());
-        assert!(type_in_crate(type_name_of::<A>(), module_path!().split("::").next().unwrap()));
+        assert!(type_in_crate(
+            type_name_of::<A>(),
+            module_path!().split("::").next().unwrap()
+        ));
     }
 
     #[test]
@@ -360,14 +372,16 @@ mod tests {
 
     #[test]
     fn plan_swaps_only_the_owning_pass() {
-        let plan = plan_selective_swap(&graph(), &graph(), &["crate_a".into()], Some(&policy())).unwrap();
+        let plan =
+            plan_selective_swap(&graph(), &graph(), &["crate_a".into()], Some(&policy())).unwrap();
         assert_eq!(plan.picks, vec![(0, 0)]);
         assert_eq!(plan.pass_names, vec!["A"]);
     }
 
     #[test]
     fn plan_swaps_a_whole_group() {
-        let plan = plan_selective_swap(&graph(), &graph(), &["crate_c".into()], Some(&policy())).unwrap();
+        let plan =
+            plan_selective_swap(&graph(), &graph(), &["crate_c".into()], Some(&policy())).unwrap();
         assert_eq!(plan.picks, vec![(2, 2), (3, 3)]);
     }
 
@@ -375,21 +389,30 @@ mod tests {
     fn plan_maps_replacement_indices_past_live_only_passes() {
         let mut live = graph();
         live.insert(1, id::<Late>("Late", "crate_l::Late"));
-        let plan = plan_selective_swap(&live, &graph(), &["crate_a".into(), "crate_c".into()], Some(&policy())).unwrap();
+        let plan = plan_selective_swap(
+            &live,
+            &graph(),
+            &["crate_a".into(), "crate_c".into()],
+            Some(&policy()),
+        )
+        .unwrap();
         assert_eq!(plan.picks, vec![(0, 0), (3, 2), (4, 3)]);
     }
 
     #[test]
     fn plan_falls_back_when_something_is_not_swappable() {
         // B is in neither list.
-        assert!(plan_selective_swap(&graph(), &graph(), &["crate_b".into()], Some(&policy())).is_err());
+        assert!(
+            plan_selective_swap(&graph(), &graph(), &["crate_b".into()], Some(&policy())).is_err()
+        );
         // No policy at all.
         assert!(plan_selective_swap(&graph(), &graph(), &["crate_a".into()], None).is_err());
     }
 
     #[test]
     fn plan_falls_back_when_the_owner_matches_no_pass() {
-        let error = plan_selective_swap(&graph(), &graph(), &["crate_z".into()], Some(&policy())).unwrap_err();
+        let error = plan_selective_swap(&graph(), &graph(), &["crate_z".into()], Some(&policy()))
+            .unwrap_err();
         assert!(error.contains("crate_z"), "{error}");
     }
 
@@ -397,6 +420,8 @@ mod tests {
     fn plan_falls_back_when_a_live_only_pass_is_affected() {
         let mut live = graph();
         live.push(id::<Late>("Late", "crate_l::Late"));
-        assert!(plan_selective_swap(&live, &graph(), &["crate_l".into()], Some(&policy())).is_err());
+        assert!(
+            plan_selective_swap(&live, &graph(), &["crate_l".into()], Some(&policy())).is_err()
+        );
     }
 }

@@ -21,14 +21,21 @@ fn gpu(want_rt: bool) -> Option<Gpu> {
     }))
     .ok()?;
     eprintln!("vg-dense adapter: {:?}", adapter.get_info());
-    let rt = want_rt && adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    let rt = want_rt
+        && adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
     if want_rt && !rt {
         eprintln!("SKIP: adapter has no EXPERIMENTAL_RAY_QUERY");
         return None;
     }
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_limits: adapter.limits(),
-        required_features: if rt { wgpu::Features::EXPERIMENTAL_RAY_QUERY } else { wgpu::Features::empty() },
+        required_features: if rt {
+            wgpu::Features::EXPERIMENTAL_RAY_QUERY
+        } else {
+            wgpu::Features::empty()
+        },
         experimental_features: if rt {
             unsafe { wgpu::ExperimentalFeatures::enabled() }
         } else {
@@ -37,7 +44,10 @@ fn gpu(want_rt: bool) -> Option<Gpu> {
         ..Default::default()
     }))
     .ok()?;
-    Some(Gpu { device: Arc::new(device), queue })
+    Some(Gpu {
+        device: Arc::new(device),
+        queue,
+    })
 }
 
 struct Rng(u64);
@@ -57,7 +67,9 @@ fn buf(g: &Gpu, label: &str, bytes: &[u8]) -> wgpu::Buffer {
     let b = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (bytes.len() as u64).max(16).next_multiple_of(4),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     g.queue.write_buffer(&b, 0, bytes);
@@ -83,23 +95,44 @@ fn random_scene(seed: u64, n_clusters: usize, max_tris: usize, spread: f32) -> S
             let (tx, ty) = (cx + rng.f(-spread, spread), cy + rng.f(-spread, spread));
             let mut t = [[0.0; 3]; 3];
             for v in &mut t {
-                *v = [tx + rng.f(-0.25, 0.25), ty + rng.f(-0.25, 0.25), rng.f(0.05, 0.95)];
+                *v = [
+                    tx + rng.f(-0.25, 0.25),
+                    ty + rng.f(-0.25, 0.25),
+                    rng.f(0.05, 0.95),
+                ];
             }
             tris.push(t);
         }
         verts_of.push(tris.iter().flatten().copied().collect::<Vec<[f32; 3]>>());
-        idx_of.push((0..n as u8).map(|t| [3 * t, 3 * t + 1, 3 * t + 2]).collect::<Vec<[u8; 3]>>());
+        idx_of.push(
+            (0..n as u8)
+                .map(|t| [3 * t, 3 * t + 1, 3 * t + 2])
+                .collect::<Vec<[u8; 3]>>(),
+        );
         all.push(tris);
     }
     let clusters: Vec<TestCluster<'_>> = verts_of
         .iter()
         .zip(&idx_of)
-        .map(|(p, t)| TestCluster { positions: p, tris: t, material: 0, attrs: None })
+        .map(|(p, t)| TestCluster {
+            positions: p,
+            tris: t,
+            material: 0,
+            attrs: None,
+        })
         .collect();
-    Scene { page: TestPage::build(0, &clusters), tris: all }
+    Scene {
+        page: TestPage::build(0, &clusters),
+        tris: all,
+    }
 }
 
-const IDENTITY: [[f32; 4]; 4] = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [0., 0., 0., 1.]];
+const IDENTITY: [[f32; 4]; 4] = [
+    [1., 0., 0., 0.],
+    [0., 1., 0., 0.],
+    [0., 0., 1., 0.],
+    [0., 0., 0., 1.],
+];
 
 /// Where cluster `ci` of `n` sits in the unified visible list. The split layout
 /// puts the first half at 3.. (phase 0, bin 0) and the rest at 200.. (phase 1,
@@ -114,7 +147,13 @@ fn unified(ci: u32, n: u32, split: bool) -> u32 {
     }
 }
 
-fn expected_tiles(scene: &Scene, cfg: &DenseConfig, viewport: [u32; 2], dense: &[bool], split: bool) -> Vec<(u32, u32)> {
+fn expected_tiles(
+    scene: &Scene,
+    cfg: &DenseConfig,
+    viewport: [u32; 2],
+    dense: &[bool],
+    split: bool,
+) -> Vec<(u32, u32)> {
     let p = PeelParams::from(cfg);
     let mut refs = Vec::new();
     for (ci, c) in scene.tris.iter().enumerate() {
@@ -126,10 +165,19 @@ fn expected_tiles(scene: &Scene, cfg: &DenseConfig, viewport: [u32; 2], dense: &
                 z: t[i][2],
                 valid: true,
             };
-            refs.push(RefTri { v: [v(0), v(1), v(2)], id: vis_pack(unified(ci as u32, scene.tris.len() as u32, split), ti as u32) });
+            refs.push(RefTri {
+                v: [v(0), v(1), v(2)],
+                id: vis_pack(
+                    unified(ci as u32, scene.tris.len() as u32, split),
+                    ti as u32,
+                ),
+            });
         }
     }
-    let tiles = [viewport[0].div_ceil(cfg.tile), viewport[1].div_ceil(cfg.tile)];
+    let tiles = [
+        viewport[0].div_ceil(cfg.tile),
+        viewport[1].div_ceil(cfg.tile),
+    ];
     let mut out = vec![(0u32, 0u32); (viewport[0] * viewport[1]) as usize];
     for ty in 0..tiles[1] {
         for tx in 0..tiles[0] {
@@ -156,18 +204,36 @@ struct RunResult {
     stats: DenseStats,
 }
 
-fn run_nonrt(g: &Gpu, scene: &Scene, cfg: DenseConfig, viewport: [u32; 2], dense: &[bool]) -> RunResult {
+fn run_nonrt(
+    g: &Gpu,
+    scene: &Scene,
+    cfg: DenseConfig,
+    viewport: [u32; 2],
+    dense: &[bool],
+) -> RunResult {
     run_nonrt_layout(g, scene, cfg, viewport, dense, false)
 }
 
-fn run_nonrt_layout(g: &Gpu, scene: &Scene, cfg: DenseConfig, viewport: [u32; 2], dense: &[bool], split: bool) -> RunResult {
+fn run_nonrt_layout(
+    g: &Gpu,
+    scene: &Scene,
+    cfg: DenseConfig,
+    viewport: [u32; 2],
+    dense: &[bool],
+    split: bool,
+) -> RunResult {
     let mut pass = DenseNonRtPass::new(&g.device, cfg).expect("pass");
     let n = scene.tris.len() as u32;
-    let garbage = helio_vg_format::GpuVisibleCluster { instance: 0, cluster_slot: scene.page.slots[0] };
+    let garbage = helio_vg_format::GpuVisibleCluster {
+        instance: 0,
+        cluster_slot: scene.page.slots[0],
+    };
     let mut visible = vec![garbage; if split { n as usize + 300 } else { n as usize }];
     for i in 0..n {
-        visible[unified(i, n, split) as usize] =
-            helio_vg_format::GpuVisibleCluster { instance: 0, cluster_slot: scene.page.slots[i as usize] };
+        visible[unified(i, n, split) as usize] = helio_vg_format::GpuVisibleCluster {
+            instance: 0,
+            cluster_slot: scene.page.slots[i as usize],
+        };
     }
     let mask: Vec<u32> = dense.iter().map(|&d| d as u32).collect();
     let tile_mask = buf(g, "mask", cast_slice(&mask));
@@ -187,7 +253,12 @@ fn run_nonrt_layout(g: &Gpu, scene: &Scene, cfg: DenseConfig, viewport: [u32; 2]
     let visible_buf = buf(g, "visible", cast_slice(&visible));
     let pool = buf(g, "pool", &scene.page.pool());
     let quant = buf(g, "quant", cast_slice(&[scene.page.quant]));
-    let inst = GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row: 0 };
+    let inst = GpuVgInstance {
+        asset_slot: 0,
+        flags: INST_ENABLED,
+        lod_error_scale: 1.0,
+        object_row: 0,
+    };
     let instances = buf(g, "instances", cast_slice(&[inst]));
     let mut object = [0f32; 63];
     object[4..20].copy_from_slice(cast_slice(&IDENTITY));
@@ -220,14 +291,26 @@ fn run_nonrt_layout(g: &Gpu, scene: &Scene, cfg: DenseConfig, viewport: [u32; 2]
     b.copy_stats(&mut enc);
     g.queue.submit(Some(enc.finish()));
     let stats = b.read_stats(&g.device);
-    let raw = read_buffer(&g.device, &g.queue, &b.dense_key, viewport[0] as u64 * viewport[1] as u64 * 8);
+    let raw = read_buffer(
+        &g.device,
+        &g.queue,
+        &b.dense_key,
+        viewport[0] as u64 * viewport[1] as u64 * 8,
+    );
     let words: &[u32] = cast_slice(&raw);
-    RunResult { keys: words.chunks(2).map(|c| (c[0], c[1])).collect(), stats }
+    RunResult {
+        keys: words.chunks(2).map(|c| (c[0], c[1])).collect(),
+        stats,
+    }
 }
 
 /// Fraction of dense pixels whose id differs and whose depth differs
 /// materially (edge-grazing and equal-depth pixels may legitimately differ).
-fn mismatch_fraction(got: &[(u32, u32)], want: &[(u32, u32)], covered: impl Fn(usize) -> bool) -> (usize, usize) {
+fn mismatch_fraction(
+    got: &[(u32, u32)],
+    want: &[(u32, u32)],
+    covered: impl Fn(usize) -> bool,
+) -> (usize, usize) {
     let (mut bad, mut n) = (0, 0);
     for i in 0..got.len() {
         if !covered(i) {
@@ -242,11 +325,21 @@ fn mismatch_fraction(got: &[(u32, u32)], want: &[(u32, u32)], covered: impl Fn(u
     (bad, n)
 }
 
-fn check_nonrt(cfg: DenseConfig, viewport: [u32; 2], dense_pick: impl Fn(u32, u32) -> bool, seed: u64) -> Option<RunResult> {
+fn check_nonrt(
+    cfg: DenseConfig,
+    viewport: [u32; 2],
+    dense_pick: impl Fn(u32, u32) -> bool,
+    seed: u64,
+) -> Option<RunResult> {
     let g = gpu(false)?;
     let scene = random_scene(seed, 80, 40, 0.3);
-    let tiles = [viewport[0].div_ceil(cfg.tile), viewport[1].div_ceil(cfg.tile)];
-    let dense: Vec<bool> = (0..tiles[0] * tiles[1]).map(|t| dense_pick(t % tiles[0], t / tiles[0])).collect();
+    let tiles = [
+        viewport[0].div_ceil(cfg.tile),
+        viewport[1].div_ceil(cfg.tile),
+    ];
+    let dense: Vec<bool> = (0..tiles[0] * tiles[1])
+        .map(|t| dense_pick(t % tiles[0], t / tiles[0]))
+        .collect();
     let r = run_nonrt(&g, &scene, cfg, viewport, &dense);
     let want = expected_tiles(&scene, &cfg, viewport, &dense, false);
     let covered = |i: usize| {
@@ -255,14 +348,20 @@ fn check_nonrt(cfg: DenseConfig, viewport: [u32; 2], dense_pick: impl Fn(u32, u3
     };
     let (bad, n) = mismatch_fraction(&r.keys, &want, &covered);
     assert!(n > 0);
-    assert!(bad * 100 <= n, "{bad}/{n} dense pixels differ from the z-sort reference (cfg {cfg:?})");
+    assert!(
+        bad * 100 <= n,
+        "{bad}/{n} dense pixels differ from the z-sort reference (cfg {cfg:?})"
+    );
     // Pixels outside dense tiles are untouched (still zero).
     for (i, k) in r.keys.iter().enumerate() {
         if !covered(i) {
             assert_eq!(*k, (0, 0));
         }
     }
-    assert_eq!(r.stats.tiles_processed, dense.iter().filter(|&&d| d).count() as u32);
+    assert_eq!(
+        r.stats.tiles_processed,
+        dense.iter().filter(|&&d| d).count() as u32
+    );
     // Sanity: the scene actually put geometry in the tiles.
     assert!(r.keys.iter().zip(&want).any(|(g, w)| w.0 != 0 && g.0 != 0));
     Some(r)
@@ -274,13 +373,25 @@ fn nonrt_matches_z_sort_reference_all_tiles() {
         eprintln!("SKIP: no GPU adapter");
         return;
     };
-    assert_eq!(r.stats.bin_overflow + r.stats.slot_overflow + r.stats.clamped_tiles, 0, "{:?}", r.stats);
+    assert_eq!(
+        r.stats.bin_overflow + r.stats.slot_overflow + r.stats.clamped_tiles,
+        0,
+        "{:?}",
+        r.stats
+    );
 }
 
 #[test]
 fn nonrt_sparse_tiles_and_partial_edge_tiles() {
     // 100x70 is not a multiple of 16: the right/bottom tiles are partial.
-    if check_nonrt(DenseConfig::default(), [100, 70], |x, y| (x + y) % 2 == 0, 2).is_none() {
+    if check_nonrt(
+        DenseConfig::default(),
+        [100, 70],
+        |x, y| (x + y) % 2 == 0,
+        2,
+    )
+    .is_none()
+    {
         eprintln!("SKIP: no GPU adapter");
     }
 }
@@ -294,7 +405,12 @@ fn nonrt_low_shared_memory_config() {
 
 #[test]
 fn nonrt_many_layers_use_extra_peels_but_stay_exact() {
-    let cfg = DenseConfig { slab_tris: 16, nominal_layers: 2, max_layers: 4096, ..DenseConfig::default() };
+    let cfg = DenseConfig {
+        slab_tris: 16,
+        nominal_layers: 2,
+        max_layers: 4096,
+        ..DenseConfig::default()
+    };
     let Some(r) = check_nonrt(cfg, [64, 48], |_, _| true, 4) else {
         eprintln!("SKIP: no GPU adapter");
         return;
@@ -311,22 +427,43 @@ fn nonrt_clamp_and_overflow_counters() {
     };
     let scene = random_scene(5, 80, 40, 0.3);
     // Layer cap of 1 with tiny slabs: tiles must clamp and say so.
-    let cfg = DenseConfig { slab_tris: 8, nominal_layers: 1, max_layers: 1, ..DenseConfig::default() };
+    let cfg = DenseConfig {
+        slab_tris: 8,
+        nominal_layers: 1,
+        max_layers: 1,
+        ..DenseConfig::default()
+    };
     let r = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
-    assert!(r.stats.clamped_tiles > 0 && r.stats.clamped_tris > 0 && r.stats.overflowed(), "{:?}", r.stats);
+    assert!(
+        r.stats.clamped_tiles > 0 && r.stats.clamped_tris > 0 && r.stats.overflowed(),
+        "{:?}",
+        r.stats
+    );
     // Tiny shared list pool: entries past it are dropped and counted.
-    let cfg = DenseConfig { list_pool: 4, ..DenseConfig::default() };
+    let cfg = DenseConfig {
+        list_pool: 4,
+        ..DenseConfig::default()
+    };
     let r = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
     assert!(r.stats.bin_overflow > 0, "{:?}", r.stats);
     // A tiny peel chunk loses nothing: lists longer than the chunk are peeled in
     // several passes and give the same pixels as one pass.
     let whole = run_nonrt(&g, &scene, DenseConfig::default(), [64, 48], &[true; 12]);
-    let cfg = DenseConfig { cluster_cap: 4, ..DenseConfig::default() };
+    let cfg = DenseConfig {
+        cluster_cap: 4,
+        ..DenseConfig::default()
+    };
     let chunked = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
     assert_eq!(chunked.stats.bin_overflow, 0, "{:?}", chunked.stats);
-    assert_eq!(chunked.keys, whole.keys, "chunked peel differs from the single pass");
+    assert_eq!(
+        chunked.keys, whole.keys,
+        "chunked peel differs from the single pass"
+    );
     // Slot cap: only some dense tiles are processed, the rest counted.
-    let cfg = DenseConfig { max_dense_slots: 3, ..DenseConfig::default() };
+    let cfg = DenseConfig {
+        max_dense_slots: 3,
+        ..DenseConfig::default()
+    };
     let r = run_nonrt(&g, &scene, cfg, [64, 48], &[true; 12]);
     assert_eq!(r.stats.tiles_processed, 3);
     assert_eq!(r.stats.slot_overflow, 9, "{:?}", r.stats);
@@ -343,7 +480,12 @@ mod rt {
     fn quad(error: f32, cluster: u32) -> ProxyLod {
         ProxyLod {
             error,
-            positions: vec![[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]],
+            positions: vec![
+                [-2.0, -2.0, 0.0],
+                [2.0, -2.0, 0.0],
+                [2.0, 2.0, 0.0],
+                [-2.0, 2.0, 0.0],
+            ],
             indices: vec![0, 1, 2, 0, 2, 3],
             prim_map: vec![0, 1],
             clusters: vec![cluster],
@@ -368,7 +510,10 @@ mod rt {
 
         pass.register_proxy_asset(
             &g.device,
-            &ProxyAsset { asset_key: 7, lods: vec![quad(0.0, 100), quad(1.0, 200)] },
+            &ProxyAsset {
+                asset_key: 7,
+                lods: vec![quad(0.0, 100), quad(1.0, 200)],
+            },
         )
         .unwrap();
 
@@ -404,15 +549,28 @@ mod rt {
 
         let mut enc = g.device.create_command_encoder(&Default::default());
         let info = pass
-            .prepare_frame(&g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &requests, 1.0, ppu)
+            .prepare_frame(
+                &g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &requests, 1.0, ppu,
+            )
             .expect("prepare");
-        assert!(info.complete() && info.tlas_instances == 2 && info.rt_visible_count == 2, "{info:?}");
-        let lod_of = |id: u32| info.selections.iter().find(|(i, _)| *i == id).unwrap().1.lod;
+        assert!(
+            info.complete() && info.tlas_instances == 2 && info.rt_visible_count == 2,
+            "{info:?}"
+        );
+        let lod_of = |id: u32| {
+            info.selections
+                .iter()
+                .find(|(i, _)| *i == id)
+                .unwrap()
+                .1
+                .lod
+        };
         assert_eq!(lod_of(1), 0, "near instance must use the finest proxy");
         assert_eq!(lod_of(2), 1, "far instance may use the coarse proxy");
 
         let mask = buf(&g, "mask", cast_slice(&vec![1u32; 12]));
-        pass.record(&g.device, &g.queue, &mut enc, &frame, &mask, &tlas).expect("record");
+        pass.record(&g.device, &g.queue, &mut enc, &frame, &mask, &tlas)
+            .expect("record");
         let b = pass.buffers().unwrap();
         b.copy_stats(&mut enc);
         g.queue.submit(Some(enc.finish()));
@@ -433,7 +591,10 @@ mod rt {
         for y in 0..48u32 {
             for x in 0..64u32 {
                 let i = (y * 64 + x) as usize;
-                let ndc = glam::Vec2::new((x as f32 + 0.5) / 64.0 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / 48.0 * 2.0);
+                let ndc = glam::Vec2::new(
+                    (x as f32 + 0.5) / 64.0 * 2.0 - 1.0,
+                    1.0 - (y as f32 + 0.5) / 48.0 * 2.0,
+                );
                 let p = inv * glam::Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
                 let dir = (p.truncate() / p.w).normalize();
                 // Near quad: z=-5, |x|,|y| <= 2.  Far quad: z=-400, |x|,|y| <= 200.
@@ -442,7 +603,9 @@ mod rt {
                     let q = dir * t;
                     (t > 0.0 && q.x.abs() <= half && q.y.abs() <= half).then_some((t, q))
                 };
-                let want = hit(-5.0, 2.0).map(|h| (1u32, h)).or_else(|| hit(-400.0, 200.0).map(|h| (2u32, h)));
+                let want = hit(-5.0, 2.0)
+                    .map(|h| (1u32, h))
+                    .or_else(|| hit(-400.0, 200.0).map(|h| (2u32, h)));
                 let (zbits, id) = (keys[i * 2], keys[i * 2 + 1]);
                 match want {
                     None => assert_eq!(zbits, 0, "pixel ({x},{y}) should miss"),
@@ -460,7 +623,11 @@ mod rt {
                         let row = vis_cluster(id) - DENSE_RT_VISIBLE_BASE;
                         let v = vis[row as usize];
                         assert_eq!(v.instance, inst);
-                        assert_eq!(v.cluster_slot, if inst == 1 { 100 } else { 200 }, "wrong proxy LOD behind the id");
+                        assert_eq!(
+                            v.cluster_slot,
+                            if inst == 1 { 100 } else { 200 },
+                            "wrong proxy LOD behind the id"
+                        );
                         // Triangle 0 = (0,1,2) lower-right half, triangle 1 = (0,2,3) upper-left.
                         let want_tri = if local.x > local.y { 0 } else { 1 };
                         assert_eq!(vis_tri(id), want_tri, "pixel ({x},{y})");
@@ -468,7 +635,10 @@ mod rt {
                         // Reversed infinite projection: z_ndc = near / view_depth, view_depth = -q.z.
                         let want_z = near / -q.z;
                         let _ = t;
-                        assert!((z - want_z).abs() < 1e-4 * want_z.max(1e-3), "depth {z} vs {want_z}");
+                        assert!(
+                            (z - want_z).abs() < 1e-4 * want_z.max(1e-3),
+                            "depth {z} vs {want_z}"
+                        );
                         // Barycentrics reproduce the hit point on the proxy triangle.
                         let (u, w) = bary_unpack(bary[i]);
                         let tri: [[f32; 2]; 3] = if want_tri == 0 {
@@ -478,17 +648,26 @@ mod rt {
                         };
                         let bx = (1.0 - u - w) * tri[0][0] + u * tri[1][0] + w * tri[2][0];
                         let by = (1.0 - u - w) * tri[0][1] + u * tri[1][1] + w * tri[2][1];
-                        assert!((bx - local.x).abs() < 2e-2 && (by - local.y).abs() < 2e-2, "bary ({bx},{by}) vs {local:?}");
+                        assert!(
+                            (bx - local.x).abs() < 2e-2 && (by - local.y).abs() < 2e-2,
+                            "bary ({bx},{by}) vs {local:?}"
+                        );
                     }
                 }
             }
         }
-        assert!(hits > 500 && far_hits > 100, "hits={hits} far_hits={far_hits}");
+        assert!(
+            hits > 500 && far_hits > 100,
+            "hits={hits} far_hits={far_hits}"
+        );
         let _ = Vec3::ZERO;
     }
 
     fn paged_quad(error: f32, local: u32, page: u32) -> ProxyLod {
-        ProxyLod { cluster_pages: vec![page], ..quad(error, local) }
+        ProxyLod {
+            cluster_pages: vec![page],
+            ..quad(error, local)
+        }
     }
 
     /// Page-addressed proxies: slots come from the residency resolver, an
@@ -506,7 +685,10 @@ mod rt {
         let mut tlas = TlasManager::new(g.device.clone(), 16);
         pass.register_proxy_asset(
             &g.device,
-            &ProxyAsset { asset_key: 7, lods: vec![paged_quad(0.0, 5, 3), paged_quad(1.0, 9, 4)] },
+            &ProxyAsset {
+                asset_key: 7,
+                lods: vec![paged_quad(0.0, 5, 3), paged_quad(1.0, 9, 4)],
+            },
         )
         .unwrap();
         assert_eq!(pass.lod_pages(7, 0), &[3]);
@@ -540,7 +722,10 @@ mod rt {
             let mut enc = g.device.create_command_encoder(&Default::default());
             let resolve = move |_key: u64, page: u32| resident.then_some(page + 10);
             let info = pass
-                .prepare_frame_resolved(&g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &requests, 1.0, ppu, version, &resolve)
+                .prepare_frame_resolved(
+                    &g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &requests, 1.0,
+                    ppu, version, &resolve,
+                )
                 .expect("prepare");
             g.queue.submit(Some(enc.finish()));
             info
@@ -548,14 +733,23 @@ mod rt {
 
         let first = step(&mut pass, 1, true);
         assert!(first.complete() && first.tlas_instances == 1, "{first:?}");
-        assert!(first.tlas_rebuilt && first.tables_rebuilt && first.blas_builds == 1, "{first:?}");
+        assert!(
+            first.tlas_rebuilt && first.tables_rebuilt && first.blas_builds == 1,
+            "{first:?}"
+        );
         let row = read_rows(&pass);
         assert_eq!(row.instance, 4);
-        assert_eq!(row.cluster_slot, (13 << helio_vg_format::PAGE_CLUSTER_SHIFT) | 5);
+        assert_eq!(
+            row.cluster_slot,
+            (13 << helio_vg_format::PAGE_CLUSTER_SHIFT) | 5
+        );
 
         // Identical inputs: nothing is rebuilt.
         let again = step(&mut pass, 1, true);
-        assert!(!again.tlas_rebuilt && !again.tables_rebuilt && again.blas_builds == 0, "{again:?}");
+        assert!(
+            !again.tlas_rebuilt && !again.tables_rebuilt && again.blas_builds == 0,
+            "{again:?}"
+        );
         assert_eq!(again.rt_visible_count, first.rt_visible_count);
 
         // The pool layout changed: tables are rewritten, the TLAS is not.
@@ -581,7 +775,14 @@ mod rt {
         pass.set_max_visible_rows(1);
         let mut blas = BlasManager::new(g.device.clone());
         let mut tlas = TlasManager::new(g.device.clone(), 16);
-        pass.register_proxy_asset(&g.device, &ProxyAsset { asset_key: 7, lods: vec![quad(0.0, 1)] }).unwrap();
+        pass.register_proxy_asset(
+            &g.device,
+            &ProxyAsset {
+                asset_key: 7,
+                lods: vec![quad(0.0, 1)],
+            },
+        )
+        .unwrap();
         let proj = Mat4::perspective_infinite_reverse_rh(1.0, 64.0 / 48.0, 0.1);
         let frame = DenseFrame {
             view_proj: proj.to_cols_array_2d(),
@@ -601,10 +802,24 @@ mod rt {
         };
         let mut enc = g.device.create_command_encoder(&Default::default());
         let info = pass
-            .prepare_frame(&g.device, &g.queue, &mut enc, &mut blas, &mut tlas, &frame, &[mk(1), mk(2)], 1.0, 100.0)
+            .prepare_frame(
+                &g.device,
+                &g.queue,
+                &mut enc,
+                &mut blas,
+                &mut tlas,
+                &frame,
+                &[mk(1), mk(2)],
+                1.0,
+                100.0,
+            )
             .unwrap();
         g.queue.submit(Some(enc.finish()));
-        assert_eq!((info.tlas_instances, info.dropped_instances), (1, 1), "{info:?}");
+        assert_eq!(
+            (info.tlas_instances, info.dropped_instances),
+            (1, 1),
+            "{info:?}"
+        );
         assert!(!info.complete());
     }
 
@@ -616,7 +831,10 @@ mod rt {
             return;
         };
         if !rt_available(&g.device) {
-            assert!(matches!(DenseRtPass::new(&g.device, DenseConfig::default()), Err(RtError::Unsupported)));
+            assert!(matches!(
+                DenseRtPass::new(&g.device, DenseConfig::default()),
+                Err(RtError::Unsupported)
+            ));
         }
         let _ = TlasManager::new(g.device.clone(), 1);
     }
@@ -635,6 +853,9 @@ fn nonrt_bins_every_cull_range_of_both_phases_and_nothing_else() {
     let r = run_nonrt_layout(&g, &scene, cfg, viewport, &dense, true);
     let want = expected_tiles(&scene, &cfg, viewport, &dense, true);
     let (bad, n) = mismatch_fraction(&r.keys, &want, |_| true);
-    assert!(n > 0 && bad * 100 <= n, "{bad}/{n} pixels differ for the split two-phase layout");
+    assert!(
+        n > 0 && bad * 100 <= n,
+        "{bad}/{n} pixels differ for the split two-phase layout"
+    );
     assert!(r.keys.iter().zip(&want).any(|(g, w)| w.0 != 0 && g.0 != 0));
 }

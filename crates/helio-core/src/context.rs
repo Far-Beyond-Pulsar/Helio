@@ -114,8 +114,8 @@ pub(crate) struct RecordedStreams {
     pub(crate) render_pass_open: bool,
 }
 use crate::graph::PipelineRegistry;
-use crate::{Profiler, SceneBufferProjection};
 use crate::GpuCameraUniforms;
+use crate::{Profiler, SceneBufferProjection};
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -593,11 +593,15 @@ impl<'a> PassContext<'a> {
         &'b mut self,
         desc: &'b wgpu::ComputePassDescriptor<'b>,
     ) -> ComputeCmds<'b> {
-        assert!(self.active_render_pass.is_none(),
-            "graphics-stream compute cannot run inside a render pass");
+        assert!(
+            self.active_render_pass.is_none(),
+            "graphics-stream compute cannot run inside a render pass"
+        );
         #[cfg(debug_assertions)]
-        assert!(!self.chain_transparent,
-            "chain-transparent passes cannot use graphics-stream compute");
+        assert!(
+            !self.chain_transparent,
+            "chain-transparent passes cannot use graphics-stream compute"
+        );
         if let Some(recorded) = self.recorded {
             return ComputeCmds::begin_recorded(recorded.graphics, desc);
         }

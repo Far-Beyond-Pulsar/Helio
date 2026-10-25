@@ -102,11 +102,15 @@ pub struct GltfMaterial {
 pub fn gltf_materials(doc: &serde_json::Value) -> HashMap<String, GltfMaterial> {
     let image_of = |tex: &serde_json::Value| -> Option<String> {
         let t = doc["textures"].get(tex["index"].as_u64()? as usize)?;
-        doc["images"].get(t["source"].as_u64()? as usize)?["uri"].as_str().map(str::to_string)
+        doc["images"].get(t["source"].as_u64()? as usize)?["uri"]
+            .as_str()
+            .map(str::to_string)
     };
     let mut out = HashMap::new();
     for m in doc["materials"].as_array().into_iter().flatten() {
-        let Some(name) = m["name"].as_str() else { continue };
+        let Some(name) = m["name"].as_str() else {
+            continue;
+        };
         let pbr = &m["pbrMetallicRoughness"];
         let base = &pbr["baseColorTexture"];
         let pair = |v: &serde_json::Value| -> Option<[f32; 2]> {
@@ -147,7 +151,12 @@ pub fn read_gltf_materials(path: &Path) -> HashMap<String, GltfMaterial> {
 pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
     let mut by_key: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<Job> = Vec::new();
-    let mut add = |path: PathBuf, opacity: Option<PathBuf>, role: Role, marble: bool, mat: Mat, channel: u8| {
+    let mut add = |path: PathBuf,
+                   opacity: Option<PathBuf>,
+                   role: Role,
+                   marble: bool,
+                   mat: Mat,
+                   channel: u8| {
         if !path.is_file() {
             return;
         }
@@ -167,7 +176,8 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
             }
         }
     };
-    let mut gltfs: HashMap<&'static str, Option<(PathBuf, HashMap<String, GltfMaterial>)>> = HashMap::new();
+    let mut gltfs: HashMap<&'static str, Option<(PathBuf, HashMap<String, GltfMaterial>)>> =
+        HashMap::new();
     for &mat in mats {
         if let Some(id) = mat.marble_set() {
             for (role_name, role, channel) in [
@@ -187,7 +197,9 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
                 })
             });
             let Some((gltf, info)) = entry else { continue };
-            let Some(m) = info.get(slot.name) else { continue };
+            let Some(m) = info.get(slot.name) else {
+                continue;
+            };
             let dir = gltf.parent().unwrap_or(assets).to_path_buf();
             for (file, role, channel) in [
                 (&m.base, Role::Srgb, CH_BASE),
@@ -195,9 +207,14 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
                 (&m.arm, Role::Linear, CH_ARM),
             ] {
                 if let Some(file) = file {
-                    let opacity = (m.masked && channel == CH_BASE
-                        && file.ends_with(".jpg") && file.contains("_diff_"))
-                        .then(|| dir.join(file.replace("_diff_", "_alpha_")).with_extension("png"));
+                    let opacity = (m.masked
+                        && channel == CH_BASE
+                        && file.ends_with(".jpg")
+                        && file.contains("_diff_"))
+                    .then(|| {
+                        dir.join(file.replace("_diff_", "_alpha_"))
+                            .with_extension("png")
+                    });
                     add(dir.join(file), opacity, role, false, mat, channel);
                 }
             }
@@ -212,7 +229,10 @@ pub fn jobs(assets: &Path, mats: &[Mat], config: &Config) -> Vec<Job> {
 pub fn estimate_bytes(jobs: &[Job]) -> u64 {
     jobs.iter()
         .map(|j| {
-            let side = image::image_dimensions(&j.path).map(|(w, h)| w.max(h)).unwrap_or(j.cap).min(j.cap);
+            let side = image::image_dimensions(&j.path)
+                .map(|(w, h)| w.max(h))
+                .unwrap_or(j.cap)
+                .min(j.cap);
             chain_bytes(side, side)
         })
         .sum()
@@ -224,14 +244,22 @@ fn srgb_to_linear_lut() -> [f32; 256] {
     let mut lut = [0.0f32; 256];
     for (i, v) in lut.iter_mut().enumerate() {
         let c = i as f32 / 255.0;
-        *v = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        *v = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
     }
     lut
 }
 
 fn linear_to_srgb8(l: f32) -> u8 {
     let c = l.clamp(0.0, 1.0);
-    let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let s = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
     (s * 255.0 + 0.5) as u8
 }
 
@@ -240,45 +268,48 @@ pub fn downsample(src: &[u8], w: u32, h: u32, role: Role) -> (Vec<u8>, u32, u32)
     let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
     let lut = srgb_to_linear_lut();
     let mut out = vec![0u8; (nw * nh * 4) as usize];
-    out.par_chunks_mut((nw * 4) as usize).enumerate().for_each(|(y, row)| {
-        for x in 0..nw as usize {
-            let mut taps = [[0u8; 4]; 4];
-            for (i, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
-                let sx = (x * 2 + dx).min(w as usize - 1);
-                let sy = (y * 2 + dy).min(h as usize - 1);
-                let o = (sy * w as usize + sx) * 4;
-                taps[i] = [src[o], src[o + 1], src[o + 2], src[o + 3]];
-            }
-            let px = &mut row[x * 4..x * 4 + 4];
-            match role {
-                Role::Srgb => {
-                    for c in 0..3 {
-                        let lin = taps.iter().map(|t| lut[t[c] as usize]).sum::<f32>() * 0.25;
-                        px[c] = linear_to_srgb8(lin);
-                    }
-                    px[3] = ((taps.iter().map(|t| u32::from(t[3])).sum::<u32>() + 2) / 4) as u8;
+    out.par_chunks_mut((nw * 4) as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..nw as usize {
+                let mut taps = [[0u8; 4]; 4];
+                for (i, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
+                    let sx = (x * 2 + dx).min(w as usize - 1);
+                    let sy = (y * 2 + dy).min(h as usize - 1);
+                    let o = (sy * w as usize + sx) * 4;
+                    taps[i] = [src[o], src[o + 1], src[o + 2], src[o + 3]];
                 }
-                Role::Normal => {
-                    let mut v = [0.0f32; 3];
-                    for t in &taps {
+                let px = &mut row[x * 4..x * 4 + 4];
+                match role {
+                    Role::Srgb => {
                         for c in 0..3 {
-                            v[c] += t[c] as f32 / 255.0 * 2.0 - 1.0;
+                            let lin = taps.iter().map(|t| lut[t[c] as usize]).sum::<f32>() * 0.25;
+                            px[c] = linear_to_srgb8(lin);
+                        }
+                        px[3] = ((taps.iter().map(|t| u32::from(t[3])).sum::<u32>() + 2) / 4) as u8;
+                    }
+                    Role::Normal => {
+                        let mut v = [0.0f32; 3];
+                        for t in &taps {
+                            for c in 0..3 {
+                                v[c] += t[c] as f32 / 255.0 * 2.0 - 1.0;
+                            }
+                        }
+                        let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+                        for c in 0..3 {
+                            px[c] = ((v[c] / len * 0.5 + 0.5) * 255.0 + 0.5) as u8;
+                        }
+                        px[3] = 255;
+                    }
+                    Role::Linear => {
+                        for c in 0..4 {
+                            px[c] =
+                                ((taps.iter().map(|t| u32::from(t[c])).sum::<u32>() + 2) / 4) as u8;
                         }
                     }
-                    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
-                    for c in 0..3 {
-                        px[c] = ((v[c] / len * 0.5 + 0.5) * 255.0 + 0.5) as u8;
-                    }
-                    px[3] = 255;
-                }
-                Role::Linear => {
-                    for c in 0..4 {
-                        px[c] = ((taps.iter().map(|t| u32::from(t[c])).sum::<u32>() + 2) / 4) as u8;
-                    }
                 }
             }
-        }
-    });
+        });
     (out, nw, nh)
 }
 
@@ -303,7 +334,9 @@ fn alpha_coverage(pixels: &[u8]) -> f64 {
 /// texels permit. Leave RGB and zero alpha untouched; never fill empty cards.
 fn preserve_coverage(pixels: &mut [u8], target: f64) {
     let mut histogram = [0usize; 256];
-    for p in pixels.chunks_exact(4) { histogram[p[3] as usize] += 1; }
+    for p in pixels.chunks_exact(4) {
+        histogram[p[3] as usize] += 1;
+    }
     let total = (pixels.len() / 4) as f64;
     let mut selected = 0usize;
     let mut threshold = 256usize;
@@ -317,13 +350,17 @@ fn preserve_coverage(pixels: &mut [u8], target: f64) {
         }
     }
     let scale = 127.5 / (threshold as f64 - 0.5);
-    for p in pixels.chunks_exact_mut(4) { p[3] = (p[3] as f64 * scale).round().clamp(0.0, 255.0) as u8; }
+    for p in pixels.chunks_exact_mut(4) {
+        p[3] = (p[3] as f64 * scale).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 fn cutout_mips(level0: Vec<u8>, w: u32, h: u32, coverage: f64) -> Vec<Vec<u8>> {
     // Filter the unscaled alpha chain, so compensation does not accumulate.
     let mut mips = build_mips(level0, w, h, Role::Srgb);
-    for mip in &mut mips { preserve_coverage(mip, coverage); }
+    for mip in &mut mips {
+        preserve_coverage(mip, coverage);
+    }
     mips
 }
 
@@ -331,21 +368,34 @@ pub fn decode(path: &Path, role: Role, cap: u32) -> Result<Decoded, String> {
     decode_with_opacity(path, None, role, cap)
 }
 
-pub fn decode_with_opacity(path: &Path, opacity: Option<&Path>, role: Role, cap: u32) -> Result<Decoded, String> {
+pub fn decode_with_opacity(
+    path: &Path,
+    opacity: Option<&Path>,
+    role: Role,
+    cap: u32,
+) -> Result<Decoded, String> {
     let mut reader = image::ImageReader::open(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .with_guessed_format()
         .map_err(|e| format!("{}: {e}", path.display()))?;
     reader.no_limits();
-    let img = reader.decode().map_err(|e| format!("{}: {e}", path.display()))?;
+    let img = reader
+        .decode()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let (w, h) = (img.width(), img.height());
     let mut rgba = img.into_rgba8();
     if let Some(path) = opacity {
         // Apply before resizing; filtering a missing (opaque) alpha channel
         // first cannot reconstruct the leaf silhouette later.
-        let mask = image::open(path).map_err(|e| format!("opacity {}: {e}", path.display()))?.into_luma8();
+        let mask = image::open(path)
+            .map_err(|e| format!("opacity {}: {e}", path.display()))?
+            .into_luma8();
         if mask.dimensions() != (w, h) {
-            return Err(format!("opacity {} dimensions {:?} do not match colour {w}x{h}", path.display(), mask.dimensions()));
+            return Err(format!(
+                "opacity {} dimensions {:?} do not match colour {w}x{h}",
+                path.display(),
+                mask.dimensions()
+            ));
         }
         for (colour, alpha) in rgba.pixels_mut().zip(mask.pixels()) {
             colour[3] = ((u16::from(colour[3]) * u16::from(alpha[0]) + 127) / 255) as u8;
@@ -355,15 +405,24 @@ pub fn decode_with_opacity(path: &Path, opacity: Option<&Path>, role: Role, cap:
     let (mut w, mut h) = (w, h);
     if w.max(h) > cap {
         let scale = f64::from(cap) / f64::from(w.max(h));
-        let (nw, nh) = (((f64::from(w) * scale).round() as u32).max(1), ((f64::from(h) * scale).round() as u32).max(1));
+        let (nw, nh) = (
+            ((f64::from(w) * scale).round() as u32).max(1),
+            ((f64::from(h) * scale).round() as u32).max(1),
+        );
         rgba = image::imageops::resize(&rgba, nw, nh, image::imageops::FilterType::Triangle);
         w = nw;
         h = nh;
     }
     let mips = if let Some(coverage) = coverage {
         cutout_mips(rgba.into_raw(), w, h, coverage)
-    } else { build_mips(rgba.into_raw(), w, h, role) };
-    Ok(Decoded { width: w, height: h, mips })
+    } else {
+        build_mips(rgba.into_raw(), w, h, role)
+    };
+    Ok(Decoded {
+        width: w,
+        height: h,
+        mips,
+    })
 }
 
 #[cfg(test)]
@@ -372,7 +431,9 @@ mod tests {
 
     #[test]
     fn cutout_mips_preserve_coverage_without_filling_empty_texels() {
-        let base: Vec<u8> = (0..64*64).flat_map(|i| [80, 160, 40, if (i % 64) < 24 { 255 } else { 0 }]).collect();
+        let base: Vec<u8> = (0..64 * 64)
+            .flat_map(|i| [80, 160, 40, if (i % 64) < 24 { 255 } else { 0 }])
+            .collect();
         let coverage = alpha_coverage(&base);
         let mips = cutout_mips(base, 64, 64, coverage);
         for mip in &mips[..5] {
@@ -390,9 +451,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let colour = dir.join("leaves.jpg");
         let opacity = dir.join("alpha.png");
-        image::RgbImage::from_pixel(8, 8, image::Rgb([30, 120, 40])).save(&colour).unwrap();
-        assert!(decode_with_opacity(&colour, Some(&dir.join("missing.png")), Role::Srgb, 8).is_err());
-        image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 {255} else {0}])).save(&opacity).unwrap();
+        image::RgbImage::from_pixel(8, 8, image::Rgb([30, 120, 40]))
+            .save(&colour)
+            .unwrap();
+        assert!(
+            decode_with_opacity(&colour, Some(&dir.join("missing.png")), Role::Srgb, 8).is_err()
+        );
+        image::GrayImage::from_fn(8, 8, |x, _| image::Luma([if x < 4 { 255 } else { 0 }]))
+            .save(&opacity)
+            .unwrap();
         let decoded = decode_with_opacity(&colour, Some(&opacity), Role::Srgb, 4).unwrap();
         assert_eq!((decoded.width, decoded.height), (4, 4));
         assert_eq!(alpha_coverage(&decoded.mips[0]), 0.5);
@@ -401,7 +468,9 @@ mod tests {
     }
 
     fn fixture(name: &str) -> serde_json::Value {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("vg_stress_prep/fixtures").join(name);
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("vg_stress_prep/fixtures")
+            .join(name);
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
     }
 
@@ -410,16 +479,28 @@ mod tests {
         let leaves = gltf_materials(&fixture("island_tree_01.gltf"));
         assert!(leaves["island_tree_01_leaves"].masked);
         assert!(!leaves["island_tree_01"].masked && !leaves["island_tree_01_branches"].masked);
-        assert_eq!(leaves["island_tree_01_leaves"].base.as_deref(), Some("textures/island_tree_01_leaves_diff_2k.jpg"));
-        assert_eq!(leaves["island_tree_01_leaves"].normal.as_deref(), Some("textures/island_tree_01_leaves_nor_gl_2k.jpg"));
-        assert_eq!(leaves["island_tree_01_leaves"].arm.as_deref(), Some("textures/island_tree_01_leaves_arm_2k.jpg"));
+        assert_eq!(
+            leaves["island_tree_01_leaves"].base.as_deref(),
+            Some("textures/island_tree_01_leaves_diff_2k.jpg")
+        );
+        assert_eq!(
+            leaves["island_tree_01_leaves"].normal.as_deref(),
+            Some("textures/island_tree_01_leaves_nor_gl_2k.jpg")
+        );
+        assert_eq!(
+            leaves["island_tree_01_leaves"].arm.as_deref(),
+            Some("textures/island_tree_01_leaves_arm_2k.jpg")
+        );
         let (scale, offset) = leaves["island_tree_01_branches"].uv.unwrap();
         assert!((scale[0] - 15.0).abs() < 1e-4 && (scale[1] - 3.4).abs() < 1e-4);
         assert!((offset[1] + 2.4).abs() < 1e-4);
         assert!(leaves["island_tree_01"].uv.is_none());
         let small = gltf_materials(&fixture("tree_small_02.gltf"));
         assert!(small["tree_small_02_leaves"].masked && !small["tree_small_02_trunk"].masked);
-        assert_eq!(small["tree_small_02_trunk"].base.as_deref(), Some("textures/tree_small_02_diff_2k.jpg"));
+        assert_eq!(
+            small["tree_small_02_trunk"].base.as_deref(),
+            Some("textures/tree_small_02_diff_2k.jpg")
+        );
     }
 
     #[test]
@@ -438,7 +519,9 @@ mod tests {
     #[test]
     fn mip_chain_has_wgpu_sizes_and_averages() {
         let (w, h) = (8u32, 4u32);
-        let level0: Vec<u8> = (0..w * h).flat_map(|i| [(i % 2 * 200) as u8, 100, 50, 255]).collect();
+        let level0: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 2 * 200) as u8, 100, 50, 255])
+            .collect();
         let mips = build_mips(level0, w, h, Role::Linear);
         let sizes: Vec<usize> = mips.iter().map(|m| m.len() / 4).collect();
         assert_eq!(sizes, [32, 8, 2, 1]);
@@ -455,7 +538,13 @@ mod tests {
         let (n, _, _) = downsample(&px, 2, 2, Role::Normal);
         assert!((i32::from(n[0]) - 128).abs() <= 1 && n[2] >= 253);
         // Black and white average to about 188 in sRGB, not 128.
-        let bw: Vec<u8> = [[0, 0, 0, 255], [255, 255, 255, 255], [0, 0, 0, 255], [255, 255, 255, 255]].concat();
+        let bw: Vec<u8> = [
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+        ]
+        .concat();
         let (s, _, _) = downsample(&bw, 2, 2, Role::Srgb);
         assert!((185..=190).contains(&s[0]), "{}", s[0]);
     }
@@ -474,7 +563,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vgtex-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let img = image::RgbImage::from_fn(64, 32, |x, y| image::Rgb([x as u8 * 4, y as u8 * 8, 77]));
+        let img =
+            image::RgbImage::from_fn(64, 32, |x, y| image::Rgb([x as u8 * 4, y as u8 * 8, 77]));
         img.save(dir.join("t.png")).unwrap();
         let d = decode(&dir.join("t.png"), Role::Srgb, 16).unwrap();
         assert_eq!((d.width, d.height), (16, 8));

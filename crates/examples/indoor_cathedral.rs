@@ -572,7 +572,10 @@ impl ApplicationHandler for App {
 
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         // `HELIO_DEBUG_MODE=<mode>`: one of the renderer's debug views.
-        if let Some(mode) = std::env::var("HELIO_DEBUG_MODE").ok().and_then(|v| v.parse().ok()) {
+        if let Some(mode) = std::env::var("HELIO_DEBUG_MODE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             renderer.set_debug_mode(mode);
         }
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -925,7 +928,10 @@ impl AppState {
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
-        if self.capture.frame(&self.device, &self.queue, &output.texture) {
+        if self
+            .capture
+            .frame(&self.device, &self.queue, &output.texture)
+        {
             std::process::exit(0);
         }
         self.queue.present(output);

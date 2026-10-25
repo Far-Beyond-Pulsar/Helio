@@ -13,7 +13,9 @@ mod edits;
 mod ids;
 mod source_data;
 
-pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditBase, VoxelEditJournal, VoxelKeptChunks};
+pub use brush::{
+    VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditBase, VoxelEditJournal, VoxelKeptChunks,
+};
 pub use chunk_codec::{VoxelChunkCodecError, VoxelMaterialChunk};
 pub use data_api::{
     VoxelBatchReceipt, VoxelPayloadKey, VoxelPayloadStore, VoxelSourceWriter, VoxelStoredPayload,

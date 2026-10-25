@@ -114,6 +114,15 @@ impl RendererBuilder {
         self
     }
 
+    /// Replace the renderer configuration before graph construction. This is
+    /// used by [`HelioGraphicsContext`](crate::HelioGraphicsContext) to apply
+    /// display-derived output settings without exposing XR setup to apps.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_renderer_config(mut self, config: RendererConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     /// Build the render graph from anything that implements [`IntoGraph`]: a
     /// built-in pipeline, a render-graph asset or a plain function.
     pub fn with_graph(self, pipeline: impl IntoGraph + 'static) -> Self {
@@ -135,7 +144,10 @@ impl RendererBuilder {
     /// Enable editor mode (shows the `EDITOR` group, enables gizmo drawing).
     /// Add a scene derivation, run each frame (in the order added) between
     /// the SceneDB snapshot and the graph; see `helio_core::scene_derivation`.
-    pub fn with_scene_derivation(mut self, derivation: Box<dyn helio_core::SceneDerivation>) -> Self {
+    pub fn with_scene_derivation(
+        mut self,
+        derivation: Box<dyn helio_core::SceneDerivation>,
+    ) -> Self {
         self.scene_derivations.push(derivation);
         self
     }
@@ -217,9 +229,9 @@ impl RendererBuilder {
         });
 
         let config = self.config;
-        let pass_graph_fn = self.pass_graph_fn.expect(
-            "RendererBuilder::build: call .with_pass_build_context() before .build()",
-        );
+        let pass_graph_fn = self
+            .pass_graph_fn
+            .expect("RendererBuilder::build: call .with_pass_build_context() before .build()");
         let graph = pass_graph_fn(PassBuildContext {
             device: &device,
             queue: &queue,

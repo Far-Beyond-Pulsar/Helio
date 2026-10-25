@@ -176,7 +176,11 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: true,
         });
-        fallback_local_visibility.slice(..).get_mapped_range_mut().expect("mapped at creation").copy_from_slice(&u32::MAX.to_le_bytes());
+        fallback_local_visibility
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("mapped at creation")
+            .copy_from_slice(&u32::MAX.to_le_bytes());
         fallback_local_visibility.unmap();
         let fallback_gi_irradiance = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Deferred Fallback GI Irradiance"),
@@ -190,7 +194,11 @@ impl DeferredLightPass {
             device,
             "Deferred Lighting Shader",
             helio_core::include_wgsl!("../shaders/deferred_lighting.wgsl"),
-            &[helio_mats::PBR_EVAL_SNIPPET, ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET],
+            &[
+                helio_mats::PBR_EVAL_SNIPPET,
+                ATMOSPHERE_SNIPPET,
+                ATMOSPHERE_SKY_TABLE_SNIPPET,
+            ],
         );
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -401,34 +409,37 @@ impl DeferredLightPass {
             bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2), Some(&bgl_3)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("DeferredLight Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("DeferredLight Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: pre_aa_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: pre_aa_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let reflection_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("DeferredReflection PL"),
@@ -439,47 +450,51 @@ impl DeferredLightPass {
                 ],
                 immediate_size: 0,
             });
-        let reflection_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("DeferredReflection Additive Pipeline"),
-            layout: Some(&reflection_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let reflection_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("DeferredReflection Additive Pipeline"),
+                layout: Some(&reflection_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_reflection"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: pre_aa_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_reflection"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: pre_aa_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Zero,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let reflection_debug_pipeline =
-            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+        );
+        let reflection_debug_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
                 label: Some("DeferredReflection Debug Pipeline"),
                 layout: Some(&reflection_pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -506,7 +521,8 @@ impl DeferredLightPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
 
         let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
         let (_fallback_static_shadow_tex, fallback_static_shadow_view) =
@@ -863,7 +879,12 @@ impl DeferredLightPass {
 
 impl RenderPass for DeferredLightPass {
     fn scene_buffers(&self) -> &'static [&'static str] {
-        &["portal_chain_unmap", "reflection_captures", "scene_lights", "water_volumes"]
+        &[
+            "portal_chain_unmap",
+            "reflection_captures",
+            "scene_lights",
+            "water_volumes",
+        ]
     }
 
     fn name(&self) -> &'static str {
@@ -1025,7 +1046,10 @@ impl RenderPass for DeferredLightPass {
         let directional_visibility_view = ctx
             .registry
             .texture_binding(helio_pass_sky::clouds::SUN_VISIBILITY)
-            .or_else(|| ctx.registry.texture_binding(helio_pass_sky::clouds::DIRECTIONAL_VISIBILITY))
+            .or_else(|| {
+                ctx.registry
+                    .texture_binding(helio_pass_sky::clouds::DIRECTIONAL_VISIBILITY)
+            })
             .unwrap_or(&self.fallback_ssr_view);
 
         let gbuffer_key: Vec<wgpu::TextureView> = [
@@ -1327,7 +1351,12 @@ impl RenderPass for DeferredLightPass {
             .registry
             .buffer_binding(helio_pass_gi::GI_IRRADIANCE)
             .unwrap_or(&self.fallback_gi_irradiance);
-        let tile_key = [tile_lists.clone(), tile_counts.clone(), local_visibility.clone(), gi_irradiance.clone()];
+        let tile_key = [
+            tile_lists.clone(),
+            tile_counts.clone(),
+            local_visibility.clone(),
+            gi_irradiance.clone(),
+        ];
         if self.bind_group_3_key.as_ref() != Some(&tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG3"),
@@ -1595,42 +1624,118 @@ impl RenderPass for DeferredLightPass {
 
     fn debug_view_legend(&self, debug_mode: u32) -> Option<DebugViewLegend> {
         static COLORS: &[DebugViewLegendStop] = &[
-            DebugViewLegendStop { label: "0 µs/px", color: [0, 0, 255] },
-            DebugViewLegendStop { label: "0.01 µs/px", color: [0, 255, 255] },
-            DebugViewLegendStop { label: "0.03 µs/px", color: [0, 255, 0] },
-            DebugViewLegendStop { label: "0.1 µs/px", color: [255, 255, 0] },
-            DebugViewLegendStop { label: "0.5+ µs/px", color: [255, 0, 0] },
+            DebugViewLegendStop {
+                label: "0 µs/px",
+                color: [0, 0, 255],
+            },
+            DebugViewLegendStop {
+                label: "0.01 µs/px",
+                color: [0, 255, 255],
+            },
+            DebugViewLegendStop {
+                label: "0.03 µs/px",
+                color: [0, 255, 0],
+            },
+            DebugViewLegendStop {
+                label: "0.1 µs/px",
+                color: [255, 255, 0],
+            },
+            DebugViewLegendStop {
+                label: "0.5+ µs/px",
+                color: [255, 0, 0],
+            },
         ];
         static LIGHTS: &[DebugViewLegendStop] = &[
-            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
-            DebugViewLegendStop { label: "2", color: [0, 255, 255] },
-            DebugViewLegendStop { label: "4", color: [0, 255, 0] },
-            DebugViewLegendStop { label: "6", color: [255, 255, 0] },
-            DebugViewLegendStop { label: "8+", color: [255, 0, 0] },
+            DebugViewLegendStop {
+                label: "0",
+                color: [0, 0, 255],
+            },
+            DebugViewLegendStop {
+                label: "2",
+                color: [0, 255, 255],
+            },
+            DebugViewLegendStop {
+                label: "4",
+                color: [0, 255, 0],
+            },
+            DebugViewLegendStop {
+                label: "6",
+                color: [255, 255, 0],
+            },
+            DebugViewLegendStop {
+                label: "8+",
+                color: [255, 0, 0],
+            },
         ];
         static WORK: &[DebugViewLegendStop] = &[
-            DebugViewLegendStop { label: "0", color: [0, 0, 255] },
-            DebugViewLegendStop { label: "8", color: [0, 255, 255] },
-            DebugViewLegendStop { label: "16", color: [0, 255, 0] },
-            DebugViewLegendStop { label: "24", color: [255, 255, 0] },
-            DebugViewLegendStop { label: "32+", color: [255, 0, 0] },
+            DebugViewLegendStop {
+                label: "0",
+                color: [0, 0, 255],
+            },
+            DebugViewLegendStop {
+                label: "8",
+                color: [0, 255, 255],
+            },
+            DebugViewLegendStop {
+                label: "16",
+                color: [0, 255, 0],
+            },
+            DebugViewLegendStop {
+                label: "24",
+                color: [255, 255, 0],
+            },
+            DebugViewLegendStop {
+                label: "32+",
+                color: [255, 0, 0],
+            },
         ];
 
         // Colours match `deferred_lighting.wgsl` (classic, voxel) and the virtual
         // geometry debug pass (`DBG_RVR_*` in `vg_debug.wgsl`).
         static RAY_VS_RASTER: &[DebugViewLegendStop] = &[
-            DebugViewLegendStop { label: "Raster: hardware (classic, VG tier 1)", color: [255, 92, 20] },
-            DebugViewLegendStop { label: "Raster: compute micro-raster (VG tier 2)", color: [255, 217, 26] },
-            DebugViewLegendStop { label: "Raster: dense-tile depth peel (VG tier 3)", color: [230, 26, 26] },
-            DebugViewLegendStop { label: "Ray traced: voxels", color: [31, 199, 255] },
-            DebugViewLegendStop { label: "Ray traced: VG ray query (tier 3)", color: [77, 102, 255] },
+            DebugViewLegendStop {
+                label: "Raster: hardware (classic, VG tier 1)",
+                color: [255, 92, 20],
+            },
+            DebugViewLegendStop {
+                label: "Raster: compute micro-raster (VG tier 2)",
+                color: [255, 217, 26],
+            },
+            DebugViewLegendStop {
+                label: "Raster: dense-tile depth peel (VG tier 3)",
+                color: [230, 26, 26],
+            },
+            DebugViewLegendStop {
+                label: "Ray traced: voxels",
+                color: [31, 199, 255],
+            },
+            DebugViewLegendStop {
+                label: "Ray traced: VG ray query (tier 3)",
+                color: [77, 102, 255],
+            },
         ];
 
         match debug_mode {
-            33 => Some(DebugViewLegend { title: "Ray trace vs raster", unit: "", stops: RAY_VS_RASTER }),
-            28 => Some(DebugViewLegend { title: "Light complexity", unit: "lights", stops: LIGHTS }),
-            29 => Some(DebugViewLegend { title: "Shader complexity", unit: "work units", stops: WORK }),
-            34 => Some(DebugViewLegend { title: "Estimated GPU time per pixel", unit: "µs / pixel", stops: COLORS }),
+            33 => Some(DebugViewLegend {
+                title: "Ray trace vs raster",
+                unit: "",
+                stops: RAY_VS_RASTER,
+            }),
+            28 => Some(DebugViewLegend {
+                title: "Light complexity",
+                unit: "lights",
+                stops: LIGHTS,
+            }),
+            29 => Some(DebugViewLegend {
+                title: "Shader complexity",
+                unit: "work units",
+                stops: WORK,
+            }),
+            34 => Some(DebugViewLegend {
+                title: "Estimated GPU time per pixel",
+                unit: "µs / pixel",
+                stops: COLORS,
+            }),
             _ => None,
         }
     }

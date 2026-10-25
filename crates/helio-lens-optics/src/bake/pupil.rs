@@ -51,7 +51,10 @@ impl PupilFootprints {
 }
 
 /// Bake the footprints at the reference wavelength.
-pub fn bake_footprints(rx: &Prescription, config: &BakeConfig) -> Result<PupilFootprints, OpticsError> {
+pub fn bake_footprints(
+    rx: &Prescription,
+    config: &BakeConfig,
+) -> Result<PupilFootprints, OpticsError> {
     let res = config.footprint_resolution.max(2);
     let ss = config.footprint_supersample.max(1);
     let fno = config.footprint_f_number.unwrap_or(rx.f_number);
@@ -60,16 +63,24 @@ pub fn bake_footprints(rx: &Prescription, config: &BakeConfig) -> Result<PupilFo
     let dist = config.focus_distance_mm;
     let mut data = vec![0.0f32; config.footprint_fields.len() * res * res];
     for (f, &r) in config.footprint_fields.iter().enumerate() {
-        let Some(field) = field_for(&base, r, dist) else { continue };
+        let Some(field) = field_for(&base, r, dist) else {
+            continue;
+        };
         for v in 0..res {
             for u in 0..res {
                 let mut hit = 0usize;
                 for sj in 0..ss {
                     for si in 0..ss {
-                        let x = -1.0 + 2.0 * (u as f64 + (si as f64 + 0.5) / ss as f64) / res as f64;
-                        let y = -1.0 + 2.0 * (v as f64 + (sj as f64 + 0.5) / ss as f64) / res as f64;
+                        let x =
+                            -1.0 + 2.0 * (u as f64 + (si as f64 + 0.5) / ss as f64) / res as f64;
+                        let y =
+                            -1.0 + 2.0 * (v as f64 + (sj as f64 + 0.5) / ss as f64) / res as f64;
                         if x * x + y * y <= 1.0
-                            && tracer.aim(field, [x, y]).ok().and_then(|ray| tracer.trace(ray).ok()).is_some()
+                            && tracer
+                                .aim(field, [x, y])
+                                .ok()
+                                .and_then(|ray| tracer.trace(ray).ok())
+                                .is_some()
                         {
                             hit += 1;
                         }

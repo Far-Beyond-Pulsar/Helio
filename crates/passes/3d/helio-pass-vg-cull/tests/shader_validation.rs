@@ -20,8 +20,17 @@ fn cull_shader_validates() {
         )
         .validate(&m)
         .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        for entry in ["cs_density", "cs_seed", "cs_round_prepare", "cs_traverse", "cs_finalize"] {
-            assert!(m.entry_points.iter().any(|e| e.name == entry), "missing {entry}");
+        for entry in [
+            "cs_density",
+            "cs_seed",
+            "cs_round_prepare",
+            "cs_traverse",
+            "cs_finalize",
+        ] {
+            assert!(
+                m.entry_points.iter().any(|e| e.name == entry),
+                "missing {entry}"
+            );
         }
     }
 }

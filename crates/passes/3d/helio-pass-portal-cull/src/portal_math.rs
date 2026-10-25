@@ -218,7 +218,11 @@ mod tests {
     fn view_map_places_target_contents_beyond_an_opposing_source_portal() {
         let source = pose_at(Vec3::new(0.0, 0.0, 6.0), Vec3::NEG_Z);
         let target = pose_at(Vec3::new(0.0, 0.0, -6.0), Vec3::Z);
-        let map = PortalPair { a: source, b: target }.view_map_inverse();
+        let map = PortalPair {
+            a: source,
+            b: target,
+        }
+        .view_map_inverse();
 
         // The target-room center is six units in front of the target portal.
         // It must land six units beyond the source portal, not on the camera

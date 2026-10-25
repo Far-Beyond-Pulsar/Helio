@@ -19,9 +19,9 @@
 //! * a checksum of everything before it.
 use crate::edit_store::{Brick, BrickKey, CellEdit, EditStore, BRICK_CELLS};
 use crate::edits::Brush;
-use crate::record;
 use crate::grid::Grid;
 use crate::planet::{Edits, Planet, PlanetRecipe};
+use crate::record;
 
 const MAGIC: [u8; 4] = *b"HVPS";
 /// The format (only this one reads).
@@ -33,7 +33,10 @@ pub enum SnapshotError {
     NotASnapshot,
     UnsupportedVersion(u16),
     /// Written for a different grid.
-    GridMismatch { snapshot: u64, planet: u64 },
+    GridMismatch {
+        snapshot: u64,
+        planet: u64,
+    },
     /// Failed its checksum or holds invalid data.
     Corrupt(&'static str),
     /// Its brushes could not be applied to the planet.
@@ -46,7 +49,10 @@ impl std::fmt::Display for SnapshotError {
             Self::NotASnapshot => write!(f, "not a planet edit snapshot"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported snapshot version {v}"),
             Self::GridMismatch { snapshot, planet } => {
-                write!(f, "snapshot grid {snapshot:016x} does not match planet grid {planet:016x}")
+                write!(
+                    f,
+                    "snapshot grid {snapshot:016x} does not match planet grid {planet:016x}"
+                )
             }
             Self::Corrupt(reason) => write!(f, "snapshot is corrupt: {reason}"),
             Self::Rejected(reason) => write!(f, "snapshot was rejected: {reason}"),
@@ -71,7 +77,10 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], SnapshotError> {
-        let out = self.bytes.get(self.at..self.at + n).ok_or(SnapshotError::NotASnapshot)?;
+        let out = self
+            .bytes
+            .get(self.at..self.at + n)
+            .ok_or(SnapshotError::NotASnapshot)?;
         self.at += n;
         Ok(out)
     }
@@ -96,7 +105,10 @@ impl<'a> Reader<'a> {
     fn brushes(&mut self) -> Result<Vec<Brush>, SnapshotError> {
         let n = self.u32()? as usize;
         (0..n)
-            .map(|index| record::decode(index, self.take(record::RECORD_BYTES)?).map_err(|_| SnapshotError::Corrupt("brush record")))
+            .map(|index| {
+                record::decode(index, self.take(record::RECORD_BYTES)?)
+                    .map_err(|_| SnapshotError::Corrupt("brush record"))
+            })
             .collect()
     }
 }
@@ -105,7 +117,11 @@ impl<'a> Reader<'a> {
 pub fn grid_fingerprint(grid: &Grid) -> u64 {
     let form = format!("{:?}", grid.shape());
     let mut bytes = form.into_bytes();
-    for v in [grid.radius().to_bits(), grid.voxel_size().to_bits(), grid.cells() as u64] {
+    for v in [
+        grid.radius().to_bits(),
+        grid.voxel_size().to_bits(),
+        grid.cells() as u64,
+    ] {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
     record::fnv64(&bytes)
@@ -129,7 +145,10 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
     if u64::from_le_bytes(sum.try_into().unwrap()) != record::fnv64(body) {
         return Err(SnapshotError::Corrupt("checksum"));
     }
-    Ok(Reader { bytes: body, at: 16 })
+    Ok(Reader {
+        bytes: body,
+        at: 16,
+    })
 }
 
 impl Planet {
@@ -140,9 +159,20 @@ impl Planet {
         out[..4].copy_from_slice(&MAGIC);
         out[4..6].copy_from_slice(&VERSION.to_le_bytes());
         out[8..16].copy_from_slice(&grid_fingerprint(self.grid()).to_le_bytes());
-        let crate::planet::BakedState { sealed, hash: sealed_hash, .. } = edits.baked_state();
+        let crate::planet::BakedState {
+            sealed,
+            hash: sealed_hash,
+            ..
+        } = edits.baked_state();
         let (top, bottom) = self.edit_bounds();
-        for v in [edits.len() as u64, edits.hash(), sealed as u64, sealed_hash, top.to_bits(), bottom.to_bits()] {
+        for v in [
+            edits.len() as u64,
+            edits.hash(),
+            sealed as u64,
+            sealed_hash,
+            top.to_bits(),
+            bottom.to_bits(),
+        ] {
             out.extend_from_slice(&v.to_le_bytes());
         }
         for log in [&edits.large, &edits.recent] {
@@ -160,7 +190,11 @@ impl Planet {
             for v in [key.bi, key.bj, key.bk] {
                 out.extend_from_slice(&v.to_le_bytes());
             }
-            let runs: Vec<(u16, u16)> = brick.cells.chunk_by(|a, b| a == b).map(|run| (run.len() as u16, run[0].0)).collect();
+            let runs: Vec<(u16, u16)> = brick
+                .cells
+                .chunk_by(|a, b| a == b)
+                .map(|run| (run.len() as u16, run[0].0))
+                .collect();
             out.extend_from_slice(&(runs.len() as u16).to_le_bytes());
             for (len, value) in runs {
                 out.extend_from_slice(&len.to_le_bytes());
@@ -179,19 +213,31 @@ impl Planet {
         let mut planet = Planet::new(recipe).map_err(SnapshotError::Rejected)?;
         let grid = *planet.grid();
         let mut r = open(bytes, &grid)?;
-        let covers = Covers { brushes: r.u64()? as usize, hash: r.u64()? };
+        let covers = Covers {
+            brushes: r.u64()? as usize,
+            hash: r.u64()?,
+        };
         let sealed = (r.u64()? as usize, r.u64()?);
         let bounds = (r.f64()?, r.f64()?);
         let large = r.brushes()?;
         let recent = r.brushes()?;
         let mut baked = EditStore::default();
         for _ in 0..r.u64()? {
-            let key = BrickKey { face: r.u8()?, level: r.u8()?, bi: r.i32()?, bj: r.i32()?, bk: r.i32()? };
+            let key = BrickKey {
+                face: r.u8()?,
+                level: r.u8()?,
+                bi: r.i32()?,
+                bj: r.i32()?,
+                bk: r.i32()?,
+            };
             let mut brick = Brick::default();
             let mut at = 0;
             for _ in 0..r.u16()? {
                 let (len, value) = (r.u16()? as usize, r.u16()?);
-                let run = brick.cells.get_mut(at..at + len).ok_or(SnapshotError::Corrupt("brick runs"))?;
+                let run = brick
+                    .cells
+                    .get_mut(at..at + len)
+                    .ok_or(SnapshotError::Corrupt("brick runs"))?;
                 run.fill(CellEdit(value));
                 at += len;
             }
@@ -203,7 +249,8 @@ impl Planet {
         if r.at != r.bytes.len() {
             return Err(SnapshotError::Corrupt("trailing data"));
         }
-        let edits = Edits::from_parts(planet.grid(), &large, baked, sealed, &recent).map_err(SnapshotError::Rejected)?;
+        let edits = Edits::from_parts(planet.grid(), &large, baked, sealed, &recent)
+            .map_err(SnapshotError::Rejected)?;
         if (edits.len(), edits.hash()) != (covers.brushes, covers.hash) {
             return Err(SnapshotError::Corrupt("history"));
         }
@@ -226,11 +273,24 @@ mod tests {
         let top = p.column_top(face, i0 + 20, j0 + 20, 0);
         let mut applied = Vec::new();
         for n in 0..700 {
-            let cell = Cell::new(face, i0 + (n * 7 % 40), j0 + (n * 13 % 40), top - 12 + (n % 20));
+            let cell = Cell::new(
+                face,
+                i0 + (n * 7 % 40),
+                j0 + (n * 13 % 40),
+                top - 12 + (n % 20),
+            );
             let brush = Brush {
                 center: g.cell_center(cell).to_array(),
-                radius: if n % 90 == 11 { 4.0 } else { 0.1 + f64::from(n % 6) * 0.1 },
-                shape: if n % 2 == 0 { BrushShape::Sphere } else { BrushShape::Cube },
+                radius: if n % 90 == 11 {
+                    4.0
+                } else {
+                    0.1 + f64::from(n % 6) * 0.1
+                },
+                shape: if n % 2 == 0 {
+                    BrushShape::Sphere
+                } else {
+                    BrushShape::Cube
+                },
                 op: [BrushOp::Remove, BrushOp::Add, BrushOp::Paint][n as usize % 3],
                 material: 1 + (n as u32 % 9),
                 height: 0.0,
@@ -246,10 +306,19 @@ mod tests {
     fn snapshots_load_identical_edits_and_take_further_brushes() {
         let (a, applied) = edited();
         let bytes = a.snapshot();
-        assert_eq!((a.edits().len(), a.edits().hash()), (applied.len(), crate::edits::history_hash(applied.iter())));
+        assert_eq!(
+            (a.edits().len(), a.edits().hash()),
+            (applied.len(), crate::edits::history_hash(applied.iter()))
+        );
         let mut b = Planet::from_snapshot(PlanetRecipe::default(), &bytes).unwrap();
-        assert_eq!((b.edits().len(), b.edits().hash()), (a.edits().len(), a.edits().hash()));
-        assert_eq!(b.edits().baked.brick_counts(), a.edits().baked.brick_counts());
+        assert_eq!(
+            (b.edits().len(), b.edits().hash()),
+            (a.edits().len(), a.edits().hash())
+        );
+        assert_eq!(
+            b.edits().baked.brick_counts(),
+            a.edits().baked.brick_counts()
+        );
         for (key, brick) in a.edits().baked.bricks() {
             assert_eq!(b.edits().baked.brick(&key), Some(brick));
         }
@@ -270,14 +339,34 @@ mod tests {
         let bytes = p.snapshot();
         let mut flipped = bytes.clone();
         flipped[bytes.len() / 2] ^= 0x10;
-        assert_eq!(Planet::from_snapshot(PlanetRecipe::default(), &flipped).err(), Some(SnapshotError::Corrupt("checksum")));
+        assert_eq!(
+            Planet::from_snapshot(PlanetRecipe::default(), &flipped).err(),
+            Some(SnapshotError::Corrupt("checksum"))
+        );
         // Another terrain on the same grid takes the edits (a generator
         // update keeps them); another grid does not.
-        let hills = PlanetRecipe { terrain: crate::layers::TerrainLayers::earth().heightfield().source(7), ..PlanetRecipe::default() };
-        assert_eq!(Planet::from_snapshot(hills, &bytes).unwrap().edits().hash(), p.edits().hash());
-        let other = PlanetRecipe { voxel_size_m: 0.3, ..PlanetRecipe::default() };
-        assert!(matches!(Planet::from_snapshot(other, &bytes), Err(SnapshotError::GridMismatch { .. })));
+        let hills = PlanetRecipe {
+            terrain: crate::layers::TerrainLayers::earth()
+                .heightfield()
+                .source(7),
+            ..PlanetRecipe::default()
+        };
+        assert_eq!(
+            Planet::from_snapshot(hills, &bytes).unwrap().edits().hash(),
+            p.edits().hash()
+        );
+        let other = PlanetRecipe {
+            voxel_size_m: 0.3,
+            ..PlanetRecipe::default()
+        };
+        assert!(matches!(
+            Planet::from_snapshot(other, &bytes),
+            Err(SnapshotError::GridMismatch { .. })
+        ));
         assert!(Planet::from_snapshot(PlanetRecipe::default(), &bytes[..bytes.len() - 3]).is_err());
-        assert!(matches!(Planet::from_snapshot(PlanetRecipe::default(), b"nope"), Err(SnapshotError::NotASnapshot)));
+        assert!(matches!(
+            Planet::from_snapshot(PlanetRecipe::default(), b"nope"),
+            Err(SnapshotError::NotASnapshot)
+        ));
     }
 }

@@ -5,8 +5,8 @@ pub mod gpu_types;
 pub use gpu_types::*;
 pub mod budget;
 pub mod sun_occlusion;
-pub use sun_occlusion::*;
 pub use budget::*;
+pub use sun_occlusion::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -151,14 +151,17 @@ fn pipeline(
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
-    helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-        label: Some(entry),
-        layout: Some(&pl),
-        module: shader,
-        entry_point: Some(entry),
-        compilation_options: Default::default(),
-        cache: None,
-    })
+    helio_core::shader::create_compute_pipeline(
+        &device,
+        wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: Some(&pl),
+            module: shader,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+    )
 }
 impl ShadowMatrixPass {
     pub fn new(
@@ -187,7 +190,11 @@ impl ShadowMatrixPass {
             &layout,
             &[lights, &desired, camera, &uniform_buf, dirty, hashes],
         );
-        let shader = helio_core::shader::module(device, "Shadow matrices", helio_core::include_wgsl!("../shaders/shadow_matrices.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Shadow matrices",
+            helio_core::include_wgsl!("../shaders/shadow_matrices.wgsl"),
+        );
         let matrix_pipeline = pipeline(device, &layout, &shader, "compute_shadow_matrices");
         let caster_layout = bgl(device, "Shadow allocation", &[rw, Uniform, rw, ro, rw]);
         let proposed = buffer(
@@ -219,7 +226,11 @@ impl ShadowMatrixPass {
             &caster_layout,
             &[lights, &params, &proposed, &committed, &candidates],
         );
-        let shader = helio_core::shader::module(device, "Shadow residency", helio_core::include_wgsl!("../shaders/shadow_casters.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Shadow residency",
+            helio_core::include_wgsl!("../shaders/shadow_casters.wgsl"),
+        );
         let pipelines = [
             "score_lights",
             "select_lights",

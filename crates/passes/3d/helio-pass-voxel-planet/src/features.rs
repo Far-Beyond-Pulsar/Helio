@@ -52,7 +52,7 @@
 
 use crate::grid::Grid;
 use crate::noise::{hash3, noise, scale, ONE};
-use crate::stamp::{coarse_of, cell_of, CompiledPart, Stamp, MAX_STAMP_REACH, UNIT};
+use crate::stamp::{cell_of, coarse_of, CompiledPart, Stamp, MAX_STAMP_REACH, UNIT};
 use crate::terrain::{top_cells, Column, TerrainField};
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +122,21 @@ impl FeatureSet {
 
 impl Default for Spawn {
     fn default() -> Self {
-        Self { name: String::new(), stamps: Vec::new(), spacing: 8, density: 0.5, field_scale_m: 0.0, field_threshold: -1.0, surfaces: Vec::new(), heights_m: [-1e9, 1e9], height_wander_m: [0.0, 0.0], max_relief: u32::MAX, sink: 0, far_material: 0, far_height: 0 }
+        Self {
+            name: String::new(),
+            stamps: Vec::new(),
+            spacing: 8,
+            density: 0.5,
+            field_scale_m: 0.0,
+            field_threshold: -1.0,
+            surfaces: Vec::new(),
+            heights_m: [-1e9, 1e9],
+            height_wander_m: [0.0, 0.0],
+            max_relief: u32::MAX,
+            sink: 0,
+            far_material: 0,
+            far_height: 0,
+        }
     }
 }
 
@@ -145,17 +159,38 @@ impl CompiledStamp {
         let parts = stamp.compile()?;
         let (lo, hi) = stamp.bounds().unwrap_or(([0; 3], [-1; 3]));
         let size = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
-        let reach = [lo[0], lo[2], hi[0], hi[2]].into_iter().map(i32::abs).max().unwrap_or(0);
+        let reach = [lo[0], lo[2], hi[0], hi[2]]
+            .into_iter()
+            .map(i32::abs)
+            .max()
+            .unwrap_or(0);
         // The columns under its solid parts (their outlines from above).
         let mut covered = 0.0;
         for z in lo[2]..=hi[2] {
             for x in lo[0]..=hi[0] {
                 let c = [x * UNIT + UNIT / 2, z * UNIT + UNIT / 2];
-                let keep = parts.iter().filter(|p| p.material != 0 && p.lo[0] <= x && x <= p.hi[0] && p.lo[2] <= z && z <= p.hi[2] && from_above(p, c)).map(|p| f64::from(p.keep) / 256.0).fold(0.0, f64::max);
+                let keep = parts
+                    .iter()
+                    .filter(|p| {
+                        p.material != 0
+                            && p.lo[0] <= x
+                            && x <= p.hi[0]
+                            && p.lo[2] <= z
+                            && z <= p.hi[2]
+                            && from_above(p, c)
+                    })
+                    .map(|p| f64::from(p.keep) / 256.0)
+                    .fold(0.0, f64::max);
                 covered += keep;
             }
         }
-        Ok(Self { lo, size, parts, reach, area: covered.round() as u32 })
+        Ok(Self {
+            lo,
+            size,
+            parts,
+            reach,
+            area: covered.round() as u32,
+        })
     }
 
     /// What it holds at offset `p` (its own frame): `None` nothing,
@@ -177,11 +212,18 @@ fn from_above(p: &CompiledPart, c: [i32; 2]) -> bool {
     if !p.capsule {
         return true;
     }
-    let (a, b) = ([p.a[0] as f64, p.a[2] as f64], [p.b[0] as f64, p.b[2] as f64]);
+    let (a, b) = (
+        [p.a[0] as f64, p.a[2] as f64],
+        [p.b[0] as f64, p.b[2] as f64],
+    );
     let d = [b[0] - a[0], b[1] - a[1]];
     let w = [c[0] as f64 - a[0], c[1] as f64 - a[1]];
     let length = d[0] * d[0] + d[1] * d[1];
-    let t = if length > 0.0 { ((w[0] * d[0] + w[1] * d[1]) / length).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if length > 0.0 {
+        ((w[0] * d[0] + w[1] * d[1]) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let e = [w[0] - d[0] * t, w[1] - d[1] * t];
     let r = f64::from(p.radius[0].max(p.radius[1]));
     e[0] * e[0] + e[1] * e[1] <= r * r
@@ -228,7 +270,18 @@ impl CompiledSpawn {
     /// lies within its heights, as they wander there (`spawn_grows_at` in
     /// chunk_generate.wgsl).
     pub fn grows_at(&self, grid: &Grid, face: u8, i: i32, j: i32, ground: i32) -> bool {
-        let wander = if self.wander_shift > 0 { scale(noise(grid.domain_point(face, i, j, 0), self.wander_shift, self.seed ^ 0x7a3d_e1f1), self.wander) } else { 0 };
+        let wander = if self.wander_shift > 0 {
+            scale(
+                noise(
+                    grid.domain_point(face, i, j, 0),
+                    self.wander_shift,
+                    self.seed ^ 0x7a3d_e1f1,
+                ),
+                self.wander,
+            )
+        } else {
+            0
+        };
         let ground = ground.saturating_add(wander);
         ground >= self.tops[0] && ground <= self.tops[1]
     }
@@ -306,7 +359,10 @@ impl Placement {
     fn local_box(&self, lo: [i32; 3], hi: [i32; 3]) -> ([i32; 3], [i32; 3]) {
         let a = self.local(lo);
         let b = self.local([hi[0] - 1, hi[1] - 1, hi[2] - 1]);
-        ([a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])], [a[0].max(b[0]) + 1, a[1].max(b[1]) + 1, a[2].max(b[2]) + 1])
+        (
+            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+            [a[0].max(b[0]) + 1, a[1].max(b[1]) + 1, a[2].max(b[2]) + 1],
+        )
     }
 }
 
@@ -314,9 +370,15 @@ impl CompiledFeatures {
     /// `set` compiled for a world of seed `seed`.
     pub fn new(set: &FeatureSet, grid: &Grid, seed: u64) -> Result<Self, String> {
         if set.stamps.len() > MAX_STAMPS || set.spawns.len() > MAX_SPAWNS {
-            return Err(format!("at most {MAX_STAMPS} stamps and {MAX_SPAWNS} spawns"));
+            return Err(format!(
+                "at most {MAX_STAMPS} stamps and {MAX_SPAWNS} spawns"
+            ));
         }
-        let stamps: Vec<CompiledStamp> = set.stamps.iter().map(CompiledStamp::new).collect::<Result<_, _>>()?;
+        let stamps: Vec<CompiledStamp> = set
+            .stamps
+            .iter()
+            .map(CompiledStamp::new)
+            .collect::<Result<_, _>>()?;
         let voxel = grid.voxel_size();
         let mut spawns = Vec::new();
         let (mut above, mut below) = (0, 0);
@@ -325,7 +387,10 @@ impl CompiledFeatures {
                 return Err(format!("spawn {} names no stamp of the set", s.name));
             }
             if !(1..=MAX_SPACING).contains(&s.spacing) {
-                return Err(format!("spawn {} spacing {} is not 1 to {MAX_SPACING} columns", s.name, s.spacing));
+                return Err(format!(
+                    "spawn {} spacing {} is not 1 to {MAX_SPACING} columns",
+                    s.name, s.spacing
+                ));
             }
             if n > 0 && s.spacing > set.spawns[n - 1].spacing {
                 return Err(format!("spawn {} is wider than the spawn before it: spawns go from the widest spacing to the narrowest", s.name));
@@ -336,7 +401,10 @@ impl CompiledFeatures {
             let mut surfaces = 0u64;
             for &m in &s.surfaces {
                 if m >= 64 {
-                    return Err(format!("spawn {} surface material {m} is not under 64", s.name));
+                    return Err(format!(
+                        "spawn {} surface material {m} is not under 64",
+                        s.name
+                    ));
                 }
                 surfaces |= 1 << m;
             }
@@ -352,16 +420,37 @@ impl CompiledFeatures {
                 heights += st.lo[1] + st.size[1] - s.sink;
             }
             if s.far_material >= 128 {
-                return Err(format!("spawn {} far material {} is not under 128", s.name, s.far_material));
+                return Err(format!(
+                    "spawn {} far material {} is not under 128",
+                    s.name, s.far_material
+                ));
             }
-            let far_height = if s.far_height > 0 { s.far_height.min(2 * MAX_STAMP_REACH as u32) as i32 } else { (heights as f64 / s.stamps.len() as f64).round().max(1.0) as i32 };
+            let far_height = if s.far_height > 0 {
+                s.far_height.min(2 * MAX_STAMP_REACH as u32) as i32
+            } else {
+                (heights as f64 / s.stamps.len() as f64).round().max(1.0) as i32
+            };
             if s.far_material != 0 {
                 above = above.max(far_height);
             }
             // The field's scale as the layer stack's noise takes it.
-            let field_shift = if s.field_scale_m > 0.0 { (s.field_scale_m / crate::grid::DOMAIN_UNIT).log2().round().clamp(1.0, 30.0) as u32 } else { 0 };
+            let field_shift = if s.field_scale_m > 0.0 {
+                (s.field_scale_m / crate::grid::DOMAIN_UNIT)
+                    .log2()
+                    .round()
+                    .clamp(1.0, 30.0) as u32
+            } else {
+                0
+            };
             let layer = |m: f64| (m / voxel).floor().clamp(-2.0e9, 2.0e9) as i32;
-            let wander_shift = if s.height_wander_m[0] > 0.0 && s.height_wander_m[1] > 0.0 { (s.height_wander_m[1] / crate::grid::DOMAIN_UNIT).log2().round().clamp(1.0, 30.0) as u32 } else { 0 };
+            let wander_shift = if s.height_wander_m[0] > 0.0 && s.height_wander_m[1] > 0.0 {
+                (s.height_wander_m[1] / crate::grid::DOMAIN_UNIT)
+                    .log2()
+                    .round()
+                    .clamp(1.0, 30.0) as u32
+            } else {
+                0
+            };
             spawns.push(CompiledSpawn {
                 stamps: s.stamps.clone(),
                 spacing: s.spacing as i32,
@@ -369,24 +458,53 @@ impl CompiledFeatures {
                 inset: s.spacing as i32 / 4,
                 density: (f64::from(s.density.clamp(0.0, 1.0)) * 65_536.0).round() as u32,
                 field_shift,
-                field_threshold: (f64::from(s.field_threshold.clamp(-1.0, 1.0)) * f64::from(ONE)).round() as i32,
+                field_threshold: (f64::from(s.field_threshold.clamp(-1.0, 1.0)) * f64::from(ONE))
+                    .round() as i32,
                 seed: (hash3(n as i32, (seed >> 32) as i32, seed as i32, 0x5eed_f00d)) | 1,
                 surfaces,
                 tops: [layer(s.heights_m[0]) + 1, layer(s.heights_m[1]) + 1],
-                wander: if wander_shift > 0 { layer(s.height_wander_m[0]).min(1 << 26) } else { 0 },
+                wander: if wander_shift > 0 {
+                    layer(s.height_wander_m[0]).min(1 << 26)
+                } else {
+                    0
+                },
                 wander_shift,
                 max_relief: s.max_relief.min(i32::MAX as u32) as i32,
                 sink: s.sink,
                 far_material: s.far_material,
                 far_height,
-                field_level: if s.field_scale_m > 0.0 { (s.field_scale_m / voxel).log2().ceil().clamp(0.0, 31.0) as u32 } else { 0 },
+                field_level: if s.field_scale_m > 0.0 {
+                    (s.field_scale_m / voxel).log2().ceil().clamp(0.0, 31.0) as u32
+                } else {
+                    0
+                },
                 // Overlapping crowns: the union of placements at this density.
-                cover: ((1.0 - (-f64::from(s.density.clamp(0.0, 1.0)) * area / f64::from(s.spacing * s.spacing)).exp()) * 65_536.0).round() as u32,
+                cover: ((1.0
+                    - (-f64::from(s.density.clamp(0.0, 1.0)) * area
+                        / f64::from(s.spacing * s.spacing))
+                    .exp())
+                    * 65_536.0)
+                    .round() as u32,
             });
         }
-        let mut features = Self { stamps, spawns, above: above.max(0), below: below.max(0), levels: Vec::new(), stride: 0, blocks: 0 };
-        features.levels = (0..NEAR_LEVELS).map(|level| features.layout(level)).collect();
-        features.stride = features.levels.iter().map(|l| l.squares as usize).max().unwrap_or(0);
+        let mut features = Self {
+            stamps,
+            spawns,
+            above: above.max(0),
+            below: below.max(0),
+            levels: Vec::new(),
+            stride: 0,
+            blocks: 0,
+        };
+        features.levels = (0..NEAR_LEVELS)
+            .map(|level| features.layout(level))
+            .collect();
+        features.stride = features
+            .levels
+            .iter()
+            .map(|l| l.squares as usize)
+            .max()
+            .unwrap_or(0);
         features.blocks = features.levels.iter().map(|l| l.blocks).max().unwrap_or(0);
         if features.stride > MAX_FOOTPRINT_SQUARES {
             return Err(format!("the spawns' placements take {} squares a footprint, more than {MAX_FOOTPRINT_SQUARES}: fewer spawns of narrow spacing", features.stride));
@@ -403,13 +521,17 @@ impl CompiledFeatures {
     /// eight (its shapes stay legible; past that its far form, if any).
     pub fn drawn(&self, s: usize, level: u32) -> bool {
         let sp = &self.spawns[s];
-        level == 0 || (8i64 << level) <= (4 * i64::from(sp.spacing)).min(i64::from(2 * sp.reach + 1))
+        level == 0
+            || (8i64 << level) <= (4 * i64::from(sp.spacing)).min(i64::from(2 * sp.reach + 1))
     }
 
     /// Spawns whose placements a footprint of `level` keeps: up to the last
     /// drawn one (the drawn ones exclude the earlier ones' footprints).
     pub fn near(&self, level: u32) -> usize {
-        (0..self.spawns.len()).rev().find(|&s| self.drawn(s, level)).map_or(0, |s| s + 1)
+        (0..self.spawns.len())
+            .rev()
+            .find(|&s| self.drawn(s, level))
+            .map_or(0, |s| s + 1)
     }
 
     /// The far form over level column `(i, j)` of `face` (`level` > 0),
@@ -419,17 +541,35 @@ impl CompiledFeatures {
     /// base column, or from its field level the field's majority, a
     /// threshold under zero; its heights and ground materials) gives its
     /// material and canopy, layers `[ground, ground + height)`.
-    pub fn far_cover(&self, grid: &Grid, face: u8, level: u32, i: i32, j: i32, (ground, surface): (i32, i32)) -> Option<(u32, i32, i32)> {
+    pub fn far_cover(
+        &self,
+        grid: &Grid,
+        face: u8,
+        level: u32,
+        i: i32,
+        j: i32,
+        (ground, surface): (i32, i32),
+    ) -> Option<(u32, i32, i32)> {
         if level == 0 {
             return None;
         }
         for (s, sp) in self.spawns.iter().enumerate() {
             let mid = 1 << (level - 1);
-            if self.drawn(s, level) || sp.far_material == 0 || !sp.grows_at(grid, face, (i << level) + mid, (j << level) + mid, ground) {
+            if self.drawn(s, level)
+                || sp.far_material == 0
+                || !sp.grows_at(grid, face, (i << level) + mid, (j << level) + mid, ground)
+            {
                 continue;
             }
             // The column holds canopy with the spawn's coverage for odds.
-            if hash3(i, j, (level << 3) as i32 | i32::from(face), sp.seed ^ 0xfa7f_0e55) >> 16 >= sp.cover {
+            if hash3(
+                i,
+                j,
+                (level << 3) as i32 | i32::from(face),
+                sp.seed ^ 0xfa7f_0e55,
+            ) >> 16
+                >= sp.cover
+            {
                 continue;
             }
             if sp.surfaces != 0 && (surface >= 64 || sp.surfaces & (1 << surface) == 0) {
@@ -439,7 +579,11 @@ impl CompiledFeatures {
                 let pass = if level >= sp.field_level {
                     sp.field_threshold < 0
                 } else {
-                    noise(grid.domain_point(face, (i << level) + mid, (j << level) + mid, 0), sp.field_shift, sp.seed ^ 0x632b_e5ab) > sp.field_threshold
+                    noise(
+                        grid.domain_point(face, (i << level) + mid, (j << level) + mid, 0),
+                        sp.field_shift,
+                        sp.seed ^ 0x632b_e5ab,
+                    ) > sp.field_threshold
                 };
                 if !pass {
                     continue;
@@ -452,7 +596,11 @@ impl CompiledFeatures {
 
     /// Cell `k` of `level` under a far form's canopy `(material, lo, hi)`:
     /// its material where the canopy's layers fill half of it.
-    pub fn far_cell(level: u32, k: i32, (material, lo, hi): (u32, i32, i32)) -> Option<Option<u32>> {
+    pub fn far_cell(
+        level: u32,
+        k: i32,
+        (material, lo, hi): (u32, i32, i32),
+    ) -> Option<Option<u32>> {
         let a = (i64::from(k) << level).max(i64::from(lo));
         let b = ((i64::from(k) + 1) << level).min(i64::from(hi));
         (2 * (b - a) >= 1i64 << level).then_some(Some(material))
@@ -470,9 +618,22 @@ impl CompiledFeatures {
         let mut spawns = vec![SquareGrid::default(); near];
         let mut margins = vec![0i64; near];
         for s in (0..near).rev() {
-            let (spacing, reach) = (i64::from(self.spawns[s].spacing), i64::from(self.spawns[s].reach));
-            margins[s] = (s + 1..near).map(|t| i64::from(self.spawns[t].spacing - self.spawns[t].inset) + 2 * i64::from(self.spawns[t].reach) + reach).fold(reach, i64::max);
-            spawns[s] = SquareGrid { offset: 0, side: ((width + 2 * margins[s] - 1) / spacing + 2) as u32, margin: margins[s] as i32 };
+            let (spacing, reach) = (
+                i64::from(self.spawns[s].spacing),
+                i64::from(self.spawns[s].reach),
+            );
+            margins[s] = (s + 1..near)
+                .map(|t| {
+                    i64::from(self.spawns[t].spacing - self.spawns[t].inset)
+                        + 2 * i64::from(self.spawns[t].reach)
+                        + reach
+                })
+                .fold(reach, i64::max);
+            spawns[s] = SquareGrid {
+                offset: 0,
+                side: ((width + 2 * margins[s] - 1) / spacing + 2) as u32,
+                margin: margins[s] as i32,
+            };
         }
         let mut offset = 0;
         for g in &mut spawns {
@@ -480,8 +641,16 @@ impl CompiledFeatures {
             offset += g.side * g.side;
         }
         // `side` squares from anywhere span this many blocks a side.
-        let blocks = spawns.iter().map(|g| (g.side as usize).div_ceil(BLOCK_SIDE as usize) + 1).map(|b| b * b).sum();
-        LevelLayout { spawns, squares: offset, blocks }
+        let blocks = spawns
+            .iter()
+            .map(|g| (g.side as usize).div_ceil(BLOCK_SIDE as usize) + 1)
+            .map(|b| b * b)
+            .sum();
+        LevelLayout {
+            spawns,
+            squares: offset,
+            blocks,
+        }
     }
 
     /// Spawn `s`'s squares in a footprint of `level` at columns `first`
@@ -507,7 +676,13 @@ impl CompiledFeatures {
         let levels_at = stamps_at + 16 * self.stamps.len();
         let mut data = levels_at + 4 * (1 + MAX_SPAWNS) * NEAR_LEVELS as usize;
         let mut w = vec![0u32; data];
-        w[..5].copy_from_slice(&[self.spawns.len() as u32, spawns_at as u32, stamps_at as u32, levels_at as u32, self.stride as u32]);
+        w[..5].copy_from_slice(&[
+            self.spawns.len() as u32,
+            spawns_at as u32,
+            stamps_at as u32,
+            levels_at as u32,
+            self.stride as u32,
+        ]);
         let mut tail: Vec<u32> = Vec::new();
         let put = |tail: &mut Vec<u32>, words: &[u32]| {
             let at = data + tail.len();
@@ -548,15 +723,31 @@ impl CompiledFeatures {
             let parts: Vec<u32> = st.parts.iter().flat_map(|p| p.gpu_words()).collect();
             let parts = put(&mut tail, &parts);
             let r = &mut w[stamps_at + 16 * n..stamps_at + 16 * n + 16];
-            r[..9].copy_from_slice(&[st.lo[0] as u32, st.lo[1] as u32, st.lo[2] as u32, st.reach as u32, st.size[0] as u32, st.size[1] as u32, st.size[2] as u32, st.parts.len() as u32, parts]);
+            r[..9].copy_from_slice(&[
+                st.lo[0] as u32,
+                st.lo[1] as u32,
+                st.lo[2] as u32,
+                st.reach as u32,
+                st.size[0] as u32,
+                st.size[1] as u32,
+                st.size[2] as u32,
+                st.parts.len() as u32,
+                parts,
+            ]);
         }
         for (level, l) in self.levels.iter().enumerate() {
             let at = levels_at + 4 * (1 + MAX_SPAWNS) * level;
             w[at] = l.spawns.len() as u32;
-            w[at + 1] = (0..l.spawns.len()).filter(|&s| self.drawn(s, level as u32)).fold(0, |m, s| m | 1 << s);
+            w[at + 1] = (0..l.spawns.len())
+                .filter(|&s| self.drawn(s, level as u32))
+                .fold(0, |m, s| m | 1 << s);
             w[at + 2] = l.squares;
             for (s, g) in l.spawns.iter().enumerate() {
-                w[at + 4 * (1 + s)..at + 4 * (1 + s) + 3].copy_from_slice(&[g.offset, g.side, g.margin as u32]);
+                w[at + 4 * (1 + s)..at + 4 * (1 + s) + 3].copy_from_slice(&[
+                    g.offset,
+                    g.side,
+                    g.margin as u32,
+                ]);
             }
         }
         data += tail.len();
@@ -567,7 +758,15 @@ impl CompiledFeatures {
 
     /// Spawn `s`'s raw candidate on square `(gx, gy)` of `face`: where its
     /// own rules let it grow (exclusion aside).
-    pub fn candidate(&self, s: usize, grid: &Grid, top: &dyn Fn(u8, i32, i32) -> (i32, i32), face: u8, gx: i32, gy: i32) -> Option<Placement> {
+    pub fn candidate(
+        &self,
+        s: usize,
+        grid: &Grid,
+        top: &dyn Fn(u8, i32, i32) -> (i32, i32),
+        face: u8,
+        gx: i32,
+        gy: i32,
+    ) -> Option<Placement> {
         let sp = &self.spawns[s];
         let h = hash3(gx, gy, i32::from(face), sp.seed);
         if (h >> 16) >= sp.density {
@@ -575,14 +774,24 @@ impl CompiledFeatures {
         }
         // The anchor in the square's middle.
         let slack = (sp.spacing - 2 * sp.inset) as u32;
-        let jitter = |salt: u32| sp.inset + (hash3(gx, gy, i32::from(face), sp.seed ^ salt) % slack) as i32;
-        let (i, j) = (gx * sp.spacing + jitter(0x9e37_79b9), gy * sp.spacing + jitter(0x85eb_ca6b));
+        let jitter =
+            |salt: u32| sp.inset + (hash3(gx, gy, i32::from(face), sp.seed ^ salt) % slack) as i32;
+        let (i, j) = (
+            gx * sp.spacing + jitter(0x9e37_79b9),
+            gy * sp.spacing + jitter(0x85eb_ca6b),
+        );
         // Its footprint on the face.
         let n = grid.cells();
         if i < sp.reach || j < sp.reach || i >= n - sp.reach || j >= n - sp.reach {
             return None;
         }
-        if sp.field_shift > 0 && noise(grid.domain_point(face, i, j, 0), sp.field_shift, sp.seed ^ 0x632b_e5ab) <= sp.field_threshold {
+        if sp.field_shift > 0
+            && noise(
+                grid.domain_point(face, i, j, 0),
+                sp.field_shift,
+                sp.seed ^ 0x632b_e5ab,
+            ) <= sp.field_threshold
+        {
             return None;
         }
         let (ground, surface) = top(face, i, j);
@@ -594,7 +803,16 @@ impl CompiledFeatures {
         }
         let v = hash3(gx, gy, i32::from(face), sp.seed ^ 0xc2b2_ae35);
         let stamp = sp.stamps[(v % sp.stamps.len() as u32) as usize];
-        let placement = Placement { spawn: s as u32, stamp, face, i, j, k: ground - sp.sink, turn: (v >> 8) & 3, mirror: (v >> 10) & 1 == 1 };
+        let placement = Placement {
+            spawn: s as u32,
+            stamp,
+            face,
+            i,
+            j,
+            k: ground - sp.sink,
+            turn: (v >> 8) & 3,
+            mirror: (v >> 10) & 1 == 1,
+        };
         if sp.max_relief < i32::MAX {
             let r = self.stamps[stamp as usize].reach.max(1);
             let (mut lo, mut hi) = (ground, ground);
@@ -613,7 +831,8 @@ impl CompiledFeatures {
 
 /// Squares decided so far, by spawn, face and square: the raw candidate and
 /// whether it is placed.
-pub type PlacementCache = rustc_hash::FxHashMap<(u32, u8, i32, i32), (Option<Placement>, Option<bool>)>;
+pub type PlacementCache =
+    rustc_hash::FxHashMap<(u32, u8, i32, i32), (Option<Placement>, Option<bool>)>;
 
 /// Feature evaluation over a planet's terrain (the CPU's; the GPU lists a
 /// footprint's placements).
@@ -626,8 +845,18 @@ pub struct FeatureEval<'a> {
 }
 
 impl<'a> FeatureEval<'a> {
-    pub fn new(features: &'a CompiledFeatures, grid: &'a Grid, top: &'a dyn Fn(u8, i32, i32) -> (i32, i32), cache: &'a mut PlacementCache) -> Self {
-        Self { features, grid, top, cache }
+    pub fn new(
+        features: &'a CompiledFeatures,
+        grid: &'a Grid,
+        top: &'a dyn Fn(u8, i32, i32) -> (i32, i32),
+        cache: &'a mut PlacementCache,
+    ) -> Self {
+        Self {
+            features,
+            grid,
+            top,
+            cache,
+        }
     }
 
     /// Spawn `s`'s raw candidate on square `(gx, gy)` of `face`, if any.
@@ -636,7 +865,9 @@ impl<'a> FeatureEval<'a> {
         if let Some(&(p, _)) = self.cache.get(&key) {
             return p;
         }
-        let p = self.features.candidate(s, self.grid, self.top, face, gx, gy);
+        let p = self
+            .features
+            .candidate(s, self.grid, self.top, face, gx, gy);
         self.cache.insert(key, (p, None));
         p
     }
@@ -662,24 +893,41 @@ impl<'a> FeatureEval<'a> {
     /// `[i0, i1)` x `[j0, j1)`.
     fn raw_meets(&mut self, s: usize, face: u8, i: [i32; 2], j: [i32; 2]) -> bool {
         let features = self.features;
-        self.squares_near(s, i, j).into_iter().filter_map(|(gx, gy)| self.raw(s, face, gx, gy)).any(|p| {
-            let (fi, fj) = p.footprint(features);
-            fi[0] < i[1] && fi[1] > i[0] && fj[0] < j[1] && fj[1] > j[0]
-        })
+        self.squares_near(s, i, j)
+            .into_iter()
+            .filter_map(|(gx, gy)| self.raw(s, face, gx, gy))
+            .any(|p| {
+                let (fi, fj) = p.footprint(features);
+                fi[0] < i[1] && fi[1] > i[0] && fj[0] < j[1] && fj[1] > j[0]
+            })
     }
 
     /// Spawn `s`'s squares that may reach base columns `[i0, i1)` x
     /// `[j0, j1)` (within its reach of them), by row then column.
     fn squares_near(&self, s: usize, i: [i32; 2], j: [i32; 2]) -> Vec<(i32, i32)> {
-        let (spacing, r) = (self.features.spawns[s].spacing, self.features.spawns[s].reach);
+        let (spacing, r) = (
+            self.features.spawns[s].spacing,
+            self.features.spawns[s].reach,
+        );
         let g = |v: i32| v.div_euclid(spacing);
-        (g(j[0] - r)..=g(j[1] - 1 + r)).flat_map(|gy| (g(i[0] - r)..=g(i[1] - 1 + r)).map(move |gx| (gx, gy))).collect()
+        (g(j[0] - r)..=g(j[1] - 1 + r))
+            .flat_map(|gy| (g(i[0] - r)..=g(i[1] - 1 + r)).map(move |gx| (gx, gy)))
+            .collect()
     }
 
     /// Spawn `s`'s placements of the squares that may reach base columns
     /// `[i0, i1)` x `[j0, j1)`, by row then column.
-    pub fn placements_near(&mut self, s: usize, face: u8, i: [i32; 2], j: [i32; 2]) -> Vec<Placement> {
-        self.squares_near(s, i, j).into_iter().filter_map(|(gx, gy)| self.placement(s, face, gx, gy)).collect()
+    pub fn placements_near(
+        &mut self,
+        s: usize,
+        face: u8,
+        i: [i32; 2],
+        j: [i32; 2],
+    ) -> Vec<Placement> {
+        self.squares_near(s, i, j)
+            .into_iter()
+            .filter_map(|(gx, gy)| self.placement(s, face, gx, gy))
+            .collect()
     }
 
     /// What the features make of base cell `(i, j, k)` of `face` (the last
@@ -689,7 +937,9 @@ impl<'a> FeatureEval<'a> {
         let mut out = None;
         for s in 0..self.features.spawns.len() {
             for p in self.placements_near(s, face, [i, i + 1], [j, j + 1]) {
-                if let Some(v) = self.features.stamps[p.stamp as usize].at(p.local([i - p.i, k - p.k, j - p.j])) {
+                if let Some(v) =
+                    self.features.stamps[p.stamp as usize].at(p.local([i - p.i, k - p.k, j - p.j]))
+                {
                     out = Some(v);
                 }
             }
@@ -699,7 +949,14 @@ impl<'a> FeatureEval<'a> {
 
     /// What the near spawns make of cell `(i, j, k)` of `level`: the last
     /// placement whose stamp holds its centre (`stamp::coarse_of`).
-    pub fn coarse_cell(&mut self, face: u8, level: u32, i: i32, j: i32, k: i32) -> Option<Option<u32>> {
+    pub fn coarse_cell(
+        &mut self,
+        face: u8,
+        level: u32,
+        i: i32,
+        j: i32,
+        k: i32,
+    ) -> Option<Option<u32>> {
         if level == 0 {
             return self.cell(face, i, j, k);
         }
@@ -708,7 +965,10 @@ impl<'a> FeatureEval<'a> {
         let mut out = None;
         for s in (0..self.features.near(level)).filter(|&s| self.features.drawn(s, level)) {
             for p in self.placements_near(s, face, [bi, bi + s0], [bj, bj + s0]) {
-                let (lo, hi) = p.local_box([bi - p.i, bk - p.k, bj - p.j], [bi + s0 - p.i, bk + s0 - p.k, bj + s0 - p.j]);
+                let (lo, hi) = p.local_box(
+                    [bi - p.i, bk - p.k, bj - p.j],
+                    [bi + s0 - p.i, bk + s0 - p.k, bj + s0 - p.j],
+                );
                 if let Some(v) = self.features.stamps[p.stamp as usize].coarse(lo, hi) {
                     out = Some(v);
                 }
@@ -723,10 +983,25 @@ impl<'a> FeatureEval<'a> {
 /// the terrain's height there. The material is the terrain's rules' at the
 /// column's top cell on level ground (slope 0: the same at every level, a
 /// column's own inputs).
-pub fn ground(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, height: i32) -> (i32, i32) {
+pub fn ground(
+    grid: &Grid,
+    field: &dyn TerrainField,
+    face: u8,
+    i: i32,
+    j: i32,
+    level: u32,
+    height: i32,
+) -> (i32, i32) {
     let top = top_cells(grid, height, level) - 1;
     let surface = field.surface(Column { face, i, j, level }, height) & 0xff;
-    let material = field.ground_material(grid.volume_point(face, i, j, top, level), surface, height, 0, 0, top << level) & crate::terrain::material::ID;
+    let material = field.ground_material(
+        grid.volume_point(face, i, j, top, level),
+        surface,
+        height,
+        0,
+        0,
+        top << level,
+    ) & crate::terrain::material::ID;
     (top_cells(grid, height, 0), material as i32)
 }
 
@@ -752,8 +1027,16 @@ mod tests {
     #[test]
     fn wandering_heights_break_the_contour() {
         let grid = Grid::new(crate::planet::EARTH_RADIUS, 0.1).unwrap();
-        let spawn = |wander: [f64; 2]| Spawn { stamps: vec![0], heights_m: [-1e9, 100.0], height_wander_m: wander, ..Spawn::default() };
-        let set = FeatureSet { stamps: stamps(), spawns: vec![spawn([20.0, 400.0]), spawn([0.0, 0.0])] };
+        let spawn = |wander: [f64; 2]| Spawn {
+            stamps: vec![0],
+            heights_m: [-1e9, 100.0],
+            height_wander_m: wander,
+            ..Spawn::default()
+        };
+        let set = FeatureSet {
+            stamps: stamps(),
+            spawns: vec![spawn([20.0, 400.0]), spawn([0.0, 0.0])],
+        };
         let compiled = CompiledFeatures::new(&set, &grid, 7).unwrap();
         let (wandering, fixed) = (&compiled.spawns[0], &compiled.spawns[1]);
         let n = grid.cells() / 2;
@@ -770,9 +1053,15 @@ mod tests {
                 }
             }
             // Never past the wander.
-            assert!(wandering.grows_at(&grid, 2, i, j, (79.0 / 0.1) as i32) && !wandering.grows_at(&grid, 2, i, j, (121.0 / 0.1) as i32));
+            assert!(
+                wandering.grows_at(&grid, 2, i, j, (79.0 / 0.1) as i32)
+                    && !wandering.grows_at(&grid, 2, i, j, (121.0 / 0.1) as i32)
+            );
         }
-        assert!(above > 100 && below > 100, "{above} grow past the limit, {below} bare short of it");
+        assert!(
+            above > 100 && below > 100,
+            "{above} grow past the limit, {below} bare short of it"
+        );
     }
 
     /// A tree (trunk and crown) and a hut (walls, its inside and a door
@@ -792,14 +1081,34 @@ mod tests {
         FeatureSet {
             stamps: stamps(),
             spawns: vec![
-                Spawn { name: "huts".into(), stamps: vec![1], spacing: 48, density: 0.6, max_relief: 3, ..Spawn::default() },
-                Spawn { name: "trees".into(), stamps: vec![0], spacing: 6, density: 0.7, field_scale_m: 40.0, field_threshold: -0.3, max_relief: 3, ..Spawn::default() },
+                Spawn {
+                    name: "huts".into(),
+                    stamps: vec![1],
+                    spacing: 48,
+                    density: 0.6,
+                    max_relief: 3,
+                    ..Spawn::default()
+                },
+                Spawn {
+                    name: "trees".into(),
+                    stamps: vec![0],
+                    spacing: 6,
+                    density: 0.7,
+                    field_scale_m: 40.0,
+                    field_threshold: -0.3,
+                    max_relief: 3,
+                    ..Spawn::default()
+                },
             ],
         }
     }
 
     fn world(features: FeatureSet) -> Planet {
-        Planet::new(PlanetRecipe { features, ..PlanetRecipe::default() }).unwrap()
+        Planet::new(PlanetRecipe {
+            features,
+            ..PlanetRecipe::default()
+        })
+        .unwrap()
     }
 
     /// A block of 40 x 40 base columns on face 4.
@@ -810,10 +1119,14 @@ mod tests {
 
     /// Every spawn's placements reaching the block, spawns in order.
     fn placements(p: &Planet, (face, i0, j0): (u8, i32, i32)) -> Vec<Placement> {
-        let top = |f: u8, i: i32, j: i32| ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0));
+        let top = |f: u8, i: i32, j: i32| {
+            ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0))
+        };
         let mut cache = PlacementCache::default();
         let mut eval = FeatureEval::new(p.features(), p.grid(), &top, &mut cache);
-        (0..p.features().spawns.len()).flat_map(|s| eval.placements_near(s, face, [i0, i0 + 40], [j0, j0 + 40])).collect()
+        (0..p.features().spawns.len())
+            .flat_map(|s| eval.placements_near(s, face, [i0, i0 + 40], [j0, j0 + 40]))
+            .collect()
     }
 
     /// Features are a function of the world: a world made again from its
@@ -826,9 +1139,15 @@ mod tests {
         assert_eq!(recipe.features, set());
         let b = Planet::new(recipe).unwrap();
         assert_eq!(a.recipe().fingerprint(), b.recipe().fingerprint());
-        assert_ne!(a.recipe().fingerprint(), PlanetRecipe::default().fingerprint());
+        assert_ne!(
+            a.recipe().fingerprint(),
+            PlanetRecipe::default().fingerprint()
+        );
         let (pa, pb) = (placements(&a, block(&a)), placements(&b, block(&b)));
-        assert!(pa.iter().any(|p| p.spawn == 0) && pa.iter().filter(|p| p.spawn == 1).count() > 10, "{pa:?}");
+        assert!(
+            pa.iter().any(|p| p.spawn == 0) && pa.iter().filter(|p| p.spawn == 1).count() > 10,
+            "{pa:?}"
+        );
         assert_eq!(pa, pb);
     }
 
@@ -846,7 +1165,16 @@ mod tests {
             for j in j0..j0 + 40 {
                 let top = p.column_top(face, i, j, 0);
                 for k in top - 4..top + 12 {
-                    let expected = all.iter().filter_map(|pl| p.features().stamps[pl.stamp as usize].at(pl.local([i - pl.i, k - pl.k, j - pl.j]))).last();
+                    let expected = all
+                        .iter()
+                        .filter_map(|pl| {
+                            p.features().stamps[pl.stamp as usize].at(pl.local([
+                                i - pl.i,
+                                k - pl.k,
+                                j - pl.j,
+                            ]))
+                        })
+                        .last();
                     let cell = Cell::new(face, i, j, k);
                     match expected {
                         Some(Some(m)) => {
@@ -854,7 +1182,11 @@ mod tests {
                             solid += 1;
                         }
                         Some(None) => assert_eq!(p.kind(cell), 0, "({i}, {j}, {k}) cleared"),
-                        None => assert_eq!(p.sample_kind(0, face, i, j, k), bare.sample_kind(0, face, i, j, k), "({i}, {j}, {k}) terrain"),
+                        None => assert_eq!(
+                            p.sample_kind(0, face, i, j, k),
+                            bare.sample_kind(0, face, i, j, k),
+                            "({i}, {j}, {k}) terrain"
+                        ),
                     }
                 }
             }
@@ -874,7 +1206,10 @@ mod tests {
         for (n, a) in all.iter().enumerate() {
             let sp = &p.features().spawns[a.spawn as usize];
             for v in [a.i, a.j] {
-                assert!((sp.inset..sp.spacing - sp.inset).contains(&v.rem_euclid(sp.spacing)), "{a:?} off its square's middle");
+                assert!(
+                    (sp.inset..sp.spacing - sp.inset).contains(&v.rem_euclid(sp.spacing)),
+                    "{a:?} off its square's middle"
+                );
             }
             let (ai, aj) = a.footprint(p.features());
             for b in &all[n + 1..] {
@@ -899,7 +1234,10 @@ mod tests {
         let all = placements(&p, (face, i0, j0));
         assert_eq!((p.features().near(1), p.features().near(2)), (1, 0));
         let level = 1u32;
-        let near: Vec<&Placement> = all.iter().filter(|pl| p.features().drawn(pl.spawn as usize, level)).collect();
+        let near: Vec<&Placement> = all
+            .iter()
+            .filter(|pl| p.features().drawn(pl.spawn as usize, level))
+            .collect();
         let s = 1 << level;
         let (mut solid, mut air) = (0, 0);
         for ci in (i0 >> level)..((i0 + 40) >> level) {
@@ -910,18 +1248,29 @@ mod tests {
                         .iter()
                         .filter_map(|pl| {
                             let a = pl.local([bi - pl.i, bk - pl.k, bj - pl.j]);
-                            let b = pl.local([bi + s - 1 - pl.i, bk + s - 1 - pl.k, bj + s - 1 - pl.j]);
-                            let (lo, hi) = ([0, 1, 2].map(|k| a[k].min(b[k])), [0, 1, 2].map(|k| a[k].max(b[k]) + 1));
+                            let b =
+                                pl.local([bi + s - 1 - pl.i, bk + s - 1 - pl.k, bj + s - 1 - pl.j]);
+                            let (lo, hi) = (
+                                [0, 1, 2].map(|k| a[k].min(b[k])),
+                                [0, 1, 2].map(|k| a[k].max(b[k]) + 1),
+                            );
                             p.features().stamps[pl.stamp as usize].coarse(lo, hi)
                         })
                         .last();
                     solid += usize::from(matches!(expected, Some(Some(_))));
                     air += usize::from(expected == Some(None));
-                    assert_eq!(p.features_at(level, face, ci, cj, ck), expected, "level {level} ({ci}, {cj}, {ck})");
+                    assert_eq!(
+                        p.features_at(level, face, ci, cj, ck),
+                        expected,
+                        "level {level} ({ci}, {cj}, {ck})"
+                    );
                 }
             }
         }
-        assert!(solid > 5 && air > 0, "level {level}: {solid} solid, {air} air cells");
+        assert!(
+            solid > 5 && air > 0,
+            "level {level}: {solid} solid, {air} air cells"
+        );
     }
 
     /// Near and far agree in coverage: past the trees' near levels their
@@ -938,15 +1287,28 @@ mod tests {
         assert!(fc.drawn(1, 0) && !fc.drawn(1, 1) && fc.spawns[1].far_height == 9);
         let (face, i0, j0) = block(&p);
         let side = 256;
-        let top = |f: u8, i: i32, j: i32| ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0));
+        let top = |f: u8, i: i32, j: i32| {
+            ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0))
+        };
         let mut cache = PlacementCache::default();
-        let trees = FeatureEval::new(fc, p.grid(), &top, &mut cache).placements_near(1, face, [i0, i0 + side], [j0, j0 + side]);
+        let trees = FeatureEval::new(fc, p.grid(), &top, &mut cache).placements_near(
+            1,
+            face,
+            [i0, i0 + side],
+            [j0, j0 + side],
+        );
         let mut crowns = rustc_hash::FxHashSet::default();
         for t in &trees {
             let st = &fc.stamps[t.stamp as usize];
-            for (dx, dz) in (-st.reach..=st.reach).flat_map(|x| (-st.reach..=st.reach).map(move |z| (x, z))) {
+            for (dx, dz) in
+                (-st.reach..=st.reach).flat_map(|x| (-st.reach..=st.reach).map(move |z| (x, z)))
+            {
                 let (i, j) = (t.i + dx, t.j + dz);
-                if (i0..i0 + side).contains(&i) && (j0..j0 + side).contains(&j) && (st.lo[1]..st.lo[1] + st.size[1]).any(|y| matches!(st.at(t.local([dx, y, dz])), Some(Some(_)))) {
+                if (i0..i0 + side).contains(&i)
+                    && (j0..j0 + side).contains(&j)
+                    && (st.lo[1]..st.lo[1] + st.size[1])
+                        .any(|y| matches!(st.at(t.local([dx, y, dz])), Some(Some(_))))
+                {
                     crowns.insert((i, j));
                 }
             }
@@ -956,15 +1318,33 @@ mod tests {
         for level in 2..6u32 {
             let n = side >> level;
             let (mut covered, mut solid) = (0, 0);
-            for (i, j) in (0..n).flat_map(|a| (0..n).map(move |b| ((i0 >> level) + a, (j0 >> level) + b))) {
-                let g = ground(p.grid(), p.field(), face, i, j, level, p.column_height(face, i, j, level));
-                let Some(cover) = fc.far_cover(p.grid(), face, level, i, j, g) else { continue };
+            for (i, j) in
+                (0..n).flat_map(|a| (0..n).map(move |b| ((i0 >> level) + a, (j0 >> level) + b)))
+            {
+                let g = ground(
+                    p.grid(),
+                    p.field(),
+                    face,
+                    i,
+                    j,
+                    level,
+                    p.column_height(face, i, j, level),
+                );
+                let Some(cover) = fc.far_cover(p.grid(), face, level, i, j, g) else {
+                    continue;
+                };
                 assert_eq!((cover.0, cover.2 - cover.1), (11, 9));
                 covered += 1;
-                solid += usize::from(((cover.1 >> level)..=((cover.2 - 1) >> level)).any(|k| p.features_at(level, face, i, j, k) == Some(Some(11))));
+                solid += usize::from(
+                    ((cover.1 >> level)..=((cover.2 - 1) >> level))
+                        .any(|k| p.features_at(level, face, i, j, k) == Some(Some(11))),
+                );
             }
             let far = covered as f64 / f64::from(n * n);
-            assert!((far - near).abs() < 0.12, "level {level}: canopy covers {far}, crowns {near}");
+            assert!(
+                (far - near).abs() < 0.12,
+                "level {level}: canopy covers {far}, crowns {near}"
+            );
             // Cells of 0.4 m hold the 0.9 m canopy; cells of 3.2 m none.
             match level {
                 2 => assert_eq!(solid, covered),
@@ -984,14 +1364,49 @@ mod tests {
         let crown = Cell::new(tree.face, tree.i, tree.j, tree.k + 6);
         let trunk = Cell::new(tree.face, tree.i, tree.j, tree.k + 2);
         assert!(p.solid(crown) && p.solid(trunk));
-        let brush = |cell: Cell, radius: f64, shape: BrushShape, op: BrushOp| Brush { center: grid.cell_center(cell).to_array(), radius, shape, op, material: 3, height: 0.0 };
-        p.apply(brush(crown, grid.voxel_size() * 1.5, BrushShape::Sphere, BrushOp::Remove)).unwrap();
+        let brush = |cell: Cell, radius: f64, shape: BrushShape, op: BrushOp| Brush {
+            center: grid.cell_center(cell).to_array(),
+            radius,
+            shape,
+            op,
+            material: 3,
+            height: 0.0,
+        };
+        p.apply(brush(
+            crown,
+            grid.voxel_size() * 1.5,
+            BrushShape::Sphere,
+            BrushOp::Remove,
+        ))
+        .unwrap();
         assert!(!p.solid(crown), "dug");
-        p.apply(brush(crown, grid.voxel_size() * 0.5, BrushShape::Cube, BrushOp::Paint)).unwrap();
+        p.apply(brush(
+            crown,
+            grid.voxel_size() * 0.5,
+            BrushShape::Cube,
+            BrushOp::Paint,
+        ))
+        .unwrap();
         assert!(!p.solid(crown), "paint keeps air air");
-        p.apply(brush(trunk, grid.voxel_size() * 0.5, BrushShape::Cube, BrushOp::Paint)).unwrap();
+        p.apply(brush(
+            trunk,
+            grid.voxel_size() * 0.5,
+            BrushShape::Cube,
+            BrushOp::Paint,
+        ))
+        .unwrap();
         assert_eq!(p.material(trunk), 3, "paint recolours a feature's cell");
-        p.apply(brush(Cell::new(tree.face, tree.i, tree.j, tree.k + 20), grid.voxel_size() * 0.5, BrushShape::Cube, BrushOp::Add)).unwrap();
-        assert_eq!(p.material(Cell::new(tree.face, tree.i, tree.j, tree.k + 20)), 3, "added over a tree");
+        p.apply(brush(
+            Cell::new(tree.face, tree.i, tree.j, tree.k + 20),
+            grid.voxel_size() * 0.5,
+            BrushShape::Cube,
+            BrushOp::Add,
+        ))
+        .unwrap();
+        assert_eq!(
+            p.material(Cell::new(tree.face, tree.i, tree.j, tree.k + 20)),
+            3,
+            "added over a tree"
+        );
     }
 }

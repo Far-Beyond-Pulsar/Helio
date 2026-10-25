@@ -24,8 +24,14 @@ impl Frame {
     /// plane).
     pub fn new(position: DVec3, heading: DVec3) -> Self {
         let up = position.normalize_or(DVec3::Y);
-        let forward = (heading - up * heading.dot(up)).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
-        Frame { up, forward, right: forward.cross(up) }
+        let forward = (heading - up * heading.dot(up))
+            .try_normalize()
+            .unwrap_or_else(|| up.any_orthonormal_vector());
+        Frame {
+            up,
+            forward,
+            right: forward.cross(up),
+        }
     }
 }
 
@@ -33,23 +39,45 @@ impl Frame {
 /// centre, corners and edges' middles.
 fn across() -> impl Iterator<Item = (f64, f64)> + Clone {
     let r = PLAYER_WIDTH * 0.5 - 0.02;
-    [(0.0, 0.0), (r, r), (-r, r), (r, -r), (-r, -r), (r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)].into_iter()
+    [
+        (0.0, 0.0),
+        (r, r),
+        (-r, r),
+        (r, -r),
+        (-r, -r),
+        (r, 0.0),
+        (-r, 0.0),
+        (0.0, r),
+        (0.0, -r),
+    ]
+    .into_iter()
 }
 
 /// Offsets of the sample points: across the box at five heights.
 fn samples() -> impl Iterator<Item = (f64, f64, f64)> {
     let heights = [0.002, 0.55, 1.1, 1.65, PLAYER_HEIGHT - 0.04];
-    heights.into_iter().flat_map(|h| across().map(move |(x, z)| (h, x, z)))
+    heights
+        .into_iter()
+        .flat_map(|h| across().map(move |(x, z)| (h, x, z)))
 }
 
 /// Whether the box standing at `feet` (in `frame`) overlaps solid blocks.
 pub fn collides(world: &World, feet: DVec3, frame: &Frame) -> bool {
-    samples().any(|(h, x, z)| world.is_solid(world.cell_at(feet + frame.up * h + frame.right * x + frame.forward * z)))
+    samples().any(|(h, x, z)| {
+        world.is_solid(world.cell_at(feet + frame.up * h + frame.right * x + frame.forward * z))
+    })
 }
 
 /// Whether the cell is inside the box standing at `feet`.
-pub fn occupies(world: &World, feet: DVec3, frame: &Frame, cell: helio_pass_voxel_planet::Cell) -> bool {
-    samples().any(|(h, x, z)| world.cell_at(feet + frame.up * h + frame.right * x + frame.forward * z) == cell)
+pub fn occupies(
+    world: &World,
+    feet: DVec3,
+    frame: &Frame,
+    cell: helio_pass_voxel_planet::Cell,
+) -> bool {
+    samples().any(|(h, x, z)| {
+        world.cell_at(feet + frame.up * h + frame.right * x + frame.forward * z) == cell
+    })
 }
 
 /// Movements shorter than this (metres) are not made.
@@ -65,10 +93,19 @@ pub struct Moved {
 
 /// Moves the box from `feet` by `delta`, resolving vertical movement first and
 /// then each horizontal axis, with step-up. Returns the new position.
-pub fn slide(world: &World, mut feet: DVec3, delta: DVec3, frame: &Frame, can_step: bool) -> (DVec3, Moved) {
+pub fn slide(
+    world: &World,
+    mut feet: DVec3,
+    delta: DVec3,
+    frame: &Frame,
+    can_step: bool,
+) -> (DVec3, Moved) {
     let mut moved = Moved::default();
     let vertical = delta.dot(frame.up);
-    let horizontal = [frame.right * delta.dot(frame.right), frame.forward * delta.dot(frame.forward)];
+    let horizontal = [
+        frame.right * delta.dot(frame.right),
+        frame.forward * delta.dot(frame.forward),
+    ];
 
     // Vertical, in steps shorter than a block. A movement under a
     // nanometre is a velocity's rounding residue (the grip's decay never
@@ -109,7 +146,10 @@ pub fn slide(world: &World, mut feet: DVec3, delta: DVec3, frame: &Frame, can_st
             if can_step {
                 let lift = (1..=(STEP_M / VOXEL_M).round() as i32)
                     .map(|n| f64::from(n) * VOXEL_M + 0.02)
-                    .find(|&h| !collides(world, next + frame.up * h, frame) && !collides(world, feet + frame.up * h, frame));
+                    .find(|&h| {
+                        !collides(world, next + frame.up * h, frame)
+                            && !collides(world, feet + frame.up * h, frame)
+                    });
                 if let Some(h) = lift {
                     feet = rest_on_floor(world, next + frame.up * h, frame);
                     moved.stepped = true;

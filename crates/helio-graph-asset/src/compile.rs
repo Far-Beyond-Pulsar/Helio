@@ -58,14 +58,24 @@ pub(crate) fn build_graph(
 
     for &index in &plan.order {
         let node = &flat.nodes[index];
-        let descriptor = registry.get(&node.kind).expect("validated node kinds are registered");
+        let descriptor = registry
+            .get(&node.kind)
+            .expect("validated node kinds are registered");
         let params = descriptor.effective_params(&node.params);
         let first_pass = graph.pass_count();
         {
-            let mut build =
-                NodeBuild { graph: &mut graph, env: &mut *env, params: &params, node_id: &node.id };
+            let mut build = NodeBuild {
+                graph: &mut graph,
+                env: &mut *env,
+                params: &params,
+                node_id: &node.id,
+            };
             descriptor.run(&mut build).map_err(|message| {
-                vec![Diagnostic { severity: Severity::Error, node: Some(node.id.clone()), message }]
+                vec![Diagnostic {
+                    severity: Severity::Error,
+                    node: Some(node.id.clone()),
+                    message,
+                }]
             })?;
             // Performance markers belong to the compiler, not to the graph: a node
             // that ends a phase asks for one, the registry says what it is.
@@ -101,7 +111,11 @@ pub struct GraphAssetPipeline {
 
 impl GraphAssetPipeline {
     pub fn new(asset: Arc<GraphAsset>, registry: Arc<NodeRegistry>, fallback: Fallback) -> Self {
-        Self { asset, registry, fallback }
+        Self {
+            asset,
+            registry,
+            fallback,
+        }
     }
 }
 
@@ -160,7 +174,10 @@ fn build(
         }
         Err(diagnostics) => {
             for diagnostic in &diagnostics {
-                log::error!("render graph `{}`: {diagnostic}; using the default pipeline", asset.name);
+                log::error!(
+                    "render graph `{}`: {diagnostic}; using the default pipeline",
+                    asset.name
+                );
             }
             drop(env);
             fallback(ctx)

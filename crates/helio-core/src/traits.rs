@@ -472,7 +472,8 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// pass of the frame executes (see [`crate::FrameDemands`]). Producers of
     /// optional outputs check [`crate::is_demanded`] and skip work nobody
     /// asked for. `ctx.registry` holds only the frame inputs at this point.
-    fn declare_frame_demands(&mut self, _ctx: &PrepareContext, _demands: &mut crate::FrameDemands) {}
+    fn declare_frame_demands(&mut self, _ctx: &PrepareContext, _demands: &mut crate::FrameDemands) {
+    }
 
     /// Whether `execute` writes every pixel of `ctx.target` without reading
     /// what was there, and no earlier pass in the graph reads the target.

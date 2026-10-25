@@ -206,15 +206,21 @@ pub fn run_scene_animated(
         // meshes are still published for the GI probes to trace, partially
         // (`HELIO_SCENE_RAYS=off`: none, for A/B).
         let scene_rays = ray_traced
-            || (device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            || (device
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
                 && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"));
         let mut acceleration = if ray_traced {
             helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
         } else {
-            helio_default_passes::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone())
+            helio_default_passes::ray_tracing::SceneDbRayTracing::partial(
+                device.clone(),
+                queue.clone(),
+            )
         };
-        let mut scene_handle=crate::v3_demo_common::scene_db_handle(&scene_db);
-        let architectural_store = architectural_materials::load(&device, &queue, &mut scene_db.world);
+        let mut scene_handle = crate::v3_demo_common::scene_db_handle(&scene_db);
+        let architectural_store =
+            architectural_materials::load(&device, &queue, &mut scene_db.world);
         let has_architectural_textures = architectural_store.is_some();
         if let Some(store) = architectural_store {
             scene_handle = scene_handle.with_texture_store(store).unwrap();
@@ -361,10 +367,18 @@ pub fn run_scene_animated(
                 );
         }
         if name.starts_with("cathedral") {
-            let camera = view_override(width as f32 / height as f32)
-                .unwrap_or_else(|| camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32));
-            warm_up_cathedral(&scene_db, &mut renderer,
-                scene_rays.then_some(&acceleration), &device, &queue, &camera, &view);
+            let camera = view_override(width as f32 / height as f32).unwrap_or_else(|| {
+                camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32)
+            });
+            warm_up_cathedral(
+                &scene_db,
+                &mut renderer,
+                scene_rays.then_some(&acceleration),
+                &device,
+                &queue,
+                &camera,
+                &view,
+            );
         }
         let mut frame_times = Vec::new();
         let graph_timings = std::env::var_os("HLFS_GRAPH_TIMINGS").is_some();
@@ -475,23 +489,32 @@ pub fn run_scene_animated(
             (query, resolve, read)
         });
         let mut postprocess_timing_csv = String::from("frame,uber_ms\n");
-        let postprocess_compute_timing = std::env::var_os("HLFS_POSTPROCESS_COMPUTE_TIMINGS").map(|_| {
-            let pass = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>().expect("postprocess pass");
-            assert!(pass.enable_compute_timing(&device), "GPU timestamps unavailable");
-            let query = pass.compute_timing_query().unwrap().clone();
-            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Postprocess compute timestamps"), size: 32,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
+        let postprocess_compute_timing =
+            std::env::var_os("HLFS_POSTPROCESS_COMPUTE_TIMINGS").map(|_| {
+                let pass = renderer
+                    .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
+                    .expect("postprocess pass");
+                assert!(
+                    pass.enable_compute_timing(&device),
+                    "GPU timestamps unavailable"
+                );
+                let query = pass.compute_timing_query().unwrap().clone();
+                let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Postprocess compute timestamps"),
+                    size: 32,
+                    usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let read = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Postprocess compute timing readback"),
+                    size: 32,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (query, resolve, read)
             });
-            let read = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Postprocess compute timing readback"), size: 32,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            (query, resolve, read)
-        });
-        let mut postprocess_compute_timing_csv = String::from("frame,exposure_ms,local_exposure_ms,bloom_ms,postprocess_compute_ms\n");
+        let mut postprocess_compute_timing_csv =
+            String::from("frame,exposure_ms,local_exposure_ms,bloom_ms,postprocess_compute_ms\n");
         let transparent_timing = std::env::var_os("HLFS_TRANSPARENT_TIMINGS").map(|_| {
             let pass = renderer
                 .find_pass_mut::<helio_pass_transparent::TransparentPass>()
@@ -555,7 +578,9 @@ pub fn run_scene_animated(
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             let after_flush = std::time::Instant::now();
             if scene_rays {
-                acceleration.prepare(&scene_db.world).expect("animated capture geometry");
+                acceleration
+                    .prepare(&scene_db.world)
+                    .expect("animated capture geometry");
                 renderer.set_ray_tracing_frame(acceleration.frame());
             }
             let after_rt = std::time::Instant::now();
@@ -802,9 +827,14 @@ pub fn run_scene_animated(
                 rx.recv().unwrap().unwrap();
                 let bytes = read.slice(..).get_mapped_range().unwrap();
                 let ticks: &[u64] = bytemuck::cast_slice(&bytes);
-                let ms = |a: usize, b: usize| (ticks[b] - ticks[a]) as f64 * queue.get_timestamp_period() as f64 / 1e6;
+                let ms = |a: usize, b: usize| {
+                    (ticks[b] - ticks[a]) as f64 * queue.get_timestamp_period() as f64 / 1e6
+                };
                 let (exposure, local, bloom) = (ms(0, 1), ms(1, 2), ms(2, 3));
-                postprocess_compute_timing_csv.push_str(&format!("{frame},{exposure},{local},{bloom},{}\n", exposure + local + bloom));
+                postprocess_compute_timing_csv.push_str(&format!(
+                    "{frame},{exposure},{local},{bloom},{}\n",
+                    exposure + local + bloom
+                ));
                 drop(bytes);
                 read.unmap();
             }

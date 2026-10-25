@@ -85,7 +85,8 @@ pub struct SpriteCullPass {
     sort_keys_buf: wgpu::Buffer,
     scene_instances_epoch: Option<u64>,
     active_slot_count: u32,
-    scene_mode: u32,    cull_uniform_buf: wgpu::Buffer,
+    scene_mode: u32,
+    cull_uniform_buf: wgpu::Buffer,
     cull_bind_group: wgpu::BindGroup,
     view_min: [f32; 2],
     view_max: [f32; 2],
@@ -141,7 +142,11 @@ impl SpriteCullPass {
         let max_blocks = max_visible.div_ceil(WG_SIZE).max(1);
 
         // ── Cull ────────────────────────────────────────────────────────────
-        let cull_shader = helio_core::shader::module(device, "Sprite Cull Shader", helio_core::include_wgsl!("../shaders/sprite_cull.wgsl"));
+        let cull_shader = helio_core::shader::module(
+            device,
+            "Sprite Cull Shader",
+            helio_core::include_wgsl!("../shaders/sprite_cull.wgsl"),
+        );
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Cull BGL"),
             entries: &[
@@ -158,14 +163,17 @@ impl SpriteCullPass {
             bind_group_layouts: &[Some(&cull_bgl)],
             immediate_size: 0,
         });
-        let cull_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Sprite Cull Pipeline"),
-            layout: Some(&cull_pl),
-            module: &cull_shader,
-            entry_point: Some("cs_cull"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let cull_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Sprite Cull Pipeline"),
+                layout: Some(&cull_pl),
+                module: &cull_shader,
+                entry_point: Some("cs_cull"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let cull_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sprite Cull Uniforms"),
             size: std::mem::size_of::<CullUniforms>() as u64,
@@ -270,16 +278,23 @@ impl SpriteCullPass {
         });
 
         // ── Sort ────────────────────────────────────────────────────────────
-        let sort_shader = helio_core::shader::module(device, "Sprite Sort Shader", helio_core::include_wgsl!("../shaders/sprite_sort.wgsl"));
+        let sort_shader = helio_core::shader::module(
+            device,
+            "Sprite Sort Shader",
+            helio_core::include_wgsl!("../shaders/sprite_sort.wgsl"),
+        );
 
-        let prepare_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Sprite Sort Prepare Pipeline"),
-            layout: Some(&prepare_pl),
-            module: &sort_shader,
-            entry_point: Some("cs_prepare"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let prepare_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Sprite Sort Prepare Pipeline"),
+                layout: Some(&prepare_pl),
+                module: &sort_shader,
+                entry_point: Some("cs_prepare"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let prepare_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sprite Sort Prepare BG"),
             layout: &prepare_bgl,
@@ -300,7 +315,13 @@ impl SpriteCullPass {
         });
 
         let sort = helio_core::radix_sort::RadixSort::new(device);
-        let sort_binds = sort.bind(device, &frame_uniform_buf, [&keys_a, &keys_b], [&*indices_a, &indices_b], max_visible);
+        let sort_binds = sort.bind(
+            device,
+            &frame_uniform_buf,
+            [&keys_a, &keys_b],
+            [&*indices_a, &indices_b],
+            max_visible,
+        );
 
         Self {
             max_visible,
@@ -333,17 +354,39 @@ impl SpriteCullPass {
         }
     }
 
-    fn make_cull_bind_group(&self, device: &wgpu::Device, instances: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn make_cull_bind_group(
+        &self,
+        device: &wgpu::Device,
+        instances: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Sprite Cull BG"),
             layout: &self.cull_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.cull_uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: instances.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.legacy_alive_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.visible_indices_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.sort_keys_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: self.indirect_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.cull_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: instances.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.legacy_alive_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.visible_indices_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.sort_keys_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.indirect_buf.as_entire_binding(),
+                },
             ],
         })
     }
@@ -440,7 +483,9 @@ impl RenderPass for SpriteCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        let scene = ctx.scene_buffers.get(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"));
+        let scene = ctx
+            .scene_buffers
+            .get(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"));
         if self.skip_while_empty {
             self.liveness.update(ctx.device, ctx.queue, scene);
             self.live = scene.is_some_and(|handle| self.liveness.maybe_live(handle));
@@ -458,7 +503,9 @@ impl RenderPass for SpriteCullPass {
         if self.scene_instances_epoch != epoch {
             self.scene_instances_epoch = epoch;
             self.scene_mode = u32::from(scene.is_some());
-            self.active_slot_count = scene.map(|handle| (handle.buffer.size() / 80) as u32).unwrap_or(self.active_slot_count);
+            self.active_slot_count = scene
+                .map(|handle| (handle.buffer.size() / 80) as u32)
+                .unwrap_or(self.active_slot_count);
             if let Some(handle) = scene {
                 self.cull_bind_group = self.make_cull_bind_group(ctx.device, &handle.buffer);
             } else {
@@ -540,7 +587,8 @@ impl SpriteCullPass {
                 label: Some("SpriteSort"),
                 timestamp_writes: None,
             });
-            self.sort.record(&mut pass, &self.sort_binds, &self.dispatch_args_buf, 0);
+            self.sort
+                .record(&mut pass, &self.sort_binds, &self.dispatch_args_buf, 0);
         }
     }
 
@@ -570,4 +618,3 @@ impl SpriteCullPass {
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
 }
-

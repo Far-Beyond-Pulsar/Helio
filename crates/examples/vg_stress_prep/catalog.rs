@@ -32,7 +32,11 @@ pub struct TreeSlot {
 }
 
 const fn slot(name: &'static str, masked: bool, fallback: [f32; 3]) -> TreeSlot {
-    TreeSlot { name, masked, fallback }
+    TreeSlot {
+        name,
+        masked,
+        fallback,
+    }
 }
 const BARK: [f32; 3] = [0.17, 0.11, 0.07];
 const LEAF: [f32; 3] = [0.07, 0.17, 0.06];
@@ -70,11 +74,36 @@ pub const TREES: &[TreeDef] = &[
         large: true,
         resolutions: &["2k", "1k"],
         variants: &[
-            TreeVariant { mesh: 0, label: "a", triangles: 6_951_524, masked_triangles: 0, height: 20.4 },
-            TreeVariant { mesh: 1, label: "b", triangles: 4_234_432, masked_triangles: 0, height: 14.9 },
-            TreeVariant { mesh: 2, label: "c", triangles: 5_996_296, masked_triangles: 0, height: 17.5 },
+            TreeVariant {
+                mesh: 0,
+                label: "a",
+                triangles: 6_951_524,
+                masked_triangles: 0,
+                height: 20.4,
+            },
+            TreeVariant {
+                mesh: 1,
+                label: "b",
+                triangles: 4_234_432,
+                masked_triangles: 0,
+                height: 14.9,
+            },
+            TreeVariant {
+                mesh: 2,
+                label: "c",
+                triangles: 5_996_296,
+                masked_triangles: 0,
+                height: 17.5,
+            },
         ],
-        slots: &[slot("pine_tree_01_bark", false, BARK), slot("pine_tree_01_trunk_a", false, BARK), slot("pine_tree_01_twig", false, LEAF), slot("pine_tree_01_dead_branches", false, BARK), slot("pine_tree_01_trunk_b", false, BARK), slot("pine_tree_01_trunk_c", false, BARK)],
+        slots: &[
+            slot("pine_tree_01_bark", false, BARK),
+            slot("pine_tree_01_trunk_a", false, BARK),
+            slot("pine_tree_01_twig", false, LEAF),
+            slot("pine_tree_01_dead_branches", false, BARK),
+            slot("pine_tree_01_trunk_b", false, BARK),
+            slot("pine_tree_01_trunk_c", false, BARK),
+        ],
         forest_scale: (0.8, 1.25),
     },
     TreeDef {
@@ -83,11 +112,36 @@ pub const TREES: &[TreeDef] = &[
         large: true,
         resolutions: &["2k", "1k"],
         variants: &[
-            TreeVariant { mesh: 0, label: "a", triangles: 4_176_819, masked_triangles: 4_066_119, height: 18.9 },
-            TreeVariant { mesh: 1, label: "b", triangles: 2_300_624, masked_triangles: 2_207_296, height: 14.1 },
-            TreeVariant { mesh: 2, label: "c", triangles: 505_494, masked_triangles: 446_074, height: 14.5 },
+            TreeVariant {
+                mesh: 0,
+                label: "a",
+                triangles: 4_176_819,
+                masked_triangles: 4_066_119,
+                height: 18.9,
+            },
+            TreeVariant {
+                mesh: 1,
+                label: "b",
+                triangles: 2_300_624,
+                masked_triangles: 2_207_296,
+                height: 14.1,
+            },
+            TreeVariant {
+                mesh: 2,
+                label: "c",
+                triangles: 505_494,
+                masked_triangles: 446_074,
+                height: 14.5,
+            },
         ],
-        slots: &[slot("fir_tree_01_bark", false, BARK), slot("fir_tree_01_trunk_a", false, BARK), slot("fir_tree_01_twig", true, LEAF), slot("fir_tree_01_dead_branches", false, BARK), slot("fir_tree_01_trunk_b", false, BARK), slot("fir_tree_01_trunk_c", false, BARK)],
+        slots: &[
+            slot("fir_tree_01_bark", false, BARK),
+            slot("fir_tree_01_trunk_a", false, BARK),
+            slot("fir_tree_01_twig", true, LEAF),
+            slot("fir_tree_01_dead_branches", false, BARK),
+            slot("fir_tree_01_trunk_b", false, BARK),
+            slot("fir_tree_01_trunk_c", false, BARK),
+        ],
         forest_scale: (0.8, 1.25),
     },
     TreeDef {
@@ -95,8 +149,18 @@ pub const TREES: &[TreeDef] = &[
         label: "Island Tree 01",
         large: false,
         resolutions: &["2k", "1k"],
-        variants: &[TreeVariant { mesh: 0, label: "a", triangles: 1_599_403, masked_triangles: 1_060_032, height: 5.0 }],
-        slots: &[slot("island_tree_01", false, BARK), slot("island_tree_01_leaves", true, LEAF), slot("island_tree_01_branches", false, BARK)],
+        variants: &[TreeVariant {
+            mesh: 0,
+            label: "a",
+            triangles: 1_599_403,
+            masked_triangles: 1_060_032,
+            height: 5.0,
+        }],
+        slots: &[
+            slot("island_tree_01", false, BARK),
+            slot("island_tree_01_leaves", true, LEAF),
+            slot("island_tree_01_branches", false, BARK),
+        ],
         forest_scale: (1.0, 1.7),
     },
     TreeDef {
@@ -104,8 +168,18 @@ pub const TREES: &[TreeDef] = &[
         label: "Island Tree 02",
         large: false,
         resolutions: &["2k", "1k"],
-        variants: &[TreeVariant { mesh: 0, label: "a", triangles: 1_072_213, masked_triangles: 714_744, height: 3.4 }],
-        slots: &[slot("island_tree_02", false, BARK), slot("island_tree_02_leaves", true, LEAF), slot("island_tree_02_branches", false, BARK)],
+        variants: &[TreeVariant {
+            mesh: 0,
+            label: "a",
+            triangles: 1_072_213,
+            masked_triangles: 714_744,
+            height: 3.4,
+        }],
+        slots: &[
+            slot("island_tree_02", false, BARK),
+            slot("island_tree_02_leaves", true, LEAF),
+            slot("island_tree_02_branches", false, BARK),
+        ],
         forest_scale: (1.1, 1.9),
     },
     TreeDef {
@@ -113,8 +187,18 @@ pub const TREES: &[TreeDef] = &[
         label: "Island Tree 03",
         large: false,
         resolutions: &["2k", "1k"],
-        variants: &[TreeVariant { mesh: 0, label: "a", triangles: 2_085_320, masked_triangles: 1_408_704, height: 2.6 }],
-        slots: &[slot("island_tree_03", false, BARK), slot("island_tree_03_leaves", true, LEAF), slot("island_tree_03_branches", false, BARK)],
+        variants: &[TreeVariant {
+            mesh: 0,
+            label: "a",
+            triangles: 2_085_320,
+            masked_triangles: 1_408_704,
+            height: 2.6,
+        }],
+        slots: &[
+            slot("island_tree_03", false, BARK),
+            slot("island_tree_03_leaves", true, LEAF),
+            slot("island_tree_03_branches", false, BARK),
+        ],
         forest_scale: (1.3, 2.2),
     },
     TreeDef {
@@ -122,8 +206,18 @@ pub const TREES: &[TreeDef] = &[
         label: "Small Tree 02",
         large: false,
         resolutions: &["2k", "1k"],
-        variants: &[TreeVariant { mesh: 0, label: "a", triangles: 2_062_487, masked_triangles: 1_939_380, height: 4.6 }],
-        slots: &[slot("tree_small_02_branches", false, BARK), slot("tree_small_02_leaves", true, LEAF), slot("tree_small_02_trunk", false, BARK)],
+        variants: &[TreeVariant {
+            mesh: 0,
+            label: "a",
+            triangles: 2_062_487,
+            masked_triangles: 1_939_380,
+            height: 4.6,
+        }],
+        slots: &[
+            slot("tree_small_02_branches", false, BARK),
+            slot("tree_small_02_leaves", true, LEAF),
+            slot("tree_small_02_trunk", false, BARK),
+        ],
         forest_scale: (1.0, 1.8),
     },
 ];
@@ -140,10 +234,30 @@ pub struct MarbleDef {
 }
 
 pub const MARBLES: &[MarbleDef] = &[
-    MarbleDef { id: "grey_cartago_01", label: "Grey Cartago 01", use_for: "main floor, pedestals, impluvium", resolutions: &["8k", "4k", "2k"] },
-    MarbleDef { id: "grey_cartago_03", label: "Grey Cartago 03", use_for: "Ionic columns, secondary slabs, benches, steles, step accents", resolutions: &["8k", "4k", "2k"] },
-    MarbleDef { id: "marble_01", label: "Marble 01", use_for: "Doric columns, entablature, walls, pediments, steps", resolutions: &["8k", "4k", "2k"] },
-    MarbleDef { id: "marble_mosaic_tiles", label: "Marble Mosaic Tiles", use_for: "floor inlay border, plaza", resolutions: &["8k", "4k", "2k"] },
+    MarbleDef {
+        id: "grey_cartago_01",
+        label: "Grey Cartago 01",
+        use_for: "main floor, pedestals, impluvium",
+        resolutions: &["8k", "4k", "2k"],
+    },
+    MarbleDef {
+        id: "grey_cartago_03",
+        label: "Grey Cartago 03",
+        use_for: "Ionic columns, secondary slabs, benches, steles, step accents",
+        resolutions: &["8k", "4k", "2k"],
+    },
+    MarbleDef {
+        id: "marble_01",
+        label: "Marble 01",
+        use_for: "Doric columns, entablature, walls, pediments, steps",
+        resolutions: &["8k", "4k", "2k"],
+    },
+    MarbleDef {
+        id: "marble_mosaic_tiles",
+        label: "Marble Mosaic Tiles",
+        use_for: "floor inlay border, plaza",
+        resolutions: &["8k", "4k", "2k"],
+    },
 ];
 
 pub fn tree(id: &str) -> Option<&'static TreeDef> {
@@ -230,8 +344,14 @@ impl Config {
             Some("max") | Some("high") => TextureQuality::Max,
             _ => TextureQuality::Balanced,
         };
-        let fetch_displacement = displacement.is_some_and(|d| !matches!(d.trim(), "" | "0" | "false"));
-        Config { trees, density, quality, fetch_displacement }
+        let fetch_displacement =
+            displacement.is_some_and(|d| !matches!(d.trim(), "" | "0" | "false"));
+        Config {
+            trees,
+            density,
+            quality,
+            fetch_displacement,
+        }
     }
 
     /// CLI (`--trees <v>`, `--density <v>`, `--textures <v>`, `--small-trees`)
@@ -262,8 +382,12 @@ impl Config {
             .or_else(|| env("VG_STRESS_TREES"));
         Config::resolve(
             trees.as_deref(),
-            flag("--density").or_else(|| env("VG_STRESS_DENSITY")).as_deref(),
-            flag("--textures").or_else(|| env("VG_STRESS_TEXTURES")).as_deref(),
+            flag("--density")
+                .or_else(|| env("VG_STRESS_DENSITY"))
+                .as_deref(),
+            flag("--textures")
+                .or_else(|| env("VG_STRESS_TEXTURES"))
+                .as_deref(),
             env("VG_STRESS_DISPLACEMENT").as_deref(),
         )
     }
@@ -279,8 +403,13 @@ mod tests {
 
     fn cfg(args: &[&str], env: &[(&str, &str)]) -> Config {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        Config::from_sources(&args, &|k| env.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone()))
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Config::from_sources(&args, &|k| {
+            env.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+        })
     }
 
     #[test]
@@ -294,13 +423,35 @@ mod tests {
 
     #[test]
     fn small_preset_drops_the_large_packages() {
-        for c in [cfg(&["--trees", "small"], &[]), cfg(&["--small-trees"], &[]), cfg(&[], &[("VG_STRESS_TREES", "small")])] {
+        for c in [
+            cfg(&["--trees", "small"], &[]),
+            cfg(&["--small-trees"], &[]),
+            cfg(&[], &[("VG_STRESS_TREES", "small")]),
+        ] {
             let ids: Vec<_> = c.trees.iter().map(|t| t.id).collect();
-            assert_eq!(ids, ["island_tree_01", "island_tree_02", "island_tree_03", "tree_small_02"]);
+            assert_eq!(
+                ids,
+                [
+                    "island_tree_01",
+                    "island_tree_02",
+                    "island_tree_03",
+                    "tree_small_02"
+                ]
+            );
         }
         // CLI beats environment.
-        assert_eq!(cfg(&["--trees=none"], &[("VG_STRESS_TREES", "small")]).trees.len(), 0);
-        assert_eq!(cfg(&[], &[("VG_STRESS_TREES", "pine_tree_01, island_tree_02")]).trees.len(), 2);
+        assert_eq!(
+            cfg(&["--trees=none"], &[("VG_STRESS_TREES", "small")])
+                .trees
+                .len(),
+            0
+        );
+        assert_eq!(
+            cfg(&[], &[("VG_STRESS_TREES", "pine_tree_01, island_tree_02")])
+                .trees
+                .len(),
+            2
+        );
         // A typo never breaks a build: falls back to the default.
         assert_eq!(cfg(&[], &[("VG_STRESS_TREES", "oak")]).trees.len(), 6);
     }
@@ -314,7 +465,10 @@ mod tests {
         assert_eq!(parse_density("0"), None);
         assert_eq!(parse_density("nan"), None);
         assert_eq!(parse_density("1000"), Some(MAX_DENSITY));
-        assert_eq!(cfg(&["--density", "high"], &[("VG_STRESS_DENSITY", "low")]).density, 3.0);
+        assert_eq!(
+            cfg(&["--density", "high"], &[("VG_STRESS_DENSITY", "low")]).density,
+            3.0
+        );
     }
 
     #[test]
@@ -323,7 +477,12 @@ mod tests {
             for v in t.variants {
                 assert!(v.masked_triangles <= v.triangles, "{}", t.id);
             }
-            assert_eq!(t.slots.iter().all(|s| !s.masked), t.variants.iter().all(|v| v.masked_triangles == 0), "{}", t.id);
+            assert_eq!(
+                t.slots.iter().all(|s| !s.masked),
+                t.variants.iter().all(|v| v.masked_triangles == 0),
+                "{}",
+                t.id
+            );
         }
         assert_eq!(tree("pine_tree_01").unwrap().triangles(), 17_182_252);
         assert_eq!(tree("fir_tree_01").unwrap().triangles(), 6_982_937);

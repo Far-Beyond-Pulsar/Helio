@@ -183,31 +183,31 @@ pub struct GpuPostProcessUniforms {
     // Lens flare: appended 96-byte block (24 words); shared with the optics
     // pass. Camera optics (f-number, focal length, sensor, iris) are not here:
     // they belong to the camera's `LensComponent` (helio-pass-lens).
-    pub lens_enabled: u32,             // 432
-    pub lens_quality: u32,             // 436
-    pub lens_profile: u32,             // 440
-    pub lens_ghost_count: u32,         // 444
-    pub lens_intensity: f32,           // 448
-    pub lens_threshold: f32,           // 452
-    pub lens_soft_knee: f32,           // 456
-    pub lens_ghost_intensity: f32,     // 460
-    pub lens_halo_intensity: f32,      // 464
-    pub lens_glare_intensity: f32,     // 468
-    pub lens_streak_intensity: f32,    // 472
-    pub lens_dispersion: f32,          // 476
+    pub lens_enabled: u32,          // 432
+    pub lens_quality: u32,          // 436
+    pub lens_profile: u32,          // 440
+    pub lens_ghost_count: u32,      // 444
+    pub lens_intensity: f32,        // 448
+    pub lens_threshold: f32,        // 452
+    pub lens_soft_knee: f32,        // 456
+    pub lens_ghost_intensity: f32,  // 460
+    pub lens_halo_intensity: f32,   // 464
+    pub lens_glare_intensity: f32,  // 468
+    pub lens_streak_intensity: f32, // 472
+    pub lens_dispersion: f32,       // 476
     /// Reserved: natural cos^4 falloff is the lens's (`helio-pass-lens`).
-    pub reserved_lens_vignette: f32,   // 480
+    pub reserved_lens_vignette: f32, // 480
     pub lens_starburst_intensity: f32, // 484
-    pub lens_starburst_length: f32,    // 488
-    pub lens_coating_strength: f32,    // 492
-    pub lens_ghost_rim: f32,           // 496
-    pub lens_dirt_intensity: f32,      // 500
-    pub lens_light_sources: u32,       // 504
-    pub lens_light_intensity: f32,     // 508
-    pub lens_field_margin: f32,        // 512
+    pub lens_starburst_length: f32, // 488
+    pub lens_coating_strength: f32, // 492
+    pub lens_ghost_rim: f32,        // 496
+    pub lens_dirt_intensity: f32,   // 500
+    pub lens_light_sources: u32,    // 504
+    pub lens_light_intensity: f32,  // 508
+    pub lens_field_margin: f32,     // 512
     /// Temporal response time constant in seconds (0 = instantaneous).
-    pub lens_response_time: f32,       // 516
-    pub pad_lens: [f32; 2],            // 520..528
+    pub lens_response_time: f32, // 516
+    pub pad_lens: [f32; 2],         // 520..528
 }
 
 // Total: 528 bytes (33 uniform slots). Fog sits at 272; the lens block starts at 432.
@@ -346,7 +346,6 @@ impl Default for GpuPostProcessUniforms {
             grain_size: 1.0,
             grain_enabled: 0,
 
-
             motion_blur_amount: 0.0,
             motion_blur_max: 64.0,
             motion_blur_enabled: 0,
@@ -481,7 +480,6 @@ pub struct PostProcessSettings {
     pub grain_response: f32,
     pub grain_size: f32,
     pub grain_enabled: bool,
-
 
     // Motion Blur
     pub motion_blur_amount: f32,
@@ -706,7 +704,6 @@ impl Default for PostProcessSettings {
             grain_size: 1.0,
             grain_enabled: false,
 
-
             motion_blur_amount: 0.0,
             motion_blur_max: 64.0,
             motion_blur_enabled: false,
@@ -830,7 +827,6 @@ impl PostProcessVolumeDescriptor {
         }
     }
 }
-
 
 /// Shared lens authoring settings. Quality: 0 cheap, 1 high; profile: 0 spherical, 1 anamorphic.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1005,7 +1001,11 @@ impl PostProcessProperty {
     pub fn set(mask: &mut [u32; 4], property: usize, enabled: bool) {
         assert!(property < Self::COUNT);
         let bit = 1 << (property % 32);
-        if enabled { mask[property / 32] |= bit; } else { mask[property / 32] &= !bit; }
+        if enabled {
+            mask[property / 32] |= bit;
+        } else {
+            mask[property / 32] &= !bit;
+        }
     }
     pub fn contains(mask: &[u32; 4], property: usize) -> bool {
         property < Self::COUNT && mask[property / 32] & (1 << (property % 32)) != 0
@@ -1015,20 +1015,40 @@ impl PostProcessProperty {
 /// CPU reference for the production GPU resolver. Equal priorities retain input row order.
 pub struct PostProcessBlender;
 impl PostProcessBlender {
-    pub fn blend(camera_pos: [f32; 3], volumes: &[GpuPostProcessVolume], camera_settings: &PostProcessSettings) -> GpuPostProcessUniforms {
+    pub fn blend(
+        camera_pos: [f32; 3],
+        volumes: &[GpuPostProcessVolume],
+        camera_settings: &PostProcessSettings,
+    ) -> GpuPostProcessUniforms {
         Self::blend_gpu(camera_pos, volumes, camera_settings.to_gpu())
     }
 
-    pub fn blend_gpu(camera_pos: [f32; 3], volumes: &[GpuPostProcessVolume], baseline: GpuPostProcessUniforms) -> GpuPostProcessUniforms {
-        let mut ordered: Vec<_> = volumes.iter().filter(|v| v.priority.is_finite() && v.blend_weight.is_finite() && v.blend_weight > 0.0).collect();
-        ordered.sort_by(|a,b| a.priority.partial_cmp(&b.priority).unwrap());
+    pub fn blend_gpu(
+        camera_pos: [f32; 3],
+        volumes: &[GpuPostProcessVolume],
+        baseline: GpuPostProcessUniforms,
+    ) -> GpuPostProcessUniforms {
+        let mut ordered: Vec<_> = volumes
+            .iter()
+            .filter(|v| {
+                v.priority.is_finite() && v.blend_weight.is_finite() && v.blend_weight > 0.0
+            })
+            .collect();
+        ordered.sort_by(|a, b| a.priority.partial_cmp(&b.priority).unwrap());
         let mut result = baseline;
         let mut medium = baseline;
         for v in ordered {
             let weight = volume_weight(camera_pos, v);
-            if weight > 0.0 { result = blend_properties(result, &v.settings, weight, &v.override_mask); }
+            if weight > 0.0 {
+                result = blend_properties(result, &v.settings, weight, &v.override_mask);
+            }
             if v.unbound != 0 {
-                medium = blend_properties(medium, &v.settings, v.blend_weight.clamp(0.0, 1.0), &v.override_mask);
+                medium = blend_properties(
+                    medium,
+                    &v.settings,
+                    v.blend_weight.clamp(0.0, 1.0),
+                    &v.override_mask,
+                );
             }
         }
         // Bounded media are evaluated by the fog pass in world space, not at the camera.
@@ -1042,12 +1062,23 @@ impl PostProcessBlender {
         result.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
         result.fog_color = medium.fog_color;
         result.fog_emissive = medium.fog_emissive;
-        result.fog_density = if medium.fog_enabled != 0 { medium.fog_density } else { 0.0 };
-        let mut range = if medium.fog_enabled != 0 { medium.fog_max_distance } else { 0.0 };
+        result.fog_density = if medium.fog_enabled != 0 {
+            medium.fog_density
+        } else {
+            0.0
+        };
+        let mut range = if medium.fog_enabled != 0 {
+            medium.fog_max_distance
+        } else {
+            0.0
+        };
         for v in volumes {
-            if v.unbound == 0 && v.blend_weight > 0.0
+            if v.unbound == 0
+                && v.blend_weight > 0.0
                 && PostProcessProperty::contains(&v.override_mask, PostProcessProperty::FOG_ENABLED)
-                && v.settings.fog_enabled != 0 && v.settings.fog_density > 0.0 {
+                && v.settings.fog_enabled != 0
+                && v.settings.fog_density > 0.0
+            {
                 result.fog_enabled = 1;
                 range = range.max(v.settings.fog_max_distance);
             }
@@ -1058,104 +1089,357 @@ impl PostProcessBlender {
 }
 
 pub fn volume_weight(pos: [f32; 3], v: &GpuPostProcessVolume) -> f32 {
-    if !v.blend_weight.is_finite() || v.blend_weight <= 0.0 { return 0.0; }
+    if !v.blend_weight.is_finite() || v.blend_weight <= 0.0 {
+        return 0.0;
+    }
     let weight = v.blend_weight.clamp(0.0, 1.0);
-    if v.unbound != 0 { return weight; }
+    if v.unbound != 0 {
+        return weight;
+    }
     let mut boundary = f32::INFINITY;
     for axis in 0..3 {
-        if !(pos[axis] >= v.bounds_min[axis] && pos[axis] <= v.bounds_max[axis]) { return 0.0; }
-        boundary = boundary.min(pos[axis] - v.bounds_min[axis]).min(v.bounds_max[axis] - pos[axis]);
+        if !(pos[axis] >= v.bounds_min[axis] && pos[axis] <= v.bounds_max[axis]) {
+            return 0.0;
+        }
+        boundary = boundary
+            .min(pos[axis] - v.bounds_min[axis])
+            .min(v.bounds_max[axis] - pos[axis]);
     }
-    if v.blend_radius > 0.0 { weight * (boundary / v.blend_radius).clamp(0.0, 1.0) } else { weight }
+    if v.blend_radius > 0.0 {
+        weight * (boundary / v.blend_radius).clamp(0.0, 1.0)
+    } else {
+        weight
+    }
 }
 
-fn blend_properties(mut a: GpuPostProcessUniforms, b: &GpuPostProcessUniforms, t: f32, mask: &[u32; 4]) -> GpuPostProcessUniforms {
-    if PostProcessProperty::contains(mask, 0) { if t >= 0.5 { a.exposure_mode = b.exposure_mode; } }
-    if PostProcessProperty::contains(mask, 1) { a.exposure_compensation += (b.exposure_compensation - a.exposure_compensation) * t; }
-    if PostProcessProperty::contains(mask, 2) { a.exposure_min += (b.exposure_min - a.exposure_min) * t; }
-    if PostProcessProperty::contains(mask, 3) { a.exposure_max += (b.exposure_max - a.exposure_max) * t; }
-    if PostProcessProperty::contains(mask, 4) { a.bloom_intensity += (b.bloom_intensity - a.bloom_intensity) * t; }
-    if PostProcessProperty::contains(mask, 5) { a.bloom_threshold += (b.bloom_threshold - a.bloom_threshold) * t; }
-    if PostProcessProperty::contains(mask, 6) { a.bloom_knee += (b.bloom_knee - a.bloom_knee) * t; }
-    if PostProcessProperty::contains(mask, 7) { a.bloom_radius += (b.bloom_radius - a.bloom_radius) * t; }
-    if PostProcessProperty::contains(mask, 8) { for c in 0..3 { a.bloom_tint[c] += (b.bloom_tint[c] - a.bloom_tint[c]) * t; } }
-    if PostProcessProperty::contains(mask, 9) { if t >= 0.5 { a.bloom_enabled = b.bloom_enabled; } }
-    if PostProcessProperty::contains(mask, 10) { for c in 0..3 { a.color_saturation[c] += (b.color_saturation[c] - a.color_saturation[c]) * t; } }
-    if PostProcessProperty::contains(mask, 11) { a.exposure_speed_up += (b.exposure_speed_up - a.exposure_speed_up) * t; }
-    if PostProcessProperty::contains(mask, 12) { for c in 0..3 { a.color_contrast[c] += (b.color_contrast[c] - a.color_contrast[c]) * t; } }
-    if PostProcessProperty::contains(mask, 13) { a.exposure_speed_down += (b.exposure_speed_down - a.exposure_speed_down) * t; }
-    if PostProcessProperty::contains(mask, 14) { for c in 0..3 { a.color_gamma[c] += (b.color_gamma[c] - a.color_gamma[c]) * t; } }
-    if PostProcessProperty::contains(mask, 15) { for c in 0..3 { a.color_gain[c] += (b.color_gain[c] - a.color_gain[c]) * t; } }
-    if PostProcessProperty::contains(mask, 16) { for c in 0..3 { a.color_offset[c] += (b.color_offset[c] - a.color_offset[c]) * t; } }
-    if PostProcessProperty::contains(mask, 17) { a.white_temp += (b.white_temp - a.white_temp) * t; }
-    if PostProcessProperty::contains(mask, 18) { a.white_tint += (b.white_tint - a.white_tint) * t; }
-    if PostProcessProperty::contains(mask, 19) { if t >= 0.5 { a.white_balance_enabled = b.white_balance_enabled; } }
-    if PostProcessProperty::contains(mask, 20) { if t >= 0.5 { a.tonemap_operator = b.tonemap_operator; } }
-    if PostProcessProperty::contains(mask, 21) { a.tonemap_exposure += (b.tonemap_exposure - a.tonemap_exposure) * t; }
-    if PostProcessProperty::contains(mask, 22) { a.tonemap_white_point += (b.tonemap_white_point - a.tonemap_white_point) * t; }
-    if PostProcessProperty::contains(mask, 23) { a.vignette_intensity += (b.vignette_intensity - a.vignette_intensity) * t; }
-    if PostProcessProperty::contains(mask, 24) { a.vignette_smoothness += (b.vignette_smoothness - a.vignette_smoothness) * t; }
-    if PostProcessProperty::contains(mask, 25) { a.vignette_roundness += (b.vignette_roundness - a.vignette_roundness) * t; }
-    if PostProcessProperty::contains(mask, 26) { for c in 0..3 { a.vignette_color[c] += (b.vignette_color[c] - a.vignette_color[c]) * t; } }
-    if PostProcessProperty::contains(mask, 27) { if t >= 0.5 { a.vignette_enabled = b.vignette_enabled; } }
-    if PostProcessProperty::contains(mask, 28) { a.grain_intensity += (b.grain_intensity - a.grain_intensity) * t; }
-    if PostProcessProperty::contains(mask, 29) { a.grain_response += (b.grain_response - a.grain_response) * t; }
-    if PostProcessProperty::contains(mask, 30) { a.grain_size += (b.grain_size - a.grain_size) * t; }
-    if PostProcessProperty::contains(mask, 31) { if t >= 0.5 { a.grain_enabled = b.grain_enabled; } }
-    if PostProcessProperty::contains(mask, 32) { a.motion_blur_amount += (b.motion_blur_amount - a.motion_blur_amount) * t; }
-    if PostProcessProperty::contains(mask, 33) { a.motion_blur_max += (b.motion_blur_max - a.motion_blur_max) * t; }
-    if PostProcessProperty::contains(mask, 34) { if t >= 0.5 { a.motion_blur_enabled = b.motion_blur_enabled; } }
-    if PostProcessProperty::contains(mask, 35) { a.blend_weight_bloom += (b.blend_weight_bloom - a.blend_weight_bloom) * t; }
-    if PostProcessProperty::contains(mask, 36) { a.blend_weight_motion_blur += (b.blend_weight_motion_blur - a.blend_weight_motion_blur) * t; }
-    if PostProcessProperty::contains(mask, 37) { a.blend_weight_vignette += (b.blend_weight_vignette - a.blend_weight_vignette) * t; }
-    if PostProcessProperty::contains(mask, 38) { a.blend_weight_grain += (b.blend_weight_grain - a.blend_weight_grain) * t; }
-    if PostProcessProperty::contains(mask, 39) { a.blend_weight_exposure += (b.blend_weight_exposure - a.blend_weight_exposure) * t; }
-    if PostProcessProperty::contains(mask, 40) { if t >= 0.5 { a.fog_enabled = b.fog_enabled; } }
-    if PostProcessProperty::contains(mask, 41) { if t >= 0.5 { a.fog_mode = b.fog_mode; } }
-    if PostProcessProperty::contains(mask, 42) { a.fog_density += (b.fog_density - a.fog_density) * t; }
-    if PostProcessProperty::contains(mask, 43) { a.fog_height_falloff += (b.fog_height_falloff - a.fog_height_falloff) * t; }
-    if PostProcessProperty::contains(mask, 44) { a.fog_start_distance += (b.fog_start_distance - a.fog_start_distance) * t; }
-    if PostProcessProperty::contains(mask, 45) { a.fog_max_distance += (b.fog_max_distance - a.fog_max_distance) * t; }
-    if PostProcessProperty::contains(mask, 46) { a.fog_height += (b.fog_height - a.fog_height) * t; }
-    if PostProcessProperty::contains(mask, 47) { a.fog_scattering_anisotropy += (b.fog_scattering_anisotropy - a.fog_scattering_anisotropy) * t; }
-    if PostProcessProperty::contains(mask, 48) { for c in 0..3 { a.fog_color[c] += (b.fog_color[c] - a.fog_color[c]) * t; } }
-    if PostProcessProperty::contains(mask, 49) { for c in 0..3 { a.fog_emissive[c] += (b.fog_emissive[c] - a.fog_emissive[c]) * t; } }
-    if PostProcessProperty::contains(mask, 50) { if t >= 0.5 { a.hdr_output_mode = b.hdr_output_mode; } }
-    if PostProcessProperty::contains(mask, 51) { a.hdr_max_nits += (b.hdr_max_nits - a.hdr_max_nits) * t; }
-    if PostProcessProperty::contains(mask, 52) { a.hdr_ui_brightness += (b.hdr_ui_brightness - a.hdr_ui_brightness) * t; }
-    if PostProcessProperty::contains(mask, 53) { for c in 0..3 { a.lift_color[c] += (b.lift_color[c] - a.lift_color[c]) * t; } }
-    if PostProcessProperty::contains(mask, 54) { for c in 0..3 { a.gamma_color[c] += (b.gamma_color[c] - a.gamma_color[c]) * t; } }
-    if PostProcessProperty::contains(mask, 55) { for c in 0..3 { a.gain_color[c] += (b.gain_color[c] - a.gain_color[c]) * t; } }
-    if PostProcessProperty::contains(mask, 56) { a.shadows_max += (b.shadows_max - a.shadows_max) * t; }
-    if PostProcessProperty::contains(mask, 57) { a.highlights_min += (b.highlights_min - a.highlights_min) * t; }
-    if PostProcessProperty::contains(mask, 58) { a.shadow_highlight_balance += (b.shadow_highlight_balance - a.shadow_highlight_balance) * t; }
-    if PostProcessProperty::contains(mask, 59) { a.hue_shift += (b.hue_shift - a.hue_shift) * t; }
-    if PostProcessProperty::contains(mask, 60) { if t >= 0.5 { a.lut_generation = b.lut_generation; } }
-    if PostProcessProperty::contains(mask, 61) { a.lut_intensity += (b.lut_intensity - a.lut_intensity) * t; }
-    if PostProcessProperty::contains(mask, 62) { if t >= 0.5 { a.lut_platform = b.lut_platform; } }
-    if PostProcessProperty::contains(mask, 63) { if t >= 0.5 { a.lens_enabled = b.lens_enabled; } }
-    if PostProcessProperty::contains(mask, 64) { if t >= 0.5 { a.lens_quality = b.lens_quality; } }
-    if PostProcessProperty::contains(mask, 65) { if t >= 0.5 { a.lens_profile = b.lens_profile; } }
-    if PostProcessProperty::contains(mask, 66) { if t >= 0.5 { a.lens_ghost_count = b.lens_ghost_count; } }
-    if PostProcessProperty::contains(mask, 67) { a.lens_intensity += (b.lens_intensity - a.lens_intensity) * t; }
-    if PostProcessProperty::contains(mask, 68) { a.lens_threshold += (b.lens_threshold - a.lens_threshold) * t; }
-    if PostProcessProperty::contains(mask, 69) { a.lens_soft_knee += (b.lens_soft_knee - a.lens_soft_knee) * t; }
-    if PostProcessProperty::contains(mask, 70) { a.lens_ghost_intensity += (b.lens_ghost_intensity - a.lens_ghost_intensity) * t; }
-    if PostProcessProperty::contains(mask, 71) { a.lens_halo_intensity += (b.lens_halo_intensity - a.lens_halo_intensity) * t; }
-    if PostProcessProperty::contains(mask, 72) { a.lens_glare_intensity += (b.lens_glare_intensity - a.lens_glare_intensity) * t; }
-    if PostProcessProperty::contains(mask, 73) { a.lens_streak_intensity += (b.lens_streak_intensity - a.lens_streak_intensity) * t; }
-    if PostProcessProperty::contains(mask, 74) { a.lens_dispersion += (b.lens_dispersion - a.lens_dispersion) * t; }
-    if PostProcessProperty::contains(mask, 75) { a.lens_starburst_intensity += (b.lens_starburst_intensity - a.lens_starburst_intensity) * t; }
-    if PostProcessProperty::contains(mask, 76) { a.lens_starburst_length += (b.lens_starburst_length - a.lens_starburst_length) * t; }
-    if PostProcessProperty::contains(mask, 77) { a.lens_coating_strength += (b.lens_coating_strength - a.lens_coating_strength) * t; }
-    if PostProcessProperty::contains(mask, 78) { a.lens_ghost_rim += (b.lens_ghost_rim - a.lens_ghost_rim) * t; }
-    if PostProcessProperty::contains(mask, 79) { a.lens_dirt_intensity += (b.lens_dirt_intensity - a.lens_dirt_intensity) * t; }
-    if PostProcessProperty::contains(mask, 80) { if t >= 0.5 { a.lens_light_sources = b.lens_light_sources; } }
-    if PostProcessProperty::contains(mask, 81) { a.lens_light_intensity += (b.lens_light_intensity - a.lens_light_intensity) * t; }
-    if PostProcessProperty::contains(mask, 82) { a.lens_field_margin += (b.lens_field_margin - a.lens_field_margin) * t; }
-    if PostProcessProperty::contains(mask, 83) { a.lens_response_time += (b.lens_response_time - a.lens_response_time) * t; }
-    if PostProcessProperty::contains(mask, 84) { a.local_exposure_highlight_contrast += (b.local_exposure_highlight_contrast - a.local_exposure_highlight_contrast) * t; }
-    if PostProcessProperty::contains(mask, 85) { a.local_exposure_shadow_contrast += (b.local_exposure_shadow_contrast - a.local_exposure_shadow_contrast) * t; }
-    if PostProcessProperty::contains(mask, 86) { a.local_exposure_detail_strength += (b.local_exposure_detail_strength - a.local_exposure_detail_strength) * t; }
+fn blend_properties(
+    mut a: GpuPostProcessUniforms,
+    b: &GpuPostProcessUniforms,
+    t: f32,
+    mask: &[u32; 4],
+) -> GpuPostProcessUniforms {
+    if PostProcessProperty::contains(mask, 0) {
+        if t >= 0.5 {
+            a.exposure_mode = b.exposure_mode;
+        }
+    }
+    if PostProcessProperty::contains(mask, 1) {
+        a.exposure_compensation += (b.exposure_compensation - a.exposure_compensation) * t;
+    }
+    if PostProcessProperty::contains(mask, 2) {
+        a.exposure_min += (b.exposure_min - a.exposure_min) * t;
+    }
+    if PostProcessProperty::contains(mask, 3) {
+        a.exposure_max += (b.exposure_max - a.exposure_max) * t;
+    }
+    if PostProcessProperty::contains(mask, 4) {
+        a.bloom_intensity += (b.bloom_intensity - a.bloom_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 5) {
+        a.bloom_threshold += (b.bloom_threshold - a.bloom_threshold) * t;
+    }
+    if PostProcessProperty::contains(mask, 6) {
+        a.bloom_knee += (b.bloom_knee - a.bloom_knee) * t;
+    }
+    if PostProcessProperty::contains(mask, 7) {
+        a.bloom_radius += (b.bloom_radius - a.bloom_radius) * t;
+    }
+    if PostProcessProperty::contains(mask, 8) {
+        for c in 0..3 {
+            a.bloom_tint[c] += (b.bloom_tint[c] - a.bloom_tint[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 9) {
+        if t >= 0.5 {
+            a.bloom_enabled = b.bloom_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 10) {
+        for c in 0..3 {
+            a.color_saturation[c] += (b.color_saturation[c] - a.color_saturation[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 11) {
+        a.exposure_speed_up += (b.exposure_speed_up - a.exposure_speed_up) * t;
+    }
+    if PostProcessProperty::contains(mask, 12) {
+        for c in 0..3 {
+            a.color_contrast[c] += (b.color_contrast[c] - a.color_contrast[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 13) {
+        a.exposure_speed_down += (b.exposure_speed_down - a.exposure_speed_down) * t;
+    }
+    if PostProcessProperty::contains(mask, 14) {
+        for c in 0..3 {
+            a.color_gamma[c] += (b.color_gamma[c] - a.color_gamma[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 15) {
+        for c in 0..3 {
+            a.color_gain[c] += (b.color_gain[c] - a.color_gain[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 16) {
+        for c in 0..3 {
+            a.color_offset[c] += (b.color_offset[c] - a.color_offset[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 17) {
+        a.white_temp += (b.white_temp - a.white_temp) * t;
+    }
+    if PostProcessProperty::contains(mask, 18) {
+        a.white_tint += (b.white_tint - a.white_tint) * t;
+    }
+    if PostProcessProperty::contains(mask, 19) {
+        if t >= 0.5 {
+            a.white_balance_enabled = b.white_balance_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 20) {
+        if t >= 0.5 {
+            a.tonemap_operator = b.tonemap_operator;
+        }
+    }
+    if PostProcessProperty::contains(mask, 21) {
+        a.tonemap_exposure += (b.tonemap_exposure - a.tonemap_exposure) * t;
+    }
+    if PostProcessProperty::contains(mask, 22) {
+        a.tonemap_white_point += (b.tonemap_white_point - a.tonemap_white_point) * t;
+    }
+    if PostProcessProperty::contains(mask, 23) {
+        a.vignette_intensity += (b.vignette_intensity - a.vignette_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 24) {
+        a.vignette_smoothness += (b.vignette_smoothness - a.vignette_smoothness) * t;
+    }
+    if PostProcessProperty::contains(mask, 25) {
+        a.vignette_roundness += (b.vignette_roundness - a.vignette_roundness) * t;
+    }
+    if PostProcessProperty::contains(mask, 26) {
+        for c in 0..3 {
+            a.vignette_color[c] += (b.vignette_color[c] - a.vignette_color[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 27) {
+        if t >= 0.5 {
+            a.vignette_enabled = b.vignette_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 28) {
+        a.grain_intensity += (b.grain_intensity - a.grain_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 29) {
+        a.grain_response += (b.grain_response - a.grain_response) * t;
+    }
+    if PostProcessProperty::contains(mask, 30) {
+        a.grain_size += (b.grain_size - a.grain_size) * t;
+    }
+    if PostProcessProperty::contains(mask, 31) {
+        if t >= 0.5 {
+            a.grain_enabled = b.grain_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 32) {
+        a.motion_blur_amount += (b.motion_blur_amount - a.motion_blur_amount) * t;
+    }
+    if PostProcessProperty::contains(mask, 33) {
+        a.motion_blur_max += (b.motion_blur_max - a.motion_blur_max) * t;
+    }
+    if PostProcessProperty::contains(mask, 34) {
+        if t >= 0.5 {
+            a.motion_blur_enabled = b.motion_blur_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 35) {
+        a.blend_weight_bloom += (b.blend_weight_bloom - a.blend_weight_bloom) * t;
+    }
+    if PostProcessProperty::contains(mask, 36) {
+        a.blend_weight_motion_blur += (b.blend_weight_motion_blur - a.blend_weight_motion_blur) * t;
+    }
+    if PostProcessProperty::contains(mask, 37) {
+        a.blend_weight_vignette += (b.blend_weight_vignette - a.blend_weight_vignette) * t;
+    }
+    if PostProcessProperty::contains(mask, 38) {
+        a.blend_weight_grain += (b.blend_weight_grain - a.blend_weight_grain) * t;
+    }
+    if PostProcessProperty::contains(mask, 39) {
+        a.blend_weight_exposure += (b.blend_weight_exposure - a.blend_weight_exposure) * t;
+    }
+    if PostProcessProperty::contains(mask, 40) {
+        if t >= 0.5 {
+            a.fog_enabled = b.fog_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 41) {
+        if t >= 0.5 {
+            a.fog_mode = b.fog_mode;
+        }
+    }
+    if PostProcessProperty::contains(mask, 42) {
+        a.fog_density += (b.fog_density - a.fog_density) * t;
+    }
+    if PostProcessProperty::contains(mask, 43) {
+        a.fog_height_falloff += (b.fog_height_falloff - a.fog_height_falloff) * t;
+    }
+    if PostProcessProperty::contains(mask, 44) {
+        a.fog_start_distance += (b.fog_start_distance - a.fog_start_distance) * t;
+    }
+    if PostProcessProperty::contains(mask, 45) {
+        a.fog_max_distance += (b.fog_max_distance - a.fog_max_distance) * t;
+    }
+    if PostProcessProperty::contains(mask, 46) {
+        a.fog_height += (b.fog_height - a.fog_height) * t;
+    }
+    if PostProcessProperty::contains(mask, 47) {
+        a.fog_scattering_anisotropy +=
+            (b.fog_scattering_anisotropy - a.fog_scattering_anisotropy) * t;
+    }
+    if PostProcessProperty::contains(mask, 48) {
+        for c in 0..3 {
+            a.fog_color[c] += (b.fog_color[c] - a.fog_color[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 49) {
+        for c in 0..3 {
+            a.fog_emissive[c] += (b.fog_emissive[c] - a.fog_emissive[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 50) {
+        if t >= 0.5 {
+            a.hdr_output_mode = b.hdr_output_mode;
+        }
+    }
+    if PostProcessProperty::contains(mask, 51) {
+        a.hdr_max_nits += (b.hdr_max_nits - a.hdr_max_nits) * t;
+    }
+    if PostProcessProperty::contains(mask, 52) {
+        a.hdr_ui_brightness += (b.hdr_ui_brightness - a.hdr_ui_brightness) * t;
+    }
+    if PostProcessProperty::contains(mask, 53) {
+        for c in 0..3 {
+            a.lift_color[c] += (b.lift_color[c] - a.lift_color[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 54) {
+        for c in 0..3 {
+            a.gamma_color[c] += (b.gamma_color[c] - a.gamma_color[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 55) {
+        for c in 0..3 {
+            a.gain_color[c] += (b.gain_color[c] - a.gain_color[c]) * t;
+        }
+    }
+    if PostProcessProperty::contains(mask, 56) {
+        a.shadows_max += (b.shadows_max - a.shadows_max) * t;
+    }
+    if PostProcessProperty::contains(mask, 57) {
+        a.highlights_min += (b.highlights_min - a.highlights_min) * t;
+    }
+    if PostProcessProperty::contains(mask, 58) {
+        a.shadow_highlight_balance += (b.shadow_highlight_balance - a.shadow_highlight_balance) * t;
+    }
+    if PostProcessProperty::contains(mask, 59) {
+        a.hue_shift += (b.hue_shift - a.hue_shift) * t;
+    }
+    if PostProcessProperty::contains(mask, 60) {
+        if t >= 0.5 {
+            a.lut_generation = b.lut_generation;
+        }
+    }
+    if PostProcessProperty::contains(mask, 61) {
+        a.lut_intensity += (b.lut_intensity - a.lut_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 62) {
+        if t >= 0.5 {
+            a.lut_platform = b.lut_platform;
+        }
+    }
+    if PostProcessProperty::contains(mask, 63) {
+        if t >= 0.5 {
+            a.lens_enabled = b.lens_enabled;
+        }
+    }
+    if PostProcessProperty::contains(mask, 64) {
+        if t >= 0.5 {
+            a.lens_quality = b.lens_quality;
+        }
+    }
+    if PostProcessProperty::contains(mask, 65) {
+        if t >= 0.5 {
+            a.lens_profile = b.lens_profile;
+        }
+    }
+    if PostProcessProperty::contains(mask, 66) {
+        if t >= 0.5 {
+            a.lens_ghost_count = b.lens_ghost_count;
+        }
+    }
+    if PostProcessProperty::contains(mask, 67) {
+        a.lens_intensity += (b.lens_intensity - a.lens_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 68) {
+        a.lens_threshold += (b.lens_threshold - a.lens_threshold) * t;
+    }
+    if PostProcessProperty::contains(mask, 69) {
+        a.lens_soft_knee += (b.lens_soft_knee - a.lens_soft_knee) * t;
+    }
+    if PostProcessProperty::contains(mask, 70) {
+        a.lens_ghost_intensity += (b.lens_ghost_intensity - a.lens_ghost_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 71) {
+        a.lens_halo_intensity += (b.lens_halo_intensity - a.lens_halo_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 72) {
+        a.lens_glare_intensity += (b.lens_glare_intensity - a.lens_glare_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 73) {
+        a.lens_streak_intensity += (b.lens_streak_intensity - a.lens_streak_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 74) {
+        a.lens_dispersion += (b.lens_dispersion - a.lens_dispersion) * t;
+    }
+    if PostProcessProperty::contains(mask, 75) {
+        a.lens_starburst_intensity += (b.lens_starburst_intensity - a.lens_starburst_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 76) {
+        a.lens_starburst_length += (b.lens_starburst_length - a.lens_starburst_length) * t;
+    }
+    if PostProcessProperty::contains(mask, 77) {
+        a.lens_coating_strength += (b.lens_coating_strength - a.lens_coating_strength) * t;
+    }
+    if PostProcessProperty::contains(mask, 78) {
+        a.lens_ghost_rim += (b.lens_ghost_rim - a.lens_ghost_rim) * t;
+    }
+    if PostProcessProperty::contains(mask, 79) {
+        a.lens_dirt_intensity += (b.lens_dirt_intensity - a.lens_dirt_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 80) {
+        if t >= 0.5 {
+            a.lens_light_sources = b.lens_light_sources;
+        }
+    }
+    if PostProcessProperty::contains(mask, 81) {
+        a.lens_light_intensity += (b.lens_light_intensity - a.lens_light_intensity) * t;
+    }
+    if PostProcessProperty::contains(mask, 82) {
+        a.lens_field_margin += (b.lens_field_margin - a.lens_field_margin) * t;
+    }
+    if PostProcessProperty::contains(mask, 83) {
+        a.lens_response_time += (b.lens_response_time - a.lens_response_time) * t;
+    }
+    if PostProcessProperty::contains(mask, 84) {
+        a.local_exposure_highlight_contrast +=
+            (b.local_exposure_highlight_contrast - a.local_exposure_highlight_contrast) * t;
+    }
+    if PostProcessProperty::contains(mask, 85) {
+        a.local_exposure_shadow_contrast +=
+            (b.local_exposure_shadow_contrast - a.local_exposure_shadow_contrast) * t;
+    }
+    if PostProcessProperty::contains(mask, 86) {
+        a.local_exposure_detail_strength +=
+            (b.local_exposure_detail_strength - a.local_exposure_detail_strength) * t;
+    }
     a
 }
