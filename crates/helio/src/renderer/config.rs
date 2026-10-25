@@ -116,8 +116,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         wgpu::Features::PIPELINE_CACHE | // persistent driver-validated pipeline cache
         wgpu::Features::SHADER_INT64 | // hardware wide multiplies (voxel planet fixed-point math)
         wgpu::Features::POLYGON_MODE_LINE; // wireframe debug view
-    // Virtual geometry's software raster uses a 64-bit atomicMax; both features
-    // are needed together, and without them it falls back to a tiled kernel.
+                                           // Virtual geometry's software raster uses a 64-bit atomicMax; both features
+                                           // are needed together, and without them it falls back to a tiled kernel.
     if adapter_features.contains(VIRTUAL_GEOMETRY_INT64_FEATURES) {
         optional |= VIRTUAL_GEOMETRY_INT64_FEATURES;
     }
@@ -189,10 +189,18 @@ mod tests {
     #[test]
     fn software_vulkan_gets_no_ray_queries() {
         use wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu};
-        assert!(!ray_queries_usable(&adapter("llvmpipe (LLVM 20.1.2, 256 bits)", "llvmpipe", Cpu)));
+        assert!(!ray_queries_usable(&adapter(
+            "llvmpipe (LLVM 20.1.2, 256 bits)",
+            "llvmpipe",
+            Cpu
+        )));
         assert!(!ray_queries_usable(&adapter("lavapipe", "", IntegratedGpu)));
         assert!(!ray_queries_usable(&adapter("Some CPU device", "", Cpu)));
-        assert!(ray_queries_usable(&adapter("NVIDIA GeForce RTX 4080", "NVIDIA", DiscreteGpu)));
+        assert!(ray_queries_usable(&adapter(
+            "NVIDIA GeForce RTX 4080",
+            "NVIDIA",
+            DiscreteGpu
+        )));
     }
 
     #[test]
@@ -211,8 +219,10 @@ mod tests {
 
     #[test]
     fn conservative_rasterization_is_requested_only_when_available() {
-        assert!(required_wgpu_features(wgpu::Features::CONSERVATIVE_RASTERIZATION)
-            .contains(wgpu::Features::CONSERVATIVE_RASTERIZATION));
+        assert!(
+            required_wgpu_features(wgpu::Features::CONSERVATIVE_RASTERIZATION)
+                .contains(wgpu::Features::CONSERVATIVE_RASTERIZATION)
+        );
     }
 
     #[test]
@@ -352,15 +362,11 @@ pub struct RendererConfig {
     /// HDR display output mode. Default `Ldr`.
     pub hdr_output_mode: helio_pass_postprocess::HdrOutputMode,
     pub render_mode: RenderMode,
-    /// Enable the OpenXR render path. When `true` the graph is built in
-    /// multiview mode (2-layer array targets, `multiview_mask = 0b11`) and the
-    /// app is expected to drive the headset through
-    /// [`Renderer::render_xr`](crate::Renderer#method.render_xr) instead of
-    /// [`Renderer::render`](crate::Renderer#method.render). Default `false`.
-    ///
-    /// Note: this does *not* create an OpenXR session — the app still has to
-    /// create the `helio-xr` session/swapchain and hand it to the renderer via
-    /// [`Renderer::set_xr_session`](crate::Renderer#method.set_xr_session).
+    /// Enable the experimental multiview render-graph path. This is a low-level
+    /// graph setting and does not discover or start OpenXR. For application
+    /// level automatic XR startup with desktop fallback, use
+    /// [`HelioGraphicsConfig::vr_support`](crate::HelioGraphicsConfig::vr_support)
+    /// before creating the scene GPU mirror and renderer. Default `false`.
     pub enable_xr: bool,
 
     /// Enable the portal duplicate-draw passes (`PortalCullPass`/`PortalInstancePass`).
@@ -483,6 +489,19 @@ impl RendererConfig {
     pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
         self.render_mode = mode;
         self
+    }
+
+    /// Construct the renderer configuration for an [`XrRuntime`](helio_xr::XrRuntime).
+    /// The graph uses the runtime's per-eye extent and swapchain format, with
+    /// render scaling disabled so the submitted image exactly matches the eye
+    /// target. Helio currently renders eyes sequentially through the ordinary
+    /// graph, so this intentionally leaves graph multiview disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn for_xr(runtime: &helio_xr::XrRuntime, render_mode: RenderMode) -> Self {
+        let (width, height) = runtime.eye_extent();
+        Self::new(width, height, runtime.swapchain.format)
+            .with_render_mode(render_mode)
+            .with_render_scale(1.0)
     }
 
     /// Enable/disable the OpenXR (multiview) render path.
