@@ -624,7 +624,7 @@ impl Renderer {
     /// multiview mask infrastructure are in place; wiring `view_index` through
     /// the shaders is a follow-up (stereo depth requires it).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
+    pub(crate) fn render_xr(&mut self, mirror: Option<&wgpu::TextureView>) -> HelioResult<()> {
         if self.graph.requires_ray_tracing() {
             return Err(helio_core::Error::InvalidPassConfig(
                 "HLFS RT stereo support is not implemented".into(),
@@ -855,7 +855,7 @@ impl Renderer {
     /// window. A temporarily unavailable mirror image never prevents the XR
     /// frame from being submitted to the headset.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn render_xr_to_surface(
+    pub(crate) fn render_xr_to_surface(
         &mut self,
         mirror_surface: Option<&wgpu::Surface<'_>>,
     ) -> HelioResult<()> {
