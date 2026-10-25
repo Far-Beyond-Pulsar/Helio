@@ -321,6 +321,12 @@ fn nearest_buffer(device: &wgpu::Device, texels: u64) -> wgpu::Buffer {
 /// publishes the upsampled, temporally accumulated image as `tsr_color`.
 /// By default it also blits to `ctx.target`.
 pub struct TsrPass {
+    /// A private second instance used only by the right eye in sequential XR.
+    /// It owns independent history textures and camera/jitter tracking; the
+    /// normal instance remains the mono and left-eye path.
+    xr_right: Option<Box<TsrPass>>,
+    active_xr_right: bool,
+    xr_mode: bool,
     color_input: &'static str,
     intermediate_output: bool,
     timing_query: Option<wgpu::QuerySet>,
@@ -387,17 +393,20 @@ pub struct TsrPass {
     reactivity: f32,
 
     quality: TsrQuality,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl TsrPass {
     /// Select the scene-linear image reconstructed by this pass.
     pub fn with_color_input(mut self, key: &'static str) -> Self {
         self.color_input = key;
+        if let Some(right) = &mut self.xr_right { right.color_input = key; }
         self
     }
     /// Publish the HDR resolve for post-processing without a redundant surface blit.
     pub fn with_intermediate_output(mut self) -> Self {
         self.intermediate_output = true;
+        if let Some(right) = &mut self.xr_right { right.intermediate_output = true; }
         self
     }
 
@@ -405,6 +414,7 @@ impl TsrPass {
     /// The resolved RGB is unchanged for zero current/previous coverage.
     pub fn with_transparency_reactivity(mut self) -> Self {
         self.transparency_reactivity = true;
+        if let Some(right) = &mut self.xr_right { right.transparency_reactivity = true; }
         self
     }
 
@@ -419,6 +429,16 @@ impl TsrPass {
         device: &wgpu::Device,
         _internal_width: u32,
         _internal_height: u32,
+        output_width: u32,
+        output_height: u32,
+        format: wgpu::TextureFormat,
+        quality: TsrQuality,
+    ) -> Self {
+        Self::new_inner(device, output_width, output_height, format, quality)
+    }
+
+    fn new_inner(
+        device: &wgpu::Device,
         output_width: u32,
         output_height: u32,
         format: wgpu::TextureFormat,
@@ -592,7 +612,10 @@ impl TsrPass {
             &[target(OUTPUT_FORMAT)]);
         let blit_pipeline = fullscreen("TSR Blit Pipeline", &blit_bgl, &blit_shader, "vs_blit", "fs_blit", &[target(format)]);
 
-        Self {
+        let pass = Self {
+            xr_right: None,
+            active_xr_right: false,
+            xr_mode: false,
             color_input: "pre_aa",
             intermediate_output: false,
             timing_query: None,
@@ -633,7 +656,9 @@ impl TsrPass {
             previous_view_id: None,
             reactivity: 0.0,
             quality,
-        }
+            surface_format: format,
+        };
+        pass
     }
 
     // ── Public reactivity API ─────────────────────────────────────────────────
@@ -644,6 +669,9 @@ impl TsrPass {
     /// change where stale history would cause visible ghosting.
     pub fn reset_history(&mut self) {
         self.first_frame = true;
+        if let Some(right) = &mut self.xr_right {
+            right.reset_history();
+        }
     }
 
     /// Optional GPU timestamps: before the resolve, after it, after the
@@ -657,6 +685,9 @@ impl TsrPass {
             ty: wgpu::QueryType::Timestamp,
             count: 4,
         }));
+        if let Some(right) = &mut self.xr_right {
+            right.enable_timing(device);
+        }
         true
     }
 
@@ -668,6 +699,7 @@ impl TsrPass {
     /// the resolve reads zero (all shading deterministic).
     pub fn with_stochastic_mask(mut self) -> Self {
         self.stochastic_mask = true;
+        if let Some(right) = &mut self.xr_right { right.stochastic_mask = true; }
         self
     }
 
@@ -677,6 +709,7 @@ impl TsrPass {
         if self.stochastic_mask != enabled {
             self.stochastic_mask = enabled;
             self.bind_group_key = None;
+            if let Some(right) = &mut self.xr_right { right.set_stochastic_mask(enabled); }
         }
     }
 
@@ -684,6 +717,7 @@ impl TsrPass {
     /// every texel moves with the camera.
     pub fn with_motion_vectors(mut self) -> Self {
         self.motion_vectors = true;
+        if let Some(right) = &mut self.xr_right { right.motion_vectors = true; }
         self
     }
 
@@ -694,6 +728,7 @@ impl TsrPass {
             self.transparency_reactivity = enabled;
             self.reset_history();
             self.bind_group_key = None;
+            if let Some(right) = &mut self.xr_right { right.set_transparency_reactivity(enabled); }
         }
     }
 
@@ -708,6 +743,7 @@ impl TsrPass {
     /// can have different TSR responsiveness.
     pub fn set_reactivity(&mut self, factor: f32) {
         self.reactivity = factor.clamp(0.0, 1.0);
+        if let Some(right) = &mut self.xr_right { right.set_reactivity(factor); }
     }
 
     /// The quality preset this pass was constructed with.
@@ -955,6 +991,10 @@ fn draw_fullscreen(
 // ── RenderPass impl ───────────────────────────────────────────────────────────
 
 impl RenderPass for TsrPass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+    }
+
     fn name(&self) -> &'static str {
         "TSR"
     }
@@ -964,7 +1004,13 @@ impl RenderPass for TsrPass {
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // The pass owns this view for the graph lifetime; frame registries
         // cannot outlive it. Resize replaces it before the next publication.
-        let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.output_view) };
+        let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(
+            if self.active_xr_right {
+                &self.xr_right.as_ref().expect("right-eye TSR state").output_view
+            } else {
+                &self.output_view
+            },
+        ) };
         frame.write(helio_core::ResourceKey::new("tsr_color"), view, "TSR");
     }
 
@@ -992,6 +1038,9 @@ impl RenderPass for TsrPass {
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if let Some(right) = &mut self.xr_right {
+            right.on_resize(device, width, height);
+        }
         self.output_width = width.max(1);
         self.output_height = height.max(1);
 
@@ -1014,6 +1063,31 @@ impl RenderPass for TsrPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.active_xr_right = self.xr_mode && ctx.camera_data.jitter_frame[3].to_bits() == 2;
+        if self.active_xr_right {
+            if self.xr_right.is_none() {
+                let mut right = Self::new_inner(
+                    ctx.device,
+                    self.output_width,
+                    self.output_height,
+                    self.surface_format,
+                    self.quality,
+                );
+                right.color_input = self.color_input;
+                right.intermediate_output = self.intermediate_output;
+                right.transparency_reactivity = self.transparency_reactivity;
+                right.stochastic_mask = self.stochastic_mask;
+                right.motion_vectors = self.motion_vectors;
+                right.reactivity = self.reactivity;
+                if self.timing_query.is_some() {
+                    right.enable_timing(ctx.device);
+                }
+                self.xr_right = Some(Box::new(right));
+            }
+            if let Some(right) = &mut self.xr_right {
+                return right.prepare(ctx);
+            }
+        }
         // The camera is the sample authority. Reconstructing a separate
         // sequence here breaks manual offsets and externally owned frame clocks.
         let ndc = ctx.camera_data.jitter_frame;
@@ -1064,6 +1138,11 @@ impl RenderPass for TsrPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.active_xr_right {
+            if let Some(right) = &mut self.xr_right {
+                return right.execute(ctx);
+            }
+        }
         // ── 1. Lazy bind groups ────────────────────────────────────────────────
         let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new(self.color_input), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(

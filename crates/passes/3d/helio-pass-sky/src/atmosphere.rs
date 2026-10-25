@@ -443,6 +443,7 @@ pub struct AtmospherePass {
     sky_table: wgpu::Buffer,
     rows: helio_core::SceneBufferLiveness,
     active: bool,
+    xr_mode: bool,
     /// `(epoch, content_generation)` of the atmosphere rows the
     /// parameter-only tables (transmittance, multiple scattering, the sky
     /// irradiance table) were last built from; `None` rebuilds them.
@@ -620,6 +621,7 @@ impl AtmospherePass {
                 row.len() >= 112 && row[108..112].iter().any(|&b| b != 0)
             }),
             active: false,
+            xr_mode: false,
             params_tables: None,
             trace: std::env::var_os("HELIO_ATMOSPHERE_TRACE").map(|_| Vec::new()),
             frame_index: 0,
@@ -635,6 +637,10 @@ impl AtmospherePass {
 }
 
 impl RenderPass for AtmospherePass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+    }
+
     fn scene_buffers(&self) -> &'static [&'static str] {
         &["atmospheres", "scene_lights"]
     }
@@ -690,7 +696,7 @@ impl RenderPass for AtmospherePass {
         let uniform = ResolveUniform {
             origin_hi: hi.extend(0.0).to_array(),
             origin_lo: lo.extend(0.0).to_array(),
-            clock: [ctx.time_delta, 0.0, 0.0, 0.0],
+            clock: [ctx.time_delta, f32::from(self.xr_mode), 0.0, 0.0],
         };
         ctx.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
         Ok(())
@@ -740,7 +746,11 @@ impl RenderPass for AtmospherePass {
             pass.set_bind_group(1, kernel.group.as_ref(), &[]);
             pass.dispatch_workgroups(kernel.groups[0], kernel.groups[1], kernel.groups[2]);
         }
-        self.clouds.record(&mut pass);
+        // In XR the sky-view LUT provides the baked cloudless sky. Avoid
+        // generating cloud weather, shadows and volumes for each eye.
+        if !self.xr_mode {
+            self.clouds.record(&mut pass);
+        }
         drop(pass);
         self.frame_index += 1;
         if let Some(trace) = &mut self.trace {

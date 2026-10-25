@@ -68,6 +68,9 @@ impl XrInstance {
         extensions.khr_vulkan_enable2 = supported.khr_vulkan_enable2;
         extensions.khr_vulkan_enable = !supported.khr_vulkan_enable2 && supported.khr_vulkan_enable;
         extensions.ext_debug_utils = supported.ext_debug_utils;
+        // Optional runtime query for the active HMD display cadence. Keep it
+        // optional so SteamVR runtimes without the FB extension still work.
+        extensions.fb_display_refresh_rate = supported.fb_display_refresh_rate;
 
         // ── API version negotiation ──────────────────────────────────────────
         //

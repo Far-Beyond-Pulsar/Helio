@@ -747,7 +747,8 @@ impl Renderer {
 
         let mut representative = self.default_xr_camera(near_far.0, near_far.1);
         for (eye, pose) in located.view_poses.iter().enumerate() {
-            let eye_uniform = helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0];
+            let eye_uniform = helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0]
+                .with_view_id(eye as u32 + 1);
 
             // `cameras[0]` (the slot every shader samples) is this eye's camera.
             // Writing both slots to the same value keeps the storage buffer
@@ -772,6 +773,7 @@ impl Renderer {
                     cam.view = pose.view_matrix();
                     cam.proj = pose.projection(near_far.0);
                     cam.position = pose.eye_position;
+                    cam.view_id = eye as u32 + 1;
                     cam.near = near_far.0;
                     cam.far = near_far.1;
                     cam.jitter = [0.0, 0.0];

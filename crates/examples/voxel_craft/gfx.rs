@@ -207,6 +207,18 @@ fn tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
     }
 }
 
+/// VR renders two eye views every frame. Start at half linear resolution and
+/// reconstruct to the runtime's recommended per-eye size; users can opt into
+/// balanced, quality, or native rendering through `VOXEL_CRAFT_VR_QUALITY`.
+fn vr_tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
+    match std::env::var("VOXEL_CRAFT_VR_QUALITY").as_deref() {
+        Ok("native" | "fxaa") => None,
+        Ok("balanced") => Some(helio_pass_tsr::TsrQuality::Balanced),
+        Ok("quality") => Some(helio_pass_tsr::TsrQuality::Quality),
+        _ => Some(helio_pass_tsr::TsrQuality::Performance),
+    }
+}
+
 impl Gfx {
     pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
         // OpenXR must choose/create the Vulkan device before a renderer exists.
@@ -292,8 +304,11 @@ impl Gfx {
             Box::new(pass)
         });
         let renderer_config = RendererConfig::new(render_size[0], render_size[1], render_format);
-        // Native per-eye targets and spatial AA: no desktop TSR scaling/jitter.
-        let mut renderer_config = match if vr { None } else { tsr_quality() } {
+        // Render VR eyes at Performance scale by default, then reconstruct to
+        // the headset's native swapchain dimensions. This cuts pixel shading
+        // by 75% across both eyes while keeping the compositor target unchanged.
+        let quality = if vr { vr_tsr_quality() } else { tsr_quality() };
+        let mut renderer_config = match quality {
             Some(quality) => renderer_config.with_tsr_quality(quality),
             None => renderer_config.without_tsr().with_render_scale(1.0),
         };
@@ -466,10 +481,15 @@ impl Gfx {
                 pass.set_residency_eye(Some(view.eye));
             }
             let mut xr = self.xr.take().expect("VR frame has a runtime");
+            self.renderer.set_xr_mode(true);
             let xr_size = xr.size();
             let device = self.device.clone();
             let queue = self.queue.clone();
             let result = xr.draw(&device, &queue, vr.world_from_stage, origin, mirror.as_ref().map(|v| (v, self.size)), |eye_index, camera, target| {
+                let mut camera = camera.clone();
+                // Stable identity lets camera-dependent temporal effects keep
+                // independent left/right reprojection state across frames.
+                camera.view_id = eye_index as u32 + 1;
                 if let Some(frame) = self.source.lock().unwrap().as_mut() {
                     frame.eye = origin + camera.position.as_dvec3();
                 }
@@ -480,7 +500,7 @@ impl Gfx {
                 self.renderer.set_frame_delta_override(Some((view.dt * 0.5).max(1.0e-6)));
                 self.renderer.set_frame_clock_delta(Some(if eye_index == 0 { weather_delta } else { 0.0 }));
                 self.rays.publish(&self.scene.world, &mut self.renderer);
-                self.renderer.render(camera, target)?;
+                self.renderer.render(&camera, target)?;
                 if let Some(timings) = &mut self.timings {
                     let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
                     let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());
@@ -489,6 +509,7 @@ impl Gfx {
                 Ok(())
             });
             self.xr = Some(xr);
+            self.renderer.set_xr_mode(false);
             if let Err(error) = result {
                 log::error!("[XR] render: {error}");
                 self.failed = true;

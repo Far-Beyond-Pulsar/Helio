@@ -59,6 +59,10 @@ fn resolve() {
         }
     }
     if !found { return; }
+    // Keep authored atmosphere data intact while resolving a cloudless XR sky.
+    if resolve_input.clock.y > 0.5 {
+        params.clouds_enabled = 0u;
+    }
     // Sun: the first directional light with any intensity (direction_outer
     // is the direction the light travels).
     var sun = vec3<f32>(0.0, 1.0, 0.0);
