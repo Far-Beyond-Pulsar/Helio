@@ -469,9 +469,8 @@ fn from_far_away_the_cover_is_weather_not_a_tile() {
     let distance = 4.0 * radius;
     let towards = glam::DVec3::new(0.3, 0.6, 1.0).normalize();
     let eye = towards * distance;
-    view.renderer.set_world_origin(Some(eye));
     let fov = 2.0 * (radius / distance).asin() as f32 * 1.1;
-    let camera = Camera::perspective_look_at(Vec3::ZERO, -towards.as_vec3(), Vec3::Y, fov, 1.0, 1000.0, 1.0e9);
+    let camera = Camera::perspective_look_to(eye, -towards.as_vec3(), Vec3::Y, fov, 1.0, 1000.0, 1.0e9);
     let sun = (towards.as_vec3() + Vec3::new(0.3, 0.2, 0.0)).normalize();
     let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
     let clouds = CloudLayer { wind: [0.0; 3], ..CloudLayer::cumulus() };
@@ -560,13 +559,12 @@ fn clouds_cost() {
     };
     let get = |m: &std::collections::HashMap<&str, f32>, k: &str| m.get(k).copied().unwrap_or(0.0);
     let radius = 6_371_000.0f64;
-    let orbit = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(1.0, -0.55, 0.2), Vec3::Y, 70f32.to_radians(), 16.0 / 9.0, 1.0, 1.0e9);
+    let orbit = Camera::perspective_look_to(glam::DVec3::new(0.0, radius + 400_000.0, 0.0), Vec3::new(1.0, -0.55, 0.2), Vec3::Y, 70f32.to_radians(), 16.0 / 9.0, 1.0, 1.0e9);
     let views = [
-        ("ground", None, camera, AtmosphereComponent::earth()),
-        ("orbit", Some(glam::DVec3::new(0.0, radius + 400_000.0, 0.0)), orbit, AtmosphereComponent::earth().around_planet([0.0; 3], radius)),
+        ("ground", camera, AtmosphereComponent::earth()),
+        ("orbit", orbit, AtmosphereComponent::earth().around_planet([0.0; 3], radius)),
     ];
-    for (name, origin, camera, air) in views {
-        view.renderer.set_world_origin(origin);
+    for (name, camera, air) in views {
         let clear = measure(&mut view, &camera, air);
         let cloudy = measure(&mut view, &camera, air.with_clouds(CloudLayer::cumulus()));
         let trace = get(&cloudy, "CloudTrace");

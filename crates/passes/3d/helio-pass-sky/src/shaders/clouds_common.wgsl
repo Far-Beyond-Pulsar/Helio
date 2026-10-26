@@ -36,10 +36,12 @@ const CLOUD_WEATHER_CONTRAST: f32 = 2.0;
 const CLOUD_SHARE_LIMIT: f32 = 2.6;
 // How far the weather's regimes move the form away from the layer's.
 const CLOUD_REGIME_SPAN: f32 = 0.9;
-// The mesoscale's and the groups' shares of the local field, and the
-// cells' share of the mesoscale (the rest is fractal noise).
+// The mesoscale's share of the local field (the groups' is the rest), on a
+// planet a few of its cells round: on one smaller than its cells the
+// mesoscale fades out (the whole planet would sit in one cell, its cover
+// shifted everywhere alike). And the cells' share of the mesoscale (the
+// rest is fractal noise).
 const CLOUD_MESO_SHARE: f32 = 0.6;
-const CLOUD_GROUPS_SHARE: f32 = 0.4;
 const CLOUD_CELLS_SHARE: f32 = 0.65;
 // The cover's edge, in standard deviations of the local field.
 const CLOUD_EDGE: f32 = 0.55;
@@ -66,6 +68,9 @@ struct CloudLayerParams {
     inv_meso: f32,
     inv_shape: f32,
     inv_detail: f32,
+    // The mesoscale's and the groups' shares of the local field.
+    meso_share: f32,
+    groups_share: f32,
     // Noise texels per kilometre of each scale, for mips from footprints.
     groups_texels: f32,
     meso_texels: f32,
@@ -115,6 +120,8 @@ fn cloud_layer_params(frame: AtmosphereFrame) -> CloudLayerParams {
     c.inv_meso = 1.0 / max(p.cloud_mesoscale_scale, 1e-3);
     c.inv_shape = 1.0 / max(p.cloud_shape_scale, 1e-3);
     c.inv_detail = 1.0 / max(p.cloud_detail_scale, 1e-3);
+    c.meso_share = CLOUD_MESO_SHARE * smoothstep(1.0, 4.0, p.bottom_radius * c.inv_meso);
+    c.groups_share = 1.0 - c.meso_share;
     c.groups_texels = c.inv_groups * CLOUD_WEATHER_TEXELS;
     c.meso_texels = c.inv_meso * CLOUD_WEATHER_TEXELS;
     c.shape_texels = c.inv_shape * CLOUD_SHAPE_TEXELS;
@@ -198,15 +205,15 @@ fn cloud_weather_at(c: CloudLayerParams, anchor: vec3<f32>, footprint: f32) -> v
     let groups = textureSampleLevel(cloud_weather, cloud_noise_sampler, anchor * c.inv_groups + c.groups_offset,
         cloud_lod(footprint, c.groups_texels));
     let meso = 0.6 * a.x + 0.4 * b.x;
-    let q = CLOUD_MESO_SHARE * meso + CLOUD_GROUPS_SHARE * groups.r;
-    let lost = CLOUD_MESO_SHARE * CLOUD_MESO_SHARE * (0.36 * a.y + 0.16 * b.y)
-        + CLOUD_GROUPS_SHARE * CLOUD_GROUPS_SHARE * groups.g * groups.g;
+    let q = c.meso_share * meso + c.groups_share * groups.r;
+    let lost = c.meso_share * c.meso_share * (0.36 * a.y + 0.16 * b.y)
+        + c.groups_share * c.groups_share * groups.g * groups.g;
     // The field's distribution over the whole volume, as `q`'s (the two
     // lookups' spreads add as independent).
     let f = c.field;
     let whole = cloud_meso_field(f, cells);
-    let mean = CLOUD_MESO_SHARE * whole.x + CLOUD_GROUPS_SHARE * f.x;
-    let spread = CLOUD_MESO_SHARE * CLOUD_MESO_SHARE * 0.52 * whole.y + CLOUD_GROUPS_SHARE * CLOUD_GROUPS_SHARE * f.y * f.y;
+    let mean = c.meso_share * whole.x + c.groups_share * f.x;
+    let spread = c.meso_share * c.meso_share * 0.52 * whole.y + c.groups_share * c.groups_share * f.y * f.y;
     let sigma = sqrt(max(spread, 1e-8));
     // The share of sky the weather covers here, and the chance the local
     // field (its mean under the footprint, give or take what the footprint
@@ -234,9 +241,15 @@ fn cloud_soft_positive(mean: f32, sigma: f32) -> f32 {
 // (each about a quarter of the billows' size), not through their mean
 // smeared evenly (which would be opaque wherever any cloud is). From afar
 // a field of cumulus then hides about the share of the ground it covers.
+// How far billows are smaller than a footprint of `footprint` km: 0 resolved,
+// 1 well below it.
+fn cloud_unresolved(c: CloudLayerParams, footprint: f32) -> f32 {
+    return smoothstep(0.5, 2.0, footprint * c.inv_shape * 4.0);
+}
+
 fn cloud_clumped(c: CloudLayerParams, d: f32, inside: f32, footprint: f32) -> f32 {
     let clump = 0.25 / c.inv_shape;
-    let unresolved = smoothstep(0.5, 2.0, footprint / clump);
+    let unresolved = cloud_unresolved(c, footprint);
     if unresolved <= 0.0 || inside <= 1e-4 || c.extinction <= 0.0 { return d; }
     let within = d / inside * c.extinction;
     let effective = inside * (1.0 - exp(-within * clump)) / (clump * c.extinction);
@@ -278,7 +291,11 @@ fn cloud_smooth_density(c: CloudLayerParams, x: vec3<f32>, h: f32, weather: vec2
     // Cover carves the billows (thin cover keeps only their cores) and
     // scales what is left: clamp(billows * profile + cover - 1, 0, cover).
     let mean = s.r * profile + weather.x - 1.0;
-    let sigma = s.g * profile;
+    // The spread counts only where the billows are smaller than the
+    // footprint: where they are resolved, the mip's spread is noise the
+    // next steps resolve, and its tail would lay a haze over the clear sky
+    // between clouds (a dim shadow everywhere from a shadow map's texels).
+    let sigma = s.g * profile * cloud_unresolved(c, footprint);
     let d = cloud_soft_positive(mean, sigma) - cloud_soft_positive(mean - weather.x, sigma);
     if d <= 1e-4 { return 0.0; }
     // The share of the footprint inside a billow.
@@ -292,7 +309,7 @@ fn cloud_smooth_density(c: CloudLayerParams, x: vec3<f32>, h: f32, weather: vec2
     let eroded = clamp(cloud_remap(d, erode, 1.0), 0.0, 1.0);
     // Wisps finer than the footprint thin the clouds by their mean instead:
     // a threshold on a footprint's mean density would erase it.
-    return cloud_clumped(c, mix(eroded, d * (1.0 - 0.5 * c.erosion), smoothstep(1.0, 3.0, detail_lod)), inside, footprint);
+    return cloud_clumped(c, mix(eroded, d * (1.0 - 0.5 * c.erosion), smoothstep(4.0, 6.0, detail_lod)), inside, footprint);
 }
 
 // The layer's height (0..1) of planet-relative point `x`.

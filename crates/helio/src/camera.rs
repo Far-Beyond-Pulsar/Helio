@@ -78,7 +78,8 @@ impl Camera {
         )
     }
 
-    /// A perspective camera at world-space `eye` looking along `forward`.
+    /// A perspective camera at world-space `eye` looking along `forward`
+    /// (any length).
     pub fn perspective_look_to(
         eye: DVec3,
         forward: Vec3,
@@ -90,7 +91,9 @@ impl Camera {
     ) -> Self {
         Self::new(
             eye,
-            glam::camera::rh::view::look_to_mat4(Vec3::ZERO, forward, up),
+            // The view's rotation must be orthonormal (passes invert it by
+            // its transpose), and glam builds it from a unit direction.
+            glam::camera::rh::view::look_to_mat4(Vec3::ZERO, forward.normalize(), up),
             helio_core::depth::perspective(fov_y_radians, aspect, near),
             near,
             far,
@@ -193,6 +196,18 @@ mod tests {
         let edge = Vec3::new(5.0 * tan_x(&plain), 0.0, -5.0);
         assert!((pixel(&plain, edge, 1920.0) - 1920.0).abs() < 1e-2);
         assert!((pixel(&wide, edge, 1920.0) - (960.0 + 960.0 / 1.25)).abs() < 1e-2);
+    }
+
+    /// A camera looking along a direction of any length (as
+    /// `perspective_look_at`'s target minus eye) has an orthonormal
+    /// rotation: passes invert it by its transpose.
+    #[test]
+    fn look_to_any_length_keeps_the_rotation_orthonormal() {
+        let camera = Camera::perspective_look_to(DVec3::new(0.0, 200.0, 0.0), Vec3::new(1.0, 0.45, 0.2), Vec3::Y, 1.2, 16.0 / 9.0, 0.1, 1e7);
+        let r = glam::Mat3::from_mat4(camera.rotation);
+        assert!((r * r.transpose()).abs_diff_eq(glam::Mat3::IDENTITY, 1e-5));
+        let at = Camera::perspective_look_at(Vec3::new(0.0, 200.0, 0.0), Vec3::new(3.0, 201.35, 0.6), Vec3::Y, 1.2, 16.0 / 9.0, 0.1, 1e7);
+        assert!(at.rotation.abs_diff_eq(camera.rotation, 1e-5));
     }
 
     /// A camera's world-space view matrix comes back as it was given, from
