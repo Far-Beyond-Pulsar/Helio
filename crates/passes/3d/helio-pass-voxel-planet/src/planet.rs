@@ -297,6 +297,17 @@ pub struct RayHit {
     pub normal: DVec3,
 }
 
+/// What a CPU query of the world counts as solid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Matter {
+    /// Everything drawn: the terrain, its edits and the features (trees,
+    /// rocks, structures). Physics, picks and placement.
+    All,
+    /// The ground: the terrain and its edits, features passed through. An
+    /// editor camera flies through a forest and stops at the ground.
+    Ground,
+}
+
 pub struct Planet {
     recipe: PlanetRecipe,
     /// `record::recipe_fingerprint` of the recipe, once: a recipe with
@@ -397,7 +408,11 @@ impl Planet {
     }
     /// Layers features stand over the ground at most.
     fn features_above(&self) -> i32 {
-        if self.features.is_empty() { 0 } else { self.features.above }
+        self.features_above_of(Matter::All)
+    }
+    /// [`Self::features_above`] of `matter`: none when features pass.
+    fn features_above_of(&self, matter: Matter) -> i32 {
+        if self.features.is_empty() || matter == Matter::Ground { 0 } else { self.features.above }
     }
     pub fn grid(&self) -> &Grid {
         &self.grid
@@ -596,9 +611,17 @@ impl Planet {
     /// Canonical `(kind, material)` of a level cell: kind 0 air, 1 solid.
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
+        self.sample_kind_of(level, face, i, j, k, Matter::All)
+    }
+    /// [`Self::sample_kind`] of `matter`.
+    fn sample_kind_of(&self, level: u32, face: u8, i: i32, j: i32, k: i32, matter: Matter) -> (u32, u32) {
         let height = self.column_height(face, i, j, level);
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
-        let (kind, material) = features::apply(self.features_at(level, face, i, j, k), kind, 0);
+        let features = match matter {
+            Matter::All => self.features_at(level, face, i, j, k),
+            Matter::Ground => None,
+        };
+        let (kind, material) = features::apply(features, kind, 0);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         let point = || self.grid.volume_point(face, i, j, k, level);
         let large = self.large_brushes(face, i, j, Some(k), level);
@@ -608,8 +631,8 @@ impl Planet {
     }
     /// [`Self::kind`] for cells walked by a ray: the column's top and
     /// brushes are looked up once per column, not per cell.
-    fn kind_in(&self, column: &mut Option<RayColumn>, cell: Cell) -> u32 {
-        self.kind_at(column, 0, cell.face, cell.i, cell.j, cell.k)
+    fn kind_in(&self, column: &mut Option<RayColumn>, cell: Cell, matter: Matter) -> u32 {
+        self.kind_at(column, 0, cell.face, cell.i, cell.j, cell.k, matter)
     }
     /// Canonical kind of level cell `(i, j, k)` (as [`Self::sample_kind`]),
     /// for walks: the column's height and brushes are looked up once per
@@ -617,7 +640,7 @@ impl Planet {
     /// kind (paint keeps it), so the field is sampled only where none does:
     /// a walk down a dug pit or tunnel crosses carved cells without
     /// evaluating the rock (and its caves) above them.
-    fn kind_at(&self, column: &mut Option<RayColumn>, level: u32, face: u8, i: i32, j: i32, k: i32) -> u32 {
+    fn kind_at(&self, column: &mut Option<RayColumn>, level: u32, face: u8, i: i32, j: i32, k: i32, matter: Matter) -> u32 {
         let key = (face, i, j, level);
         if column.as_ref().is_none_or(|c| c.key != key) {
             *column = Some(RayColumn {
@@ -649,8 +672,10 @@ impl Planet {
         if let Some(kind) = decided(&c.large) {
             return kind;
         }
-        if let Some(v) = self.features_at(level, face, i, j, k) {
-            return u32::from(v.is_some());
+        if matter == Matter::All {
+            if let Some(v) = self.features_at(level, face, i, j, k) {
+                return u32::from(v.is_some());
+            }
         }
         terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
     }
@@ -685,6 +710,10 @@ impl Planet {
     }
     pub fn solid(&self, cell: Cell) -> bool {
         self.kind(cell) == 1
+    }
+    /// Whether base cell `cell` is solid `matter`.
+    pub fn solid_of(&self, cell: Cell, matter: Matter) -> bool {
+        self.sample_kind_of(0, cell.face, cell.i, cell.j, cell.k, matter).0 == 1
     }
     /// Resolved material of a base cell (0 for air).
     pub fn material(&self, cell: Cell) -> u32 {
@@ -755,7 +784,7 @@ impl Planet {
             if t > limit {
                 return None;
             }
-            if stop(self.kind_in(&mut column, cell)) {
+            if stop(self.kind_in(&mut column, cell, Matter::All)) {
                 return Some(RayHit {
                     cell,
                     previous,
@@ -892,7 +921,7 @@ impl Planet {
                 return None;
             }
             let cell = cell_of(idx);
-            if stop(self.kind_in(&mut column, cell)) {
+            if stop(self.kind_in(&mut column, cell, Matter::All)) {
                 return Some(RayHit { cell, previous, distance: t, normal });
             }
             let axis = if next[0] <= next[1] && next[0] <= next[2] { 0 } else if next[1] <= next[2] { 1 } else { 2 };
@@ -947,18 +976,22 @@ impl Planet {
     /// cells, not a ray from the world's outer radius through the edit index
     /// cell by cell.
     pub fn surface_point(&self, p: DVec3, clearance: f64) -> DVec3 {
+        self.surface_point_of(p, clearance, Matter::All)
+    }
+    /// [`Self::surface_point`] over the solid `matter`.
+    pub fn surface_point_of(&self, p: DVec3, clearance: f64, matter: Matter) -> DVec3 {
         let g = &self.grid;
         let (cell, _) = g.locate(g.at_radial(p, g.radius()));
         let (face, i, j) = (cell.face, cell.i, cell.j);
         let mut column = None;
         // Fills the column's height and brushes.
-        self.kind_in(&mut column, Cell::new(face, i, j, 0));
+        self.kind_in(&mut column, Cell::new(face, i, j, 0), matter);
         let c = column.as_ref().expect("filled above");
         let added = c.large.iter().chain(&c.recent).filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
         let baked = self.edits.baked.solid_top(face, 0, i, j).unwrap_or(i32::MIN);
-        let mut k = (terrain::generated_top(g, &*self.field, face, i, j, 0, c.height) + self.features_above()).max(added).max(baked);
+        let mut k = (terrain::generated_top(g, &*self.field, face, i, j, 0, c.height) + self.features_above_of(matter)).max(added).max(baked);
         let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
-        while k > floor && self.kind_in(&mut column, Cell::new(face, i, j, k - 1)) != 1 {
+        while k > floor && self.kind_in(&mut column, Cell::new(face, i, j, k - 1), matter) != 1 {
             k -= 1;
         }
         g.at_radial(p, g.layer_radius(f64::from(k)) + clearance)
@@ -1039,6 +1072,10 @@ impl Planet {
     /// hundred cells to 400 m), refined to the exact air-to-solid layer;
     /// a solid slab thinner than the stride there can be stepped over.
     pub fn ground_height(&self, eye: DVec3) -> f64 {
+        self.ground_height_of(eye, Matter::All)
+    }
+    /// [`Self::ground_height`] over the solid `matter`.
+    pub fn ground_height_of(&self, eye: DVec3, matter: Matter) -> f64 {
         const REACH: i32 = 4096;
         let g = &self.grid;
         let (cell, _) = g.locate(eye);
@@ -1046,10 +1083,10 @@ impl Planet {
         let top = terrain::generated_top(g, &*self.field, cell.face, cell.i, cell.j, 0, self.column_height(cell.face, cell.i, cell.j, 0));
         let height = g.height(eye);
         let mut column = None;
-        let solid = |column: &mut Option<RayColumn>, k: i32| self.kind_in(column, Cell::new(cell.face, cell.i, cell.j, k)) == 1;
+        let solid = |column: &mut Option<RayColumn>, k: i32| self.kind_in(column, Cell::new(cell.face, cell.i, cell.j, k), matter) == 1;
         if cell.k >= top {
             // Over the terrain: features may stand on it.
-            let mut k = (top + self.features_above()).min(cell.k);
+            let mut k = (top + self.features_above_of(matter)).min(cell.k);
             while k > top && !solid(&mut column, k - 1) {
                 k -= 1;
             }
@@ -1088,6 +1125,45 @@ mod tests {
 
     fn planet() -> Planet {
         Planet::new(PlanetRecipe::default()).unwrap()
+    }
+
+    /// Over a feature (a tree on Earth), every query of all matter stops at
+    /// it; the ground's pass through it to the terrain: what an editor
+    /// camera flies through and lands on.
+    #[test]
+    fn ground_matter_passes_features() {
+        let planet = Planet::new(PlanetRecipe {
+            radius_m: EARTH_RADIUS,
+            terrain: crate::layers::TerrainLayers::earth().source(7),
+            features: crate::feature_recipe::FeatureRecipe::earth().grow(0.1, 7),
+            ..Default::default()
+        })
+        .unwrap();
+        let (g, face) = (planet.grid(), 2u8);
+        let c0 = g.cells() / 2;
+        let top = |f: u8, i: i32, j: i32| features::ground(g, planet.field(), f, i, j, 0, planet.column_height(f, i, j, 0));
+        let mut cache = PlacementCache::default();
+        let mut eval = FeatureEval::new(&*planet.features, g, &top, &mut cache);
+        // A feature's solid cell over the terrain, in the column of its anchor.
+        let (cell, ground) = (0..planet.features.spawns.len())
+            .flat_map(|s| eval.placements_near(s, face, [c0, c0 + 4000], [c0, c0 + 4000]))
+            .find_map(|p| {
+                let ground = planet.terrain_top(face, p.i, p.j);
+                (ground..ground + 400)
+                    .map(|k| Cell::new(face, p.i, p.j, k))
+                    .find(|c| matches!(planet.features_at(0, face, c.i, c.j, c.k), Some(Some(_))))
+                    .map(|c| (c, ground))
+            })
+            .expect("a feature over the terrain");
+        assert!(planet.solid_of(cell, Matter::All) && planet.solid(cell), "{cell:?}");
+        assert!(!planet.solid_of(cell, Matter::Ground), "the ground has no feature at {cell:?}");
+        // From above: all matter lands on the feature, the ground on the terrain.
+        let eye = g.position(face, [f64::from(cell.i) + 0.5, f64::from(cell.j) + 0.5, f64::from(ground + 600)]);
+        let over_ground = planet.ground_height_of(eye, Matter::Ground);
+        assert!((over_ground - 600.0 * g.voxel_size()).abs() < 1e-4, "{over_ground}");
+        assert!(planet.ground_height_of(eye, Matter::All) <= over_ground - f64::from(cell.k + 1 - ground) * g.voxel_size() + 1e-4);
+        let landed = planet.surface_point_of(eye, 0.0, Matter::Ground);
+        assert!((g.height(landed) - f64::from(ground) * g.voxel_size()).abs() < 1e-4);
     }
 
     /// Earth without caves and overhangs: a pure heightfield, for
@@ -1334,7 +1410,7 @@ mod tests {
                     assert_eq!(p.sample_kind(0, face, i, j, k), expected, "cell ({i}, {j}, {k})");
                     assert_eq!(p.solid(Cell::new(face, i, j, k)), expected.0 == 1);
                     // The walks' kind, decided by the last edit at the cell.
-                    assert_eq!(p.kind_in(&mut column, Cell::new(face, i, j, k)), expected.0, "walked cell ({i}, {j}, {k})");
+                    assert_eq!(p.kind_in(&mut column, Cell::new(face, i, j, k), Matter::All), expected.0, "walked cell ({i}, {j}, {k})");
                     edited += usize::from(expected != (kind, 0));
                 }
             }

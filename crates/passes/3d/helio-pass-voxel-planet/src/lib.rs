@@ -39,5 +39,5 @@ pub mod meadow;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};
-pub use planet::{Planet, PlanetRecipe, RayHit};
+pub use planet::{Matter, Planet, PlanetRecipe, RayHit};
 pub use terrain::{GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, TerrainSource};
