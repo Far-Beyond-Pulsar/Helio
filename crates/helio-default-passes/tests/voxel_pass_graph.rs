@@ -410,7 +410,7 @@ fn capture(editor: &Editor, name: &str, pixels: &[[u8; 4]]) {
 
 /// The same local camera and sun at two poles must see the same sky, and a
 /// resize must not reset it. The atmosphere is a scene row; the sun is the
-/// scene's directional light; the world origin is the eye.
+/// scene's directional light; the frame's origin follows the eye.
 #[test]
 fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
     let Some(mut editor) = editor(256, 144) else { return };
@@ -441,7 +441,8 @@ fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[],
     });
-    let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(0.8,-0.6,0.0), Vec3::X, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
+    let (eye, forward, up, _) = cases[1];
+    let camera = Camera::perspective_look_to(eye, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
     for _ in 0..8 { editor.render(&camera); }
     let mean = mean_rgb(&editor.rgba());
     for c in 0..3 { assert!((mean[c] - means[1][c]).abs() < 6.0, "sky reset during resize: {mean:?} vs {:?}", means[1]); }
