@@ -251,9 +251,12 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     assert_eq!(&water[60..62], &[190.25, 250.0], "world phase");
     let world_to_decal = glam::Mat4::from_cols_slice(&decal[..16]);
     assert!(world_to_decal.transform_point3(offset).length() < 1e-5);
-    // The layer where placement tests its points: the frame's space.
-    assert!(near(&layer[0..3], glam::Vec3::new(offset.x - 8.0, -0.125, offset.z - 8.0)), "{:?}", &layer[0..3]);
-    assert!(near(&layer[4..7], glam::Vec3::new(offset.x + 8.0, 9.875, offset.z + 8.0)), "{:?}", &layer[4..7]);
+    // The layer where placement tests its points: the frame's space, its
+    // square around the owner exactly; its authored f32 altitudes keep
+    // their own 0.5 m step up there.
+    assert!(near(&[layer[0], 0.0, layer[2]], glam::Vec3::new(offset.x - 8.0, 0.0, offset.z - 8.0)), "{:?}", &layer[0..3]);
+    assert!(near(&[layer[4], 0.0, layer[6]], glam::Vec3::new(offset.x + 8.0, 0.0, offset.z + 8.0)), "{:?}", &layer[4..7]);
+    assert!((layer[1] + 0.125).abs() <= 0.5 && (layer[5] - 9.875).abs() <= 0.5, "altitudes {} {}", layer[1], layer[5]);
 
     // A moved origin re-derives them, though no input row changed.
     let moved = origin + glam::DVec3::new(1024.0, 0.0, 0.0);

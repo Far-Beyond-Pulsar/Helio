@@ -167,18 +167,24 @@ fn write_layer(row: u32, output: u32) {
     let center = placed_position(t);
     let scale = abs(object_scale(t));
     let half = bitcast<f32>(sources[source]);
-    var origin_y = 0.0;
-    if (u.flags & RELATIVE) != 0u {
-        origin_y = u.origin_hi.y + u.origin_lo.y;
-    }
     rows_out[output] = bitcast<u32>(center.x - half * scale.x);
-    rows_out[output + 1u] = bitcast<u32>(bitcast<f32>(sources[source + 2u]) - origin_y);
+    rows_out[output + 1u] = bitcast<u32>(placed_altitude(bitcast<f32>(sources[source + 2u])));
     rows_out[output + 2u] = bitcast<u32>(center.z - half * scale.z);
     rows_out[output + 3u] = 0u;
     rows_out[output + 4u] = bitcast<u32>(center.x + half * scale.x);
-    rows_out[output + 5u] = bitcast<u32>(bitcast<f32>(sources[source + 3u]) - origin_y);
+    rows_out[output + 5u] = bitcast<u32>(placed_altitude(bitcast<f32>(sources[source + 3u])));
     rows_out[output + 6u] = bitcast<u32>(center.z + half * scale.z);
     rows_out[output + 7u] = sources[source + 1u];
+}
+
+/// A world altitude as this table places rows: less the origin's Y for a
+/// `RELATIVE` table. Authored altitudes are f32: far from the world origin
+/// they hold only their own step (0.5 m at Earth's radius), which this keeps.
+fn placed_altitude(y: f32) -> f32 {
+    if (u.flags & RELATIVE) != 0u {
+        return y - (u.origin_hi.y + u.origin_lo.y);
+    }
+    return y;
 }
 
 /// The owner's position as this table places rows: relative to the world
