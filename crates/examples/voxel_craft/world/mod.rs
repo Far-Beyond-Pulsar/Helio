@@ -53,7 +53,13 @@ impl World {
         self.queries.focus(PLAYER, position, PLAYER_FOCUS_M);
     }
 
-    /// Whether the world around the player is resident.
+    /// Whether the world within `radius` of `position` is resident (it is
+    /// asked for when not).
+    pub fn loaded_around(&self, position: DVec3, radius: f64) -> bool {
+        self.queries.resident_within(position, radius)
+    }
+
+    /// Whether the whole world around the player is resident.
     pub fn loaded(&self) -> bool {
         self.queries.loading() == 0
     }

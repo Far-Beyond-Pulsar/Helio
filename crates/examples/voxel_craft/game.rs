@@ -189,7 +189,8 @@ impl Game {
                 }
             }
         }
-        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, self.gfx.settled(), &mut self.quit));
+        let settled = self.gfx.settled() && self.world.loaded();
+        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, settled, &mut self.quit));
         let (eye, look) = self.player.camera(&self.world);
         let outline = self.interaction.outline(&self.world);
         let view = View {

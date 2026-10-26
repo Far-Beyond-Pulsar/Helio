@@ -415,6 +415,23 @@ impl WorldQueries {
         state.wanted.len() + state.sampling.len()
     }
 
+    /// Whether every brick within `radius` of `center` is resident; those
+    /// that are not are asked for. A body waits on this for the space it
+    /// moves in, not a whole focus.
+    pub fn resident_within(&self, center: DVec3, radius: f64) -> bool {
+        let planet = self.planet();
+        let keys = region(&planet, center, radius);
+        let missing: Vec<BrickKey> = {
+            let bricks = self.shared.bricks.read().expect("bricks");
+            keys.into_iter().filter(|key| !bricks.contains_key(key)).collect()
+        };
+        if missing.is_empty() {
+            return true;
+        }
+        self.want(&missing);
+        false
+    }
+
     /// Bricks resident.
     pub fn resident(&self) -> usize {
         self.shared.bricks.read().expect("bricks").len()
@@ -573,14 +590,20 @@ impl Drop for WorldQueries {
     }
 }
 
-/// List focus `id`'s bricks that are not resident as wanted: those whose
-/// cells come within its radius (on a lattice of points finer than a brick,
-/// located on the grid, so faces' edges are crossed like anywhere else).
+/// List focus `id`'s bricks as wanted ([`region`]; resident ones are
+/// dropped when taken).
 fn list_focus(state: &mut State, id: u64, _tick: u64) {
     let Some(focus) = state.foci.get_mut(&id) else { return };
     focus.listed_at = Some(focus.center);
     let (center, radius) = (focus.center, focus.radius);
     let planet = state.planet.clone();
+    state.wanted.extend(region(&planet, center, radius));
+}
+
+/// The bricks whose cells come within `radius` of `center`: those of a
+/// lattice of points finer than a brick, located on the grid, so faces'
+/// edges are crossed like anywhere else (none above the world).
+fn region(planet: &Planet, center: DVec3, radius: f64) -> FxHashSet<BrickKey> {
     let grid = planet.grid();
     let brick_m = f64::from(QUERY_BRICK) * grid.voxel_size();
     let up = grid.up(center);
@@ -604,9 +627,7 @@ fn list_focus(state: &mut State, id: u64, _tick: u64) {
             }
         }
     }
-    for key in keys {
-        state.wanted.insert(key);
-    }
+    keys
 }
 
 /// The edit histories' difference between `old` and `new`, as brushes:
