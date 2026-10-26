@@ -7,6 +7,60 @@ Code: `src/chunks/` (`mod.rs`: `ChunkWorld`; `classify.rs`, `residency.rs`,
 `drawn.rs`, `pass.rs`, `scene.rs`), `shaders/chunk_generate.wgsl`,
 `shaders/chunk_draw.wgsl`, `shaders/chunk_table.wgsl`.
 
+## Volumes
+
+A scene holds any number of voxel worlds (`crate::volume`): a
+`VoxelVolume` is a world (its recipe and edits, a `Planet`) and an f64
+`VolumeTransform`, a rotation then a translation that may change every
+frame. A planet, a moon, a plane and a ship-sized block are all volumes.
+Every world keeps its own frame (planet-centred, or the plane's): its
+cells, edits, CPU queries and chunks never change as it moves.
+
+One `ChunkWorld` holds them all (`ChunkWorld::add_volume`,
+`set_transform`, `remove_volume`; `ChunkPass` follows a frame's
+`PlanetFrame::volumes` by their host ids):
+
+- **One chunk pool.** A node key carries its volume (`NodeKey::volume`,
+  bits 16 and up of the chunk table's key x), so slots, leaf and detail
+  pages, the chunk table, the drawn cut, kept chunks and the readbacks are
+  shared; eviction under pressure takes each volume's share by the chunks
+  it holds.
+- **One planner.** Its thread plans every volume a job (`residency::
+  Worker`), each with the eye, view and velocity in its own frame: the eye's
+  own motion and the volume's under it (a moon's orbit), so residency
+  follows screen size in every volume alike.
+- **Generation per world.** A volume has its terrain program's pipelines
+  (shared by volumes of one program and form), its own footprint pool (no
+  larger than the footprints it has: a block's is a few slots), features,
+  brushes and baked bricks. One volume generates a frame: those with edits
+  first, then those with requests, in turn.
+- **One tracer, a pass a volume.** A view traces its volumes nearest first
+  (by their bounds; the primary one always), each by the same kernels with
+  its own `DrawParams`: the eye in its frame, the camera's projections
+  composed with its rotation, the sun and the scene's lights turned into
+  it (`to_local`), the last frame's projection from where its transform
+  had its points (moving volumes write their own motion vectors). A later
+  volume's seed keeps only boxes nearer than the hits already found, and
+  its trace walks no farther than them, so the nearest hit of any volume
+  wins per pixel, hidden volumes cost little, and volumes may overlap (a
+  ship landed in the ground). A chunk's frame stays in its volume's
+  coordinates: a moving or spinning volume rewrites none.
+- **Shading per volume.** Every shading kernel runs a dispatch a volume
+  and takes the hits of its pass's volume (`ours`; the pixels no volume
+  hits, the first pass's): sun, sky and local lights walk the hit's own
+  volume (a volume shadows itself exactly; one volume's shadow on another
+  is not cast yet, except through the sun's occlusion maps, which every
+  volume draws into). Normals leave in the world's axes (`to_world`); the
+  denoiser runs once in the world's frame, reprojecting each hit by its
+  volume's motion (`motions`).
+- **The primary volume** (the frame's first) is the one foliage grows on
+  and GI probes trace.
+
+CPU queries take world positions: `Volumes` (exact casts and solid tests
+over every volume a ray or point meets, nearest hit first) and
+`VolumeQueries` (each volume's `WorldQueries` bricks). Picks name the
+volume they hit (`PickHit::volume`); their cells are in its frame.
+
 ## Nodes and chunks
 
 - A **node** is a chunk: `(face, level, cx, cy, cz)`, 64³ cells of its

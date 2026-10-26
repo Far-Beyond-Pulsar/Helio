@@ -6,7 +6,7 @@ mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
 use helio_pass_voxel_planet::chunks::{
-    residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights,
+    residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights, VolumeId,
 };
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
@@ -124,7 +124,7 @@ impl World {
 
     fn with_capacity(gpu: &Gpu, planet: &Planet, capacity: Capacity) -> Self {
         Self {
-            chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, capacity),
+            chunks: ChunkWorld::of_planet(&gpu.device, &gpu.queue, planet, capacity),
             frame: 0,
             sun: Vec3::new(0.3, 0.8, 0.4).normalize(),
             scene_depth: None,
@@ -138,7 +138,7 @@ impl World {
 
     /// The planet's edits now (a new world for a history it cannot follow).
     fn sync(&mut self, gpu: &Gpu, planet: &Planet) {
-        if !self.chunks.sync_edits(planet) {
+        if !self.chunks.sync_edits(VolumeId(0), planet) {
             *self = Self::new(gpu, planet);
         }
     }
@@ -1804,12 +1804,12 @@ fn a_loaded_world_restores_its_edited_chunks() {
         saved.frame(&gpu, &planet, &here, None);
     }
     assert_eq!(saved.chunks.keeping(), 0, "packing the resident chunks");
-    let bytes = saved.chunks.kept_chunks(&planet).to_bytes();
+    let bytes = saved.chunks.kept_chunks(VolumeId(0), &planet).to_bytes();
     let snapshot = planet.snapshot();
     let loaded = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
     let chunks = KeptChunks::from_bytes(&bytes).unwrap();
     let mut world = World::new(&gpu, &loaded);
-    let kept = world.chunks.load_kept(&loaded, &chunks).unwrap();
+    let kept = world.chunks.load_kept(VolumeId(0), &loaded, &chunks).unwrap();
     let (again, (restored, generated), keeping_ms, _) =
         settle_counting(&gpu, &mut world, &loaded, &here);
     let mut cold = World::new(&gpu, &loaded);
@@ -1851,7 +1851,7 @@ fn a_loaded_world_restores_its_edited_chunks() {
         .unwrap();
     assert!(World::new(&gpu, &other)
         .chunks
-        .load_kept(&other, &chunks)
+        .load_kept(VolumeId(0), &other, &chunks)
         .is_err());
     // Damaged bytes: refused.
     let mut damaged = bytes.clone();
@@ -3198,7 +3198,7 @@ fn footprint_placements_are_the_cpus() {
         );
         let mut world = World::new(&gpu, &planet);
         world.settle(&gpu, &planet, &view);
-        let (footprints, buffer) = world.chunks.footprint_placements();
+        let (footprints, buffer) = world.chunks.footprint_placements(VolumeId(0));
         let words = read_words(&gpu, buffer);
         for (fp, slot) in footprints {
             let near = features.near(fp.level);

@@ -69,6 +69,18 @@ struct DrawParams {
     // step along x, along y; [1].w 1 when the camera holds still since the
     // last frame (its projections differ by their jitter alone).
     rays: array<vec4<f32>, 3>,
+    // The volume's axes in the world (its rotation's columns, xyz): every
+    // position, ray and normal above is in the volume's frame (eye-relative
+    // in its axes); rays, the sun and the scene's lights come into it by
+    // `to_local`, normals written for the world leave by `to_world`. The
+    // identity for the camera's own parameters (the denoiser's).
+    rotation: array<vec4<f32>, 3>,
+    // x: the volume's index (its chunk keys' bits 16 and up); y: its pass
+    // in this view (0: the first traced, which also writes the pixels no
+    // volume hits); z: the volumes traced; w: flags (1: a volume moved since
+    // the last frame, `motions`; 2: this one moved, its hits write their own
+    // motion).
+    volume: vec4<u32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -187,6 +199,57 @@ var<private> heat: u32;
 
 const NONE: u32 = 0xffffffffu;
 
+// ---- Volumes ----
+// Every placed world draws by its own passes (`DrawParams::volume`), in its
+// own frame. A chunk key's x is face | level << 8 | volume << 16
+// (`NodeKey::table_key`): this pass's volume's keys.
+fn key_x(face: i32, level: i32) -> i32 {
+    return face | (level << 8u) | i32(params.volume.x << 16u);
+}
+
+fn key_level(x: i32) -> i32 {
+    return (x >> 8u) & 255;
+}
+
+// The volume of the chunk in `slot`.
+fn slot_volume(slot: u32) -> u32 {
+    return u32(chunk_keys[slot].x) >> 16u;
+}
+
+// Whether a hit in chunk `slot` is this pass's volume's (one volume
+// traced: every hit).
+fn ours(slot: u32) -> bool {
+    return params.volume.z <= 1u || slot_volume(slot) == params.volume.x;
+}
+
+// Whether this pass writes pixel hit `slot` (NONE: no volume's hit, the
+// first pass's).
+fn pass_pixel(slot: u32) -> bool {
+    if slot == NONE { return params.volume.y == 0u; }
+    return ours(slot);
+}
+
+// A vector of the volume's frame in the world's axes, and back.
+fn to_world(v: vec3<f32>) -> vec3<f32> {
+    return params.rotation[0].xyz * v.x + params.rotation[1].xyz * v.y + params.rotation[2].xyz * v.z;
+}
+
+fn to_local(v: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(dot(params.rotation[0].xyz, v), dot(params.rotation[1].xyz, v), dot(params.rotation[2].xyz, v));
+}
+
+// Each volume's motion since the last frame (`ChunkWorld::volume_motions`):
+// the last frame's projection of this frame's eye-relative world points,
+// by volume index; read where a volume moved (`params.volume.w` bit 0).
+@group(0) @binding(19) var<storage, read> motions: array<mat4x4<f32>>;
+
+// The last frame's projection of hit slot `slot`'s points (eye-relative,
+// world axes).
+fn previous_projection(slot: u32) -> mat4x4<f32> {
+    if (params.volume.w & 1u) == 0u || slot == NONE { return params.prev_view_proj; }
+    return motions[slot_volume(slot)];
+}
+
 fn key_hash(k: vec4<i32>) -> u32 {
     var h = bitcast<u32>(k.x) * 0x9E3779B1u;
     h = (h ^ bitcast<u32>(k.y)) * 0x85EBCA77u;
@@ -239,6 +302,11 @@ struct Cull {
 fn cull_bin(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.table.z { return; }
     let slot = drawn_slots[id.x];
+    // Another volume's chunk: its own pass draws it.
+    if !ours(slot) {
+        cull_bins[id.x] = NONE;
+        return;
+    }
     let c = chunk_frame(slot);
     let top = chunk_meta[slot].top;
     let grow = statics[slot].m0.w;
@@ -365,11 +433,17 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
 }
 
 // Boxes the eye is outside of: the box's front face is the depth. Later
-// rounds keep only the boxes beyond where the pixel's ray left the last.
+// rounds keep only the boxes beyond where the pixel's ray left the last;
+// a later volume's pass only those nearer than an earlier volume's hit.
 @fragment
 fn seed_fragment(in: VOut) -> @location(0) u32 {
-    let exit = textureLoad(exits, vec2<i32>(in.position.xy), 0).r;
+    let p = vec2<i32>(in.position.xy);
+    let exit = textureLoad(exits, p, 0).r;
     if exit < 0.0 || (exit > 0.0 && ray_distance(in.world) <= exit) { discard; }
+    if params.volume.y > 0u {
+        let hit = textureLoad(hit_distance, p, 0).r;
+        if hit > 0.0 && ray_distance(in.world) >= hit { discard; }
+    }
     return in.instance;
 }
 
@@ -390,7 +464,9 @@ fn seed_fragment_inside(in: VOut) -> SeedInside {
 @group(1) @binding(0) var seed: texture_2d<u32>;
 @group(1) @binding(1) var out_visibility: texture_storage_2d<rg32uint, write>;
 @group(1) @binding(2) var out_colour: texture_storage_2d<rgba8unorm, write>;
-@group(1) @binding(3) var out_distance: texture_storage_2d<r32float, write>;
+// Read back by a later volume's pass: only hits nearer than an earlier
+// volume's replace them.
+@group(1) @binding(3) var out_distance: texture_storage_2d<r32float, read_write>;
 @group(1) @binding(6) var out_exits: texture_storage_2d<r32float, read_write>;
 
 fn bit64(m: vec2<u32>, b: u32) -> bool {
@@ -839,7 +915,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
 fn cell_frame(slot: u32, cell: vec3<i32>) -> ChunkDraw {
     let c = chunk_frame(slot);
     let key = chunk_keys[slot];
-    let level = key.x >> 8u;
+    let level = key_level(key.x);
     if !exact_level(level) { return c; }
     let face = key.x & 7;
     let g = vec3<f32>(key.yzw * 64 + cell) + 0.5;
@@ -1068,7 +1144,7 @@ fn frame_near(k: vec4<i32>) -> u32 {
 fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, crossed: bool) -> Place {
     let top = i32(params.cut.x);
     var diff = 0;
-    var e = find_entry(vec4<i32>(face | (level << 8), cell >> vec3<u32>(6u)));
+    var e = find_entry(vec4<i32>(key_x(face, level), cell >> vec3<u32>(6u)));
     // Mostly the next chunk of the same level.
     if e != NONE {
         let v = chunk_table[e * 2u + 1u];
@@ -1082,7 +1158,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         }
         diff += 1;
         let c = cell_at(cell, frac, diff);
-        e = find_entry(vec4<i32>(face | ((level + diff) << 8), c >> vec3<u32>(6u)));
+        e = find_entry(vec4<i32>(key_x(face, level + diff), c >> vec3<u32>(6u)));
     }
     var empty = e == NONE;
     // An ancestor found climbing: a coarser node fading in over it may show
@@ -1093,7 +1169,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         var u = diff;
         for (var n = 0u; n < 32u && level + u < top; n++) {
             u += 1;
-            let pe = find_entry(vec4<i32>(face | ((level + u) << 8), cell_at(cell, frac, u) >> vec3<u32>(6u)));
+            let pe = find_entry(vec4<i32>(key_x(face, level + u), cell_at(cell, frac, u) >> vec3<u32>(6u)));
             if pe == NONE { break; }
             let state = chunk_table[pe * 2u + 1u].y;
             if state == 0 { continue; }
@@ -1123,7 +1199,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
             diff += 1;
         }
         let c = cell_at(cell, frac, diff);
-        e = find_entry(vec4<i32>(face | ((level + diff) << 8), c >> vec3<u32>(6u)));
+        e = find_entry(vec4<i32>(key_x(face, level + diff), c >> vec3<u32>(6u)));
         if e == NONE {
             if way > 0 { return lost_at(2u); }
             empty = true;
@@ -1132,7 +1208,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     let at = level + diff;
     let c = cell_at(cell, frac, diff);
     let node = c >> vec3<u32>(6u);
-    let key = vec4<i32>(face | (at << 8), node);
+    let key = vec4<i32>(key_x(face, at), node);
     if !empty {
         let v = chunk_table[e * 2u + 1u];
         let kind = entry_kind(v);
@@ -1147,7 +1223,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     for (var n = 0u; n < 32u && level + up < top; n++) {
         let pc = cell_at(cell, frac, up + 1);
         let pnode = pc >> vec3<u32>(6u);
-        let pe = find_entry(vec4<i32>(face | ((level + up + 1) << 8), pnode));
+        let pe = find_entry(vec4<i32>(key_x(face, level + up + 1), pnode));
         if pe == NONE { break; }
         let pv = chunk_table[pe * 2u + 1u];
         let clo = unpack_corner(pv.z >> 8u);
@@ -1189,7 +1265,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
 // tile can reach past the face's edge (its columns there are empty), and a
 // ray crossing them would skip what lies across the edge.
 fn clip_to_face(hi: vec3<i32>, key: vec4<i32>) -> vec3<i32> {
-    let edge = vec2<i32>(i32(params.table.y >> u32(key.x >> 8u))) - key.yz * 64;
+    let edge = vec2<i32>(i32(params.table.y >> u32(key_level(key.x)))) - key.yz * 64;
     return vec3<i32>(min(hi.xy, edge), hi.z);
 }
 
@@ -1268,7 +1344,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     // face's) in cube_lo and cube_hi. Such a walk starts where the ray
     // enters its seed box (an exact chunk's raster box reaches past its
     // cells, over its neighbours'): the drawn cut there.
-    var exact = exact_level(key.x >> 8u);
+    var exact = exact_level(key_level(key.x));
     var place = exact;
     if exact && real {
         let frame = chunk_frame(start.slot);
@@ -1290,7 +1366,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
         WCOUNT(3)
         // Where the ray goes next: the face, level, cell and where in it.
         var face = key.x & 7;
-        let level = key.x >> 8u;
+        let level = key_level(key.x);
         var cell = vec3<i32>(0);
         var frac = vec3<f32>(0.0);
         if exact {
@@ -1422,7 +1498,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             slot = next.slot;
             key = chunk_keys[next.slot];
             real = true;
-            exact = exact_level(key.x >> 8u);
+            exact = exact_level(key_level(key.x));
             if exact {
                 cube_lo = key.yzw * 64;
                 cube_hi = cube_lo + vec3<i32>(64);
@@ -1451,7 +1527,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             // not one (exact, or on another face): in the grid's own cells.
             if (exact_level(next.level) || (next.frame == NONE && (exact || crossed))) {
                 exact = true;
-                key = vec4<i32>(face | (next.level << 8u), 0, 0, 0);
+                key = vec4<i32>(key_x(face, next.level), 0, 0, 0);
                 cube_lo = next.lo;
                 cube_hi = next.hi;
             } else {
@@ -1461,8 +1537,8 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                     frame_slot = next.frame;
                     key = chunk_keys[next.frame];
                 }
-                cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
-                cube_hi = clip_to_face(to_frame(next.hi, next.level - (key.x >> 8u), key, false), key);
+                cube_lo = to_frame(next.lo, next.level - (key_level(key.x)), key, true);
+                cube_hi = clip_to_face(to_frame(next.hi, next.level - (key_level(key.x)), key, false), key);
             }
         }
     }
@@ -1491,7 +1567,7 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
     let p = vec2<i32>(id.xy);
     let exit = textureLoad(out_exits, p).r;
     if exit < 0.0 { return; }
-    if exit == 0.0 {
+    if exit == 0.0 && params.volume.y == 0u {
         textureStore(out_visibility, p, vec4<u32>(0xffffffffu, 0u, 0u, 0u));
         textureStore(out_distance, p, vec4<f32>(0.0));
         if plain_colour() { textureStore(out_colour, p, vec4<f32>(0.0)); }
@@ -1503,6 +1579,12 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         return;
     }
     COUNT(0)
+    // A later volume's pass: only a hit nearer than an earlier volume's.
+    var limit = 1e30;
+    if params.volume.y > 0u {
+        let hit = textureLoad(out_distance, p).r;
+        if hit > 0.0 { limit = hit; }
+    }
     let dir = pixel_ray(id.xy, size);
     let org = select(vec3<f32>(0.0), pixel_origin(id.xy, size), ortho);
     var t_prev = max(exit, params.sun.w);
@@ -1517,7 +1599,7 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
     // Both levels of a switch are drawn: a box of the one this pixel does
     // not show starts the walk where the ray enters it.
     let own = find_entry(key);
-    if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 && !exact_level(key.x >> 8u) {
+    if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 && !exact_level(key_level(key.x)) {
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
@@ -1527,7 +1609,7 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         t_prev = max(max(lo.x, max(lo.y, lo.z)), t_prev);
         let q = o + d * t_prev;
         let local = clamp(vec3<i32>(floor(q)), vec3<i32>(0, 0, i32(frame.box.x)), vec3<i32>(63, 63, i32(frame.box.y) - 1));
-        let next = place_at(key.x & 7, key.x >> 8u, key.yzw * 64 + local, clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999)), r, false);
+        let next = place_at(key.x & 7, key_level(key.x), key.yzw * 64 + local, clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999)), r, false);
         if next.slot != NONE {
             frame = chunk_frame(next.slot);
             key = chunk_keys[next.slot];
@@ -1539,16 +1621,16 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
                 frame = chunk_frame(next.frame);
                 key = chunk_keys[next.frame];
             }
-            cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
-            cube_hi = clip_to_face(to_frame(next.hi, next.level - (key.x >> 8u), key, false), key);
+            cube_lo = to_frame(next.lo, next.level - (key_level(key.x)), key, true);
+            cube_hi = clip_to_face(to_frame(next.hi, next.level - (key_level(key.x)), key, false), key);
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, 1e30, r, 128u, true, id.xy);
+    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, limit, r, 128u, true, id.xy);
     if !end.hit {
         // Unresolved: the next round seeds the boxes beyond (none past
-        // the ceiling: the sky).
-        textureStore(out_exits, p, vec4<f32>(select(end.t + 1e-4, -1.0, end.t < 0.0)));
+        // the ceiling, the sky, or an earlier volume's hit).
+        textureStore(out_exits, p, vec4<f32>(select(end.t + 1e-4, -1.0, end.t < 0.0 || end.t >= limit)));
         return;
     }
     COUNT(2)
@@ -1615,7 +1697,7 @@ fn mosaic_weight(projected: f32) -> f32 {
 // pigment, edges or corner shading. Finest cells keep their voxel look at
 // any size.
 fn under_refined(key: vec4<i32>, projected: f32) -> f32 {
-    if (key.x >> 8u) == 0 { return 0.0; }
+    if (key_level(key.x)) == 0 { return 0.0; }
     return smoothstep(1.5, 4.0, projected);
 }
 
@@ -1924,7 +2006,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let p = vec2<i32>(pixel.xy);
     let v = textureLoad(hit_visibility, p, 0).xy;
     let shading = textureLoad(hit_normal, p, 0);
-    if v.x == NONE || dot(shading.xyz, shading.xyz) == 0.0 { discard; }
+    if v.x == NONE || !ours(v.x) || dot(shading.xyz, shading.xyz) == 0.0 { discard; }
     let t = textureLoad(hit_distance, p, 0).r;
     let size = textureDimensions(hit_distance);
     let position = pixel_ray(vec2<u32>(pixel.xy), size) * t;
@@ -1933,7 +2015,8 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
     let material = (v.y >> 21u) & 31u;
-    var normal = shading.xyz;
+    // In the volume's frame (the cell's axes), out in the world's.
+    var normal = to_local(shading.xyz);
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
     let pixel_m = pixel_width(vec2<u32>(pixel.xy), size, t);
@@ -1943,7 +2026,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     var albedo = look.albedo;
     var roughness = palette(material).w;
     var emissive = albedo * materials.m[min(material, 31u)].light.y;
-    let level = u32(chunk_keys[v.x].x >> 8u) & 31u;
+    let level = u32(key_level(chunk_keys[v.x].x)) & 31u;
     // A pixel's footprint along the face over its width (the view's slant).
     let slant = 1.0 / max(abs(dot(normal, normalize(position))), 1.0 / 16.0);
     let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m, slant);
@@ -1967,9 +2050,9 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     }
     // Environment-only level diagnostics (`HELIO_VOXEL_CHUNKS_LEVELS`).
     if voxel_levels_debug() && (!voxel_levels_half_debug() || p.x < i32(size.x / 2u)) {
-        out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0);
+        out.albedo = vec4<f32>(level_colour(u32(key_level(chunk_keys[v.x].x)) & 31u), 1.0);
     }
-    out.normal = vec4<f32>(normal, f0);
+    out.normal = vec4<f32>(to_world(normal), f0);
     out.orm = vec4<f32>(look.ao * textureLoad(hit_sky, p, 0).r * occlusion, clamp(roughness, 0.04, 1.0), 0.0, f0);
     out.emissive = vec4<f32>(emissive, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).
@@ -1980,17 +2063,19 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let through = materials.m[min(material, 31u)].light.x;
     out.sss = vec4<f32>(select(vec3<f32>(0.0), albedo, through > 0.0), 0.0);
     out.extra = vec4<f32>(0.0, 0.0, 0.0, select(0.0, f32(SURFACE_FLAG_TWO_SIDED), through > 0.0));
-    // The terrain is static: w 0 (helio-pass-tsr MOTION_VECTORS) leaves its
+    // A still volume: w 0 (helio-pass-tsr MOTION_VECTORS) leaves its
     // motion, the camera's, to TSR, which derives it from depth at full
     // precision. These eye-relative matrices are f32 products that cancel
     // the camera's position: near points move by up to 0.05 px of rounding.
+    // A volume that moved moves by itself (w 1): the last frame's projection
+    // takes its points from where its transform had them.
     let previous = params.prev_view_proj * vec4<f32>(position, 1.0);
     var velocity = vec2<f32>(0.0);
     if previous.w > 0.0 {
         let ndc = previous.xy / previous.w;
         velocity = pixel.xy - (vec2<f32>(ndc.x, -ndc.y) * 0.5 + 0.5) * vec2<f32>(size);
     }
-    out.velocity = vec4<f32>(velocity, 0.0, 0.0);
+    out.velocity = vec4<f32>(velocity, 0.0, select(0.0, 1.0, (params.volume.w & 2u) != 0u));
     out.depth = clip.z / clip.w;
     return out;
 }
@@ -2236,7 +2321,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
         // frame chunk's cells (exact integers far from the origin).
         t_prev = max(t_leave, t_prev);
         if t_prev >= t_end { break; }
-        let level = key.x >> 8u;
+        let level = key_level(key.x);
         let q = o + d * t_leave;
         let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
         var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
@@ -2287,8 +2372,8 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
                 frame = chunk_frame(next.frame);
                 key = chunk_keys[next.frame];
             }
-            cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
-            cube_hi = clip_to_face(to_frame(next.hi, next.level - (key.x >> 8u), key, false), key);
+            cube_lo = to_frame(next.lo, next.level - (key_level(key.x)), key, true);
+            cube_hi = clip_to_face(to_frame(next.hi, next.level - (key_level(key.x)), key, false), key);
             real = false;
         }
     }
@@ -2371,9 +2456,10 @@ fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= quarter.x || id.y >= quarter.y { return; }
     let q = sky_pixel(id.xy, size);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    if !pass_pixel(v.x) { return; }
     var sample = vec2<f32>(1.0, 0.0);
     if v.x != NONE {
-        if exact_level(chunk_keys[v.x].x >> 8u) { return; }
+        if exact_level(key_level(chunk_keys[v.x].x)) { return; }
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         sample = vec2<f32>(sky_visibility_fine(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), q, size, t)), t);
     }
@@ -2388,7 +2474,7 @@ fn sky_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= quarter.x || id.y >= quarter.y { return; }
     let q = sky_pixel(id.xy, size);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
-    if v.x == NONE || !exact_level(chunk_keys[v.x].x >> 8u) { return; }
+    if v.x == NONE || !ours(v.x) || !exact_level(key_level(chunk_keys[v.x].x)) { return; }
     var sample = vec2<f32>(1.0, 0.0);
     {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
@@ -2433,9 +2519,10 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= half.x || id.y >= half.y { return; }
     let q = sample_pixel(id.xy, size);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    if !pass_pixel(v.x) { return; }
     var sample = vec4<u32>(0u);
     if v.x != NONE {
-        if exact_level(chunk_keys[v.x].x >> 8u) { return; }
+        if exact_level(key_level(chunk_keys[v.x].x)) { return; }
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
@@ -2452,7 +2539,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= half.x || id.y >= half.y { return; }
     let q = sample_pixel(id.xy, size);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
-    if v.x == NONE || !exact_level(chunk_keys[v.x].x >> 8u) { return; }
+    if v.x == NONE || !ours(v.x) || !exact_level(key_level(chunk_keys[v.x].x)) { return; }
     var sample = vec4<u32>(0u);
     {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
@@ -2498,12 +2585,12 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
     let r = fade_dither(q);
     var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
     var t0 = 0.0;
-    if v.x != NONE && !exact_level(chunk_keys[v.x].x >> 8u) {
+    if v.x != NONE && !exact_level(key_level(chunk_keys[v.x].x)) {
         let key = chunk_keys[v.x];
         let frame = chunk_frame(v.x);
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         var face = key.x & 7;
-        let level = key.x >> 8u;
+        let level = key_level(key.x);
         var cell = key.yzw * 64 + vec3<i32>(floor(o));
         var frac = clamp(fract(o), vec3<f32>(0.0), vec3<f32>(0.999));
         // Past a face's edge: the face across it (past a corner, or a
@@ -2526,11 +2613,11 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
         } else if at.level == LOST {
             return none;
         } else if exact_level(at.level) {
-            start = Walk(v.x, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
+            start = Walk(v.x, vec4<i32>(key_x(face, at.level), 0, 0, 0), at.lo, at.hi, false);
         } else {
             let f = select(v.x, at.frame, at.frame != NONE);
             let fk = chunk_keys[f];
-            start = Walk(f, fk, to_frame(at.lo, at.level - (fk.x >> 8u), fk, true), clip_to_face(to_frame(at.hi, at.level - (fk.x >> 8u), fk, false), fk), false);
+            start = Walk(f, fk, to_frame(at.lo, at.level - (key_level(fk.x)), fk, true), clip_to_face(to_frame(at.hi, at.level - (key_level(fk.x)), fk, false), fk), false);
         }
         // Off the surface a mesh stands on: a twentieth of the hit's cell.
         t0 = 0.05 * length(frame.m0.xyz);
@@ -2547,7 +2634,7 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
         }
         let level = min(i32(params.planet.z), i32(params.cut.x));
         if !exact_level(level) { return none; }
-        start.key = vec4<i32>(face_with_normal(normal) | (level << 8u), 0, 0, 0);
+        start.key = vec4<i32>(key_x(face_with_normal(normal), level), 0, 0, 0);
     }
     return walk(start, org, dir, t0, range, r, 96u, false, q);
 }
@@ -2580,6 +2667,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = vec2<i32>(id.xy);
     let sun = params.sun.xyz;
     let v = textureLoad(hit_visibility, p, 0).xy;
+    if !pass_pixel(v.x) { return; }
     textureStore(out_stochastic, p, vec4<f32>(stochastic_share(p, size, v, mesh_point(id.xy, size)), 0.0, 0.0, 0.0));
     // A mesh in front of the hit (or the sky): near the eye, the sun's
     // occlusion maps' finest level (a texture read where a walk cost a
@@ -2588,7 +2676,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     let mesh = mesh_point(id.xy, size);
     if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
         textureStore(out_normal, p, vec4<f32>(0.0));
-        let seen = sun_occlusion_levels(mesh.xyz, 1u);
+        let seen = sun_occlusion_levels(to_world(mesh.xyz), 1u);
         if seen.y > 0.0 && !steady_shadows() {
             store_walked(p, size, seen.x, 1.0, 0.0);
             return;
@@ -2630,7 +2718,8 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     let f = hit_face(v, ground, id.xy, size, t);
-    textureStore(out_normal, p, vec4<f32>(f.shading, sky_at(p, at_hit, reach, size)));
+    // Lit in the world (the denoiser's and lighting's frame).
+    textureStore(out_normal, p, vec4<f32>(to_world(f.shading), sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
     if dot(f.shading, sun) <= 0.0 {
         own = 1.0;
@@ -2640,14 +2729,14 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         // from frame to frame).
         let through = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x;
         if dot(f.normal, sun) < 0.0 && through > 0.0 {
-            lit = clamp(through, 0.0, 1.0) * sun_occlusion(at_hit - f.normal * (1.5 * f.cell));
+            lit = clamp(through, 0.0, 1.0) * sun_occlusion(to_world(at_hit - f.normal * (1.5 * f.cell)));
         }
     } else if sub_pixel(f, id.xy, size, t) && !steady {
         // Cells under a pixel and a half: their own sun is aliasing (each
         // frame's jitter and samples land on other cells), so the sun's
         // occlusion maps', steady from frame to frame and no finer than
         // the pixel sees.
-        lit = sun_occlusion(at_hit + f.normal * (0.5 * f.cell));
+        lit = sun_occlusion(to_world(at_hit + f.normal * (0.5 * f.cell)));
         own = 1.0;
     } else {
         let found = sampled != 0u;
@@ -2671,6 +2760,7 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let q = vec2<u32>(packed & 0x7fffu, packed >> 16u);
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    if !pass_pixel(v.x) { return; }
     if (packed & MESH_PIXEL) != 0u {
         store_walked(vec2<i32>(q), size, mesh_walk(q, mesh_point(q, size).xyz, v, params.sun.xyz, 1e30), 1.0, 0.0);
         return;
@@ -2744,13 +2834,14 @@ fn light_reach(light: SceneLight, at: vec3<f32>, n: vec3<f32>, transmits: bool) 
     // Shadows as the deferred lighting requests them (`shadow_factor`).
     let requested = select(light.shadow_index != 0xffffffffu, (light.flags & 4u) != 0u, (light.flags & 8u) != 0u);
     if light.light_type == 0u || !requested || (light.flags & 48u) == 48u { return none; }
-    let to = light.position_range.xyz - params.light_eye.xyz - at;
+    // The light in the volume's frame (eye-relative).
+    let to = to_local(light.position_range.xyz - params.light_eye.xyz) - at;
     let range = length(to);
     if range > light.position_range.w || range < 1e-4 { return none; }
     let dir = to / range;
     let back = dot(n, n) > 0.0 && dot(n, dir) <= 0.0;
     if back && !transmits { return none; }
-    if light.light_type == 2u && dot(-dir, normalize(light.direction_outer.xyz)) < light.direction_outer.w { return none; }
+    if light.light_type == 2u && dot(-dir, normalize(to_local(light.direction_outer.xyz))) < light.direction_outer.w { return none; }
     return LightReach(true, dir, range, back);
 }
 
@@ -2766,7 +2857,7 @@ fn light_tile(p: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
 fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
     let list = light_tile(q, size);
     let at = pixel_ray(q, size) * t;
-    let n = textureLoad(hit_normals, vec2<i32>(q), 0).xyz;
+    let n = to_local(textureLoad(hit_normals, vec2<i32>(q), 0).xyz);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     let transmits = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x > 0.0;
     var seen = 0xffffffffu;
@@ -2789,7 +2880,7 @@ fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
 // Whether pixel `p`'s hit is the terrain's (no mesh in front of it), and
 // of a fine level (`fine`) or an exact one.
 fn local_hit(p: vec2<u32>, size: vec2<u32>, v: vec2<u32>, t: f32, fine: bool) -> bool {
-    if v.x == NONE || exact_level(chunk_keys[v.x].x >> 8u) == fine { return false; }
+    if v.x == NONE || !ours(v.x) || exact_level(key_level(chunk_keys[v.x].x)) == fine { return false; }
     let mesh = mesh_point(p, size);
     return !(mesh.w > 0.0 && length(mesh.xyz) < t);
 }
@@ -2801,8 +2892,9 @@ fn store_local_sample(b: vec2<u32>, size: vec2<u32>, fine: bool) {
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
     if !local_hit(q, size, v, t, fine) {
-        // The other kernel's, or none (a mesh, the sky).
-        if fine { local_samples[b.y * half.x + b.x] = vec2<u32>(0xffffffffu, 0u); }
+        // The other kernel's, or none (a mesh, the sky); another volume's
+        // pass writes its own.
+        if fine && pass_pixel(v.x) { local_samples[b.y * half.x + b.x] = vec2<u32>(0xffffffffu, 0u); }
         return;
     }
     var seen = 0xffffffffu;
@@ -2883,6 +2975,7 @@ fn local_shadow_far(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= size.x || id.y >= size.y { return; }
     let p = vec2<i32>(id.xy);
     let v = textureLoad(hit_visibility, p, 0).xy;
+    if !pass_pixel(v.x) { return; }
     let t = textureLoad(hit_distance, p, 0).r;
     if local_hit(id.xy, size, v, t, true) { return; }
     var seen = vec2<u32>(0xffffffffu, 1u);
@@ -3058,9 +3151,9 @@ struct Reprojection {
     tolerance: f32,
 }
 
-fn reproject(s: Surface, size: vec2<u32>) -> Reprojection {
+fn reproject(s: Surface, size: vec2<u32>, previous: mat4x4<f32>) -> Reprojection {
     var r: Reprojection;
-    let clip = params.prev_view_proj * vec4<f32>(s.at, 1.0);
+    let clip = previous * vec4<f32>(s.at, 1.0);
     if clip.w <= 0.0 { return r; }
     let ndc = clip.xy / clip.w + params.history.xy;
     let uv = (vec2<f32>(ndc.x, -ndc.y) * 0.5 + 0.5) * vec2<f32>(size) - 0.5;
@@ -3231,7 +3324,9 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgroup_id)
         hi = max(hi, w_hi[i]);
     }
     // The histories along the motion (none: this frame's samples).
-    let last = history_at(reproject(s, size), s.normal, size);
+    // Along the hit's volume's motion (`previous_projection`).
+    let slot = textureLoad(hit_visibility, p, 0).x;
+    let last = history_at(reproject(s, size, previous_projection(slot)), s.normal, size);
     var h = vec4<f32>(sun, sky, sky * sky, 0.0);
     var short = vec2<f32>(sun, sky);
     var sun_weight = 0.0;
@@ -3648,7 +3743,7 @@ fn local_temporal(@builtin(global_invocation_id) id: vec3<u32>, @builtin(workgro
         }
         // The 2x2 texels about the hit last frame that hold its surface.
         // No history after a frame without local lights (none was kept).
-        var r = reproject(s, size);
+        var r = reproject(s, size, previous_projection(hit.x));
         if local_present[4] == 0u { r.depth = 0.0; }
         let packed = pack_unit(s.normal);
         var texels: array<u32, 4>;
@@ -3783,21 +3878,21 @@ var<workgroup> w_base: u32;
 // wants.
 fn wanted_node(v: vec2<u32>, t: f32, p: vec2<u32>, size: vec2<u32>) -> vec4<i32> {
     let key = chunk_keys[v.x];
-    let level = key.x >> 8u;
+    let level = key_level(key.x);
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     var size_m = length(statics[v.x].m0.xyz);
     if exact_level(level) { size_m = length(cell_frame(v.x, cell).m0.xyz); }
     let n = clamp(i32(ceil(log2(max(size_m / max(pixel_width(p, size, t), 1e-6), 1e-3)))) + 2, 0, level);
     // Up to six levels finer, the node's 64 cells hold the hit's whole cell.
     if n <= 6 {
-        return vec4<i32>((key.x & 7) | ((level - n) << 8u), (key.yzw * 64 + cell) >> vec3<u32>(u32(6 - n)));
+        return vec4<i32>(key_x(key.x & 7, level - n), (key.yzw * 64 + cell) >> vec3<u32>(u32(6 - n)));
     }
     let c = cell_frame(v.x, cell);
     let position = pixel_ray(p, size) * t;
     let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
     let frac = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(0.999));
     let fine = ((key.yzw * 64 + cell) << vec3<u32>(u32(n))) + vec3<i32>(floor(frac * f32(1 << u32(n))));
-    return vec4<i32>((key.x & 7) | ((level - n) << 8u), fine >> vec3<u32>(6u));
+    return vec4<i32>(key_x(key.x & 7, level - n), fine >> vec3<u32>(6u));
 }
 
 @compute @workgroup_size(16, 16)
@@ -3812,7 +3907,7 @@ fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     if all(p < size) {
         let v = textureLoad(hit_visibility, vec2<i32>(p), 0).xy;
         let t = textureLoad(hit_distance, vec2<i32>(p), 0).r;
-        if v.x != NONE && t > 0.0 { key = wanted_node(v, t, p, size); }
+        if v.x != NONE && t > 0.0 && ours(v.x) { key = wanted_node(v, t, p, size); }
     }
     w_keys[li] = key;
     workgroupBarrier();
@@ -3898,17 +3993,17 @@ fn probe_start(c: vec4<i32>, org: vec3<f32>, r: i32) -> ProbeStart {
     }
     if at.level == LOST { return out; }
     if exact_level(at.level) {
-        out.walk = Walk(0u, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
+        out.walk = Walk(0u, vec4<i32>(key_x(face, at.level), 0, 0, 0), at.lo, at.hi, false);
         out.ok = true;
         return out;
     }
     var f = at.frame;
     for (var l = at.level; l >= 0 && f == NONE; l--) {
-        f = frame_near(vec4<i32>(face | (l << 8u), (c.xyz >> vec3<u32>(u32(l))) >> vec3<u32>(6u)));
+        f = frame_near(vec4<i32>(key_x(face, l), (c.xyz >> vec3<u32>(u32(l))) >> vec3<u32>(6u)));
     }
     if f == NONE { return out; }
     let fk = chunk_keys[f];
-    let diff = at.level - (fk.x >> 8u);
+    let diff = at.level - (key_level(fk.x));
     out.walk = Walk(f, fk, to_frame(at.lo, diff, fk, true), clip_to_face(to_frame(at.hi, diff, fk, false), fk), false);
     out.ok = true;
     return out;
@@ -3925,17 +4020,19 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = gi_rays[id.x];
     let q = vec2<u32>(id.x & 63u, id.x >> 6u);
     let r = fade_dither(q);
-    let start = probe_start(gi_cells[ray.probe], ray.origin.xyz, r);
+    // In the primary volume's frame (its probes were located there).
+    let org = to_local(ray.origin.xyz);
+    let start = probe_start(gi_cells[ray.probe], org, r);
     if start.rock {
         gi_hits[id.x] = GiHit(1e-3, gi_pack_unit(ray.dir), 0u, 1u);
         return;
     }
     if !start.ok { return; }
-    let end = walk(start.walk, ray.origin.xyz, ray.dir, 0.0, ray.origin.w, r, 96u, false, q);
+    let end = walk(start.walk, org, to_local(ray.dir), 0.0, ray.origin.w, r, 96u, false, q);
     if !end.hit { return; }
     let c = cell_frame(end.slot, end.cell);
     let axis = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
-    let n = normalize(axis) * select(-1.0, 1.0, end.sign == 1u);
+    let n = to_world(normalize(axis) * select(-1.0, 1.0, end.sign == 1u));
     let material = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
     // The sun from off the hit's face by half its cell; through a cell
     // that lets light through, from off its far side.
@@ -4026,12 +4123,14 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     // Walked from under the query start by the tile drop (`frac.w`), where drawn
     // chunks are near; lower, a step at a time, where none is near enough to start
     // from (rock ends it: the ground is over the start there).
-    let up = normalize(query.up);
+    // In the primary volume's frame (its tiles were placed there).
+    let up = to_local(normalize(query.up));
+    let from_eye = to_local(query.start - probe_frame.eye.xyz);
     var drop = tile.frac.w;
     var org = vec3<f32>(0.0);
     var start: ProbeStart;
     for (var attempt = 0u; attempt < PROBE_ATTEMPTS; attempt++) {
-        org = query.start - probe_frame.eye.xyz - up * drop;
+        org = from_eye - up * drop;
         let d = org - tile.at.xyz;
         let c = tile.frac.xyz + vec3<f32>(dot(tile.j0.xyz, d), dot(tile.j1.xyz, d), dot(tile.j2.xyz, d));
         start = probe_start(vec4<i32>(tile.cell.xyz + vec3<i32>(floor(c)), tile.cell.w), org, 0);
@@ -4053,7 +4152,7 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
                 let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
                 let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
                 let colour = material_albedo(min(m, 31u), p, 0u, 0.4, 0.0);
-                hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(n), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
+                hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(to_world(n)), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
             }
         }
     }

@@ -18,6 +18,7 @@
 //! [`ChunkWorld::take_ground_changes`]: super::ChunkWorld::take_ground_changes
 
 use crate::grid::Grid;
+use crate::volume::VolumeTransform;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
 use helio_pass_foliage_place::{GroundChart, GroundGeometry, TileFrame, FOLIAGE_TILE_SIZE_METERS};
@@ -27,24 +28,31 @@ use std::sync::{Mutex, RwLock};
 /// it is over.
 const CHART_HYSTERESIS: f64 = 1.0 / 16.0;
 
-/// The planet's tiling for foliage. Its grid is set once the planet is known
-/// ([`Self::set_grid`]); until then it has no chart.
+/// The primary volume's tiling for foliage (in the world: its grid placed
+/// by its transform). Its grid is set once the volume is known
+/// ([`Self::set_volume`]); until then it has no chart.
 #[derive(Default)]
 pub struct PlanetGround {
-    grid: RwLock<Option<Grid>>,
+    grid: RwLock<Option<(Grid, VolumeTransform)>>,
     face: Mutex<Option<u8>>,
 }
 
 impl PlanetGround {
-    pub fn set_grid(&self, grid: Grid) {
+    /// Foliage grows on `grid` placed by `transform`.
+    pub fn set_volume(&self, grid: Grid, transform: VolumeTransform) {
         let mut current = self.grid.write().expect("planet ground");
-        if current.as_ref() != Some(&grid) {
-            *current = Some(grid);
+        if current.map(|(g, _)| g) != Some(grid) {
             *self.face.lock().expect("planet ground") = None;
         }
+        *current = Some((grid, transform));
     }
 
-    fn grid(&self) -> Option<Grid> {
+    /// Foliage grows on `grid` in the world's frame.
+    pub fn set_grid(&self, grid: Grid) {
+        self.set_volume(grid, VolumeTransform::IDENTITY);
+    }
+
+    fn grid(&self) -> Option<(Grid, VolumeTransform)> {
         *self.grid.read().expect("planet ground")
     }
 
@@ -56,7 +64,8 @@ impl PlanetGround {
 
 impl GroundGeometry for PlanetGround {
     fn chart(&self, eye: DVec3) -> Option<GroundChart> {
-        let grid = self.grid()?;
+        let (grid, transform) = self.grid()?;
+        let eye = transform.to_local(eye);
         let n = f64::from(grid.cells());
         let mut face = self.face.lock().expect("planet ground");
         let within = |f: u8| {
@@ -78,7 +87,7 @@ impl GroundGeometry for PlanetGround {
     }
 
     fn tile_frame(&self, chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame> {
-        let grid = self.grid()?;
+        let (grid, transform) = self.grid()?;
         let face = u8::try_from(chart).ok()?;
         let base = Self::tile_cells(&grid);
         let n = base * f64::from(span.max(1));
@@ -86,16 +95,16 @@ impl GroundGeometry for PlanetGround {
         let at = |i: f64, j: f64| grid.position(face, [i, j, 0.0]);
         let origin = at(i0, j0);
         Some(TileFrame {
-            origin,
-            axis_u: at(i0 + n, j0) - origin,
-            axis_v: at(i0, j0 + n) - origin,
-            up: grid.up(at(i0 + n * 0.5, j0 + n * 0.5)),
+            origin: transform.to_world(origin),
+            axis_u: transform.dir_to_world(at(i0 + n, j0) - origin),
+            axis_v: transform.dir_to_world(at(i0, j0 + n) - origin),
+            up: transform.dir_to_world(grid.up(at(i0 + n * 0.5, j0 + n * 0.5))),
         })
     }
 
     fn locate(&self, chart: u64, p: DVec3) -> Option<[f64; 2]> {
-        let grid = self.grid()?;
-        let c = grid.face_coords(u8::try_from(chart).ok()?, p)?;
+        let (grid, transform) = self.grid()?;
+        let c = grid.face_coords(u8::try_from(chart).ok()?, transform.to_local(p))?;
         let s = grid.voxel_size();
         Some([c[0] * s, c[1] * s])
     }
