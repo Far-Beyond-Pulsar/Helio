@@ -17,7 +17,7 @@
 //!   `HELIO_VOXEL_GEN_BENCH=rounds` then generates its tiles again that many
 //!   times (`GENBENCH`: the GPU's generation time by kernel).
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
-//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide` flies through the
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide|sway` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
 //!
@@ -1392,7 +1392,39 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
-/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide`: a flight
+/// Every GPU allocation the device holds (wgpu's allocator), by label,
+/// largest first, to `<out>/memory_<mode>.csv` and a summary line: what the
+/// renderer keeps in GPU memory, item by item.
+fn memory_report(flight: &Flight, mode: &str) {
+    let Some(report) = flight.device.generate_allocator_report() else {
+        return;
+    };
+    let mut by_label: std::collections::HashMap<&str, (u64, usize)> = Default::default();
+    for a in &report.allocations {
+        let entry = by_label.entry(a.name.as_str()).or_default();
+        entry.0 += a.size;
+        entry.1 += 1;
+    }
+    let mut rows: Vec<_> = by_label.into_iter().collect();
+    rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+    let mut csv = String::from("label,mb,count
+");
+    for (label, (bytes, n)) in &rows {
+        csv += &format!("\"{}\",{:.2},{n}
+", label.replace('"', "'"), *bytes as f64 / 1048576.0);
+    }
+    let _ = std::fs::write(flight.output.join(format!("memory_{mode}.csv")), csv);
+    eprintln!(
+        "MEMORY {mode}: {:.0} MB allocated in {} allocations ({} labels), {:.0} MB reserved in {} blocks",
+        report.total_allocated_bytes as f64 / 1048576.0,
+        report.allocations.len(),
+        rows.len(),
+        report.total_reserved_bytes as f64 / 1048576.0,
+        report.blocks.len()
+    );
+}
+
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide|sway`: a flight
 /// through the renderer in real time (the path follows the wall clock, as a
 /// game's camera does: a slow frame moves it further), from 2 m to 400 km
 /// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
@@ -1422,6 +1454,18 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         if mode == "cruise" {
             let eye = planet.surface_point(ground + ahead * (300.0 * t), 40.0);
             return (eye, (ahead - up * 0.15).normalize().as_vec3());
+        }
+        if mode == "sway" {
+            // 60 m over the ground, the view swaying 10 degrees either way
+            // over a minute: an editor left open with a camera barely
+            // touched (memory soaks).
+            let side = up.cross(ahead);
+            let a = 10f64.to_radians() * (t * std::f64::consts::TAU / 60.0).sin();
+            let look = ahead * a.cos() + side * a.sin();
+            return (
+                planet.surface_point(ground, 60.0),
+                (look - up * 0.35).normalize().as_vec3(),
+            );
         }
         if mode == "dig" {
             // 6 m over the ground looking ahead and down; a ball is dug
@@ -1944,6 +1988,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         flight.capture(&format!("stress_{mode}_{n:02}_ref2"));
     }
     refinement_gate(&flight.output, mode, samples.len());
+    memory_report(flight, mode);
     // `HELIO_VOXEL_PICKS`: the last sample's view, settled, against the CPU.
     if let Some(&(eye, forward)) = samples.last() {
         pick_probe(flight, mode, eye, forward);
