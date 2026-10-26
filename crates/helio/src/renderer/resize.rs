@@ -62,17 +62,24 @@ impl Renderer {
 
         self.clear_target_next_frame = true;
 
-        // Same recipe the current graph was built from, at the new size:
-        // one stored config, not a field per pass-specific flag, so no
-        // setting can be dropped by a rebuild (Helio#254/#255).
-        let config = RendererConfig {
-            width,
-            height,
-            ..self.renderer_config()
-        };
-        if let Some(replacement) = self.build_replacement_graph(config) {
-            self.install_replacement_graph(replacement);
+        if std::mem::take(&mut self.pending_graph_rebuild) {
+            // A graph-level setting or pass topology changed along with this
+            // resize. Rebuild from the stored config so those changes reach
+            // the passes (Helio#254/#255).
+            let config = RendererConfig {
+                width,
+                height,
+                ..self.renderer_config()
+            };
+            if let Some(replacement) = self.build_replacement_graph(config) {
+                self.install_replacement_graph(replacement);
+            } else {
+                self.graph.set_render_size(internal_w, internal_h);
+            }
         } else {
+            // Resizing is common while docking and dragging the editor. Keep
+            // the pass instances, pipelines and their persistent state; only
+            // resize graph-owned textures and notify passes of the new size.
             self.graph.set_render_size(internal_w, internal_h);
         }
 
@@ -111,8 +118,12 @@ impl Renderer {
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {
-        self.render_scale = scale.clamp(0.25, 1.0);
-        self.set_render_size(self.output_width, self.output_height);
+        let scale = scale.clamp(0.25, 1.0);
+        if (self.render_scale - scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.render_scale = scale;
+        self.pending_resize = Some((self.output_width, self.output_height));
     }
 
     /// Change temporal resolve when scene content becomes available after the
@@ -125,6 +136,7 @@ impl Renderer {
         }
         self.tsr_quality = quality;
         self.render_scale = scale;
+        self.pending_graph_rebuild = true;
         self.pending_resize = Some((self.output_width, self.output_height));
     }
 

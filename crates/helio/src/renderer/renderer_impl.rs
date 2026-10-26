@@ -13,7 +13,7 @@ use super::config::{RenderMode, RendererConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use super::stereo_mirror::StereoMirror;
 
-/// Closure that rebuilds the render graph on resize.
+/// Closure that rebuilds the render graph when graph-level configuration changes.
 pub type GraphRebuilder = Arc<
     dyn Fn(
             &Arc<wgpu::Device>,
@@ -28,7 +28,7 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
-/// Reapplies application-owned pass settings after a resize rebuilds the graph.
+/// Reapplies application-owned pass settings after a graph rebuild.
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
@@ -100,8 +100,8 @@ pub struct Renderer {
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
-    /// rebuild (resize, a config change) hands the graph builder, so the new
-    /// graph has the same passes and pass settings (Helio#254/#255).
+    /// rebuild hands the graph builder, so the new graph has the same passes
+    /// and pass settings (Helio#254/#255).
     ///
     /// Opaque to the renderer: it never interprets pass-specific fields
     /// (shadow atlas, SSR, foliage, portals, TSR, reflections), it only
@@ -165,6 +165,10 @@ pub struct Renderer {
     pub(crate) bake_scene: Option<helio_bake::SceneGeometry>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
+    /// A pending size update also needs a fresh graph because graph-level
+    /// settings or the pass topology changed. Ordinary viewport resizes keep
+    /// the existing passes and resize their resources in place.
+    pub(crate) pending_graph_rebuild: bool,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
@@ -183,7 +187,7 @@ pub struct Renderer {
     /// cameras and nothing else.
     pub(crate) xr_stage_transform: glam::Mat4,
     /// Templates registered by the user for the gbuffer (opaque) path.
-    /// Preserved across graph rebuilds (resize). Shared (not cloned) with
+    /// Preserved across graph rebuilds. Shared (not cloned) with
     /// passes and the GPU scene via `Arc<RwLock<_>>` — see
     /// `SharedTemplateRegistry` for why cloning this must be avoided.
     pub(crate) template_registry: SharedTemplateRegistry,
@@ -193,7 +197,7 @@ pub struct Renderer {
     pub(crate) transparent_template_registry: SharedTemplateRegistry,
     pub(crate) render_mode: RenderMode,
     /// Whether the render graph was built in OpenXR multiview mode. Mirrors
-    /// `config.enable_xr` and is preserved across graph rebuilds (resize) so an
+    /// `config.enable_xr` and is preserved across graph rebuilds so an
     /// opt-in is not silently lost.
     pub(crate) enable_xr: bool,
     #[cfg(not(target_arch = "wasm32"))]
@@ -377,6 +381,7 @@ impl Renderer {
     /// Rebuild the graph from [`Self::renderer_config`] before the next frame.
     /// No-op for graphs installed without a rebuilder.
     pub fn request_graph_rebuild(&mut self) {
+        self.pending_graph_rebuild = true;
         self.pending_resize = Some((self.output_width, self.output_height));
     }
 
