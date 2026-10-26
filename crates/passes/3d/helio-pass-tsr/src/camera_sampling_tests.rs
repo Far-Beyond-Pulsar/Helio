@@ -141,9 +141,21 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
         assert_eq!(words[5], previous_uv[1].to_bits());
         // Reset uses the current view; subsequent unchanged-origin frames
         // reproject with the preceding raw view exactly.
-        let expected_view = if index == 0 { camera.view } else { previous_view };
-        let expected = Reprojection::new(camera.view_proj, [0.0; 3], camera.prev_view_proj, expected_view);
-        assert_eq!(&words[8..36], bytemuck::cast_slice::<Reprojection, u32>(&[expected]));
+        let expected_view = if index == 0 {
+            camera.view
+        } else {
+            previous_view
+        };
+        let expected = Reprojection::new(
+            camera.view_proj,
+            [0.0; 3],
+            camera.prev_view_proj,
+            expected_view,
+        );
+        assert_eq!(
+            &words[8..36],
+            bytemuck::cast_slice::<Reprojection, u32>(&[expected])
+        );
         previous_view = camera.view;
         previous_view_proj = camera.view_proj;
         previous_uv = [camera.jitter_frame[0] * 0.5, -camera.jitter_frame[1] * 0.5];
@@ -154,8 +166,7 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
 
 #[test]
 fn resolved_view_publication_follows_resize() {
-    let instance =
-        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, _) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let mut pass = TsrPass::new(
@@ -180,7 +191,12 @@ fn resolved_view_publication_follows_resize() {
             .unwrap();
         assert_eq!(published, &pass.output_view);
         for history in &pass.histories {
-            for texture in [&history.color, &history.depth_coarse, &history.state, &history.noise] {
+            for texture in [
+                &history.color,
+                &history.depth_coarse,
+                &history.state,
+                &history.noise,
+            ] {
                 assert_eq!(texture.size(), pass.output_texture.size());
             }
         }
@@ -194,8 +210,7 @@ fn resolved_view_publication_follows_resize() {
 fn reprojection_removes_both_jitters_without_removing_camera_motion() {
     use wgpu::util::DeviceExt;
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let source = helio_core::shader::resolve(include_str!("../shaders/tsr_main.wgsl"));
@@ -261,7 +276,8 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
                 let mut view_proj = identity;
                 view_proj[12] = current[0];
                 view_proj[13] = current[1];
-                uniform.reprojection = Reprojection::new(view_proj, [0.0; 3], camera.prev_view_proj, previous_view);
+                uniform.reprojection =
+                    Reprojection::new(view_proj, [0.0; 3], camera.prev_view_proj, previous_view);
                 uniform.previous_jitter_uv = [previous[0] * 0.5, -previous[1] * 0.5];
                 let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
@@ -320,8 +336,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
 #[test]
 fn depth_history_rejects_disocclusion_and_invalid_samples() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let source = helio_core::shader::resolve(include_str!("../shaders/tsr_main.wgsl"));

@@ -231,7 +231,14 @@ pub fn raster(
         clipped_tris: 0,
     };
     for t in tris {
-        let s = tri_setup(t.v[0], t.v[1], t.v[2], [width as i32, height as i32], cull_back, t.mirrored);
+        let s = tri_setup(
+            t.v[0],
+            t.v[1],
+            t.v[2],
+            [width as i32, height as i32],
+            cull_back,
+            t.mirrored,
+        );
         match s.kind {
             Kind::Clipped => {
                 out.clipped_tris += 1;
@@ -242,7 +249,10 @@ pub fn raster(
             Kind::Int => {}
         }
         let (tx0, ty0) = (s.px0 as u32 >> 4, s.py0 as u32 >> 4);
-        let (tx1, ty1) = ((s.px1 as u32 >> 4).min(tx0 + 7), (s.py1 as u32 >> 4).min(ty0 + 7));
+        let (tx1, ty1) = (
+            (s.px1 as u32 >> 4).min(tx0 + 7),
+            (s.py1 as u32 >> 4).min(ty0 + 7),
+        );
         for ty in ty0..=ty1 {
             for tx in tx0..=tx1 {
                 out.tile_counters[((ty * tiles_x + tx) * 2) as usize] += 1;
@@ -250,7 +260,9 @@ pub fn raster(
         }
         for y in s.py0..=s.py1 {
             for x in s.px0..=s.px1 {
-                let Some(d) = depth_at(&s, x, y) else { continue };
+                let Some(d) = depth_at(&s, x, y) else {
+                    continue;
+                };
                 let i = (y as u32 * width + x as u32) as usize;
                 if let Some(h) = hw_depth {
                     if d < h[i] {
@@ -293,7 +305,11 @@ mod tests {
     /// Front-facing (a2 < 0 in y-down pixel space) triangle at constant depth.
     fn tri(p: [[f32; 2]; 3], z: f32, id: u32) -> RefTri {
         let v = |q: [f32; 2]| [q[0], q[1], z, 1.0];
-        let mut t = RefTri { v: [v(p[0]), v(p[1]), v(p[2])], id, mirrored: false };
+        let mut t = RefTri {
+            v: [v(p[0]), v(p[1]), v(p[2])],
+            id,
+            mirrored: false,
+        };
         let s = tri_setup(t.v[0], t.v[1], t.v[2], [4096, 4096], false, false);
         if s.kind == Kind::Int && s.a2 > 0 || s.kind == Kind::Float && s.fa2 > 0.0 {
             t.v.swap(1, 2);
@@ -351,10 +367,19 @@ mod tests {
         let front = tri([[0.0, 0.0], [8.0, 0.0], [0.0, 8.0]], 0.5, 1);
         let mut back = front;
         back.v.swap(1, 2);
-        assert!(raster(&[back], 8, 8, None, true).keys.iter().all(|&k| k == 0));
-        assert!(raster(&[back], 8, 8, None, false).keys.iter().any(|&k| k != 0));
+        assert!(raster(&[back], 8, 8, None, true)
+            .keys
+            .iter()
+            .all(|&k| k == 0));
+        assert!(raster(&[back], 8, 8, None, false)
+            .keys
+            .iter()
+            .any(|&k| k != 0));
         back.mirrored = true;
-        assert!(raster(&[back], 8, 8, None, true).keys.iter().any(|&k| k != 0));
+        assert!(raster(&[back], 8, 8, None, true)
+            .keys
+            .iter()
+            .any(|&k| k != 0));
     }
 
     #[test]
@@ -372,7 +397,11 @@ mod tests {
         for j in 0..=n {
             for i in 0..=n {
                 let boundary = i == 0 || j == 0 || i == n || j == n;
-                let (jx, jy) = if boundary { (0.0, 0.0) } else { (rnd() * 1.0, rnd() * 1.0) };
+                let (jx, jy) = if boundary {
+                    (0.0, 0.0)
+                } else {
+                    (rnd() * 1.0, rnd() * 1.0)
+                };
                 grid[j * (n + 1) + i] = [4.0 + i as f32 * cell + jx, 4.0 + j as f32 * cell + jy];
             }
         }

@@ -143,12 +143,12 @@ impl Renderer {
     ///
     /// Keep it a rigid transform. Scale here would scale the interpupillary distance
     /// along with everything else, which is a reliable way to make people motion-sick.
-    pub fn set_xr_stage_transform(&mut self, world_from_stage: glam::Mat4) {
+    pub(crate) fn set_xr_stage_transform(&mut self, world_from_stage: glam::Mat4) {
         self.xr_stage_transform = world_from_stage;
     }
 
     /// The current stage transform.
-    pub fn xr_stage_transform(&self) -> glam::Mat4 {
+    pub(crate) fn xr_stage_transform(&self) -> glam::Mat4 {
         self.xr_stage_transform
     }
 }

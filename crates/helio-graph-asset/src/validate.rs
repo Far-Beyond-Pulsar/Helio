@@ -71,7 +71,9 @@ pub struct Validation {
 
 impl Validation {
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.diagnostics.iter().filter(|d| d.severity == Severity::Error)
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
     }
 
     pub fn has_errors(&self) -> bool {
@@ -90,8 +92,18 @@ pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     let expanded = crate::sections::expand(asset);
     let flattened = crate::buffers::flatten(&expanded.asset, registry);
     let mut validation = validate_flat(&flattened.asset, registry);
-    validation.diagnostics.splice(0..0, expanded.diagnostics.into_iter().chain(flattened.diagnostics));
-    if validation.diagnostics.iter().any(|d| d.severity == Severity::Error) {
+    validation.diagnostics.splice(
+        0..0,
+        expanded
+            .diagnostics
+            .into_iter()
+            .chain(flattened.diagnostics),
+    );
+    if validation
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == Severity::Error)
+    {
         validation.plan = None;
     }
     validation.flat = Some(flattened.asset);
@@ -122,10 +134,22 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     for node in &asset.nodes {
         match registry.get(&node.kind) {
             Some(descriptor) => {
+                if let Some(reason) = descriptor.unsupported {
+                    if !is_disabled(node) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Warning,
+                            node: Some(node.id.clone()),
+                            message: format!("builds nothing: {reason}"),
+                        });
+                    }
+                }
                 let node_pins = descriptor.pins(&node.params);
                 for pin in node_pins.inputs.iter().chain(&node_pins.outputs) {
                     if pin.ty.kind != PinKind::Flow && pin.resource.trim().is_empty() {
-                        error!(Some(&node.id), format!("pin `{}` needs a resource name", pin.name));
+                        error!(
+                            Some(&node.id),
+                            format!("pin `{}` needs a resource name", pin.name)
+                        );
                     }
                 }
                 pins.push(Some(node_pins));
@@ -142,17 +166,27 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     let mut feeds: HashMap<(usize, &str), usize> = HashMap::new();
     for connection in &asset.connections {
         let (from, to) = (&connection.from, &connection.to);
-        let (Some(&from_idx), Some(&to_idx)) =
-            (index_of.get(from.node.as_str()), index_of.get(to.node.as_str()))
-        else {
-            error!(None::<&str>, format!("wire {}.{} -> {}.{} names a missing node", from.node, from.pin, to.node, to.pin));
+        let (Some(&from_idx), Some(&to_idx)) = (
+            index_of.get(from.node.as_str()),
+            index_of.get(to.node.as_str()),
+        ) else {
+            error!(
+                None::<&str>,
+                format!(
+                    "wire {}.{} -> {}.{} names a missing node",
+                    from.node, from.pin, to.node, to.pin
+                )
+            );
             continue;
         };
         let (Some(from_pins), Some(to_pins)) = (&pins[from_idx], &pins[to_idx]) else {
             continue; // the unknown kind is already reported
         };
         let Some(out_pin) = from_pins.outputs.iter().find(|p| p.name == from.pin) else {
-            error!(Some(&from.node), format!("has no output pin `{}`", from.pin));
+            error!(
+                Some(&from.node),
+                format!("has no output pin `{}`", from.pin)
+            );
             continue;
         };
         let Some(in_pin) = to_pins.inputs.iter().find(|p| p.name == to.pin) else {
@@ -177,37 +211,61 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
             let count = feeds.entry((to_idx, to.pin.as_str())).or_default();
             *count += 1;
             if *count == 2 {
-                error!(Some(&to.node), format!("input `{}` has more than one wire", to.pin));
+                error!(
+                    Some(&to.node),
+                    format!("input `{}` has more than one wire", to.pin)
+                );
             }
         }
         let flow = out_pin.ty.kind == PinKind::Flow;
-        if !edges.iter().any(|e| e.0 == from_idx && e.1 == to_idx && e.2 == in_pin.history && e.3 == flow) {
+        if !edges
+            .iter()
+            .any(|e| e.0 == from_idx && e.1 == to_idx && e.2 == in_pin.history && e.3 == flow)
+        {
             edges.push((from_idx, to_idx, in_pin.history, flow));
         }
     }
 
     let outputs = asset.nodes.iter().filter(|n| n.kind == OUTPUT).count();
     if outputs != 1 {
-        error!(None::<&str>, format!("a render graph needs exactly one Output node, found {outputs}"));
+        error!(
+            None::<&str>,
+            format!("a render graph needs exactly one Output node, found {outputs}")
+        );
     }
-    let starts = asset.nodes.iter().filter(|n| n.kind == ON_FRAME_START).count();
+    let starts = asset
+        .nodes
+        .iter()
+        .filter(|n| n.kind == ON_FRAME_START)
+        .count();
     if starts != 1 {
-        error!(None::<&str>, format!("a render graph needs exactly one On Frame Start node, found {starts}"));
+        error!(
+            None::<&str>,
+            format!("a render graph needs exactly one On Frame Start node, found {starts}")
+        );
     }
 
     // History wires do not order the graph, so only the others can cycle.
-    let ordering: Vec<(usize, usize)> =
-        edges.iter().filter(|e| !e.2).map(|e| (e.0, e.1)).collect();
+    let ordering: Vec<(usize, usize)> = edges.iter().filter(|e| !e.2).map(|e| (e.0, e.1)).collect();
     if let Some(node) = find_cycle(asset.nodes.len(), &ordering) {
         error!(Some(&asset.nodes[node].id), "is part of a cycle".into());
     }
 
     if diagnostics.iter().any(|d| d.severity == Severity::Error) {
-        return Validation { diagnostics, plan: None, flat: None };
+        return Validation {
+            diagnostics,
+            plan: None,
+            flat: None,
+        };
     }
 
-    let disabled: Vec<usize> =
-        asset.nodes.iter().enumerate().filter(|(_, n)| is_disabled(n)).map(|(i, _)| i).collect();
+    let disabled: Vec<usize> = asset
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| is_disabled(n))
+        .map(|(i, _)| i)
+        .collect();
     let disabled_set: HashSet<usize> = disabled.iter().copied().collect();
 
     // What a bypassed node would have supplied is missing downstream.
@@ -285,8 +343,9 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     // Dependencies first, ties by the order nodes were authored.
     let mut order = Vec::new();
     let mut placed: HashSet<usize> = HashSet::new();
-    let building: Vec<usize> =
-        (0..asset.nodes.len()).filter(|i| !disabled_set.contains(i)).collect();
+    let building: Vec<usize> = (0..asset.nodes.len())
+        .filter(|i| !disabled_set.contains(i))
+        .collect();
     while order.len() < building.len() {
         let next = building
             .iter()
@@ -303,7 +362,11 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
         order.push(next);
     }
 
-    Validation { diagnostics, plan: Some(Plan { order, disabled }), flat: None }
+    Validation {
+        diagnostics,
+        plan: Some(Plan { order, disabled }),
+        flat: None,
+    }
 }
 
 fn describe(ty: PinType, resource: &str) -> String {
@@ -333,7 +396,11 @@ fn find_cycle(count: usize, edges: &[(usize, usize)]) -> Option<usize> {
             }
         }
     }
-    (removed < count).then(|| (0..count).find(|i| indegree[*i] > 0).expect("a remaining node"))
+    (removed < count).then(|| {
+        (0..count)
+            .find(|i| indegree[*i] > 0)
+            .expect("a remaining node")
+    })
 }
 
 #[cfg(test)]
@@ -359,7 +426,10 @@ mod tests {
     }
 
     fn wire(a: &str, ap: &str, b: &str, bp: &str) -> Connection {
-        Connection { from: PinRef::new(a, ap), to: PinRef::new(b, bp) }
+        Connection {
+            from: PinRef::new(a, ap),
+            to: PinRef::new(b, bp),
+        }
     }
 
     fn registry() -> NodeRegistry {
@@ -380,7 +450,10 @@ mod tests {
     }
 
     fn order_ids(asset: &GraphAsset, plan: &Plan) -> Vec<String> {
-        plan.order.iter().map(|i| asset.nodes[*i].id.clone()).collect()
+        plan.order
+            .iter()
+            .map(|i| asset.nodes[*i].id.clone())
+            .collect()
     }
 
     #[test]
@@ -431,6 +504,35 @@ mod tests {
     }
 
     #[test]
+    fn an_unsupported_node_is_reported_but_still_builds() {
+        let mut registry = registry();
+        registry.register(
+            NodeDescriptor::new("t.caps", "Caps", "Test", "", |_| Ok(()))
+                .with_pins(vec![PinDesc::flow("in")], vec![PinDesc::flow("out")])
+                .with_unsupported("the platform cannot do this"),
+        );
+        let mut asset = graph();
+        asset.nodes.push(node("caps", "t.caps", None));
+        asset
+            .connections
+            .push(wire("start", "out", "caps", "in"));
+        asset
+            .connections
+            .push(wire("caps", "out", "out", "in"));
+        let validation = validate(&asset, &registry);
+        let warned = validation.diagnostics.iter().any(|d| {
+            d.severity == Severity::Warning && d.message.contains("builds nothing") && d.node.as_deref() == Some("caps")
+        });
+        assert!(warned, "{:?}", validation.diagnostics);
+        assert!(!validation.has_errors());
+        assert!(validate(&asset, &registry).plan.is_some());
+
+        asset.nodes[2].params.insert("enabled".into(), json!(false));
+        let validation = validate(&asset, &registry);
+        assert!(validation.diagnostics.iter().all(|d| d.node.as_deref() != Some("caps")));
+    }
+
+    #[test]
     fn rejects_mismatched_pins_and_unknown_kinds() {
         let mut asset = graph();
         asset.nodes.push(node("buf", PERSISTENT_BUFFER, Some("b")));
@@ -438,8 +540,14 @@ mod tests {
         asset.connections.push(wire("buf", "b", "out", "in"));
         let result = validate(&asset, &registry());
         let messages: Vec<_> = result.errors().map(|d| d.message.clone()).collect();
-        assert!(messages.iter().any(|m| m.contains("cannot feed")), "{messages:?}");
-        assert!(messages.iter().any(|m| m.contains("unknown node kind")), "{messages:?}");
+        assert!(
+            messages.iter().any(|m| m.contains("cannot feed")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("unknown node kind")),
+            "{messages:?}"
+        );
     }
 
     #[test]
@@ -447,7 +555,10 @@ mod tests {
         let mut registry = registry();
         registry.register(
             NodeDescriptor::new("t.pass", "Pass", "Test", "", |_| Ok(())).with_pins(
-                vec![PinDesc::resource(PinType::TEXTURE, "a"), PinDesc::flow("in")],
+                vec![
+                    PinDesc::resource(PinType::TEXTURE, "a"),
+                    PinDesc::flow("in"),
+                ],
                 vec![PinDesc::flow("out")],
             ),
         );
@@ -508,7 +619,10 @@ mod tests {
         let plan = result.plan.expect("valid");
         let ids = order_ids(&asset, &plan);
         let at = |id: &str| ids.iter().position(|k| k == id).unwrap();
-        assert!(at("a") < at("b"), "a (writer of x) builds before b: {ids:?}");
+        assert!(
+            at("a") < at("b"),
+            "a (writer of x) builds before b: {ids:?}"
+        );
     }
 
     #[test]
@@ -520,7 +634,9 @@ mod tests {
         asset.nodes.push(node("b", "t.flow", None));
         asset.connections.push(wire("a", "out", "b", "in"));
         asset.connections.push(wire("b", "out", "a", "in"));
-        assert!(validate(&asset, &registry).errors().any(|d| d.message.contains("cycle")));
+        assert!(validate(&asset, &registry)
+            .errors()
+            .any(|d| d.message.contains("cycle")));
 
         let mut asset = graph();
         asset.nodes.push(node("t1", TEXTURE, Some("x")));

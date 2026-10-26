@@ -7,7 +7,8 @@
 use glam::{Mat4, Vec3, Vec4};
 
 const SHADOW_WGSL: &str = include_str!("../shaders/shadow.wgsl");
-const SHADOW_DIRTY_WGSL: &str = include_str!("../../helio-pass-shadow-dirty/shaders/shadow_dirty.wgsl");
+const SHADOW_DIRTY_WGSL: &str =
+    include_str!("../../helio-pass-shadow-dirty/shaders/shadow_dirty.wgsl");
 
 /// The page-mask helpers of `source`: from `fn ratio_range` through the end of
 /// `fn sphere_pages`.
@@ -127,7 +128,9 @@ fn pages_on_gpu(cases: &[Case], helpers: &str) -> Option<Vec<[u32; 2]>> {
         }
         encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, bytes);
         queue.submit(Some(encoder.finish()));
-        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let mapped = staging.slice(..).get_mapped_range().unwrap();
         let words: &[u32] = bytemuck::cast_slice(&mapped);
@@ -136,7 +139,11 @@ fn pages_on_gpu(cases: &[Case], helpers: &str) -> Option<Vec<[u32; 2]>> {
 }
 
 fn view(rng: &mut Rng, perspective: bool) -> Mat4 {
-    let eye = Vec3::new(rng.range(-5.0, 5.0), rng.range(2.0, 8.0), rng.range(-5.0, 5.0));
+    let eye = Vec3::new(
+        rng.range(-5.0, 5.0),
+        rng.range(2.0, 8.0),
+        rng.range(-5.0, 5.0),
+    );
     let target = Vec3::new(rng.range(-2.0, 2.0), 0.0, rng.range(-2.0, 2.0));
     let look = Mat4::look_at_rh(eye, target, Vec3::Y);
     let projection = if perspective {
@@ -159,14 +166,21 @@ fn page_masks_contain_every_point_of_the_sphere() {
     let mut cases = Vec::new();
     for i in 0..4000 {
         let matrix = view(&mut rng, i % 2 == 0);
-        let center = Vec3::new(rng.range(-8.0, 8.0), rng.range(-1.0, 6.0), rng.range(-8.0, 8.0));
+        let center = Vec3::new(
+            rng.range(-8.0, 8.0),
+            rng.range(-1.0, 6.0),
+            rng.range(-8.0, 8.0),
+        );
         let radius = rng.range(0.05, 3.0);
         cases.push(Case {
             matrix: matrix.to_cols_array(),
             sphere: [center.x, center.y, center.z, radius],
         });
     }
-    for (label, source) in [("shadow.wgsl", SHADOW_WGSL), ("shadow_dirty.wgsl", SHADOW_DIRTY_WGSL)] {
+    for (label, source) in [
+        ("shadow.wgsl", SHADOW_WGSL),
+        ("shadow_dirty.wgsl", SHADOW_DIRTY_WGSL),
+    ] {
         let Some(masks) = pages_on_gpu(&cases, page_helpers(source)) else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: page mask");
             return;
@@ -233,6 +247,14 @@ fn a_small_sphere_dirties_few_pages_and_a_huge_one_all() {
         return;
     };
     let count = |m: [u32; 2]| m[0].count_ones() + m[1].count_ones();
-    assert!(count(masks[0]) >= 1 && count(masks[0]) <= 8, "{:?}", masks[0]);
-    assert_eq!(count(masks[1]), 64, "a sphere around the camera covers every page");
+    assert!(
+        count(masks[0]) >= 1 && count(masks[0]) <= 8,
+        "{:?}",
+        masks[0]
+    );
+    assert_eq!(
+        count(masks[1]),
+        64,
+        "a sphere around the camera covers every page"
+    );
 }

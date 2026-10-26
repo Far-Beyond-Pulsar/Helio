@@ -699,7 +699,9 @@ pub fn validate_wgsl(resolved: &str, line_offset: usize) -> Result<(), ShaderErr
     };
 
     let module = naga::front::wgsl::parse_str(resolved).map_err(|error| {
-        let line = error.location(resolved).map(|location| location.line_number);
+        let line = error
+            .location(resolved)
+            .map(|location| location.line_number);
         describe(error.to_string(), error.emit_to_string(resolved), line)
     })?;
     naga::valid::Validator::new(
@@ -712,7 +714,11 @@ pub fn validate_wgsl(resolved: &str, line_offset: usize) -> Result<(), ShaderErr
             .spans()
             .find(|context| context.0.is_defined())
             .map(|context| context.0.location(resolved).line_number);
-        describe(error.as_inner().to_string(), error.emit_to_string(resolved), line)
+        describe(
+            error.as_inner().to_string(),
+            error.emit_to_string(resolved),
+            line,
+        )
     })?;
     Ok(())
 }
@@ -783,7 +789,10 @@ fn handle_change(path: &Path) {
             continue;
         }
         let resolved = super::resolve_from(&item.text, &item.snippets, &snapshot);
-        let offset = resolved.lines().count().saturating_sub(item.text.lines().count());
+        let offset = resolved
+            .lines()
+            .count()
+            .saturating_sub(item.text.lines().count());
         if let Err(error) = validate_wgsl(&resolved, offset) {
             let diagnostic = ShaderDiagnostic {
                 path: item.path.clone(),
@@ -818,12 +827,7 @@ fn handle_change(path: &Path) {
 
 /// Whether a shader with `source` expands against the prelude/snippet at
 /// `path`.
-fn depends_on(
-    snapshot: &Snapshot,
-    source: &str,
-    snippets: &[ShaderSnippet],
-    path: &Path,
-) -> bool {
+fn depends_on(snapshot: &Snapshot, source: &str, snippets: &[ShaderSnippet], path: &Path) -> bool {
     if super::uses_prelude(source)
         && snapshot.path_of(&PRELUDE_FILE).map(PathBuf::as_path) == Some(path)
     {
@@ -846,7 +850,10 @@ pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         !std::env::var("HELIO_SHADER_HOT_RELOAD").is_ok_and(|value| {
-            matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off")
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off"
+            )
         })
     })
 }
@@ -1054,7 +1061,9 @@ mod tests {
         let before = current_source(&source, "test", &[], true);
         assert_eq!(before, "EMBEDDED TEXT");
 
-        let path = state().path_of(&SELF_FILE).expect("hot.rs should be locatable");
+        let path = state()
+            .path_of(&SELF_FILE)
+            .expect("hot.rs should be locatable");
         set_override(path.clone(), "OVERRIDDEN TEXT");
         let after = current_source(&source, "test", &[], true);
         assert_eq!(after, "OVERRIDDEN TEXT");
@@ -1081,7 +1090,9 @@ mod tests {
         let src = "//!use hot_test_snippet\nbody";
         assert!(resolve_with(src, &[snippet]).contains("// embedded snippet"));
 
-        let path = state().path_of(&SNIPPET_FILE).expect("directives.rs should be locatable");
+        let path = state()
+            .path_of(&SNIPPET_FILE)
+            .expect("directives.rs should be locatable");
         set_override(path.clone(), "// overridden snippet");
         let resolved = resolve_with(src, &[snippet]);
         state().overrides.remove(&path);
@@ -1106,7 +1117,14 @@ mod tests {
             "../shaders/a.wgsl",
         )
         .expect("suffix match should resolve");
-        assert_eq!(found, crate_dir.join("shaders").join("a.wgsl").canonicalize().unwrap());
+        assert_eq!(
+            found,
+            crate_dir
+                .join("shaders")
+                .join("a.wgsl")
+                .canonicalize()
+                .unwrap()
+        );
 
         assert!(resolve_in(&[crate_dir], "src/lib.rs", "../shaders/missing.wgsl").is_none());
         let _ = std::fs::remove_dir_all(&root);
@@ -1122,7 +1140,8 @@ mod tests {
     fn validation_reports_the_original_file_line() {
         // Prelude-using shader with the mistake on line 4 of the file the
         // author edits; naga sees it after the prelude's lines.
-        let original = "//!use helio_prelude\n\n@compute @workgroup_size(1)\nfn main() { let x: u32 = ; }\n";
+        let original =
+            "//!use helio_prelude\n\n@compute @workgroup_size(1)\nfn main() { let x: u32 = ; }\n";
         let resolved = resolve_with(original, &[]);
         let offset = resolved.lines().count() - original.lines().count();
         assert_eq!(offset, expanded_lines_with(original, &[]));
@@ -1135,14 +1154,17 @@ mod tests {
     #[test]
     fn validation_rejects_semantic_errors() {
         // Parses, but negating a u32 does not validate.
-        let src = "@compute @workgroup_size(1)\nfn main() {\n    let a: u32 = 1u;\n    let b = -a;\n}\n";
+        let src =
+            "@compute @workgroup_size(1)\nfn main() {\n    let a: u32 = 1u;\n    let b = -a;\n}\n";
         let error = validate_wgsl(src, 0).expect_err("semantic error must be rejected");
         assert_eq!(error.line, Some(4), "message: {}", error.message);
     }
 
     #[test]
     fn fragments_without_entry_points_are_not_validated_standalone() {
-        assert!(!has_entry_point("fn helper() -> f32 { return unknown_binding; }"));
+        assert!(!has_entry_point(
+            "fn helper() -> f32 { return unknown_binding; }"
+        ));
         assert!(has_entry_point("@fragment fn fs() {}"));
     }
 
@@ -1164,15 +1186,17 @@ mod tests {
     /// A registry that knows the prelude and the Hi-Z style snippet file.
     fn registry() -> State {
         let mut state = State::default();
-        state
-            .paths
-            .insert(path_key(&PRELUDE_FILE), Some(PathBuf::from(PRELUDE_ON_DISK)));
+        state.paths.insert(
+            path_key(&PRELUDE_FILE),
+            Some(PathBuf::from(PRELUDE_ON_DISK)),
+        );
         state
             .snippet_files
             .insert(PathBuf::from(PRELUDE_ON_DISK), PRELUDE);
-        state
-            .paths
-            .insert(path_key(&SNIPPET_FILE), Some(PathBuf::from(SNIPPET_ON_DISK)));
+        state.paths.insert(
+            path_key(&SNIPPET_FILE),
+            Some(PathBuf::from(SNIPPET_ON_DISK)),
+        );
         state
             .snippet_files
             .insert(PathBuf::from(SNIPPET_ON_DISK), "// snippet");
@@ -1213,15 +1237,32 @@ mod tests {
             crate_name_of("C:/work/crates/passes/3d/helio-pass-fxaa").as_deref(),
             Some("helio_pass_fxaa")
         );
-        assert_eq!(crate_name_of("/a/helio-core/").as_deref(), Some("helio_core"));
+        assert_eq!(
+            crate_name_of("/a/helio-core/").as_deref(),
+            Some("helio_core")
+        );
         assert_eq!(crate_name_of(""), None);
     }
 
     #[test]
     fn a_shader_edit_is_attributed_to_the_crate_that_embedded_it() {
         let mut state = registry();
-        add_shader(&mut state, "/w/fxaa/a.wgsl", "/w/helio-pass-fxaa", "FXAA", "// a", &[]);
-        add_shader(&mut state, "/w/ssr/b.wgsl", "/w/helio-pass-ssr", "SSR", "// b", &[]);
+        add_shader(
+            &mut state,
+            "/w/fxaa/a.wgsl",
+            "/w/helio-pass-fxaa",
+            "FXAA",
+            "// a",
+            &[],
+        );
+        add_shader(
+            &mut state,
+            "/w/ssr/b.wgsl",
+            "/w/helio-pass-ssr",
+            "SSR",
+            "// b",
+            &[],
+        );
 
         let attribution = state.attribute(&[PathBuf::from("/w/fxaa/a.wgsl")]);
         assert_eq!(attribution.owners, vec![owner("helio_pass_fxaa", "FXAA")]);
@@ -1232,8 +1273,22 @@ mod tests {
     #[test]
     fn two_labels_in_one_file_are_both_attributed() {
         let mut state = registry();
-        add_shader(&mut state, "/w/x/a.wgsl", "/w/helio-pass-x", "X vertex", "// a", &[]);
-        add_shader(&mut state, "/w/x/a.wgsl", "/w/helio-pass-x", "X pipeline", "// a", &[]);
+        add_shader(
+            &mut state,
+            "/w/x/a.wgsl",
+            "/w/helio-pass-x",
+            "X vertex",
+            "// a",
+            &[],
+        );
+        add_shader(
+            &mut state,
+            "/w/x/a.wgsl",
+            "/w/helio-pass-x",
+            "X pipeline",
+            "// a",
+            &[],
+        );
         let attribution = state.attribute(&[PathBuf::from("/w/x/a.wgsl")]);
         assert_eq!(attribution.owners.len(), 2);
         assert_eq!(attribution.crates().len(), 1);
@@ -1242,9 +1297,30 @@ mod tests {
     #[test]
     fn a_prelude_edit_fans_out_to_every_shader_that_opts_in() {
         let mut state = registry();
-        add_shader(&mut state, "/w/a.wgsl", "/w/helio-pass-a", "A", "//!use helio_prelude\n// a", &[]);
-        add_shader(&mut state, "/w/b.wgsl", "/w/helio-pass-b", "B", "//!use helio_prelude\n// b", &[]);
-        add_shader(&mut state, "/w/c.wgsl", "/w/helio-pass-c", "C", "// c, no prelude", &[]);
+        add_shader(
+            &mut state,
+            "/w/a.wgsl",
+            "/w/helio-pass-a",
+            "A",
+            "//!use helio_prelude\n// a",
+            &[],
+        );
+        add_shader(
+            &mut state,
+            "/w/b.wgsl",
+            "/w/helio-pass-b",
+            "B",
+            "//!use helio_prelude\n// b",
+            &[],
+        );
+        add_shader(
+            &mut state,
+            "/w/c.wgsl",
+            "/w/helio-pass-c",
+            "C",
+            "// c, no prelude",
+            &[],
+        );
 
         let attribution = state.attribute(&[PathBuf::from(PRELUDE_ON_DISK)]);
         assert_eq!(
@@ -1257,7 +1333,14 @@ mod tests {
     #[test]
     fn a_prelude_edit_is_unattributed_when_unregistered_shaders_use_it() {
         let mut state = registry();
-        add_shader(&mut state, "/w/a.wgsl", "/w/helio-pass-a", "A", "//!use helio_prelude", &[]);
+        add_shader(
+            &mut state,
+            "/w/a.wgsl",
+            "/w/helio-pass-a",
+            "A",
+            "//!use helio_prelude",
+            &[],
+        );
         // A pass compiled prelude-using text from a plain `&str`.
         state.note_untracked("//!use helio_prelude\nfn f() {}", &[]);
 
@@ -1269,15 +1352,39 @@ mod tests {
     #[test]
     fn a_snippet_edit_fans_out_to_the_shaders_that_use_its_marker() {
         let mut state = registry();
-        add_shader(&mut state, "/w/occ.wgsl", "/w/helio-pass-occ", "Occlusion", "//!use hiz\n// x", &[snippet()]);
-        add_shader(&mut state, "/w/ssr.wgsl", "/w/helio-pass-ssr", "SSR", "//!use hiz\n// y", &[snippet()]);
+        add_shader(
+            &mut state,
+            "/w/occ.wgsl",
+            "/w/helio-pass-occ",
+            "Occlusion",
+            "//!use hiz\n// x",
+            &[snippet()],
+        );
+        add_shader(
+            &mut state,
+            "/w/ssr.wgsl",
+            "/w/helio-pass-ssr",
+            "SSR",
+            "//!use hiz\n// y",
+            &[snippet()],
+        );
         // Declares the snippet but does not opt into it.
-        add_shader(&mut state, "/w/sky.wgsl", "/w/helio-pass-sky", "Sky", "// z", &[snippet()]);
+        add_shader(
+            &mut state,
+            "/w/sky.wgsl",
+            "/w/helio-pass-sky",
+            "Sky",
+            "// z",
+            &[snippet()],
+        );
 
         let attribution = state.attribute(&[PathBuf::from(SNIPPET_ON_DISK)]);
         assert_eq!(
             attribution.owners,
-            vec![owner("helio_pass_occ", "Occlusion"), owner("helio_pass_ssr", "SSR")]
+            vec![
+                owner("helio_pass_occ", "Occlusion"),
+                owner("helio_pass_ssr", "SSR")
+            ]
         );
         assert!(attribution.is_complete());
     }
@@ -1291,14 +1398,19 @@ mod tests {
         // Nothing recorded.
         assert!(!state.attribute(&[]).is_complete());
         // A file the registry has never heard of.
-        assert!(!state.attribute(&[PathBuf::from("/w/unknown.wgsl")]).is_complete());
+        assert!(!state
+            .attribute(&[PathBuf::from("/w/unknown.wgsl")])
+            .is_complete());
         // A shader without an owning crate.
-        assert!(!state.attribute(&[PathBuf::from("/w/orphan.wgsl")]).is_complete());
+        assert!(!state
+            .attribute(&[PathBuf::from("/w/orphan.wgsl")])
+            .is_complete());
         // A snippet nothing registered uses.
         let none = state.attribute(&[PathBuf::from(SNIPPET_ON_DISK)]);
         assert!(!none.is_complete() && none.owners.is_empty());
         // One unattributable file taints an otherwise attributable batch.
-        let mixed = state.attribute(&[PathBuf::from("/w/a.wgsl"), PathBuf::from("/w/unknown.wgsl")]);
+        let mixed =
+            state.attribute(&[PathBuf::from("/w/a.wgsl"), PathBuf::from("/w/unknown.wgsl")]);
         assert_eq!(mixed.owners, vec![owner("helio_pass_a", "A")]);
         assert!(!mixed.is_complete());
     }
@@ -1311,7 +1423,10 @@ mod tests {
         state.accept(PathBuf::from("/w/a.wgsl"), "a2".into());
 
         let batch = state.drain_pending();
-        assert_eq!(batch.paths, vec![PathBuf::from("/w/a.wgsl"), PathBuf::from("/w/b.wgsl")]);
+        assert_eq!(
+            batch.paths,
+            vec![PathBuf::from("/w/a.wgsl"), PathBuf::from("/w/b.wgsl")]
+        );
         assert!(state.pending.is_empty() && state.baseline.is_empty());
         // The override table holds the latest text either way.
         assert_eq!(state.overrides[&PathBuf::from("/w/a.wgsl")], "a2");
@@ -1327,7 +1442,10 @@ mod tests {
 
         state.reject(&batch, "GPU rejected it");
         assert!(!state.overrides.contains_key(&path));
-        assert!(state.pending.is_empty(), "a restore must not queue another reload");
+        assert!(
+            state.pending.is_empty(),
+            "a restore must not queue another reload"
+        );
         assert!(state.diagnostics[&path].message.contains("GPU rejected"));
     }
 

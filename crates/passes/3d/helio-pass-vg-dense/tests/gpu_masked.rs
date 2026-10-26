@@ -11,8 +11,12 @@ use helio_vg_format::{GpuVgInstance, INST_ENABLED};
 
 const VIEW: [u32; 2] = [64, 64];
 const CHECKS: u32 = 8;
-const IDENTITY: [[f32; 4]; 4] =
-    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+const IDENTITY: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
 const BACK_Z: f32 = 0.3;
 const FRONT_Z: f32 = 0.6;
 /// Unified visible index of the masked cluster (bin 6 range starts here).
@@ -36,13 +40,22 @@ fn buf(device: &wgpu::Device, label: &str, bytes: &[u8]) -> wgpu::Buffer {
     let b = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: (bytes.len() as u64).max(16).next_multiple_of(4),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     b
 }
 
-fn grid(x0: f32, y0: f32, size: f32, z: f32, n: usize, flip: bool) -> (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u8; 3]>) {
+fn grid(
+    x0: f32,
+    y0: f32,
+    size: f32,
+    z: f32,
+    n: usize,
+    flip: bool,
+) -> (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[u8; 3]>) {
     let mut pos = Vec::new();
     let mut uv = Vec::new();
     for j in 0..=n {
@@ -56,7 +69,10 @@ fn grid(x0: f32, y0: f32, size: f32, z: f32, n: usize, flip: bool) -> (Vec<[f32;
     let mut tris = Vec::new();
     for j in 0..n {
         for i in 0..n {
-            for t in [[at(i, j), at(i + 1, j), at(i, j + 1)], [at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]] {
+            for t in [
+                [at(i, j), at(i + 1, j), at(i, j + 1)],
+                [at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)],
+            ] {
                 tris.push(if flip { [t[0], t[2], t[1]] } else { t });
             }
         }
@@ -123,16 +139,35 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
     let page = TestPage::build(
         0,
         &[
-            TestCluster { positions: &bp, tris: &bt, material: 0, attrs: None },
-            TestCluster { positions: &fp, tris: &ft, material: 0, attrs: Some(&rows) },
+            TestCluster {
+                positions: &bp,
+                tris: &bt,
+                material: 0,
+                attrs: None,
+            },
+            TestCluster {
+                positions: &fp,
+                tris: &ft,
+                material: 0,
+                attrs: Some(&rows),
+            },
         ],
     );
 
     // Visible list: opaque at unified 0 (bin 0), masked at MASKED_AT (bin 6).
-    let garbage = helio_vg_format::GpuVisibleCluster { instance: 0, cluster_slot: page.slots[0] };
+    let garbage = helio_vg_format::GpuVisibleCluster {
+        instance: 0,
+        cluster_slot: page.slots[0],
+    };
     let mut visible = vec![garbage; 128];
-    visible[0] = helio_vg_format::GpuVisibleCluster { instance: 0, cluster_slot: page.slots[0] };
-    visible[MASKED_AT as usize] = helio_vg_format::GpuVisibleCluster { instance: 0, cluster_slot: page.slots[1] };
+    visible[0] = helio_vg_format::GpuVisibleCluster {
+        instance: 0,
+        cluster_slot: page.slots[0],
+    };
+    visible[MASKED_AT as usize] = helio_vg_format::GpuVisibleCluster {
+        instance: 0,
+        cluster_slot: page.slots[1],
+    };
     let mut cull_state = vec![0u32; 160];
     let r = helio_vg_format::CULL_STATE_RANGES as usize;
     cull_state[r] = 0; // phase 0 bin 0 {0, 1}
@@ -154,7 +189,12 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
     queue.write_buffer(&pool, 0, &page.pool());
     let quant = buf(device, "quant", cast_slice(&[page.quant]));
     queue.write_buffer(&quant, 0, cast_slice(&[page.quant]));
-    let inst = GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row: 0 };
+    let inst = GpuVgInstance {
+        asset_slot: 0,
+        flags: INST_ENABLED,
+        lod_error_scale: 1.0,
+        object_row: 0,
+    };
     let instances = buf(device, "instances", cast_slice(&[inst]));
     queue.write_buffer(&instances, 0, cast_slice(&[inst]));
     let mut object = [0f32; 63];
@@ -167,7 +207,11 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
     let make_texture = |w: u32, h: u32, texels: &[u8]| {
         let t = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("alpha texture"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -176,10 +220,23 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &t, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &t,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             texels,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         t
     };
@@ -192,7 +249,13 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
     let checker_tex = make_texture(CHECKS, CHECKS, &checker);
     let white_tex = make_texture(1, 1, &[255; 4]);
     let views: Vec<wgpu::TextureView> = (0..binding.max_textures)
-        .map(|i| if i == 0 { checker_tex.create_view(&Default::default()) } else { white_tex.create_view(&Default::default()) })
+        .map(|i| {
+            if i == 0 {
+                checker_tex.create_view(&Default::default())
+            } else {
+                white_tex.create_view(&Default::default())
+            }
+        })
         .collect();
     let samplers: Vec<wgpu::Sampler> = (0..binding.max_textures)
         .map(|_| {
@@ -213,7 +276,12 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
     material[14] = u32::MAX;
     material[15] = u32::MAX;
     material[16] = u32::MAX;
-    material[18] = helio_mats::FLAG_ALPHA_TEST | if double_sided { helio_mats::FLAG_DOUBLE_SIDED } else { 0 };
+    material[18] = helio_mats::FLAG_ALPHA_TEST
+        | if double_sided {
+            helio_mats::FLAG_DOUBLE_SIDED
+        } else {
+            0
+        };
     let mut tex_data = [0u32; 88];
     tex_data[87] = (-1.0f32).to_bits();
     let materials = buf(device, "materials", cast_slice(&material));
@@ -262,7 +330,12 @@ fn run(s: &Setup, double_sided: bool, flip_front: bool, with_tables: bool) -> Ve
     );
     queue.submit(Some(enc.finish()));
     let b = pass.buffers().unwrap();
-    let raw = read_buffer(device, queue, &b.dense_key, VIEW[0] as u64 * VIEW[1] as u64 * 8);
+    let raw = read_buffer(
+        device,
+        queue,
+        &b.dense_key,
+        VIEW[0] as u64 * VIEW[1] as u64 * 8,
+    );
     let words: &[u32] = cast_slice(&raw);
     words.chunks(2).map(|c| (c[0], c[1])).collect()
 }
@@ -271,16 +344,30 @@ fn judge(label: &str, keys: &[(u32, u32)], front_everywhere: bool, back_everywhe
     let (mut front, mut back, mut judged) = (0, 0, 0);
     for py in 0..VIEW[1] {
         for px in 0..VIEW[0] {
-            let Some(keep) = expected(px, py) else { continue };
+            let Some(keep) = expected(px, py) else {
+                continue;
+            };
             judged += 1;
             let (zbits, id) = keys[(py * VIEW[0] + px) as usize];
             let cluster = id >> 7;
             let z = f32::from_bits(zbits);
             let is_front = cluster == MASKED_AT;
-            let want_front = if front_everywhere { true } else if back_everywhere { false } else { keep };
-            assert_eq!(is_front, want_front, "{label}: pixel ({px},{py}): cluster {cluster}, depth {z}");
+            let want_front = if front_everywhere {
+                true
+            } else if back_everywhere {
+                false
+            } else {
+                keep
+            };
+            assert_eq!(
+                is_front, want_front,
+                "{label}: pixel ({px},{py}): cluster {cluster}, depth {z}"
+            );
             let want_z = if want_front { FRONT_Z } else { BACK_Z };
-            assert!((z - want_z).abs() < 1e-3, "{label}: pixel ({px},{py}) depth {z}, want {want_z}");
+            assert!(
+                (z - want_z).abs() < 1e-3,
+                "{label}: pixel ({px},{py}) depth {z}, want {want_z}"
+            );
             if is_front {
                 front += 1
             } else {

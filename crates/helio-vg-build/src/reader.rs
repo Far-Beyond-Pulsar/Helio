@@ -30,8 +30,12 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 fn read_pod<T: Pod>(b: &[u8], off: usize) -> Result<T, ParseError> {
-    let end = off.checked_add(std::mem::size_of::<T>()).ok_or(ParseError::Truncated)?;
-    b.get(off..end).map(bytemuck::pod_read_unaligned).ok_or(ParseError::Truncated)
+    let end = off
+        .checked_add(std::mem::size_of::<T>())
+        .ok_or(ParseError::Truncated)?;
+    b.get(off..end)
+        .map(bytemuck::pod_read_unaligned)
+        .ok_or(ParseError::Truncated)
 }
 
 fn read_vec<T: Pod>(b: &[u8], off: usize, count: usize) -> Result<Vec<T>, ParseError> {
@@ -41,7 +45,9 @@ fn read_vec<T: Pod>(b: &[u8], off: usize, count: usize) -> Result<Vec<T>, ParseE
         .and_then(|n| n.checked_add(off))
         .ok_or(ParseError::Truncated)?;
     let s = b.get(off..end).ok_or(ParseError::Truncated)?;
-    Ok(s.chunks_exact(sz).map(bytemuck::pod_read_unaligned).collect())
+    Ok(s.chunks_exact(sz)
+        .map(bytemuck::pod_read_unaligned)
+        .collect())
 }
 
 pub struct VgeoReader<'a> {
@@ -73,17 +79,32 @@ impl<'a> VgeoReader<'a> {
         }
         let meta: VgeoMeta = read_pod(bytes, std::mem::size_of::<VgeoHeader>())?;
         let a = &header.asset;
-        let nodes = read_vec(bytes, header.hierarchy_offset as usize, a.node_count as usize)?;
-        let group_refs = read_vec(bytes, header.group_refs_offset as usize, a.group_count as usize)?;
-        let page_dir: Vec<PageDirEntry> =
-            read_vec(bytes, header.page_dir_offset as usize, a.page_count as usize)?;
+        let nodes = read_vec(
+            bytes,
+            header.hierarchy_offset as usize,
+            a.node_count as usize,
+        )?;
+        let group_refs = read_vec(
+            bytes,
+            header.group_refs_offset as usize,
+            a.group_count as usize,
+        )?;
+        let page_dir: Vec<PageDirEntry> = read_vec(
+            bytes,
+            header.page_dir_offset as usize,
+            a.page_count as usize,
+        )?;
         let pages_end = header.pages_offset as usize + a.page_count as usize * PAGE_BYTES as usize;
         if pages_end > bytes.len() || a.root_page_count > a.page_count {
             return Err(ParseError::BadOffsets);
         }
         let mut page_deps = vec![Vec::new(); a.page_count as usize];
         if meta.page_deps_offset != 0 {
-            let csr: Vec<u32> = read_vec(bytes, meta.page_deps_offset as usize, a.page_count as usize + 1)?;
+            let csr: Vec<u32> = read_vec(
+                bytes,
+                meta.page_deps_offset as usize,
+                a.page_count as usize + 1,
+            )?;
             let flat: Vec<u32> = read_vec(
                 bytes,
                 meta.page_deps_offset as usize + csr.len() * 4,
@@ -93,11 +114,22 @@ impl<'a> VgeoReader<'a> {
                 page_deps[p] = flat[csr[p] as usize..csr[p + 1] as usize].to_vec();
             }
         }
-        Ok(Self { bytes, header, meta, nodes, group_refs, page_dir, page_deps })
+        Ok(Self {
+            bytes,
+            header,
+            meta,
+            nodes,
+            group_refs,
+            page_dir,
+            page_deps,
+        })
     }
 
     pub fn page(&self, id: u32) -> Result<PageView<'a>, ParseError> {
-        let e = self.page_dir.get(id as usize).ok_or(ParseError::PageOutOfRange)?;
+        let e = self
+            .page_dir
+            .get(id as usize)
+            .ok_or(ParseError::PageOutOfRange)?;
         let off = e.file_offset as usize;
         let bytes = self
             .bytes
@@ -107,14 +139,23 @@ impl<'a> VgeoReader<'a> {
         if header.magic != PAGE_MAGIC {
             return Err(ParseError::BadMagic);
         }
-        Ok(PageView { bytes, header, meta: self.meta })
+        Ok(PageView {
+            bytes,
+            header,
+            meta: self.meta,
+        })
     }
 
     /// Clusters of a hierarchy leaf.
     pub fn group_clusters(&self, group: u32) -> Result<Vec<GpuCluster>, ParseError> {
-        let r = self.group_refs.get(group as usize).ok_or(ParseError::BadOffsets)?;
+        let r = self
+            .group_refs
+            .get(group as usize)
+            .ok_or(ParseError::BadOffsets)?;
         let page = self.page(r.page_id)?;
-        (r.first_cluster()..r.first_cluster() + r.cluster_count()).map(|i| page.cluster(i)).collect()
+        (r.first_cluster()..r.first_cluster() + r.cluster_count())
+            .map(|i| page.cluster(i))
+            .collect()
     }
 
     /// CPU reference of the runtime cut: walk the hierarchy, enter a child iff
@@ -155,7 +196,11 @@ impl<'a> VgeoReader<'a> {
                     if proj.project(c.self_error, c.sphere) <= tau
                         && proj.project(c.parent_error, c.parent_sphere) > tau
                     {
-                        out.push(SelectedCluster { page_id: g.page_id, cluster_index: k, cluster: c });
+                        out.push(SelectedCluster {
+                            page_id: g.page_id,
+                            cluster_index: k,
+                            cluster: c,
+                        });
                     }
                 }
             }
@@ -180,7 +225,9 @@ impl<'a> PageView<'a> {
     }
 
     pub fn clusters(&self) -> Result<Vec<GpuCluster>, ParseError> {
-        (0..self.header.cluster_count).map(|i| self.cluster(i)).collect()
+        (0..self.header.cluster_count)
+            .map(|i| self.cluster(i))
+            .collect()
     }
 
     pub fn decode_cluster(&self, i: u32) -> Result<DecodedCluster<'a>, ParseError> {
@@ -224,13 +271,21 @@ impl<'a> PageView<'a> {
             positions.push(p);
         }
         let io = c.index_offset as usize;
-        let raw = self.bytes.get(io..io + nt * 3).ok_or(ParseError::Truncated)?;
+        let raw = self
+            .bytes
+            .get(io..io + nt * 3)
+            .ok_or(ParseError::Truncated)?;
         let tris = raw.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
         let stride = self.meta.attribute_stride as usize;
         let attributes = self
             .bytes
             .get(attr_off..attr_off + nv * stride)
             .ok_or(ParseError::Truncated)?;
-        Ok(DecodedCluster { lattice, positions, tris, attributes })
+        Ok(DecodedCluster {
+            lattice,
+            positions,
+            tris,
+            attributes,
+        })
     }
 }

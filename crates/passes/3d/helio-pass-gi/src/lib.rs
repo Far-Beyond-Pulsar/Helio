@@ -151,14 +151,17 @@ impl Clipmap {
     pub fn entered(&self, before: Option<&Clipmap>) -> Vec<u32> {
         let mut out = Vec::new();
         for level in 0..LEVELS {
-            if before.is_some_and(|b| b.first[level] == self.first[level] && b.finest == self.finest) {
+            if before
+                .is_some_and(|b| b.first[level] == self.first[level] && b.finest == self.finest)
+            {
                 continue;
             }
             for z in 0..SIDE {
                 for y in 0..SIDE {
                     for x in 0..SIDE {
                         let world = self.first[level] + I64Vec3::new(x, y, z);
-                        if !before.is_some_and(|b| b.finest == self.finest && b.holds(level, world)) {
+                        if !before.is_some_and(|b| b.finest == self.finest && b.holds(level, world))
+                        {
                             out.push(Self::index(level, world));
                         }
                     }
@@ -215,7 +218,11 @@ struct Schedule {
 
 impl Schedule {
     fn new() -> Self {
-        Self { entered: Default::default(), queued: vec![false; PROBES as usize], cursor: [0; LEVELS] }
+        Self {
+            entered: Default::default(),
+            queued: vec![false; PROBES as usize],
+            cursor: [0; LEVELS],
+        }
     }
 
     fn enter(&mut self, index: u32) {
@@ -229,7 +236,9 @@ impl Schedule {
         for level in 0..LEVELS {
             let start = out.len();
             while out.len() - start < LEVEL_UPDATES[level] {
-                let Some(index) = self.entered[level].pop_front() else { break };
+                let Some(index) = self.entered[level].pop_front() else {
+                    break;
+                };
                 self.queued[index as usize] = false;
                 out.push(index);
             }
@@ -287,8 +296,18 @@ fn uniform(binding: u32, size: u64) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn buffer(device: &wgpu::Device, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false })
+fn buffer(
+    device: &wgpu::Device,
+    label: &str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage,
+        mapped_at_creation: false,
+    })
 }
 
 /// The probes' state across frames (kept over graph rebuilds).
@@ -310,14 +329,36 @@ struct Probes {
 
 impl Probes {
     fn new(device: &wgpu::Device) -> Self {
-        let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+        let storage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
         Self {
-            frame: buffer(device, "GI frame", FRAME_BYTES, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
-            probes: buffer(device, "GI probes", u64::from(PROBES * PROBE_WORDS) * 4, storage),
+            frame: buffer(
+                device,
+                "GI frame",
+                FRAME_BYTES,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
+            probes: buffer(
+                device,
+                "GI probes",
+                u64::from(PROBES * PROBE_WORDS) * 4,
+                storage,
+            ),
             rays: buffer(device, "GI rays", u64::from(MAX_RAYS) * RAY_BYTES, storage),
             hits: buffer(device, "GI hits", u64::from(MAX_RAYS) * HIT_BYTES, storage),
-            light: buffer(device, "GI hit light", u64::from(MAX_RAYS) * HIT_LIGHT_BYTES, storage),
-            lists: buffer(device, "GI lists", u64::from(2 * MAX_UPDATES + PROBES) * 4, storage),
+            light: buffer(
+                device,
+                "GI hit light",
+                u64::from(MAX_RAYS) * HIT_LIGHT_BYTES,
+                storage,
+            ),
+            lists: buffer(
+                device,
+                "GI lists",
+                u64::from(2 * MAX_UPDATES + PROBES) * 4,
+                storage,
+            ),
             sun: buffer(device, "GI sun", 32, storage),
             clipmap: None,
             schedule: Schedule::new(),
@@ -343,7 +384,10 @@ pub struct GiConfig {
 
 impl Default for GiConfig {
     fn default() -> Self {
-        Self { finest_spacing: DEFAULT_FINEST_SPACING, needs_tlas: false }
+        Self {
+            finest_spacing: DEFAULT_FINEST_SPACING,
+            needs_tlas: false,
+        }
     }
 }
 
@@ -390,7 +434,12 @@ impl GiPass {
             device,
             "GI update",
             helio_core::include_wgsl!("../shaders/gi_update.wgsl"),
-            &[ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET],
+            &[
+                ATMOSPHERE_SNIPPET,
+                ATMOSPHERE_SKY_TABLE_SNIPPET,
+                GI_COMMON_SNIPPET,
+                GI_SAMPLE_SNIPPET,
+            ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GI update"),
@@ -398,14 +447,17 @@ impl GiPass {
             immediate_size: 0,
         });
         let pipeline = |entry: &str| {
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
         let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
         Self {
@@ -417,8 +469,18 @@ impl GiPass {
             reset: pipeline("gi_reset"),
             rays: pipeline("gi_rays_main"),
             layout,
-            fallback_atmosphere: buffer(device, "GI no atmosphere", ATMOSPHERE_FRAME_BYTES, uniform),
-            fallback_sky_table: buffer(device, "GI no sky table", ATMOSPHERE_SKY_TABLE_BYTES, uniform),
+            fallback_atmosphere: buffer(
+                device,
+                "GI no atmosphere",
+                ATMOSPHERE_FRAME_BYTES,
+                uniform,
+            ),
+            fallback_sky_table: buffer(
+                device,
+                "GI no sky table",
+                ATMOSPHERE_SKY_TABLE_BYTES,
+                uniform,
+            ),
             fallback_lights: buffer(device, "GI no lights", 128, wgpu::BufferUsages::STORAGE),
             group: None,
             counts: [0; 2],
@@ -447,14 +509,29 @@ impl GiPass {
             levels: clipmap.levels(eye),
             sky: sky.extend(0.0).to_array(),
             ground: ground.extend(0.0).to_array(),
-            counts: [self.list.len() as u32, state.updated, entered.len() as u32, parity],
+            counts: [
+                self.list.len() as u32,
+                state.updated,
+                entered.len() as u32,
+                parity,
+            ],
             rotation: self.rotation,
             prev_rotation: state.prev_rotation,
         };
         helio_core::upload::write_buffer(queue, &state.frame, 0, bytemuck::bytes_of(&gpu));
-        helio_core::upload::write_buffer(queue, &state.lists, u64::from(parity * MAX_UPDATES) * 4, bytemuck::cast_slice(&self.list));
+        helio_core::upload::write_buffer(
+            queue,
+            &state.lists,
+            u64::from(parity * MAX_UPDATES) * 4,
+            bytemuck::cast_slice(&self.list),
+        );
         if !entered.is_empty() {
-            helio_core::upload::write_buffer(queue, &state.lists, u64::from(2 * MAX_UPDATES) * 4, bytemuck::cast_slice(&entered));
+            helio_core::upload::write_buffer(
+                queue,
+                &state.lists,
+                u64::from(2 * MAX_UPDATES) * 4,
+                bytemuck::cast_slice(&entered),
+            );
         }
         self.counts = [self.list.len() as u32, entered.len() as u32];
     }
@@ -463,7 +540,14 @@ impl GiPass {
     /// integrated, the probes that came in reset, this frame's rays, the
     /// hits cleared for the tracers. `atmosphere`, `sky_table` and `lights`
     /// are the atmosphere's and the scene's (none: no atmosphere, no sun).
-    pub fn record(&mut self, device: &wgpu::Device, cmds: &mut helio_core::CommandRecorder<'_>, atmosphere: Option<&wgpu::Buffer>, sky_table: Option<&wgpu::Buffer>, lights: Option<&wgpu::Buffer>) {
+    pub fn record(
+        &mut self,
+        device: &wgpu::Device,
+        cmds: &mut helio_core::CommandRecorder<'_>,
+        atmosphere: Option<&wgpu::Buffer>,
+        sky_table: Option<&wgpu::Buffer>,
+        lights: Option<&wgpu::Buffer>,
+    ) {
         let atmosphere = atmosphere.unwrap_or(&self.fallback_atmosphere);
         let sky_table = sky_table.unwrap_or(&self.fallback_sky_table);
         let lights = lights.unwrap_or(&self.fallback_lights);
@@ -474,24 +558,59 @@ impl GiPass {
                 label: Some("GI update"),
                 layout: &self.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: s.frame.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: s.probes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: s.rays.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: s.hits.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: s.lists.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: s.sun.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: lights.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: atmosphere.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 8, resource: sky_table.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 9, resource: s.light.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: s.frame.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: s.probes.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: s.rays.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: s.hits.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: s.lists.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: s.sun.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: atmosphere.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: sky_table.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: s.light.as_entire_binding(),
+                    },
                 ],
             });
             self.group = Some((group, key));
         }
-        let Some((group, _)) = &self.group else { return };
+        let Some((group, _)) = &self.group else {
+            return;
+        };
         let state = &mut self.state;
         {
-            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI update"), timestamp_writes: None });
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("GI update"),
+                timestamp_writes: None,
+            });
             pass.set_bind_group(0, Some(group), &[]);
             pass.set_pipeline(&self.sun);
             pass.dispatch_workgroups(1, 1, 1);
@@ -541,7 +660,9 @@ impl RenderPass for GiPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[GI_FRAME, GI_PROBES, GI_RAYS, GI_HITS, GI_SUN, GI_LIGHT, GI_CLIPMAP]
+        &[
+            GI_FRAME, GI_PROBES, GI_RAYS, GI_HITS, GI_SUN, GI_LIGHT, GI_CLIPMAP,
+        ]
     }
 
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
@@ -556,18 +677,24 @@ impl RenderPass for GiPass {
     }
 
     fn inherit_persistent_state(&mut self, previous: &mut dyn RenderPass) -> bool {
-        let Some(previous) = previous.as_any_mut().downcast_mut::<Self>() else { return false };
+        let Some(previous) = previous.as_any_mut().downcast_mut::<Self>() else {
+            return false;
+        };
         std::mem::swap(&mut self.state, &mut previous.state);
         true
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
+        let environment = ctx
+            .registry
+            .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
         self.live = !self.config.needs_tlas || environment.is_some_and(|e| e.tlas.is_some());
         if !self.live {
             return Ok(());
         }
-        let (ambient, intensity) = environment.map_or(([0.5, 0.5, 0.6], 1.0), |e| (e.ambient_color, e.ambient_intensity));
+        let (ambient, intensity) = environment.map_or(([0.5, 0.5, 0.6], 1.0), |e| {
+            (e.ambient_color, e.ambient_intensity)
+        });
         let sky = Vec3::from(ambient) * intensity;
         self.begin(ctx.queue, eye(ctx), ctx.frame_num, sky, sky * 0.15);
         Ok(())
@@ -577,17 +704,34 @@ impl RenderPass for GiPass {
         if !self.live {
             return Ok(());
         }
-        let atmosphere = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)).cloned();
-        let sky_table = ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE)).cloned();
-        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
+        let atmosphere = ctx
+            .registry
+            .get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME))
+            .cloned();
+        let sky_table = ctx
+            .registry
+            .get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE))
+            .cloned();
+        let lights = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|h| h.buffer.clone());
         let mut cmds = ctx.graphics_cmds();
-        self.record(ctx.device, &mut cmds, atmosphere.as_ref(), sky_table.as_ref(), lights.as_ref());
+        self.record(
+            ctx.device,
+            &mut cmds,
+            atmosphere.as_ref(),
+            sky_table.as_ref(),
+            lights.as_ref(),
+        );
         Ok(())
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let s = &self.state;
-        let Some(clipmap) = s.clipmap.filter(|_| self.live) else { return };
+        let Some(clipmap) = s.clipmap.filter(|_| self.live) else {
+            return;
+        };
         frame.write_buffer_binding(GI_FRAME, &s.frame, "GI");
         frame.write_buffer_binding(GI_PROBES, &s.probes, "GI");
         frame.write_buffer_binding(GI_RAYS, &s.rays, "GI");
@@ -613,16 +757,17 @@ pub struct GiResolvePass {
 
 impl GiResolvePass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let texture = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture {
-                sample_type,
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
+        let texture =
+            |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("GI resolve"),
             entries: &[
@@ -646,30 +791,67 @@ impl GiResolvePass {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("gi_resolve"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("gi_resolve"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let view = buffer(device, "GI resolve view", 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        Self { layout, pipeline, out: None, view, debug_mode: 0, view_written: None }
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("gi_resolve"),
+                layout: Some(&pipeline_layout),
+                module: &module,
+                entry_point: Some("gi_resolve"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let view = buffer(
+            device,
+            "GI resolve view",
+            16,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        Self {
+            layout,
+            pipeline,
+            out: None,
+            view,
+            debug_mode: 0,
+            view_written: None,
+        }
     }
 
     /// Records the probes' irradiance at each pixel of a `size` frame
     /// (`gi_irradiance`) from `frame`, `probes` and `camera` (GiPass's
     /// frame and probes, Helio's camera) and the G-buffer's normals and
     /// depth.
-    pub fn record(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cmds: &mut helio_core::CommandRecorder<'_>, [frame, probes, camera]: [&wgpu::Buffer; 3], normal: &wgpu::TextureView, depth: &wgpu::TextureView, size: [u32; 2]) {
+    pub fn record(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cmds: &mut helio_core::CommandRecorder<'_>,
+        [frame, probes, camera]: [&wgpu::Buffer; 3],
+        normal: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: [u32; 2],
+    ) {
         let size = [size[0].max(1), size[1].max(1)];
         if self.out.as_ref().is_none_or(|(_, s)| *s != size) {
             let bytes = u64::from(size[0]) * u64::from(size[1]) * 8;
-            self.out = Some((buffer(device, "GI irradiance", bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC), size));
+            self.out = Some((
+                buffer(
+                    device,
+                    "GI irradiance",
+                    bytes,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                ),
+                size,
+            ));
         }
         if self.view_written != Some(self.debug_mode) {
-            helio_core::upload::write_buffer(queue, &self.view, 0, bytemuck::cast_slice(&[self.debug_mode, 0, 0, 0]));
+            helio_core::upload::write_buffer(
+                queue,
+                &self.view,
+                0,
+                bytemuck::cast_slice(&[self.debug_mode, 0, 0, 0]),
+            );
             self.view_written = Some(self.debug_mode);
         }
         let Some((out, _)) = &self.out else { return };
@@ -677,16 +859,40 @@ impl GiResolvePass {
             label: Some("GI resolve"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: frame.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: probes.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: camera.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(normal) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
-                wgpu::BindGroupEntry { binding: 5, resource: out.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: self.view.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: probes.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: camera.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: out.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.view.as_entire_binding(),
+                },
             ],
         });
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("GI resolve"), timestamp_writes: None });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("GI resolve"),
+            timestamp_writes: None,
+        });
         pass.set_bind_group(0, Some(&group), &[]);
         pass.set_pipeline(&self.pipeline);
         pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
@@ -725,15 +931,29 @@ impl RenderPass for GiResolvePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let (Some(frame), Some(probes)) = (ctx.registry.buffer_binding(GI_FRAME), ctx.registry.buffer_binding(GI_PROBES)) else {
+        let (Some(frame), Some(probes)) = (
+            ctx.registry.buffer_binding(GI_FRAME),
+            ctx.registry.buffer_binding(GI_PROBES),
+        ) else {
             self.out = None;
             return Ok(());
         };
-        let Some(gbuffer) = ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new("gbuffer")) else {
+        let Some(gbuffer) = ctx
+            .registry
+            .get::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new("gbuffer"))
+        else {
             return Err(helio_core::Error::ResourceNotFound("gbuffer".into()));
         };
         let mut cmds = ctx.graphics_cmds();
-        self.record(ctx.device, ctx.queue, &mut cmds, [frame, probes, ctx.camera], gbuffer.views[1], ctx.depth, [ctx.width, ctx.height]);
+        self.record(
+            ctx.device,
+            ctx.queue,
+            &mut cmds,
+            [frame, probes, ctx.camera],
+            gbuffer.views[1],
+            ctx.depth,
+            [ctx.width, ctx.height],
+        );
         Ok(())
     }
 
@@ -777,7 +997,12 @@ mod tests {
             let (level, world) = b.probe(index);
             assert!(!a.holds(level, world));
         }
-        let count = |level: usize| entered.iter().filter(|&&i| (i / LEVEL_PROBES) as usize == level).count() as i64;
+        let count = |level: usize| {
+            entered
+                .iter()
+                .filter(|&&i| (i / LEVEL_PROBES) as usize == level)
+                .count() as i64
+        };
         let moved = |level: usize| (b.first[level].x - a.first[level].x).abs();
         for level in 0..LEVELS {
             assert_eq!(count(level), moved(level) * SIDE * SIDE);
@@ -795,7 +1020,10 @@ mod tests {
             let c = Clipmap::around(eye, finest);
             for level in 0..LEVELS {
                 let local = eye / c.spacing(level) - c.first[level].as_dvec3();
-                assert!(local.cmpge(DVec3::splat(11.0)).all() && local.cmplt(DVec3::splat(12.0)).all(), "{level} {local}");
+                assert!(
+                    local.cmpge(DVec3::splat(11.0)).all() && local.cmplt(DVec3::splat(12.0)).all(),
+                    "{level} {local}"
+                );
             }
         }
     }
@@ -804,8 +1032,19 @@ mod tests {
     #[test]
     fn shader_constants_match() {
         let source = GI_COMMON_SNIPPET.source;
-        for (name, value) in [("GI_LEVELS", LEVELS as u32), ("GI_SIDE", SIDE as u32), ("GI_LEVEL_PROBES", LEVEL_PROBES), ("GI_PROBES", PROBES), ("GI_RAYS", RAYS), ("GI_MAX_UPDATES", MAX_UPDATES), ("GI_PROBE_WORDS", PROBE_WORDS)] {
-            assert!(source.contains(&format!("const {name}: u32 = {value}u;")), "{name} is not {value} in gi_common.wgsl");
+        for (name, value) in [
+            ("GI_LEVELS", LEVELS as u32),
+            ("GI_SIDE", SIDE as u32),
+            ("GI_LEVEL_PROBES", LEVEL_PROBES),
+            ("GI_PROBES", PROBES),
+            ("GI_RAYS", RAYS),
+            ("GI_MAX_UPDATES", MAX_UPDATES),
+            ("GI_PROBE_WORDS", PROBE_WORDS),
+        ] {
+            assert!(
+                source.contains(&format!("const {name}: u32 = {value}u;")),
+                "{name} is not {value} in gi_common.wgsl"
+            );
         }
     }
 
@@ -848,22 +1087,52 @@ mod shader_tests {
 
     fn validate(label: &str, source: &str, snippets: &[helio_core::shader::ShaderSnippet]) {
         let text = helio_core::shader::resolve_with(source, snippets);
-        let module = wgpu::naga::front::wgsl::parse_str(&text).unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&text)));
-        wgpu::naga::valid::Validator::new(wgpu::naga::valid::ValidationFlags::all(), wgpu::naga::valid::Capabilities::all())
-            .validate(&module)
+        let module = wgpu::naga::front::wgsl::parse_str(&text)
             .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&text)));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&text)));
     }
 
     #[test]
     fn shaders_validate() {
-        validate("gi_update", include_str!("../shaders/gi_update.wgsl"), &[ATMOSPHERE_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
-        validate("gi_resolve", include_str!("../shaders/gi_resolve.wgsl"), &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET]);
+        validate(
+            "gi_update",
+            include_str!("../shaders/gi_update.wgsl"),
+            &[
+                ATMOSPHERE_SNIPPET,
+                ATMOSPHERE_SKY_TABLE_SNIPPET,
+                GI_COMMON_SNIPPET,
+                GI_SAMPLE_SNIPPET,
+            ],
+        );
+        validate(
+            "gi_resolve",
+            include_str!("../shaders/gi_resolve.wgsl"),
+            &[GI_COMMON_SNIPPET, GI_SAMPLE_SNIPPET],
+        );
         use helio_mats::{MaterialBindingConfig, MaterialBindingMode};
         for binding in [
-            MaterialBindingConfig { mode: MaterialBindingMode::BindingArray, max_textures: 256 },
-            MaterialBindingConfig { mode: MaterialBindingMode::Expanded, max_textures: 16 },
+            MaterialBindingConfig {
+                mode: MaterialBindingMode::BindingArray,
+                max_textures: 256,
+            },
+            MaterialBindingConfig {
+                mode: MaterialBindingMode::Expanded,
+                max_textures: 16,
+            },
         ] {
-            validate("gi_mesh_trace", &crate::mesh::mesh_trace_source(binding), &[GI_COMMON_SNIPPET, helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET]);
+            validate(
+                "gi_mesh_trace",
+                &crate::mesh::mesh_trace_source(binding),
+                &[
+                    GI_COMMON_SNIPPET,
+                    helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
+                ],
+            );
         }
     }
 }

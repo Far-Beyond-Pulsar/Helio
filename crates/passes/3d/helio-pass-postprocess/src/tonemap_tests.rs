@@ -6,7 +6,10 @@ fn agx(inputs: &[[f32; 3]], punchy: bool) -> Vec<[f32; 3]> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await.unwrap();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .unwrap();
         let probe = format!(
             "{}\n@group(1) @binding(0) var<storage, read_write> probe: array<vec4<f32>>;\n\
              @compute @workgroup_size(1) fn probe_agx(@builtin(global_invocation_id) id: vec3<u32>) {{\n\
@@ -14,7 +17,10 @@ fn agx(inputs: &[[f32; 3]], punchy: bool) -> Vec<[f32; 3]> {
              }}",
             helio_core::shader::resolve(&PostProcessPass::build_shader_source(&[])),
         );
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("AgX probe"), source: wgpu::ShaderSource::Wgsl(probe.into()) });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("AgX probe"),
+            source: wgpu::ShaderSource::Wgsl(probe.into()),
+        });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("AgX probe"),
             layout: None,
@@ -25,13 +31,28 @@ fn agx(inputs: &[[f32; 3]], punchy: bool) -> Vec<[f32; 3]> {
         });
         let words: Vec<[f32; 4]> = inputs.iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
         let size = (words.len() * 16) as u64;
-        let data = device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let data = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         queue.write_buffer(&data, 0, bytemuck::cast_slice(&words));
-        let readback = device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &pipeline.get_bind_group_layout(1),
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: data.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: data.as_entire_binding(),
+            }],
         });
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -44,7 +65,8 @@ fn agx(inputs: &[[f32; 3]], punchy: bool) -> Vec<[f32; 3]> {
         queue.submit([encoder.finish()]);
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let out: Vec<[f32; 4]> = bytemuck::cast_slice(&readback.slice(..).get_mapped_range().unwrap()).to_vec();
+        let out: Vec<[f32; 4]> =
+            bytemuck::cast_slice(&readback.slice(..).get_mapped_range().unwrap()).to_vec();
         out.iter().map(|v| [v[0], v[1], v[2]]).collect()
     })
 }
@@ -75,17 +97,34 @@ fn agx_keeps_grey_and_the_hue_of_bright_colours() {
     let greys = [0.0f32, 0.01, 0.05, 0.18, 0.5, 1.0, 4.0, 16.0, 64.0];
     let green = [0.2f32, 1.0, 0.05];
     let scales = [0.25f32, 1.0, 4.0, 16.0];
-    let inputs: Vec<[f32; 3]> = greys.iter().map(|&v| [v; 3]).chain(scales.iter().map(|&k| green.map(|c| c * k))).collect();
+    let inputs: Vec<[f32; 3]> = greys
+        .iter()
+        .map(|&v| [v; 3])
+        .chain(scales.iter().map(|&k| green.map(|c| c * k)))
+        .collect();
     let out = agx(&inputs, false);
     let grey: Vec<f32> = out[..greys.len()].iter().map(|c| c[1]).collect();
-    assert!(grey.windows(2).all(|w| w[1] > w[0] || w[1] >= 0.99), "{grey:?}");
-    assert!(grey[0] < 1e-3 && (0.15..0.25).contains(&grey[3]) && grey[8] > 0.99, "{grey:?}");
+    assert!(
+        grey.windows(2).all(|w| w[1] > w[0] || w[1] >= 0.99),
+        "{grey:?}"
+    );
+    assert!(
+        grey[0] < 1e-3 && (0.15..0.25).contains(&grey[3]) && grey[8] > 0.99,
+        "{grey:?}"
+    );
     for c in &out[..greys.len()] {
-        assert!((c[0] - c[1]).abs() < 2e-3 && (c[2] - c[1]).abs() < 2e-3, "grey stays neutral: {c:?}");
+        assert!(
+            (c[0] - c[1]).abs() < 2e-3 && (c[2] - c[1]).abs() < 2e-3,
+            "grey stays neutral: {c:?}"
+        );
     }
     let source = hue(green.map(|c| c.powf(2.2)));
     for (k, c) in scales.iter().zip(&out[greys.len()..]) {
-        assert!((hue(*c) - source).abs() < 25.0, "x{k}: {c:?} hue {} vs {source}", hue(*c));
+        assert!(
+            (hue(*c) - source).abs() < 25.0,
+            "x{k}: {c:?} hue {} vs {source}",
+            hue(*c)
+        );
     }
 }
 
@@ -97,16 +136,37 @@ fn agx_punchy_saturates_and_keeps_grey() {
     let saturation = |c: [f32; 3]| {
         let [r, g, b] = c.map(|v| v.max(0.0).powf(1.0 / 2.2));
         let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-        if max > 0.0 { (max - min) / max } else { 0.0 }
+        if max > 0.0 {
+            (max - min) / max
+        } else {
+            0.0
+        }
     };
-    let inputs = [[0.05f32; 3], [0.18; 3], [1.0; 3], [0.18, 0.32, 0.62], [0.2, 0.4, 0.09]];
+    let inputs = [
+        [0.05f32; 3],
+        [0.18; 3],
+        [1.0; 3],
+        [0.18, 0.32, 0.62],
+        [0.2, 0.4, 0.09],
+    ];
     let (base, punchy) = (agx(&inputs, false), agx(&inputs, true));
     for c in &punchy[..3] {
-        assert!((c[0] - c[1]).abs() < 2e-3 && (c[2] - c[1]).abs() < 2e-3, "grey stays neutral: {c:?}");
+        assert!(
+            (c[0] - c[1]).abs() < 2e-3 && (c[2] - c[1]).abs() < 2e-3,
+            "grey stays neutral: {c:?}"
+        );
     }
-    assert!(punchy[0][1] < punchy[1][1] && punchy[1][1] < punchy[2][1], "{punchy:?}");
+    assert!(
+        punchy[0][1] < punchy[1][1] && punchy[1][1] < punchy[2][1],
+        "{punchy:?}"
+    );
     for n in 3..5 {
-        assert!(saturation(punchy[n]) > saturation(base[n]) + 0.1, "{:?} vs {:?}", punchy[n], base[n]);
+        assert!(
+            saturation(punchy[n]) > saturation(base[n]) + 0.1,
+            "{:?} vs {:?}",
+            punchy[n],
+            base[n]
+        );
     }
 }
 
@@ -125,17 +185,35 @@ fn agx_punchy_keeps_the_hue_of_dark_colours() {
         let y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
         c.map(|v| v / y * 0.18 * ev.exp2())
     };
-    let inputs: Vec<[f32; 3]> = tiles.iter().flat_map(|&t| evs.iter().map(move |&ev| at(t, ev))).collect();
+    let inputs: Vec<[f32; 3]> = tiles
+        .iter()
+        .flat_map(|&t| evs.iter().map(move |&ev| at(t, ev)))
+        .collect();
     let out = agx(&inputs, true);
     let luma = |c: &[f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     for (t, row) in out.chunks(evs.len()).enumerate() {
         let reference = hue(row[0]);
         for (ev, c) in evs.iter().zip(row) {
-            assert!(c.iter().all(|&v| v > 0.0), "tile {t} at {ev} EV clipped a channel: {c:?}");
-            assert!((hue(*c) - reference).abs() < 2.0, "tile {t} at {ev} EV: hue {} vs {reference}", hue(*c));
+            assert!(
+                c.iter().all(|&v| v > 0.0),
+                "tile {t} at {ev} EV clipped a channel: {c:?}"
+            );
+            assert!(
+                (hue(*c) - reference).abs() < 2.0,
+                "tile {t} at {ev} EV: hue {} vs {reference}",
+                hue(*c)
+            );
         }
-        assert!(row.windows(2).all(|w| luma(&w[1]) < luma(&w[0])), "tile {t} darkens: {row:?}");
+        assert!(
+            row.windows(2).all(|w| luma(&w[1]) < luma(&w[0])),
+            "tile {t} darkens: {row:?}"
+        );
     }
     let apart = |i: usize| (hue(out[i]) - hue(out[evs.len() + i])).abs();
-    assert!(apart(3) > 0.9 * apart(0), "tiles at -4 EV {} degrees apart, at -1 EV {}", apart(3), apart(0));
+    assert!(
+        apart(3) > 0.9 * apart(0),
+        "tiles at -4 EV {} degrees apart, at -1 EV {}",
+        apart(3),
+        apart(0)
+    );
 }

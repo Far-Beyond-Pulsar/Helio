@@ -18,7 +18,9 @@ fn check_packing(@builtin(global_invocation_id) id: vec3<u32>) {
 "#].concat();
         let module = f.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Packed HDR numeric validation"),
-            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&source).into_owned().into()),
+            source: wgpu::ShaderSource::Wgsl(
+                helio_core::shader::resolve(&source).into_owned().into(),
+            ),
         });
         let pipeline = f
             .device
@@ -379,8 +381,7 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
 #[ignore = "requires a GPU adapter; run explicitly with --ignored"]
 fn creates_pipelines_on_available_adapter() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await

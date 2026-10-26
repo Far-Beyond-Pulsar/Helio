@@ -78,11 +78,18 @@ pub fn estimated_size(title: &str, pins: &NodePins) -> (f32, f32) {
         .map(|row| {
             let input = pins.inputs.get(row).map_or(0, label_len) as f32 * LABEL_GLYPH;
             let output = pins.outputs.get(row).map_or(0, label_len) as f32 * LABEL_GLYPH;
-            let gap = if input > 0.0 && output > 0.0 { 12.0 } else { 0.0 };
+            let gap = if input > 0.0 && output > 0.0 {
+                12.0
+            } else {
+                0.0
+            };
             BODY_PAD * 2.0 + PIN_SIZE + 10.0 + input + output + gap
         })
         .fold(0.0_f32, f32::max);
-    (snap(header.max(body).max(160.0)) + SLACK_X, snap(height) + SLACK_Y)
+    (
+        snap(header.max(body).max(160.0)) + SLACK_X,
+        snap(height) + SLACK_Y,
+    )
 }
 
 struct Item {
@@ -107,19 +114,21 @@ fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
     }
 
     let count = asset.nodes.len();
-    let index: HashMap<&str, usize> =
-        asset.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = asset
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
     let sizes: Vec<(f32, f32)> = asset
         .nodes
         .iter()
         .map(|node| match asset.section_of(node) {
-            Some(section) => {
-                estimated_size(&section.name, &crate::sections::section_pins(section))
-            }
+            Some(section) => estimated_size(&section.name, &crate::sections::section_pins(section)),
             None => match registry.get(&node.kind) {
                 Some(descriptor) => {
-                    let title = crate::buffers::title_of(node)
-                        .unwrap_or_else(|| descriptor.title.clone());
+                    let title =
+                        crate::buffers::title_of(node).unwrap_or_else(|| descriptor.title.clone());
                     estimated_size(&title, &descriptor.pins(&node.params))
                 }
                 None => estimated_size(&node.kind, &NodePins::default()),
@@ -128,9 +137,10 @@ fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
         .collect();
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for wire in &asset.connections {
-        if let (Some(&from), Some(&to)) =
-            (index.get(wire.from.node.as_str()), index.get(wire.to.node.as_str()))
-        {
+        if let (Some(&from), Some(&to)) = (
+            index.get(wire.from.node.as_str()),
+            index.get(wire.to.node.as_str()),
+        ) {
             if from != to && !edges.contains(&(from, to)) {
                 edges.push((from, to));
             }
@@ -169,8 +179,12 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
         asset.comments.retain(|c| !c.id.starts_with(LANE_PREFIX));
         return;
     }
-    let index: HashMap<&str, usize> =
-        asset.nodes.iter().enumerate().map(|(i, n)| (n.id.as_str(), i)).collect();
+    let index: HashMap<&str, usize> = asset
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
 
     let mut items: Vec<Item> = Vec::with_capacity(count);
     let mut all_pins: Vec<NodePins> = Vec::with_capacity(count);
@@ -184,8 +198,11 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
             ),
             None => (node.kind.clone(), String::new(), NodePins::default()),
         };
-        let executes =
-            pins.inputs.iter().chain(&pins.outputs).any(|pin| pin.ty.kind == PinKind::Flow);
+        let executes = pins
+            .inputs
+            .iter()
+            .chain(&pins.outputs)
+            .any(|pin| pin.ty.kind == PinKind::Flow);
         items.push(Item {
             kind: node.kind.clone(),
             category,
@@ -197,10 +214,14 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
 
     // Wires that order the graph: flow and data, not history.
     let mut forward: Vec<(usize, usize)> = Vec::new();
+    // Every wire, history ones too: a data node sits beside whoever it feeds
+    // even when that read is last frame's value.
+    let mut wired: Vec<(usize, usize)> = Vec::new();
     for connection in &asset.connections {
-        let (Some(&from), Some(&to)) =
-            (index.get(connection.from.node.as_str()), index.get(connection.to.node.as_str()))
-        else {
+        let (Some(&from), Some(&to)) = (
+            index.get(connection.from.node.as_str()),
+            index.get(connection.to.node.as_str()),
+        ) else {
             continue;
         };
         let history = all_pins[to]
@@ -208,8 +229,11 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
             .iter()
             .find(|pin| pin.name == connection.to.pin)
             .is_some_and(|pin| pin.history);
-        if !history && from != to && !forward.contains(&(from, to)) {
-            forward.push((from, to));
+        if from != to && !wired.contains(&(from, to)) {
+            wired.push((from, to));
+            if !history && !forward.contains(&(from, to)) {
+                forward.push((from, to));
+            }
         }
     }
 
@@ -218,15 +242,18 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
     let order = stable_topological_order(&executing, &forward);
 
     // 2. Attach each data node to the first executing node that uses it.
-    let position_in_order: HashMap<usize, usize> =
-        order.iter().enumerate().map(|(rank, node)| (*node, rank)).collect();
+    let position_in_order: HashMap<usize, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(rank, node)| (*node, rank))
+        .collect();
     let mut reads: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut sets: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut unused: Vec<usize> = Vec::new();
     for node in (0..count).filter(|i| !items[*i].executes) {
-        if let Some(user) = first_user(node, &forward, &position_in_order) {
+        if let Some(user) = first_user(node, &wired, &position_in_order) {
             reads.entry(user).or_default().push(node);
-        } else if let Some(producer) = last_producer(node, &forward, &position_in_order) {
+        } else if let Some(producer) = last_producer(node, &wired, &position_in_order) {
             sets.entry(producer).or_default().push(node);
         } else {
             unused.push(node);
@@ -318,7 +345,10 @@ pub(crate) fn stable_topological_order(nodes: &[usize], edges: &[(usize, usize)]
     let mut order = Vec::with_capacity(nodes.len());
     let mut done: HashSet<usize> = HashSet::new();
     while order.len() < nodes.len() {
-        let next = nodes.iter().copied().find(|n| !done.contains(n) && remaining[n] == 0);
+        let next = nodes
+            .iter()
+            .copied()
+            .find(|n| !done.contains(n) && remaining[n] == 0);
         let Some(next) = next else {
             order.extend(nodes.iter().copied().filter(|n| !done.contains(n)));
             break;
@@ -451,9 +481,21 @@ fn place_lane(
     for (node, reads, sets) in members {
         let (read_offsets, read_block) = block_layout(reads, items);
         let (set_offsets, set_block) = block_layout(sets, items);
-        let node_size = if *node == usize::MAX { (0.0, 0.0) } else { items[*node].size };
-        let left = if reads.is_empty() { 0.0 } else { read_block.0 + SOURCE_GAP };
-        let right = if sets.is_empty() { 0.0 } else { SOURCE_GAP + set_block.0 };
+        let node_size = if *node == usize::MAX {
+            (0.0, 0.0)
+        } else {
+            items[*node].size
+        };
+        let left = if reads.is_empty() {
+            0.0
+        } else {
+            read_block.0 + SOURCE_GAP
+        };
+        let right = if sets.is_empty() {
+            0.0
+        } else {
+            SOURCE_GAP + set_block.0
+        };
         let unit = left + node_size.0 + right;
 
         if x > 0.0 && x + unit > MAX_ROW_WIDTH {
@@ -498,7 +540,11 @@ fn lane_comment(
         [0.45, 0.65, 0.75, 0.16],
     ];
     let title = key.strip_prefix("Passes: ").unwrap_or(key);
-    let title = if title.is_empty() || title == "Graph" { "Frame" } else { title };
+    let title = if title.is_empty() || title == "Graph" {
+        "Frame"
+    } else {
+        title
+    };
     let mut nodes: Vec<String> = Vec::new();
     for (node, reads, sets) in members {
         if *node != usize::MAX {
@@ -509,7 +555,10 @@ fn lane_comment(
     GraphComment {
         id: format!("{LANE_PREFIX}{lane}"),
         text: title.to_string(),
-        position: [bounds.0 - COMMENT_PAD, bounds.1 - COMMENT_PAD - COMMENT_TITLE],
+        position: [
+            bounds.0 - COMMENT_PAD,
+            bounds.1 - COMMENT_PAD - COMMENT_TITLE,
+        ],
         size: [
             bounds.2 - bounds.0 + COMMENT_PAD * 2.0,
             bounds.3 - bounds.1 + COMMENT_PAD * 2.0 + COMMENT_TITLE,
@@ -536,7 +585,10 @@ mod tests {
     }
 
     fn wire(a: &str, ap: &str, b: &str, bp: &str) -> Connection {
-        Connection { from: PinRef::new(a, ap), to: PinRef::new(b, bp) }
+        Connection {
+            from: PinRef::new(a, ap),
+            to: PinRef::new(b, bp),
+        }
     }
 
     fn registry() -> NodeRegistry {
@@ -544,8 +596,14 @@ mod tests {
         for (kind, category) in [("t.a", "Passes: Alpha"), ("t.b", "Passes: Beta")] {
             registry.register(
                 NodeDescriptor::new(kind, kind, category, "", |_| Ok(())).with_pins(
-                    vec![PinDesc::flow("in"), PinDesc::resource(PinType::TEXTURE, "x")],
-                    vec![PinDesc::flow("out"), PinDesc::resource(PinType::TEXTURE, "y")],
+                    vec![
+                        PinDesc::flow("in"),
+                        PinDesc::resource(PinType::TEXTURE, "x"),
+                    ],
+                    vec![
+                        PinDesc::flow("out"),
+                        PinDesc::resource(PinType::TEXTURE, "y"),
+                    ],
                 ),
             );
         }
@@ -586,7 +644,12 @@ mod tests {
         let node = asset.node(id).unwrap();
         let descriptor = registry.get(&node.kind).unwrap();
         let (w, h) = estimated_size(&descriptor.title, &descriptor.pins(&node.params));
-        (node.position[0], node.position[1], node.position[0] + w, node.position[1] + h)
+        (
+            node.position[0],
+            node.position[1],
+            node.position[0] + w,
+            node.position[1] + h,
+        )
     }
 
     fn overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
@@ -615,9 +678,12 @@ mod tests {
         let mut asset = sample();
         auto_layout(&mut asset, &registry);
         let x = |id: &str| asset.node(id).unwrap().position[0];
-        assert!(x("start") < x("a") && x("a") < x("b") && x("b") < x("out"));
+        let y = |id: &str| asset.node(id).unwrap().position[1];
+        assert!(x("start") < x("a") && y("start") == y("a"));
+        assert!(x("b") < x("out") && y("b") == y("out"));
+        assert!(y("a") < y("b"), "Beta runs on the row below Alpha");
         // A source is left of the node it feeds, and in the same lane row.
-        assert!(x("src_a") < x("a"));
+        assert!(x("src_a") < x("a") && y("src_a") == y("a"));
         assert!(x("src_b1") < x("b") && x("src_b2") < x("b"));
         assert_eq!(x("src_b1"), x("src_b2"), "one column");
         assert_ne!(
@@ -636,7 +702,9 @@ mod tests {
         // The start joins Alpha, the output joins Beta, and the unfed source is unattached.
         assert_eq!(titles, vec!["Alpha", "Beta", "Unattached"]);
         let alpha = &asset.comments[0];
-        assert!(alpha.nodes.contains(&"start".to_string()) && alpha.nodes.contains(&"a".to_string()));
+        assert!(
+            alpha.nodes.contains(&"start".to_string()) && alpha.nodes.contains(&"a".to_string())
+        );
         let beta = &asset.comments[1];
         assert!(beta.nodes.contains(&"out".to_string()));
         // A comment surrounds the nodes it names.
@@ -684,7 +752,10 @@ mod tests {
         asset.connections.push(wire(&previous, "out", "out", "in"));
         auto_layout(&mut asset, &registry);
         let rows: HashSet<i64> = asset.nodes.iter().map(|n| n.position[1] as i64).collect();
-        assert!(rows.len() > 1, "a 30-node lane should wrap onto more than one row");
+        assert!(
+            rows.len() > 1,
+            "a 30-node lane should wrap onto more than one row"
+        );
     }
 
     #[test]
@@ -700,11 +771,18 @@ mod tests {
         asset.connections.push(wire("a", "y", "sink", "y"));
         auto_layout(&mut asset, &registry);
         let x = |id: &str| asset.node(id).unwrap().position[0];
-        assert!(x("sink") > x("a"), "a Set sits after the node that produces it");
-        assert!(x("sink") < x("b"), "and before the next node");
+        let y = |id: &str| asset.node(id).unwrap().position[1];
+        assert!(
+            x("sink") > x("a"),
+            "a Set sits after the node that produces it"
+        );
+        assert!(y("sink") == y("a"), "and in its row");
         for other in ["a", "b", "start", "out", "src_a", "src_b1"] {
             assert!(
-                !overlap(rect(&asset, &registry, "sink"), rect(&asset, &registry, other)),
+                !overlap(
+                    rect(&asset, &registry, "sink"),
+                    rect(&asset, &registry, other)
+                ),
                 "sink overlaps {other}"
             );
         }
@@ -725,9 +803,13 @@ mod tests {
             asset.connections.push(wire(&id, "x", "a", "x"));
         }
         auto_layout(&mut asset, &registry);
-        let columns: HashSet<i64> =
-            (0..20).map(|i| asset.node(&format!("s{i}")).unwrap().position[0] as i64).collect();
-        assert!(columns.len() > 1, "20 sources should not form a single column");
+        let columns: HashSet<i64> = (0..20)
+            .map(|i| asset.node(&format!("s{i}")).unwrap().position[0] as i64)
+            .collect();
+        assert!(
+            columns.len() > 1,
+            "20 sources should not form a single column"
+        );
         let tallest = (0..20)
             .map(|i| asset.node(&format!("s{i}")).unwrap().position[1] as i64)
             .max()

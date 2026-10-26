@@ -64,7 +64,12 @@ impl Transform {
         let p = glam::DVec3::from_array(position);
         let hi = p.as_vec3();
         let lo = (p - hi.as_dvec3()).as_vec3();
-        Self { position_hi: hi.to_array(), position_lo: lo.to_array(), rotation, scale }
+        Self {
+            position_hi: hi.to_array(),
+            position_lo: lo.to_array(),
+            rotation,
+            scale,
+        }
     }
 }
 
@@ -485,30 +490,57 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
     // The f64 offset to the f32 rounding of a small number (a millimetre's
     // millionths), where an f32 world position would be 0.5 m out.
     let offset = (glam::DVec3::from_array(far_position) - origin).as_vec3();
-    assert!((offset - glam::Vec3::new(0.25, 2.246, 5.0)).abs().max_element() < 1e-6, "{offset}");
+    assert!(
+        (offset - glam::Vec3::new(0.25, 2.246, 5.0))
+            .abs()
+            .max_element()
+            < 1e-6,
+        "{offset}"
+    );
     let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
     );
     let model = glam::Mat4::from_cols_array_2d(&objects[0].transform);
-    assert!((model.w_axis.truncate() - offset).abs().max_element() < 1e-6, "model translation {}", model.w_axis);
+    assert!(
+        (model.w_axis.truncate() - offset).abs().max_element() < 1e-6,
+        "model translation {}",
+        model.w_axis
+    );
     let relative = Transform::at(offset.as_dvec3().to_array(), far.rotation, far.scale);
     let center = model_of(&relative).transform_point3(glam::Vec3::new(0.5, 0.0, 0.0));
-    assert!(close(&objects[0].bounds[..3], &center.to_array()), "bounds centre");
+    assert!(
+        close(&objects[0].bounds[..3], &center.to_array()),
+        "bounds centre"
+    );
 
     let lights: Vec<helio::GpuLight> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("scene_lights")).unwrap().buffer,
     );
-    assert!((glam::Vec3::from_slice(&lights[2].position_range[..3]) - offset).abs().max_element() < 1e-6, "light position");
+    assert!(
+        (glam::Vec3::from_slice(&lights[2].position_range[..3]) - offset)
+            .abs()
+            .max_element()
+            < 1e-6,
+        "light position"
+    );
     let billboards: Vec<[f32; 12]> = read(
         &device,
         &queue,
-        &out.get(BufferKey::of("billboard_instances")).unwrap().buffer,
+        &out.get(BufferKey::of("billboard_instances"))
+            .unwrap()
+            .buffer,
     );
-    assert!((glam::Vec3::from_slice(&billboards[2][..3]) - offset).abs().max_element() < 1e-6, "billboard position");
+    assert!(
+        (glam::Vec3::from_slice(&billboards[2][..3]) - offset)
+            .abs()
+            .max_element()
+            < 1e-6,
+        "billboard position"
+    );
 
     // A moved origin moves every position, though no input row changed.
     let moved = origin + glam::DVec3::new(0.0, 1.0, 0.0);
@@ -519,7 +551,11 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
     );
     let model = glam::Mat4::from_cols_array_2d(&objects[0].transform);
-    assert!((model.w_axis.y - (offset.y - 1.0)).abs() < 1e-6, "{}", model.w_axis.y);
+    assert!(
+        (model.w_axis.y - (offset.y - 1.0)).abs() < 1e-6,
+        "{}",
+        model.w_axis.y
+    );
 }
 
 #[test]
@@ -637,7 +673,10 @@ fn moving_objects_moves_the_objects_but_not_the_structure() {
     let scene = base_scene();
     let mut join = SceneJoin::new(&device, KEYS, false);
     let generation = |projection: &SceneBufferProjection, key: &'static str| {
-        projection.get(BufferKey::of(key)).unwrap().content_generation
+        projection
+            .get(BufferKey::of(key))
+            .unwrap()
+            .content_generation
     };
     let first = run(&mut join, &device, &queue, &scene, 1);
     let (objects, materials, structure) = (
@@ -684,7 +723,11 @@ fn moving_objects_moves_the_objects_but_not_the_structure() {
         generation(&moved, "static_objects") > objects,
         "the objects hold placements, so they changed"
     );
-    assert_eq!(generation(&moved, "materials"), materials, "materials follow the structure");
+    assert_eq!(
+        generation(&moved, "materials"),
+        materials,
+        "materials follow the structure"
+    );
     assert_eq!(
         generation(&moved, "scene_objects_structure"),
         structure,

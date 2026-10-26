@@ -2,8 +2,7 @@
 #[ignore = "requires a GPU"]
 fn edges_are_reflection_symmetric_and_constant_borders_stay_constant() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         // Invoke the production pixel function at exact texel centers. The

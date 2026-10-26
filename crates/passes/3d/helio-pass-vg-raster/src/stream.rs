@@ -104,7 +104,8 @@ impl PagePool {
                     uvs.iter()
                         .map(|uv| {
                             let mut row = [0u8; 16];
-                            let (u, v) = (f16_bits(uv[0]).to_le_bytes(), f16_bits(uv[1]).to_le_bytes());
+                            let (u, v) =
+                                (f16_bits(uv[0]).to_le_bytes(), f16_bits(uv[1]).to_le_bytes());
                             row[8..10].copy_from_slice(&u);
                             row[10..12].copy_from_slice(&v);
                             row
@@ -129,9 +130,17 @@ impl PagePool {
             .entries
             .iter()
             .enumerate()
-            .map(|(i, e)| GpuVisibleCluster { instance: e.instance, cluster_slot: page.slots[i] })
+            .map(|(i, e)| GpuVisibleCluster {
+                instance: e.instance,
+                cluster_slot: page.slots[i],
+            })
             .collect();
-        BuiltPool { bytes: page.pool(), quant: page.quant, visible, page }
+        BuiltPool {
+            bytes: page.pool(),
+            quant: page.quant,
+            visible,
+            page,
+        }
     }
 }
 
@@ -148,10 +157,16 @@ mod tests {
         let step = b.quant.step;
         for (a, d) in pts.iter().zip(&b.page.decoded[0]) {
             for k in 0..3 {
-                assert!((a[k] - d[k]).abs() <= step * 0.5 + 1e-5, "{a:?} {d:?} step {step}");
+                assert!(
+                    (a[k] - d[k]).abs() <= step * 0.5 + 1e-5,
+                    "{a:?} {d:?} step {step}"
+                );
             }
         }
-        assert_eq!(b.visible[0].cluster_slot, helio_vg_format::cluster_slot(0, 0));
+        assert_eq!(
+            b.visible[0].cluster_slot,
+            helio_vg_format::cluster_slot(0, 0)
+        );
     }
 
     #[test]

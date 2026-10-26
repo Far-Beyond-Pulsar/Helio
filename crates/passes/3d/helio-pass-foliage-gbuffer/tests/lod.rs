@@ -14,7 +14,8 @@ fn a_tuft_draws_at_exactly_one_level_across_the_band() {
     while d < 12.0 {
         for k in 0..64 {
             let unit = k as f32 / 64.0;
-            let drawn = u32::from(lod_draws(0, d, boundary, band, unit)) + u32::from(lod_draws(1, d, boundary, band, unit));
+            let drawn = u32::from(lod_draws(0, d, boundary, band, unit))
+                + u32::from(lod_draws(1, d, boundary, band, unit));
             assert_eq!(drawn, 1, "tuft {unit} drawn {drawn} times at {d} m");
         }
         d += 0.13;
@@ -23,7 +24,11 @@ fn a_tuft_draws_at_exactly_one_level_across_the_band() {
 
 #[test]
 fn the_share_at_l1_grows_across_the_band() {
-    let share = |d: f32| (0..1000).filter(|&k| lod_draws(1, d, 6.0, 4.0, k as f32 / 1000.0)).count();
+    let share = |d: f32| {
+        (0..1000)
+            .filter(|&k| lod_draws(1, d, 6.0, 4.0, k as f32 / 1000.0))
+            .count()
+    };
     assert_eq!(share(1.0), 0);
     assert!(share(3.0) < share(4.0) && share(4.0) < share(5.0));
     assert_eq!(share(7.0), 1000);

@@ -37,7 +37,6 @@ pub struct Model {
     pub measure: Measure,
 }
 
-
 pub const SOURCES: &[Source] = &[
     Source {
         file: "lucy.tar.gz",
@@ -98,14 +97,61 @@ pub const SOURCES: &[Source] = &[
     },
 ];
 
-
 pub const MODELS: &[Model] = &[
-    Model { name: "lucy", archive: "lucy.tar.gz", member: Some("lucy.ply"), up: Up::Z, yaw_deg: 180.0, size: 3.4, measure: Measure::Height },
-    Model { name: "thai_statue", archive: "xyzrgb_statuette.ply.gz", member: None, up: Up::Y, yaw_deg: 0.0, size: 2.8, measure: Measure::Height },
-    Model { name: "xyzrgb_dragon", archive: "xyzrgb_dragon.ply.gz", member: None, up: Up::Y, yaw_deg: -90.0, size: 2.2, measure: Measure::Height },
-    Model { name: "manuscript", archive: "xyzrgb_manuscript.ply.gz", member: None, up: Up::Y, yaw_deg: 0.0, size: 2.0, measure: Measure::Max },
-    Model { name: "happy_buddha", archive: "happy_recon.tar.gz", member: Some("happy_recon/happy_vrip.ply"), up: Up::Y, yaw_deg: 0.0, size: 2.2, measure: Measure::Height },
-    Model { name: "dragon", archive: "dragon_recon.tar.gz", member: Some("dragon_recon/dragon_vrip.ply"), up: Up::Y, yaw_deg: 90.0, size: 1.9, measure: Measure::Height },
+    Model {
+        name: "lucy",
+        archive: "lucy.tar.gz",
+        member: Some("lucy.ply"),
+        up: Up::Z,
+        yaw_deg: 180.0,
+        size: 3.4,
+        measure: Measure::Height,
+    },
+    Model {
+        name: "thai_statue",
+        archive: "xyzrgb_statuette.ply.gz",
+        member: None,
+        up: Up::Y,
+        yaw_deg: 0.0,
+        size: 2.8,
+        measure: Measure::Height,
+    },
+    Model {
+        name: "xyzrgb_dragon",
+        archive: "xyzrgb_dragon.ply.gz",
+        member: None,
+        up: Up::Y,
+        yaw_deg: -90.0,
+        size: 2.2,
+        measure: Measure::Height,
+    },
+    Model {
+        name: "manuscript",
+        archive: "xyzrgb_manuscript.ply.gz",
+        member: None,
+        up: Up::Y,
+        yaw_deg: 0.0,
+        size: 2.0,
+        measure: Measure::Max,
+    },
+    Model {
+        name: "happy_buddha",
+        archive: "happy_recon.tar.gz",
+        member: Some("happy_recon/happy_vrip.ply"),
+        up: Up::Y,
+        yaw_deg: 0.0,
+        size: 2.2,
+        measure: Measure::Height,
+    },
+    Model {
+        name: "dragon",
+        archive: "dragon_recon.tar.gz",
+        member: Some("dragon_recon/dragon_vrip.ply"),
+        up: Up::Y,
+        yaw_deg: 90.0,
+        size: 1.9,
+        measure: Measure::Height,
+    },
 ];
 
 /// Bumped whenever the transform or output layout changes, so stale GLBs are
@@ -149,10 +195,18 @@ pub fn normalise(positions: &mut [[f32; 3]], model: &Model) {
         Measure::Height => ext[2],
         Measure::Max => ext[0].max(ext[1]).max(ext[2]),
     };
-    let scale = if reference > 0.0 { model.size / reference } else { 1.0 };
+    let scale = if reference > 0.0 {
+        model.size / reference
+    } else {
+        1.0
+    };
     let (cx, cyy) = ((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5);
     for p in positions.iter_mut() {
-        let b = [(p[0] - cx) * scale, (p[1] - cyy) * scale, (p[2] - lo[2]) * scale];
+        let b = [
+            (p[0] - cx) * scale,
+            (p[1] - cyy) * scale,
+            (p[2] - lo[2]) * scale,
+        ];
         // Blender (x, y, z) -> FBX Y-up / -Z-forward export (x, z, -y).
         *p = [b[0], b[2], -b[1]];
     }
@@ -209,7 +263,15 @@ mod tests {
     }
 
     fn model(up: Up, yaw: f32, size: f32, measure: Measure) -> Model {
-        Model { name: "t", archive: "t", member: None, up, yaw_deg: yaw, size, measure }
+        Model {
+            name: "t",
+            archive: "t",
+            member: None,
+            up,
+            yaw_deg: yaw,
+            size,
+            measure,
+        }
     }
 
     #[test]
@@ -243,11 +305,20 @@ mod tests {
 
     #[test]
     fn normals_are_unit_and_face_the_winding_direction() {
-        let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [5.0, 5.0, 5.0]];
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [5.0, 5.0, 5.0],
+        ];
         let n = smooth_normals(&p, &[0, 1, 2]);
         for i in 0..3 {
             assert!((n[i][2] - 1.0).abs() < 1e-6);
         }
-        assert_eq!(n[3], [0.0, 1.0, 0.0], "unreferenced vertex gets a safe default");
+        assert_eq!(
+            n[3],
+            [0.0, 1.0, 0.0],
+            "unreferenced vertex gets a safe default"
+        );
     }
 }

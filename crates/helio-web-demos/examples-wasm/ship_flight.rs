@@ -269,7 +269,8 @@ impl HelioWasmApp for Demo {
                         for v in &mut vertices {
                             v.position = (Vec3::from(v.position) - center).to_array();
                         }
-                        let mesh_id = crate::common::spawn_mesh(world,
+                        let mesh_id = crate::common::spawn_mesh(
+                            world,
                             helio::MeshUpload {
                                 vertices,
                                 indices: mesh.indices.clone(),
@@ -280,13 +281,16 @@ impl HelioWasmApp for Demo {
                             .and_then(|i| mat_ids.get(i).copied())
                             .or_else(|| mat_ids.first().copied())
                             .unwrap_or_else(|| {
-                                crate::common::spawn_material(world, make_material(
-                                    [0.25, 0.40, 0.70, 1.0],
-                                    0.25,
-                                    0.85,
-                                    [0.0; 3],
-                                    0.0,
-                                ))
+                                crate::common::spawn_material(
+                                    world,
+                                    make_material(
+                                        [0.25, 0.40, 0.70, 1.0],
+                                        0.25,
+                                        0.85,
+                                        [0.0; 3],
+                                        0.0,
+                                    ),
+                                )
                             });
                         insert_object(world, mesh_id, mat_id, Mat4::IDENTITY, radius).unwrap()
                     })
@@ -296,13 +300,10 @@ impl HelioWasmApp for Demo {
             }
             Err(e) => {
                 log::warn!("ship FBX load failed: {e:?}, using fallback cube");
-                let mat = crate::common::spawn_material(world, make_material(
-                    [0.25, 0.40, 0.70, 1.0],
-                    0.25,
-                    0.85,
-                    [0.0; 3],
-                    0.0,
-                ));
+                let mat = crate::common::spawn_material(
+                    world,
+                    make_material([0.25, 0.40, 0.70, 1.0], 0.25, 0.85, [0.0; 3], 0.0),
+                );
                 let mesh = crate::common::spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 2.0));
                 let id = insert_object(world, mesh, mat, Mat4::IDENTITY, 2.0).unwrap();
                 (vec![id], 2.0, 240.0)
@@ -310,20 +311,14 @@ impl HelioWasmApp for Demo {
         };
 
         // Asteroid field
-        let rocky = crate::common::spawn_material(world, make_material(
-            [0.15, 0.12, 0.09, 1.0],
-            0.90,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let dark = crate::common::spawn_material(world, make_material(
-            [0.09, 0.09, 0.11, 1.0],
-            0.70,
-            0.25,
-            [0.0; 3],
-            0.0,
-        ));
+        let rocky = crate::common::spawn_material(
+            world,
+            make_material([0.15, 0.12, 0.09, 1.0], 0.90, 0.0, [0.0; 3], 0.0),
+        );
+        let dark = crate::common::spawn_material(
+            world,
+            make_material([0.09, 0.09, 0.11, 1.0], 0.70, 0.25, [0.0; 3], 0.0),
+        );
         let cube = crate::common::spawn_mesh(world, cube_mesh([0.0, 0.0, 0.0], 0.5));
 
         let field_radius = 12000.0_f32;
@@ -366,22 +361,13 @@ impl HelioWasmApp for Demo {
         }
 
         // Ship lights
-        let engine_light = crate::common::spawn_light(world, point_light(
-                [0.0; 3],
-                [0.35, 0.65, 1.0],
-                1.8,
-                ship_radius * 3.5,
-            ));
-        let spotlight_left = crate::common::spawn_light(world, spot_light(
-                [0.0; 3],
-                [0.0, 0.0, -1.0],
-                [1.0, 1.0, 0.95],
-                35.0,
-                ship_radius * 15.0,
-                25_f32.to_radians(),
-                35_f32.to_radians(),
-            ));
-        let spotlight_right = crate::common::spawn_light(world, spot_light(
+        let engine_light = crate::common::spawn_light(
+            world,
+            point_light([0.0; 3], [0.35, 0.65, 1.0], 1.8, ship_radius * 3.5),
+        );
+        let spotlight_left = crate::common::spawn_light(
+            world,
+            spot_light(
                 [0.0; 3],
                 [0.0, 0.0, -1.0],
                 [1.0, 1.0, 0.95],
@@ -389,43 +375,46 @@ impl HelioWasmApp for Demo {
                 ship_radius * 15.0,
                 25_f32.to_radians(),
                 35_f32.to_radians(),
-            ));
-        let hull_port = crate::common::spawn_light(world, point_light(
+            ),
+        );
+        let spotlight_right = crate::common::spawn_light(
+            world,
+            spot_light(
                 [0.0; 3],
-                [1.0, 0.1, 0.1],
-                12.0,
-                ship_radius * 4.0,
-            ));
-        let hull_starboard = crate::common::spawn_light(world, point_light(
-                [0.0; 3],
-                [0.1, 1.0, 0.1],
-                12.0,
-                ship_radius * 4.0,
-            ));
-        let hull_top = crate::common::spawn_light(world, point_light(
-                [0.0; 3],
-                [1.0, 1.0, 1.0],
-                9.6,
-                ship_radius * 4.0,
-            ));
-        let hull_belly = crate::common::spawn_light(world, point_light(
-                [0.0; 3],
-                [0.4, 0.6, 1.0],
-                8.4,
-                ship_radius * 4.0,
-            ));
+                [0.0, 0.0, -1.0],
+                [1.0, 1.0, 0.95],
+                35.0,
+                ship_radius * 15.0,
+                25_f32.to_radians(),
+                35_f32.to_radians(),
+            ),
+        );
+        let hull_port = crate::common::spawn_light(
+            world,
+            point_light([0.0; 3], [1.0, 0.1, 0.1], 12.0, ship_radius * 4.0),
+        );
+        let hull_starboard = crate::common::spawn_light(
+            world,
+            point_light([0.0; 3], [0.1, 1.0, 0.1], 12.0, ship_radius * 4.0),
+        );
+        let hull_top = crate::common::spawn_light(
+            world,
+            point_light([0.0; 3], [1.0, 1.0, 1.0], 9.6, ship_radius * 4.0),
+        );
+        let hull_belly = crate::common::spawn_light(
+            world,
+            point_light([0.0; 3], [0.4, 0.6, 1.0], 8.4, ship_radius * 4.0),
+        );
 
         // Distant stars (directional)
-        crate::common::spawn_light(world, directional_light(
-                [-0.5, -0.4, 0.8],
-                [1.0, 0.98, 0.95],
-                0.8,
-            ));
-        crate::common::spawn_light(world, directional_light(
-                [0.6, 0.2, -0.7],
-                [0.2, 0.25, 0.4],
-                0.04,
-            ));
+        crate::common::spawn_light(
+            world,
+            directional_light([-0.5, -0.4, 0.8], [1.0, 0.98, 0.95], 0.8),
+        );
+        crate::common::spawn_light(
+            world,
+            directional_light([0.6, 0.2, -0.7], [0.2, 0.25, 0.4], 0.04),
+        );
         renderer.set_ambient([0.04, 0.05, 0.08], 0.003);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 

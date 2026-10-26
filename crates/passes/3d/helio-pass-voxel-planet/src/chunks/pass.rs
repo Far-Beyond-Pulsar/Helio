@@ -27,7 +27,10 @@ pub struct ChunkPass {
     /// How the frame's kept chunks went into the last world built: how
     /// many, or why they were refused.
     kept_loaded: Option<Result<usize, String>>,
-    last_eye: Option<(DVec3, std::time::Instant)>,
+    last_eye: [Option<(DVec3, std::time::Instant)>; 2],
+    /// Stereo draws can share a head-centred residency viewpoint while tracing
+    /// from each actual eye. Inter-eye distance must not become movement velocity.
+    residency_eye: Option<DVec3>,
     stats: UpdateStats,
     /// Frames whose GPU times came back, until taken.
     timings: Vec<FrameTimings>,
@@ -36,14 +39,18 @@ pub struct ChunkPass {
     /// The last frame's CPU milliseconds: prepare, execute.
     cpu_ms: [f64; 2],
     /// Voxel materials as the host's scene materials (`set_scene_materials`).
-    scene: Option<(super::scene::VoxelMaterialMap, super::scene::SceneMaterialSource)>,
+    scene: Option<(
+        super::scene::VoxelMaterialMap,
+        super::scene::SceneMaterialSource,
+    )>,
     /// Every hit walks its own sun ray (`set_steady_shadows`).
     steady_shadows: bool,
     /// The eye's world position this frame (`helio_pass_gi::eye`), where
     /// the GI clipmap the terrain traces rays of is centred.
     gi_eye: Option<DVec3>,
     /// The last frame's projection jitter (NDC).
-    last_jitter: Vec2,
+    last_jitter: [Vec2; 2],
+    xr_mode: bool,
     /// The terrain as the ground foliage grows on (`chunks::ground`): shared with a
     /// foliage placement pass ([`Self::foliage_ground`]), its tiling and its answers.
     planet_ground: std::sync::Arc<super::ground::PlanetGround>,
@@ -60,7 +67,10 @@ impl ChunkPass {
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
         let planet_ground = std::sync::Arc::new(super::ground::PlanetGround::default());
-        let foliage_ground = std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(Box::new(planet_ground.clone())));
+        let foliage_ground =
+            std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(
+                Box::new(planet_ground.clone()),
+            ));
         Self {
             source,
             config,
@@ -71,7 +81,8 @@ impl ChunkPass {
             shown: None,
             exporting: false,
             kept_loaded: None,
-            last_eye: None,
+            last_eye: [None; 2],
+            residency_eye: None,
             stats: UpdateStats::default(),
             timings: Vec::new(),
             budget_ms: None,
@@ -79,7 +90,8 @@ impl ChunkPass {
             scene: None,
             steady_shadows: false,
             gi_eye: None,
-            last_jitter: Vec2::ZERO,
+            last_jitter: [Vec2::ZERO; 2],
+            xr_mode: false,
             planet_ground,
             foliage_ground,
         }
@@ -97,7 +109,11 @@ impl ChunkPass {
     /// the frame's material table from the context (see
     /// `helio_default_passes::voxel_scene_materials`). Devices without
     /// texture binding arrays keep the appearance table's colours.
-    pub fn set_scene_materials(&mut self, map: super::scene::VoxelMaterialMap, source: super::scene::SceneMaterialSource) {
+    pub fn set_scene_materials(
+        &mut self,
+        map: super::scene::VoxelMaterialMap,
+        source: super::scene::SceneMaterialSource,
+    ) {
         self.scene = Some((map, source));
     }
 
@@ -107,6 +123,12 @@ impl ChunkPass {
     /// shadows).
     pub fn set_steady_shadows(&mut self, on: bool) {
         self.steady_shadows = on;
+    }
+
+    /// Override the position used for residency/prefetch, without changing the
+    /// frame's tracing eye. Use the head centre for both draws of a stereo pair.
+    pub fn set_residency_eye(&mut self, eye: Option<DVec3>) {
+        self.residency_eye = eye;
     }
 
     /// The host's art settings; whether they changed.
@@ -124,9 +146,16 @@ impl ChunkPass {
     /// A host viewport should keep rendering until residency settles.
     /// A save's export too, until answered.
     pub fn needs_frame(&self) -> bool {
-        let Ok(source) = self.source.try_lock() else { return true };
-        let Some(frame) = source.as_ref() else { return false };
-        let exporting = frame.export.as_ref().is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted));
+        let Ok(source) = self.source.try_lock() else {
+            return true;
+        };
+        let Some(frame) = source.as_ref() else {
+            return false;
+        };
+        let exporting = frame
+            .export
+            .as_ref()
+            .is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted));
         exporting || self.world.as_ref().is_none_or(|w| !w.settled())
     }
 
@@ -245,6 +274,10 @@ const WRITES: &[&str] = &[
 const KEEP_TIMINGS: usize = 256;
 
 impl RenderPass for ChunkPass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+    }
+
     fn name(&self) -> &'static str {
         "VoxelChunks"
     }
@@ -270,6 +303,7 @@ impl RenderPass for ChunkPass {
             self.scene = previous.scene.take();
         }
         self.steady_shadows |= previous.steady_shadows;
+        self.residency_eye = previous.residency_eye;
         self.world.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
@@ -309,8 +343,16 @@ impl RenderPass for ChunkPass {
             frame.write_buffer_binding("local_visibility", buffer, self.name());
         }
         if let Some((maps, sun_frame)) = self.world.as_ref().and_then(ChunkWorld::sun_occlusion) {
-            frame.write_texture_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS, maps, self.name());
-            frame.write_buffer_binding(helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME, sun_frame, self.name());
+            frame.write_texture_binding(
+                helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
+                maps,
+                self.name(),
+            );
+            frame.write_buffer_binding(
+                helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
+                sun_frame,
+                self.name(),
+            );
         }
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -418,10 +460,13 @@ impl ChunkPass {
             if let Some(appearance) = &self.appearance {
                 world.set_appearance(appearance);
             }
-            self.kept_loaded = frame.kept.as_ref().map(|kept| world.load_kept(&frame.planet, kept));
+            self.kept_loaded = frame
+                .kept
+                .as_ref()
+                .map(|kept| world.load_kept(&frame.planet, kept));
             self.world = Some(world);
             self.built_for = Some(recipe);
-            self.last_eye = None;
+            self.last_eye = [None; 2];
             self.exporting = false;
         }
         // A save's export: the resident edited chunks packed (over the
@@ -472,51 +517,74 @@ impl ChunkPass {
             view!("gbuffer_velocity"),
         ];
         let camera = ctx.camera_data;
-        // Chunks are drawn relative to the eye. The frame's coordinates may
-        // put the camera off their origin (a host's camera-relative frames
-        // keep an origin while the camera moves within a cell of it): its
-        // view-projection, moved by the camera's position, is the eye's.
+        let eye_index = if self.xr_mode && camera.jitter_frame[3].to_bits() == 2 {
+            1
+        } else {
+            0
+        };
+        // The tracer starts every perspective ray at zero. Its matrices must
+        // therefore be eye-relative, and its absolute ray origin must be the
+        // SAME eye as the renderer camera (including OpenXR's predicted pose
+        // and each eye's offset). PlanetFrame.eye can be an older input sample;
+        // it remains useful for residency, but cannot anchor the traced view.
         let at = Vec3::from_slice(&camera.position_near[..3]);
-        let view_proj = Mat4::from_cols_array(&camera.view_proj) * Mat4::from_translation(at);
+        let (trace_eye, view_proj, prev_view_proj) =
+            trace_camera(camera, ctx.world_origin);
         let proj = Mat4::from_cols_array(&camera.proj);
-        // The last frame's, which the renderer keeps in this frame's
-        // coordinates (rebased when the origin moves), the same way.
-        let prev_view_proj =
-            Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
-        let jitter = [jitter, std::mem::replace(&mut self.last_jitter, jitter)];
+        let jitter = [
+            jitter,
+            std::mem::replace(&mut self.last_jitter[eye_index], jitter),
+        ];
         let now = std::time::Instant::now();
-        let interval = self
-            .last_eye
-            .map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
-        let velocity = match (self.last_eye, interval) {
-            (Some((eye, _)), Some(dt)) => (frame.eye - eye) / dt,
+        let residency_eye = self.residency_eye.unwrap_or(frame.eye);
+        let interval =
+            self.last_eye[eye_index].map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
+        let velocity = match (self.last_eye[eye_index], interval) {
+            (Some((eye, _)), Some(dt)) => (residency_eye - eye) / dt,
             _ => DVec3::ZERO,
         };
-        self.last_eye = Some((frame.eye, now));
+        self.last_eye[eye_index] = Some((residency_eye, now));
         // In view: the cone around the camera's forward reaching the
         // frustum's corners. A pixel's angle sets the cut's detail.
         let tan_y = 1.0 / f64::from(proj.y_axis.y);
-        let tan_x = 1.0 / f64::from(proj.x_axis.x);
         let view = residency::View {
             forward: glam::Vec3::from_slice(&camera.forward_far[..3])
                 .as_dvec3()
                 .normalize(),
-            cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos(),
+            cos_half: frustum_cos_half(proj, Vec2::from_slice(&camera.jitter_frame[..2])),
         };
         self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
         // The scene's lights and their tile lists (light culling's), for
         // the terrain's shadows of them.
-        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights")).map(|h| h.buffer.clone());
-        let tile_lists = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists")).map(|b| (*b).clone());
-        let tile_counts = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")).map(|b| (*b).clone());
+        let lights = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map(|h| h.buffer.clone());
+        let tile_lists = ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_lists"))
+            .map(|b| (*b).clone());
+        let tile_counts = ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
+            .map(|b| (*b).clone());
         // The GI probes' rays, when a GI pass runs before this one.
         let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
-        let clipmap = ctx.registry.get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
-        let gi = match (binding(helio_pass_gi::GI_FRAME), binding(helio_pass_gi::GI_RAYS), binding(helio_pass_gi::GI_HITS), binding(helio_pass_gi::GI_SUN), clipmap, self.gi_eye) {
+        let clipmap = ctx
+            .registry
+            .get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
+        let gi = match (
+            binding(helio_pass_gi::GI_FRAME),
+            binding(helio_pass_gi::GI_RAYS),
+            binding(helio_pass_gi::GI_HITS),
+            binding(helio_pass_gi::GI_SUN),
+            clipmap,
+            self.gi_eye,
+        ) {
             (Some(frame_gi), Some(rays), Some(hits), Some(sun), Some(clipmap), Some(world_eye)) => {
-                world.follow_gi(clipmap, world_eye, frame.eye);
+                world.follow_gi(clipmap, world_eye, trace_eye);
                 Some((frame_gi, rays, hits, sun))
             }
             _ => None,
@@ -548,7 +616,7 @@ impl ChunkPass {
         }
         self.stats = world.update(
             encoder,
-            frame.eye,
+            residency_eye,
             velocity,
             Some(view),
             ctx.frame_num,
@@ -559,15 +627,19 @@ impl ChunkPass {
         }
         world.set_steady_shadows(self.steady_shadows);
         // The atmosphere's sun disk sizes the shadows' penumbrae.
-        world.set_atmosphere_frame(ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME)).map(|b| (*b).clone()));
+        world.set_atmosphere_frame(
+            ctx.registry
+                .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME))
+                .map(|b| (*b).clone()),
+        );
         // The sun's occlusion by the terrain, for what else the sun lights
         // (the GI probes' hits in this draw, volumetric fog): a level of its
         // clipmap a frame.
-        world.draw_sun_occlusion(encoder, ctx.frame_num, frame.eye, frame.sun);
-        world.draw(
+        world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        world.draw_for_eye(
             encoder,
             ctx.frame_num,
-            frame.eye,
+            trace_eye,
             view_proj,
             prev_view_proj,
             jitter,
@@ -576,19 +648,44 @@ impl ChunkPass {
             [ctx.width, ctx.height],
             Some(ctx.depth),
             match (&lights, &tile_lists, &tile_counts) {
-                (Some(lights), Some(tile_lists), Some(tile_counts)) => Some(super::SceneLights { lights, tile_lists, tile_counts, eye: at }),
+                (Some(lights), Some(tile_lists), Some(tile_counts)) => Some(super::SceneLights {
+                    lights,
+                    tile_lists,
+                    tile_counts,
+                    eye: at,
+                }),
                 _ => None,
             }
             .as_ref(),
-            gi.as_ref().map(|(frame, rays, hits, sun)| super::GiRays { frame, rays, hits, sun }).as_ref(),
+            gi.as_ref()
+                .map(|(frame, rays, hits, sun)| super::GiRays {
+                    frame,
+                    rays,
+                    hits,
+                    sun,
+                })
+                .as_ref(),
+            eye_index,
         );
         // Foliage's ground: where the drawn terrain changed, and this frame's
         // questions (`chunks::ground`) answered against the cut just drawn.
-        self.foliage_ground.push_changes(world.take_ground_changes());
+        self.foliage_ground
+            .push_changes(world.take_ground_changes());
         if let Some(question) = self.foliage_ground.take_question() {
-            let exchange = (binding(helio_pass_foliage_place::GROUND_QUERIES), binding(helio_pass_foliage_place::GROUND_HITS));
+            let exchange = (
+                binding(helio_pass_foliage_place::GROUND_QUERIES),
+                binding(helio_pass_foliage_place::GROUND_HITS),
+            );
             if let (Some(queries), Some(hits)) = exchange {
-                world.probe_ground(encoder, &queries, &hits, &question.tiles, &frame.planet, frame.eye, at);
+                world.probe_ground(
+                    encoder,
+                    &queries,
+                    &hits,
+                    &question.tiles,
+                    &frame.planet,
+                    trace_eye,
+                    at,
+                );
                 self.foliage_ground.answer(question.batch);
             }
         }
@@ -598,5 +695,162 @@ impl ChunkPass {
             world.copy_picks(encoder, picks);
         }
         Ok(())
+    }
+}
+
+/// The voxel shader unprojects a direction from zero (`pixel_ray`), unlike
+/// mesh projection which accepts geometry relative to any origin. Pair that
+/// eye-relative matrix with the active camera's absolute position: the
+/// frame's world origin plus the camera's position in the frame.
+fn trace_camera(camera: &helio_core::GpuCameraUniforms, world_origin: DVec3) -> (DVec3, Mat4, Mat4) {
+    let at = Vec3::from_slice(&camera.position_near[..3]);
+    let eye = world_origin + at.as_dvec3();
+    let from_eye = Mat4::from_translation(at);
+    (
+        eye,
+        Mat4::from_cols_array(&camera.view_proj) * from_eye,
+        // Previous VP is rebased into the CURRENT frame coordinates by Helio.
+        Mat4::from_cols_array(&camera.prev_view_proj) * from_eye,
+    )
+}
+
+/// XR frusta are asymmetric: include the offset on each axis so chunks at the
+/// wider edge of either eye are not rejected by the residency cone. The
+/// projection's per-frame jitter (an NDC translation, `jitter`) is not part of
+/// the frustum: it would change the view every frame, and a view that changes
+/// is planned again and never settles.
+fn frustum_cos_half(proj: Mat4, jitter: Vec2) -> f64 {
+    let proj = Mat4::from_translation(-jitter.extend(0.0)) * proj;
+    let tan_x = (1.0 + f64::from(proj.z_axis.x).abs()) / f64::from(proj.x_axis.x).abs();
+    let tan_y = (1.0 + f64::from(proj.z_axis.y).abs()) / f64::from(proj.y_axis.y).abs();
+    (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos()
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+
+    #[test]
+    fn voxel_rays_and_mesh_projection_agree_for_moving_stereo_eyes() {
+        let origin = DVec3::new(6_371_200.0, -1024.0, 2048.0);
+        let old_head = Vec3::new(7.0, 2.0, -3.0);
+        // Keep the app's earlier input pose unchanged while rendering newer
+        // translated/rotated eyes, as OpenXR's predicted display poses do.
+        let landmarks = [
+            Vec3::new(8.0, 1.0, -10.0),
+            Vec3::new(4.0, 4.0, -12.0),
+            Vec3::new(10.0, -1.0, -20.0),
+        ];
+        for motion in [Vec3::ZERO, Vec3::new(0.3, -0.6, 0.2)] {
+            for yaw in [0.0, 0.6, -0.4] {
+                let orientation = glam::Quat::from_rotation_y(yaw)
+                    * glam::Quat::from_rotation_x(-0.2)
+                    * glam::Quat::from_rotation_z(0.15);
+                for side in [-1.0, 1.0] {
+                    let at = old_head + motion + orientation * Vec3::X * (side * 0.032);
+                    let pose = Mat4::from_rotation_translation(orientation, at);
+                    let mut proj = helio_core::depth::perspective(1.4, 1.1, 0.05);
+                    proj.z_axis.x = side * 0.15;
+                    let view = pose.inverse();
+                    let camera = helio_core::GpuCameraUniforms::new(
+                        view,
+                        proj,
+                        at,
+                        0.05,
+                        1000.0,
+                        0,
+                        [0.0; 2],
+                        proj * view,
+                    );
+                    let (eye, vp, _) = trace_camera(&camera, origin);
+                    assert!(eye.distance(origin + at.as_dvec3()) < 1e-9);
+                    let rays = super::super::ray_plane(vp, [128, 128]);
+                    for point in landmarks {
+                        // Rasterized foliage sees this fixed world landmark.
+                        let ndc = (proj * view).project_point3(point);
+                        let expected = (point - at).normalize();
+                        // Mirror chunk_draw.wgsl::pixel_ray: it unprojects a
+                        // POINT and normalizes it, assuming the eye is zero.
+                        let ray = vp
+                            .inverse()
+                            .project_point3(Vec3::new(ndc.x, ndc.y, 0.5))
+                            .normalize();
+                        assert!(
+                            ray.distance(expected) < 2e-4,
+                            "shader ray drift: {ray:?} != {expected:?}"
+                        );
+                        let pixel =
+                            Vec2::new((ndc.x + 1.0) * 64.0 - 0.5, (1.0 - ndc.y) * 64.0 - 0.5);
+                        let plane_ray = (Vec3::from_slice(&rays[0])
+                            + Vec3::from_slice(&rays[1]) * pixel.x
+                            + Vec3::from_slice(&rays[2]) * pixel.y)
+                            .normalize();
+                        assert!(plane_ray.distance(expected) < 5e-4, "ray plane drift");
+                        let world_point = origin + point.as_dvec3();
+                        let distance = world_point.distance(eye);
+                        assert!((eye + ray.as_dvec3() * distance).distance(world_point) < 0.005);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn voxel_previous_projection_uses_current_eye_after_origin_rebase() {
+        let origin = DVec3::new(6_371_200.0, 0.0, 0.0);
+        let old_origin = origin - DVec3::new(128.0, 0.0, 0.0);
+        let at = Vec3::new(0.1, 1.4, 0.0);
+        let old_at = Vec3::new(127.9, 1.8, 0.1);
+        let proj = helio_core::depth::perspective(1.4, 1.1, 0.05);
+        let old_vp = proj * Mat4::from_translation(-old_at);
+        let rebased_previous = old_vp * Mat4::from_translation((origin - old_origin).as_vec3());
+        let camera = helio_core::GpuCameraUniforms::new(
+            Mat4::from_translation(-at),
+            proj,
+            at,
+            0.05,
+            1000.0,
+            0,
+            [0.0; 2],
+            rebased_previous,
+        );
+        let (eye, _, previous) = trace_camera(&camera, origin);
+        let landmark = origin + DVec3::new(1.0, 2.0, -8.0);
+        let expected = old_vp.project_point3((landmark - old_origin).as_vec3());
+        let actual = previous.project_point3((landmark - eye).as_vec3());
+        assert!(actual.distance(expected) < 1e-5);
+
+    }
+
+    #[test]
+    fn residency_cone_contains_all_asymmetric_frustum_corners() {
+        for offset in [-0.45, 0.0, 0.45] {
+            let mut proj = helio_core::depth::perspective(1.4, 1.1, 0.05);
+            proj.z_axis.x = offset;
+            proj.z_axis.y = 0.2;
+            let inverse = proj.inverse();
+            let cos_half = frustum_cos_half(proj, Vec2::ZERO);
+            for x in [-1.0, 1.0] {
+                for y in [-1.0, 1.0] {
+                    let ray = inverse.project_point3(Vec3::new(x, y, 1.0)).normalize();
+                    assert!(
+                        f64::from(-ray.z) + 1e-7 >= cos_half,
+                        "corner {ray:?} was culled"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn residency_cone_ignores_projection_jitter() {
+        let proj = helio_core::depth::perspective(1.2, 16.0 / 9.0, 0.05);
+        let still = frustum_cos_half(proj, Vec2::ZERO);
+        for frame in 0..8 {
+            let [x, y] = helio_core::temporal::r1_r2_jitter(frame);
+            let jitter = Vec2::new(x * 2.0 / 1600.0, y * 2.0 / 900.0);
+            let jittered = Mat4::from_translation(jitter.extend(0.0)) * proj;
+            assert_eq!(frustum_cos_half(jittered, jitter), still);
+        }
     }
 }

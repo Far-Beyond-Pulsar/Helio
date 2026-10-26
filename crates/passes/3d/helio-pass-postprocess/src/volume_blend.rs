@@ -83,11 +83,13 @@ pub const AUTO_EXPOSURE_MAYBE_ACTIVE: &str = "auto_exposure_maybe_active";
 pub const FOG_SETTINGS_MAYBE_ACTIVE: &str = "fog_settings_maybe_active";
 
 fn read_f32(row: &[u8], offset: usize) -> Option<f32> {
-    row.get(offset..offset + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+    row.get(offset..offset + 4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
 }
 
 fn read_u32(row: &[u8], offset: usize) -> Option<u32> {
-    row.get(offset..offset + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    row.get(offset..offset + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
 }
 
 const BLOOM_ENABLED: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, bloom_enabled);
@@ -113,7 +115,10 @@ fn volume_row_enables_bloom(row: &[u8]) -> bool {
     use crate::GpuPostProcessVolume as V;
     const PROPERTY: usize = 9;
     let weight = read_f32(row, std::mem::offset_of!(V, blend_weight));
-    let mask = read_u32(row, std::mem::offset_of!(V, override_mask) + PROPERTY / 32 * 4);
+    let mask = read_u32(
+        row,
+        std::mem::offset_of!(V, override_mask) + PROPERTY / 32 * 4,
+    );
     let bloom = read_u32(row, std::mem::offset_of!(V, settings) + BLOOM_ENABLED);
     match (weight, mask, bloom) {
         (Some(weight), Some(mask), Some(bloom)) => {
@@ -142,7 +147,10 @@ fn volume_row_enables_auto_exposure(row: &[u8]) -> bool {
     use crate::GpuPostProcessVolume as V;
     const PROPERTY: usize = 0;
     let weight = read_f32(row, std::mem::offset_of!(V, blend_weight));
-    let mask = read_u32(row, std::mem::offset_of!(V, override_mask) + PROPERTY / 32 * 4);
+    let mask = read_u32(
+        row,
+        std::mem::offset_of!(V, override_mask) + PROPERTY / 32 * 4,
+    );
     let mode = read_u32(row, std::mem::offset_of!(V, settings) + EXPOSURE_MODE);
     match (weight, mask, mode) {
         (Some(weight), Some(mask), Some(mode)) => {
@@ -181,10 +189,20 @@ impl PostProcessVolumeBlendPass {
         Self::with_defaults(device, &crate::PostProcessSettings::default())
     }
     pub fn with_defaults(device: &wgpu::Device, settings: &crate::PostProcessSettings) -> Self {
-        let shader = helio_core::shader::module(device, "PostProcess Resolver", helio_core::include_wgsl!("../shaders/postprocess.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "PostProcess Resolver",
+            helio_core::include_wgsl!("../shaders/postprocess.wgsl"),
+        );
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
-            binding, visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }, count: None,
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
         };
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PostProcess Resolver BGL"),
@@ -197,26 +215,64 @@ impl PostProcessVolumeBlendPass {
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("PostProcess Resolver PL"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0,
+            label: Some("PostProcess Resolver PL"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("PostProcess Resolver"), layout: Some(&layout), module: &shader,
-            entry_point: Some("cs_volume_blend"), compilation_options: Default::default(), cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("PostProcess Resolver"),
+                layout: Some(&layout),
+                module: &shader,
+                entry_point: Some("cs_volume_blend"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let defaults = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("PostProcess Defaults"), contents: bytemuck::bytes_of(&settings.to_gpu()), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("PostProcess Defaults"),
+            contents: bytemuck::bytes_of(&settings.to_gpu()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let buffer = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label), size, usage, mapped_at_creation: false,
-        });
+        let buffer = |label, size, usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
         let size = std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64;
         Self {
-            pipeline, bgl, defaults, default_settings: settings.clone(),
-            blend_output_buf: buffer("PostProcess Resolve Storage", size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
-            resolved: buffer("PostProcess Resolved Uniforms", size, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC),
-            fallback_pp_volumes: buffer("PostProcess Empty Volumes", std::mem::size_of::<crate::GpuPostProcessVolume>() as u64, wgpu::BufferUsages::STORAGE),
-            fallback_cameras: buffer("PostProcess Empty Cameras", std::mem::size_of::<crate::CameraPostProcessComponent>() as u64, wgpu::BufferUsages::STORAGE),
-            bind_group: None, bind_group_key: None,
+            pipeline,
+            bgl,
+            defaults,
+            default_settings: settings.clone(),
+            blend_output_buf: buffer(
+                "PostProcess Resolve Storage",
+                size,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            ),
+            resolved: buffer(
+                "PostProcess Resolved Uniforms",
+                size,
+                wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+            ),
+            fallback_pp_volumes: buffer(
+                "PostProcess Empty Volumes",
+                std::mem::size_of::<crate::GpuPostProcessVolume>() as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            fallback_cameras: buffer(
+                "PostProcess Empty Cameras",
+                std::mem::size_of::<crate::CameraPostProcessComponent>() as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            bind_group: None,
+            bind_group_key: None,
             bloom: SettingActivity::new(
                 settings.to_gpu().bloom_enabled != 0,
                 camera_row_enables_bloom,
@@ -247,20 +303,37 @@ impl PostProcessVolumeBlendPass {
     }
 
     /// The baseline [`Self::set_defaults`] last set (or the constructor's).
-    pub fn defaults(&self) -> &crate::PostProcessSettings { &self.default_settings }
+    pub fn defaults(&self) -> &crate::PostProcessSettings {
+        &self.default_settings
+    }
 
     /// GPU-derived settings, valid after the resolver dispatch and copy.
-    pub fn resolved_uniforms(&self) -> &wgpu::Buffer { &self.resolved }
+    pub fn resolved_uniforms(&self) -> &wgpu::Buffer {
+        &self.resolved
+    }
 }
 impl RenderPass for PostProcessVolumeBlendPass {
     fn scene_buffers(&self) -> &'static [&'static str] {
         &["camera_postprocess", "post_process_volumes"]
     }
 
-    fn name(&self) -> &'static str { "PostProcessVolumeBlendPass" }
-    fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.write_buffer("postprocess_uniforms"); }
-    fn writes(&self) -> &'static [&'static str] { &["postprocess_uniforms"] }
-    fn render_pass_descriptor<'a>(&'a self, _: &'a wgpu::TextureView, _: &'a wgpu::TextureView, _: &'a helio_core::ResourceRegistry<'a>) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
+    fn name(&self) -> &'static str {
+        "PostProcessVolumeBlendPass"
+    }
+    fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        builder.write_buffer("postprocess_uniforms");
+    }
+    fn writes(&self) -> &'static [&'static str] {
+        &["postprocess_uniforms"]
+    }
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _: &'a wgpu::TextureView,
+        _: &'a wgpu::TextureView,
+        _: &'a helio_core::ResourceRegistry<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let cameras = ctx.scene_buffers.get(BufferKey::of("camera_postprocess"));
         let volumes = ctx.scene_buffers.get(BufferKey::of("post_process_volumes"));
@@ -270,18 +343,42 @@ impl RenderPass for PostProcessVolumeBlendPass {
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let volumes = ctx.scene_buffers.get(BufferKey::of("post_process_volumes")).map(|h| &h.buffer).unwrap_or(&self.fallback_pp_volumes);
-        let cameras = ctx.scene_buffers.get(BufferKey::of("camera_postprocess")).map(|h| &h.buffer).unwrap_or(&self.fallback_cameras);
+        let volumes = ctx
+            .scene_buffers
+            .get(BufferKey::of("post_process_volumes"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.fallback_pp_volumes);
+        let cameras = ctx
+            .scene_buffers
+            .get(BufferKey::of("camera_postprocess"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.fallback_cameras);
         let key = [ctx.camera.clone(), volumes.clone(), cameras.clone()];
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PostProcess Resolver BG"), layout: &self.bgl,
+                label: Some("PostProcess Resolver BG"),
+                layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.defaults.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: ctx.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 15, resource: volumes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 16, resource: self.blend_output_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 20, resource: cameras.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.defaults.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: ctx.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: volumes.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 16,
+                        resource: self.blend_output_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 20,
+                        resource: cameras.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -289,24 +386,45 @@ impl RenderPass for PostProcessVolumeBlendPass {
         // Record with the fog consumers to preserve producer/copy/consumer order.
         let mut cmds = ctx.graphics_cmds();
         {
-            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PostProcess Resolve"), timestamp_writes: None });
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PostProcess Resolve"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        cmds.copy_buffer_to_buffer(&self.blend_output_buf, 0, &self.resolved, 0, std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64);
+        cmds.copy_buffer_to_buffer(
+            &self.blend_output_buf,
+            0,
+            &self.resolved,
+            0,
+            std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
+        );
         Ok(())
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let buffer: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.resolved) };
-        frame.write(ResourceKey::new("postprocess_uniforms"), buffer, self.name());
-        frame.write(ResourceKey::new(BLOOM_MAYBE_ACTIVE), self.bloom.maybe_active, self.name());
+        frame.write(
+            ResourceKey::new("postprocess_uniforms"),
+            buffer,
+            self.name(),
+        );
+        frame.write(
+            ResourceKey::new(BLOOM_MAYBE_ACTIVE),
+            self.bloom.maybe_active,
+            self.name(),
+        );
         frame.write(
             ResourceKey::new(AUTO_EXPOSURE_MAYBE_ACTIVE),
             self.auto_exposure.maybe_active,
             self.name(),
         );
-        frame.write(ResourceKey::new(FOG_SETTINGS_MAYBE_ACTIVE), self.fog.maybe_active, self.name());
+        frame.write(
+            ResourceKey::new(FOG_SETTINGS_MAYBE_ACTIVE),
+            self.fog.maybe_active,
+            self.name(),
+        );
     }
 }
 
@@ -325,10 +443,21 @@ mod activity_tests {
             row
         };
         assert!(camera_row_enables_bloom(bytemuck::bytes_of(&row(true, 1))));
-        assert!(!camera_row_enables_bloom(bytemuck::bytes_of(&row(false, 1))));
-        assert!(!camera_row_enables_bloom(bytemuck::bytes_of(&row(true, 0))), "disabled rows are not blended");
-        assert!(!camera_row_enables_bloom(&[0u8; std::mem::size_of::<CameraPostProcessComponent>()]), "empty row");
-        assert!(camera_row_enables_bloom(&[0u8; 8]), "a short row errs toward maybe");
+        assert!(!camera_row_enables_bloom(bytemuck::bytes_of(&row(
+            false, 1
+        ))));
+        assert!(
+            !camera_row_enables_bloom(bytemuck::bytes_of(&row(true, 0))),
+            "disabled rows are not blended"
+        );
+        assert!(
+            !camera_row_enables_bloom(&[0u8; std::mem::size_of::<CameraPostProcessComponent>()]),
+            "empty row"
+        );
+        assert!(
+            camera_row_enables_bloom(&[0u8; 8]),
+            "a short row errs toward maybe"
+        );
     }
 
     #[test]
@@ -344,11 +473,25 @@ mod activity_tests {
             }
             volume
         };
-        assert!(volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 1.0, true))));
-        assert!(!volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 1.0, false))), "does not override bloom");
-        assert!(!volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 0.0, true))), "zero weight is inactive");
-        assert!(!volume_row_enables_bloom(bytemuck::bytes_of(&row(false, 1.0, true))), "overrides bloom off");
-        assert!(!volume_row_enables_bloom(&[0u8; std::mem::size_of::<GpuPostProcessVolume>()]), "empty row");
+        assert!(volume_row_enables_bloom(bytemuck::bytes_of(&row(
+            true, 1.0, true
+        ))));
+        assert!(
+            !volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 1.0, false))),
+            "does not override bloom"
+        );
+        assert!(
+            !volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 0.0, true))),
+            "zero weight is inactive"
+        );
+        assert!(
+            !volume_row_enables_bloom(bytemuck::bytes_of(&row(false, 1.0, true))),
+            "overrides bloom off"
+        );
+        assert!(
+            !volume_row_enables_bloom(&[0u8; std::mem::size_of::<GpuPostProcessVolume>()]),
+            "empty row"
+        );
     }
 
     #[test]
@@ -362,10 +505,19 @@ mod activity_tests {
             row.enabled = enabled;
             row
         };
-        assert!(camera_row_enables_auto_exposure(bytemuck::bytes_of(&camera(true, 1))));
-        assert!(!camera_row_enables_auto_exposure(bytemuck::bytes_of(&camera(false, 1))));
-        assert!(!camera_row_enables_auto_exposure(bytemuck::bytes_of(&camera(true, 0))));
-        assert!(camera_row_enables_auto_exposure(&[0u8; 8]), "a short row errs toward maybe");
+        assert!(camera_row_enables_auto_exposure(bytemuck::bytes_of(
+            &camera(true, 1)
+        )));
+        assert!(!camera_row_enables_auto_exposure(bytemuck::bytes_of(
+            &camera(false, 1)
+        )));
+        assert!(!camera_row_enables_auto_exposure(bytemuck::bytes_of(
+            &camera(true, 0)
+        )));
+        assert!(
+            camera_row_enables_auto_exposure(&[0u8; 8]),
+            "a short row errs toward maybe"
+        );
 
         let volume = |auto, weight, overrides| {
             let mut settings = PostProcessSettings::default();
@@ -380,11 +532,23 @@ mod activity_tests {
             }
             volume
         };
-        assert!(volume_row_enables_auto_exposure(bytemuck::bytes_of(&volume(true, 1.0, true))));
-        assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(&volume(true, 1.0, false))));
-        assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(&volume(true, 0.0, true))));
-        assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(&volume(false, 1.0, true))));
-        assert_eq!(PostProcessSettings::default().to_gpu().exposure_mode, 0, "manual by default");
+        assert!(volume_row_enables_auto_exposure(bytemuck::bytes_of(
+            &volume(true, 1.0, true)
+        )));
+        assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(
+            &volume(true, 1.0, false)
+        )));
+        assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(
+            &volume(true, 0.0, true)
+        )));
+        assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(
+            &volume(false, 1.0, true)
+        )));
+        assert_eq!(
+            PostProcessSettings::default().to_gpu().exposure_mode,
+            0,
+            "manual by default"
+        );
     }
 
     #[test]
@@ -400,18 +564,33 @@ mod activity_tests {
             row
         };
         assert!(camera_row_enables_fog(bytemuck::bytes_of(&camera(true, 1))));
-        assert!(!camera_row_enables_fog(bytemuck::bytes_of(&camera(false, 1))));
-        assert!(!camera_row_enables_fog(bytemuck::bytes_of(&camera(true, 0))));
+        assert!(!camera_row_enables_fog(bytemuck::bytes_of(&camera(
+            false, 1
+        ))));
+        assert!(!camera_row_enables_fog(bytemuck::bytes_of(&camera(
+            true, 0
+        ))));
         let volume = |fog, weight| {
             let mut volume: GpuPostProcessVolume = bytemuck::Zeroable::zeroed();
             volume.settings = settings(fog).to_gpu();
             volume.blend_weight = weight;
             volume
         };
-        assert!(volume_row_enables_fog(bytemuck::bytes_of(&volume(true, 1.0))), "no override bit needed");
-        assert!(!volume_row_enables_fog(bytemuck::bytes_of(&volume(true, 0.0))));
-        assert!(!volume_row_enables_fog(bytemuck::bytes_of(&volume(false, 1.0))));
-        assert_eq!(PostProcessSettings::default().to_gpu().fog_enabled, 0, "fog off by default");
+        assert!(
+            volume_row_enables_fog(bytemuck::bytes_of(&volume(true, 1.0))),
+            "no override bit needed"
+        );
+        assert!(!volume_row_enables_fog(bytemuck::bytes_of(&volume(
+            true, 0.0
+        ))));
+        assert!(!volume_row_enables_fog(bytemuck::bytes_of(&volume(
+            false, 1.0
+        ))));
+        assert_eq!(
+            PostProcessSettings::default().to_gpu().fog_enabled,
+            0,
+            "fog off by default"
+        );
     }
 
     #[test]

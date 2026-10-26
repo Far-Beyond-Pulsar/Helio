@@ -82,10 +82,19 @@ impl ProxyLod {
         if self.prim_map.len() != self.indices.len() / 3 {
             return Err("prim_map must have one entry per triangle".into());
         }
-        if self.indices.iter().any(|&i| i as usize >= self.positions.len()) {
+        if self
+            .indices
+            .iter()
+            .any(|&i| i as usize >= self.positions.len())
+        {
             return Err("index out of range".into());
         }
-        let max_ord = self.prim_map.iter().map(|m| m >> helio_vg_format::VIS_TRI_BITS).max().unwrap_or(0);
+        let max_ord = self
+            .prim_map
+            .iter()
+            .map(|m| m >> helio_vg_format::VIS_TRI_BITS)
+            .max()
+            .unwrap_or(0);
         if max_ord as usize >= self.clusters.len() {
             return Err("prim_map references a missing proxy cluster".into());
         }
@@ -137,10 +146,18 @@ pub fn select_proxy_lod(
     for l in (0..errors.len()).rev() {
         let p = proj(errors[l]);
         if p <= tau_px {
-            return ProxySelection { lod: l, projected_error_px: p, within_tau: true };
+            return ProxySelection {
+                lod: l,
+                projected_error_px: p,
+                within_tau: true,
+            };
         }
     }
-    ProxySelection { lod: 0, projected_error_px: errors.first().map_or(0.0, |&e| proj(e)), within_tau: false }
+    ProxySelection {
+        lod: 0,
+        projected_error_px: errors.first().map_or(0.0, |&e| proj(e)),
+        within_tau: false,
+    }
 }
 
 /// BLAS cache key for `(asset, lod)`.
@@ -215,7 +232,9 @@ pub struct RtFrameInfo {
 impl RtFrameInfo {
     /// Every requested instance is covered.
     pub fn complete(&self) -> bool {
-        self.missing_proxy_instances == 0 && self.unresolved_page_instances == 0 && self.dropped_instances == 0
+        self.missing_proxy_instances == 0
+            && self.unresolved_page_instances == 0
+            && self.dropped_instances == 0
     }
 }
 
@@ -247,13 +266,18 @@ struct Grow {
 }
 impl Grow {
     fn new(device: &wgpu::Device, label: &str) -> Self {
-        Self { buf: Self::alloc(device, label, 64), cap: 64 }
+        Self {
+            buf: Self::alloc(device, label, 64),
+            cap: 64,
+        }
     }
     fn alloc(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         })
     }
@@ -317,14 +341,23 @@ impl DenseRtPass {
         let args_bgl = bgl(
             device,
             "vg_dense_rt args",
-            &[bgl_entry(0, uniform()), bgl_entry(1, storage(false)), bgl_entry(3, storage(false))],
+            &[
+                bgl_entry(0, uniform()),
+                bgl_entry(1, storage(false)),
+                bgl_entry(3, storage(false)),
+            ],
         );
         let trace_bgl = bgl(
             device,
             "vg_dense_rt trace",
             &[
                 bgl_entry(0, uniform()),
-                bgl_entry(1, wgpu::BindingType::AccelerationStructure { vertex_return: false }),
+                bgl_entry(
+                    1,
+                    wgpu::BindingType::AccelerationStructure {
+                        vertex_return: false,
+                    },
+                ),
                 bgl_entry(2, storage(true)),
                 bgl_entry(3, storage(true)),
                 bgl_entry(8, storage(false)),
@@ -336,7 +369,13 @@ impl DenseRtPass {
         let args = config::args_source(&cfg);
         let rt = config::rt_source(&cfg);
         Ok(Self {
-            compact: pipeline(device, "vg_dense_rt compact", &tiles, "compact_tiles_only", &compact_bgl),
+            compact: pipeline(
+                device,
+                "vg_dense_rt compact",
+                &tiles,
+                "compact_tiles_only",
+                &compact_bgl,
+            ),
             args: pipeline(device, "vg_dense_rt args", &args, "make_args_rt", &args_bgl),
             trace: pipeline(device, "vg_dense_rt trace", &rt, "trace", &trace_bgl),
             compact_bgl,
@@ -397,7 +436,11 @@ impl DenseRtPass {
     /// Upload an asset's proxy LODs (built by `helio_vg_stream::proxy`).
     /// Replaces any previous registration of `asset_key`. Returns the GPU bytes
     /// the asset holds (vertex + index + prim_map).
-    pub fn register_proxy_asset(&mut self, device: &wgpu::Device, asset: &ProxyAsset) -> Result<u64, String> {
+    pub fn register_proxy_asset(
+        &mut self,
+        device: &wgpu::Device,
+        asset: &ProxyAsset,
+    ) -> Result<u64, String> {
         for lod in &asset.lods {
             lod.validate()?;
         }
@@ -414,14 +457,20 @@ impl DenseRtPass {
         let mut cluster_pages = Vec::new();
         let mut gpu_bytes = 0u64;
         for lod in &asset.lods {
-            let usage = wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE;
+            let usage = wgpu::BufferUsages::BLAS_INPUT
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::STORAGE;
             let vertices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vg_dense_rt proxy vertices"),
                 size: (lod.positions.len() * 12) as u64,
                 usage,
                 mapped_at_creation: true,
             });
-            vertices.slice(..).get_mapped_range_mut().unwrap().copy_from_slice(bytemuck::cast_slice(&lod.positions));
+            vertices
+                .slice(..)
+                .get_mapped_range_mut()
+                .unwrap()
+                .copy_from_slice(bytemuck::cast_slice(&lod.positions));
             vertices.unmap();
             let indices = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vg_dense_rt proxy indices"),
@@ -429,14 +478,19 @@ impl DenseRtPass {
                 usage,
                 mapped_at_creation: true,
             });
-            indices.slice(..).get_mapped_range_mut().unwrap().copy_from_slice(bytemuck::cast_slice(&lod.indices));
+            indices
+                .slice(..)
+                .get_mapped_range_mut()
+                .unwrap()
+                .copy_from_slice(bytemuck::cast_slice(&lod.indices));
             indices.unmap();
             let prim_map_offset = self.prim_map_pool.len() as u32;
             self.prim_map_pool.extend_from_slice(&lod.prim_map);
             let mut pages = lod.cluster_pages.clone();
             pages.sort_unstable();
             pages.dedup();
-            gpu_bytes += (lod.positions.len() * 12 + lod.indices.len() * 4 + lod.prim_map.len() * 4) as u64;
+            gpu_bytes +=
+                (lod.positions.len() * 12 + lod.indices.len() * 4 + lod.prim_map.len() * 4) as u64;
             lods.push(GpuLod {
                 vertices,
                 indices,
@@ -453,7 +507,15 @@ impl DenseRtPass {
         }
         self.prim_map_dirty = true;
         self.pool_epoch += 1;
-        self.assets.insert(asset.asset_key, GpuAsset { lods, clusters, cluster_pages, gpu_bytes });
+        self.assets.insert(
+            asset.asset_key,
+            GpuAsset {
+                lods,
+                clusters,
+                cluster_pages,
+                gpu_bytes,
+            },
+        );
         Ok(gpu_bytes)
     }
 
@@ -480,7 +542,9 @@ impl DenseRtPass {
     /// Forget an asset's proxies and drop its BLASes. Returns the GPU bytes
     /// released.
     pub fn unregister_proxy_asset(&mut self, blas: &mut BlasManager, asset_key: u64) -> u64 {
-        let Some(removed) = self.drop_asset(asset_key) else { return 0 };
+        let Some(removed) = self.drop_asset(asset_key) else {
+            return 0;
+        };
         for l in 0..removed.lods.len() {
             blas.remove_blas(proxy_mesh_id(asset_key, l));
         }
@@ -489,7 +553,10 @@ impl DenseRtPass {
 
     /// Registered assets and the GPU bytes they hold.
     pub fn proxy_stats(&self) -> (u32, u64) {
-        (self.assets.len() as u32, self.assets.values().map(|a| a.gpu_bytes).sum())
+        (
+            self.assets.len() as u32,
+            self.assets.values().map(|a| a.gpu_bytes).sum(),
+        )
     }
 
     /// Select proxy LODs, build any missing BLASes, and (re)build the TLAS and
@@ -511,7 +578,19 @@ impl DenseRtPass {
         tau_px: f32,
         px_per_unit: f32,
     ) -> Result<RtFrameInfo, RtError> {
-        self.prepare_frame_resolved(device, queue, encoder, blas, tlas, frame, requests, tau_px, px_per_unit, 0, &|_, _| None)
+        self.prepare_frame_resolved(
+            device,
+            queue,
+            encoder,
+            blas,
+            tlas,
+            frame,
+            requests,
+            tau_px,
+            px_per_unit,
+            0,
+            &|_, _| None,
+        )
     }
 
     /// As [`Self::prepare_frame`], resolving page-addressed proxy clusters to
@@ -568,9 +647,11 @@ impl DenseRtPass {
             }
             if !asset.cluster_pages[sel.lod].is_empty() {
                 let lod = &asset.lods[sel.lod];
-                let ok = *resolvable
-                    .entry((r.asset_key, sel.lod))
-                    .or_insert_with(|| lod.pages.iter().all(|&p| resolve_page(r.asset_key, p).is_some()));
+                let ok = *resolvable.entry((r.asset_key, sel.lod)).or_insert_with(|| {
+                    lod.pages
+                        .iter()
+                        .all(|&p| resolve_page(r.asset_key, p).is_some())
+                });
                 if !ok {
                     info.unresolved_page_instances += 1;
                     continue;
@@ -630,7 +711,8 @@ impl DenseRtPass {
 
         // Table signature: which instances, which level, which asset, under
         // which residency/pool layout.
-        let mut sig: u64 = 0xcbf2_9ce4_8422_2325 ^ residency_version.rotate_left(17) ^ self.pool_epoch;
+        let mut sig: u64 =
+            0xcbf2_9ce4_8422_2325 ^ residency_version.rotate_left(17) ^ self.pool_epoch;
         let mut mix = |v: u64| {
             sig = (sig ^ v).wrapping_mul(0x0000_0100_0000_01b3);
         };
@@ -661,7 +743,10 @@ impl DenseRtPass {
                             .or_insert_with(|| resolve_page(r.asset_key, page).unwrap_or(0));
                         (pool << helio_vg_format::PAGE_CLUSTER_SHIFT) | cl
                     };
-                    visible.push(DenseVisibleGpu { instance: r.instance_id, cluster_slot });
+                    visible.push(DenseVisibleGpu {
+                        instance: r.instance_id,
+                        cluster_slot,
+                    });
                 }
                 rows.push(RtInstanceGpu {
                     visible_base,
@@ -674,11 +759,22 @@ impl DenseRtPass {
             self.rt_visible_rows = visible.len() as u32;
             if self.prim_map_dirty {
                 let bytes = bytemuck::cast_slice(&self.prim_map_pool).to_vec();
-                self.prim_map_buf.write(device, queue, "vg_dense_rt prim_map", &bytes);
+                self.prim_map_buf
+                    .write(device, queue, "vg_dense_rt prim_map", &bytes);
                 self.prim_map_dirty = false;
             }
-            self.instances_buf.write(device, queue, "vg_dense_rt instances", bytemuck::cast_slice(&rows));
-            self.rt_visible_buf.write(device, queue, "vg_dense_rt visible", bytemuck::cast_slice(&visible));
+            self.instances_buf.write(
+                device,
+                queue,
+                "vg_dense_rt instances",
+                bytemuck::cast_slice(&rows),
+            );
+            self.rt_visible_buf.write(
+                device,
+                queue,
+                "vg_dense_rt visible",
+                bytemuck::cast_slice(&visible),
+            );
             self.rt_instance_count = rows.len() as u32;
             self.last_table_sig = Some(sig);
             info.tables_rebuilt = true;
@@ -730,7 +826,15 @@ impl DenseRtPass {
         tile_mask: &wgpu::Buffer,
         tlas: &TlasManager,
     ) -> Result<(), RtError> {
-        self.record_scoped(device, queue, encoder, frame, tile_mask, tlas, &mut GpuScopes::none())
+        self.record_scoped(
+            device,
+            queue,
+            encoder,
+            frame,
+            tile_mask,
+            tlas,
+            &mut GpuScopes::none(),
+        )
     }
 
     /// [`Self::record_rec`] with per-kernel GPU timestamp scopes.
@@ -748,12 +852,18 @@ impl DenseRtPass {
         let Some(tlas_res) = tlas.as_binding() else {
             return Err(RtError::Acceleration(AccelerationError::Unsupported));
         };
-        if !self.buffers.as_ref().is_some_and(|b| b.matches(&self.cfg, frame.viewport)) {
+        if !self
+            .buffers
+            .as_ref()
+            .is_some_and(|b| b.matches(&self.cfg, frame.viewport))
+        {
             let b = DenseBuffers::new(device, &self.cfg, frame.viewport, false);
             self.dense_bary = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("vg_dense_rt bary"),
                 size: (frame.viewport[0] as u64 * frame.viewport[1] as u64 * 4).max(16),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }));
             self.buffers = Some(b);
@@ -770,19 +880,31 @@ impl DenseRtPass {
         let compact_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vg_dense_rt compact"),
             layout: &self.compact_bgl,
-            entries: &[bg_entry(0, &b.params), bg_entry(1, tile_mask), bg_entry(2, &b.tile_slot), bg_entry(3, &b.state)],
+            entries: &[
+                bg_entry(0, &b.params),
+                bg_entry(1, tile_mask),
+                bg_entry(2, &b.tile_slot),
+                bg_entry(3, &b.state),
+            ],
         });
         let args_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vg_dense_rt args"),
             layout: &self.args_bgl,
-            entries: &[bg_entry(0, &b.params), bg_entry(1, &b.state), bg_entry(3, &b.args)],
+            entries: &[
+                bg_entry(0, &b.params),
+                bg_entry(1, &b.state),
+                bg_entry(3, &b.args),
+            ],
         });
         let trace_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vg_dense_rt trace"),
             layout: &self.trace_bgl,
             entries: &[
                 bg_entry(0, &b.params),
-                wgpu::BindGroupEntry { binding: 1, resource: tlas_res },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: tlas_res,
+                },
                 bg_entry(2, &self.instances_buf.buf),
                 bg_entry(3, &self.prim_map_buf.buf),
                 bg_entry(8, &b.state),
@@ -793,8 +915,10 @@ impl DenseRtPass {
         let mut run = |label: &'static str, f: &dyn Fn(&mut helio_core::ComputeCmds<'_>)| {
             scopes.begin(encoder, label);
             {
-                let mut pass = encoder
-                    .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(label),
+                    timestamp_writes: None,
+                });
                 f(&mut pass);
             }
             scopes.end(encoder, label);
@@ -821,7 +945,10 @@ impl DenseRtPass {
     /// (including instances left out for non-resident pages), so the caller can
     /// request exactly those pages.
     pub fn lod_pages(&self, asset_key: u64, lod: usize) -> &[u32] {
-        self.assets.get(&asset_key).and_then(|a| a.lods.get(lod)).map_or(&[], |l| l.pages.as_slice())
+        self.assets
+            .get(&asset_key)
+            .and_then(|a| a.lods.get(lod))
+            .map_or(&[], |l| l.pages.as_slice())
     }
 
     pub fn tlas_instance_count(&self) -> u32 {
@@ -849,7 +976,10 @@ mod tests {
                 assert!(s.projected_error_px <= 1.0);
                 if s.lod + 1 < errors.len() {
                     let coarser = errors[s.lod + 1] * ppu / d;
-                    assert!(coarser > 1.0, "a coarser LOD would still have been within tau");
+                    assert!(
+                        coarser > 1.0,
+                        "a coarser LOD would still have been within tau"
+                    );
                 }
             }
             last = s.lod;

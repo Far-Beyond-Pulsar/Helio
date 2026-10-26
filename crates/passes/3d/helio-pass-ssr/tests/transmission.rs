@@ -6,8 +6,7 @@ use wgpu::util::DeviceExt;
 #[ignore = "requires hardware ray queries"]
 fn reflected_segment_filters_only_sheets_before_nearest_opaque_hit() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {

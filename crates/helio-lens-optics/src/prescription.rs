@@ -13,7 +13,9 @@ pub enum OpticsError {
     /// Exactly one surface must have `stop = true`.
     StopCount(usize),
     /// A surface glass cannot be evaluated (unknown catalog name, bad model).
-    UnknownGlass { surface: usize },
+    UnknownGlass {
+        surface: usize,
+    },
     /// A field holds a non-finite or out-of-range value.
     Invalid(String),
     /// The paraxial system is degenerate (e.g. afocal) for the requested query.
@@ -237,7 +239,11 @@ impl Prescription {
     }
 
     /// An ideal thin lens at the stop with the sensor at its focal plane.
-    pub fn ideal_thin_lens(focal_length_mm: f64, f_number: f64, sensor_half_diagonal_mm: f64) -> Self {
+    pub fn ideal_thin_lens(
+        focal_length_mm: f64,
+        f_number: f64,
+        sensor_half_diagonal_mm: f64,
+    ) -> Self {
         Prescription {
             name: format!("Ideal thin lens {focal_length_mm} mm f/{f_number}"),
             source: "Idealized paraxial thin lens (zero aberration fallback)".into(),
@@ -277,14 +283,20 @@ impl Prescription {
                 && s.thickness.is_finite()
                 && s.conic.is_finite()
                 && s.aspheric.iter().all(|a| a.is_finite());
-            if !finite || (strict_thickness && s.thickness < 0.0) || s.semi_aperture.is_nan() || s.semi_aperture <= 0.0 {
+            if !finite
+                || (strict_thickness && s.thickness < 0.0)
+                || s.semi_aperture.is_nan()
+                || s.semi_aperture <= 0.0
+            {
                 return Err(OpticsError::Invalid(format!(
                     "surface {i}: non-finite value, negative thickness or non-positive aperture"
                 )));
             }
             if let Some(f) = s.thin_focal_length {
                 if !f.is_finite() || f == 0.0 {
-                    return Err(OpticsError::Invalid(format!("surface {i}: bad thin focal length")));
+                    return Err(OpticsError::Invalid(format!(
+                        "surface {i}: bad thin focal length"
+                    )));
                 }
             }
             if s.glass.index_at(550.0).is_none() {

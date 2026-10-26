@@ -10,6 +10,48 @@ Every voxel's colour is procedural: nothing is textured.
 cargo run -p examples --release --bin voxel_craft
 ```
 
+The native demo detects a connected OpenXR headset at startup, using the same
+Vulkan bootstrap as `foliage_demo`. With a headset it renders stereo at the
+runtime's recommended eye resolution and shows a side-by-side desktop mirror.
+If OpenXR setup fails it logs the reason and starts the usual desktop game.
+`VOXEL_CRAFT_VR=off` forces desktop mode; the screenshot tour also uses desktop.
+
+### VR controls
+
+Connect Oculus/Meta Link and start your chosen OpenXR runtime before launching
+the demo. A successful connection logs `[XR] Voxel Craft ready`. The registered
+OpenXR runtime determines whether SteamVR or Meta drives the headset.
+
+| Controller input | Action |
+|---|---|
+| Head and hands | tracked view, pointing ray, selected block in the right hand |
+| Left stick | head-relative movement with world collision |
+| Right stick left/right | 30° snap turn; return to centre before turning again |
+| Right stick up/down | next/previous hotbar block |
+| Right / left trigger | hold to dig / press to build where the right hand points |
+| A / right primary | jump; hold to ascend in flight |
+| B / right secondary | toggle flight |
+| X / left primary | pick the targeted block |
+| Y / left secondary, or keyboard C | recenter room movement |
+| Left grip | sneak; descend in flight |
+| Right grip | sprint / fast flight |
+| Keyboard R / Esc | respawn / quit |
+
+Touch and Index use the face buttons above. WMR uses stick clicks for
+primary actions and menu buttons for secondary actions; Vive uses trackpads
+and their clicks. Simple controllers have pointing, triggers, and menu clicks;
+keyboard movement remains available. If the pointing controller is untracked,
+aim falls back to the headset gaze and the held block is hidden.
+
+Room movement follows the planet's local gravity and uses the player's collision
+solver. Snap turns pivot beneath the head. Looking and crouching remain tracked;
+VR always uses first person. Inputs pause while the runtime dashboard has focus;
+release the sticks and buttons to resume. Mirror resizing/minimizing does not
+change the eye resolution or suspend headset rendering. VR uses native-resolution
+FXAA without TSR or projection jitter. Runtime exit/loss ends the game cleanly.
+
+### Desktop controls
+
 | Input | Action |
 |---|---|
 | WASD, mouse | move, look |
@@ -26,6 +68,10 @@ Environment: `VOXEL_CRAFT_QUALITY=performance|balanced|quality|native`,
 `VOXEL_CRAFT_LOD` (cells per pixel, default 0.6), `VOXEL_CRAFT_DISTANCE`
 (view distance in metres, default 12 000), `VOXEL_CRAFT_NO_CLOUDS=1` (a
 clear sky).
+
+`VOXEL_CRAFT_FRAMES=<n>` exits after `n` rendered frames, for a bounded desktop
+or headset smoke check. `VOXEL_CRAFT_TIMINGS=<n>` logs GPU pass timings over `n`
+draws (two eye draws per headset frame).
 
 ### Screenshot tour
 
@@ -89,6 +135,7 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
 | `structures/` | blueprints (stamps of this game's blocks, a block a metre): cottage, tower, ruins, well, pyramid |
 | `player/` | movement and collision on a sphere (stepping up ledges), digging and building, the character |
 | `input.rs` | keyboard and mouse state |
+| `xr/` | OpenXR frame lifecycle, controller actions, planetary rig, spectator mirror |
 
 ## How it fits together
 
@@ -120,3 +167,11 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
   nothing streams around the player, memory does not grow with the area,
   forests show to the horizon as their canopies, and what the player digs
   or builds applies over them.
+
+In VR, the application waits for OpenXR before simulation and samples head and
+controller poses at that frame's predicted display time. It supplies each eye's
+absolute position to the voxel source and each asymmetric projection to the
+normal render graph. Residency follows the head centre so eye separation does
+not become artificial motion. Floating-origin subtraction happens in double
+precision before constructing GPU transforms. Each begun OpenXR frame is ended,
+including frames skipped for tracking loss and frames whose rendering fails.

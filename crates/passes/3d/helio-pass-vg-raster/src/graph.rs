@@ -15,10 +15,14 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
+use helio_core::{
+    BufferKey, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult,
+};
 use helio_pass_vg_cull::{
-    dense_dispatch_args_offset, hw_masked_draw_args_offset, sw_dispatch_args_offset, sw_masked_dispatch_args_offset, state, VgCullFrameData, VgCullInputs, ARGS_BYTE_OFFSET,
-    ARGS_PHASE_BYTES, BIN_COUNT, BIN_DENSE, BIN_SW, BIN_SW_MASKED, KEY_CULL, KEY_CULL_EARLY, KEY_HIZ_LATE, KEY_INPUTS,
+    dense_dispatch_args_offset, hw_masked_draw_args_offset, state, sw_dispatch_args_offset,
+    sw_masked_dispatch_args_offset, VgCullFrameData, VgCullInputs, ARGS_BYTE_OFFSET,
+    ARGS_PHASE_BYTES, BIN_COUNT, BIN_DENSE, BIN_SW, BIN_SW_MASKED, KEY_CULL, KEY_CULL_EARLY,
+    KEY_HIZ_LATE, KEY_INPUTS,
 };
 use wgpu::util::DeviceExt;
 
@@ -65,14 +69,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl VgRasterShared {
     pub fn new(device: &wgpu::Device, config: VgRasterConfig) -> Self {
-        Self(Arc::new(Mutex::new(Shared { raster: VgRaster::new(device, config), targets: None })))
+        Self(Arc::new(Mutex::new(Shared {
+            raster: VgRaster::new(device, config),
+            targets: None,
+        })))
     }
 
     /// (Re)create the targets for `width x height`.
     pub fn ensure_targets(&self, device: &wgpu::Device, width: u32, height: u32) {
         let mut shared = lock(&self.0);
         let (w, h) = (width.max(1), height.max(1));
-        if shared.targets.as_ref().is_some_and(|t| t.width == w && t.height == h) {
+        if shared
+            .targets
+            .as_ref()
+            .is_some_and(|t| t.width == w && t.height == h)
+        {
             return;
         }
         let targets = VgTargets::new(device, w, h, &shared.raster);
@@ -95,7 +106,11 @@ impl VgRasterShared {
     /// Diagnostics (capture / calibration tools only: it BLOCKS on the GPU).
     /// The per-tile Tier 2 counters of the last recorded frame as
     /// `[triangles, depth-passing hits]` per tile, row-major, plus the tile grid.
-    pub fn tile_counters_blocking(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<(Vec<[u32; 2]>, [u32; 2])> {
+    pub fn tile_counters_blocking(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<(Vec<[u32; 2]>, [u32; 2])> {
         let (buffer, tiles) = {
             let shared = lock(&self.0);
             let t = shared.targets.as_ref()?;
@@ -176,7 +191,9 @@ fn record_phase(
     phase: u32,
 ) -> Option<Published> {
     let inputs = cull_inputs(ctx.registry)?;
-    let cull = ctx.registry.get::<VgCullFrameData<'_>>(ResourceKey::new(cull_key))?;
+    let cull = ctx
+        .registry
+        .get::<VgCullFrameData<'_>>(ResourceKey::new(cull_key))?;
     let mut guard = lock(&shared.0);
     let Shared { raster, targets } = &mut *guard;
     let targets = targets.as_mut()?;
@@ -185,7 +202,9 @@ fn record_phase(
     // no masked bins either (it gets the same `materials` buffer).
     let masked = match (
         ctx.scene_buffers.get(BufferKey::of("materials")),
-        ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures()),
+        ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(
+            helio_core::resource_keys::material_textures(),
+        ),
     ) {
         (Some(materials), Some(material_textures)) => Some(VgMaskedInputs {
             materials: &materials.buffer,
@@ -219,7 +238,14 @@ fn record_phase(
         }),
     };
     let mut rec = ctx.graphics_cmds();
-    raster.encode_phase(ctx.device, ctx.queue, &mut rec, targets, &raster_inputs, phase);
+    raster.encode_phase(
+        ctx.device,
+        ctx.queue,
+        &mut rec,
+        targets,
+        &raster_inputs,
+        phase,
+    );
     if phase == 1 {
         raster.encode_classify(ctx.device, &mut rec, targets);
     }
@@ -238,7 +264,10 @@ impl VgRasterEarlyPass {
     }
 
     pub fn new(shared: VgRasterShared) -> Self {
-        Self { shared, published: None }
+        Self {
+            shared,
+            published: None,
+        }
     }
 }
 
@@ -259,7 +288,8 @@ impl RenderPass for VgRasterEarlyPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if cull_inputs(ctx.registry).is_some() {
-            self.shared.ensure_targets(ctx.device, ctx.width, ctx.height);
+            self.shared
+                .ensure_targets(ctx.device, ctx.width, ctx.height);
         }
         Ok(())
     }
@@ -271,7 +301,11 @@ impl RenderPass for VgRasterEarlyPass {
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         if let Some(p) = &self.published {
-            frame.write(ResourceKey::new(KEY_RASTER_EARLY), p.data(), "VgRasterEarly");
+            frame.write(
+                ResourceKey::new(KEY_RASTER_EARLY),
+                p.data(),
+                "VgRasterEarly",
+            );
         }
     }
 }
@@ -284,7 +318,10 @@ pub struct VgRasterLatePass {
 
 impl VgRasterLatePass {
     pub fn new(shared: VgRasterShared) -> Self {
-        Self { shared, published: None }
+        Self {
+            shared,
+            published: None,
+        }
     }
 }
 
@@ -305,7 +342,11 @@ impl RenderPass for VgRasterLatePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.published = None;
-        if ctx.registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER_EARLY)).is_none() {
+        if ctx
+            .registry
+            .get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER_EARLY))
+            .is_none()
+        {
             return Ok(());
         }
         self.published = record_phase(&self.shared, ctx, KEY_CULL, 1);
@@ -408,15 +449,26 @@ impl VgHizLatePass {
             count: None,
         };
         let bgl = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries })
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries,
+            })
         };
         let mip0_bgl = bgl(
             "VG Hiz mip0",
-            &[uniform(0), sampled(wgpu::TextureSampleType::Depth), storage_tex],
+            &[
+                uniform(0),
+                sampled(wgpu::TextureSampleType::Depth),
+                storage_tex,
+            ],
         );
         let mipn_bgl = bgl(
             "VG Hiz mipN",
-            &[uniform(0), sampled(wgpu::TextureSampleType::Float { filterable: false }), storage_tex],
+            &[
+                uniform(0),
+                sampled(wgpu::TextureSampleType::Float { filterable: false }),
+                storage_tex,
+            ],
         );
         let pipeline = |label: &str, source: &str, entry: &str, bgl: &wgpu::BindGroupLayout| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -470,7 +522,11 @@ impl VgHizLatePass {
         let mut size = (width.max(1), height.max(1));
         for (mip, dst_view) in self.mip_views.iter().enumerate() {
             let (layout, source, params): (_, wgpu::BindingResource<'_>, [u32; 4]) = if mip == 0 {
-                (&self.mip0_bgl, wgpu::BindingResource::TextureView(depth), [size.0, size.1, 0, 0])
+                (
+                    &self.mip0_bgl,
+                    wgpu::BindingResource::TextureView(depth),
+                    [size.0, size.1, 0, 0],
+                )
             } else {
                 (
                     &self.mipn_bgl,
@@ -495,15 +551,24 @@ impl VgHizLatePass {
                 label: Some("VG Hiz level"),
                 layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: source },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: source,
+                    },
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(dst_view),
                     },
                 ],
             });
-            self.levels.push(HizLevel { group, groups: (size.0.div_ceil(8), size.1.div_ceil(8)) });
+            self.levels.push(HizLevel {
+                group,
+                groups: (size.0.div_ceil(8), size.1.div_ceil(8)),
+            });
             size = ((size.0 >> 1).max(1), (size.1 >> 1).max(1));
         }
         self.built_for = Some((depth.clone(), width, height));
@@ -518,7 +583,11 @@ impl RenderPass for VgHizLatePass {
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(KEY_RASTER_EARLY);
         // Full mip chain is allocated for R32Float by the graph (like `hiz`).
-        builder.write_color(KEY_HIZ_LATE, ResourceFormat::R32Float, ResourceSize::MatchSurface);
+        builder.write_color(
+            KEY_HIZ_LATE,
+            ResourceFormat::R32Float,
+            ResourceSize::MatchSurface,
+        );
         builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
@@ -529,18 +598,18 @@ impl RenderPass for VgHizLatePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(early) =
-            ctx.registry.get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER_EARLY))
+        let Some(early) = ctx
+            .registry
+            .get::<VgRasterFrameData<'_>>(ResourceKey::new(KEY_RASTER_EARLY))
         else {
             return Ok(());
         };
         let Some(texture) = ctx.resource_pool.get_texture(KEY_HIZ_LATE) else {
             return Ok(());
         };
-        let stale = self
-            .built_for
-            .as_ref()
-            .is_none_or(|(view, w, h)| view != early.depth || *w != early.width || *h != early.height);
+        let stale = self.built_for.as_ref().is_none_or(|(view, w, h)| {
+            view != early.depth || *w != early.width || *h != early.height
+        });
         if stale {
             self.rebuild(ctx.device, texture, early.depth, early.width, early.height);
         }

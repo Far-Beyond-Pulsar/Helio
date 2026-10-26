@@ -129,7 +129,12 @@ impl Camera {
     pub fn with_overscan(mut self, factor: f32) -> Self {
         if factor.is_finite() && factor > 1.0 {
             let inverse = 1.0 / factor;
-            for column in [&mut self.proj.x_axis, &mut self.proj.y_axis, &mut self.proj.z_axis, &mut self.proj.w_axis] {
+            for column in [
+                &mut self.proj.x_axis,
+                &mut self.proj.y_axis,
+                &mut self.proj.z_axis,
+                &mut self.proj.w_axis,
+            ] {
                 column.x *= inverse;
                 column.y *= inverse;
             }
@@ -160,7 +165,15 @@ mod tests {
     use super::*;
 
     fn camera() -> Camera {
-        Camera::perspective_look_at(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y, 0.8, 16.0 / 9.0, 0.1, 100.0)
+        Camera::perspective_look_at(
+            Vec3::ZERO,
+            Vec3::NEG_Z,
+            Vec3::Y,
+            0.8,
+            16.0 / 9.0,
+            0.1,
+            100.0,
+        )
     }
 
     /// The pixel column (of `width`) the world point `p` lands in.
@@ -172,7 +185,10 @@ mod tests {
     #[test]
     fn no_overscan_leaves_the_projection_bit_for_bit() {
         for factor in [1.0, 0.5, f32::NAN, f32::INFINITY] {
-            assert_eq!(camera().with_overscan(factor).proj.to_cols_array(), camera().proj.to_cols_array());
+            assert_eq!(
+                camera().with_overscan(factor).proj.to_cols_array(),
+                camera().proj.to_cols_array()
+            );
         }
     }
 
@@ -185,7 +201,11 @@ mod tests {
         assert!((tan_y(&wide) / tan_y(&plain) - 1.25).abs() < 1e-6);
         assert!((tan_x(&wide) / tan_x(&plain) - 1.25).abs() < 1e-6);
         // The aspect, the depth range and the view are untouched.
-        assert!((wide.proj.x_axis.x / wide.proj.y_axis.y - plain.proj.x_axis.x / plain.proj.y_axis.y).abs() < 1e-6);
+        assert!(
+            (wide.proj.x_axis.x / wide.proj.y_axis.y - plain.proj.x_axis.x / plain.proj.y_axis.y)
+                .abs()
+                < 1e-6
+        );
         assert_eq!(wide.proj.z_axis.z, plain.proj.z_axis.z);
         assert_eq!(wide.proj.w_axis.z, plain.proj.w_axis.z);
         assert_eq!(wide.rotation, plain.rotation);

@@ -80,7 +80,10 @@ impl GlobalEdges {
         let mut keys: Vec<u64> = Vec::new();
         for t in tris {
             for e in 0..3 {
-                keys.push(edge_key(vs.pid[t[e] as usize], vs.pid[t[(e + 1) % 3] as usize]));
+                keys.push(edge_key(
+                    vs.pid[t[e] as usize],
+                    vs.pid[t[(e + 1) % 3] as usize],
+                ));
             }
         }
         keys.par_sort_unstable();
@@ -135,14 +138,23 @@ fn find(p: &mut [u32], mut x: u32) -> u32 {
 
 /// Per triangle: does it belong to a floating piece? `edges` = sorted edge
 /// keys of the group (one entry per use).
-fn floating_flags(vs: &VertexStore, tris: &[Tri], edges: &[u64], global: Option<&GlobalEdges>) -> Vec<bool> {
+fn floating_flags(
+    vs: &VertexStore,
+    tris: &[Tri],
+    edges: &[u64],
+    global: Option<&GlobalEdges>,
+) -> Vec<bool> {
     let cross = |key: u64| -> bool {
         let Some(global) = global else { return false };
         let lo = edges.partition_point(|&e| e < key);
         let hi = edges.partition_point(|&e| e <= key);
         (hi - lo) as u32 != global.count(key)
     };
-    let mut pids: Vec<u32> = tris.iter().filter(|t| vs.floating[t.v[0] as usize]).flat_map(|t| t.v.map(|v| vs.pid[v as usize])).collect();
+    let mut pids: Vec<u32> = tris
+        .iter()
+        .filter(|t| vs.floating[t.v[0] as usize])
+        .flat_map(|t| t.v.map(|v| vs.pid[v as usize]))
+        .collect();
     pids.sort_unstable();
     pids.dedup();
     let local = |v: u32| pids.binary_search(&vs.pid[v as usize]).unwrap() as u32;
@@ -170,7 +182,10 @@ fn floating_flags(vs: &VertexStore, tris: &[Tri], edges: &[u64], global: Option<
             }
         }
     }
-    roots.iter().map(|r| r.is_some_and(|r| !touches[r as usize])).collect()
+    roots
+        .iter()
+        .map(|r| r.is_some_and(|r| !touches[r as usize]))
+        .collect()
 }
 
 /// Simplify a group to about `target` triangles with its boundary locked.
@@ -230,7 +245,6 @@ pub fn simplify_group(
     };
     let n_floating = floating.iter().filter(|&&f| f).count();
 
-
     // (material, floating) sections.
     let mut sections: BTreeMap<(u32, bool), Vec<[u32; 3]>> = BTreeMap::new();
     for (t, &f) in tris.iter().zip(&floating) {
@@ -247,7 +261,11 @@ pub fn simplify_group(
             // (the sections are simplified independently and must still meet).
             let mut sec_edges: Vec<u64> = section
                 .iter()
-                .flat_map(|t| (0..3).map(move |e| edge_key(vs.pid[t[e] as usize], vs.pid[t[(e + 1) % 3] as usize])))
+                .flat_map(|t| {
+                    (0..3).map(move |e| {
+                        edge_key(vs.pid[t[e] as usize], vs.pid[t[(e + 1) % 3] as usize])
+                    })
+                })
                 .collect();
             sec_edges.sort_unstable();
             let mut pinned: Vec<u32> = Vec::new();
@@ -257,7 +275,8 @@ pub fn simplify_group(
                 while j < sec_edges.len() && sec_edges[j] == sec_edges[k] {
                     j += 1;
                 }
-                let all = edges.partition_point(|&e| e <= sec_edges[k]) - edges.partition_point(|&e| e < sec_edges[k]);
+                let all = edges.partition_point(|&e| e <= sec_edges[k])
+                    - edges.partition_point(|&e| e < sec_edges[k]);
                 if all != j - k {
                     pinned.push((sec_edges[k] >> 32) as u32);
                     pinned.push(sec_edges[k] as u32);
@@ -266,7 +285,8 @@ pub fn simplify_group(
             }
             pinned.sort_unstable();
             pinned.dedup();
-            let (reduced, nv, merged) = simplify_floating(vs, &section, want, &pinned, &mut new_verts);
+            let (reduced, nv, merged) =
+                simplify_floating(vs, &section, want, &pinned, &mut new_verts);
             merged_cards |= merged;
             n_verts += nv;
             output.extend(reduced.into_iter().map(|t| (t, material)));
@@ -309,7 +329,10 @@ pub fn simplify_group(
                 .map(|t| [ids[t[0] as usize], ids[t[1] as usize], ids[t[2] as usize]])
                 .collect();
             let actual = boundary_signature(vs, &reduced, !whole);
-            if expected == actual && !reduced.is_empty() && (!whole || nonmanifold(vs, &reduced) <= nm_in) {
+            if expected == actual
+                && !reduced.is_empty()
+                && (!whole || nonmanifold(vs, &reduced) <= nm_in)
+            {
                 budget_rounds += 1;
                 if budget.is_infinite() || budget_rounds > 3 {
                     break;
@@ -349,7 +372,10 @@ pub fn simplify_group(
                 }
             }
         }
-        if !reduced.is_empty() && expected == boundary_signature(vs, &reduced, !whole) && (!whole || nonmanifold(vs, &reduced) <= nm_in) {
+        if !reduced.is_empty()
+            && expected == boundary_signature(vs, &reduced, !whole)
+            && (!whole || nonmanifold(vs, &reduced) <= nm_in)
+        {
             // The simplifier's own error estimate is ignored: the DAG builder
             // measures the real deviation against the original surface
             // (`deviation.rs`).
@@ -366,7 +392,11 @@ pub fn simplify_group(
     // Merged cards keep the measured deviation (their error is a real distance,
     // not the spacing proxy used for pieces that could only be thinned).
     let coverage = (!merged_cards && src_floating * 10 >= tris.len() * 9).then(|| {
-        let float_out: Vec<[u32; 3]> = output.iter().filter(|(t, _)| vs.floating[t[0] as usize]).map(|(t, _)| *t).collect();
+        let float_out: Vec<[u32; 3]> = output
+            .iter()
+            .filter(|(t, _)| vs.floating[t[0] as usize])
+            .map(|(t, _)| *t)
+            .collect();
         (!float_out.is_empty()).then(|| (float_out.len(), mean_footprint(vs, &float_out)))
     });
     SimplifyResult {
@@ -391,14 +421,21 @@ fn simplify_floating(
     new_verts: &mut Vec<(V3, u32)>,
 ) -> (Vec<[u32; 3]>, usize, bool) {
     // Connected pieces (by canonical position id).
-    let mut pids: Vec<u32> = section.iter().flatten().map(|&v| vs.pid[v as usize]).collect();
+    let mut pids: Vec<u32> = section
+        .iter()
+        .flatten()
+        .map(|&v| vs.pid[v as usize])
+        .collect();
     pids.sort_unstable();
     pids.dedup();
     let local = |v: u32| pids.binary_search(&vs.pid[v as usize]).unwrap() as u32;
     let mut parent: Vec<u32> = (0..pids.len() as u32).collect();
     for t in section {
         for k in 1..3 {
-            let (a, b) = (find(&mut parent, local(t[0])), find(&mut parent, local(t[k])));
+            let (a, b) = (
+                find(&mut parent, local(t[0])),
+                find(&mut parent, local(t[k])),
+            );
             if a != b {
                 parent[a.max(b) as usize] = a.min(b);
             }
@@ -406,12 +443,18 @@ fn simplify_floating(
     }
     let mut pieces: BTreeMap<u32, Vec<[u32; 3]>> = BTreeMap::new();
     for t in section {
-        pieces.entry(find(&mut parent, local(t[0]))).or_default().push(*t);
+        pieces
+            .entry(find(&mut parent, local(t[0])))
+            .or_default()
+            .push(*t);
     }
     let mut cards: Vec<Vec<[u32; 3]>> = Vec::new();
     let mut rest: Vec<[u32; 3]> = Vec::new();
     for (_, p) in pieces {
-        let pinned_piece = p.iter().flatten().any(|&v| pinned.binary_search(&vs.pid[v as usize]).is_ok());
+        let pinned_piece = p
+            .iter()
+            .flatten()
+            .any(|&v| pinned.binary_search(&vs.pid[v as usize]).is_ok());
         if p.len() <= CARD_MAX_TRIS && !pinned_piece {
             cards.push(p);
         } else {
@@ -542,7 +585,14 @@ fn describe_card(vs: &VertexStore, tris: &[[u32; 3]]) -> Option<Card> {
         lo = lo.min(d);
         hi = hi.max(d);
     }
-    Some(Card { centre: to_f32(centre), axis, normal, area: area as f32, length: (hi - lo).max(1e-9), verts })
+    Some(Card {
+        centre: to_f32(centre),
+        axis,
+        normal,
+        area: area as f32,
+        length: (hi - lo).max(1e-9),
+        verts,
+    })
 }
 
 /// Merge card-like pieces into `want_cards` quads (two triangles each).
@@ -556,7 +606,13 @@ fn describe_card(vs: &VertexStore, tris: &[[u32; 3]]) -> Option<Card> {
 /// introduces, and the spread of the members inside the cell, are what the
 /// DAG builder measures as this group's error, so a level is only selected at
 /// distances where that error is below a pixel.
-fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, base0: u32, new_verts: &mut Vec<(V3, u32)>) -> Vec<[u32; 3]> {
+fn merge_cards(
+    vs: &VertexStore,
+    pieces: &[Vec<[u32; 3]>],
+    want_cards: usize,
+    base0: u32,
+    new_verts: &mut Vec<(V3, u32)>,
+) -> Vec<[u32; 3]> {
     let cards: Vec<Card> = pieces.iter().filter_map(|p| describe_card(vs, p)).collect();
     let mut cells: Vec<Vec<usize>> = Vec::new();
     fn split(cards: &[Card], idx: Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
@@ -571,16 +627,27 @@ fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, ba
                 hi[a] = hi[a].max(cards[i].centre[a]);
             }
         }
-        let axis = (0..3).max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b]))).unwrap();
+        let axis = (0..3)
+            .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+            .unwrap();
         let mut idx = idx;
-        idx.sort_by(|&a, &b| cards[a].centre[axis].total_cmp(&cards[b].centre[axis]).then(a.cmp(&b)));
+        idx.sort_by(|&a, &b| {
+            cards[a].centre[axis]
+                .total_cmp(&cards[b].centre[axis])
+                .then(a.cmp(&b))
+        });
         let k1 = k / 2;
         let cut = (idx.len() * k1 / k).clamp(1, idx.len() - 1);
         let right = idx.split_off(cut);
         split(cards, idx, k1, out);
         split(cards, right, k - k1, out);
     }
-    split(&cards, (0..cards.len()).collect(), want_cards.max(1), &mut cells);
+    split(
+        &cards,
+        (0..cards.len()).collect(),
+        want_cards.max(1),
+        &mut cells,
+    );
     // A cell that straddles a gap (stray pieces left at the edge of a group)
     // would put its card where no piece is: split such cells until compact, at
     // the price of fewer merges there.
@@ -592,13 +659,25 @@ fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, ba
             }
         }
         let c = scale(c, 1.0 / cell.len() as f32);
-        cell.iter().map(|&i| dist(cards[i].centre, c)).fold(0.0f32, f32::max)
+        cell.iter()
+            .map(|&i| dist(cards[i].centre, c))
+            .fold(0.0f32, f32::max)
     };
-    let mut radii: Vec<f32> = cells.iter().filter(|c| c.len() > 1).map(|c| radius_of(c)).collect();
+    let mut radii: Vec<f32> = cells
+        .iter()
+        .filter(|c| c.len() > 1)
+        .map(|c| radius_of(c))
+        .collect();
     if !radii.is_empty() {
         radii.sort_by(f32::total_cmp);
         let limit = CELL_RADIUS_SPREAD * radii[radii.len() / 2];
-        fn compact(cards: &[Card], cell: Vec<usize>, limit: f32, radius_of: &dyn Fn(&[usize]) -> f32, out: &mut Vec<Vec<usize>>) {
+        fn compact(
+            cards: &[Card],
+            cell: Vec<usize>,
+            limit: f32,
+            radius_of: &dyn Fn(&[usize]) -> f32,
+            out: &mut Vec<Vec<usize>>,
+        ) {
             if cell.len() <= 1 || radius_of(&cell) <= limit {
                 out.push(cell);
                 return;
@@ -620,7 +699,10 @@ fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, ba
     for cell in cells {
         let members: Vec<&Card> = cell.iter().map(|&i| &cards[i]).collect();
         let area: f32 = members.iter().map(|c| c.area).sum();
-        let reference = members.iter().max_by(|a, b| a.area.total_cmp(&b.area)).unwrap();
+        let reference = members
+            .iter()
+            .max_by(|a, b| a.area.total_cmp(&b.area))
+            .unwrap();
         // Orientation-agnostic dominant axis and consistent plane normal.
         let mut axis_cov = [[0.0f64; 3]; 3];
         let mut centre = [0.0f64; 3];
@@ -634,18 +716,30 @@ fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, ba
                     axis_cov[i][j] += w * (c.axis[i] * c.axis[j]) as f64;
                 }
             }
-            let s = if dot(c.normal, reference.normal) < 0.0 { -1.0 } else { 1.0 };
+            let s = if dot(c.normal, reference.normal) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
             for i in 0..3 {
                 n_sum[i] += w * (s * c.normal[i]) as f64;
             }
             mean_len += w * c.length as f64;
         }
         let a_total = area.max(1e-30) as f64;
-        let centre = to_f32([centre[0] / a_total, centre[1] / a_total, centre[2] / a_total]);
+        let centre = to_f32([
+            centre[0] / a_total,
+            centre[1] / a_total,
+            centre[2] / a_total,
+        ]);
         let mean_len = (mean_len / a_total) as f32;
         let normal = {
             let n = normalize(to_f32(n_sum));
-            if length(n) > 0.0 { n } else { reference.normal }
+            if length(n) > 0.0 {
+                n
+            } else {
+                reference.normal
+            }
         };
         let (_, ev) = eigen_sym3(axis_cov);
         let mut axis = sub(to_f32(ev[0]), scale(normal, dot(to_f32(ev[0]), normal)));
@@ -657,7 +751,12 @@ fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, ba
         let len = mean_len.max(area.sqrt());
         let wid = area / len;
         let (a, b) = (scale(axis, len * 0.5), scale(side, wid * 0.5));
-        let corners = [sub(sub(centre, a), b), sub(add(centre, a), b), add(add(centre, a), b), add(sub(centre, a), b)];
+        let corners = [
+            sub(sub(centre, a), b),
+            sub(add(centre, a), b),
+            add(add(centre, a), b),
+            add(sub(centre, a), b),
+        ];
         let first = base0 + new_verts.len() as u32;
         let signs = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
         for (p, (sa, sb)) in corners.into_iter().zip(signs) {
@@ -687,12 +786,20 @@ fn merge_cards(vs: &VertexStore, pieces: &[Vec<[u32; 3]>], want_cards: usize, ba
 /// Reduce floating pieces of one material section to about `want` triangles:
 /// unlocked edge collapse with island pruning, then proximity merging if the
 /// pieces cannot collapse into each other. Returns (triangles, vertex count).
-fn collapse_floating(vs: &VertexStore, section: &[[u32; 3]], want: usize, pinned: &[u32]) -> (Vec<[u32; 3]>, usize) {
+fn collapse_floating(
+    vs: &VertexStore,
+    section: &[[u32; 3]],
+    want: usize,
+    pinned: &[u32],
+) -> (Vec<[u32; 3]>, usize) {
     let mut ids: Vec<u32> = section.iter().flatten().copied().collect();
     ids.sort_unstable();
     ids.dedup();
     let positions: Vec<_> = ids.iter().map(|&g| vs.pos[g as usize]).collect();
-    let locks: Vec<bool> = ids.iter().map(|&g| pinned.binary_search(&vs.pid[g as usize]).is_ok()).collect();
+    let locks: Vec<bool> = ids
+        .iter()
+        .map(|&g| pinned.binary_search(&vs.pid[g as usize]).is_ok())
+        .collect();
     let indices: Vec<u32> = section
         .iter()
         .flatten()
@@ -710,7 +817,14 @@ fn collapse_floating(vs: &VertexStore, section: &[[u32; 3]], want: usize, pinned
         None,
     );
     if result.len() / 3 * SLOPPY_TRIGGER.1 > want * SLOPPY_TRIGGER.0 {
-        let merged = meshopt::simplify_sloppy_with_locks(&result, &vertices, &locks, want * 3, f32::MAX, None);
+        let merged = meshopt::simplify_sloppy_with_locks(
+            &result,
+            &vertices,
+            &locks,
+            want * 3,
+            f32::MAX,
+            None,
+        );
         if !merged.is_empty() {
             result = merged;
         }
@@ -735,12 +849,16 @@ fn nonmanifold(vs: &VertexStore, tris: &[[u32; 3]]) -> usize {
     let mut edges = BTreeMap::new();
     for t in tris {
         for e in 0..3 {
-            *edges.entry(edge_key(vs.pid[t[e] as usize], vs.pid[t[(e + 1) % 3] as usize])).or_insert(0usize) += 1;
+            *edges
+                .entry(edge_key(
+                    vs.pid[t[e] as usize],
+                    vs.pid[t[(e + 1) % 3] as usize],
+                ))
+                .or_insert(0usize) += 1;
         }
     }
     edges.values().filter(|&&n| n > 2).count()
 }
-
 
 /// Square root of the mean triangle area: the linear footprint of one output
 /// triangle (thin needles count as thin, not as long).
@@ -748,7 +866,11 @@ fn mean_footprint(vs: &VertexStore, tris: &[[u32; 3]]) -> f32 {
     let mut s = 0.0f64;
     for t in tris {
         let p = t.map(|v| vs.pos[v as usize]);
-        s += 0.5 * crate::math::length(crate::math::cross(crate::math::sub(p[1], p[0]), crate::math::sub(p[2], p[0]))) as f64;
+        s += 0.5
+            * crate::math::length(crate::math::cross(
+                crate::math::sub(p[1], p[0]),
+                crate::math::sub(p[2], p[0]),
+            )) as f64;
     }
     (s / tris.len().max(1) as f64).sqrt() as f32
 }

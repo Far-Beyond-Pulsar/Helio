@@ -12,8 +12,8 @@ pub mod spectral;
 pub mod trace;
 
 pub use bake::{
-    bake_focus, bake_footprints, bake_psf, bake_ray_map, bake_vignetting, BakeConfig, FocusData, LensBake,
-    PsfTable, PupilFootprints, RayMapLut, VignettingLut, PSF_FIXED_FIELDS,
+    bake_focus, bake_footprints, bake_psf, bake_ray_map, bake_vignetting, BakeConfig, FocusData,
+    LensBake, PsfTable, PupilFootprints, RayMapLut, VignettingLut, PSF_FIXED_FIELDS,
 };
 pub use glass::{catalog_glass, catalog_names, Glass, C_LINE_NM, D_LINE_NM, F_LINE_NM};
 pub use paraxial::{FocusMode, Paraxial};

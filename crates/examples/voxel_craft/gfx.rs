@@ -2,11 +2,17 @@
 //! materials, the character), the voxel planet pass wired to the world, and
 //! drawing a frame for the player's camera.
 
-use crate::player::avatar::Avatar;
 use crate::palette;
-use crate::v3_demo_common::{directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle, set_camera_postprocess, spawn_light, update_light, SceneRays};
-use glam::{DVec3, Vec3};
-use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig};
+use crate::player::avatar::Avatar;
+use crate::v3_demo_common::{
+    directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle,
+    set_camera_postprocess, spawn_light, update_light, SceneRays,
+};
+use glam::{DMat4, DVec3, Vec3};
+use helio::{
+    Camera, HelioGraphicsConfig, HelioGraphicsContext, HelioXrInput, Renderer, RendererBuilder,
+    RendererConfig,
+};
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_foliage_place::components::FoliageInteractorComponent;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
@@ -18,9 +24,15 @@ use std::sync::{Arc, Mutex};
 use winit::window::Window;
 
 pub struct Gfx {
+    #[cfg(not(target_arch = "wasm32"))]
+    xr_input: Option<HelioXrInput>,
+    xr_active: bool,
+    pub failed: bool,
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
+    surface_usage: wgpu::TextureUsages,
     surface_format: wgpu::TextureFormat,
+    present_mode: wgpu::PresentMode,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pub renderer: Renderer,
@@ -72,9 +84,20 @@ struct PassTimings {
 impl PassTimings {
     /// Adds the renderer's latest completed GPU frame, and logs the means every
     /// `window` frames.
-    fn add(&mut self, snapshot: &helio::RenderTimingSnapshot, voxel: &[helio_pass_voxel_planet::chunks::FrameTimings], stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>, size: [u32; 2]) {
+    fn add(
+        &mut self,
+        snapshot: &helio::RenderTimingSnapshot,
+        voxel: &[helio_pass_voxel_planet::chunks::FrameTimings],
+        stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>,
+        size: [u32; 2],
+    ) {
         if let Some(s) = stats {
-            for (sum, n) in self.residency.iter_mut().zip([s.generated_chunks, s.evicted_chunks, s.evicted_unseen, s.switches]) {
+            for (sum, n) in self.residency.iter_mut().zip([
+                s.generated_chunks,
+                s.evicted_chunks,
+                s.evicted_unseen,
+                s.switches,
+            ]) {
                 *sum += n;
             }
             self.last_stats = Some(s);
@@ -82,16 +105,35 @@ impl PassTimings {
         for t in voxel {
             self.voxel.0 += 1;
             let [a, b, c, d, e] = t.shadow_stages;
-            for (sum, ms) in self.voxel.1.iter_mut().zip([t.draw, t.seed, t.shadow, t.denoise, t.generate, a, b, c, d, e, t.occlusion, t.fallbacks]) {
+            for (sum, ms) in self.voxel.1.iter_mut().zip([
+                t.draw,
+                t.seed,
+                t.shadow,
+                t.denoise,
+                t.generate,
+                a,
+                b,
+                c,
+                d,
+                e,
+                t.occlusion,
+                t.fallbacks,
+            ]) {
                 *sum += ms;
             }
-            for (sum, ms) in self.generation.iter_mut().zip(t.stages.iter().chain(&t.tile_stages)) {
+            for (sum, ms) in self
+                .generation
+                .iter_mut()
+                .zip(t.stages.iter().chain(&t.tile_stages))
+            {
                 *sum += ms;
             }
             self.generated[0] += t.tiles;
             self.generated[1] += t.chunks;
         }
-        let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else { return };
+        let Some(frame) = snapshot.gpu_frame_index.filter(|f| *f != self.last) else {
+            return;
+        };
         self.last = frame;
         self.frames += 1;
         self.total += f64::from(snapshot.total_gpu_ms.unwrap_or(0.0));
@@ -102,24 +144,54 @@ impl PassTimings {
             return;
         }
         let n = f64::from(self.frames);
-        let mut passes: Vec<_> = self.passes.iter().map(|(name, ms)| (*name, ms / n)).collect();
+        let mut passes: Vec<_> = self
+            .passes
+            .iter()
+            .map(|(name, ms)| (*name, ms / n))
+            .collect();
         passes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let list: Vec<String> = passes.iter().filter(|(_, ms)| *ms >= 0.02).map(|(name, ms)| format!("{name} {ms:.3}")).collect();
-        log::info!("[timings] {}x{} over {} frames: gpu {:.3} ms; {}", size[0], size[1], self.frames, self.total / n, list.join(", "));
+        let list: Vec<String> = passes
+            .iter()
+            .filter(|(_, ms)| *ms >= 0.02)
+            .map(|(name, ms)| format!("{name} {ms:.3}"))
+            .collect();
+        log::info!(
+            "[timings] {}x{} over {} frames: gpu {:.3} ms; {}",
+            size[0],
+            size[1],
+            self.frames,
+            self.total / n,
+            list.join(", ")
+        );
         if self.voxel.0 > 0 {
-            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion, fallbacks] = self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
-            log::info!("[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3} (fallbacks {fallbacks:.3}), local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}, sun occlusion {occlusion:.3}", self.voxel.0);
+            let [draw, seed, shadow, denoise, generate, sun, sky, hits, local, gi, occlusion, fallbacks] =
+                self.voxel.1.map(|ms| ms / f64::from(self.voxel.0));
+            log::info!(
+                "[timings] voxel stages over {} frames: draw {draw:.3} (seed {seed:.3}), shadow {shadow:.3} (sun samples {sun:.3}, sky samples {sky:.3}, hits {hits:.3} (fallbacks {fallbacks:.3}), local {local:.3}, GI rays {gi:.3}), denoise {denoise:.3}, generate {generate:.3}, sun occlusion {occlusion:.3}",
+                self.voxel.0
+            );
         }
         if self.voxel.0 > 0 {
-            let [tiles, columns, builds, nodes, tile_columns, halos, features] = self.generation.map(|ms| ms / f64::from(self.voxel.0));
+            let [tiles, columns, builds, nodes, tile_columns, halos, features] =
+                self.generation.map(|ms| ms / f64::from(self.voxel.0));
             let per = |n: usize| n as f64 / f64::from(self.voxel.0);
-            log::info!("[timings] generation: tiles {tiles:.3} (nodes {nodes:.3}, columns {tile_columns:.3}, halos {halos:.3}, features {features:.3}), chunk columns {columns:.3}, chunk builds {builds:.3}; a frame {:.1} tiles, {:.1} chunks", per(self.generated[0]), per(self.generated[1]));
+            log::info!(
+                "[timings] generation: tiles {tiles:.3} (nodes {nodes:.3}, columns {tile_columns:.3}, halos {halos:.3}, features {features:.3}), chunk columns {columns:.3}, chunk builds {builds:.3}; a frame {:.1} tiles, {:.1} chunks",
+                per(self.generated[0]),
+                per(self.generated[1])
+            );
         }
         self.generation = [0.0; 7];
         self.generated = [0; 2];
         if let Some(s) = self.last_stats {
             let [generated, evicted, unseen, switches] = self.residency;
-            log::info!("[timings] residency over the window: generated {generated} chunks, evicted {evicted} ({unseen} never drawn), switches {switches}; now requests {}, resident {}, drawn {}, fading {}", s.requests, s.resident_chunks, s.drawn_chunks, s.fading_nodes);
+            log::info!(
+                "[timings] residency over the window: generated {generated} chunks, evicted {evicted} ({unseen} never drawn), switches {switches}; now requests {}, resident {}, drawn {}, fading {}",
+                s.requests,
+                s.resident_chunks,
+                s.drawn_chunks,
+                s.fading_nodes
+            );
         }
         self.residency = [0; 4];
         self.voxel = (0, [0.0; 12]);
@@ -131,7 +203,12 @@ impl PassTimings {
 
 /// Residency settings for chunk trees at a window of height `h`.
 fn chunk_config(h: u32) -> ResidencyConfig {
-    let number = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let number = |name: &str, default: f64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
     let mut config = ResidencyConfig::default();
     config.plan.pixel_angle = 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h);
     // Cells a pixel wide at most: one-block detail wherever it shows.
@@ -166,41 +243,46 @@ fn tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
     }
 }
 
+/// VR renders two eye views every frame. Start at half linear resolution and
+/// reconstruct to the runtime's recommended per-eye size; users can opt into
+/// balanced, quality, or native rendering through `VOXEL_CRAFT_VR_QUALITY`.
+fn vr_tsr_quality() -> Option<helio_pass_tsr::TsrQuality> {
+    match std::env::var("VOXEL_CRAFT_VR_QUALITY").as_deref() {
+        Ok("native" | "fxaa") => None,
+        Ok("balanced") => Some(helio_pass_tsr::TsrQuality::Balanced),
+        Ok("quality") => Some(helio_pass_tsr::TsrQuality::Quality),
+        _ => Some(helio_pass_tsr::TsrQuality::Performance),
+    }
+}
+
 impl Gfx {
     pub fn new(window: Arc<Window>, planet: &Planet) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            // `WGPU_VALIDATION=1`, `WGPU_DEBUG=1`: the validation layer, labels.
-            flags: wgpu::InstanceFlags::empty().with_env(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("a GPU adapter");
-        log::info!("adapter: {:?}", adapter.get_info());
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Voxel Craft"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| log::error!("[GPU] {e:?}")));
-        let (device, queue) = (Arc::new(device), Arc::new(queue));
-
-        let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
-        // The surface is configured at the first frame (`configure`): just
-        // after the window opens its reported size can still be the one
-        // before the display's scale applies, larger than the surface.
-        let alpha_mode = caps.alpha_modes[0];
         let size = window.inner_size();
         let size = [size.width.max(1), size.height.max(1)];
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size[0],
+            size[1],
+            HelioGraphicsConfig {
+                vr_support: std::env::var_os("VOXEL_CRAFT_SHOTS").is_none()
+                    && !matches!(
+                        std::env::var("VOXEL_CRAFT_VR").as_deref(),
+                        Ok("off" | "0" | "false")
+                    ),
+                application_name: "Voxel Craft".into(),
+                present_mode: wgpu::PresentMode::AutoNoVsync,
+                surface_usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC,
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let surface_config = graphics.surface_config.clone();
+        let (device, queue) = (graphics.device.clone(), graphics.queue.clone());
+        let render_target = graphics.render_target();
+        let render_size = [render_target.0, render_target.1];
+        let render_format = render_target.2;
+        let vr = graphics.is_xr();
 
         // The scene: SceneDB rows for the sun, the air, the blocks' materials
         // and the character.
@@ -208,7 +290,9 @@ impl Gfx {
         let palette = palette::load(&mut scene.world);
         // Grass and flowers on the world's grass: the engine's voxel meadow, with stands
         // of tall grass in places and a fresh breeze through it.
-        let meadow = helio_pass_voxel_planet::meadow::meadow().with_tall_stands().with_wind([1.0, 0.35], 4.5, 0.8);
+        let meadow = helio_pass_voxel_planet::meadow::meadow()
+            .with_tall_stands()
+            .with_wind([1.0, 0.35], 4.5, 0.8);
         for row in meadow.types {
             let entity = scene.world.spawn();
             scene.world.insert(entity, row);
@@ -217,8 +301,14 @@ impl Gfx {
         scene.world.insert(wind, meadow.wind);
         // The player's feet push it aside, and leave a track that rises behind them.
         let feet = scene.world.spawn();
-        scene.world.insert(feet, FoliageInteractorComponent::new(DVec3::ZERO, 0.7, 1.0, Vec3::ZERO, 1.2));
-        let sun_light = spawn_light(&mut scene.world, sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]));
+        scene.world.insert(
+            feet,
+            FoliageInteractorComponent::new(DVec3::ZERO, 0.7, 1.0, Vec3::ZERO, 1.2),
+        );
+        let sun_light = spawn_light(
+            &mut scene.world,
+            sun_light([-0.3, -0.8, -0.4], [1.0, 0.96, 0.9]),
+        );
         let air = scene.world.spawn();
         // Fair-weather cumulus, sized for the small planet: a layer from 0.9
         // to 2.2 km over the ground, drifting with a light breeze
@@ -233,8 +323,13 @@ impl Gfx {
             wind: [6.0, 0.0, 2.5],
             ..helio_pass_sky::CloudLayer::cumulus()
         };
-        let sky = helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius());
-        let sky = if std::env::var_os("VOXEL_CRAFT_NO_CLOUDS").is_some() { sky } else { sky.with_clouds(clouds) };
+        let sky = helio_pass_sky::AtmosphereComponent::earth()
+            .around_planet([0.0; 3], planet.grid().radius());
+        let sky = if std::env::var_os("VOXEL_CRAFT_NO_CLOUDS").is_some() {
+            sky
+        } else {
+            sky.with_clouds(clouds)
+        };
         scene.world.insert(air, sky);
         // A light ground haze, thinning with altitude over the planet, the
         // sun scatters forward through: shafts past trees and ridges (the
@@ -242,8 +337,14 @@ impl Gfx {
         let haze = scene.world.spawn();
         scene.world.insert(
             haze,
-            helio_pass_volumetric_fog::GlobalFogComponent { mode: 1, extinction: 0.001, height_falloff: 0.01, anisotropy: 0.6, ..Default::default() }
-                .around_planet([0.0; 3], planet.grid().radius()),
+            helio_pass_volumetric_fog::GlobalFogComponent {
+                mode: 1,
+                extinction: 0.001,
+                height_falloff: 0.01,
+                anisotropy: 0.6,
+                ..Default::default()
+            }
+            .around_planet([0.0; 3], planet.grid().radius()),
         );
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         // AgX with its punchy look: sunlit leaves and grass roll toward
@@ -260,16 +361,20 @@ impl Gfx {
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
         let appearance = palette.appearance;
-        let config = chunk_config(size[1]);
+        let config = chunk_config(render_size[1]);
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
             Box::new(pass)
         });
-        let renderer_config = RendererConfig::new(size[0], size[1], surface_format);
-        let mut renderer_config = match tsr_quality() {
+        let renderer_config = RendererConfig::new(render_size[0], render_size[1], render_format);
+        // Render VR eyes at Performance scale by default, then reconstruct to
+        // the headset's native swapchain dimensions. This cuts pixel shading
+        // by 75% across both eyes while keeping the compositor target unchanged.
+        let quality = if vr { vr_tsr_quality() } else { tsr_quality() };
+        let mut renderer_config = match quality {
             Some(quality) => renderer_config.with_tsr_quality(quality),
-            None => renderer_config.without_tsr(),
+            None => renderer_config.without_tsr().with_render_scale(1.0),
         };
         // The meadow, grown on the terrain the planet pass draws
         // (`VOXEL_CRAFT_NO_FOLIAGE`: bare turf, for A/B measurements).
@@ -278,29 +383,110 @@ impl Gfx {
         renderer_config.foliage_blades_per_tuft = Some(meadow.blades_per_tuft);
         renderer_config.foliage_range = Some(meadow.range);
         let handle = scene_db_handle(&scene);
-        let mut renderer = RendererBuilder::new(renderer_config, handle)
-            .with_external_device()
-            .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
-            .build(device.clone(), queue.clone(), size[0], size[1], surface_format);
+        let builder = RendererBuilder::new(renderer_config, handle).with_pass_build_context(
+            Box::new(move |ctx| {
+                build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
+            }),
+        );
+        let (mut renderer, xr_input) = graphics
+            .build_renderer(builder, renderer_config)
+            .expect("Helio renderer");
+        let surface = graphics.surface;
+        let surface_usage = surface_config.usage;
+        let surface_format = surface_config.format;
+        let alpha_mode = surface_config.alpha_mode;
+        let present_mode = surface_config.present_mode;
+        let xr_input = xr_input;
+        if vr {
+            renderer.set_jitter_enabled(false);
+        }
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         // `VOXEL_CRAFT_DEBUG=<mode>`: one of the renderer's debug views.
-        if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG").ok().and_then(|v| v.parse().ok()) {
+        if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
             renderer.set_debug_mode(mode);
         }
-        let timings = std::env::var("VOXEL_CRAFT_TIMINGS").ok().and_then(|v| v.parse().ok()).map(|window: u32| PassTimings {
-            frames: 0,
-            window: window.max(1),
-            last: u64::MAX,
-            total: 0.0,
-            passes: Default::default(),
-            voxel: (0, [0.0; 12]),
-            residency: [0; 4],
-            last_stats: None,
-            generation: [0.0; 7],
-            generated: [0; 2],
-        });
+        let timings = std::env::var("VOXEL_CRAFT_TIMINGS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|window: u32| PassTimings {
+                frames: 0,
+                window: window.max(1),
+                last: u64::MAX,
+                total: 0.0,
+                passes: Default::default(),
+                voxel: (0, [0.0; 12]),
+                residency: [0; 4],
+                last_stats: None,
+                generation: [0.0; 7],
+                generated: [0; 2],
+            });
         let rays = SceneRays::new(&device, &queue);
-        Self { window, surface, surface_format, device, queue, renderer, scene, avatar, rays, feet, source, sun_light, origin: DVec3::ZERO, size, alpha_mode, configured: None, clock: 0.0, timings }
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_input,
+            xr_active: vr,
+            failed: false,
+            window,
+            surface,
+            surface_usage,
+            surface_format,
+            present_mode,
+            device,
+            queue,
+            renderer,
+            scene,
+            avatar,
+            rays,
+            feet,
+            source,
+            sun_light,
+            origin: DVec3::ZERO,
+            size,
+            alpha_mode,
+            configured: Some([surface_config.width, surface_config.height]),
+            clock: 0.0,
+            timings,
+        }
+    }
+
+    pub fn vr_active(&self) -> bool {
+        self.xr_active
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn xr_frame_input(&mut self) -> helio_xr::Result<Option<crate::xr::rig::FrameInput>> {
+        let Some(input) = &mut self.xr_input else {
+            return Ok(None);
+        };
+        let state = input.frame_state(&self.renderer, &glam::Mat4::IDENTITY)?;
+        let Some(tracking) = state.tracking else {
+            return Ok(None);
+        };
+        let Some(head) = tracking.head else {
+            return Ok(None);
+        };
+        let controls = state.controllers;
+        Ok(Some(crate::xr::rig::FrameInput {
+            focused: state.focused,
+            head,
+            grips: tracking.grips,
+            aim: tracking.aims[1],
+            movement: controls.left_stick,
+            turn: controls.right_stick,
+            buttons: crate::xr::rig::Buttons {
+                mine: controls.trigger[1],
+                place: controls.trigger[0],
+                jump: controls.primary[1],
+                pick: controls.primary[0],
+                fly: controls.secondary[1],
+                recenter: controls.secondary[0],
+                sneak: controls.squeeze[0],
+                sprint: controls.squeeze[1],
+            },
+        }))
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -317,18 +503,18 @@ impl Gfx {
         self.surface.configure(
             &self.device,
             &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                usage: self.surface_usage,
                 format: self.surface_format,
                 width: size[0],
                 height: size[1],
-                present_mode: wgpu::PresentMode::Fifo,
+                present_mode: self.present_mode,
                 alpha_mode: self.alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
                 color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
-        if size != self.size {
+        if size != self.size && !self.vr_active() {
             self.renderer.set_render_size(size[0], size[1]);
         }
         self.size = size;
@@ -337,14 +523,33 @@ impl Gfx {
 
     /// Whether the planet pass is still generating terrain for this view.
     pub fn settled(&self) -> bool {
-        self.renderer.find_pass::<ChunkPass>().is_none_or(ChunkPass::settled)
+        self.renderer
+            .find_pass::<ChunkPass>()
+            .is_none_or(ChunkPass::settled)
     }
 
     /// Draws a frame of `view`.
     pub fn draw(&mut self, view: &View) {
         let (planet, eye, forward) = (view.planet, view.eye, view.look);
+        // The planet pass builds eye-relative chunk geometry from PlanetFrame.eye.
+        // In VR that must be the tracked head position, not the player's body
+        // eye: otherwise the camera follows vertical room-scale head motion
+        // while the voxel pass's geometry origin stays fixed, making the world
+        // appear to move toward the player. Keep `eye` for gameplay/avatar
+        // placement and use `render_eye` only for rendering and residency.
+        #[cfg(not(target_arch = "wasm32"))]
+        let render_eye = view.vr.map(|vr| vr.head.w_axis.truncate()).unwrap_or(eye);
+        #[cfg(target_arch = "wasm32")]
+        let render_eye = eye;
         let sun = view.sun.normalize();
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: sun.as_vec3(), picks: None, kept: None, export: None });
+        *self.source.lock().unwrap() = Some(PlanetFrame {
+            eye: render_eye,
+            planet: planet.clone(),
+            sun: sun.as_vec3(),
+            picks: None,
+            kept: None,
+            export: None,
+        });
         // The sun's light follows the sky.
         update_light(
             &mut self.scene.world,
@@ -353,20 +558,39 @@ impl Gfx {
                 (-sun).as_vec3().to_array(),
                 // Warm at the horizon, white overhead.
                 {
-                    let up = eye.normalize();
+                    let up = render_eye.normalize();
                     let height = sun.dot(up).clamp(-0.2, 1.0) as f32;
                     let warm = (1.0 - height * 2.2).clamp(0.0, 1.0);
                     [1.0, 0.97 - 0.25 * warm, 0.92 - 0.5 * warm]
                 },
             ),
         );
-        self.renderer.set_frame_clock_delta(Some((view.weather - self.clock).clamp(0.0, 0.1) as f32));
+        let weather_delta = (view.weather - self.clock).clamp(0.0, 0.1) as f32;
+        self.renderer.set_frame_clock_delta(Some(weather_delta));
         self.clock = view.weather;
-        self.origin = self.renderer.origin_for(eye);
+        self.origin = self.renderer.origin_for(render_eye);
         let origin = self.origin;
         // The character and what it holds, and the targeted block's outline.
-        self.avatar.pose(&mut self.scene.world, &mut self.renderer, view.player, (eye, forward), origin, view.time);
-        if let Some(mut feet) = self.scene.world.get_mut::<FoliageInteractorComponent>(self.feet) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let hand = view
+            .vr
+            .map(|vr| vr.grips[1].map(|pose| (DMat4::from_translation(-origin) * pose).as_mat4()));
+        #[cfg(target_arch = "wasm32")]
+        let hand = None;
+        self.avatar.pose(
+            &mut self.scene.world,
+            &mut self.renderer,
+            view.player,
+            (eye, forward),
+            origin,
+            view.time,
+            hand,
+        );
+        if let Some(mut feet) = self
+            .scene
+            .world
+            .get_mut::<FoliageInteractorComponent>(self.feet)
+        {
             feet.set_motion(view.player.position, view.player.velocity.as_vec3());
         }
         self.renderer.debug_clear();
@@ -374,14 +598,18 @@ impl Gfx {
             self.renderer.debug_line(*a, *b, [0.05, 0.05, 0.05, 1.0]);
         }
         // A crosshair fixed in front of the eye.
-        if !view.player.third_person {
+        if !view.player.third_person && !self.vr_active() {
             let look = forward.normalize();
             let right = look.cross(eye.normalize()).normalize_or_zero();
             let above = right.cross(look);
             let centre = eye + look * 0.6;
             let reach = 0.0045;
             for (a, b) in [(-right, right), (-above, above)] {
-                self.renderer.debug_line(centre + a * reach, centre + b * reach, [1.0, 1.0, 1.0, 0.9]);
+                self.renderer.debug_line(
+                    centre + a * reach,
+                    centre + b * reach,
+                    [1.0, 1.0, 1.0, 0.9],
+                );
             }
         }
 
@@ -390,32 +618,87 @@ impl Gfx {
         if now.width > 0 && now.height > 0 {
             self.configure([now.width, now.height]);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(vr) = view.vr {
+            let (start, direction) = vr.aim;
+            let end = view
+                .target
+                .unwrap_or(start + direction * crate::config::REACH);
+            self.renderer.debug_line(start, end, [0.3, 0.85, 1.0, 0.8]);
+            for grip in vr.grips.iter().flatten() {
+                let a = grip.transform_point3(DVec3::new(0.0, 0.0, 0.04));
+                let b = grip.transform_point3(DVec3::new(0.0, 0.0, -0.12));
+                self.renderer.debug_line(a, b, [0.9, 0.9, 0.95, 1.0]);
+            }
+            if let Some(input) = &self.xr_input {
+                let world_from_stage =
+                    (DMat4::from_translation(-origin) * vr.world_from_stage).as_mat4();
+                input.set_locomotion_transform(&mut self.renderer, world_from_stage);
+            }
+        }
+        if self.vr_active() {
+            if let Some(pass) = self.renderer.find_pass_mut::<ChunkPass>() {
+                pass.set_residency_eye(Some(render_eye));
+            }
+        }
         let up = eye.normalize().as_vec3();
         let forward = forward.normalize().as_vec3();
-        let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
-        let near = (planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
-        let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let camera = Camera::perspective_look_to(eye, forward, up, 70f32.to_radians(), aspect, near, 40_000_000.0);
-
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return,
+        let up = if forward.dot(up).abs() > 0.999 {
+            up.any_orthonormal_vector()
+        } else {
+            up
         };
-        let target = output.texture.create_view(&Default::default());
+        let near = (planet.air_clearance(render_eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+        let aspect = self.size[0] as f32 / self.size[1] as f32;
+        let camera = Camera::perspective_look_to(
+            render_eye,
+            forward,
+            up,
+            70f32.to_radians(),
+            aspect,
+            near,
+            40_000_000.0,
+        );
+
+        // Let Helio own the ordinary window frame and its XR mirror. Screenshot
+        // capture is the sole path that needs the acquired surface texture.
+        let output = if view.screenshot.is_some() {
+            match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                _ => return,
+            }
+        } else {
+            None
+        };
         flush_scene_db(&self.scene, &self.queue);
         self.rays.publish(&self.scene.world, &mut self.renderer);
-        if let Err(error) = self.renderer.render(&camera, &target) {
+        if let Some(output) = &output {
+            let target = output.texture.create_view(&Default::default());
+            if let Err(error) = self.renderer.render(&camera, &target) {
+                log::error!("render: {error:?}");
+            }
+        } else if let Err(error) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("render: {error:?}");
         }
         if let Some(timings) = &mut self.timings {
-            let voxel = self.renderer.find_pass_mut::<ChunkPass>().map(ChunkPass::take_timings).unwrap_or_default();
-            let stats = self.renderer.find_pass::<ChunkPass>().map(|pass| *pass.stats());
+            let voxel = self
+                .renderer
+                .find_pass_mut::<ChunkPass>()
+                .map(ChunkPass::take_timings)
+                .unwrap_or_default();
+            let stats = self
+                .renderer
+                .find_pass::<ChunkPass>()
+                .map(|pass| *pass.stats());
             timings.add(self.renderer.timing_snapshot(), &voxel, stats, self.size);
         }
-        if let Some(path) = view.screenshot {
+        if let (Some(path), Some(output)) = (view.screenshot, output.as_ref()) {
             self.save_screenshot(&output.texture, path);
         }
-        self.queue.present(output);
+        if let Some(output) = output {
+            self.queue.present(output);
+        }
     }
 
     /// Writes the frame just drawn to `path` (PNG).
@@ -429,22 +712,49 @@ impl Gfx {
     fn read_pixels(&self, texture: &wgpu::Texture) -> Vec<u8> {
         let [w, h] = self.size;
         let row = (w * 4).div_ceil(256) * 256;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(row) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
         let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
-        let bgra = matches!(self.surface_format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let bgra = matches!(
+            self.surface_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
         let mut pixels = Vec::with_capacity((w * h * 4) as usize);
         for line in data.chunks(row as usize).take(h as usize) {
             for p in line[..(w * 4) as usize].chunks(4) {
-                pixels.extend_from_slice(&if bgra { [p[2], p[1], p[0], 255] } else { [p[0], p[1], p[2], 255] });
+                pixels.extend_from_slice(&if bgra {
+                    [p[2], p[1], p[0], 255]
+                } else {
+                    [p[0], p[1], p[2], 255]
+                });
             }
         }
         drop(data);
@@ -454,6 +764,10 @@ impl Gfx {
 
 /// What a frame shows.
 pub struct View<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub vr: Option<&'a crate::xr::rig::RigView>,
+    pub target: Option<DVec3>,
+    pub dt: f32,
     pub planet: &'a Arc<Planet>,
     pub player: &'a crate::player::Player,
     /// The camera: position and look direction (planet-centred).

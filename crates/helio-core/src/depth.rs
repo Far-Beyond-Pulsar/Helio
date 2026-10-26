@@ -73,8 +73,16 @@ pub fn is_reversed(proj: &Mat4) -> bool {
 ///
 /// Arguments are magnitudes; the sign is the convention's business (positive
 /// under reversed Z). `clamp` caps the total bias, 0 for no cap.
-pub const fn bias_toward_camera(constant: i32, slope_scale: f32, clamp: f32) -> wgpu::DepthBiasState {
-    wgpu::DepthBiasState { constant, slope_scale, clamp }
+pub const fn bias_toward_camera(
+    constant: i32,
+    slope_scale: f32,
+    clamp: f32,
+) -> wgpu::DepthBiasState {
+    wgpu::DepthBiasState {
+        constant,
+        slope_scale,
+        clamp,
+    }
 }
 
 /// Frustum planes of a view-projection built on the engine projection
@@ -121,7 +129,9 @@ mod tests {
         assert!(depth_at(&proj, 1.0e30) < 1e-20);
         assert!(depth_at(&proj, 1.0e30) >= CLEAR);
         assert!(is_reversed(&proj));
-        assert!(!is_reversed(&glam::camera::rh::proj::directx::perspective(1.0, 1.0, NEAR, 100.0)));
+        assert!(!is_reversed(&glam::camera::rh::proj::directx::perspective(
+            1.0, 1.0, NEAR, 100.0
+        )));
     }
 
     #[test]
@@ -138,7 +148,10 @@ mod tests {
         let proj = perspective(1.0, 16.0 / 9.0, NEAR);
         for distance in [NEAR, 10_000.0, 40_000_000.0] {
             let back = view_depth(&proj, depth_at(&proj, distance));
-            assert!((back - distance).abs() <= distance * 1e-5, "{distance} came back as {back}");
+            assert!(
+                (back - distance).abs() <= distance * 1e-5,
+                "{distance} came back as {back}"
+            );
         }
         assert_eq!(view_depth(&proj, CLEAR), f32::INFINITY);
     }
@@ -147,7 +160,9 @@ mod tests {
     fn view_depth_reads_a_standard_projection_too() {
         let proj = glam::camera::rh::proj::directx::perspective(1.0, 1.0, 0.1, 100.0);
         for distance in [0.1, 3.0, 100.0] {
-            assert!((view_depth(&proj, depth_at(&proj, distance)) - distance).abs() < distance * 1e-4);
+            assert!(
+                (view_depth(&proj, depth_at(&proj, distance)) - distance).abs() < distance * 1e-4
+            );
         }
     }
 
@@ -164,17 +179,27 @@ mod tests {
 
     #[test]
     fn frustum_planes_are_finite_and_cull_only_what_is_outside() {
-        let view = glam::camera::rh::view::look_at_mat4(Vec3::new(3.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
+        let view =
+            glam::camera::rh::view::look_at_mat4(Vec3::new(3.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
         let view_proj = perspective(1.0, 16.0 / 9.0, NEAR) * view;
         let planes = frustum_planes(view_proj.to_cols_array());
         assert!(planes.iter().flatten().all(|v| v.is_finite()));
-        let inside = |p: Vec3| planes.iter().all(|pl| Vec3::from_slice(pl).dot(p) + pl[3] >= 0.0);
+        let inside = |p: Vec3| {
+            planes
+                .iter()
+                .all(|pl| Vec3::from_slice(pl).dot(p) + pl[3] >= 0.0)
+        };
         let eye = Vec3::new(3.0, 2.0, 5.0);
         let forward = (Vec3::ZERO - eye).normalize();
         assert!(inside(Vec3::ZERO));
         assert!(inside(eye + forward * 40_000_000.0), "no far plane");
-        assert!(!inside(eye + forward * (NEAR * 0.5)), "in front of the near plane");
+        assert!(
+            !inside(eye + forward * (NEAR * 0.5)),
+            "in front of the near plane"
+        );
         assert!(!inside(eye - forward), "behind the camera");
-        assert!(!inside(eye + forward + view.inverse().transform_vector3(Vec3::X) * 10.0));
+        assert!(!inside(
+            eye + forward + view.inverse().transform_vector3(Vec3::X) * 10.0
+        ));
     }
 }

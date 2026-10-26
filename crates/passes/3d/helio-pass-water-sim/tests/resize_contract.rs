@@ -1,5 +1,5 @@
-use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use bytemuck::Zeroable;
+use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     GpuCameraUniforms, PassContext, RenderGraph, RenderPass, ResourceKey, Result as HelioResult,
     SceneInput,
@@ -64,15 +64,16 @@ impl RenderPass for PreAaDepthConsumer {
         let pre_aa = resources
             .read_texture_view(ResourceKey::new("pre_aa"), self.name())
             .expect("pre_aa is published");
-        let color_attachments = storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
-            view: pre_aa,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })]));
+        let color_attachments =
+            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+                view: pre_aa,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Pre-AA Depth Consumer"),
             color_attachments,
@@ -156,15 +157,16 @@ fn color_only_descriptor<'a>(
     view: &'a wgpu::TextureView,
     storage: &'a mut helio_core::RenderFrameStorage,
 ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-    let color_attachments = storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
-        view,
-        resolve_target: None,
-        depth_slice: None,
-        ops: wgpu::Operations {
-            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-            store: wgpu::StoreOp::Store,
-        },
-    })]));
+    let color_attachments =
+        storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })]));
     Some(wgpu::RenderPassDescriptor {
         label: Some(label),
         color_attachments,
@@ -230,8 +232,6 @@ async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter
     }
     None
 }
-
-
 
 /// The camera and empty scene buffers the graph needs, without a renderer.
 struct TestSceneInput {

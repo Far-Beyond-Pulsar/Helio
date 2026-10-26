@@ -31,8 +31,13 @@ pub struct World {
 impl World {
     pub fn new(planet: Planet) -> Self {
         let snapshot = Arc::new(planet.clone());
-        let threads = std::thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(2).clamp(1, 4));
-        Self { queries: WorldQueries::new(snapshot.clone(), threads), snapshot, worker: Worker::spawn(planet) }
+        let threads = std::thread::available_parallelism()
+            .map_or(2, |n| n.get().saturating_sub(2).clamp(1, 4));
+        Self {
+            queries: WorldQueries::new(snapshot.clone(), threads),
+            snapshot,
+            worker: Worker::spawn(planet),
+        }
     }
 
     /// The latest finished planet, for drawing.
@@ -86,7 +91,10 @@ impl World {
     /// Whether `cell` is solid. Space not resident yet is: the player
     /// waits at its edge rather than falling into it.
     pub fn is_solid(&self, cell: Cell) -> bool {
-        self.queries.solid(cell, Matter::All).ready().unwrap_or(true)
+        self.queries
+            .solid(cell, Matter::All)
+            .ready()
+            .unwrap_or(true)
     }
 
     /// The block at `cell` (`None`: air, ground the game has no block for,
@@ -110,6 +118,9 @@ impl World {
     /// The first solid cell along a ray, as edited, within the resident
     /// world (`None` past it).
     pub fn raycast(&self, origin: DVec3, direction: DVec3, max: f64) -> Option<RayHit> {
-        self.queries.raycast(origin, direction, max, Matter::All).ready().flatten()
+        self.queries
+            .raycast(origin, direction, max, Matter::All)
+            .ready()
+            .flatten()
     }
 }

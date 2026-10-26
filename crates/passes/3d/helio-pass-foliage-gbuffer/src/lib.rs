@@ -178,7 +178,6 @@ pub const GBUFFER_TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float, // 7 velocity (depth residual reserved)
 ];
 
-
 /// The two targets grass does not write, which therefore carry
 /// [`wgpu::ColorWrites::empty()`].
 ///
@@ -384,7 +383,13 @@ pub fn decide_frame(
 /// the bands fade, not this.
 pub fn lod_draws(level: u32, distance: f32, boundary: f32, band: f32, unit: f32) -> bool {
     let t = ((distance - (boundary - band)) / band.max(1.0e-6)).clamp(0.0, 1.0);
-    let f = if band > 0.0 { t * t * (3.0 - 2.0 * t) } else if distance < boundary { 0.0 } else { 1.0 };
+    let f = if band > 0.0 {
+        t * t * (3.0 - 2.0 * t)
+    } else if distance < boundary {
+        0.0
+    } else {
+        1.0
+    };
     match level {
         0 => unit < 1.0 - f,
         1 => unit >= 1.0 - f,
@@ -500,7 +505,9 @@ impl FoliageGBufferPass {
         let box_state = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("FoliageGBuffer/BoxState"),
             size: BOX_STATE_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
         let globals_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -527,7 +534,6 @@ impl FoliageGBufferPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
 
         // ── Bind group layouts ────────────────────────────────────────────────
         //
@@ -575,7 +581,10 @@ impl FoliageGBufferPass {
             device,
             "FoliageGBuffer Shader",
             helio_core::include_wgsl!("../shaders/foliage_gbuffer.wgsl"),
-            &[helio_pass_foliage_place::WIND_SNIPPET, helio_pass_foliage_place::COMMON_SNIPPET],
+            &[
+                helio_pass_foliage_place::WIND_SNIPPET,
+                helio_pass_foliage_place::COMMON_SNIPPET,
+            ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("FoliageGBuffer PL"),
@@ -583,46 +592,51 @@ impl FoliageGBufferPass {
             immediate_size: 0,
         });
         let targets = color_target_states();
-        let raster = |label: &str, entry: &str| helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                // No vertex buffer. Every attribute is derived from `vertex_index` and
-                // the packed instance record — see `geometry`.
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                // No effect on a non-indexed draw, but on Vulkan a `Some` value sets
-                // `primitiveRestartEnable`, and `None` is the correct state here.
-                strip_index_format: None,
-                // Blades are two-sided: a grass blade is a surface with no back. The
-                // fragment shader flips the normal by `@builtin(front_facing)`.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                // Grass is opaque geometry and must occlude what is behind it.
-                depth_write_enabled: Some(true),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            // Single-sampled, like every other Helio raster pass.
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let raster = |label: &str, entry: &str| {
+            helio_core::shader::create_render_pipeline(
+                &device,
+                wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        // No vertex buffer. Every attribute is derived from `vertex_index` and
+                        // the packed instance record — see `geometry`.
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &targets,
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        // No effect on a non-indexed draw, but on Vulkan a `Some` value sets
+                        // `primitiveRestartEnable`, and `None` is the correct state here.
+                        strip_index_format: None,
+                        // Blades are two-sided: a grass blade is a surface with no back. The
+                        // fragment shader flips the normal by `@builtin(front_facing)`.
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        // Grass is opaque geometry and must occlude what is behind it.
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    // Single-sampled, like every other Helio raster pass.
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                },
+            )
+        };
         let pipeline = raster("FoliageGBuffer Pipeline", "vs_main");
         let box_pipeline = raster("FoliageGBuffer Box Pipeline", "vs_box");
 
@@ -732,11 +746,26 @@ impl RenderPass for FoliageGBufferPass {
         //
         // The views must be byte-identical to `GBufferPass`'s, in the same order:
         // `compute_chains` requires an exact attachment match before it will fuse.
-        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "FoliageGBuffer")?;
-        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "FoliageGBuffer")?;
-        let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "FoliageGBuffer")?;
-        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "FoliageGBuffer")?;
-        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "FoliageGBuffer")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(
+            helio_core::ResourceKey::new("gbuffer"),
+            "FoliageGBuffer",
+        )?;
+        let lightmap_uv = resources.read(
+            helio_core::ResourceKey::new("gbuffer_lightmap_uv"),
+            "FoliageGBuffer",
+        )?;
+        let sss_target = resources.read(
+            helio_core::ResourceKey::new("gbuffer_sss"),
+            "FoliageGBuffer",
+        )?;
+        let extra_target = resources.read(
+            helio_core::ResourceKey::new("gbuffer_extra"),
+            "FoliageGBuffer",
+        )?;
+        let velocity_target = resources.read(
+            helio_core::ResourceKey::new("gbuffer_velocity"),
+            "FoliageGBuffer",
+        )?;
 
         // `LoadOp::Load` on all eight: this pass adds geometry to a G-buffer that
         // `GBufferPass` has already filled. A clear here would erase the scene.
@@ -748,8 +777,8 @@ impl RenderPass for FoliageGBufferPass {
             load: wgpu::LoadOp::Load,
             store: wgpu::StoreOp::Store,
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -821,7 +850,8 @@ impl RenderPass for FoliageGBufferPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let type_handle = ctx.scene_buffers.get(BufferKey::of("foliage_types"));
-        self.type_liveness.update(ctx.device, ctx.queue, type_handle);
+        self.type_liveness
+            .update(ctx.device, ctx.queue, type_handle);
         let type_handle = type_handle.filter(|handle| self.type_liveness.maybe_live(handle));
         let wind_handle = ctx.scene_buffers.get(BufferKey::of("foliage_wind"));
         let tables = type_handle.map(|handle| FoliageTables {
@@ -859,13 +889,12 @@ impl RenderPass for FoliageGBufferPass {
         let globals = FoliageGlobals {
             screen_size: [ctx.width as f32, ctx.height as f32],
             frame: ctx.frame_num as u32,
-            flags: if debug_lod_enabled() { FLAG_DEBUG_LOD } else { 0 },
-            clock: [
-                ctx.time,
-                ctx.time - ctx.time_delta,
-                0.0,
-                0.0,
-            ],
+            flags: if debug_lod_enabled() {
+                FLAG_DEBUG_LOD
+            } else {
+                0
+            },
+            clock: [ctx.time, ctx.time - ctx.time_delta, 0.0, 0.0],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.
             lod_quality_scale: {
@@ -961,13 +990,22 @@ impl RenderPass for FoliageGBufferPass {
                             binding: 6,
                             resource: self.visible_blades.as_entire_binding(),
                         },
-                        wgpu::BindGroupEntry { binding: 7, resource: self.interactors.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: self.interactors.as_entire_binding(),
+                        },
                         wgpu::BindGroupEntry {
                             binding: 9,
                             resource: self.tile_frames.as_entire_binding(),
                         },
-                        wgpu::BindGroupEntry { binding: 10, resource: self.bands.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 11, resource: self.boxes.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: self.bands.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: self.boxes.as_entire_binding(),
+                        },
                     ],
                 }))
             } else {
@@ -1007,17 +1045,25 @@ const BOX_DRAW_OFFSET: u64 = 16;
 const BOX_GROUPS: u32 = 1024;
 
 fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
 }
 
 /// Group 0 of the foliage shader: the camera, globals, wind, types, records, tiles, the
 /// visible list, interactors, frames and bands, and (the draw's) the expanded boxes.
 fn layout_0(device: &wgpu::Device, label: &str, boxes: bool) -> wgpu::BindGroupLayout {
-    let stages = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
+    let stages =
+        wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
     let buffer = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: stages,
-        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     };
     let storage = wgpu::BufferBindingType::Storage { read_only: true };
@@ -1026,19 +1072,22 @@ fn layout_0(device: &wgpu::Device, label: &str, boxes: bool) -> wgpu::BindGroupL
         // single-pass stereo path (mono reads index 0).
         buffer(0, storage),
         buffer(1, wgpu::BufferBindingType::Uniform),
-        buffer(2, storage),  // wind
-        buffer(3, storage),  // foliage_types
-        buffer(4, storage),  // blade_arena
-        buffer(5, storage),  // tile_table
-        buffer(6, storage),  // visible_blades
-        buffer(7, storage),  // foliage_interactors
-        buffer(9, storage),  // tile_frames
+        buffer(2, storage),                           // wind
+        buffer(3, storage),                           // foliage_types
+        buffer(4, storage),                           // blade_arena
+        buffer(5, storage),                           // tile_table
+        buffer(6, storage),                           // visible_blades
+        buffer(7, storage),                           // foliage_interactors
+        buffer(9, storage),                           // tile_frames
         buffer(10, wgpu::BufferBindingType::Uniform), // bands
     ];
     if boxes {
         entries.push(buffer(11, storage));
     }
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &entries,
+    })
 }
 
 impl FoliageGBufferPass {
@@ -1049,7 +1098,16 @@ impl FoliageGBufferPass {
         FoliageBoxesPass::new(
             device,
             Arc::clone(&self.globals_buf),
-            [&self.blade_arena, &self.tile_table, &self.tile_frames, &self.visible_blades, &self.foliage_indirect, &self.bands, &self.interactors].map(Arc::clone),
+            [
+                &self.blade_arena,
+                &self.tile_table,
+                &self.tile_frames,
+                &self.visible_blades,
+                &self.foliage_indirect,
+                &self.bands,
+                &self.interactors,
+            ]
+            .map(Arc::clone),
             Arc::clone(&self.boxes),
             Arc::clone(&self.box_state),
         )
@@ -1078,13 +1136,26 @@ pub struct FoliageBoxesPass {
 }
 
 impl FoliageBoxesPass {
-    fn new(device: &wgpu::Device, globals: Arc<wgpu::Buffer>, producer: [Arc<wgpu::Buffer>; 7], boxes: Arc<wgpu::Buffer>, box_state: Arc<wgpu::Buffer>) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        globals: Arc<wgpu::Buffer>,
+        producer: [Arc<wgpu::Buffer>; 7],
+        boxes: Arc<wgpu::Buffer>,
+        box_state: Arc<wgpu::Buffer>,
+    ) -> Self {
         let layout_0 = layout_0(device, "FoliageBoxes BGL 0", false);
-        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("FoliageBoxes BGL 1"), entries: &[] });
+        let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("FoliageBoxes BGL 1"),
+            entries: &[],
+        });
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         };
         let layout_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1095,7 +1166,10 @@ impl FoliageBoxesPass {
             device,
             "FoliageBoxes Shader",
             helio_core::include_wgsl!("../shaders/foliage_gbuffer.wgsl"),
-            &[helio_pass_foliage_place::WIND_SNIPPET, helio_pass_foliage_place::COMMON_SNIPPET],
+            &[
+                helio_pass_foliage_place::WIND_SNIPPET,
+                helio_pass_foliage_place::COMMON_SNIPPET,
+            ],
         );
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("FoliageBoxes PL"),
@@ -1103,26 +1177,49 @@ impl FoliageBoxesPass {
             immediate_size: 0,
         });
         let pipeline = |label: &str, entry: &str| {
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                module: &shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
-        let empty_group = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("FoliageBoxes BG 1"), layout: &empty_layout, entries: &[] });
+        let empty_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("FoliageBoxes BG 1"),
+            layout: &empty_layout,
+            entries: &[],
+        });
         let group_2 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("FoliageBoxes BG 2"),
             layout: &layout_2,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: boxes.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: box_state.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: producer[4].as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: boxes.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: box_state.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: producer[4].as_entire_binding(),
+                },
             ],
         });
-        let placeholder = |label: &str, size: u64| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let placeholder = |label: &str, size: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
         Self {
             expand: pipeline("FoliageBoxes Expand", "cs_boxes"),
             finish: pipeline("FoliageBoxes Finish", "cs_boxes_finish"),
@@ -1133,8 +1230,14 @@ impl FoliageBoxesPass {
             globals,
             producer,
             box_state,
-            placeholder_wind: placeholder("FoliageBoxes/WindPlaceholder", std::mem::size_of::<helio_pass_foliage_place::GpuWind>() as u64),
-            placeholder_type: placeholder("FoliageBoxes/TypesPlaceholder", std::mem::size_of::<GpuFoliageType>() as u64),
+            placeholder_wind: placeholder(
+                "FoliageBoxes/WindPlaceholder",
+                std::mem::size_of::<helio_pass_foliage_place::GpuWind>() as u64,
+            ),
+            placeholder_type: placeholder(
+                "FoliageBoxes/TypesPlaceholder",
+                std::mem::size_of::<GpuFoliageType>() as u64,
+            ),
             active: false,
         }
     }
@@ -1164,7 +1267,14 @@ impl RenderPass for FoliageBoxesPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // As the draw: no type rows or no wind, no foliage.
-        self.active = ctx.scene_buffers.get(BufferKey::of("foliage_types")).is_some() && ctx.scene_buffers.get(BufferKey::of("foliage_wind")).is_some();
+        self.active = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_types"))
+            .is_some()
+            && ctx
+                .scene_buffers
+                .get(BufferKey::of("foliage_wind"))
+                .is_some();
         Ok(())
     }
 
@@ -1172,8 +1282,16 @@ impl RenderPass for FoliageBoxesPass {
         if !self.active {
             return Ok(());
         }
-        let wind = ctx.scene_buffers.get(BufferKey::of("foliage_wind")).map(|h| &h.buffer).unwrap_or(&self.placeholder_wind);
-        let types = ctx.scene_buffers.get(BufferKey::of("foliage_types")).map(|h| &h.buffer).unwrap_or(&self.placeholder_type);
+        let wind = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_wind"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.placeholder_wind);
+        let types = ctx
+            .scene_buffers
+            .get(BufferKey::of("foliage_types"))
+            .map(|h| &h.buffer)
+            .unwrap_or(&self.placeholder_type);
         let key = (ctx.camera.clone(), wind.clone(), types.clone());
         if self.group_0.as_ref().is_none_or(|(k, _)| *k != key) {
             let [blades, tiles, frames, visible, _, bands, interactors] = &self.producer;
@@ -1197,7 +1315,10 @@ impl RenderPass for FoliageBoxesPass {
         }
         let mut encoder = ctx.graphics_cmds();
         encoder.clear_buffer(&self.box_state, 0, Some(BOX_DRAW_OFFSET));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Foliage Boxes"), timestamp_writes: None });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Foliage Boxes"),
+            timestamp_writes: None,
+        });
         pass.set_bind_group(0, &self.group_0.as_ref().unwrap().1, &[]);
         pass.set_bind_group(1, &self.empty_group, &[]);
         pass.set_bind_group(2, &self.group_2, &[]);
@@ -1234,5 +1355,3 @@ mod tests {
         assert_eq!(offsets, vec![0, 1024, 2048, 3072]);
     }
 }
-
-

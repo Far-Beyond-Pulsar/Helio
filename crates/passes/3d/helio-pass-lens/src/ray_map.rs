@@ -59,9 +59,14 @@ pub(crate) fn sensor_weights(lambda: f32) -> [f32; 3] {
 pub fn spectral_samples(n: usize) -> Vec<SpectralSample> {
     let n = n.clamp(1, 16);
     if n == 1 {
-        return vec![SpectralSample { t: 0.0, weights: [1.0; 3] }];
+        return vec![SpectralSample {
+            t: 0.0,
+            weights: [1.0; 3],
+        }];
     }
-    let lambdas: Vec<f32> = (0..n).map(|j| 400.0 + (j as f32 + 0.5) * 300.0 / n as f32).collect();
+    let lambdas: Vec<f32> = (0..n)
+        .map(|j| 400.0 + (j as f32 + 0.5) * 300.0 / n as f32)
+        .collect();
     let raw: Vec<[f32; 3]> = lambdas.iter().map(|&l| sensor_weights(l)).collect();
     let mut total = [0.0f32; 3];
     for w in &raw {
@@ -82,7 +87,11 @@ pub fn spectral_samples(n: usize) -> Vec<SpectralSample> {
 type V2 = [f32; 2];
 
 fn bounded(x: f32, lo: f32, hi: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x.clamp(lo, hi) } else { fallback }
+    if x.is_finite() {
+        x.clamp(lo, hi)
+    } else {
+        fallback
+    }
 }
 fn length(v: V2) -> f32 {
     (v[0] * v[0] + v[1] * v[1]).sqrt()
@@ -103,7 +112,11 @@ fn replaced_by_prescription(kind: u32) -> bool {
         || kind == element_kind::LATERAL_CA
 }
 fn port_index(n: f32) -> f32 {
-    if n > 0.0 { n.clamp(1.05, 2.5) } else { WATER_INDEX }
+    if n > 0.0 {
+        n.clamp(1.05, 2.5)
+    } else {
+        WATER_INDEX
+    }
 }
 fn along(x: V2, r: f32, theta: f32) -> V2 {
     if r < 1.0e-5 {
@@ -131,7 +144,8 @@ fn panini_inverse(p: &[f32; 16], x: V2) -> V2 {
     let d = p[1].clamp(0.0, 8.0);
     let s = p[2].clamp(0.0, 1.0);
     let k = x[0] / (d + 1.0);
-    let phi = ((k * d / (1.0 + k * k).sqrt()).clamp(-1.0, 1.0).asin() + k.atan()).clamp(-MAX_ANGLE, MAX_ANGLE);
+    let phi = ((k * d / (1.0 + k * k).sqrt()).clamp(-1.0, 1.0).asin() + k.atan())
+        .clamp(-MAX_ANGLE, MAX_ANGLE);
     let c = phi.cos();
     let squeeze = (d + 1.0) / (d + c);
     let vertical = x[1] / (1.0 * (1.0 - s) + squeeze * s);
@@ -232,7 +246,11 @@ fn dome_port_map(p: &[f32; 16], x: V2, t: f32) -> V2 {
     let r = length(x);
     let theta = r.atan();
     let sin_incidence = ratio * theta.sin();
-    along(x, r, theta - sin_incidence.clamp(-1.0, 1.0).asin() + (sin_incidence / n).clamp(-1.0, 1.0).asin())
+    along(
+        x,
+        r,
+        theta - sin_incidence.clamp(-1.0, 1.0).asin() + (sin_incidence / n).clamp(-1.0, 1.0).asin(),
+    )
 }
 
 /// The lens as the ray map sees it. Build with [`RayMap::new`].
@@ -307,7 +325,9 @@ impl RayMap {
         } else {
             sensor_width * 2.0 / 3.0
         };
-        let count = (lens.element_count as usize).min(MAX_LENS_ELEMENTS as usize).min(elements.len());
+        let count = (lens.element_count as usize)
+            .min(MAX_LENS_ELEMENTS as usize)
+            .min(elements.len());
         let elements = &elements[..count];
         let mut f_number = bounded(lens.f_number, 0.7, 32.0, 2.8);
         let rays = rays.to_vec();
@@ -402,14 +422,20 @@ impl RayMap {
         let p = &e.params;
         match e.kind {
             element_kind::PROJECTION => apply_projection(p, x),
-            element_kind::BROWN_CONRADY | element_kind::ANAMORPHIC_DISTORTION => undistort(e.kind, p, x),
+            element_kind::BROWN_CONRADY | element_kind::ANAMORPHIC_DISTORTION => {
+                undistort(e.kind, p, x)
+            }
             element_kind::DIVISION => {
                 let r2 = dot(x, x);
                 let k = (1.0 + p[0] * r2 + p[1] * r2 * r2).max(0.1);
                 [x[0] / k, x[1] / k]
             }
             element_kind::ANAMORPHIC_SQUEEZE => {
-                let s = if p[0] > 0.0 { p[0].clamp(0.1, 8.0) } else { 1.0 };
+                let s = if p[0] > 0.0 {
+                    p[0].clamp(0.1, 8.0)
+                } else {
+                    1.0
+                };
                 [x[0] * s, x[1]]
             }
             element_kind::SHIFT => [x[0] + p[0] * self.scale, x[1] + p[1] * self.scale],
@@ -449,13 +475,20 @@ impl RayMap {
         };
         let spin = bounded(p[4], -100.0, 100.0, 0.0) * copy as f32;
         let (c, s) = (spin.cos(), spin.sin());
-        [c * x[0] - s * x[1] + offset[0], s * x[0] + c * x[1] + offset[1]]
+        [
+            c * x[0] - s * x[1] + offset[0],
+            s * x[0] + c * x[1] + offset[1],
+        ]
     }
 
     /// Weight of copy `copy` of a prism element: `ratio^copy`, normalised.
     pub fn prism_weight(e: &LensElementComponent, copy: u32) -> f32 {
         let n = Self::prism_count(e);
-        let ratio = if e.params[5] > 0.0 { bounded(e.params[5], 0.05, 20.0, 1.0) } else { 1.0 };
+        let ratio = if e.params[5] > 0.0 {
+            bounded(e.params[5], 0.05, 20.0, 1.0)
+        } else {
+            1.0
+        };
         let (mut total, mut mine, mut w) = (0.0, 1.0, 1.0);
         for i in 0..n {
             if i == copy {
@@ -474,7 +507,11 @@ impl RayMap {
                 return None;
             }
             let weight = self.region_weight(e, q);
-            (weight > 0.0).then(|| PrismSelection { index, weight, copies: Self::prism_count(e) })
+            (weight > 0.0).then(|| PrismSelection {
+                index,
+                weight,
+                copies: Self::prism_count(e),
+            })
         })
     }
 
@@ -487,7 +524,9 @@ impl RayMap {
     /// covers `q`, with its coverage (`find_prescription` in `lens.wgsl`).
     fn find_prescription(&self, q: V2) -> Option<(usize, f32)> {
         self.elements.iter().enumerate().find_map(|(index, e)| {
-            if e.kind != element_kind::PRESCRIPTION || self.rays.get(prescription_layer(e)).is_none() {
+            if e.kind != element_kind::PRESCRIPTION
+                || self.rays.get(prescription_layer(e)).is_none()
+            {
                 return None;
             }
             let weight = self.region_weight(e, q);
@@ -533,7 +572,11 @@ impl RayMap {
             x = mix(x, self.map_element(e, x, t), w);
         }
         let scene = [x[0] / self.scale, x[1] / self.scale];
-        if scene[0].abs() < 1.0e4 && scene[1].abs() < 1.0e4 { scene } else { q }
+        if scene[0].abs() < 1.0e4 && scene[1].abs() < 1.0e4 {
+            scene
+        } else {
+            q
+        }
     }
 
     /// How far beyond the rendered frame the map reaches at the frame's
@@ -562,7 +605,11 @@ impl RayMap {
                 }
             }
         }
-        if reach.is_finite() { reach.min(OVERSCAN_CAP) } else { OVERSCAN_CAP }
+        if reach.is_finite() {
+            reach.min(OVERSCAN_CAP)
+        } else {
+            OVERSCAN_CAP
+        }
     }
 
     /// Natural + optical + hood + filter transmission at the sensor position
@@ -590,11 +637,16 @@ impl RayMap {
             let p = &e.params;
             match e.kind {
                 element_kind::NATURAL_VIGNETTE => {
-                    let natural = lerp(1.0, cos_squared * cos_squared, bounded(p[0], 0.0, 1.0, 0.0));
+                    let natural =
+                        lerp(1.0, cos_squared * cos_squared, bounded(p[0], 0.0, 1.0, 0.0));
                     mul(&mut t, [lerp(1.0, natural, w); 3]);
                 }
                 element_kind::OPTICAL_VIGNETTE => {
-                    let mut barrel = if p[1] > 0.0 { bounded(p[1], 0.5, 4.0, 1.0) } else { 1.0 };
+                    let mut barrel = if p[1] > 0.0 {
+                        bounded(p[1], 0.5, 4.0, 1.0)
+                    } else {
+                        1.0
+                    };
                     if p[2] > 0.0 {
                         barrel *= self.f_number / bounded(p[2], 0.7, 64.0, self.f_number);
                     }
@@ -629,11 +681,17 @@ impl RayMap {
                 }
                 element_kind::COLOR_FILTER => {
                     let amount = bounded(p[3], 0.0, 1.0, 0.0) * w;
-                    mul(&mut t, [0, 1, 2].map(|c| lerp(1.0, p[c].clamp(0.0, 1.0), amount)));
+                    mul(
+                        &mut t,
+                        [0, 1, 2].map(|c| lerp(1.0, p[c].clamp(0.0, 1.0), amount)),
+                    );
                 }
                 element_kind::T_STOP_LOSS => {
                     let ratio = self.f_number / t_stop.max(0.1);
-                    mul(&mut t, [lerp(1.0, ratio * ratio, bounded(p[0], 0.0, 1.0, 0.0) * w); 3]);
+                    mul(
+                        &mut t,
+                        [lerp(1.0, ratio * ratio, bounded(p[0], 0.0, 1.0, 0.0) * w); 3],
+                    );
                 }
                 _ => {}
             }
@@ -657,8 +715,12 @@ pub fn circle_overlap(d: f32, b: f32) -> f32 {
         return (b * b).min(1.0);
     }
     let a1 = ((d * d + 1.0 - b * b) / (2.0 * d)).clamp(-1.0, 1.0).acos();
-    let a2 = ((d * d + b * b - 1.0) / (2.0 * d * b)).clamp(-1.0, 1.0).acos();
-    let k = ((-d + 1.0 + b) * (d + 1.0 - b) * (d - 1.0 + b) * (d + 1.0 + b)).max(0.0).sqrt();
+    let a2 = ((d * d + b * b - 1.0) / (2.0 * d * b))
+        .clamp(-1.0, 1.0)
+        .acos();
+    let k = ((-d + 1.0 + b) * (d + 1.0 - b) * (d - 1.0 + b) * (d + 1.0 + b))
+        .max(0.0)
+        .sqrt();
     (a1 + b * b * a2 - 0.5 * k) / std::f32::consts::PI
 }
 
@@ -668,7 +730,11 @@ pub fn circle_overlap(d: f32, b: f32) -> f32 {
 /// rendered image. 1 for a map that stays inside the frame, e.g. the
 /// identity. `aspect` is the image's width over height; `elements` is the
 /// lens's stack (`lens.element_first ..`). See [`RayMap::required_overscan`].
-pub fn required_overscan(lens: &LensComponent, elements: &[LensElementComponent], aspect: f32) -> f32 {
+pub fn required_overscan(
+    lens: &LensComponent,
+    elements: &[LensElementComponent],
+    aspect: f32,
+) -> f32 {
     RayMap::new(lens, elements, aspect).required_overscan()
 }
 

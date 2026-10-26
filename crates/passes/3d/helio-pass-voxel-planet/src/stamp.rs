@@ -42,10 +42,18 @@ pub enum Shape {
     /// Points within a radius of the segment from `a` to `b`, the radius
     /// going from `radius[0]` at `a` to `radius[1]` at `b` (a branch, a
     /// trunk; a ball with `a == b`).
-    Capsule { a: [f32; 3], b: [f32; 3], radius: [f32; 2] },
+    Capsule {
+        a: [f32; 3],
+        b: [f32; 3],
+        radius: [f32; 2],
+    },
     /// The same between the planes through `a` and `b` square to the
     /// segment: flat ends (a cone's tier, a column).
-    Cone { a: [f32; 3], b: [f32; 3], radius: [f32; 2] },
+    Cone {
+        a: [f32; 3],
+        b: [f32; 3],
+        radius: [f32; 2],
+    },
 }
 
 /// A shape of a stamp: a material (`None`: air, clearing what stands
@@ -70,11 +78,25 @@ pub struct Part {
 
 impl Part {
     pub fn solid(shape: Shape, material: u32) -> Self {
-        Self { shape, material: Some(material), sparse: 0.0, rough: 0.0, lump: 0.0, lump_size: 1 }
+        Self {
+            shape,
+            material: Some(material),
+            sparse: 0.0,
+            rough: 0.0,
+            lump: 0.0,
+            lump_size: 1,
+        }
     }
 
     pub fn air(shape: Shape) -> Self {
-        Self { shape, material: None, sparse: 0.0, rough: 0.0, lump: 0.0, lump_size: 1 }
+        Self {
+            shape,
+            material: None,
+            sparse: 0.0,
+            rough: 0.0,
+            lump: 0.0,
+            lump_size: 1,
+        }
     }
 }
 
@@ -108,12 +130,21 @@ impl Stamp {
 
     /// Fills the box between cells `a` and `b` (inclusive) with `material`.
     pub fn fill(&mut self, a: [i32; 3], b: [i32; 3], material: u32) {
-        self.add(Part::solid(Shape::Box { lo: min3(a, b), hi: max3(a, b) }, material));
+        self.add(Part::solid(
+            Shape::Box {
+                lo: min3(a, b),
+                hi: max3(a, b),
+            },
+            material,
+        ));
     }
 
     /// Clears the box between cells `a` and `b` (inclusive).
     pub fn hollow(&mut self, a: [i32; 3], b: [i32; 3]) {
-        self.add(Part::air(Shape::Box { lo: min3(a, b), hi: max3(a, b) }));
+        self.add(Part::air(Shape::Box {
+            lo: min3(a, b),
+            hi: max3(a, b),
+        }));
     }
 
     /// The four walls of the box between `a` and `b` (its outer cells on
@@ -128,7 +159,14 @@ impl Stamp {
 
     /// A ball of `material` of `radius` cells around point `centre`.
     pub fn ball(&mut self, centre: [f32; 3], radius: f32, material: u32) {
-        self.add(Part::solid(Shape::Capsule { a: centre, b: centre, radius: [radius; 2] }, material));
+        self.add(Part::solid(
+            Shape::Capsule {
+                a: centre,
+                b: centre,
+                radius: [radius; 2],
+            },
+            material,
+        ));
     }
 
     /// A tapered capsule of `material` from point `a` (radius `radius[0]`)
@@ -148,9 +186,20 @@ impl Stamp {
         let f = at.map(|v| v as f32);
         self.parts.extend(other.parts.iter().map(|p| {
             let shape = match p.shape {
-                Shape::Box { lo, hi } => Shape::Box { lo: add3(lo, at), hi: add3(hi, at) },
-                Shape::Capsule { a, b, radius } => Shape::Capsule { a: addf(a, f), b: addf(b, f), radius },
-                Shape::Cone { a, b, radius } => Shape::Cone { a: addf(a, f), b: addf(b, f), radius },
+                Shape::Box { lo, hi } => Shape::Box {
+                    lo: add3(lo, at),
+                    hi: add3(hi, at),
+                },
+                Shape::Capsule { a, b, radius } => Shape::Capsule {
+                    a: addf(a, f),
+                    b: addf(b, f),
+                    radius,
+                },
+                Shape::Cone { a, b, radius } => Shape::Cone {
+                    a: addf(a, f),
+                    b: addf(b, f),
+                    radius,
+                },
             };
             Part { shape, ..*p }
         }));
@@ -166,7 +215,11 @@ impl Stamp {
 
     /// The parts compiled for evaluation.
     pub fn compile(&self) -> Result<Vec<CompiledPart>, String> {
-        self.parts.iter().enumerate().map(|(n, p)| CompiledPart::new(p, n as u32)).collect()
+        self.parts
+            .iter()
+            .enumerate()
+            .map(|(n, p)| CompiledPart::new(p, n as u32))
+            .collect()
     }
 
     /// The smallest and largest cells any part may hold (`None` when
@@ -185,8 +238,12 @@ impl Stamp {
 
     /// The cells the stamp holds (air or a material), in no order.
     pub fn cells(&self) -> Vec<([i32; 3], Option<u32>)> {
-        let Ok(parts) = self.compile() else { return Vec::new() };
-        let Some((lo, hi)) = self.bounds() else { return Vec::new() };
+        let Ok(parts) = self.compile() else {
+            return Vec::new();
+        };
+        let Some((lo, hi)) = self.bounds() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         for y in lo[1]..=hi[1] {
             for z in lo[2]..=hi[2] {
@@ -205,7 +262,11 @@ impl Stamp {
     /// materials, vertical runs as one brush each.
     pub fn brushes(&self, grid: &Grid, face: u8, i: i32, j: i32, k: i32) -> Vec<Brush> {
         let at = |p: [i32; 3]| Cell::new(face, i + p[0], j + p[2], k + p[1]);
-        let (air, solid): (Vec<_>, Vec<_>) = self.cells().into_iter().map(|(p, m)| (at(p), m)).partition(|(_, m)| m.is_none());
+        let (air, solid): (Vec<_>, Vec<_>) = self
+            .cells()
+            .into_iter()
+            .map(|(p, m)| (at(p), m))
+            .partition(|(_, m)| m.is_none());
         let mut out = run_brushes(grid, air);
         out.extend(run_brushes(grid, solid));
         out
@@ -275,11 +336,30 @@ impl CompiledPart {
         let rough = units(part.rough.max(0.0));
         let seed = hash3(index as i32, 0x57a, 0x3e7, 0x9e37_79b9);
         let lump = units(part.lump.max(0.0));
-        let lump_shift = part.lump_size.max(1).next_power_of_two().trailing_zeros().min(8);
+        let lump_shift = part
+            .lump_size
+            .max(1)
+            .next_power_of_two()
+            .trailing_zeros()
+            .min(8);
         let p = match part.shape {
             Shape::Box { lo, hi } => {
                 let (lo, hi) = (min3(lo, hi), max3(lo, hi));
-                Self { capsule: false, flat: false, material, lo, hi, a: lo.map(|v| v * UNIT), b: hi.map(|v| (v + 1) * UNIT), radius: [0; 2], rough: 0, keep, seed, lump: 0, lump_shift: 0 }
+                Self {
+                    capsule: false,
+                    flat: false,
+                    material,
+                    lo,
+                    hi,
+                    a: lo.map(|v| v * UNIT),
+                    b: hi.map(|v| (v + 1) * UNIT),
+                    radius: [0; 2],
+                    rough: 0,
+                    keep,
+                    seed,
+                    lump: 0,
+                    lump_shift: 0,
+                }
             }
             Shape::Capsule { a, b, radius } | Shape::Cone { a, b, radius } => {
                 let flat = matches!(part.shape, Shape::Cone { .. });
@@ -297,20 +377,44 @@ impl CompiledPart {
                 let length = (dot3(d, d) as f64).sqrt();
                 let reach = |end: i32, k: usize| {
                     if flat && length > 0.0 {
-                        let disk = f64::from(end) * (1.0 - (f64::from(d[k]) / length).powi(2)).max(0.0).sqrt();
+                        let disk = f64::from(end)
+                            * (1.0 - (f64::from(d[k]) / length).powi(2)).max(0.0).sqrt();
                         r.min((disk + length / 256.0).ceil() as i32 + 2)
                     } else {
                         r
                     }
                 };
                 // Cells whose centre may lie within the radius.
-                let lo = [0, 1, 2].map(|k| ((a[k] - reach(radius[0], k)).min(b[k] - reach(radius[1], k)) - UNIT / 2).div_euclid(UNIT));
-                let hi = [0, 1, 2].map(|k| ((a[k] + reach(radius[0], k)).max(b[k] + reach(radius[1], k)) - UNIT / 2).div_euclid(UNIT) + 1);
-                Self { capsule: true, flat, material, lo, hi, a, b, radius, rough, keep, seed, lump, lump_shift }
+                let lo = [0, 1, 2].map(|k| {
+                    ((a[k] - reach(radius[0], k)).min(b[k] - reach(radius[1], k)) - UNIT / 2)
+                        .div_euclid(UNIT)
+                });
+                let hi = [0, 1, 2].map(|k| {
+                    ((a[k] + reach(radius[0], k)).max(b[k] + reach(radius[1], k)) - UNIT / 2)
+                        .div_euclid(UNIT)
+                        + 1
+                });
+                Self {
+                    capsule: true,
+                    flat,
+                    material,
+                    lo,
+                    hi,
+                    a,
+                    b,
+                    radius,
+                    rough,
+                    keep,
+                    seed,
+                    lump,
+                    lump_shift,
+                }
             }
         };
         if p.lo.iter().chain(&p.hi).any(|v| v.abs() > MAX_STAMP_REACH) {
-            return Err(format!("a stamp's part reaches past {MAX_STAMP_REACH} cells from its anchor"));
+            return Err(format!(
+                "a stamp's part reaches past {MAX_STAMP_REACH} cells from its anchor"
+            ));
         }
         Ok(p)
     }
@@ -409,18 +513,48 @@ fn along(dot: i32, length: i32) -> i32 {
 /// cell exactly.
 pub fn cell_brush(grid: &Grid, cell: Cell, material: Option<u32>) -> Brush {
     let (op, material) = material.map_or((BrushOp::Remove, 0), |m| (BrushOp::Add, m));
-    Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material, height: 0.0 }
+    Brush {
+        center: grid.cell_center(cell).to_array(),
+        radius: grid.voxel_size() * 0.5,
+        shape: BrushShape::Cube,
+        op,
+        material,
+        height: 0.0,
+    }
 }
 
 /// A flat-topped box brush over `columns` x `columns` columns (odd, centred
 /// on column `(i, j)` of `face`), `layers` tall from layer `k`, of
 /// `material` or air: one brush fills or clears what would take thousands
 /// of cells (a building's footprint).
-pub fn column_box(grid: &Grid, face: u8, i: i32, j: i32, k: i32, columns: i32, layers: i32, material: Option<u32>) -> Brush {
+pub fn column_box(
+    grid: &Grid,
+    face: u8,
+    i: i32,
+    j: i32,
+    k: i32,
+    columns: i32,
+    layers: i32,
+    material: Option<u32>,
+) -> Brush {
     let voxel = grid.voxel_size();
-    let centre = grid.position(face, [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + f64::from(layers) * 0.5]);
+    let centre = grid.position(
+        face,
+        [
+            f64::from(i) + 0.5,
+            f64::from(j) + 0.5,
+            f64::from(k) + f64::from(layers) * 0.5,
+        ],
+    );
     let (op, material) = material.map_or((BrushOp::Remove, 0), |m| (BrushOp::Add, m));
-    Brush { center: centre.to_array(), radius: f64::from(columns) * voxel * 0.5, shape: BrushShape::Cube, op, material, height: f64::from(layers) * voxel * 0.5 }
+    Brush {
+        center: centre.to_array(),
+        radius: f64::from(columns) * voxel * 0.5,
+        shape: BrushShape::Cube,
+        op,
+        material,
+        height: f64::from(layers) * voxel * 0.5,
+    }
 }
 
 /// Brushes for `cells`, a vertical run of one material (or of air) in a
@@ -437,12 +571,24 @@ pub fn run_brushes(grid: &Grid, cells: Vec<(Cell, Option<u32>)>) -> Vec<Brush> {
     let mut run: Option<(Cell, Option<u32>, i32)> = None;
     let flush = |run: Option<(Cell, Option<u32>, i32)>, out: &mut Vec<Brush>| {
         if let Some((start, m, length)) = run {
-            out.push(if length == 1 { cell_brush(grid, start, m) } else { column_box(grid, start.face, start.i, start.j, start.k, 1, length, m) });
+            out.push(if length == 1 {
+                cell_brush(grid, start, m)
+            } else {
+                column_box(grid, start.face, start.i, start.j, start.k, 1, length, m)
+            });
         }
     };
     for (cell, m) in cells {
         run = match run {
-            Some((start, rm, length)) if rm == m && start.face == cell.face && start.i == cell.i && start.j == cell.j && start.k + length == cell.k => Some((start, rm, length + 1)),
+            Some((start, rm, length))
+                if rm == m
+                    && start.face == cell.face
+                    && start.i == cell.i
+                    && start.j == cell.j
+                    && start.k + length == cell.k =>
+            {
+                Some((start, rm, length + 1))
+            }
             other => {
                 flush(other, &mut out);
                 Some((cell, m, 1))
@@ -495,20 +641,45 @@ mod tests {
             (state >> 11) as f32 / (1u64 << 53) as f32
         };
         for n in 0..300 {
-            let a = [next() * 40.0 - 20.0, next() * 40.0 - 20.0, next() * 40.0 - 20.0];
-            let tilt = if n % 3 == 0 { [0.0, 1.0, 0.0] } else { [next() - 0.5, next() - 0.5, next() - 0.5] };
+            let a = [
+                next() * 40.0 - 20.0,
+                next() * 40.0 - 20.0,
+                next() * 40.0 - 20.0,
+            ];
+            let tilt = if n % 3 == 0 {
+                [0.0, 1.0, 0.0]
+            } else {
+                [next() - 0.5, next() - 0.5, next() - 0.5]
+            };
             let length = next() * 30.0;
-            let b = [a[0] + tilt[0] * length, a[1] + tilt[1] * length, a[2] + tilt[2] * length];
+            let b = [
+                a[0] + tilt[0] * length,
+                a[1] + tilt[1] * length,
+                a[2] + tilt[2] * length,
+            ];
             let radius = [next() * 12.0, next() * 12.0];
-            let part = Part { rough: next() * 2.0, lump: next() * 2.0, lump_size: 2, ..Part::solid(Shape::Cone { a, b, radius }, 5) };
+            let part = Part {
+                rough: next() * 2.0,
+                lump: next() * 2.0,
+                lump_size: 2,
+                ..Part::solid(Shape::Cone { a, b, radius }, 5)
+            };
             let compiled = CompiledPart::new(&part, n).unwrap();
             let r = radius[0].max(radius[1]).ceil() as i32 + 1;
             for x in (a[0].min(b[0]) as i32 - r)..=(a[0].max(b[0]) as i32 + r) {
                 for y in (a[1].min(b[1]) as i32 - r)..=(a[1].max(b[1]) as i32 + r) {
                     for z in (a[2].min(b[2]) as i32 - r)..=(a[2].max(b[2]) as i32 + r) {
                         if cell_of(&[compiled], [x, y, z]).is_some() {
-                            let inside = (0..3).all(|k| compiled.lo[k] <= [x, y, z][k] && [x, y, z][k] <= compiled.hi[k]);
-                            assert!(inside, "cone {n} {a:?} {b:?} {radius:?}: {:?} outside {:?} {:?}", [x, y, z], compiled.lo, compiled.hi);
+                            let inside = (0..3).all(|k| {
+                                compiled.lo[k] <= [x, y, z][k] && [x, y, z][k] <= compiled.hi[k]
+                            });
+                            assert!(
+                                inside,
+                                "cone {n} {a:?} {b:?} {radius:?}: {:?} outside {:?} {:?}",
+                                [x, y, z],
+                                compiled.lo,
+                                compiled.hi
+                            );
                         }
                     }
                 }
@@ -533,7 +704,12 @@ mod tests {
         house.ball([0.5, 6.5, 0.5], 2.0, 9);
         let cells = house.cells();
         let brushes = house.brushes(&grid, face, i, j, k);
-        assert!(brushes.len() * 2 < cells.len(), "{} brushes for {} cells", brushes.len(), cells.len());
+        assert!(
+            brushes.len() * 2 < cells.len(),
+            "{} brushes for {} cells",
+            brushes.len(),
+            cells.len()
+        );
         for brush in brushes {
             planet.apply(brush).unwrap();
         }
@@ -553,18 +729,45 @@ mod tests {
     fn shapes_hold_the_cells_whose_centres_they_hold() {
         let mut ball = Stamp::new();
         ball.ball([0.5, 0.5, 0.5], 2.0, 5);
-        let expected = (-2..=2).flat_map(|x| (-2..=2).flat_map(move |y| (-2..=2).map(move |z| x * x + y * y + z * z))).filter(|&d| d <= 4).count();
+        let expected = (-2..=2)
+            .flat_map(|x| (-2..=2).flat_map(move |y| (-2..=2).map(move |z| x * x + y * y + z * z)))
+            .filter(|&d| d <= 4)
+            .count();
         assert_eq!(ball.cells().len(), expected);
         let mut cone = Stamp::new();
         cone.capsule([0.5, 0.0, 0.5], [0.5, 20.0, 0.5], [3.0, 0.5], 5);
         let width = |y: i32| (-4..=4).filter(|&x| cone.get([x, y, 0]).is_some()).count();
-        assert!(width(1) > width(10) && width(10) > width(19), "{} {} {}", width(1), width(10), width(19));
+        assert!(
+            width(1) > width(10) && width(10) > width(19),
+            "{} {} {}",
+            width(1),
+            width(10),
+            width(19)
+        );
         assert!(cone.get([0, -2, 0]).is_some(), "a capsule's end is round");
         let mut flat = Stamp::new();
         flat.cone([0.5, 0.0, 0.5], [0.5, 20.0, 0.5], [3.0, 0.5], 5);
-        assert_eq!((flat.get([0, -1, 0]), flat.get([0, 0, 0]), flat.get([2, 0, 0])), (None, Some(Some(5)), Some(Some(5))), "a cone's end is flat");
+        assert_eq!(
+            (
+                flat.get([0, -1, 0]),
+                flat.get([0, 0, 0]),
+                flat.get([2, 0, 0])
+            ),
+            (None, Some(Some(5)), Some(Some(5))),
+            "a cone's end is flat"
+        );
         let mut leaves = Stamp::new();
-        leaves.add(Part { sparse: 0.25, ..Part::solid(Shape::Capsule { a: [0.0; 3], b: [0.0; 3], radius: [8.0; 2] }, 5) });
+        leaves.add(Part {
+            sparse: 0.25,
+            ..Part::solid(
+                Shape::Capsule {
+                    a: [0.0; 3],
+                    b: [0.0; 3],
+                    radius: [8.0; 2],
+                },
+                5,
+            )
+        });
         let kept = leaves.cells().len() as f64;
         let mut whole = Stamp::new();
         whole.ball([0.0; 3], 8.0, 5);
@@ -574,7 +777,18 @@ mod tests {
         // more than the ball shrunk by the whole lump, the same through
         // each block of cells.
         let mut lumpy = Stamp::new();
-        lumpy.add(Part { lump: 3.0, lump_size: 4, ..Part::solid(Shape::Capsule { a: [0.0; 3], b: [0.0; 3], radius: [8.0; 2] }, 5) });
+        lumpy.add(Part {
+            lump: 3.0,
+            lump_size: 4,
+            ..Part::solid(
+                Shape::Capsule {
+                    a: [0.0; 3],
+                    b: [0.0; 3],
+                    radius: [8.0; 2],
+                },
+                5,
+            )
+        });
         let mut small = Stamp::new();
         small.ball([0.0; 3], 5.0, 5);
         let n = lumpy.cells().len();
@@ -592,8 +806,16 @@ mod tests {
         assert_eq!(coarse_of(&parts, [0, 0, 0], [2, 2, 2]), Some(Some(4)));
         assert_eq!(coarse_of(&parts, [2, 0, 0], [4, 2, 2]), None);
         s.hollow([0, 0, 0], [0, 0, 0]);
-        assert_eq!(coarse_of(&s.compile().unwrap(), [0, 0, 0], [2, 2, 2]), Some(Some(4)), "cell (0, 0, 0) ends at the centre");
+        assert_eq!(
+            coarse_of(&s.compile().unwrap(), [0, 0, 0], [2, 2, 2]),
+            Some(Some(4)),
+            "cell (0, 0, 0) ends at the centre"
+        );
         s.hollow([1, 1, 1], [1, 1, 1]);
-        assert_eq!(coarse_of(&s.compile().unwrap(), [0, 0, 0], [2, 2, 2]), Some(None), "cell (1, 1, 1) starts at it");
+        assert_eq!(
+            coarse_of(&s.compile().unwrap(), [0, 0, 0], [2, 2, 2]),
+            Some(None),
+            "cell (1, 1, 1) starts at it"
+        );
     }
 }

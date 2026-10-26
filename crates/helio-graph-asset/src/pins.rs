@@ -155,7 +155,13 @@ impl PinDesc {
     /// A resource pin named after the resource it binds.
     pub fn resource(ty: PinType, resource: impl Into<String>) -> Self {
         let resource = resource.into();
-        Self { name: resource.clone(), ty, resource, history: false, optional: false }
+        Self {
+            name: resource.clone(),
+            ty,
+            resource,
+            history: false,
+            optional: false,
+        }
     }
 
     /// Whether a wire from `self` (an output) to `to` (an input) is legal.

@@ -37,7 +37,11 @@ fn cottage(rng: &mut Rng) -> Blueprint {
     let mut b = Blueprint::new(5, 4);
     let (hx, hz) = (4, 3);
     // Floor and plinth.
-    b.fill([-hx - 1, -1, -hz - 1], [hx + 1, -1, hz + 1], Block::Cobblestone);
+    b.fill(
+        [-hx - 1, -1, -hz - 1],
+        [hx + 1, -1, hz + 1],
+        Block::Cobblestone,
+    );
     b.fill([-hx, 0, -hz], [hx, 0, hz], Block::OakPlanks);
     // Walls: planks with a log frame.
     b.walls([-hx, 1, -hz], [hx, 4, hz], Block::OakPlanks);
@@ -91,7 +95,11 @@ fn cottage(rng: &mut Rng) -> Blueprint {
     }
     // Chimney on a side wall.
     let side = if rng.f64() < 0.5 { -1 } else { 1 };
-    b.fill([side * (hx + 1), 0, 1], [side * (hx + 1), 9, 2], Block::Cobblestone);
+    b.fill(
+        [side * (hx + 1), 0, 1],
+        [side * (hx + 1), 9, 2],
+        Block::Cobblestone,
+    );
     // Lamp and a hearth inside.
     b.set([0, 4, 0], Block::Glowstone);
     b.set([side * (hx - 1), 1, 1], Block::Cobblestone);
@@ -168,7 +176,14 @@ fn ruins(rng: &mut Rng) -> Blueprint {
         let x = 3 * sign;
         let height = 5 + rng.int(0, 3);
         for y in 0..height {
-            b.set([x, y, 0], if rng.f64() < 0.3 { Block::Cobblestone } else { Block::StoneBricks });
+            b.set(
+                [x, y, 0],
+                if rng.f64() < 0.3 {
+                    Block::Cobblestone
+                } else {
+                    Block::StoneBricks
+                },
+            );
             b.set([x, y, 1], Block::Cobblestone);
         }
         b.set([x, 0, -1], Block::StoneBricks);
@@ -191,7 +206,15 @@ fn ruins(rng: &mut Rng) -> Blueprint {
     }
     for _ in 0..14 {
         let (x, z) = (rng.int(-5, 5), rng.int(-2, 3));
-        b.set([x, 0, z], *rng.choice(&[Block::Cobblestone, Block::Gravel, Block::StoneBricks, Block::Andesite]));
+        b.set(
+            [x, 0, z],
+            *rng.choice(&[
+                Block::Cobblestone,
+                Block::Gravel,
+                Block::StoneBricks,
+                Block::Andesite,
+            ]),
+        );
     }
     b
 }
@@ -220,8 +243,20 @@ fn pyramid() -> Blueprint {
     let n = 7;
     for layer in 0..=n {
         let r = n - layer;
-        b.fill([-r - 1, layer, -r - 1], [r + 1, layer, r + 1], if layer % 3 == 2 { Block::Sandstone } else { Block::Sand });
-        b.walls([-r - 1, layer, -r - 1], [r + 1, layer, r + 1], Block::Sandstone);
+        b.fill(
+            [-r - 1, layer, -r - 1],
+            [r + 1, layer, r + 1],
+            if layer % 3 == 2 {
+                Block::Sandstone
+            } else {
+                Block::Sand
+            },
+        );
+        b.walls(
+            [-r - 1, layer, -r - 1],
+            [r + 1, layer, r + 1],
+            Block::Sandstone,
+        );
     }
     // Entrance, hall and chamber.
     b.hollow([0, 1, -8], [0, 2, -4]);

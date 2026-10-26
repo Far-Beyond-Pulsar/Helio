@@ -62,10 +62,28 @@ impl Player {
         Frame::new(self.position, self.heading)
     }
 
+    /// Room movement uses the same collision solver as stick/keyboard movement.
+    pub fn move_room(&mut self, world: &World, displacement: DVec3) {
+        let frame = self.frame();
+        let (position, _) = physics::slide(world, self.position, displacement, &frame, false);
+        self.position = position;
+    }
+
+    pub fn turn(&mut self, angle: f64) {
+        let frame = self.frame();
+        self.heading = rotate(frame.forward, frame.up, angle);
+    }
+
     /// The eye, planet-centred.
     pub fn eye(&self) -> DVec3 {
         let frame = self.frame();
-        self.position + frame.up * if self.sneaking { EYE_HEIGHT - 0.25 } else { EYE_HEIGHT }
+        self.position
+            + frame.up
+                * if self.sneaking {
+                    EYE_HEIGHT - 0.25
+                } else {
+                    EYE_HEIGHT
+                }
     }
 
     /// The direction the player looks along.
@@ -84,7 +102,9 @@ impl Player {
         }
         let back = -look;
         let wanted = THIRD_PERSON_DISTANCE;
-        let free = world.raycast(eye, back, wanted + 0.4).map_or(wanted, |h| (h.distance - 0.4).max(0.5));
+        let free = world
+            .raycast(eye, back, wanted + 0.4)
+            .map_or(wanted, |h| (h.distance - 0.4).max(0.5));
         (eye + back * free, look)
     }
 
@@ -109,14 +129,21 @@ impl Player {
         self.jump_tap += dt;
         self.sneaking = controls.sneak && !self.flying;
 
-        let wish_planar = (frame.forward * controls.forward + frame.right * controls.strafe).normalize_or_zero();
+        // Preserve analogue stick magnitude while limiting keyboard diagonals.
+        let wish_planar = (frame.forward * controls.forward + frame.right * controls.strafe)
+            .clamp_length_max(1.0);
         self.sprinting = controls.sprint && controls.forward > 0.0;
         if self.flying {
-            let speed = if controls.sprint { FLY_FAST_SPEED } else { FLY_SPEED };
+            let speed = if controls.sprint {
+                FLY_FAST_SPEED
+            } else {
+                FLY_SPEED
+            };
             let lift = f64::from(i32::from(controls.jump) - i32::from(controls.sneak));
             let target = (wish_planar + frame.up * lift).normalize_or_zero() * speed;
             self.velocity += (target - self.velocity) * (1.0 - (-8.0 * dt).exp());
-            let (position, _) = physics::slide(world, self.position, self.velocity * dt, &frame, false);
+            let (position, _) =
+                physics::slide(world, self.position, self.velocity * dt, &frame, false);
             self.position = position;
             self.on_ground = false;
         } else {
@@ -132,13 +159,23 @@ impl Player {
             let grip = if self.on_ground { 14.0 } else { 2.5 };
             let planar = planar + (wish_planar * speed - planar) * (1.0 - (-grip * dt).exp());
             // Standing: no fall to undo each frame (that bobs the camera).
-            let mut vertical = if self.on_ground && vertical <= 0.0 { 0.0 } else { vertical - GRAVITY * dt };
+            let mut vertical = if self.on_ground && vertical <= 0.0 {
+                0.0
+            } else {
+                vertical - GRAVITY * dt
+            };
             if self.on_ground && controls.jump {
                 vertical = JUMP_SPEED;
                 self.on_ground = false;
             }
             self.velocity = planar + frame.up * vertical;
-            let (position, moved) = physics::slide(world, self.position, self.velocity * dt, &frame, self.on_ground);
+            let (position, moved) = physics::slide(
+                world,
+                self.position,
+                self.velocity * dt,
+                &frame,
+                self.on_ground,
+            );
             self.position = position;
             if moved.landed {
                 self.on_ground = true;
@@ -148,7 +185,8 @@ impl Player {
                 self.on_ground = false;
             } else if !moved.stepped {
                 // Walking off an edge: grounded only while a floor is at the soles.
-                self.on_ground = physics::floor_below(world, self.position, &frame, 0.05).is_some() && self.velocity.dot(frame.up) <= 0.0;
+                self.on_ground = physics::floor_below(world, self.position, &frame, 0.05).is_some()
+                    && self.velocity.dot(frame.up) <= 0.0;
             }
             if moved.stepped {
                 self.on_ground = true;
@@ -158,11 +196,17 @@ impl Player {
 
         // Re-aim the heading along the new tangent plane (parallel transport).
         let up = self.position.normalize();
-        self.heading = (self.heading - up * self.heading.dot(up)).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+        self.heading = (self.heading - up * self.heading.dot(up))
+            .try_normalize()
+            .unwrap_or_else(|| up.any_orthonormal_vector());
 
         // Animation follows the planar speed.
         let planar_speed = (self.velocity - up * self.velocity.dot(up)).length();
-        let moving = if self.on_ground || self.flying { (planar_speed / WALK_SPEED).min(1.5) } else { 0.0 };
+        let moving = if self.on_ground || self.flying {
+            (planar_speed / WALK_SPEED).min(1.5)
+        } else {
+            0.0
+        };
         self.swing += (moving - self.swing) * (1.0 - (-10.0 * dt).exp());
         self.stride += planar_speed * dt * 2.2;
 
@@ -185,7 +229,6 @@ impl Player {
         double
     }
 }
-
 
 /// `v` rotated by `angle` about the unit axis `axis`.
 fn rotate(v: DVec3, axis: DVec3, angle: f64) -> DVec3 {
@@ -211,7 +254,9 @@ mod tests {
         let mut world = World::new(Planet::new(recipe()).unwrap());
         let grid = *world.planet().grid();
         let n = f64::from(grid.cells());
-        let ground = world.planet().surface_point(grid.position(2, [n * 0.5, n * 0.5, 0.0]), 6.0);
+        let ground = world
+            .planet()
+            .surface_point(grid.position(2, [n * 0.5, n * 0.5, 0.0]), 6.0);
         let plate = world.cell_centre(world.cell_at(ground));
         let frame = Frame::new(plate, plate.normalize().any_orthonormal_vector());
         // A plate of blocks three across without its middle one.
@@ -219,7 +264,14 @@ mod tests {
         for a in -1..=1 {
             for b in -1..=1 {
                 if (a, b) != (0, 0) {
-                    edits.push(Edit::Build(world.cell_at(plate + frame.right * (BLOCK_M * f64::from(a)) + frame.forward * (BLOCK_M * f64::from(b))), Block::Cobblestone));
+                    edits.push(Edit::Build(
+                        world.cell_at(
+                            plate
+                                + frame.right * (BLOCK_M * f64::from(a))
+                                + frame.forward * (BLOCK_M * f64::from(b)),
+                        ),
+                        Block::Cobblestone,
+                    ));
                 }
             }
         }
@@ -235,8 +287,22 @@ mod tests {
                 rest.push((player.position, player.on_ground));
             }
         }
-        assert!(rest.iter().all(|r| r.1), "grounded every frame: {:?}", rest.iter().map(|r| r.1).collect::<Vec<_>>());
-        assert!(rest.iter().all(|r| r.0 == rest[0].0), "still: {:?}", rest.iter().map(|r| (r.0 - rest[0].0).length()).fold(0.0, f64::max));
-        assert!((player.position - plate).dot(frame.up) > 0.0 && (player.position - plate).dot(frame.up) < BLOCK_M, "on the plate");
+        assert!(
+            rest.iter().all(|r| r.1),
+            "grounded every frame: {:?}",
+            rest.iter().map(|r| r.1).collect::<Vec<_>>()
+        );
+        assert!(
+            rest.iter().all(|r| r.0 == rest[0].0),
+            "still: {:?}",
+            rest.iter()
+                .map(|r| (r.0 - rest[0].0).length())
+                .fold(0.0, f64::max)
+        );
+        assert!(
+            (player.position - plate).dot(frame.up) > 0.0
+                && (player.position - plate).dot(frame.up) < BLOCK_M,
+            "on the plate"
+        );
     }
 }

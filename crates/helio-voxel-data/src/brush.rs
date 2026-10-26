@@ -52,7 +52,9 @@ impl VoxelBrushEdit {
         if !(self.height.is_finite() && self.height >= 0.0) {
             return Err("brush height must be finite and non-negative".into());
         }
-        if !self.center.iter().all(|v| v.is_finite()) || !(self.radius.is_finite() && self.radius > 0.0) {
+        if !self.center.iter().all(|v| v.is_finite())
+            || !(self.radius.is_finite() && self.radius > 0.0)
+        {
             return Err("brush centre and radius must be finite, radius positive".into());
         }
         Ok(())
@@ -87,8 +89,14 @@ pub struct VoxelKeptChunks {
 impl VoxelKeptChunks {
     /// `bytes` made for every edit of `journal`.
     pub fn of(journal: &VoxelEditJournal, bytes: std::sync::Arc<[u8]>) -> Self {
-        let hash = journal.prefix_hash(journal.len()).expect("the journal's own length");
-        Self { brushes: journal.len(), hash, bytes }
+        let hash = journal
+            .prefix_hash(journal.len())
+            .expect("the journal's own length");
+        Self {
+            brushes: journal.len(),
+            hash,
+            bytes,
+        }
     }
 }
 
@@ -172,14 +180,21 @@ impl VoxelEditJournal {
         let base = self.base_len();
         match count.checked_sub(base)? {
             0 => Some(self.base.as_ref().map_or(0, |b| b.hash)),
-            i if count <= self.len => Some(self.chunks[(i - 1) / JOURNAL_CHUNK][(i - 1) % JOURNAL_CHUNK].1),
+            i if count <= self.len => {
+                Some(self.chunks[(i - 1) / JOURNAL_CHUNK][(i - 1) % JOURNAL_CHUNK].1)
+            }
             _ => None,
         }
     }
     pub fn push(&mut self, edit: VoxelBrushEdit) {
-        let hash = edit_hash(self.prefix_hash(self.len).expect("the journal's own length"), &edit);
+        let hash = edit_hash(
+            self.prefix_hash(self.len)
+                .expect("the journal's own length"),
+            &edit,
+        );
         if (self.len - self.base_len()) % JOURNAL_CHUNK == 0 {
-            self.chunks.push(std::sync::Arc::new(Vec::with_capacity(JOURNAL_CHUNK)));
+            self.chunks
+                .push(std::sync::Arc::new(Vec::with_capacity(JOURNAL_CHUNK)));
         }
         // Copies only this chunk when another journal still shares it.
         std::sync::Arc::make_mut(self.chunks.last_mut().expect("pushed above")).push((edit, hash));
@@ -199,12 +214,17 @@ impl VoxelEditJournal {
     }
     /// The listed edits (after the base), in order.
     pub fn listed(&self) -> impl Iterator<Item = &VoxelBrushEdit> {
-        self.chunks.iter().flat_map(|chunk| chunk.iter()).map(|(edit, _)| edit)
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .map(|(edit, _)| edit)
     }
     /// Edits from `start` on (from its chunk, not by walking the ones
     /// before). `start` must not be inside the base.
     pub fn iter_from(&self, start: usize) -> impl Iterator<Item = &VoxelBrushEdit> {
-        let i = start.checked_sub(self.base_len()).expect("edits inside the base are not listed");
+        let i = start
+            .checked_sub(self.base_len())
+            .expect("edits inside the base are not listed");
         self.chunks
             .iter()
             .skip(i / JOURNAL_CHUNK)
@@ -216,7 +236,9 @@ impl VoxelEditJournal {
     pub fn starts_with(&self, prefix: &VoxelEditJournal) -> bool {
         prefix.terrain == self.terrain
             && prefix.len <= self.len
-            && self.prefix_hash(prefix.len).is_some_and(|h| prefix.prefix_hash(prefix.len) == Some(h))
+            && self
+                .prefix_hash(prefix.len)
+                .is_some_and(|h| prefix.prefix_hash(prefix.len) == Some(h))
     }
     /// Fold the oldest edits into `base` (a snapshot of the world after its
     /// first `base.brushes` edits, made from this journal): they are no
@@ -226,9 +248,17 @@ impl VoxelEditJournal {
         if base.brushes < self.base_len() || self.prefix_hash(base.brushes) != Some(base.hash) {
             return false;
         }
-        let tail: Vec<(VoxelBrushEdit, u64)> =
-            self.chunks.iter().flat_map(|chunk| chunk.iter()).skip(base.brushes - self.base_len()).copied().collect();
-        self.chunks = tail.chunks(JOURNAL_CHUNK).map(|chunk| std::sync::Arc::new(chunk.to_vec())).collect();
+        let tail: Vec<(VoxelBrushEdit, u64)> = self
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .skip(base.brushes - self.base_len())
+            .copied()
+            .collect();
+        self.chunks = tail
+            .chunks(JOURNAL_CHUNK)
+            .map(|chunk| std::sync::Arc::new(chunk.to_vec()))
+            .collect();
         self.base = Some(std::sync::Arc::new(base));
         true
     }
@@ -262,7 +292,10 @@ impl VoxelEditJournal {
             return 0;
         }
         let dropped = self.len;
-        *self = Self { terrain, ..Self::default() };
+        *self = Self {
+            terrain,
+            ..Self::default()
+        };
         dropped
     }
 }
@@ -270,13 +303,19 @@ impl VoxelEditJournal {
 impl PartialEq for VoxelEditJournal {
     /// Equal length and equal prefix hash (O(1)).
     fn eq(&self, other: &Self) -> bool {
-        self.terrain == other.terrain && self.len == other.len && self.prefix_hash(self.len) == other.prefix_hash(other.len)
+        self.terrain == other.terrain
+            && self.len == other.len
+            && self.prefix_hash(self.len) == other.prefix_hash(other.len)
     }
 }
 
 impl std::fmt::Debug for VoxelEditJournal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VoxelEditJournal").field("terrain", &self.terrain).field("base", &self.base_len()).field("len", &self.len).finish()
+        f.debug_struct("VoxelEditJournal")
+            .field("terrain", &self.terrain)
+            .field("base", &self.base_len())
+            .field("len", &self.len)
+            .finish()
     }
 }
 
@@ -325,27 +364,54 @@ struct SavedJournal<E> {
 
 impl Serialize for VoxelEditJournal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let base = self.base().map(|b| SavedBase { brushes: b.brushes, hash: b.hash, snapshot: base64::encode(&b.snapshot) });
+        let base = self.base().map(|b| SavedBase {
+            brushes: b.brushes,
+            hash: b.hash,
+            snapshot: base64::encode(&b.snapshot),
+        });
         let edits: Vec<&VoxelBrushEdit> = self.listed().collect();
-        let kept = self.kept_chunks().map(|k| SavedKept { brushes: k.brushes, hash: k.hash, chunks: base64::encode(&k.bytes) });
-        SavedJournal { terrain: self.terrain, base, edits, kept }.serialize(serializer)
+        let kept = self.kept_chunks().map(|k| SavedKept {
+            brushes: k.brushes,
+            hash: k.hash,
+            chunks: base64::encode(&k.bytes),
+        });
+        SavedJournal {
+            terrain: self.terrain,
+            base,
+            edits,
+            kept,
+        }
+        .serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for VoxelEditJournal {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let saved = SavedJournal::<Vec<VoxelBrushEdit>>::deserialize(deserializer)?;
-        let mut journal = Self { terrain: saved.terrain, ..Self::default() };
+        let mut journal = Self {
+            terrain: saved.terrain,
+            ..Self::default()
+        };
         if let Some(base) = saved.base {
-            let snapshot = base64::decode(&base.snapshot).ok_or_else(|| serde::de::Error::custom("voxel edit base: invalid base64"))?;
+            let snapshot = base64::decode(&base.snapshot)
+                .ok_or_else(|| serde::de::Error::custom("voxel edit base: invalid base64"))?;
             journal.len = base.brushes;
-            journal.base = Some(std::sync::Arc::new(VoxelEditBase { brushes: base.brushes, hash: base.hash, snapshot: snapshot.into() }));
+            journal.base = Some(std::sync::Arc::new(VoxelEditBase {
+                brushes: base.brushes,
+                hash: base.hash,
+                snapshot: snapshot.into(),
+            }));
         }
         journal.extend(saved.edits);
         if let Some(kept) = saved.kept {
-            let bytes = base64::decode(&kept.chunks).ok_or_else(|| serde::de::Error::custom("voxel kept chunks: invalid base64"))?;
+            let bytes = base64::decode(&kept.chunks)
+                .ok_or_else(|| serde::de::Error::custom("voxel kept chunks: invalid base64"))?;
             // Chunks of other edits (a hand-edited level) are not kept.
-            journal.keep_chunks(VoxelKeptChunks { brushes: kept.brushes, hash: kept.hash, bytes: bytes.into() });
+            journal.keep_chunks(VoxelKeptChunks {
+                brushes: kept.brushes,
+                hash: kept.hash,
+                bytes: bytes.into(),
+            });
         }
         Ok(journal)
     }
@@ -358,9 +424,15 @@ mod base64 {
     pub fn encode(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
         for chunk in bytes.chunks(3) {
-            let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+            let n = (u32::from(chunk[0]) << 16)
+                | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+                | u32::from(*chunk.get(2).unwrap_or(&0));
             for k in 0..4 {
-                out.push(if k <= chunk.len() { ALPHABET[(n >> (18 - 6 * k)) as usize & 63] as char } else { '=' });
+                out.push(if k <= chunk.len() {
+                    ALPHABET[(n >> (18 - 6 * k)) as usize & 63] as char
+                } else {
+                    '='
+                });
             }
         }
         out
@@ -394,7 +466,14 @@ mod journal_tests {
     use super::*;
 
     fn edit(x: f64) -> VoxelBrushEdit {
-        VoxelBrushEdit { center: [x, 0.0, 0.0], radius: 1.0, shape: VoxelBrushShape::Sphere, op: VoxelBrushOp::Remove, material: 0, height: 0.0 }
+        VoxelBrushEdit {
+            center: [x, 0.0, 0.0],
+            radius: 1.0,
+            shape: VoxelBrushShape::Sphere,
+            op: VoxelBrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        }
     }
 
     #[test]
@@ -413,9 +492,17 @@ mod journal_tests {
         assert_eq!(a.iter_from(2998).count(), 2);
 
         let mut a = a;
-        assert_eq!(a.made_on(6), 0, "a journal without a terrain adopts the first");
+        assert_eq!(
+            a.made_on(6),
+            0,
+            "a journal without a terrain adopts the first"
+        );
         assert_eq!((a.terrain(), a.len()), (6, 3000));
-        assert_eq!(a.made_on(7), 3000, "edits made on another terrain are dropped");
+        assert_eq!(
+            a.made_on(7),
+            3000,
+            "edits made on another terrain are dropped"
+        );
         assert!(a.is_empty() && a.terrain() == 7);
         a.extend((0..3).map(|k| edit(k as f64)));
         assert_eq!(a.made_on(7), 0);
@@ -433,12 +520,28 @@ mod journal_tests {
     fn a_compacted_journal_keeps_its_hashes_and_saves_its_base() {
         let full: VoxelEditJournal = (0..2500).map(|k| edit(k as f64)).collect();
         let mut j = full.clone();
-        let base = VoxelEditBase { brushes: 2000, hash: full.prefix_hash(2000).unwrap(), snapshot: vec![0, 1, 2, 250, 251].into() };
-        assert!(!j.compact(VoxelEditBase { hash: 1, ..base.clone() }), "a base must start the journal");
+        let base = VoxelEditBase {
+            brushes: 2000,
+            hash: full.prefix_hash(2000).unwrap(),
+            snapshot: vec![0, 1, 2, 250, 251].into(),
+        };
+        assert!(
+            !j.compact(VoxelEditBase {
+                hash: 1,
+                ..base.clone()
+            }),
+            "a base must start the journal"
+        );
         assert!(j.compact(base.clone()));
         assert_eq!((j.len(), j.base_len()), (2500, 2000));
         assert_eq!(j, full, "compaction changes no edit");
-        assert!(j.starts_with(&{ let mut p = full.clone(); for _ in 0..100 { p.pop(); } p }));
+        assert!(j.starts_with(&{
+            let mut p = full.clone();
+            for _ in 0..100 {
+                p.pop();
+            }
+            p
+        }));
         assert_eq!(j.get(1999), None);
         assert_eq!(j.get(2000), Some(&edit(2000.0)));
         assert_eq!(j.iter_from(2498).count(), 2);
@@ -465,14 +568,22 @@ mod journal_tests {
         let bytes: std::sync::Arc<[u8]> = vec![7, 8, 9, 200].into();
         let mut short = full.clone();
         short.pop();
-        assert!(!j.keep_chunks(VoxelKeptChunks::of(&short, bytes.clone())), "chunks of other edits");
+        assert!(
+            !j.keep_chunks(VoxelKeptChunks::of(&short, bytes.clone())),
+            "chunks of other edits"
+        );
         assert!(j.keep_chunks(VoxelKeptChunks::of(&full, bytes.clone())));
         assert_eq!(j.kept_chunks().map(|k| &k.bytes), Some(&bytes));
         assert_eq!(j, full, "kept chunks change no edit");
         // Compaction keeps them (the same edits); saved and loaded.
-        assert!(j.compact(VoxelEditBase { brushes: 2000, hash: full.prefix_hash(2000).unwrap(), snapshot: vec![1, 2].into() }));
+        assert!(j.compact(VoxelEditBase {
+            brushes: 2000,
+            hash: full.prefix_hash(2000).unwrap(),
+            snapshot: vec![1, 2].into()
+        }));
         assert!(j.kept_chunks().is_some());
-        let back: VoxelEditJournal = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        let back: VoxelEditJournal =
+            serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
         assert_eq!(back.kept_chunks(), j.kept_chunks());
         // Any change drops them.
         let mut grown = back.clone();
@@ -490,16 +601,25 @@ mod journal_tests {
 
     #[test]
     fn saved_edits_load_bit_exact() {
-        let j: VoxelEditJournal = (0..2000).map(|k| edit(k as f64 * 0.1 + 1.0 / 3.0)).collect();
-        let back: VoxelEditJournal = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
-        assert_eq!(back, j, "every edit's bits (the journal hash) survive saving");
+        let j: VoxelEditJournal = (0..2000)
+            .map(|k| edit(k as f64 * 0.1 + 1.0 / 3.0))
+            .collect();
+        let back: VoxelEditJournal =
+            serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(
+            back, j,
+            "every edit's bits (the journal hash) survive saving"
+        );
     }
 
     #[test]
     fn base64_round_trips() {
         for len in 0..40 {
             let bytes: Vec<u8> = (0..len).map(|k| (k * 37 + 11) as u8).collect();
-            assert_eq!(super::base64::decode(&super::base64::encode(&bytes)), Some(bytes));
+            assert_eq!(
+                super::base64::decode(&super::base64::encode(&bytes)),
+                Some(bytes)
+            );
         }
         assert_eq!(super::base64::encode(b"Man"), "TWFu");
         assert_eq!(super::base64::encode(b"Ma"), "TWE=");

@@ -20,8 +20,12 @@ pub fn gpu() -> Option<&'static Gpu> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             // 64-bit integers as the engine's devices request them
             // (`helio::required_wgpu_features`): the hardware wide products.
-            required_features: adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::SHADER_INT64),
-            required_limits: wgpu::Limits { max_buffer_size: limits.max_buffer_size.min(u32::MAX as u64), ..limits },
+            required_features: adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::SHADER_INT64),
+            required_limits: wgpu::Limits {
+                max_buffer_size: limits.max_buffer_size.min(u32::MAX as u64),
+                ..limits
+            },
             ..Default::default()
         }))
         .ok()?;
@@ -31,12 +35,21 @@ pub fn gpu() -> Option<&'static Gpu> {
 }
 
 pub fn read_buffer(gpu: &Gpu, buffer: &wgpu::Buffer, size: u64) -> Vec<u8> {
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     let data = staging.slice(..).get_mapped_range().unwrap().to_vec();
     data
 }

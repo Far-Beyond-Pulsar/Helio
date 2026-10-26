@@ -43,7 +43,16 @@ pub fn hash(x: u32) -> u32 {
 
 /// A grid compass step (`compass_step`): the eight neighbours of a cube, axis steps first.
 pub fn compass_step(i: u32) -> [f32; 2] {
-    [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]][(i & 7) as usize]
+    [
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [-1.0, 0.0],
+        [0.0, -1.0],
+        [1.0, 1.0],
+        [-1.0, 1.0],
+        [-1.0, -1.0],
+        [1.0, -1.0],
+    ][(i & 7) as usize]
 }
 
 /// The sideways step the path has reached after rising to cube `v` (`block_target`).
@@ -86,7 +95,14 @@ pub fn block_level(b: &Blade, h: u32, rise: u32, side: u32) -> u32 {
 /// [`block_boxes`] from the levels of its sideways steps (`block_path`): a run up a column
 /// to each step's level, the steps at it (one box along an axis, a box each diagonally),
 /// and the run up to the top. A handful of steps, not a walk cube by cube.
-pub fn block_boxes_by_levels(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bool, max_steps: u32) -> Vec<BlockBox> {
+pub fn block_boxes_by_levels(
+    b: &Blade,
+    j: u32,
+    cube: f32,
+    scale: f32,
+    leafy: bool,
+    max_steps: u32,
+) -> Vec<BlockBox> {
     let [rise, side_steps] = block_steps(b, cube, scale, max_steps);
     let mut out = Vec::new();
     if rise == 0 {
@@ -100,13 +116,31 @@ pub fn block_boxes_by_levels(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bo
     let across = if leafy { b.width.max(size) } else { size };
     let perp = [dir[1].abs() * 0.5 * across, dir[0].abs() * 0.5 * across];
     let column = |h: u32, v0: u32, v1: u32| {
-        let half = if diagonal { [0.5 * size; 2] } else { [(dir[0].abs() * 0.5 * size).max(perp[0]), (dir[1].abs() * 0.5 * size).max(perp[1])] };
-        BlockBox { centre: [dir[0] * h as f32 * size, dir[1] * h as f32 * size], half, y0: v0 as f32 * height, y1: (v1 + 1) as f32 * height }
+        let half = if diagonal {
+            [0.5 * size; 2]
+        } else {
+            [
+                (dir[0].abs() * 0.5 * size).max(perp[0]),
+                (dir[1].abs() * 0.5 * size).max(perp[1]),
+            ]
+        };
+        BlockBox {
+            centre: [dir[0] * h as f32 * size, dir[1] * h as f32 * size],
+            half,
+            y0: v0 as f32 * height,
+            y1: (v1 + 1) as f32 * height,
+        }
     };
     let steps = |h0: u32, h1: u32, v: u32| {
-        let extent = [dir[0] * (h1 - h0) as f32 * size, dir[1] * (h1 - h0) as f32 * size];
+        let extent = [
+            dir[0] * (h1 - h0) as f32 * size,
+            dir[1] * (h1 - h0) as f32 * size,
+        ];
         let first = [dir[0] * h0 as f32 * size, dir[1] * h0 as f32 * size];
-        let along = [dir[0].abs() * 0.5 * size + extent[0].abs() * 0.5, dir[1].abs() * 0.5 * size + extent[1].abs() * 0.5];
+        let along = [
+            dir[0].abs() * 0.5 * size + extent[0].abs() * 0.5,
+            dir[1].abs() * 0.5 * size + extent[1].abs() * 0.5,
+        ];
         BlockBox {
             centre: [first[0] + extent[0] * 0.5, first[1] + extent[1] * 0.5],
             half: [along[0].max(perp[0]), along[1].max(perp[1])],
@@ -127,7 +161,12 @@ pub fn block_boxes_by_levels(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bo
         }
         if diagonal {
             for x in step..=last {
-                out.push(BlockBox { centre: [dir[0] * x as f32 * size, dir[1] * x as f32 * size], half: [0.5 * size; 2], y0: level as f32 * height, y1: (level + 1) as f32 * height });
+                out.push(BlockBox {
+                    centre: [dir[0] * x as f32 * size, dir[1] * x as f32 * size],
+                    half: [0.5 * size; 2],
+                    y0: level as f32 * height,
+                    y1: (level + 1) as f32 * height,
+                });
             }
         } else {
             out.push(steps(step, last, level));
@@ -187,7 +226,14 @@ pub fn block_cubes(b: &Blade, j: u32, cube: f32, scale: f32) -> Vec<[u32; 2]> {
 
 /// The boxes of a blocky blade stepping sideways at most `max_steps` (`block_path`, all of
 /// them): runs up merged, axis runs sideways merged, diagonal steps a cube each.
-pub fn block_boxes(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bool, max_steps: u32) -> Vec<BlockBox> {
+pub fn block_boxes(
+    b: &Blade,
+    j: u32,
+    cube: f32,
+    scale: f32,
+    leafy: bool,
+    max_steps: u32,
+) -> Vec<BlockBox> {
     let merge = STACK_CUBES;
     let [rise, side_steps] = block_steps(b, cube, scale, max_steps);
     let mut out = Vec::new();
@@ -214,20 +260,39 @@ pub fn block_boxes(b: &Blade, j: u32, cube: f32, scale: f32, leafy: bool, max_st
             2
         };
         let last = way == 2;
-        let breaks = last || way != run_way || (way == 0 && run_len >= merge) || (way == 1 && diagonal) || !started;
+        let breaks = last
+            || way != run_way
+            || (way == 0 && run_len >= merge)
+            || (way == 1 && diagonal)
+            || !started;
         if breaks && started {
             let first = [dir[0] * run_h as f32 * size, dir[1] * run_h as f32 * size];
             let extent = if run_way == 1 && !diagonal {
-                [dir[0] * (run_len - 1) as f32 * size, dir[1] * (run_len - 1) as f32 * size]
+                [
+                    dir[0] * (run_len - 1) as f32 * size,
+                    dir[1] * (run_len - 1) as f32 * size,
+                ]
             } else {
                 [0.0, 0.0]
             };
             let centre = [first[0] + extent[0] * 0.5, first[1] + extent[1] * 0.5];
-            let along = [dir[0].abs() * 0.5 * size + extent[0].abs() * 0.5, dir[1].abs() * 0.5 * size + extent[1].abs() * 0.5];
+            let along = [
+                dir[0].abs() * 0.5 * size + extent[0].abs() * 0.5,
+                dir[1].abs() * 0.5 * size + extent[1].abs() * 0.5,
+            ];
             let other = [dir[1].abs() * 0.5 * across, dir[0].abs() * 0.5 * across];
-            let half = if diagonal { [0.5 * size; 2] } else { [along[0].max(other[0]), along[1].max(other[1])] };
+            let half = if diagonal {
+                [0.5 * size; 2]
+            } else {
+                [along[0].max(other[0]), along[1].max(other[1])]
+            };
             let up_len = if run_way == 0 { run_len } else { 1 };
-            out.push(BlockBox { centre, half, y0: run_v as f32 * height, y1: (run_v + up_len) as f32 * height });
+            out.push(BlockBox {
+                centre,
+                half,
+                y0: run_v as f32 * height,
+                y1: (run_v + up_len) as f32 * height,
+            });
         }
         if last {
             break;

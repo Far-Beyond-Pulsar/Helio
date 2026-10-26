@@ -5,14 +5,18 @@
 mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
-use helio_pass_voxel_planet::chunks::{residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights};
+use helio_pass_voxel_planet::chunks::{
+    residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights,
+};
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::{Layer, LayerKind, TerrainLayers};
 use helio_pass_voxel_planet::stamp::{Part, Shape as Form, Stamp};
 use helio_pass_voxel_planet::terrain::material;
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe, TerrainSource};
+use helio_pass_voxel_planet::{
+    Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe, TerrainSource,
+};
 
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 
@@ -27,18 +31,36 @@ struct View {
 
 impl View {
     fn new(eye: DVec3, forward: Vec3, size: [u32; 2]) -> Self {
-        Self { eye, forward: forward.normalize(), size, near: 0.05 }
+        Self {
+            eye,
+            forward: forward.normalize(),
+            size,
+            near: 0.05,
+        }
     }
     fn view_proj(&self, planet: &Planet) -> Mat4 {
         let up = planet.grid().up(self.eye).as_vec3();
-        let up = if self.forward.dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up };
+        let up = if self.forward.dot(up).abs() > 0.99 {
+            up.any_orthonormal_vector()
+        } else {
+            up
+        };
         let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward, up);
-        let proj = helio_core::depth::perspective(FOV_Y, self.size[0] as f32 / self.size[1] as f32, self.near);
+        let proj = helio_core::depth::perspective(
+            FOV_Y,
+            self.size[0] as f32 / self.size[1] as f32,
+            self.near,
+        );
         proj * view
     }
     /// The ray through pixel (x, y)'s centre.
     fn pixel_dir(&self, view_proj: Mat4, x: u32, y: u32) -> DVec3 {
-        let ndc = glam::Vec4::new((x as f32 + 0.5) / self.size[0] as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / self.size[1] as f32 * 2.0, 0.5, 1.0);
+        let ndc = glam::Vec4::new(
+            (x as f32 + 0.5) / self.size[0] as f32 * 2.0 - 1.0,
+            1.0 - (y as f32 + 0.5) / self.size[1] as f32 * 2.0,
+            0.5,
+            1.0,
+        );
         let w = view_proj.inverse() * ndc;
         (w.truncate() / w.w).as_dvec3().normalize()
     }
@@ -47,7 +69,11 @@ impl View {
         2.0 * f64::from((FOV_Y * 0.5).tan()) / f64::from(self.size[1])
     }
     fn config(&self) -> ResidencyConfig {
-        let mut config = ResidencyConfig { footprints_per_frame: 512, generate_ms: None, ..Default::default() };
+        let mut config = ResidencyConfig {
+            footprints_per_frame: 512,
+            generate_ms: None,
+            ..Default::default()
+        };
         config.plan.pixel_angle = self.pixel_angle();
         config
     }
@@ -60,7 +86,14 @@ impl View {
 /// parallel fit in a 12 GB GPU (1.2 GB a test; a game's
 /// default world, 2.9 GB, paged eight parallel tests out of device memory
 /// and stalled them).
-const TEST_CAPACITY: Capacity = Capacity { chunks: 16384, detail_pages: 16384, footprints: 1024, bricks: 65536, kept_bytes: 256 << 20, counters: false };
+const TEST_CAPACITY: Capacity = Capacity {
+    chunks: 16384,
+    detail_pages: 16384,
+    footprints: 1024,
+    bricks: 65536,
+    kept_bytes: 256 << 20,
+    counters: false,
+};
 
 struct World {
     chunks: ChunkWorld,
@@ -111,47 +144,113 @@ impl World {
     }
 
     /// One frame: residency, the draw, `picks` copied; its residency.
-    fn frame(&mut self, gpu: &Gpu, planet: &Planet, view: &View, picks: Option<&SharedPicks>) -> helio_pass_voxel_planet::chunks::UpdateStats {
+    fn frame(
+        &mut self,
+        gpu: &Gpu,
+        planet: &Planet,
+        view: &View,
+        picks: Option<&SharedPicks>,
+    ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         self.frame_picked(gpu, planet, view, &view.config(), picks)
     }
 
     /// One frame with residency `config`.
-    fn frame_with(&mut self, gpu: &Gpu, planet: &Planet, view: &View, config: &ResidencyConfig) -> helio_pass_voxel_planet::chunks::UpdateStats {
+    fn frame_with(
+        &mut self,
+        gpu: &Gpu,
+        planet: &Planet,
+        view: &View,
+        config: &ResidencyConfig,
+    ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         self.frame_picked(gpu, planet, view, config, None)
     }
 
-    fn frame_picked(&mut self, gpu: &Gpu, planet: &Planet, view: &View, config: &ResidencyConfig, picks: Option<&SharedPicks>) -> helio_pass_voxel_planet::chunks::UpdateStats {
+    fn frame_picked(
+        &mut self,
+        gpu: &Gpu,
+        planet: &Planet,
+        view: &View,
+        config: &ResidencyConfig,
+        picks: Option<&SharedPicks>,
+    ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         let mut view_proj = view.view_proj(planet);
         let mut jitter = glam::Vec2::ZERO;
         if let Some(n) = self.jitter.as_mut() {
-            jitter = glam::Vec2::from(helio_core::temporal::r1_r2_jitter(*n)) * 2.0 / glam::Vec2::new(view.size[0] as f32, view.size[1] as f32);
+            jitter = glam::Vec2::from(helio_core::temporal::r1_r2_jitter(*n)) * 2.0
+                / glam::Vec2::new(view.size[0] as f32, view.size[1] as f32);
             *n += 1;
             view_proj = Mat4::from_translation(jitter.extend(0.0)) * view_proj;
         }
-        let (prev_view_proj, prev_jitter) = self.last.replace((view_proj, jitter)).unwrap_or((view_proj, jitter));
+        let (prev_view_proj, prev_jitter) = self
+            .last
+            .replace((view_proj, jitter))
+            .unwrap_or((view_proj, jitter));
         let tan_y = f64::from((FOV_Y * 0.5).tan());
         let tan_x = tan_y * f64::from(view.size[0]) / f64::from(view.size[1]);
-        let cone = residency::View { forward: view.forward.as_dvec3(), cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos() };
+        let cone = residency::View {
+            forward: view.forward.as_dvec3(),
+            cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos(),
+        };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
-        let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, config);
-        let lights = self.lights.as_ref().map(|[lights, tile_lists, tile_counts]| SceneLights { lights, tile_lists, tile_counts, eye: Vec3::ZERO });
+        let stats = self.chunks.update(
+            &mut recorder,
+            view.eye,
+            DVec3::ZERO,
+            Some(cone),
+            self.frame,
+            config,
+        );
+        let lights = self
+            .lights
+            .as_ref()
+            .map(|[lights, tile_lists, tile_counts]| SceneLights {
+                lights,
+                tile_lists,
+                tile_counts,
+                eye: Vec3::ZERO,
+            });
         if self.gi.is_some() {
-            self.chunks.follow_gi(helio_pass_gi::Clipmap::around(view.eye, helio_pass_gi::DEFAULT_FINEST_SPACING), view.eye, view.eye);
+            self.chunks.follow_gi(
+                helio_pass_gi::Clipmap::around(view.eye, helio_pass_gi::DEFAULT_FINEST_SPACING),
+                view.eye,
+                view.eye,
+            );
         }
-        let gi = self.gi.as_ref().map(|[frame, rays, hits, sun]| GiRays { frame, rays, hits, sun });
+        let gi = self.gi.as_ref().map(|[frame, rays, hits, sun]| GiRays {
+            frame,
+            rays,
+            hits,
+            sun,
+        });
         // As the pass: the sun's occlusion before the draw (its GI hits read it).
         if self.sun_occlusion {
-            self.chunks.draw_sun_occlusion(&mut recorder, self.frame, view.eye, self.sun);
+            self.chunks
+                .draw_sun_occlusion(&mut recorder, self.frame, view.eye, self.sun);
         }
-        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, prev_view_proj, [jitter, prev_jitter], view.near, self.sun, view.size, self.scene_depth.as_ref(), lights.as_ref(), gi.as_ref());
+        self.chunks.draw(
+            &mut recorder,
+            self.frame,
+            view.eye,
+            view_proj,
+            prev_view_proj,
+            [jitter, prev_jitter],
+            view.near,
+            self.sun,
+            view.size,
+            self.scene_depth.as_ref(),
+            lights.as_ref(),
+            gi.as_ref(),
+        );
         if let Some(picks) = picks {
             self.chunks.copy_picks(&mut recorder, picks);
         }
         drop(recorder);
         gpu.queue.submit([encoder.finish()]);
         self.chunks.submitted();
-        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         self.frame += 1;
         stats
     }
@@ -164,9 +263,16 @@ impl World {
             if self.chunks.settled() {
                 break stats;
             }
-            assert!(self.frame - started < 4000, "residency did not settle: {stats:?}");
+            assert!(
+                self.frame - started < 4000,
+                "residency did not settle: {stats:?}"
+            );
         };
-        eprintln!("settled in {} frames: {} chunks drawn; {stats:?}", self.frame - started, self.chunks.chunk_count());
+        eprintln!(
+            "settled in {} frames: {} chunks drawn; {stats:?}",
+            self.frame - started,
+            self.chunks.chunk_count()
+        );
         self.chunks.read_hits()
     }
 }
@@ -183,21 +289,44 @@ fn compare(gpu: &Gpu, world: &mut World, planet: &Planet, view: &View) -> (usize
     let view_proj = view.view_proj(planet);
     let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
     let voxel = planet.grid().voxel_size();
-    let frame = if planet.grid().is_plane() { 0.0 } else { 4.0 * 512.0 * voxel * voxel / planet.grid().radius() };
+    let frame = if planet.grid().is_plane() {
+        0.0
+    } else {
+        4.0 * 512.0 * voxel * voxel / planet.grid().radius()
+    };
     let (mut compared, mut mismatched) = (0, 0);
     for y in (0..view.size[1]).step_by(2) {
         for x in (0..view.size[0]).step_by(2) {
-            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
+            let Some(cpu) = planet
+                .raycast(view.eye, view.pixel_dir(view_proj, x, y), near)
+                .filter(|c| c.distance < near)
+            else {
+                continue;
+            };
             compared += 1;
             let drawn = hits[(y * view.size[0] + x) as usize];
             // A ray along the edge between two solid cells meets both at
             // once: either is exact.
-            let tie = |c: Cell| c.face == cpu.cell.face && (c.i - cpu.cell.i).abs() + (c.j - cpu.cell.j).abs() + (c.k - cpu.cell.k).abs() == 1 && planet.solid(c);
-            let exact = drawn.is_some_and(|h| h.level == 0 && (h.cell == cpu.cell || tie(h.cell)) && (h.distance - cpu.distance).abs() <= 2e-3 + cpu.distance * 1e-5 + frame);
+            let tie = |c: Cell| {
+                c.face == cpu.cell.face
+                    && (c.i - cpu.cell.i).abs()
+                        + (c.j - cpu.cell.j).abs()
+                        + (c.k - cpu.cell.k).abs()
+                        == 1
+                    && planet.solid(c)
+            };
+            let exact = drawn.is_some_and(|h| {
+                h.level == 0
+                    && (h.cell == cpu.cell || tie(h.cell))
+                    && (h.distance - cpu.distance).abs() <= 2e-3 + cpu.distance * 1e-5 + frame
+            });
             if !exact {
                 mismatched += 1;
                 if mismatched < 8 {
-                    eprintln!("pixel {x},{y}: drawn {drawn:?}, cpu {:?} at {}", cpu.cell, cpu.distance);
+                    eprintln!(
+                        "pixel {x},{y}: drawn {drawn:?}, cpu {:?} at {}",
+                        cpu.cell, cpu.distance
+                    );
                 }
             }
         }
@@ -239,7 +368,13 @@ fn land(planet: &Planet, face: u8, fi: f64, fj: f64) -> DVec3 {
 fn ground_view(planet: &Planet, dir: DVec3, size: [u32; 2]) -> View {
     let eye = planet.surface_point(dir, 1.7);
     let up = eye.normalize();
-    View::new(eye, (up.any_orthonormal_vector() - up * 0.35).normalize().as_vec3(), size)
+    View::new(
+        eye,
+        (up.any_orthonormal_vector() - up * 0.35)
+            .normalize()
+            .as_vec3(),
+        size,
+    )
 }
 
 fn xorshift(mut state: u64) -> impl FnMut() -> u64 {
@@ -255,13 +390,20 @@ fn xorshift(mut state: u64) -> impl FnMut() -> u64 {
 fn terrain_programs_are_bit_identical_to_cpu() {
     let Some(gpu) = gpu() else { return };
     let moon = TerrainLayers::moon().source(7);
-    let flat = TerrainLayers { soil_depth_m: 2.0, ..TerrainLayers::flat_at(-1.25) }.source(7);
+    let flat = TerrainLayers {
+        soil_depth_m: 2.0,
+        ..TerrainLayers::flat_at(-1.25)
+    }
+    .source(7);
     let desert = TerrainLayers::desert().source(7);
     let mut deep = TerrainLayers::earth();
     deep.caves.depth_m = 900.0;
     let deep = deep.source(7);
     let mut cliffs = TerrainLayers::earth();
-    cliffs.layers.push(Layer { coverage: 0.6, ..Layer::new(LayerKind::Cliffs) });
+    cliffs.layers.push(Layer {
+        coverage: 0.6,
+        ..Layer::new(LayerKind::Cliffs)
+    });
     let cliffs = cliffs.source(7);
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
@@ -283,8 +425,16 @@ fn terrain_programs_are_bit_identical_to_cpu() {
         (Shape::Plane, 0.3, cliffs.clone()),
         (Shape::InfinitePlane, 1.0, cliffs),
     ] {
-        let planet = Planet::new(PlanetRecipe { shape, voxel_size_m: size, plane_size_m: 5_000.0, terrain: terrain.clone(), ..Default::default() }).unwrap();
-        helio_pass_voxel_planet::engine::verify_field(&gpu.device, &gpu.queue, &planet, 20_000).unwrap_or_else(|e| panic!("{} on {shape:?} at {size} m: {e}", terrain.generator));
+        let planet = Planet::new(PlanetRecipe {
+            shape,
+            voxel_size_m: size,
+            plane_size_m: 5_000.0,
+            terrain: terrain.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        helio_pass_voxel_planet::engine::verify_field(&gpu.device, &gpu.queue, &planet, 20_000)
+            .unwrap_or_else(|e| panic!("{} on {shape:?} at {size} m: {e}", terrain.generator));
     }
 }
 
@@ -305,7 +455,10 @@ fn ground_view_across_a_face_edge_matches_cpu_ray_casts() {
     let grid = *planet.grid();
     let n = grid.cells();
     let i = n - 30;
-    let j = (n - n / 10..n).step_by(997).find(|&j| planet.column_top(4, i, j, 0) > 40).expect("land near the edge");
+    let j = (n - n / 10..n)
+        .step_by(997)
+        .find(|&j| planet.column_top(4, i, j, 0) > 40)
+        .expect("land near the edge");
     assert!(i >= 1 << 26 && j >= 1 << 26);
     let dir = grid.direction(4, f64::from(i) + 0.5, f64::from(j) + 0.5);
     let eye = planet.surface_point(dir, 1.7);
@@ -323,7 +476,8 @@ fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
     let grid = *planet.grid();
     let field = planet.field();
     let mut next = xorshift(0x2545_F491_4F6C_DD1D);
-    let sites = (0..6u8).flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
+    let sites = (0..6u8)
+        .flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
     for (face, a, b) in sites {
         let (base, _) = grid.locate(planet.surface_point(land(planet, face, a, b), 0.0));
         for _ in 0..4_000 {
@@ -335,13 +489,18 @@ fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
             }
             let top = planet.column_top(base.face, i, j, 0);
             let k = top - 4 - (next() % below.max(1) as u64) as i32;
-            let air = |di: i32, dj: i32, dk: i32| !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk));
+            let air = |di: i32, dj: i32, dk: i32| {
+                !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk))
+            };
             if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| air(a, b, c)))) {
                 let eye = grid.cell_center(Cell::new(base.face, i, j, k));
                 let up = eye.normalize();
                 let forward = (up.any_orthonormal_vector() - up * 0.15).normalize();
                 let side = up.cross(forward);
-                if [forward, -forward, side, -side, up, -up].iter().all(|d| planet.raycast(eye, *d, 8.0).is_some()) {
+                if [forward, -forward, side, -side, up, -up]
+                    .iter()
+                    .all(|d| planet.raycast(eye, *d, 8.0).is_some())
+                {
                     return Some((eye, forward.as_vec3()));
                 }
             }
@@ -365,7 +524,11 @@ fn deep_cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let mut stack = TerrainLayers::earth();
     stack.caves.depth_m = 800.0;
-    let planet = Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap();
+    let planet = Planet::new(PlanetRecipe {
+        terrain: stack.source(7),
+        ..Default::default()
+    })
+    .unwrap();
     let (eye, forward) = find_cave(&planet).expect("a cave near the test sites");
     matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
 }
@@ -376,7 +539,8 @@ fn find_overhang(planet: &Planet) -> Option<(DVec3, Vec3)> {
     let grid = *planet.grid();
     let field = planet.field();
     let mut next = xorshift(0x1D8E_4E27_C47D_124F);
-    let sites = (0..6u8).flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
+    let sites = (0..6u8)
+        .flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
     for (face, a, b) in sites {
         let (base, _) = grid.locate(planet.surface_point(land(planet, face, a, b), 0.0));
         for _ in 0..20_000 {
@@ -392,13 +556,22 @@ fn find_overhang(planet: &Planet) -> Option<(DVec3, Vec3)> {
                 continue;
             }
             let t = top(0, 0);
-            if (t - above..t + above).filter(|&k| planet.solid(Cell::new(base.face, i, j, k)) != (k < t)).count() < 2 {
+            if (t - above..t + above)
+                .filter(|&k| planet.solid(Cell::new(base.face, i, j, k)) != (k < t))
+                .count()
+                < 2
+            {
                 continue;
             }
             let eye = planet.surface_point(grid.cell_center(Cell::new(base.face, i, j, t)), 2.0);
             let up = eye.normalize();
-            let (di, dj) = if si.abs() >= sj.abs() { (si.signum(), 0) } else { (0, sj.signum()) };
-            let along = grid.cell_center(Cell::new(base.face, i + di, j + dj, t)) - grid.cell_center(Cell::new(base.face, i, j, t));
+            let (di, dj) = if si.abs() >= sj.abs() {
+                (si.signum(), 0)
+            } else {
+                (0, sj.signum())
+            };
+            let along = grid.cell_center(Cell::new(base.face, i + di, j + dj, t))
+                - grid.cell_center(Cell::new(base.face, i, j, t));
             let forward = ((along - up * along.dot(up)).normalize() - up * 0.3).normalize();
             return Some((eye, forward.as_vec3()));
         }
@@ -413,7 +586,11 @@ fn overhang_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let mut stack = TerrainLayers::earth();
     stack.caves.enabled = false;
-    let planet = Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap();
+    let planet = Planet::new(PlanetRecipe {
+        terrain: stack.source(7),
+        ..Default::default()
+    })
+    .unwrap();
     let (eye, forward) = find_overhang(&planet).expect("an overhang near the test sites");
     matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
 }
@@ -423,10 +600,19 @@ fn overhang_view_matches_canonical_cpu_ray_casts() {
 fn plane_views_match_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     for shape in [Shape::Plane, Shape::InfinitePlane] {
-        let planet = Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap();
+        let planet = Planet::new(PlanetRecipe {
+            shape,
+            plane_size_m: 3_000.0,
+            ..Default::default()
+        })
+        .unwrap();
         for (x, z, height, pitch) in [(12.3, -45.6, 1.7, -0.35), (-300.0, 250.0, 8.0, -1.2)] {
             let eye = planet.surface_point(DVec3::new(x, 0.0, z), height);
-            matches(&gpu, &planet, View::new(eye, Vec3::new(0.8, pitch, 0.6), [320, 180]));
+            matches(
+                &gpu,
+                &planet,
+                View::new(eye, Vec3::new(0.8, pitch, 0.6), [320, 180]),
+            );
         }
     }
 }
@@ -441,9 +627,32 @@ fn brushes_render_exactly() {
     let up = eye.normalize();
     let side = up.any_orthonormal_vector();
     let ground = planet.surface_point(dir, 0.0) + side * 4.0;
-    planet.apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-    planet.apply(Brush { center: (ground + side * 3.0 + up * 1.5).to_array(), radius: 0.8, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
-    matches_exactly(&gpu, &planet, View::new(eye, (side - up * 0.6).normalize().as_vec3(), [320, 180]), 1000);
+    planet
+        .apply(Brush {
+            center: ground.to_array(),
+            radius: 2.5,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
+    planet
+        .apply(Brush {
+            center: (ground + side * 3.0 + up * 1.5).to_array(),
+            radius: 0.8,
+            shape: BrushShape::Cube,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
+    matches_exactly(
+        &gpu,
+        &planet,
+        View::new(eye, (side - up * 0.6).normalize().as_vec3(), [320, 180]),
+        1000,
+    );
 }
 
 /// The floor of a ball 10 km across, dug from the surface: from a few metres
@@ -455,13 +664,26 @@ fn a_planet_scale_dig_renders_exactly() {
     let dir = land(&planet, 2, 0.47, 0.52);
     let ground = planet.surface_point(dir, 0.0);
     let up = ground.normalize();
-    planet.apply(Brush { center: ground.to_array(), radius: 10_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: ground.to_array(),
+            radius: 10_000.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     let side = up.any_orthonormal_vector();
     for (off, height, pitch) in [(0.0, 3.0, -0.5), (2_500.0, 4.0, -0.4), (6_000.0, 3.0, -0.3)] {
         let floor = ground - up * 10_000.0 + side * off;
         let floor = planet.surface_point(floor + up * 9_000.0, 0.0);
         let eye = floor + up * height;
-        let view = View::new(eye, (up.cross(side) + up * pitch).normalize().as_vec3(), [320, 180]);
+        let view = View::new(
+            eye,
+            (up.cross(side) + up * pitch).normalize().as_vec3(),
+            [320, 180],
+        );
         let (compared, mismatched) = compare(&gpu, &mut World::new(&gpu, &planet), &planet, &view);
         eprintln!("off {off}: {mismatched}/{compared}");
         assert!(compared > 1000, "{compared} pixels compared");
@@ -483,32 +705,57 @@ fn a_dug_floor_seen_from_afar_shows_its_nearest_cells() {
     let ground = planet.surface_point(dir, 0.0);
     let up = ground.normalize();
     let radius = 1_500.0;
-    planet.apply(Brush { center: ground.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: ground.to_array(),
+            radius,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     let side = up.any_orthonormal_vector();
-    let view = View { near: 0.002, ..View::new(ground + up * 6.0, (side - up * 0.5).normalize().as_vec3(), [480, 270]) };
+    let view = View {
+        near: 0.002,
+        ..View::new(
+            ground + up * 6.0,
+            (side - up * 0.5).normalize().as_vec3(),
+            [480, 270],
+        )
+    };
     let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
     let view_proj = view.view_proj(&planet);
     let (mut compared, mut beyond) = (0, 0);
     for y in (0..view.size[1]).step_by(12) {
         for x in (0..view.size[0]).step_by(12) {
             let dir = view.pixel_dir(view_proj, x, y);
-            let Some(cpu) = planet.raycast(view.eye, dir, 4.0 * radius) else { continue };
+            let Some(cpu) = planet.raycast(view.eye, dir, 4.0 * radius) else {
+                continue;
+            };
             // The ball's wall and floor, well under the natural ground: at
             // the rim the ground left over the ball thins to slivers a
             // coarse cell does not hold.
             let at = view.eye + dir * cpu.distance;
             let under = planet.column_top(cpu.cell.face, cpu.cell.i, cpu.cell.j, 0) - cpu.cell.k;
-            if ((at - ground).length() - radius).abs() > 1.0 || f64::from(under) * planet.grid().voxel_size() < 30.0 {
+            if ((at - ground).length() - radius).abs() > 1.0
+                || f64::from(under) * planet.grid().voxel_size() < 30.0
+            {
                 continue;
             }
-            let Some(drawn) = hits[(y * view.size[0] + x) as usize] else { continue };
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize] else {
+                continue;
+            };
             compared += 1;
             // A level's cells sit within a cell or so of the exact ground.
             let cell = planet.grid().voxel_size() * f64::from(1u32 << drawn.level);
             if (drawn.distance - cpu.distance).abs() > 3.0 * cell + 0.5 {
                 beyond += 1;
                 if beyond < 8 {
-                    eprintln!("pixel {x},{y}: drawn {:.2} m at level {} entered {:?}, cpu {:.2} m", drawn.distance, drawn.level, drawn.entered, cpu.distance);
+                    eprintln!(
+                        "pixel {x},{y}: drawn {:.2} m at level {} entered {:?}, cpu {:.2} m",
+                        drawn.distance, drawn.level, drawn.entered, cpu.distance
+                    );
                 }
             }
         }
@@ -530,8 +777,26 @@ fn box_brushes_render_exactly() {
     let ground = planet.surface_point(dir, 0.0);
     for n in 0..6 {
         let at = ground + side * (f64::from(n) * 2.5);
-        planet.apply(Brush { center: (at + up * 1.5).to_array(), radius: 1.3, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 1.5 }).unwrap();
-        planet.apply(Brush { center: (at - up * 0.75).to_array(), radius: 1.3, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.75 }).unwrap();
+        planet
+            .apply(Brush {
+                center: (at + up * 1.5).to_array(),
+                radius: 1.3,
+                shape: BrushShape::Cube,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 1.5,
+            })
+            .unwrap();
+        planet
+            .apply(Brush {
+                center: (at - up * 0.75).to_array(),
+                radius: 1.3,
+                shape: BrushShape::Cube,
+                op: BrushOp::Add,
+                material: material::BRICK,
+                height: 0.75,
+            })
+            .unwrap();
     }
     let eye = ground + up * 4.0 - side * 5.0 + up.cross(side) * 3.0;
     let forward = ((ground + side * 6.0) - eye).normalize().as_vec3();
@@ -549,13 +814,26 @@ fn a_deep_shaft_renders_exactly_at_any_depth() {
     let up = planet.grid().up(ground);
     let mut depth = -10.0;
     while depth < 600.0 {
-        planet.apply(Brush { center: (ground - up * depth).to_array(), radius: 2.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        planet
+            .apply(Brush {
+                center: (ground - up * depth).to_array(),
+                radius: 2.0,
+                shape: BrushShape::Cube,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 0.0,
+            })
+            .unwrap();
         depth += 3.0;
     }
     let mut world = World::new(&gpu, &planet);
     let side = up.any_orthonormal_vector();
     for (depth, pitch) in [(590.0, -0.6), (290.0, 0.4)] {
-        let view = View::new(ground - up * depth + side * 0.7, (side + up * pitch).normalize().as_vec3(), [256, 144]);
+        let view = View::new(
+            ground - up * depth + side * 0.7,
+            (side + up * pitch).normalize().as_vec3(),
+            [256, 144],
+        );
         let (compared, mismatched) = compare(&gpu, &mut world, &planet, &view);
         assert!(compared > 1000, "{depth} m: {compared} compared");
         assert_eq!(mismatched, 0, "{depth} m");
@@ -569,10 +847,24 @@ fn a_planet_scale_crater_renders_exactly_on_its_floor() {
     let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let ground = planet.surface_point(land(&planet, 5, 0.33, 0.52), 0.0);
     let up = planet.grid().up(ground);
-    planet.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: ground.to_array(),
+            radius: 3_000.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     let eye = ground - up * (3_000.0 - 1.7);
-    assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the crater");
-    let forward = (up.any_orthonormal_vector() - up * 0.4).normalize().as_vec3();
+    assert!(
+        !planet.solid(planet.grid().locate(eye).0),
+        "the eye is in the crater"
+    );
+    let forward = (up.any_orthonormal_vector() - up * 0.4)
+        .normalize()
+        .as_vec3();
     matches_exactly(&gpu, &planet, View::new(eye, forward, [256, 144]), 1000);
 }
 
@@ -585,14 +877,35 @@ fn a_planet_scale_crater_renders_exactly_on_its_floor() {
 #[test]
 fn a_hollowed_core_renders_exactly_from_inside() {
     let Some(gpu) = gpu() else { return };
-    let recipe = PlanetRecipe { radius_m: 3_000.0, terrain: TerrainLayers::earth().heightfield().source(7), ..Default::default() };
+    let recipe = PlanetRecipe {
+        radius_m: 3_000.0,
+        terrain: TerrainLayers::earth().heightfield().source(7),
+        ..Default::default()
+    };
     let mut planet = Planet::new(recipe).unwrap();
-    planet.apply(Brush { center: [0.0; 3], radius: 1_500.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: [0.0; 3],
+            radius: 1_500.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     let up = DVec3::new(0.3, 0.9, 0.2).normalize();
     let eye = up * (1_500.0 - 1.7);
-    assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the hollow");
-    assert!(planet.solid(planet.grid().locate(up * 1_500.5).0), "the hollow has a wall");
-    let forward = (up.any_orthonormal_vector() + up * 0.5).normalize().as_vec3();
+    assert!(
+        !planet.solid(planet.grid().locate(eye).0),
+        "the eye is in the hollow"
+    );
+    assert!(
+        planet.solid(planet.grid().locate(up * 1_500.5).0),
+        "the hollow has a wall"
+    );
+    let forward = (up.any_orthonormal_vector() + up * 0.5)
+        .normalize()
+        .as_vec3();
     matches(&gpu, &planet, View::new(eye, forward, [256, 144]));
 }
 
@@ -606,10 +919,24 @@ fn an_underground_hall_renders_exactly() {
     let ground = planet.surface_point(land(&planet, 2, 0.43, 0.57), 0.0);
     let up = planet.grid().up(ground);
     let centre = ground - up * 300.0;
-    planet.apply(Brush { center: centre.to_array(), radius: 20.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: centre.to_array(),
+            radius: 20.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     let eye = centre - up * 18.0;
-    assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the hall");
-    let forward = (up.any_orthonormal_vector() + up * 0.3).normalize().as_vec3();
+    assert!(
+        !planet.solid(planet.grid().locate(eye).0),
+        "the eye is in the hall"
+    );
+    let forward = (up.any_orthonormal_vector() + up * 0.3)
+        .normalize()
+        .as_vec3();
     matches_exactly(&gpu, &planet, View::new(eye, forward, [256, 144]), 1000);
 }
 
@@ -627,9 +954,25 @@ fn thousands_of_block_edits_render_exactly() {
     let ground = planet.surface_point(dir, 0.0);
     let block = |p: DVec3, op: BrushOp| {
         let (cell, _) = grid.locate(p);
-        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
+        Brush {
+            center: grid.cell_center(cell).to_array(),
+            radius: grid.voxel_size() * 0.5,
+            shape: BrushShape::Cube,
+            op,
+            material: if op == BrushOp::Add {
+                material::BRICK
+            } else {
+                0
+            },
+            height: 0.0,
+        }
     };
-    let at = |x: i32, y: i32, z: i32| ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 6.0) + up * (f64::from(y) * 0.1 + 0.55);
+    let at = |x: i32, y: i32, z: i32| {
+        ground
+            + side * (f64::from(x) * 0.1)
+            + fwd * (f64::from(z) * 0.1 + 6.0)
+            + up * (f64::from(y) * 0.1 + 0.55)
+    };
     let mut count = 0;
     for y in 0..60 {
         for x in -20..20 {
@@ -645,7 +988,13 @@ fn thousands_of_block_edits_render_exactly() {
     for x in -40..40 {
         for z in -30..-10 {
             if (x * 3 + z) % 2 == 0 {
-                planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) - up * 0.05, BrushOp::Remove)).unwrap();
+                planet
+                    .apply(block(
+                        ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1)
+                            - up * 0.05,
+                        BrushOp::Remove,
+                    ))
+                    .unwrap();
                 count += 1;
             }
         }
@@ -669,17 +1018,42 @@ fn edited_cells_draw_their_own_materials() {
     let side = up.any_orthonormal_vector();
     let fwd = up.cross(side);
     let ground = planet.surface_point(dir, 0.0);
-    let kinds = [material::BRICK, material::PLANKS, material::COBBLE, material::WOOD, material::CLAY, material::SNOW, material::BASALT, material::SAND];
+    let kinds = [
+        material::BRICK,
+        material::PLANKS,
+        material::COBBLE,
+        material::WOOD,
+        material::CLAY,
+        material::SNOW,
+        material::BASALT,
+        material::SAND,
+    ];
     let mut edited = std::collections::HashMap::new();
     let mut cell_brush = |planet: &mut Planet, cell: Cell, op: BrushOp, material: u32| {
-        planet.apply(Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material, height: 0.0 }).unwrap();
+        planet
+            .apply(Brush {
+                center: grid.cell_center(cell).to_array(),
+                radius: grid.voxel_size() * 0.5,
+                shape: BrushShape::Cube,
+                op,
+                material,
+                height: 0.0,
+            })
+            .unwrap();
         edited.insert(cell, material);
     };
     // A wall of blocks, each cell its own material.
     for y in 0..24i32 {
         for x in -16..16 {
-            let (cell, _) = grid.locate(ground + side * (f64::from(x) * 0.1) + fwd * 4.0 + up * (f64::from(y) * 0.1 + 0.55));
-            cell_brush(&mut planet, cell, BrushOp::Add, kinds[((x * 7 + y * 3).rem_euclid(8)) as usize]);
+            let (cell, _) = grid.locate(
+                ground + side * (f64::from(x) * 0.1) + fwd * 4.0 + up * (f64::from(y) * 0.1 + 0.55),
+            );
+            cell_brush(
+                &mut planet,
+                cell,
+                BrushOp::Add,
+                kinds[((x * 7 + y * 3).rem_euclid(8)) as usize],
+            );
         }
     }
     // Ground cells painted in a checkerboard in front of it.
@@ -688,28 +1062,51 @@ fn edited_cells_draw_their_own_materials() {
             if (x + z) % 2 != 0 {
                 continue;
             }
-            let (c, _) = grid.locate(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 0.5));
+            let (c, _) = grid
+                .locate(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 0.5));
             let cell = Cell::new(c.face, c.i, c.j, planet.column_top(c.face, c.i, c.j, 0) - 1);
             assert!(planet.solid(cell));
-            cell_brush(&mut planet, cell, BrushOp::Paint, kinds[((x + z * 5).rem_euclid(8)) as usize]);
+            cell_brush(
+                &mut planet,
+                cell,
+                BrushOp::Paint,
+                kinds[((x + z * 5).rem_euclid(8)) as usize],
+            );
         }
     }
     let eye = ground - fwd * 2.0 + up * 3.0;
-    let view = View::new(eye, ((ground + fwd * 3.0 + up * 0.8) - eye).normalize().as_vec3(), [320, 180]);
+    let view = View::new(
+        eye,
+        ((ground + fwd * 3.0 + up * 0.8) - eye)
+            .normalize()
+            .as_vec3(),
+        [320, 180],
+    );
     let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
     let view_proj = view.view_proj(&planet);
     let (mut compared, mut wrong) = (0, 0);
     for y in 0..view.size[1] {
         for x in 0..view.size[0] {
-            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 50.0) else { continue };
-            let Some(&want) = edited.get(&cpu.cell) else { continue };
+            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 50.0) else {
+                continue;
+            };
+            let Some(&want) = edited.get(&cpu.cell) else {
+                continue;
+            };
             assert_eq!(planet.material(cpu.cell), want);
-            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize]
+                .filter(|h| h.level == 0 && h.cell == cpu.cell)
+            else {
+                continue;
+            };
             compared += 1;
             if drawn.material != want {
                 wrong += 1;
                 if wrong < 8 {
-                    eprintln!("pixel {x},{y}: {:?} drawn {}, edited {want}", cpu.cell, drawn.material);
+                    eprintln!(
+                        "pixel {x},{y}: {:?} drawn {}, edited {want}",
+                        cpu.cell, drawn.material
+                    );
                 }
             }
         }
@@ -723,13 +1120,21 @@ fn edited_cells_draw_their_own_materials() {
 /// shows one material everywhere): the `steep` with the greatest top
 /// difference over 16 cells, then the `mixed` with the most distinct top
 /// materials around them, of `candidates` random ones.
-fn varied_spots(planet: &Planet, candidates: usize, steep: usize, mixed: usize) -> Vec<(String, u8, i32, i32)> {
+fn varied_spots(
+    planet: &Planet,
+    candidates: usize,
+    steep: usize,
+    mixed: usize,
+) -> Vec<(String, u8, i32, i32)> {
     let n = planet.grid().cells() as u64;
     let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
     let (mut by_relief, mut by_kinds) = (Vec::new(), Vec::new());
     for _ in 0..candidates {
         let face = (next() % 6) as u8;
-        let (i, j) = ((next() % (n - 64)) as i32 + 32, (next() % (n - 64)) as i32 + 32);
+        let (i, j) = (
+            (next() % (n - 64)) as i32 + 32,
+            (next() % (n - 64)) as i32 + 32,
+        );
         if planet.column_top(face, i, j, 0) <= 40 {
             continue;
         }
@@ -748,9 +1153,14 @@ fn varied_spots(planet: &Planet, candidates: usize, steep: usize, mixed: usize) 
     }
     by_relief.sort_by(|a, b| b.0.cmp(&a.0));
     by_kinds.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut spots: Vec<(String, u8, i32, i32)> = by_relief.iter().take(steep).map(|s| (format!("steep {} cells", s.0), s.1, s.2, s.3)).collect();
+    let mut spots: Vec<(String, u8, i32, i32)> = by_relief
+        .iter()
+        .take(steep)
+        .map(|s| (format!("steep {} cells", s.0), s.1, s.2, s.3))
+        .collect();
     for s in &by_kinds {
-        if spots.len() < steep + mixed && !spots.iter().any(|t| (t.1, t.2, t.3) == (s.1, s.2, s.3)) {
+        if spots.len() < steep + mixed && !spots.iter().any(|t| (t.1, t.2, t.3) == (s.1, s.2, s.3))
+        {
             spots.push((format!("{} materials", s.0 / 1000), s.1, s.2, s.3));
         }
     }
@@ -762,13 +1172,25 @@ fn varied_spots(planet: &Planet, candidates: usize, steep: usize, mixed: usize) 
 /// material: what the leaf's vote must draw on its top faces.
 fn uniform_leaf_top(planet: &Planet, c: Cell) -> Option<u32> {
     let grid = planet.grid();
-    let (li, lj, lk) = (c.i.div_euclid(4) * 4, c.j.div_euclid(4) * 4, c.k.div_euclid(4) * 4);
+    let (li, lj, lk) = (
+        c.i.div_euclid(4) * 4,
+        c.j.div_euclid(4) * 4,
+        c.k.div_euclid(4) * 4,
+    );
     let mut material = None;
     for a in 0..4 {
         for b in 0..4 {
             let (i, j) = (li + a, lj + b);
             let height = planet.column_height(c.face, i, j, 0);
-            let top = helio_pass_voxel_planet::terrain::generated_top(grid, planet.field(), c.face, i, j, 0, height);
+            let top = helio_pass_voxel_planet::terrain::generated_top(
+                grid,
+                planet.field(),
+                c.face,
+                i,
+                j,
+                0,
+                height,
+            );
             if !(lk..lk + 4).contains(&(top - 1)) {
                 return None;
             }
@@ -786,7 +1208,12 @@ fn uniform_leaf_top(planet: &Planet, c: Cell) -> Option<u32> {
 /// pixels, as (pixels, wrong): top faces of uniform leaves, other cells
 /// under air, cells under solid ground. Each wrong (canonical, drawn) pair
 /// is counted into `confusions`.
-fn material_agreement(gpu: &Gpu, planet: &Planet, view: &View, confusions: &mut std::collections::HashMap<(u32, u32), usize>) -> [(usize, usize); 3] {
+fn material_agreement(
+    gpu: &Gpu,
+    planet: &Planet,
+    view: &View,
+    confusions: &mut std::collections::HashMap<(u32, u32), usize>,
+) -> [(usize, usize); 3] {
     let hits = World::new(gpu, planet).settle(gpu, planet, view);
     let view_proj = view.view_proj(planet);
     let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
@@ -795,15 +1222,34 @@ fn material_agreement(gpu: &Gpu, planet: &Planet, view: &View, confusions: &mut 
     let mut leaves = std::collections::HashMap::new();
     for y in 0..view.size[1] {
         for x in 0..view.size[0] {
-            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
-            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+            let Some(cpu) = planet
+                .raycast(view.eye, view.pixel_dir(view_proj, x, y), near)
+                .filter(|c| c.distance < near)
+            else {
+                continue;
+            };
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize]
+                .filter(|h| h.level == 0 && h.cell == cpu.cell)
+            else {
+                continue;
+            };
             let c = cpu.cell;
             let own = planet.material(c);
             let covered = planet.solid(Cell::new(c.face, c.i, c.j, c.k + 1));
             // A top face: the ray stepped down k into the cell.
             let kind = if covered {
                 2
-            } else if drawn.entered == Some(4) && leaves.entry((c.face, c.i.div_euclid(4), c.j.div_euclid(4), c.k.div_euclid(4))).or_insert_with(|| uniform_leaf_top(planet, c)).is_some() {
+            } else if drawn.entered == Some(4)
+                && leaves
+                    .entry((
+                        c.face,
+                        c.i.div_euclid(4),
+                        c.j.div_euclid(4),
+                        c.k.div_euclid(4),
+                    ))
+                    .or_insert_with(|| uniform_leaf_top(planet, c))
+                    .is_some()
+            {
                 0
             } else {
                 1
@@ -834,9 +1280,18 @@ fn uniform_leaves_draw_canonical_materials() {
         let dir = grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
         let eye = planet.surface_point(dir, 1.7);
         let up = eye.normalize();
-        let view = View::new(eye, (up.any_orthonormal_vector() - up * 0.35).normalize().as_vec3(), [320, 180]);
+        let view = View::new(
+            eye,
+            (up.any_orthonormal_vector() - up * 0.35)
+                .normalize()
+                .as_vec3(),
+            [320, 180],
+        );
         let [uniform, ..] = material_agreement(&gpu, &planet, &view, &mut confusions);
-        eprintln!("{label}: {} of {} uniform-leaf top pixels wrong", uniform.1, uniform.0);
+        eprintln!(
+            "{label}: {} of {} uniform-leaf top pixels wrong",
+            uniform.1, uniform.0
+        );
         compared += uniform.0;
         wrong += uniform.1;
     }
@@ -854,7 +1309,8 @@ fn dug_walls_draw_canonical_materials() {
     let grid = *natural.grid();
     let radius = 2.5;
     let (mut compared, mut wrong, mut pages) = (0, 0, 0);
-    let mut confusions: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+    let mut confusions: std::collections::HashMap<(u32, u32), usize> =
+        std::collections::HashMap::new();
     for (label, face, i, j) in varied_spots(&natural, 600, 2, 1) {
         let dir = grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
         let eye = natural.surface_point(dir, 1.7);
@@ -862,7 +1318,16 @@ fn dug_walls_draw_canonical_materials() {
         let side = up.any_orthonormal_vector();
         let centre = natural.surface_point(dir, 0.0) + side * 4.0;
         let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
-        planet.apply(Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        planet
+            .apply(Brush {
+                center: centre.to_array(),
+                radius,
+                shape: BrushShape::Sphere,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 0.0,
+            })
+            .unwrap();
         let view = View::new(eye, (side - up * 0.35).normalize().as_vec3(), [320, 180]);
         let mut world = World::new(&gpu, &planet);
         let hits = world.settle(&gpu, &planet, &view);
@@ -872,12 +1337,22 @@ fn dug_walls_draw_canonical_materials() {
         let (mut n, mut w) = (0, 0);
         for y in 0..view.size[1] {
             for x in 0..view.size[0] {
-                let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), near).filter(|c| c.distance < near) else { continue };
+                let Some(cpu) = planet
+                    .raycast(view.eye, view.pixel_dir(view_proj, x, y), near)
+                    .filter(|c| c.distance < near)
+                else {
+                    continue;
+                };
                 // The pit's cells: within a cell of its sphere.
-                if (grid.cell_center(cpu.cell) - centre).length() > radius + 2.0 * grid.voxel_size() {
+                if (grid.cell_center(cpu.cell) - centre).length() > radius + 2.0 * grid.voxel_size()
+                {
                     continue;
                 }
-                let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == cpu.cell) else { continue };
+                let Some(drawn) = hits[(y * view.size[0] + x) as usize]
+                    .filter(|h| h.level == 0 && h.cell == cpu.cell)
+                else {
+                    continue;
+                };
                 let own = planet.material(cpu.cell);
                 n += 1;
                 if drawn.material != own {
@@ -909,7 +1384,13 @@ fn natural_cells_against_the_leaf_rule() {
     let Some(gpu) = gpu() else { return };
     let natural = Planet::new(PlanetRecipe::default()).unwrap();
     let grid = *natural.grid();
-    let name = |m: u32| if m == 0 || m as usize > material::NAMES.len() { format!("#{m}") } else { material::NAMES[m as usize - 1].to_string() };
+    let name = |m: u32| {
+        if m == 0 || m as usize > material::NAMES.len() {
+            format!("#{m}")
+        } else {
+            material::NAMES[m as usize - 1].to_string()
+        }
+    };
     let pct = |(n, w): (usize, usize)| 100.0 * w as f64 / n.max(1) as f64;
     let sum = |c: &[(usize, usize); 3]| c.iter().fold((0, 0), |a, c| (a.0 + c.0, a.1 + c.1));
     let mut confusions = std::collections::HashMap::new();
@@ -923,9 +1404,24 @@ fn natural_cells_against_the_leaf_rule() {
             let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
             if pit {
                 let ground = natural.surface_point(dir, 0.0) + side * 4.0;
-                planet.apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+                planet
+                    .apply(Brush {
+                        center: ground.to_array(),
+                        radius: 2.5,
+                        shape: BrushShape::Sphere,
+                        op: BrushOp::Remove,
+                        material: 0,
+                        height: 0.0,
+                    })
+                    .unwrap();
             }
-            let view = View::new(eye, (side - up * if lift > 2.0 { 0.6 } else { 0.35 }).normalize().as_vec3(), [320, 180]);
+            let view = View::new(
+                eye,
+                (side - up * if lift > 2.0 { 0.6 } else { 0.35 })
+                    .normalize()
+                    .as_vec3(),
+                [320, 180],
+            );
             let counts = material_agreement(&gpu, &planet, &view, &mut confusions);
             let total = sum(&counts);
             eprintln!(
@@ -962,7 +1458,12 @@ fn natural_cells_against_the_leaf_rule() {
     let mut top: Vec<_> = confusions.into_iter().collect();
     top.sort_by(|a, b| b.1.cmp(&a.1));
     for ((own, drawn), count) in top.iter().take(12) {
-        eprintln!("  own {} drawn {}: {count} pixels ({:.2}%)", name(*own), name(*drawn), 100.0 * *count as f64 / total.0.max(1) as f64);
+        eprintln!(
+            "  own {} drawn {}: {count} pixels ({:.2}%)",
+            name(*own),
+            name(*drawn),
+            100.0 * *count as f64 / total.0.max(1) as f64
+        );
     }
 }
 
@@ -982,15 +1483,28 @@ fn edit_cost_against_history() {
     let side = up.any_orthonormal_vector();
     let fwd = up.cross(side);
     let view = ground_view(&base, dir, [320, 180]);
-    for (label, radius, spread) in [("small digs (0.4 m)", 0.4, 0.5), ("large digs (8 m)", 8.0, 9.0)] {
+    for (label, radius, spread) in [
+        ("small digs (0.4 m)", 0.4, 0.5),
+        ("large digs (8 m)", 8.0, 9.0),
+    ] {
         for n in [0usize, 100, 1000, 10000] {
             let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
             let mut next = xorshift(0x2545_f491_4f6c_dd1d);
             let mut dig = |planet: &mut Planet| {
                 let a = (next() % 2001) as f64 / 1000.0 - 1.0;
                 let b = (next() % 2001) as f64 / 1000.0 - 1.0;
-                let centre = ground + side * (a * 40.0 * spread) + fwd * (b * 40.0 * spread) + up * 6.0;
-                planet.apply(Brush { center: centre.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+                let centre =
+                    ground + side * (a * 40.0 * spread) + fwd * (b * 40.0 * spread) + up * 6.0;
+                planet
+                    .apply(Brush {
+                        center: centre.to_array(),
+                        radius,
+                        shape: BrushShape::Sphere,
+                        op: BrushOp::Remove,
+                        material: 0,
+                        height: 0.0,
+                    })
+                    .unwrap();
             };
             for _ in 0..n {
                 dig(&mut planet);
@@ -1000,7 +1514,8 @@ fn edit_cost_against_history() {
             // Ten more edits, each synced and its frame run: the update's
             // CPU, the generation's GPU (`FrameTimings`), the chunks it
             // generated.
-            let (mut sync_ms, mut frame_ms, mut update_ms, mut gen_ms, mut chunks) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let (mut sync_ms, mut frame_ms, mut update_ms, mut gen_ms, mut chunks) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
             world.chunks.take_timings();
             for _ in 0..10 {
                 dig(&mut planet);
@@ -1014,9 +1529,22 @@ fn edit_cost_against_history() {
                 chunks.push(stats.generated_chunks as f64);
                 // The frame's GPU times come back with the next frame's.
                 world.frame(&gpu, &planet, &view, None);
-                gen_ms.push(world.chunks.take_timings().iter().map(|t| t.generate).sum::<f64>());
+                gen_ms.push(
+                    world
+                        .chunks
+                        .take_timings()
+                        .iter()
+                        .map(|t| t.generate)
+                        .sum::<f64>(),
+                );
             }
-            for v in [&mut sync_ms, &mut frame_ms, &mut update_ms, &mut gen_ms, &mut chunks] {
+            for v in [
+                &mut sync_ms,
+                &mut frame_ms,
+                &mut update_ms,
+                &mut gen_ms,
+                &mut chunks,
+            ] {
                 v.sort_by(f64::total_cmp);
             }
             eprintln!("EDITPARTS history {n}: update CPU p50 {:.2} ms, generation GPU p50 {:.2} ms, chunks p50 {}", update_ms[5], gen_ms[5], chunks[5]);
@@ -1035,7 +1563,12 @@ fn edit_cost_against_history() {
 
 /// Settle `view`, summing the edited chunks restored and generated and the
 /// generation's GPU milliseconds; its hits.
-fn settle_counting(gpu: &Gpu, world: &mut World, planet: &Planet, view: &View) -> (Vec<Option<PickHit>>, (usize, usize), f64, u64) {
+fn settle_counting(
+    gpu: &Gpu,
+    world: &mut World,
+    planet: &Planet,
+    view: &View,
+) -> (Vec<Option<PickHit>>, (usize, usize), f64, u64) {
     let started = world.frame;
     let (mut restored, mut generated, mut gpu_ms) = (0, 0, 0.0);
     world.chunks.take_timings();
@@ -1044,13 +1577,26 @@ fn settle_counting(gpu: &Gpu, world: &mut World, planet: &Planet, view: &View) -
         restored += stats.restored_chunks;
         generated += stats.generated_edited;
 
-        gpu_ms += world.chunks.take_timings().iter().map(|t| t.generate).sum::<f64>();
+        gpu_ms += world
+            .chunks
+            .take_timings()
+            .iter()
+            .map(|t| t.generate)
+            .sum::<f64>();
         if world.chunks.settled() {
             break;
         }
-        assert!(world.frame - started < 4000, "residency did not settle: {stats:?}");
+        assert!(
+            world.frame - started < 4000,
+            "residency did not settle: {stats:?}"
+        );
     }
-    (world.chunks.read_hits(), (restored, generated), gpu_ms, world.frame - started)
+    (
+        world.chunks.read_hits(),
+        (restored, generated),
+        gpu_ms,
+        world.frame - started,
+    )
 }
 
 /// Edited chunks the plan evicts are kept (packed, read back) and come
@@ -1073,7 +1619,16 @@ fn dug_site() -> (Planet, DVec3, [DVec3; 3]) {
         let a = (next() % 2001) as f64 / 1000.0 - 1.0;
         let b = (next() % 2001) as f64 / 1000.0 - 1.0;
         let centre = ground + side * (a * 20.0) + fwd * (b * 20.0 + 12.0) + up * 5.0;
-        planet.apply(Brush { center: centre.to_array(), radius: 8.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        planet
+            .apply(Brush {
+                center: centre.to_array(),
+                radius: 8.0,
+                shape: BrushShape::Sphere,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 0.0,
+            })
+            .unwrap();
     }
     (planet, dir, [ground, up, fwd])
 }
@@ -1085,13 +1640,25 @@ fn edited_chunks_come_back_by_copy() {
     let here = ground_view(&planet, dir, [320, 180]);
     let far = ground_view(&planet, land(&planet, 4, 0.3, 0.7), [320, 180]);
     let run = |planet: &Planet, kept_bytes: usize| {
-        let capacity = Capacity { chunks: 9000, kept_bytes, ..TEST_CAPACITY };
+        let capacity = Capacity {
+            chunks: 9000,
+            kept_bytes,
+            ..TEST_CAPACITY
+        };
         let mut world = World::with_capacity(gpu, planet, capacity);
         let (first, ..) = settle_counting(&gpu, &mut world, planet, &here);
         settle_counting(&gpu, &mut world, planet, &far);
         let stats = world.frame(&gpu, planet, &far, None);
-        let (again, (restored, generated), gpu_ms, frames) = settle_counting(&gpu, &mut world, planet, &here);
-        let same = first.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+        let (again, (restored, generated), gpu_ms, frames) =
+            settle_counting(&gpu, &mut world, planet, &here);
+        let same = first
+            .iter()
+            .zip(&again)
+            .filter(|(a, b)| {
+                a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))
+                    == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))
+            })
+            .count();
         eprintln!("KEPT {kept_bytes} bytes: {} kept at the far view ({} KiB); back: edited chunks {restored} restored, {generated} generated; {gpu_ms:.2} ms of generation GPU over {frames} frames; {same}/{} pixels as before", stats.kept_chunks, stats.kept_bytes / 1024, first.len());
         (restored, generated, same, first.len(), world)
     };
@@ -1099,21 +1666,42 @@ fn edited_chunks_come_back_by_copy() {
     let (restored, generated, same, pixels, mut world) = run(&planet, TEST_CAPACITY.kept_bytes);
     // An edit over restored chunks shows exactly; left and seen again, the
     // chunks it changed come back with it.
-    planet.apply(Brush { center: (ground + fwd * 12.0 - up * 2.0).to_array(), radius: 3.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: (ground + fwd * 12.0 - up * 2.0).to_array(),
+            radius: 3.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
     world.sync(&gpu, &planet);
     let (compared, mismatched) = compare(&gpu, &mut world, &planet, &here);
-    assert!(compared > 1000 && mismatched * 1000 <= compared, "after the edit: {mismatched}/{compared}");
+    assert!(
+        compared > 1000 && mismatched * 1000 <= compared,
+        "after the edit: {mismatched}/{compared}"
+    );
     settle_counting(&gpu, &mut world, &planet, &far);
     let (_, (restored_again, _), ..) = settle_counting(&gpu, &mut world, &planet, &here);
     let (compared_again, mismatched_again) = compare(&gpu, &mut world, &planet, &here);
     eprintln!("KEPT after an edit: {mismatched}/{compared}; left and back, {restored_again} restored, {mismatched_again}/{compared_again}");
-    assert!(compared_again > 1000 && mismatched_again * 1000 <= compared_again, "back after the edit: {mismatched_again}/{compared_again}");
+    assert!(
+        compared_again > 1000 && mismatched_again * 1000 <= compared_again,
+        "back after the edit: {mismatched_again}/{compared_again}"
+    );
 
     // The edited chunks evicted come back restored (those evicted before
     // their pack came back, or past a frame's packs, generate again); a
     // world that keeps nothing generates them all.
-    assert!(restored > 50 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
-    assert!(none == 0 && regenerated > 50, "keeping nothing: {none} restored, {regenerated} generated");
+    assert!(
+        restored > 50 && generated * 4 < restored,
+        "edited chunks: {restored} restored, {generated} generated"
+    );
+    assert!(
+        none == 0 && regenerated > 50,
+        "keeping nothing: {none} restored, {regenerated} generated"
+    );
     assert_eq!(same, pixels, "every pixel as before");
 }
 
@@ -1132,7 +1720,10 @@ fn edited_chunks_released_by_age_come_back_by_copy() {
     let mut config = here.config();
     config.plan.release_frames = release;
     let mut world = World::new(&gpu, &planet);
-    let settle = |world: &mut World, view: &View, config: &ResidencyConfig| -> (Vec<Option<PickHit>>, (usize, usize)) {
+    let settle = |world: &mut World,
+                  view: &View,
+                  config: &ResidencyConfig|
+     -> (Vec<Option<PickHit>>, (usize, usize)) {
         let started = world.frame;
         let (mut restored, mut generated) = (0, 0);
         loop {
@@ -1142,7 +1733,10 @@ fn edited_chunks_released_by_age_come_back_by_copy() {
             if world.chunks.settled() {
                 return (world.chunks.read_hits(), (restored, generated));
             }
-            assert!(world.frame - started < 4000, "residency did not settle: {stats:?}");
+            assert!(
+                world.frame - started < 4000,
+                "residency did not settle: {stats:?}"
+            );
         }
     };
     let (first, _) = settle(&mut world, &here, &config);
@@ -1161,13 +1755,31 @@ fn edited_chunks_released_by_age_come_back_by_copy() {
     let wanted = fresh.frame(&gpu, &planet, &far, None).resident_chunks;
     eprintln!("RELEASE far view: {settled_far} resident settled, {} after {} frames ({evicted} evicted, {deferred} deferred to later packs), {} kept; a fresh world {wanted}", stats.resident_chunks, release + 200, stats.kept_chunks);
     let (again, (restored, generated)) = settle(&mut world, &here, &config);
-    let same = first.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+    let same = first
+        .iter()
+        .zip(&again)
+        .filter(|(a, b)| {
+            a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))
+                == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))
+        })
+        .count();
     eprintln!("RELEASE back: edited chunks {restored} restored, {generated} generated; {same}/{} pixels as before", first.len());
-    assert!(stats.resident_chunks * 5 <= wanted * 6, "{} resident after release, a fresh world {wanted}", stats.resident_chunks);
-    assert!(deferred > 0 && stats.kept_chunks > 200, "edited chunks kept: {} ({deferred} deferred)", stats.kept_chunks);
+    assert!(
+        stats.resident_chunks * 5 <= wanted * 6,
+        "{} resident after release, a fresh world {wanted}",
+        stats.resident_chunks
+    );
+    assert!(
+        deferred > 0 && stats.kept_chunks > 200,
+        "edited chunks kept: {} ({deferred} deferred)",
+        stats.kept_chunks
+    );
     // Restores count every time a kept chunk comes back: 624 to 1323 over
     // runs (fewer with other tests on the GPU), the generated about 20.
-    assert!(restored > 200 && generated * 4 < restored, "edited chunks: {restored} restored, {generated} generated");
+    assert!(
+        restored > 200 && generated * 4 < restored,
+        "edited chunks: {restored} restored, {generated} generated"
+    );
     assert_eq!(same, first.len(), "every pixel as before");
 }
 
@@ -1198,23 +1810,49 @@ fn a_loaded_world_restores_its_edited_chunks() {
     let chunks = KeptChunks::from_bytes(&bytes).unwrap();
     let mut world = World::new(&gpu, &loaded);
     let kept = world.chunks.load_kept(&loaded, &chunks).unwrap();
-    let (again, (restored, generated), keeping_ms, _) = settle_counting(&gpu, &mut world, &loaded, &here);
+    let (again, (restored, generated), keeping_ms, _) =
+        settle_counting(&gpu, &mut world, &loaded, &here);
     let mut cold = World::new(&gpu, &loaded);
     let (_, (_, regenerated), generating_ms, _) = settle_counting(&gpu, &mut cold, &loaded, &here);
-    let same = hits.iter().zip(&again).filter(|(a, b)| a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits())) == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))).count();
+    let same = hits
+        .iter()
+        .zip(&again)
+        .filter(|(a, b)| {
+            a.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))
+                == b.map(|h| (h.cell, h.level, h.material, h.distance.to_bits()))
+        })
+        .count();
     eprintln!(
         "LOADED {kept} kept chunks, {} KiB of them besides the snapshot's {} KiB; edited chunks {restored} restored, {generated} generated ({regenerated} without them); {keeping_ms:.1} ms of generation GPU ({generating_ms:.1} without); {same}/{} pixels as saved",
         bytes.len() / 1024,
         snapshot.len() / 1024,
         hits.len()
     );
-    assert!(kept > 100 && restored > 100, "{kept} kept, {restored} restored");
-    assert!(generated * 4 < restored && regenerated > 100, "edited chunks: {generated} generated with the kept ones, {regenerated} without");
+    assert!(
+        kept > 100 && restored > 100,
+        "{kept} kept, {restored} restored"
+    );
+    assert!(
+        generated * 4 < restored && regenerated > 100,
+        "edited chunks: {generated} generated with the kept ones, {regenerated} without"
+    );
     assert_eq!(same, hits.len(), "every pixel as saved");
     // Another history: refused.
     let mut other = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
-    other.apply(Brush { center: other.surface_point(dir, 0.0).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-    assert!(World::new(&gpu, &other).chunks.load_kept(&other, &chunks).is_err());
+    other
+        .apply(Brush {
+            center: other.surface_point(dir, 0.0).to_array(),
+            radius: 1.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
+    assert!(World::new(&gpu, &other)
+        .chunks
+        .load_kept(&other, &chunks)
+        .is_err());
     // Damaged bytes: refused.
     let mut damaged = bytes.clone();
     damaged[40] ^= 1;
@@ -1236,19 +1874,37 @@ fn sealed_edits_render_exactly_under_a_running_world() {
     let ground = planet.surface_point(dir, 0.0);
     let block = |p: DVec3| {
         let (cell, _) = grid.locate(p);
-        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }
+        Brush {
+            center: grid.cell_center(cell).to_array(),
+            radius: grid.voxel_size() * 0.5,
+            shape: BrushShape::Cube,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        }
     };
     let layer = |planet: &mut Planet, height: f64, every: i32| {
         for x in -12i32..12 {
             for z in -12..12 {
                 if (x + z).rem_euclid(every) == 0 {
-                    planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) + up * height)).unwrap();
+                    planet
+                        .apply(block(
+                            ground
+                                + side * (f64::from(x) * 0.1)
+                                + fwd * (f64::from(z) * 0.1)
+                                + up * height,
+                        ))
+                        .unwrap();
                 }
             }
         }
     };
     let eye = ground + up * 9.0 - fwd * 7.0;
-    let view = View::new(eye, ((ground - up * 4.0) - eye).normalize().as_vec3(), [320, 180]);
+    let view = View::new(
+        eye,
+        ((ground - up * 4.0) - eye).normalize().as_vec3(),
+        [320, 180],
+    );
     let mut world = World::new(&gpu, &planet);
     let mut check = |planet: &Planet| {
         world.sync(&gpu, planet);
@@ -1257,10 +1913,28 @@ fn sealed_edits_render_exactly_under_a_running_world() {
         assert_eq!(mismatched, 0, "{} edits", planet.edits().len());
     };
     check(&planet);
-    planet.apply(Brush { center: (ground - up).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: (ground - up).to_array(),
+            radius: 6.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     layer(&mut planet, -5.0, 3);
     check(&planet);
-    planet.apply(Brush { center: (ground - up * 5.5 + side * 2.5).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: (ground - up * 5.5 + side * 2.5).to_array(),
+            radius: 4.0,
+            shape: BrushShape::Cube,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
     layer(&mut planet, -3.5, 2);
     layer(&mut planet, -2.5, 2);
     assert_eq!(planet.edits().large.len(), 2, "both large brushes sealed");
@@ -1284,9 +1958,19 @@ fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };
     let planet = Planet::new(PlanetRecipe::default()).unwrap();
     let grid = *planet.grid();
-    let dir = grid.direction(2, f64::from(grid.cells()) * 0.3, f64::from(grid.cells()) * 0.7);
+    let dir = grid.direction(
+        2,
+        f64::from(grid.cells()) * 0.3,
+        f64::from(grid.cells()) * 0.7,
+    );
     let eye = dir * (grid.radius() + 300_000.0);
-    let view = View::new(eye, (-dir + dir.any_orthonormal_vector() * 0.5).normalize().as_vec3(), [256, 144]);
+    let view = View::new(
+        eye,
+        (-dir + dir.any_orthonormal_vector() * 0.5)
+            .normalize()
+            .as_vec3(),
+        [256, 144],
+    );
     let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
     let view_proj = view.view_proj(&planet);
     let meets = |d: DVec3, r: f64| {
@@ -1315,22 +1999,45 @@ fn read_sun(gpu: &Gpu, world: &World) -> Vec<bool> {
     let targets = world.chunks.targets().expect("drawn");
     let [w, h] = [targets.sun.width(), targets.sun.height()];
     let row = (w * 8).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         targets.sun.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
     // x as f16: lit is 1.0 (0x3c00), shaded 0.
-    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
-        let at = (y * row + x * 8) as usize;
-        u16::from_le_bytes([bytes[at], bytes[at + 1]]) >= 0x3800
-    }).collect()
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            let at = (y * row + x * 8) as usize;
+            u16::from_le_bytes([bytes[at], bytes[at + 1]]) >= 0x3800
+        })
+        .collect()
 }
 
 /// Terrain shades the meshes in front of it: a mesh wall across a ground
@@ -1353,10 +2060,23 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
     // 6 m behind its point 4.5 m over the eye's line, towards the sun.
     let wall_m = 12.0f32;
     let ball = view.eye + forward * f64::from(wall_m) + up * 4.5 + sun * 6.0;
-    planet.apply(Brush { center: ball.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: ball.to_array(),
+            radius: 2.5,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
     let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mesh wall depth"),
-        size: wgpu::Extent3d { width: view.size[0], height: view.size[1], depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: view.size[0],
+            height: view.size[1],
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1371,7 +2091,10 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
         color_attachments: &[],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &depth_view,
-            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(view.near / wall_m), store: wgpu::StoreOp::Store }),
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(view.near / wall_m),
+                store: wgpu::StoreOp::Store,
+            }),
             stencil_ops: None,
         }),
         timestamp_writes: None,
@@ -1383,7 +2106,12 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
     world.sun = sun.as_vec3();
     world.scene_depth = Some(depth_view);
     let light = ball + sun * 4.0;
-    world.lights = Some(one_light(gpu, (light - view.eye).as_vec3(), 40.0, view.size));
+    world.lights = Some(one_light(
+        gpu,
+        (light - view.eye).as_vec3(),
+        40.0,
+        view.size,
+    ));
     world.chunks.set_steady_shadows(true);
     let hits = world.settle(gpu, &planet, &view);
     let lit = read_sun(gpu, &world);
@@ -1392,7 +2120,8 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
 
     let view_proj = view.view_proj(&planet);
     let voxel = planet.grid().voxel_size();
-    let (mut before_hits, mut before_sky, mut shaded, mut sunny, mut shaded_sky, mut mismatched) = (0, 0, 0, 0, 0, 0);
+    let (mut before_hits, mut before_sky, mut shaded, mut sunny, mut shaded_sky, mut mismatched) =
+        (0, 0, 0, 0, 0, 0);
     for y in (0..view.size[1]).step_by(4) {
         for x in (0..view.size[0]).step_by(4) {
             let dir = view.pixel_dir(view_proj, x, y);
@@ -1408,29 +2137,64 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
             if blocked.is_some_and(|b| b.distance < voxel) {
                 continue;
             }
-            if hit.is_some() { before_hits += 1 } else { before_sky += 1 }
-            if blocked.is_some() { shaded += 1 } else { sunny += 1 }
-            if hit.is_none() && blocked.is_some() { shaded_sky += 1 }
+            if hit.is_some() {
+                before_hits += 1
+            } else {
+                before_sky += 1
+            }
+            if blocked.is_some() {
+                shaded += 1
+            } else {
+                sunny += 1
+            }
+            if hit.is_none() && blocked.is_some() {
+                shaded_sky += 1
+            }
             if lit[(y * view.size[0] + x) as usize] == blocked.is_some() {
                 mismatched += 1;
                 if mismatched < 8 {
-                    eprintln!("pixel {x},{y}: gpu lit {}, cpu {blocked:?}", lit[(y * view.size[0] + x) as usize]);
+                    eprintln!(
+                        "pixel {x},{y}: gpu lit {}, cpu {blocked:?}",
+                        lit[(y * view.size[0] + x) as usize]
+                    );
                 }
             }
             let to = light - point;
-            let light_blocked = planet.raycast(point + to.normalize() * (0.05 * voxel), to.normalize(), to.length() - voxel).is_some();
+            let light_blocked = planet
+                .raycast(
+                    point + to.normalize() * (0.05 * voxel),
+                    to.normalize(),
+                    to.length() - voxel,
+                )
+                .is_some();
             light_blocked_points += usize::from(light_blocked);
-            light_mismatched += usize::from((seen[(y * view.size[0] + x) as usize] > 0.5) == light_blocked);
+            light_mismatched +=
+                usize::from((seen[(y * view.size[0] + x) as usize] > 0.5) == light_blocked);
         }
     }
     eprintln!("the light: {light_blocked_points} blocked, {light_mismatched} mismatched");
-    assert!(light_blocked_points > 50, "{light_blocked_points} wall points blocked from the light");
-    assert!(light_mismatched * 100 <= before_hits + before_sky, "{light_mismatched} mismatched for the light");
+    assert!(
+        light_blocked_points > 50,
+        "{light_blocked_points} wall points blocked from the light"
+    );
+    assert!(
+        light_mismatched * 100 <= before_hits + before_sky,
+        "{light_mismatched} mismatched for the light"
+    );
     eprintln!("wall points: {before_hits} before hits, {before_sky} before the sky ({shaded_sky} shaded); {shaded} shaded, {sunny} sunny; {mismatched} mismatched");
-    assert!(before_hits > 200 && before_sky > 50, "{before_hits} before hits, {before_sky} before the sky");
+    assert!(
+        before_hits > 200 && before_sky > 50,
+        "{before_hits} before hits, {before_sky} before the sky"
+    );
     assert!(shaded_sky > 10, "{shaded_sky} shaded before the sky");
-    assert!(shaded > 100 && sunny > 100, "{shaded} shaded, {sunny} sunny");
-    assert!(mismatched * 100 <= before_hits + before_sky, "{mismatched} mismatched");
+    assert!(
+        shaded > 100 && sunny > 100,
+        "{shaded} shaded, {sunny} sunny"
+    );
+    assert!(
+        mismatched * 100 <= before_hits + before_sky,
+        "{mismatched} mismatched"
+    );
 }
 
 /// The publish shows a hit only where no mesh is in front of it, as the
@@ -1453,28 +2217,61 @@ fn publish_shows_hits_only_in_front_of_meshes() {
     let texture = |label: &str, format: wgpu::TextureFormat| {
         gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         })
     };
     let depth = texture("mesh plane depth", wgpu::TextureFormat::Depth32Float);
     let depth_view = depth.create_view(&Default::default());
-    let gbuffer: Vec<wgpu::Texture> = helio_pass_voxel_planet::engine::GBUFFER_FORMATS.iter().map(|&f| texture("gbuffer", f)).collect();
-    let gbuffer_views: Vec<wgpu::TextureView> = gbuffer.iter().map(|t| t.create_view(&Default::default())).collect();
-    let marker = wgpu::Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 };
+    let gbuffer: Vec<wgpu::Texture> = helio_pass_voxel_planet::engine::GBUFFER_FORMATS
+        .iter()
+        .map(|&f| texture("gbuffer", f))
+        .collect();
+    let gbuffer_views: Vec<wgpu::TextureView> = gbuffer
+        .iter()
+        .map(|t| t.create_view(&Default::default()))
+        .collect();
+    let marker = wgpu::Color {
+        r: 1.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
     // The mesh pass: its colour and depth everywhere.
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("mesh plane"),
-        color_attachments: &gbuffer_views.iter().map(|v| Some(wgpu::RenderPassColorAttachment { view: v, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(marker), store: wgpu::StoreOp::Store } })).collect::<Vec<_>>(),
+        color_attachments: &gbuffer_views
+            .iter()
+            .map(|v| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view: v,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(marker),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            })
+            .collect::<Vec<_>>(),
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &depth_view,
-            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(plane_depth), store: wgpu::StoreOp::Store }),
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(plane_depth),
+                store: wgpu::StoreOp::Store,
+            }),
             stencil_ops: None,
         }),
         timestamp_writes: None,
@@ -1487,7 +2284,12 @@ fn publish_shows_hits_only_in_front_of_meshes() {
     let hits = world.settle(gpu, &planet, &view);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let views: [&wgpu::TextureView; 8] = std::array::from_fn(|i| &gbuffer_views[i]);
-    world.chunks.publish_scene(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), views, &depth_view, None);
+    world.chunks.publish_scene(
+        &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
+        views,
+        &depth_view,
+        None,
+    );
     gpu.queue.submit([encoder.finish()]);
     let albedo = read_rgba8(gpu, &gbuffer[0]);
     let published_depth = read_depth(gpu, &depth);
@@ -1514,13 +2316,19 @@ fn publish_shows_hits_only_in_front_of_meshes() {
             if bad {
                 wrong += 1;
                 if wrong < 8 {
-                    eprintln!("pixel {x},{y}: hit {hit:?}, plane at {t:.3}, albedo {:?}, depth {}", albedo[at], published_depth[at]);
+                    eprintln!(
+                        "pixel {x},{y}: hit {hit:?}, plane at {t:.3}, albedo {:?}, depth {}",
+                        albedo[at], published_depth[at]
+                    );
                 }
             }
         }
     }
     eprintln!("{shown} hits shown, {behind} behind the plane or sky");
-    assert!(shown > 2000 && behind > 2000, "{shown} shown, {behind} behind");
+    assert!(
+        shown > 2000 && behind > 2000,
+        "{shown} shown, {behind} behind"
+    );
     assert_eq!(wrong, 0);
 }
 
@@ -1528,42 +2336,93 @@ fn publish_shows_hits_only_in_front_of_meshes() {
 fn read_rgba8(gpu: &Gpu, texture: &wgpu::Texture) -> Vec<[u8; 4]> {
     let [w, h] = [texture.width(), texture.height()];
     let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
-    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
-        let at = (y * row + x * 4) as usize;
-        [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
-    }).collect()
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            let at = (y * row + x * 4) as usize;
+            [bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]
+        })
+        .collect()
 }
 
 /// A Depth32Float target, row by row.
 fn read_depth(gpu: &Gpu, texture: &wgpu::Texture) -> Vec<f32> {
     let [w, h] = [texture.width(), texture.height()];
     let row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::DepthOnly },
-        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
-    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
-        let at = (y * row + x * 4) as usize;
-        f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-    }).collect()
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            let at = (y * row + x * 4) as usize;
+            f32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        })
+        .collect()
 }
 
 /// An f16's value.
@@ -1582,21 +2441,44 @@ fn f16_value(bits: u16) -> f32 {
 fn read_rgba16(gpu: &Gpu, texture: &wgpu::Texture, channel: usize) -> Vec<f32> {
     let [w, h] = [texture.width(), texture.height()];
     let row = (w * 8).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
-    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
-        let at = (y * row + x * 8) as usize + channel * 2;
-        f16_value(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
-    }).collect()
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            let at = (y * row + x * 8) as usize + channel * 2;
+            f16_value(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
+        })
+        .collect()
 }
 
 /// The sun's visibility as lighting takes it (`directional_visibility`'s x).
@@ -1606,7 +2488,10 @@ fn read_sun_visibility(gpu: &Gpu, world: &World) -> Vec<f32> {
 
 /// The sun as the walks found it (each pixel's or its block's sample).
 fn read_sun_walked(gpu: &Gpu, world: &World) -> Vec<f32> {
-    read_words(gpu, &world.chunks.targets().expect("drawn").sun_walked).iter().map(|w| (w & 0xff) as f32 / 255.0).collect()
+    read_words(gpu, &world.chunks.targets().expect("drawn").sun_walked)
+        .iter()
+        .map(|w| (w & 0xff) as f32 / 255.0)
+        .collect()
 }
 
 /// The sky's visibility as the gbuffer takes it, and the walks' own
@@ -1623,21 +2508,44 @@ fn read_sky_samples(gpu: &Gpu, world: &World) -> Vec<f32> {
 fn read_f32(gpu: &Gpu, texture: &wgpu::Texture, channels: u32, channel: u32) -> Vec<f32> {
     let [w, h] = [texture.width(), texture.height()];
     let row = (w * 4 * channels).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(row * h),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None } },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     let bytes = staging.slice(..).get_mapped_range().unwrap().to_vec();
-    (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| {
-        let at = (y * row + (x * channels + channel) * 4) as usize;
-        f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-    }).collect()
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (y, x)))
+        .map(|(y, x)| {
+            let at = (y * row + (x * channels + channel) * 4) as usize;
+            f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+        })
+        .collect()
 }
 
 /// Frame to frame change of one visibility term over `frames` (mean
@@ -1681,7 +2589,16 @@ fn shadowed_ground() -> (Planet, View, Vec3) {
     let side = up.cross(forward).normalize();
     let sun = (up * 0.45 + side * 0.8 + forward * 0.3).normalize();
     let ball = view.eye + forward * 9.0 + up * 1.5 + sun * 4.0;
-    planet.apply(Brush { center: ball.to_array(), radius: 2.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: ball.to_array(),
+            radius: 2.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
     (planet, view, sun.as_vec3())
 }
 
@@ -1702,7 +2619,8 @@ fn terrain_shadows_match_steady_shadows() {
     let (planet, view, sun) = shadowed_ground();
     // Later the sun turns 20 degrees about the vertical and sinks a little.
     let up = planet.grid().up(view.eye).as_vec3();
-    let turned = (glam::Quat::from_axis_angle(up, 20f32.to_radians()) * sun - up * 0.08).normalize();
+    let turned =
+        (glam::Quat::from_axis_angle(up, 20f32.to_radians()) * sun - up * 0.08).normalize();
     let mut world = World::new(gpu, &planet);
     world.sun = turned;
     world.chunks.set_steady_shadows(true);
@@ -1717,10 +2635,17 @@ fn terrain_shadows_match_steady_shadows() {
     }
     let truth = read_sun_visibility(gpu, &world);
     let terrain: Vec<bool> = hits.iter().map(|h| h.is_some()).collect();
-    let lit = terrain.iter().zip(&truth).filter(|(t, s)| **t && **s > 0.5).count();
+    let lit = terrain
+        .iter()
+        .zip(&truth)
+        .filter(|(t, s)| **t && **s > 0.5)
+        .count();
     let terrain_count = terrain.iter().filter(|t| **t).count();
     eprintln!("terrain pixels {terrain_count}, lit {lit}");
-    assert!(lit > terrain_count / 5 && lit * 5 < terrain_count * 4, "{lit} of {terrain_count} lit");
+    assert!(
+        lit > terrain_count / 5 && lit * 5 < terrain_count * 4,
+        "{lit} of {terrain_count} lit"
+    );
     world.chunks.set_steady_shadows(false);
     // The sky's reference: the walks' samples over 256 frames.
     let mut reference = vec![0.0f32; terrain.len()];
@@ -1730,7 +2655,8 @@ fn terrain_shadows_match_steady_shadows() {
             *r += s / 256.0;
         }
     }
-    let (mut suns, mut skies, mut walked_suns, mut walked_skies) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut suns, mut skies, mut walked_suns, mut walked_skies) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for _ in 0..16 {
         world.frame(gpu, &planet, &view, None);
         suns.push(read_sun_visibility(gpu, &world));
@@ -1741,25 +2667,53 @@ fn terrain_shadows_match_steady_shadows() {
     let report = |name: &str, frames: &[Vec<f32>], truth: &[f32], mask: &[bool]| {
         let (e, w) = error(frames, truth, mask);
         let (f, j) = flicker(frames, mask);
-        eprintln!("{name}: error {e:.4} (off by > 0.5: {:.2}%), flicker {f:.4} (> 0.1: {:.2}%)", w * 100.0, j * 100.0);
+        eprintln!(
+            "{name}: error {e:.4} (off by > 0.5: {:.2}%), flicker {f:.4} (> 0.1: {:.2}%)",
+            w * 100.0,
+            j * 100.0
+        );
         (e, w, f, j)
     };
     let sun_before = report("sun, walked", &walked_suns, &truth, &terrain);
     let sun_after = report("sun, denoised", &suns, &truth, &terrain);
-    let in_penumbra: Vec<bool> = terrain.iter().zip(&truth).map(|(t, s)| *t && *s > 0.05 && *s < 0.95).collect();
-    report("sun in penumbrae, walked", &walked_suns, &truth, &in_penumbra);
+    let in_penumbra: Vec<bool> = terrain
+        .iter()
+        .zip(&truth)
+        .map(|(t, s)| *t && *s > 0.05 && *s < 0.95)
+        .collect();
+    report(
+        "sun in penumbrae, walked",
+        &walked_suns,
+        &truth,
+        &in_penumbra,
+    );
     report("sun in penumbrae, denoised", &suns, &truth, &in_penumbra);
     let sky_before = report("sky, walked", &walked_skies, &reference, &terrain);
     let sky_after = report("sky, denoised", &skies, &reference, &terrain);
-    assert!(sun_after.0 <= 0.01 && sun_after.1 <= 0.002, "sun against steady shadows: {sun_after:?}");
-    assert!(sun_after.2 * 10.0 <= sun_before.2 && sun_after.3 * 10.0 <= sun_before.3, "sun flicker {sun_after:?} against the walks' {sun_before:?}");
-    assert!(sky_after.0 <= 0.03 && sky_after.2 * 10.0 <= sky_before.2 && sky_after.3 * 10.0 <= sky_before.3, "sky {sky_after:?} against the walks' {sky_before:?}");
+    assert!(
+        sun_after.0 <= 0.01 && sun_after.1 <= 0.002,
+        "sun against steady shadows: {sun_after:?}"
+    );
+    assert!(
+        sun_after.2 * 10.0 <= sun_before.2 && sun_after.3 * 10.0 <= sun_before.3,
+        "sun flicker {sun_after:?} against the walks' {sun_before:?}"
+    );
+    assert!(
+        sky_after.0 <= 0.03
+            && sky_after.2 * 10.0 <= sky_before.2
+            && sky_after.3 * 10.0 <= sky_before.3,
+        "sky {sky_after:?} against the walks' {sky_before:?}"
+    );
     // A sudden turn of the sun: the error frame by frame after it.
     world.sun = turned;
     let (mut after, mut walked) = (Vec::new(), Vec::new());
     for _ in 0..16 {
         world.frame(gpu, &planet, &view, None);
-        after.push(error(&[read_sun_visibility(gpu, &world)], &truth_turned, &terrain));
+        after.push(error(
+            &[read_sun_visibility(gpu, &world)],
+            &truth_turned,
+            &terrain,
+        ));
         walked.push(read_sun_walked(gpu, &world));
     }
     for _ in 0..48 {
@@ -1767,10 +2721,18 @@ fn terrain_shadows_match_steady_shadows() {
     }
     let settled = error(&[read_sun_visibility(gpu, &world)], &truth_turned, &terrain);
     let walked = error(&walked, &truth_turned, &terrain);
-    let line: Vec<String> = after.iter().enumerate().map(|(k, (e, w))| format!("{}: {e:.4}/{:.2}%", k + 1, w * 100.0)).collect();
+    let line: Vec<String> = after
+        .iter()
+        .enumerate()
+        .map(|(k, (e, w))| format!("{}: {e:.4}/{:.2}%", k + 1, w * 100.0))
+        .collect();
     eprintln!("sun turned 20 degrees, error (mean/off by > 0.5) by frames after: {}; 64 frames after: {:.4}/{:.2}%; the walks' own: {:.4}/{:.2}%", line.join(", "), settled.0, settled.1 * 100.0, walked.0, walked.1 * 100.0);
     // Within a few frames as near as the walks themselves, and settling.
-    assert!(after[3].1 <= walked.1 && after[3].1 <= settled.1 + 0.01, "4 frames after the sun turned: {:?}, the walks' {walked:?}, settled {settled:?}", after[3]);
+    assert!(
+        after[3].1 <= walked.1 && after[3].1 <= settled.1 + 0.01,
+        "4 frames after the sun turned: {:?}, the walks' {walked:?}, settled {settled:?}",
+        after[3]
+    );
     // Jittered: steady shadows, then denoised, on the pixels whose hits
     // (level, face, distance within 2%) hold through every jittered frame.
     world.sun = sun;
@@ -1788,15 +2750,25 @@ fn terrain_shadows_match_steady_shadows() {
             world.frame(gpu, &planet, &view, None);
             suns.push(read_sun_visibility(gpu, &world));
             skies.push(read_sky_visibility(gpu, &world));
-            for (s, (now, then)) in stable.iter_mut().zip(world.chunks.read_hits().iter().zip(&hits)) {
-                *s &= now.zip(*then).is_some_and(|(a, b)| a.level == b.level && a.entered == b.entered && (a.distance - b.distance).abs() < 0.02 * b.distance);
+            for (s, (now, then)) in stable
+                .iter_mut()
+                .zip(world.chunks.read_hits().iter().zip(&hits))
+            {
+                *s &= now.zip(*then).is_some_and(|(a, b)| {
+                    a.level == b.level
+                        && a.entered == b.entered
+                        && (a.distance - b.distance).abs() < 0.02 * b.distance
+                });
             }
         }
         (suns, skies)
     };
     let (steady_suns, _) = jittered(&mut world, &mut stable, true);
     let (suns, skies) = jittered(&mut world, &mut stable, false);
-    eprintln!("jittered: {} of {terrain_count} pixels' hits hold", stable.iter().filter(|s| **s).count());
+    eprintln!(
+        "jittered: {} of {terrain_count} pixels' hits hold",
+        stable.iter().filter(|s| **s).count()
+    );
     let (mut e, mut w, mut n) = (0.0, 0usize, 0usize);
     for (a, b) in suns.iter().zip(&steady_suns) {
         for i in (0..a.len()).filter(|i| stable[*i]) {
@@ -1814,14 +2786,22 @@ fn terrain_shadows_match_steady_shadows() {
     // (Read at the jittered points, both change with the jitter at edges:
     // TSR gathers that as it does the edges of the hits themselves.)
     assert!(sun_error <= 0.02 && sun_wrong <= 0.01 && sun_flicker <= steady_flicker, "jittered sun: error {sun_error}, wrong {sun_wrong}, flicker {sun_flicker} (steady {steady_flicker})");
-    assert!(sky_jittered.0 <= 0.03 && sky_jittered.2 <= 0.01, "jittered sky {sky_jittered:?}");
+    assert!(
+        sky_jittered.0 <= 0.03 && sky_jittered.2 <= 0.01,
+        "jittered sky {sky_jittered:?}"
+    );
     world.chunks.take_timings();
     for _ in 0..60 {
         world.frame(gpu, &planet, &view, None);
     }
     let t = world.chunks.take_timings();
     let n = t.len().max(1) as f64;
-    eprintln!("shadow stage {:.3} ms, denoiser {:.3} ms ({} frames timed)", t.iter().map(|f| f.shadow).sum::<f64>() / n, t.iter().map(|f| f.denoise).sum::<f64>() / n, t.len());
+    eprintln!(
+        "shadow stage {:.3} ms, denoiser {:.3} ms ({} frames timed)",
+        t.iter().map(|f| f.shadow).sum::<f64>() / n,
+        t.iter().map(|f| f.denoise).sum::<f64>() / n,
+        t.len()
+    );
 }
 
 /// The shadow stage's and the denoiser's GPU time at 1920x1080 over the
@@ -1873,17 +2853,31 @@ fn picks_report_the_drawn_hit() {
     let hits = world.settle(&gpu, &planet, &view);
     let pixels: Vec<[u32; 2]> = (0..8).map(|n| [20 + n * 37, 5 + n * 24]).collect();
     let picks = SharedPicks::default();
-    picks.lock().unwrap().requests = pixels.iter().enumerate().map(|(n, p)| PickRequest { id: n as u64, uv: [(p[0] as f32 + 0.5) / 320.0, (p[1] as f32 + 0.5) / 180.0] }).collect();
+    picks.lock().unwrap().requests = pixels
+        .iter()
+        .enumerate()
+        .map(|(n, p)| PickRequest {
+            id: n as u64,
+            uv: [(p[0] as f32 + 0.5) / 320.0, (p[1] as f32 + 0.5) / 180.0],
+        })
+        .collect();
     for _ in 0..8 {
         world.frame(&gpu, &planet, &view, Some(&picks));
     }
     let results = std::mem::take(&mut picks.lock().unwrap().results);
     assert_eq!(results.len(), pixels.len());
-    assert!(results.iter().any(|r| r.hit.is_none()) && results.iter().any(|r| r.hit.is_some()), "sky and ground picked");
+    assert!(
+        results.iter().any(|r| r.hit.is_none()) && results.iter().any(|r| r.hit.is_some()),
+        "sky and ground picked"
+    );
     for r in results {
         let [x, y] = pixels[r.id as usize];
         let drawn = hits[(y * 320 + x) as usize];
-        assert_eq!(r.hit.map(|h| (h.cell, h.level)), drawn.map(|h| (h.cell, h.level)), "pixel {x},{y}");
+        assert_eq!(
+            r.hit.map(|h| (h.cell, h.level)),
+            drawn.map(|h| (h.cell, h.level)),
+            "pixel {x},{y}"
+        );
     }
 }
 
@@ -1906,23 +2900,98 @@ fn forest(ground_m: f64) -> FeatureSet {
     // leaf balls with broken edges, a hollow carved in its crown; and a
     // rough round boulder.
     let mut round = Stamp::new();
-    round.capsule([0.5, -1.0, 0.5], [1.2, 10.0, 0.3], [1.4, 0.6], material::WOOD);
-    round.capsule([1.0, 7.0, 0.5], [4.5, 11.0, 2.5], [0.7, 0.35], material::WOOD);
-    for (c, r) in [([1.0, 12.0, 0.5], 4.5), ([4.0, 11.5, 2.5], 3.0), ([-1.5, 11.0, -1.0], 2.5)] {
-        round.add(Part { sparse: 0.3, rough: 1.5, lump: 1.2, lump_size: 2, ..Part::solid(Form::Capsule { a: c, b: c, radius: [r; 2] }, material::LEAVES) });
+    round.capsule(
+        [0.5, -1.0, 0.5],
+        [1.2, 10.0, 0.3],
+        [1.4, 0.6],
+        material::WOOD,
+    );
+    round.capsule(
+        [1.0, 7.0, 0.5],
+        [4.5, 11.0, 2.5],
+        [0.7, 0.35],
+        material::WOOD,
+    );
+    for (c, r) in [
+        ([1.0, 12.0, 0.5], 4.5),
+        ([4.0, 11.5, 2.5], 3.0),
+        ([-1.5, 11.0, -1.0], 2.5),
+    ] {
+        round.add(Part {
+            sparse: 0.3,
+            rough: 1.5,
+            lump: 1.2,
+            lump_size: 2,
+            ..Part::solid(
+                Form::Capsule {
+                    a: c,
+                    b: c,
+                    radius: [r; 2],
+                },
+                material::LEAVES,
+            )
+        });
     }
-    round.cone([-3.5, 2.0, 3.5], [-3.5, 7.0, 3.5], [2.0, 0.3], material::LEAVES);
-    round.add(Part::air(Form::Capsule { a: [2.0, 13.0, 1.0], b: [2.0, 13.0, 1.0], radius: [1.5; 2] }));
-    round.add(Part { rough: 1.0, ..Part::solid(Form::Capsule { a: [5.5, 0.5, -3.5], b: [5.5, 0.5, -3.5], radius: [2.2; 2] }, material::BASALT) });
+    round.cone(
+        [-3.5, 2.0, 3.5],
+        [-3.5, 7.0, 3.5],
+        [2.0, 0.3],
+        material::LEAVES,
+    );
+    round.add(Part::air(Form::Capsule {
+        a: [2.0, 13.0, 1.0],
+        b: [2.0, 13.0, 1.0],
+        radius: [1.5; 2],
+    }));
+    round.add(Part {
+        rough: 1.0,
+        ..Part::solid(
+            Form::Capsule {
+                a: [5.5, 0.5, -3.5],
+                b: [5.5, 0.5, -3.5],
+                radius: [2.2; 2],
+            },
+            material::BASALT,
+        )
+    });
     FeatureSet {
         stamps: vec![hut, tree, boulder, round],
         spawns: vec![
-            Spawn { name: "huts".into(), stamps: vec![0], spacing: 48, density: 0.5, max_relief: 4, sink: 1, ..Spawn::default() },
+            Spawn {
+                name: "huts".into(),
+                stamps: vec![0],
+                spacing: 48,
+                density: 0.5,
+                max_relief: 4,
+                sink: 1,
+                ..Spawn::default()
+            },
             // Trees up to a line wandering 20 to 100 m over the ground at
             // the forest's land (far canopies stop at it), boulders up to
             // one wandering through it (both sides in view).
-            Spawn { name: "trees".into(), stamps: vec![1, 3], spacing: 16, density: 0.8, field_scale_m: 30.0, field_threshold: -0.4, heights_m: [-1e9, ground_m + 60.0], height_wander_m: [40.0, 300.0], max_relief: 3, far_material: material::LEAVES, ..Spawn::default() },
-            Spawn { name: "boulders".into(), stamps: vec![2], spacing: 8, density: 0.15, heights_m: [-1e9, ground_m + 2.0], height_wander_m: [6.0, 40.0], sink: 1, ..Spawn::default() },
+            Spawn {
+                name: "trees".into(),
+                stamps: vec![1, 3],
+                spacing: 16,
+                density: 0.8,
+                field_scale_m: 30.0,
+                field_threshold: -0.4,
+                heights_m: [-1e9, ground_m + 60.0],
+                height_wander_m: [40.0, 300.0],
+                max_relief: 3,
+                far_material: material::LEAVES,
+                ..Spawn::default()
+            },
+            Spawn {
+                name: "boulders".into(),
+                stamps: vec![2],
+                spacing: 8,
+                density: 0.15,
+                heights_m: [-1e9, ground_m + 2.0],
+                height_wander_m: [6.0, 40.0],
+                sink: 1,
+                ..Spawn::default()
+            },
         ],
     }
 }
@@ -1932,7 +3001,11 @@ fn forest_planet() -> (Planet, DVec3) {
     let bare = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = land(&bare, 2, 0.31, 0.62);
     let ground_m = bare.surface_point(dir, 0.0).length() - bare.grid().radius();
-    let planet = Planet::new(PlanetRecipe { features: forest(ground_m), ..PlanetRecipe::default() }).unwrap();
+    let planet = Planet::new(PlanetRecipe {
+        features: forest(ground_m),
+        ..PlanetRecipe::default()
+    })
+    .unwrap();
     (planet, dir)
 }
 
@@ -1946,13 +3019,29 @@ fn features_render_exactly() {
     let (c, _) = grid.locate(planet.surface_point(dir, 0.0));
     let feature_cells = (-60..60).flat_map(|d| [(d, 0), (0, d)]).filter(|&(a, b)| {
         let top = planet.column_top(c.face, c.i + a, c.j + b, 0);
-        (top..top + 16).any(|k| matches!(planet.features_at(0, c.face, c.i + a, c.j + b, k), Some(Some(_))))
+        (top..top + 16).any(|k| {
+            matches!(
+                planet.features_at(0, c.face, c.i + a, c.j + b, k),
+                Some(Some(_))
+            )
+        })
     });
     assert!(feature_cells.count() > 20, "few features near the view");
     matches_exactly(&gpu, &planet, ground_view(&planet, dir, [320, 180]), 5000);
     let eye = planet.surface_point(dir, 3.0);
     let up = eye.normalize();
-    matches_exactly(&gpu, &planet, View::new(eye, (up.any_orthonormal_vector() - up * 0.6).normalize().as_vec3(), [320, 180]), 5000);
+    matches_exactly(
+        &gpu,
+        &planet,
+        View::new(
+            eye,
+            (up.any_orthonormal_vector() - up * 0.6)
+                .normalize()
+                .as_vec3(),
+            [320, 180],
+        ),
+        5000,
+    );
 }
 
 /// Every pixel whose CPU hit is a feature's cell draws its stamp's
@@ -1963,30 +3052,50 @@ fn feature_cells_draw_their_own_materials() {
     let (planet, dir) = forest_planet();
     let eye = planet.surface_point(dir, 2.5);
     let up = eye.normalize();
-    let view = View::new(eye, (up.any_orthonormal_vector() - up * 0.3).normalize().as_vec3(), [320, 180]);
+    let view = View::new(
+        eye,
+        (up.any_orthonormal_vector() - up * 0.3)
+            .normalize()
+            .as_vec3(),
+        [320, 180],
+    );
     let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
     let view_proj = view.view_proj(&planet);
     let (mut compared, mut wrong) = (0, 0);
     let mut seen = std::collections::BTreeSet::new();
     for y in 0..view.size[1] {
         for x in 0..view.size[0] {
-            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 40.0) else { continue };
+            let Some(cpu) = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 40.0) else {
+                continue;
+            };
             let c = cpu.cell;
-            let Some(Some(want)) = planet.features_at(0, c.face, c.i, c.j, c.k) else { continue };
+            let Some(Some(want)) = planet.features_at(0, c.face, c.i, c.j, c.k) else {
+                continue;
+            };
             assert_eq!(planet.material(c), want);
-            let Some(drawn) = hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == c) else { continue };
+            let Some(drawn) =
+                hits[(y * view.size[0] + x) as usize].filter(|h| h.level == 0 && h.cell == c)
+            else {
+                continue;
+            };
             compared += 1;
             seen.insert(want);
             if drawn.material != want {
                 wrong += 1;
                 if wrong < 8 {
-                    eprintln!("pixel {x},{y}: {c:?} drawn {}, stamp {want}", drawn.material);
+                    eprintln!(
+                        "pixel {x},{y}: {c:?} drawn {}, stamp {want}",
+                        drawn.material
+                    );
                 }
             }
         }
     }
     eprintln!("compared {compared}, wrong {wrong}, materials {seen:?}");
-    assert!(compared > 2000 && seen.len() >= 3, "{compared} pixels, materials {seen:?}");
+    assert!(
+        compared > 2000 && seen.len() >= 3,
+        "{compared} pixels, materials {seen:?}"
+    );
     assert_eq!(wrong, 0);
 }
 
@@ -2003,10 +3112,23 @@ fn coarse_feature_cells_are_the_cpu_cells() {
     }
 }
 
-fn coarse_features_match(gpu: &Gpu, planet: &Planet, dir: DVec3, height: f64, down: f64, levels: std::ops::Range<u32>) {
+fn coarse_features_match(
+    gpu: &Gpu,
+    planet: &Planet,
+    dir: DVec3,
+    height: f64,
+    down: f64,
+    levels: std::ops::Range<u32>,
+) {
     let eye = planet.surface_point(dir, height);
     let up = eye.normalize();
-    let view = View::new(eye, (up.any_orthonormal_vector() - up * down).normalize().as_vec3(), [480, 270]);
+    let view = View::new(
+        eye,
+        (up.any_orthonormal_vector() - up * down)
+            .normalize()
+            .as_vec3(),
+        [480, 270],
+    );
     let hits = World::new(gpu, planet).settle(gpu, planet, &view);
     let mut by_level = [0usize; 8];
     let mut drawn = [0usize; 12];
@@ -2027,8 +3149,13 @@ fn coarse_features_match(gpu: &Gpu, planet: &Planet, dir: DVec3, height: f64, do
             }
         }
     }
-    eprintln!("{height} m up: hits by level {drawn:?}, on feature cells {by_level:?}, wrong {wrong}");
-    assert!(levels.clone().all(|l| by_level[l as usize] > 100), "{height} m up: {by_level:?}");
+    eprintln!(
+        "{height} m up: hits by level {drawn:?}, on feature cells {by_level:?}, wrong {wrong}"
+    );
+    assert!(
+        levels.clone().all(|l| by_level[l as usize] > 100),
+        "{height} m up: {by_level:?}"
+    );
     assert_eq!(wrong, 0);
 }
 
@@ -2043,15 +3170,32 @@ fn footprint_placements_are_the_cpus() {
     let Some(gpu) = gpu() else { return };
     let (planet, dir) = forest_planet();
     let (features, grid) = (planet.features(), planet.grid());
-    let top = |f: u8, i: i32, j: i32| helio_pass_voxel_planet::features::ground(grid, planet.field(), f, i, j, 0, planet.column_height(f, i, j, 0));
+    let top = |f: u8, i: i32, j: i32| {
+        helio_pass_voxel_planet::features::ground(
+            grid,
+            planet.field(),
+            f,
+            i,
+            j,
+            0,
+            planet.column_height(f, i, j, 0),
+        )
+    };
     let mut cache = Default::default();
-    let mut eval = helio_pass_voxel_planet::features::FeatureEval::new(features, grid, &top, &mut cache);
+    let mut eval =
+        helio_pass_voxel_planet::features::FeatureEval::new(features, grid, &top, &mut cache);
     let mut by_level = [0usize; 10];
     let (mut placed, mut excluded) = (0, 0);
     for (height, down) in [(1.7, 0.3), (60.0, 0.8)] {
         let eye = planet.surface_point(dir, height);
         let up = eye.normalize();
-        let view = View::new(eye, (up.any_orthonormal_vector() - up * down).normalize().as_vec3(), [320, 180]);
+        let view = View::new(
+            eye,
+            (up.any_orthonormal_vector() - up * down)
+                .normalize()
+                .as_vec3(),
+            [320, 180],
+        );
         let mut world = World::new(&gpu, &planet);
         world.settle(&gpu, &planet, &view);
         let (footprints, buffer) = world.chunks.footprint_placements();
@@ -2069,13 +3213,35 @@ fn footprint_placements_are_the_cpus() {
                     let at = 2 * (slot as usize * features.stride + offset + n);
                     let (x, y) = (words[at], words[at + 1]);
                     let want = features.candidate(s, grid, &top, fp.face, gx, gy);
-                    let got = (x != 0).then(|| (sp.stamps[((x >> 21) & 0x7f) as usize], gx * sp.spacing + ((x >> 1) & 1023) as i32, gy * sp.spacing + ((x >> 11) & 1023) as i32, y as i32, (x >> 29) & 3, x >> 31 == 1));
-                    assert_eq!(got, want.map(|p| (p.stamp, p.i, p.j, p.k, p.turn, p.mirror)), "level {} footprint {fp:?} spawn {s} square {gx},{gy}", fp.level);
+                    let got = (x != 0).then(|| {
+                        (
+                            sp.stamps[((x >> 21) & 0x7f) as usize],
+                            gx * sp.spacing + ((x >> 1) & 1023) as i32,
+                            gy * sp.spacing + ((x >> 11) & 1023) as i32,
+                            y as i32,
+                            (x >> 29) & 3,
+                            x >> 31 == 1,
+                        )
+                    });
+                    assert_eq!(
+                        got,
+                        want.map(|p| (p.stamp, p.i, p.j, p.k, p.turn, p.mirror)),
+                        "level {} footprint {fp:?} spawn {s} square {gx},{gy}",
+                        fp.level
+                    );
                     let Some(p) = want else { continue };
                     let r = features.stamps[p.stamp as usize].reach;
-                    let reaches = p.i - r <= last[0] && p.i + r >= first[0] && p.j - r <= last[1] && p.j + r >= first[1];
+                    let reaches = p.i - r <= last[0]
+                        && p.i + r >= first[0]
+                        && p.j - r <= last[1]
+                        && p.j + r >= first[1];
                     let out = reaches && eval.placement(s, fp.face, gx, gy).is_none();
-                    assert_eq!((x >> 28) & 1 == 1, out, "level {} footprint {fp:?} spawn {s} square {gx},{gy}: excluded", fp.level);
+                    assert_eq!(
+                        (x >> 28) & 1 == 1,
+                        out,
+                        "level {} footprint {fp:?} spawn {s} square {gx},{gy}: excluded",
+                        fp.level
+                    );
                     by_level[fp.level as usize] += 1;
                     placed += usize::from(reaches && !out);
                     excluded += usize::from(out);
@@ -2084,7 +3250,10 @@ fn footprint_placements_are_the_cpus() {
         }
     }
     eprintln!("candidates compared by level {by_level:?}: {placed} placed and {excluded} excluded over their footprints");
-    assert!(by_level[..2].iter().all(|&n| n > 1000) && placed > 1000 && excluded > 100, "{by_level:?} {placed} {excluded}");
+    assert!(
+        by_level[..2].iter().all(|&n| n > 1000) && placed > 1000 && excluded > 100,
+        "{by_level:?} {placed} {excluded}"
+    );
 }
 
 /// What features cost to generate (`cargo test --release --test chunks
@@ -2099,12 +3268,23 @@ fn feature_generation_cost() {
     let (forest, dir) = forest_planet();
     let bare = Planet::new(PlanetRecipe::default()).unwrap();
     let f = forest.features();
-    eprintln!("placements: {} squares a footprint, {:.1} MB over {} footprints", f.stride, (f.stride * 8 * TEST_CAPACITY.footprints) as f64 / 1048576.0, TEST_CAPACITY.footprints);
+    eprintln!(
+        "placements: {} squares a footprint, {:.1} MB over {} footprints",
+        f.stride,
+        (f.stride * 8 * TEST_CAPACITY.footprints) as f64 / 1048576.0,
+        TEST_CAPACITY.footprints
+    );
     for (name, planet) in [("bare", &bare), ("forest", &forest)] {
         for (height, down) in [(2.0, 0.3), (60.0, 0.8), (400.0, 0.35)] {
             let eye = planet.surface_point(dir, height);
             let up = eye.normalize();
-            let view = View::new(eye, (up.any_orthonormal_vector() - up * down).normalize().as_vec3(), [480, 270]);
+            let view = View::new(
+                eye,
+                (up.any_orthonormal_vector() - up * down)
+                    .normalize()
+                    .as_vec3(),
+                [480, 270],
+            );
             let mut world = World::new(&gpu, planet);
             world.settle(&gpu, planet, &view);
             world.chunks.take_timings();
@@ -2113,7 +3293,10 @@ fn feature_generation_cost() {
                 world.settle(&gpu, planet, &view);
             }
             let t = world.chunks.take_timings();
-            let (tiles, chunks) = (t.iter().map(|f| f.tiles).sum::<usize>().max(1) as f64, t.iter().map(|f| f.chunks).sum::<usize>().max(1) as f64);
+            let (tiles, chunks) = (
+                t.iter().map(|f| f.tiles).sum::<usize>().max(1) as f64,
+                t.iter().map(|f| f.chunks).sum::<usize>().max(1) as f64,
+            );
             let stage = |k: usize| t.iter().map(|f| f.stages[k]).sum::<f64>() * 1e3;
             let part = |k: usize| t.iter().map(|f| f.tile_stages[k]).sum::<f64>() * 1e3 / tiles;
             eprintln!(
@@ -2135,18 +3318,25 @@ fn feature_generation_cost() {
 /// lighting takes it (`local_visibility`: the tracked lights' slots, their
 /// visibility, the other slots' bits).
 fn read_local(gpu: &Gpu, world: &World) -> Vec<f32> {
-    let words = read_words(gpu, world.chunks.local_visibility().expect("drawn with lights"));
-    words.chunks(3).map(|w| {
-        match (0..4).find(|k| (w[0] >> (8 * k)) & 0xff == 0) {
+    let words = read_words(
+        gpu,
+        world.chunks.local_visibility().expect("drawn with lights"),
+    );
+    words
+        .chunks(3)
+        .map(|w| match (0..4).find(|k| (w[0] >> (8 * k)) & 0xff == 0) {
             Some(k) => ((w[1] >> (8 * k)) & 0xff) as f32 / 255.0,
             None => (w[2] & 1) as f32,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// The same as the walks found it (each pixel's or its block's).
 fn read_local_walked(gpu: &Gpu, world: &World) -> Vec<f32> {
-    read_words(gpu, world.chunks.local_walked().expect("drawn")).chunks(2).map(|w| (w[0] & 1) as f32).collect()
+    read_words(gpu, world.chunks.local_walked().expect("drawn"))
+        .chunks(2)
+        .map(|w| (w[0] & 1) as f32)
+        .collect()
 }
 
 /// Helio's lights and tile lists for one point light at `at`
@@ -2154,14 +3344,35 @@ fn read_local_walked(gpu: &Gpu, world: &World) -> Vec<f32> {
 fn one_light(gpu: &Gpu, at: Vec3, range: f32, size: [u32; 2]) -> [wgpu::Buffer; 3] {
     use wgpu::util::DeviceExt;
     let mut light = [0u32; 32];
-    light[..4].copy_from_slice(&[at.x.to_bits(), at.y.to_bits(), at.z.to_bits(), range.to_bits()]);
-    light[8..12].copy_from_slice(&[1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), 10f32.to_bits()]);
+    light[..4].copy_from_slice(&[
+        at.x.to_bits(),
+        at.y.to_bits(),
+        at.z.to_bits(),
+        range.to_bits(),
+    ]);
+    light[8..12].copy_from_slice(&[
+        1f32.to_bits(),
+        1f32.to_bits(),
+        1f32.to_bits(),
+        10f32.to_bits(),
+    ]);
     // Shadowed (shadow index 0), a point light.
     light[12] = 0;
     light[13] = 1;
     let tiles = (size[0].div_ceil(16) * size[1].div_ceil(16)) as usize;
-    let init = |label, contents: &[u32]| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(contents), usage: wgpu::BufferUsages::STORAGE });
-    [init("lights", &light), init("tile lists", &vec![0u32; tiles * 64]), init("tile counts", &vec![1u32; tiles])]
+    let init = |label, contents: &[u32]| {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(contents),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    };
+    [
+        init("lights", &light),
+        init("tile lists", &vec![0u32; tiles * 64]),
+        init("tile counts", &vec![1u32; tiles]),
+    ]
 }
 
 /// A local light behind two-sided foliage reaches its back faces through
@@ -2184,17 +3395,33 @@ fn local_lights_reach_leaves_through_their_cells() {
     // The slab: single leaf cells over a 2 m square across the view (a cell
     // or two thick wherever the grid's axes cross its plane).
     let centre = ground + up * 1.2 + fwd * 2.0;
-    let brush = |center: DVec3, radius: f64, op: BrushOp, material: u32| Brush { center: center.to_array(), radius, shape: BrushShape::Cube, op, material, height: 0.0 };
+    let brush = |center: DVec3, radius: f64, op: BrushOp, material: u32| Brush {
+        center: center.to_array(),
+        radius,
+        shape: BrushShape::Cube,
+        op,
+        material,
+        height: 0.0,
+    };
     let steps = (2.0 / cell).round() as i32;
     for a in 0..=steps {
         for b in 0..=steps {
             let at = centre + side * (f64::from(a) * cell - 1.0) + up * (f64::from(b) * cell - 1.0);
-            planet.apply(brush(at, 0.55 * cell, BrushOp::Add, material::LEAVES)).unwrap();
+            planet
+                .apply(brush(at, 0.55 * cell, BrushOp::Add, material::LEAVES))
+                .unwrap();
         }
     }
     // The light behind it; brick between them over one side.
     let light = centre + fwd * 1.6;
-    planet.apply(brush(centre + fwd * 0.8 + side * 0.6, 0.35, BrushOp::Add, material::BRICK)).unwrap();
+    planet
+        .apply(brush(
+            centre + fwd * 0.8 + side * 0.6,
+            0.35,
+            BrushOp::Add,
+            material::BRICK,
+        ))
+        .unwrap();
     let eye = centre - fwd * 3.0 + up * 0.3;
     let view = View::new(eye, (centre - eye).normalize().as_vec3(), [320, 180]);
     let mut world = World::new(&gpu, &planet);
@@ -2208,8 +3435,12 @@ fn local_lights_reach_leaves_through_their_cells() {
     for y in (0..view.size[1]).step_by(2) {
         for x in (0..view.size[0]).step_by(2) {
             let ray = view.pixel_dir(view_proj, x, y);
-            let Some(cpu) = planet.raycast(view.eye, ray, 30.0) else { continue };
-            if planet.material(cpu.cell) != material::LEAVES || hits[(y * view.size[0] + x) as usize].is_none_or(|h| h.level != 0) {
+            let Some(cpu) = planet.raycast(view.eye, ray, 30.0) else {
+                continue;
+            };
+            if planet.material(cpu.cell) != material::LEAVES
+                || hits[(y * view.size[0] + x) as usize].is_none_or(|h| h.level != 0)
+            {
                 continue;
             }
             let at = view.eye + ray * cpu.distance;
@@ -2220,20 +3451,28 @@ fn local_lights_reach_leaves_through_their_cells() {
             // From the far side of the hit's cell, as the walk starts.
             let from = at - cpu.normal * (1.01 * cell);
             let rest = light - from;
-            let seen = planet.raycast(from, rest.normalize(), rest.length() - cell).is_none();
+            let seen = planet
+                .raycast(from, rest.normalize(), rest.length() - cell)
+                .is_none();
             compared += 1;
             lit += usize::from(seen);
             shadowed += usize::from(!seen);
             if seen != (mask[(y * view.size[0] + x) as usize] > 0.5) {
                 wrong += 1;
                 if wrong < 8 {
-                    eprintln!("pixel {x},{y}: cpu {}, drawn otherwise", if seen { "lit" } else { "shadowed" });
+                    eprintln!(
+                        "pixel {x},{y}: cpu {}, drawn otherwise",
+                        if seen { "lit" } else { "shadowed" }
+                    );
                 }
             }
         }
     }
     eprintln!("compared {compared}, lit {lit}, shadowed {shadowed}, wrong {wrong}");
-    assert!(lit > 100 && shadowed > 100, "{compared} compared, {lit} lit, {shadowed} shadowed");
+    assert!(
+        lit > 100 && shadowed > 100,
+        "{compared} compared, {lit} lit, {shadowed} shadowed"
+    );
     assert!(wrong * 50 <= compared, "{wrong} of {compared} wrong");
 }
 
@@ -2256,9 +3495,22 @@ fn terrain_shadows_local_lights() {
     let side = up.any_orthonormal_vector();
     let fwd = up.cross(side);
     let light = ground + up * 1.0;
-    planet.apply(Brush { center: (ground + fwd * 2.0 + up * 0.8).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: (ground + fwd * 2.0 + up * 0.8).to_array(),
+            radius: 1.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
     let eye = ground + up * 7.0 - fwd * 4.0 + side * 1.5;
-    let view = View::new(eye, ((ground + fwd * 2.5) - eye).normalize().as_vec3(), [320, 180]);
+    let view = View::new(
+        eye,
+        ((ground + fwd * 2.5) - eye).normalize().as_vec3(),
+        [320, 180],
+    );
     let mut world = World::new(&gpu, &planet);
     let range = 12.0;
     world.lights = Some(one_light(&gpu, (light - eye).as_vec3(), range, view.size));
@@ -2272,7 +3524,9 @@ fn terrain_shadows_local_lights() {
     for y in (0..view.size[1]).step_by(2) {
         for x in (0..view.size[0]).step_by(2) {
             let ray = view.pixel_dir(view_proj, x, y);
-            let Some(cpu) = planet.raycast(view.eye, ray, 60.0) else { continue };
+            let Some(cpu) = planet.raycast(view.eye, ray, 60.0) else {
+                continue;
+            };
             if hits[(y * view.size[0] + x) as usize].is_none_or(|h| h.level != 0) {
                 continue;
             }
@@ -2281,20 +3535,29 @@ fn terrain_shadows_local_lights() {
             if to.length() > f64::from(range) - cell || cpu.normal.dot(to.normalize()) < 0.3 {
                 continue;
             }
-            let seen = planet.raycast(at + cpu.normal * 1e-3, to.normalize(), to.length() - cell).is_none();
+            let seen = planet
+                .raycast(at + cpu.normal * 1e-3, to.normalize(), to.length() - cell)
+                .is_none();
             compared += 1;
             shadowed += usize::from(!seen);
             lit_pixels[(y * view.size[0] + x) as usize] = true;
             if seen != (mask[(y * view.size[0] + x) as usize] > 0.5) {
                 wrong += 1;
                 if wrong < 8 {
-                    eprintln!("pixel {x},{y}: cpu {}, drawn {}", if seen { "lit" } else { "shadowed" }, if seen { "shadowed" } else { "lit" });
+                    eprintln!(
+                        "pixel {x},{y}: cpu {}, drawn {}",
+                        if seen { "lit" } else { "shadowed" },
+                        if seen { "shadowed" } else { "lit" }
+                    );
                 }
             }
         }
     }
     eprintln!("compared {compared}, shadowed {shadowed}, wrong {wrong}");
-    assert!(compared > 2000 && shadowed > 200, "{compared} compared, {shadowed} shadowed");
+    assert!(
+        compared > 2000 && shadowed > 200,
+        "{compared} compared, {shadowed} shadowed"
+    );
     assert!(wrong * 100 <= compared, "{wrong} of {compared} wrong");
     // Against steady shadows: the walks' own (each pixel taking its
     // block's sample) and denoised.
@@ -2311,13 +3574,23 @@ fn terrain_shadows_local_lights() {
     let report = |name: &str, frames: &[Vec<f32>]| {
         let (e, w) = error(frames, &mask, &lit_pixels);
         let (f, j) = flicker(frames, &lit_pixels);
-        eprintln!("light, {name}: error {e:.4} (off by > 0.5: {:.2}%), flicker {f:.4} (> 0.1: {:.2}%)", w * 100.0, j * 100.0);
+        eprintln!(
+            "light, {name}: error {e:.4} (off by > 0.5: {:.2}%), flicker {f:.4} (> 0.1: {:.2}%)",
+            w * 100.0,
+            j * 100.0
+        );
         (e, w, f, j)
     };
     let before = report("walked", &walked);
     let after = report("denoised", &denoised);
-    assert!(after.0 <= 0.01 && after.1 <= 0.005, "denoised against steady: {after:?}");
-    assert!(after.2 * 10.0 <= before.2 && after.3 * 10.0 <= before.3, "denoised flicker {after:?} against the walks' {before:?}");
+    assert!(
+        after.0 <= 0.01 && after.1 <= 0.005,
+        "denoised against steady: {after:?}"
+    );
+    assert!(
+        after.2 * 10.0 <= before.2 && after.3 * 10.0 <= before.3,
+        "denoised flicker {after:?} against the walks' {before:?}"
+    );
     // The light moves a metre aside: the steady shadows there, then frames
     // until the denoised ones follow.
     let moved = light + side * 1.0;
@@ -2338,9 +3611,20 @@ fn terrain_shadows_local_lights() {
         world.frame(&gpu, &planet, &view, None);
         after_move.push(error(&[read_local(&gpu, &world)], &truth, &lit_pixels));
     }
-    let line: Vec<String> = after_move.iter().enumerate().map(|(k, (e, w))| format!("{}: {e:.4}/{:.2}%", k + 1, w * 100.0)).collect();
-    eprintln!("light moved 1 m, error (mean/off by > 0.5) by frames after: {}", line.join(", "));
-    assert!(after_move[3].1 <= 0.02, "4 frames after the light moved: {:?}", after_move[3]);
+    let line: Vec<String> = after_move
+        .iter()
+        .enumerate()
+        .map(|(k, (e, w))| format!("{}: {e:.4}/{:.2}%", k + 1, w * 100.0))
+        .collect();
+    eprintln!(
+        "light moved 1 m, error (mean/off by > 0.5) by frames after: {}",
+        line.join(", ")
+    );
+    assert!(
+        after_move[3].1 <= 0.02,
+        "4 frames after the light moved: {:?}",
+        after_move[3]
+    );
     // The shadow stage's and the denoiser's GPU time with the light and
     // without.
     let stage = |world: &mut World| {
@@ -2350,7 +3634,10 @@ fn terrain_shadows_local_lights() {
         }
         let t = world.chunks.take_timings();
         let n = t.len().max(1) as f64;
-        (t.iter().map(|f| f.shadow).sum::<f64>() / n, t.iter().map(|f| f.denoise).sum::<f64>() / n)
+        (
+            t.iter().map(|f| f.shadow).sum::<f64>() / n,
+            t.iter().map(|f| f.denoise).sum::<f64>() / n,
+        )
     };
     world.chunks.set_steady_shadows(true);
     let steady = stage(&mut world);
@@ -2379,25 +3666,59 @@ fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [
     for (k, d) in dirs.iter().enumerate() {
         let probe = probes[k / helio_pass_gi::RAYS as usize];
         let o = (clipmap.position(probe) - eye).as_vec3();
-        rays.extend_from_slice(&[o.x.to_bits(), o.y.to_bits(), o.z.to_bits(), 1e30f32.to_bits(), d.x.to_bits(), d.y.to_bits(), d.z.to_bits(), probe]);
+        rays.extend_from_slice(&[
+            o.x.to_bits(),
+            o.y.to_bits(),
+            o.z.to_bits(),
+            1e30f32.to_bits(),
+            d.x.to_bits(),
+            d.y.to_bits(),
+            d.z.to_bits(),
+            probe,
+        ]);
     }
-    let init = |label, contents: &[u8], usage| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
-    let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    let init = |label, contents: &[u8], usage| {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage,
+            })
+    };
+    let storage =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     [
-        init("gi frame", bytemuck::bytes_of(&frame), wgpu::BufferUsages::UNIFORM),
+        init(
+            "gi frame",
+            bytemuck::bytes_of(&frame),
+            wgpu::BufferUsages::UNIFORM,
+        ),
         init("gi rays", bytemuck::cast_slice(&rays), storage),
         init("gi hits", &vec![0u8; dirs.len() * 16], storage),
-        init("gi sun", bytemuck::cast_slice(&[sun.x, sun.y, sun.z, 0.0, 1.0, 1.0, 1.0, 0.0]), storage),
+        init(
+            "gi sun",
+            bytemuck::cast_slice(&[sun.x, sun.y, sun.z, 0.0, 1.0, 1.0, 1.0, 0.0]),
+            storage,
+        ),
     ]
 }
 
 fn read_words(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<u32> {
-    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: buffer.size(), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: buffer.size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
     gpu.queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
     bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
 }
 
@@ -2435,20 +3756,32 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
     for z in 8..16 {
         for y in 8..16 {
             for x in 8..16 {
-                probes.push(helio_pass_gi::Clipmap::index(0, clipmap.first[0] + glam::I64Vec3::new(x, y, z)));
+                probes.push(helio_pass_gi::Clipmap::index(
+                    0,
+                    clipmap.first[0] + glam::I64Vec3::new(x, y, z),
+                ));
             }
         }
     }
     let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
     let mut unit = || loop {
-        let v = DVec3::new(next() as f64, next() as f64, next() as f64) / u64::MAX as f64 * 2.0 - 1.0;
+        let v =
+            DVec3::new(next() as f64, next() as f64, next() as f64) / u64::MAX as f64 * 2.0 - 1.0;
         if v.length_squared() > 1e-4 && v.length_squared() <= 1.0 {
             return v.normalize();
         }
     };
-    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize).map(|_| unit()).collect();
+    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize)
+        .map(|_| unit())
+        .collect();
     let mut world = World::new(gpu, planet);
-    world.gi = Some(gi_rays(gpu, eye, &probes, &dirs.iter().map(|d| d.as_vec3()).collect::<Vec<_>>(), world.sun));
+    world.gi = Some(gi_rays(
+        gpu,
+        eye,
+        &probes,
+        &dirs.iter().map(|d| d.as_vec3()).collect::<Vec<_>>(),
+        world.sun,
+    ));
     world.sun_occlusion = true;
     world.settle(gpu, planet, view);
     // Every level of the sun's occlusion drawn for this eye.
@@ -2457,7 +3790,8 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
     }
     // One frame's hits (the GI pass clears them each frame).
     let gi = world.gi.as_ref().unwrap();
-    gpu.queue.write_buffer(&gi[2], 0, &vec![0u8; gi[2].size() as usize]);
+    gpu.queue
+        .write_buffer(&gi[2], 0, &vec![0u8; gi[2].size() as usize]);
     world.frame(gpu, planet, view, None);
     let hits = read_words(gpu, &world.gi.as_ref().unwrap()[2]);
     let (maps, occlusion) = world.chunks.read_sun_occlusion().expect("drawn");
@@ -2467,7 +3801,9 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
     let leaf = planet.field().appearance().materials[material::LEAVES as usize].transmission;
     let leaf_through = (leaf * 255.0 + 0.5) as u32;
     // The sun at `from` by the maps (none: near a texel's edge, or past them).
-    let sun_seen = |from: DVec3| occlusion_lit(&maps, &occlusion, eye, from).map(|(lit, ..)| if lit { 1.0 } else { 0.0 });
+    let sun_seen = |from: DVec3| {
+        occlusion_lit(&maps, &occlusion, eye, from).map(|(lit, ..)| if lit { 1.0 } else { 0.0 })
+    };
     let mut c = GiRayCheck::default();
     for (k, d) in dirs.iter().enumerate() {
         let probe = probes[k / helio_pass_gi::RAYS as usize];
@@ -2479,7 +3815,9 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
             c.rock_wrong += usize::from(t != 1e-3);
             continue;
         }
-        let Some(cpu) = planet.raycast(origin, *d, 60.0) else { continue };
+        let Some(cpu) = planet.raycast(origin, *d, 60.0) else {
+            continue;
+        };
         let at = origin + *d * cpu.distance;
         let clip = view_proj * (at - eye).as_vec3().extend(1.0);
         let ndc = clip.truncate() / clip.w;
@@ -2487,13 +3825,24 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
             continue;
         }
         c.compared += 1;
-        let p = DVec3::new(f64::from(hit[1] & 1023), f64::from((hit[1] >> 10) & 1023), f64::from((hit[1] >> 20) & 1023)) / 1023.0 * 2.0 - 1.0;
+        let p = DVec3::new(
+            f64::from(hit[1] & 1023),
+            f64::from((hit[1] >> 10) & 1023),
+            f64::from((hit[1] >> 20) & 1023),
+        ) / 1023.0
+            * 2.0
+            - 1.0;
         let n = p.normalize_or_zero();
-        let exact = t > 0.0 && (f64::from(t) - cpu.distance).abs() <= 2e-3 + cpu.distance * 1e-5 && n.dot(cpu.normal) > 0.99;
+        let exact = t > 0.0
+            && (f64::from(t) - cpu.distance).abs() <= 2e-3 + cpu.distance * 1e-5
+            && n.dot(cpu.normal) > 0.99;
         if !exact {
             c.wrong += 1;
             if c.wrong < 8 {
-                eprintln!("ray {k}: drawn t {t} n {n}, cpu {} n {}", cpu.distance, cpu.normal);
+                eprintln!(
+                    "ray {k}: drawn t {t} n {n}, cpu {} n {}",
+                    cpu.distance, cpu.normal
+                );
             }
             continue;
         }
@@ -2503,16 +3852,21 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
         let facing = cpu.normal.dot(sun);
         if facing > 0.2 {
             // Where the tracer reads the maps: half a cell off the face.
-            let Some(seen) = sun_seen(at + cpu.normal * (0.5 * voxel)) else { continue };
+            let Some(seen) = sun_seen(at + cpu.normal * (0.5 * voxel)) else {
+                continue;
+            };
             c.lit += 1;
             c.shadowed += usize::from(seen < 0.5);
             c.sun_wrong += usize::from((seen - f64::from(hit[2] >> 24) / 255.0).abs() > 0.5);
         } else if leaf && facing < -0.2 {
             // Past the leaf cell, half a cell off its far side.
-            let Some(seen) = sun_seen(at - cpu.normal * (1.5 * voxel)) else { continue };
+            let Some(seen) = sun_seen(at - cpu.normal * (1.5 * voxel)) else {
+                continue;
+            };
             c.back += 1;
             c.back_shadowed += usize::from(seen == 0.0);
-            c.back_wrong += usize::from((seen - f64::from((hit[3] >> 16) & 255) / 255.0).abs() > 0.5);
+            c.back_wrong +=
+                usize::from((seen - f64::from((hit[3] >> 16) & 255) / 255.0).abs() > 0.5);
         }
     }
     eprintln!("{c:?}");
@@ -2534,9 +3888,22 @@ fn terrain_traces_gi_probe_rays() {
     let up = planet.grid().up(ground);
     let side = up.any_orthonormal_vector();
     let fwd = up.cross(side);
-    planet.apply(Brush { center: (ground + fwd * 2.0 + up * 0.8).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: (ground + fwd * 2.0 + up * 0.8).to_array(),
+            radius: 1.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
     let eye = ground + up * 3.0 - fwd * 4.0 + side * 1.5;
-    let view = View::new(eye, ((ground + fwd * 2.5) - eye).normalize().as_vec3(), [320, 180]);
+    let view = View::new(
+        eye,
+        ((ground + fwd * 2.5) - eye).normalize().as_vec3(),
+        [320, 180],
+    );
     let c = trace_gi_rays(gpu, &planet, eye, &view);
     assert!(c.rock > 50 && c.rock_wrong == 0, "{c:?}");
     assert!(c.compared > 1500 && c.wrong * 100 <= c.compared, "{c:?}");
@@ -2562,7 +3929,13 @@ fn gi_rays_see_light_through_leaves() {
         .map(|n| (c.i + n % 200 - 100, c.j + n / 200 - 100))
         .find_map(|(i, j)| {
             let top = planet.column_top(c.face, i, j, 0);
-            (top - 2..top + 3).map(|k| Cell::new(c.face, i, j, k)).find(|&w| planet.material(w) == material::WOOD && planet.material(Cell::new(w.face, w.i, w.j, w.k + 10)) == material::LEAVES)
+            (top - 2..top + 3)
+                .map(|k| Cell::new(c.face, i, j, k))
+                .find(|&w| {
+                    planet.material(w) == material::WOOD
+                        && planet.material(Cell::new(w.face, w.i, w.j, w.k + 10))
+                            == material::LEAVES
+                })
         })
         .expect("a tree");
     let trunk = grid.cell_center(Cell::new(trunk.face, trunk.i, trunk.j, trunk.k + 9));
@@ -2578,14 +3951,18 @@ fn gi_rays_see_light_through_leaves() {
     assert!(c.sun_wrong * 50 <= c.lit, "{c:?}");
 }
 
-
 /// Whether the sun's occlusion maps (`ChunkWorld::read_sun_occlusion`) say
 /// planet-centred point `p` sees the sun, the eye at `eye`: the finest level
 /// holding it, its nearest texel against the point's distance along the sun
 /// with the shader's bias (`sun_occlusion.wgsl`, without its filter), the
 /// level, its texel (m) and how far it sees toward the sun from `p` (m);
 /// `None` outside every level, or near a texel's edge.
-fn occlusion_lit(maps: &[f32], frame: &helio_pass_shadow_matrix::SunOcclusionFrame, eye: DVec3, p: DVec3) -> Option<(bool, usize, f32, f32)> {
+fn occlusion_lit(
+    maps: &[f32],
+    frame: &helio_pass_shadow_matrix::SunOcclusionFrame,
+    eye: DVec3,
+    p: DVec3,
+) -> Option<(bool, usize, f32, f32)> {
     let side = frame.info[1];
     let v3 = |a: [f32; 4]| Vec3::new(a[0], a[1], a[2]);
     let rel = (p - eye).as_vec3();
@@ -2607,7 +3984,12 @@ fn occlusion_lit(maps: &[f32], frame: &helio_pass_shadow_matrix::SunOcclusionFra
         let (x, y) = (at.x as usize, at.y as usize);
         let stored = maps[(level * side as usize + y) * side as usize + x];
         let t = d.dot(v3(l.forward));
-        return Some((stored <= 0.0 || t <= stored + 3.0 * half / side, level, 2.0 * half / side, t));
+        return Some((
+            stored <= 0.0 || t <= stored + 3.0 * half / side,
+            level,
+            2.0 * half / side,
+            t,
+        ));
     }
     None
 }
@@ -2631,13 +4013,27 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     let side = up.any_orthonormal_vector();
     let fwd = up.cross(side);
     // (distance from the eye, height, width), m: one tower a level.
-    let towers = [(10.0, 4.0, 1.5), (60.0, 16.0, 4.0), (250.0, 50.0, 16.0), (1000.0, 160.0, 50.0)];
+    let towers = [
+        (10.0, 4.0, 1.5),
+        (60.0, 16.0, 4.0),
+        (250.0, 50.0, 16.0),
+        (1000.0, 160.0, 50.0),
+    ];
     let bases: Vec<DVec3> = towers
         .iter()
         .map(|&(at, height, width)| {
             let base = planet.surface_point((eye + fwd * at).normalize(), 0.0);
             let up = base.normalize();
-            planet.apply(Brush { center: (base + up * (height * 0.5 - 4.0)).to_array(), radius: width * 0.5, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: height * 0.5 + 4.0 }).unwrap();
+            planet
+                .apply(Brush {
+                    center: (base + up * (height * 0.5 - 4.0)).to_array(),
+                    radius: width * 0.5,
+                    shape: BrushShape::Cube,
+                    op: BrushOp::Add,
+                    material: material::BRICK,
+                    height: height * 0.5 + 4.0,
+                })
+                .unwrap();
             base
         })
         .collect();
@@ -2666,14 +4062,19 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             if planet.solid(planet.grid().locate(p).0) || (p - base).dot(up) < 0.2 * height {
                 continue;
             }
-            let Some((lit, level, texel, reach)) = occlusion_lit(&maps, &frame, eye, p) else { continue };
+            let Some((lit, level, texel, reach)) = occlusion_lit(&maps, &frame, eye, p) else {
+                continue;
+            };
             // Toward the sun the level was drawn for, as far as it sees: what
             // lies farther is not in the maps.
             let f = frame.levels[level].forward;
             let sun = -DVec3::new(f64::from(f[0]), f64::from(f[1]), f64::from(f[2])).normalize();
             let hit = planet.raycast(p, sun, f64::from(reach) - 1.0);
             // Occluders within a few texels: the maps' bias and texels decide.
-            if hit.as_ref().is_some_and(|h| h.distance < 4.0 * f64::from(texel)) {
+            if hit
+                .as_ref()
+                .is_some_and(|h| h.distance < 4.0 * f64::from(texel))
+            {
                 continue;
             }
             let cpu = hit.is_none();
@@ -2688,7 +4089,10 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
         }
         let total: usize = compared.iter().sum();
         eprintln!("sun occlusion: compared {compared:?}, shadowed {shadowed:?}, wrong {wrong}");
-        assert!(compared.iter().zip(shadowed).all(|(&c, s)| c > 40 && s > 8), "{compared:?} compared, {shadowed:?} shadowed");
+        assert!(
+            compared.iter().zip(shadowed).all(|(&c, s)| c > 40 && s > 8),
+            "{compared:?} compared, {shadowed:?} shadowed"
+        );
         assert!(wrong * 50 <= total, "{wrong} of {total} wrong");
     };
     check(&world);
@@ -2696,7 +4100,9 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     // suns up to a degree apart, each kept with its own.
     let axis = up.cross(world.sun.as_dvec3()).normalize();
     for _ in 0..40 {
-        world.sun = glam::DQuat::from_axis_angle(axis, 0.03_f64.to_radians()).mul_vec3(world.sun.as_dvec3()).as_vec3();
+        world.sun = glam::DQuat::from_axis_angle(axis, 0.03_f64.to_radians())
+            .mul_vec3(world.sun.as_dvec3())
+            .as_vec3();
         world.frame(gpu, &planet, &view, None);
     }
     check(&world);
@@ -2722,35 +4128,89 @@ fn ground_probes(gpu: &Gpu, planet: &Planet, eye: DVec3) -> Probes {
     let ground = helio_pass_voxel_planet::chunks::ground::PlanetGround::default();
     ground.set_grid(*planet.grid());
     let chart = ground.chart(eye).unwrap();
-    let centre = [(chart.eye[0] / 8.0).floor() as i32, (chart.eye[1] / 8.0).floor() as i32];
-    let (mut starts, mut ups, mut tiles, mut queries) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let centre = [
+        (chart.eye[0] / 8.0).floor() as i32,
+        (chart.eye[1] / 8.0).floor() as i32,
+    ];
+    let (mut starts, mut ups, mut tiles, mut queries) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for dj in -1..=1 {
         for di in -1..=1 {
-            let frame = ground.tile_frame(chart.id, [centre[0] + di, centre[1] + dj], 1).unwrap();
+            let frame = ground
+                .tile_frame(chart.id, [centre[0] + di, centre[1] + dj], 1)
+                .unwrap();
             let start_height = (eye - frame.origin).dot(frame.up) + 256.0;
-            tiles.push(AskedTile { frame, start_height, first: queries.len() as u32, count: PROBE_SIDE * PROBE_SIDE });
+            tiles.push(AskedTile {
+                frame,
+                start_height,
+                first: queries.len() as u32,
+                count: PROBE_SIDE * PROBE_SIDE,
+            });
             for b in 0..PROBE_SIDE {
                 for a in 0..PROBE_SIDE {
-                    let (u, v) = ((f64::from(a) + 0.37) / f64::from(PROBE_SIDE), (f64::from(b) + 0.61) / f64::from(PROBE_SIDE));
-                    let start = frame.origin + frame.axis_u * u + frame.axis_v * v + frame.up * start_height;
+                    let (u, v) = (
+                        (f64::from(a) + 0.37) / f64::from(PROBE_SIDE),
+                        (f64::from(b) + 0.61) / f64::from(PROBE_SIDE),
+                    );
+                    let start = frame.origin
+                        + frame.axis_u * u
+                        + frame.axis_v * v
+                        + frame.up * start_height;
                     starts.push(start);
                     ups.push(frame.up);
-                    queries.push(GpuGroundQuery { start: (start - eye).as_vec3().to_array(), length: PROBE_LENGTH, up: frame.up.as_vec3().to_array(), _pad: 0 });
+                    queries.push(GpuGroundQuery {
+                        start: (start - eye).as_vec3().to_array(),
+                        length: PROBE_LENGTH,
+                        up: frame.up.as_vec3().to_array(),
+                        _pad: 0,
+                    });
                 }
             }
         }
     }
-    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-    let hits = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: queries.len() as u64 * 16, usage, mapped_at_creation: false });
-    let queries = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&queries), usage });
-    Probes { starts, ups, tiles, queries, hits }
+    let usage =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    let hits = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: queries.len() as u64 * 16,
+        usage,
+        mapped_at_creation: false,
+    });
+    let queries = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&queries),
+            usage,
+        });
+    Probes {
+        starts,
+        ups,
+        tiles,
+        queries,
+        hits,
+    }
 }
 
 /// The probes answered against the world's last drawn cut (eye at render origin).
-fn probe(gpu: &Gpu, world: &mut World, planet: &Planet, probes: &Probes, eye: DVec3) -> Vec<helio_pass_foliage_place::GpuGroundHit> {
+fn probe(
+    gpu: &Gpu,
+    world: &mut World,
+    planet: &Planet,
+    probes: &Probes,
+    eye: DVec3,
+) -> Vec<helio_pass_foliage_place::GpuGroundHit> {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
-    world.chunks.probe_ground(&mut recorder, &probes.queries, &probes.hits, &probes.tiles, planet, eye, Vec3::ZERO);
+    world.chunks.probe_ground(
+        &mut recorder,
+        &probes.queries,
+        &probes.hits,
+        &probes.tiles,
+        planet,
+        eye,
+        Vec3::ZERO,
+    );
     drop(recorder);
     gpu.queue.submit([encoder.finish()]);
     let bytes = common::read_buffer(gpu, &probes.hits, probes.starts.len() as u64 * 16);
@@ -2760,7 +4220,13 @@ fn probe(gpu: &Gpu, world: &mut World, planet: &Planet, probes: &Probes, eye: DV
 /// Probe hits against CPU ray casts down the same segments: where the CPU meets a
 /// top face within the level-0 range, the GPU meets it at the same distance with the
 /// cell's material; where it meets a wall or nothing, no ground. (compared, wrong.)
-fn probes_match(planet: &Planet, probes: &Probes, hits: &[helio_pass_foliage_place::GpuGroundHit], eye: DVec3, near: f64) -> (usize, usize) {
+fn probes_match(
+    planet: &Planet,
+    probes: &Probes,
+    hits: &[helio_pass_foliage_place::GpuGroundHit],
+    eye: DVec3,
+    near: f64,
+) -> (usize, usize) {
     let (mut compared, mut wrong) = (0, 0);
     for (n, hit) in hits.iter().enumerate() {
         let (start, up) = (probes.starts[n], probes.ups[n]);
@@ -2785,7 +4251,13 @@ fn probes_match(planet: &Planet, probes: &Probes, hits: &[helio_pass_foliage_pla
         if !ok {
             wrong += 1;
             if wrong < 8 {
-                eprintln!("query {n}: gpu {gpu} ground {}, cpu {:?} at {} top {top} material {}", hit.ground, cpu.cell, cpu.distance, planet.material(cpu.cell));
+                eprintln!(
+                    "query {n}: gpu {gpu} ground {}, cpu {:?} at {} top {top} material {}",
+                    hit.ground,
+                    cpu.cell,
+                    cpu.distance,
+                    planet.material(cpu.cell)
+                );
             }
         }
     }
@@ -2808,9 +4280,18 @@ fn ground_probes_meet_the_drawn_surface() {
     let probes = ground_probes(&gpu, &planet, view.eye);
     let hits = probe(&gpu, &mut world, &planet, &probes, view.eye);
     let (compared, wrong) = probes_match(&planet, &probes, &hits, view.eye, near);
-    let grounded = hits.iter().filter(|h| h.ground != helio_pass_foliage_place::GROUND_NONE).count();
-    eprintln!("compared {compared}, wrong {wrong}, {grounded} of {} on ground", hits.len());
-    assert!(compared > 1000 && grounded > 1000, "{compared} compared, {grounded} grounded");
+    let grounded = hits
+        .iter()
+        .filter(|h| h.ground != helio_pass_foliage_place::GROUND_NONE)
+        .count();
+    eprintln!(
+        "compared {compared}, wrong {wrong}, {grounded} of {} on ground",
+        hits.len()
+    );
+    assert!(
+        compared > 1000 && grounded > 1000,
+        "{compared} compared, {grounded} grounded"
+    );
     assert_eq!(wrong, 0);
     // Still: no changes, the same answers.
     world.chunks.take_ground_changes();
@@ -2818,16 +4299,36 @@ fn ground_probes_meet_the_drawn_surface() {
         world.frame(&gpu, &planet, &view, None);
     }
     let quiet = world.chunks.take_ground_changes();
-    assert!(quiet.is_empty(), "{} ground changes under a still eye", quiet.len());
+    assert!(
+        quiet.is_empty(),
+        "{} ground changes under a still eye",
+        quiet.len()
+    );
     assert_eq!(probe(&gpu, &mut world, &planet, &probes, view.eye), hits);
     // A dig 3 m from the eye's column: its box changes, and the probes see the pit.
     let up = view.eye.normalize();
     let ground = planet.surface_point(dir, 0.0) + up.any_orthonormal_vector() * 3.0;
-    planet.apply(Brush { center: ground.to_array(), radius: 1.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    planet
+        .apply(Brush {
+            center: ground.to_array(),
+            radius: 1.5,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
     world.sync(&gpu, &planet);
     world.settle(&gpu, &planet, &view);
     let changes = world.chunks.take_ground_changes();
-    assert!(changes.iter().any(|[lo, hi]| ground.cmpge(*lo - DVec3::splat(1e-6)).all() && ground.cmple(*hi + DVec3::splat(1e-6)).all()), "no change over the dig in {}", changes.len());
+    assert!(
+        changes
+            .iter()
+            .any(|[lo, hi]| ground.cmpge(*lo - DVec3::splat(1e-6)).all()
+                && ground.cmple(*hi + DVec3::splat(1e-6)).all()),
+        "no change over the dig in {}",
+        changes.len()
+    );
     let dug = probe(&gpu, &mut world, &planet, &probes, view.eye);
     let (compared, wrong) = probes_match(&planet, &probes, &dug, view.eye, near);
     let moved = dug.iter().zip(&hits).filter(|(a, b)| a != b).count();

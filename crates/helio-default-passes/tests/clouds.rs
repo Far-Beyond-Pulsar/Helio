@@ -5,7 +5,10 @@
 use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
-use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig};
+use helio::{
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    RendererBuilder, RendererConfig,
+};
 use helio_default_passes::{build_default_graph_external_with_lighting_passes, VoxelPassFactory};
 use helio_pass_sky::{AtmosphereComponent, CloudLayer, PlanetWeather};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
@@ -46,20 +49,40 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
     .unwrap();
     let (device, queue) = (Arc::new(device), Arc::new(queue));
     let gpu_context = EngineGpuContext::new(Arc::clone(&device), Arc::clone(&queue));
-    let mut gpu_store =
-        SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
+    let mut gpu_store = SceneGpuStore::new(
+        &gpu_context,
+        SceneGpuConfig {
+            classes: Vec::new(),
+            tombstone_headroom: 0,
+            max_cells_metadata: 0,
+        },
+    );
     AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        &device,
+    );
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        &device,
+    );
+    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        16,
+        &device,
+    );
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     let voxel: Vec<VoxelPassFactory> = if ground {
         let pass_source = Arc::clone(&source);
-        vec![Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))))]
+        vec![Arc::new(move |_, _, _, _| {
+            Box::new(ChunkPass::new(Arc::clone(&pass_source)))
+        })]
     } else {
         Vec::new()
     };
@@ -69,15 +92,30 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         .with_ambient([0.0; 3], 0.0)
         .with_external_device()
         .with_pass_build_context(Box::new(move |ctx| {
-            build_default_graph_external_with_lighting_passes(ctx, voxel.clone(), Vec::new(), Vec::new())
+            build_default_graph_external_with_lighting_passes(
+                ctx,
+                voxel.clone(),
+                Vec::new(),
+                Vec::new(),
+            )
         }))
-        .build(Arc::clone(&device), Arc::clone(&queue), width, height, config.surface_format);
+        .build(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            width,
+            height,
+            config.surface_format,
+        );
     renderer.set_editor_mode(false);
     renderer.set_tsr_quality(None);
     renderer.set_jitter_enabled(false);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("clouds target"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -86,27 +124,43 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         view_formats: &[],
     });
     let (sun, air) = (scene.world.spawn(), scene.world.spawn());
-    Some(View { device, queue, renderer, target, scene, sun, air, ground: ground.then_some(source) })
+    Some(View {
+        device,
+        queue,
+        renderer,
+        target,
+        scene,
+        sun,
+        air,
+        ground: ground.then_some(source),
+    })
 }
 
 impl View {
     /// A sun shining from `towards` and the atmosphere `air`.
     fn set_sky(&mut self, towards: Vec3, air: AtmosphereComponent) {
-        self.scene.world.insert(self.sun, helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
-            position_range: [0.0, 0.0, 0.0, f32::MAX],
-            direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
-            color_intensity: [1.0, 1.0, 1.0, 3.0],
-            shadow_index: u32::MAX,
-            light_type: helio::LightType::Directional as u32,
-            ..Default::default()
-        }));
+        self.scene.world.insert(
+            self.sun,
+            helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
+                color_intensity: [1.0, 1.0, 1.0, 3.0],
+                shadow_index: u32::MAX,
+                light_type: helio::LightType::Directional as u32,
+                ..Default::default()
+            }),
+        );
         self.scene.world.insert(self.air, air);
         self.scene.world.flush_gpu_mirror(&self.queue);
     }
 
     fn render(&mut self, camera: &Camera) {
-        self.renderer.render(camera, &self.target.create_view(&Default::default())).unwrap();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.renderer
+            .render(camera, &self.target.create_view(&Default::default()))
+            .unwrap();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
     }
 
     fn rgba(&self) -> Vec<[u8; 4]> {
@@ -123,13 +177,21 @@ impl View {
             self.target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size.height) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size.height),
+                },
             },
             size,
         );
         self.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
         (0..size.height as usize)
             .flat_map(|y| {
@@ -154,8 +216,14 @@ impl View {
             std::fs::create_dir_all(&output).unwrap();
             let size = self.target.size();
             let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
-            image::save_buffer(std::path::Path::new(&output).join(format!("{name}.png")), &bytes, size.width, size.height, image::ColorType::Rgba8)
-                .unwrap();
+            image::save_buffer(
+                std::path::Path::new(&output).join(format!("{name}.png")),
+                &bytes,
+                size.width,
+                size.height,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
         }
     }
 }
@@ -165,13 +233,29 @@ fn luminance(p: [u8; 4]) -> f64 {
 }
 
 fn mean_abs_difference(a: &[[u8; 4]], b: &[[u8; 4]]) -> f64 {
-    a.iter().zip(b).map(|(a, b)| (luminance(*a) - luminance(*b)).abs()).sum::<f64>() / a.len() as f64
+    a.iter()
+        .zip(b)
+        .map(|(a, b)| (luminance(*a) - luminance(*b)).abs())
+        .sum::<f64>()
+        / a.len() as f64
 }
 
 /// A camera at `eye` (world metres) looking along `forward`.
 fn camera(eye: Vec3, forward: Vec3, fov_deg: f32, aspect: f32) -> Camera {
-    let up = if forward.normalize().y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    Camera::perspective_look_at(eye, eye + forward, up, fov_deg.to_radians(), aspect, 0.1, 1.0e7)
+    let up = if forward.normalize().y.abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    Camera::perspective_look_at(
+        eye,
+        eye + forward,
+        up,
+        fov_deg.to_radians(),
+        aspect,
+        0.1,
+        1.0e7,
+    )
 }
 
 fn band() -> CloudLayer {
@@ -183,7 +267,10 @@ fn band() -> CloudLayer {
         wind: [0.0; 3],
         // Calm, with small cells: no region (a clear high, a hole between
         // cells) wider than the views.
-        weather: PlanetWeather { mesoscale_km: 8.0, ..PlanetWeather::calm() },
+        weather: PlanetWeather {
+            mesoscale_km: 8.0,
+            ..PlanetWeather::calm()
+        },
         ..CloudLayer::cumulus()
     }
 }
@@ -196,7 +283,9 @@ fn band() -> CloudLayer {
 /// sky's.
 #[test]
 fn clouds_appear_in_their_band_and_nowhere_else() {
-    let Some(mut view) = view(320, 180, false) else { return };
+    let Some(mut view) = view(320, 180, false) else {
+        return;
+    };
     let validation = view.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let sun = Vec3::new(0.4, 0.7, 0.3).normalize();
     let aspect = 16.0 / 9.0;
@@ -222,9 +311,15 @@ fn clouds_appear_in_their_band_and_nowhere_else() {
         let difference = mean_abs_difference(&clear, &cloudy);
         eprintln!("CLOUD_BAND {name}: mean |cloudy - clear| = {difference:.2}");
         if crosses {
-            assert!(difference > 4.0, "{name}: no clouds where the view crosses the band ({difference:.2})");
+            assert!(
+                difference > 4.0,
+                "{name}: no clouds where the view crosses the band ({difference:.2})"
+            );
         } else {
-            assert!(difference < 0.5, "{name}: clouds outside the band ({difference:.2})");
+            assert!(
+                difference < 0.5,
+                "{name}: clouds outside the band ({difference:.2})"
+            );
         }
     }
     assert!(pollster::block_on(validation.pop()).is_none());
@@ -234,10 +329,23 @@ fn clouds_appear_in_their_band_and_nowhere_else() {
 /// settles, no pixel flickers from frame to frame.
 #[test]
 fn a_still_cloudy_sky_does_not_flicker() {
-    let Some(mut view) = view(320, 180, false) else { return };
+    let Some(mut view) = view(320, 180, false) else {
+        return;
+    };
     let sun = Vec3::new(0.5, 0.45, 0.2).normalize();
-    view.set_sky(sun, AtmosphereComponent::earth().with_clouds(CloudLayer { coverage: 0.5, ..band() }));
-    let camera = camera(Vec3::new(0.0, 200.0, 0.0), Vec3::new(1.0, 0.45, 0.2), 70.0, 16.0 / 9.0);
+    view.set_sky(
+        sun,
+        AtmosphereComponent::earth().with_clouds(CloudLayer {
+            coverage: 0.5,
+            ..band()
+        }),
+    );
+    let camera = camera(
+        Vec3::new(0.0, 200.0, 0.0),
+        Vec3::new(1.0, 0.45, 0.2),
+        70.0,
+        16.0 / 9.0,
+    );
     let first = view.settle(&camera, 48);
     view.capture("still", &first);
     let frames: Vec<Vec<[u8; 4]>> = (0..12).map(|_| view.settle(&camera, 1)).collect();
@@ -247,19 +355,37 @@ fn a_still_cloudy_sky_does_not_flicker() {
     for i in 0..pixels {
         let values: Vec<f64> = frames.iter().map(|f| luminance(f[i])).collect();
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let std = (values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / values.len() as f64).sqrt();
-        let range = values.iter().cloned().fold(f64::MIN, f64::max) - values.iter().cloned().fold(f64::MAX, f64::min);
+        let std = (values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>()
+            / values.len() as f64)
+            .sqrt();
+        let range = values.iter().cloned().fold(f64::MIN, f64::max)
+            - values.iter().cloned().fold(f64::MAX, f64::min);
         sum_std += std;
         worst = worst.max(std);
         jumpy += usize::from(range > 6.0);
-        map[i] = [(range * 8.0).min(255.0) as u8, first[i][1] / 4, first[i][2] / 4, 255];
+        map[i] = [
+            (range * 8.0).min(255.0) as u8,
+            first[i][1] / 4,
+            first[i][2] / 4,
+            255,
+        ];
     }
     view.capture("still_flicker", &map);
     let mean_std = sum_std / pixels as f64;
     let jumpy_share = jumpy as f64 / pixels as f64;
-    eprintln!("CLOUD_FLICKER mean std {mean_std:.3}, worst std {worst:.2}, pixels changing > 6: {:.3}%", jumpy_share * 100.0);
-    assert!(mean_std < 0.35, "the still sky flickers: mean std {mean_std:.3}");
-    assert!(jumpy_share < 0.002, "{:.3}% of the pixels flicker", jumpy_share * 100.0);
+    eprintln!(
+        "CLOUD_FLICKER mean std {mean_std:.3}, worst std {worst:.2}, pixels changing > 6: {:.3}%",
+        jumpy_share * 100.0
+    );
+    assert!(
+        mean_std < 0.35,
+        "the still sky flickers: mean std {mean_std:.3}"
+    );
+    assert!(
+        jumpy_share < 0.002,
+        "{:.3}% of the pixels flicker",
+        jumpy_share * 100.0
+    );
 }
 
 /// Pearson correlation.
@@ -286,7 +412,9 @@ fn correlation(a: &[f64], b: &[f64]) -> f64 {
 #[test]
 fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     const SIZE: u32 = 128;
-    let Some(mut view) = view(SIZE, SIZE, true) else { return };
+    let Some(mut view) = view(SIZE, SIZE, true) else {
+        return;
+    };
     let validation = view.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let planet = Arc::new(
         Planet::new(PlanetRecipe {
@@ -317,14 +445,29 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     let up_fov = 100.0f32;
     let frame_up = sun.cross(Vec3::Y).normalize().cross(sun).normalize();
     let looking = |eye: Vec3, forward: Vec3, fov: f32| {
-        Camera::perspective_look_at(eye, eye + forward, frame_up, fov.to_radians(), 1.0, 0.1, 1.0e7)
+        Camera::perspective_look_at(
+            eye,
+            eye + forward,
+            frame_up,
+            fov.to_radians(),
+            1.0,
+            0.1,
+            1.0e7,
+        )
     };
     let ground_point = Vec3::new(0.0, 1.0, 0.0);
     let down = looking(ground_point + sun * to_eye, -sun, down_fov);
     let up = looking(ground_point, sun, up_fov);
     let source = view.ground.clone().unwrap();
     let settle_ground = |view: &mut View, eye: Vec3, camera: &Camera| {
-        *source.lock().unwrap() = Some(PlanetFrame { eye: eye.as_dvec3(), planet: planet.clone(), sun, picks: None, kept: None, export: None });
+        *source.lock().unwrap() = Some(PlanetFrame {
+            eye: eye.as_dvec3(),
+            planet: planet.clone(),
+            sun,
+            picks: None,
+            kept: None,
+            export: None,
+        });
         let started = std::time::Instant::now();
         loop {
             view.render(camera);
@@ -336,7 +479,10 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     };
     let side_sun = Vec3::new(-0.5, 0.6, -0.3).normalize();
     let mut images = Vec::new();
-    for air in [AtmosphereComponent::earth(), AtmosphereComponent::earth().with_clouds(clouds)] {
+    for air in [
+        AtmosphereComponent::earth(),
+        AtmosphereComponent::earth().with_clouds(clouds),
+    ] {
         view.set_sky(sun, air);
         settle_ground(&mut view, ground_point + sun * to_eye, &down);
         let ground = view.settle(&down, 16);
@@ -345,7 +491,8 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
         let sky = view.settle(&up, 16);
         images.push((ground, sky));
     }
-    let [(clear_ground, clear_sky), (cloudy_ground, cloudy_sky)] = [images.remove(0), images.remove(0)];
+    let [(clear_ground, clear_sky), (cloudy_ground, cloudy_sky)] =
+        [images.remove(0), images.remove(0)];
     view.capture("shadow_ground_clear", &clear_ground);
     view.capture("shadow_ground_cloudy", &cloudy_ground);
     view.capture("shadow_sky_clear", &clear_sky);
@@ -357,7 +504,10 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     let clouds_middle = 3750.0;
     for y in 0..n {
         for x in 0..n {
-            let ndc = glam::Vec2::new((x as f32 + 0.5) / n as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / n as f32 * 2.0);
+            let ndc = glam::Vec2::new(
+                (x as f32 + 0.5) / n as f32 * 2.0 - 1.0,
+                1.0 - (y as f32 + 0.5) / n as f32 * 2.0,
+            );
             let unproject = |depth: f32| {
                 let p = down_inverse * glam::Vec4::new(ndc.x, ndc.y, depth, 1.0);
                 p.truncate() / p.w
@@ -378,14 +528,20 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
             let cover_at = |s: usize| (luminance(cloudy_sky[s]) - luminance(clear_sky[s])).abs();
             let along_sun = pixel(ground + sun * ((clouds_middle - ground.y) / sun.y));
             let above = pixel(ground + Vec3::Y * (clouds_middle - ground.y));
-            let (Some(s), Some(a)) = (along_sun, above) else { continue };
+            let (Some(s), Some(a)) = (along_sun, above) else {
+                continue;
+            };
             let g = y * n + x;
             darkening.push(luminance(clear_ground[g]) - luminance(cloudy_ground[g]));
             cover.push(cover_at(s));
             cover_above.push(cover_at(a));
         }
     }
-    assert!(darkening.len() > n * n / 4, "the views do not overlap: {}", darkening.len());
+    assert!(
+        darkening.len() > n * n / 4,
+        "the views do not overlap: {}",
+        darkening.len()
+    );
     let mean_darkening = darkening.iter().sum::<f64>() / darkening.len() as f64;
     let r = correlation(&darkening, &cover);
     let r_above = correlation(&darkening, &cover_above);
@@ -393,9 +549,18 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
         "CLOUD_SHADOW ground darkening {mean_darkening:.2}, correlation with the cover along the sun {r:.3}, straight above {r_above:.3} ({} pixels)",
         darkening.len()
     );
-    assert!(mean_darkening > 1.5, "the clouds cast no shadow: {mean_darkening:.2}");
-    assert!(r > 0.5, "the shadow is not under the clouds along the sun: r = {r:.3}");
-    assert!(r > r_above + 0.2, "the shadow falls straight down, not along the sun: {r:.3} vs {r_above:.3}");
+    assert!(
+        mean_darkening > 1.5,
+        "the clouds cast no shadow: {mean_darkening:.2}"
+    );
+    assert!(
+        r > 0.5,
+        "the shadow is not under the clouds along the sun: r = {r:.3}"
+    );
+    assert!(
+        r > r_above + 0.2,
+        "the shadow falls straight down, not along the sun: {r:.3} vs {r_above:.3}"
+    );
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 
@@ -405,13 +570,17 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
 #[test]
 fn clouds_seen_from_orbit_lie_over_the_ground() {
     const SIZE: u32 = 128;
-    let Some(mut view) = view(SIZE, SIZE, true) else { return };
+    let Some(mut view) = view(SIZE, SIZE, true) else {
+        return;
+    };
     let validation = view.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let radius = planet.grid().radius();
     let below = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = below.normalize();
-    let sun = (up + up.any_orthonormal_vector() * 0.3).normalize().as_vec3();
+    let sun = (up + up.any_orthonormal_vector() * 0.3)
+        .normalize()
+        .as_vec3();
     // Small, dense clouds: several in the 14 km the view holds.
     let clouds = CloudLayer {
         bottom_km: 2.0,
@@ -425,11 +594,25 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
     };
     let altitude = 400_000.0;
     let eye = below + up * altitude;
-    let camera = Camera::perspective_look_to(eye, -up.as_vec3(), up.any_orthonormal_vector().as_vec3(),
+    let camera = Camera::perspective_look_to(
+        eye,
+        -up.as_vec3(),
+        up.any_orthonormal_vector().as_vec3(),
         // About 14 km of ground.
-        2.0 * (7000.0 / altitude as f32).atan(), 1.0, 1.0, 1.0e9);
+        2.0 * (7000.0 / altitude as f32).atan(),
+        1.0,
+        1.0,
+        1.0e9,
+    );
     let source = view.ground.clone().unwrap();
-    *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun, picks: None, kept: None, export: None });
+    *source.lock().unwrap() = Some(PlanetFrame {
+        eye,
+        planet,
+        sun,
+        picks: None,
+        kept: None,
+        export: None,
+    });
     let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
     let mut images = Vec::new();
     for air in [air, air.with_clouds(clouds)] {
@@ -446,11 +629,16 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
     }
     view.capture("orbit_clear", &images[0]);
     view.capture("orbit_cloudy", &images[1]);
-    let brightness = |pixels: &[[u8; 4]]| pixels.iter().map(|p| luminance(*p)).sum::<f64>() / pixels.len() as f64;
+    let brightness = |pixels: &[[u8; 4]]| {
+        pixels.iter().map(|p| luminance(*p)).sum::<f64>() / pixels.len() as f64
+    };
     let (clear, cloudy) = (brightness(&images[0]), brightness(&images[1]));
     eprintln!("CLOUD_ORBIT from 400 km: mean luminance over the ground clear {clear:.2}, cloudy {cloudy:.2}");
     // Sunlit cloud tops are brighter than the ground they hide.
-    assert!(cloudy > clear + 4.0, "no clouds over the ground from orbit ({clear:.2} -> {cloudy:.2})");
+    assert!(
+        cloudy > clear + 4.0,
+        "no clouds over the ground from orbit ({clear:.2} -> {cloudy:.2})"
+    );
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 
@@ -463,19 +651,32 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
 fn from_far_away_the_cover_is_weather_not_a_tile() {
     const SIZE: u32 = 192;
     const BLOCK: usize = 12;
-    let Some(mut view) = view(SIZE, SIZE, false) else { return };
+    let Some(mut view) = view(SIZE, SIZE, false) else {
+        return;
+    };
     let validation = view.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let radius = 6_371_000.0f64;
     let distance = 4.0 * radius;
     let towards = glam::DVec3::new(0.3, 0.6, 1.0).normalize();
     let eye = towards * distance;
     let fov = 2.0 * (radius / distance).asin() as f32 * 1.1;
-    let camera = Camera::perspective_look_to(eye, -towards.as_vec3(), Vec3::Y, fov, 1.0, 1000.0, 1.0e9);
+    let camera =
+        Camera::perspective_look_to(eye, -towards.as_vec3(), Vec3::Y, fov, 1.0, 1000.0, 1.0e9);
     let sun = (towards.as_vec3() + Vec3::new(0.3, 0.2, 0.0)).normalize();
     let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
-    let clouds = CloudLayer { wind: [0.0; 3], ..CloudLayer::cumulus() };
+    let clouds = CloudLayer {
+        wind: [0.0; 3],
+        ..CloudLayer::cumulus()
+    };
     let mut images = Vec::new();
-    for air in [air, air.with_clouds(clouds), air.with_clouds(CloudLayer { weather: PlanetWeather::calm(), ..clouds })] {
+    for air in [
+        air,
+        air.with_clouds(clouds),
+        air.with_clouds(CloudLayer {
+            weather: PlanetWeather::calm(),
+            ..clouds
+        }),
+    ] {
         view.set_sky(sun, air);
         images.push(view.settle(&camera, 24));
     }
@@ -488,21 +689,26 @@ fn from_far_away_the_cover_is_weather_not_a_tile() {
         let mut means = Vec::new();
         for by in (0..n).step_by(BLOCK) {
             for bx in (0..n).step_by(BLOCK) {
-                let centre = ((bx + BLOCK / 2) as f64 / n as f64 - 0.5, (by + BLOCK / 2) as f64 / n as f64 - 0.5);
+                let centre = (
+                    (bx + BLOCK / 2) as f64 / n as f64 - 0.5,
+                    (by + BLOCK / 2) as f64 / n as f64 - 0.5,
+                );
                 if (centre.0 * centre.0 + centre.1 * centre.1).sqrt() > 0.22 {
                     continue;
                 }
                 let mut sum = 0.0;
                 for y in by..by + BLOCK {
                     for x in bx..bx + BLOCK {
-                        sum += (luminance(cloudy[y * n + x]) - luminance(images[0][y * n + x])).abs();
+                        sum +=
+                            (luminance(cloudy[y * n + x]) - luminance(images[0][y * n + x])).abs();
                     }
                 }
                 means.push(sum / (BLOCK * BLOCK) as f64);
             }
         }
         let mean = means.iter().sum::<f64>() / means.len() as f64;
-        let std = (means.iter().map(|m| (m - mean) * (m - mean)).sum::<f64>() / means.len() as f64).sqrt();
+        let std = (means.iter().map(|m| (m - mean) * (m - mean)).sum::<f64>() / means.len() as f64)
+            .sqrt();
         (mean, std / mean.max(1e-6), means.len())
     };
     let (weather_mean, weather, blocks) = variation(&images[1]);
@@ -510,9 +716,18 @@ fn from_far_away_the_cover_is_weather_not_a_tile() {
     eprintln!(
         "CLOUD_FAR {blocks} blocks: weather cover {weather_mean:.1}, variation {weather:.3}; calm cover {calm_mean:.1}, variation {calm:.3}"
     );
-    assert!(weather_mean > 4.0 && calm_mean > 4.0, "no clouds from afar ({weather_mean:.1}, {calm_mean:.1})");
-    assert!(weather > 0.15, "the weather's cover is even from afar: {weather:.3}");
-    assert!(weather > 2.0 * calm, "the weather varies no more than a calm sky: {weather:.3} vs {calm:.3}");
+    assert!(
+        weather_mean > 4.0 && calm_mean > 4.0,
+        "no clouds from afar ({weather_mean:.1}, {calm_mean:.1})"
+    );
+    assert!(
+        weather > 0.15,
+        "the weather's cover is even from afar: {weather:.3}"
+    );
+    assert!(
+        weather > 2.0 * calm,
+        "the weather varies no more than a calm sky: {weather:.3} vs {calm:.3}"
+    );
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 
@@ -525,13 +740,24 @@ fn from_far_away_the_cover_is_weather_not_a_tile() {
 /// machines differ (the target is under 1 ms on the dev GPU).
 #[test]
 fn clouds_cost() {
-    let Some(mut view) = view(1920, 1080, false) else { return };
-    if !view.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+    let Some(mut view) = view(1920, 1080, false) else {
+        return;
+    };
+    if !view
+        .device
+        .features()
+        .contains(wgpu::Features::TIMESTAMP_QUERY)
+    {
         eprintln!("CLOUD_COST skipped: no timestamp queries");
         return;
     }
     let sun = Vec3::new(0.5, 0.35, 0.2).normalize();
-    let camera = camera(Vec3::new(0.0, 300.0, 0.0), Vec3::new(1.0, 0.25, 0.3), 70.0, 16.0 / 9.0);
+    let camera = camera(
+        Vec3::new(0.0, 300.0, 0.0),
+        Vec3::new(1.0, 0.25, 0.3),
+        70.0,
+        16.0 / 9.0,
+    );
     let measure = |view: &mut View, camera: &Camera, air: AtmosphereComponent| {
         view.set_sky(sun, air);
         let mut samples: std::collections::HashMap<&'static str, Vec<f32>> = Default::default();
@@ -559,10 +785,22 @@ fn clouds_cost() {
     };
     let get = |m: &std::collections::HashMap<&str, f32>, k: &str| m.get(k).copied().unwrap_or(0.0);
     let radius = 6_371_000.0f64;
-    let orbit = Camera::perspective_look_to(glam::DVec3::new(0.0, radius + 400_000.0, 0.0), Vec3::new(1.0, -0.55, 0.2), Vec3::Y, 70f32.to_radians(), 16.0 / 9.0, 1.0, 1.0e9);
+    let orbit = Camera::perspective_look_to(
+        glam::DVec3::new(0.0, radius + 400_000.0, 0.0),
+        Vec3::new(1.0, -0.55, 0.2),
+        Vec3::Y,
+        70f32.to_radians(),
+        16.0 / 9.0,
+        1.0,
+        1.0e9,
+    );
     let views = [
         ("ground", camera, AtmosphereComponent::earth()),
-        ("orbit", orbit, AtmosphereComponent::earth().around_planet([0.0; 3], radius)),
+        (
+            "orbit",
+            orbit,
+            AtmosphereComponent::earth().around_planet([0.0; 3], radius),
+        ),
     ];
     for (name, camera, air) in views {
         let clear = measure(&mut view, &camera, air);

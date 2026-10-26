@@ -86,8 +86,9 @@ pub fn probe(
         observed.push((node.kind.clone(), range, externals));
     })?;
 
-    let declarations: Vec<PassDeclaration> =
-        (0..graph.pass_count()).filter_map(|index| graph.pass_declaration(index)).collect();
+    let declarations: Vec<PassDeclaration> = (0..graph.pass_count())
+        .filter_map(|index| graph.pass_declaration(index))
+        .collect();
     let external: HashSet<&'static str> = graph.external_input_names().into_iter().collect();
 
     // The kind a resource has is the one its first precise producer declares.
@@ -124,8 +125,16 @@ pub fn probe(
 
         // A node that adds no pass only supplies data, and does not execute.
         let executes = !range.is_empty();
-        let mut inputs = if executes { vec![PinDesc::flow("in")] } else { Vec::new() };
-        let mut outputs = if executes { vec![PinDesc::flow("out")] } else { Vec::new() };
+        let mut inputs = if executes {
+            vec![PinDesc::flow("in")]
+        } else {
+            Vec::new()
+        };
+        let mut outputs = if executes {
+            vec![PinDesc::flow("out")]
+        } else {
+            Vec::new()
+        };
         let mut seen_inputs: HashSet<&'static str> = HashSet::new();
         let mut seen_outputs: HashSet<&'static str> = HashSet::new();
         let mut written_inside: HashSet<&'static str> = HashSet::new();
@@ -146,15 +155,17 @@ pub fn probe(
                     continue;
                 }
                 let ty = kind_of(read.name);
-                inputs.push(if external.contains(read.name) && !written_before.contains(read.name) {
-                    PinDesc::resource(PinType::SCENE, read.name)
-                } else if written_before.contains(read.name) {
-                    PinDesc::resource(ty, read.name)
-                } else if written_after.contains(read.name) {
-                    PinDesc::resource(ty, read.name).history()
-                } else {
-                    PinDesc::resource(ty, read.name).optional()
-                });
+                inputs.push(
+                    if external.contains(read.name) && !written_before.contains(read.name) {
+                        PinDesc::resource(PinType::SCENE, read.name)
+                    } else if written_before.contains(read.name) {
+                        PinDesc::resource(ty, read.name)
+                    } else if written_after.contains(read.name) {
+                        PinDesc::resource(ty, read.name).history()
+                    } else {
+                        PinDesc::resource(ty, read.name).optional()
+                    },
+                );
             }
             consumed.extend(declaration.scene_buffers.iter().copied());
             for write in &declaration.writes {
@@ -166,9 +177,15 @@ pub fn probe(
         }
         for key in consumed {
             scene_buffers.insert(key.to_string());
-            inputs.push(PinDesc::resource(PinType::BUFFER, format!("{SCENEDB_PREFIX}{key}")));
+            inputs.push(PinDesc::resource(
+                PinType::BUFFER,
+                format!("{SCENEDB_PREFIX}{key}"),
+            ));
         }
-        probe.nodes.entry(kind).or_insert(NodePins { inputs, outputs });
+        probe
+            .nodes
+            .entry(kind)
+            .or_insert(NodePins { inputs, outputs });
     }
 
     probe.scene_buffers = scene_buffers.into_iter().collect();

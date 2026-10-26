@@ -88,18 +88,29 @@ pub struct WorldVertex {
 
 impl WorldVertex {
     pub fn new(position: impl WorldPoint, color: [f32; 4]) -> Self {
-        Self { position: position.world(), color }
+        Self {
+            position: position.world(),
+            color,
+        }
     }
 
     /// This vertex in the frame of `origin`, for the GPU.
     fn in_frame(&self, origin: glam::DVec3) -> DebugVertex {
-        DebugVertex { position: (self.position - origin).as_vec3().to_array(), _pad: 0.0, color: self.color }
+        DebugVertex {
+            position: (self.position - origin).as_vec3().to_array(),
+            _pad: 0.0,
+            color: self.color,
+        }
     }
 }
 
 /// A unit vector perpendicular to `n` and another perpendicular to both.
 fn basis(n: glam::Vec3) -> (glam::Vec3, glam::Vec3) {
-    let up = if n.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
+    let up = if n.cross(glam::Vec3::Y).length_squared() < 1e-8 {
+        glam::Vec3::X
+    } else {
+        glam::Vec3::Y
+    };
     let tangent = n.cross(up).normalize_or_zero();
     (tangent, n.cross(tangent).normalize_or_zero())
 }
@@ -120,7 +131,13 @@ impl<'a> DebugBatch<'a> {
         self.lines_changed = true;
     }
 
-    pub fn tri(&mut self, v0: impl WorldPoint, v1: impl WorldPoint, v2: impl WorldPoint, color: [f32; 4]) {
+    pub fn tri(
+        &mut self,
+        v0: impl WorldPoint,
+        v1: impl WorldPoint,
+        v2: impl WorldPoint,
+        color: [f32; 4],
+    ) {
         self.state.user_tris.push(WorldVertex::new(v0, color));
         self.state.user_tris.push(WorldVertex::new(v1, color));
         self.state.user_tris.push(WorldVertex::new(v2, color));
@@ -133,13 +150,30 @@ impl<'a> DebugBatch<'a> {
     }
 
     /// A triangle of three offsets from `anchor`.
-    fn tri_at(&mut self, anchor: glam::DVec3, a: glam::Vec3, b: glam::Vec3, c: glam::Vec3, color: [f32; 4]) {
-        self.tri(anchor + a.as_dvec3(), anchor + b.as_dvec3(), anchor + c.as_dvec3(), color);
+    fn tri_at(
+        &mut self,
+        anchor: glam::DVec3,
+        a: glam::Vec3,
+        b: glam::Vec3,
+        c: glam::Vec3,
+        color: [f32; 4],
+    ) {
+        self.tri(
+            anchor + a.as_dvec3(),
+            anchor + b.as_dvec3(),
+            anchor + c.as_dvec3(),
+            color,
+        );
     }
 
     /// The circle of `radius` about `center` in the plane spanned by
     /// `tangent` and `bitangent`, as offsets from `center`.
-    fn ring(tangent: glam::Vec3, bitangent: glam::Vec3, radius: f32, segments: u32) -> impl Iterator<Item = (glam::Vec3, glam::Vec3)> {
+    fn ring(
+        tangent: glam::Vec3,
+        bitangent: glam::Vec3,
+        radius: f32,
+        segments: u32,
+    ) -> impl Iterator<Item = (glam::Vec3, glam::Vec3)> {
         let at = move |i: u32| {
             let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
             (tangent * theta.cos() + bitangent * theta.sin()) * radius
@@ -162,14 +196,25 @@ impl<'a> DebugBatch<'a> {
             return;
         }
         let c = center.world();
-        for (u, v) in [(glam::Vec3::X, glam::Vec3::Y), (glam::Vec3::X, glam::Vec3::Z), (glam::Vec3::Y, glam::Vec3::Z)] {
+        for (u, v) in [
+            (glam::Vec3::X, glam::Vec3::Y),
+            (glam::Vec3::X, glam::Vec3::Z),
+            (glam::Vec3::Y, glam::Vec3::Z),
+        ] {
             for (a, b) in Self::ring(u, v, radius, segments) {
                 self.line_at(c, a, b, color);
             }
         }
     }
 
-    pub fn filled_disk(&mut self, center: impl WorldPoint, normal: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+    pub fn filled_disk(
+        &mut self,
+        center: impl WorldPoint,
+        normal: [f32; 3],
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         if segments < 3 {
             return;
         }
@@ -180,7 +225,15 @@ impl<'a> DebugBatch<'a> {
         }
     }
 
-    pub fn cone(&mut self, apex: impl WorldPoint, axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+    pub fn cone(
+        &mut self,
+        apex: impl WorldPoint,
+        axis: [f32; 3],
+        height: f32,
+        base_radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         if segments < 3 {
             return;
         }
@@ -194,7 +247,15 @@ impl<'a> DebugBatch<'a> {
         }
     }
 
-    pub fn filled_cone(&mut self, apex: impl WorldPoint, axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+    pub fn filled_cone(
+        &mut self,
+        apex: impl WorldPoint,
+        axis: [f32; 3],
+        height: f32,
+        base_radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         if segments < 3 {
             return;
         }
@@ -208,7 +269,15 @@ impl<'a> DebugBatch<'a> {
         }
     }
 
-    pub fn cylinder(&mut self, base_center: impl WorldPoint, axis: [f32; 3], height: f32, radius: f32, color: [f32; 4], segments: u32) {
+    pub fn cylinder(
+        &mut self,
+        base_center: impl WorldPoint,
+        axis: [f32; 3],
+        height: f32,
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         if segments < 3 {
             return;
         }
@@ -267,7 +336,14 @@ impl<'a> DebugBatch<'a> {
             glam::Vec3::new(h, h, h),
             glam::Vec3::new(-h, h, h),
         ];
-        const QUADS: [[usize; 4]; 6] = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 4, 7, 3], [1, 2, 6, 5], [0, 1, 5, 4], [3, 7, 6, 2]];
+        const QUADS: [[usize; 4]; 6] = [
+            [0, 3, 2, 1],
+            [4, 5, 6, 7],
+            [0, 4, 7, 3],
+            [1, 2, 6, 5],
+            [0, 1, 5, 4],
+            [3, 7, 6, 2],
+        ];
         for [a, b, cc, d] in QUADS {
             self.tri_at(c, corners[a], corners[b], corners[cc], color);
             self.tri_at(c, corners[a], corners[cc], corners[d], color);
@@ -367,7 +443,11 @@ impl DebugPass {
         target_format: wgpu::TextureFormat,
         depth_test: bool,
     ) -> Self {
-        let shader = helio_core::shader::module(device, "Debug Draw Shader", helio_core::include_wgsl!("../../shaders/debug_draw.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Debug Draw Shader",
+            helio_core::include_wgsl!("../../shaders/debug_draw.wgsl"),
+        );
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Debug Draw BGL"),
@@ -396,99 +476,105 @@ impl DebugPass {
             mapped_at_creation: false,
         });
 
-        let pipeline_depth = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Draw Pipeline Depth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
+        let pipeline_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Draw Pipeline Depth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 16,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
-        let pipeline_no_depth = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Draw Pipeline NoDepth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
+        let pipeline_no_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Draw Pipeline NoDepth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x4,
+                                offset: 16,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         let tri_attribs = [
             wgpu::VertexAttribute {
@@ -518,36 +604,40 @@ impl DebugPass {
             ..Default::default()
         };
 
-        let pipeline_tri_depth = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Tri Pipeline Depth"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(tri_vbl.clone())],
+        let pipeline_tri_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Debug Tri Pipeline Depth"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(tri_vbl.clone())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(tri_target.clone())],
+                }),
+                primitive: tri_prim,
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(tri_target.clone())],
-            }),
-            primitive: tri_prim,
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
-        let pipeline_tri_no_depth =
-            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
+        let pipeline_tri_no_depth = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
                 label: Some("Debug Tri Pipeline NoDepth"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -567,7 +657,8 @@ impl DebugPass {
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            },
+        );
 
         let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Tri Buffer"),
@@ -888,7 +979,11 @@ impl DebugDrawPass {
         // against real geometry rather than painting over it.
         pass.set_use_scene_depth(editor_mode && depth_test);
 
-        let grid_shader = helio_core::shader::module(device, "Infinite Debug Grid Shader", helio_core::include_wgsl!("../../shaders/infinite_grid.wgsl"));
+        let grid_shader = helio_core::shader::module(
+            device,
+            "Infinite Debug Grid Shader",
+            helio_core::include_wgsl!("../../shaders/infinite_grid.wgsl"),
+        );
         let grid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Infinite Debug Grid BGL"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -907,42 +1002,45 @@ impl DebugDrawPass {
             bind_group_layouts: &[Some(&grid_bgl)],
             immediate_size: 0,
         });
-        let grid_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Infinite Debug Grid Pipeline"),
-            layout: Some(&grid_layout),
-            vertex: wgpu::VertexState {
-                module: &grid_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let grid_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Infinite Debug Grid Pipeline"),
+                layout: Some(&grid_layout),
+                vertex: wgpu::VertexState {
+                    module: &grid_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &grid_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                // `infinite_grid.wgsl` writes `frag_depth`, so this pipeline must
+                // always declare a depth attachment. It is only submitted by the
+                // editor pass, whose render-pass descriptor supplies the matching
+                // depth view. The ordinary debug pass constructs this pipeline but
+                // never uses it.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    stencil: wgpu::StencilState::default(),
+                    bias: helio_core::depth::bias_toward_camera(1, 1.0, 0.0),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &grid_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            // `infinite_grid.wgsl` writes `frag_depth`, so this pipeline must
-            // always declare a depth attachment. It is only submitted by the
-            // editor pass, whose render-pass descriptor supplies the matching
-            // depth view. The ordinary debug pass constructs this pipeline but
-            // never uses it.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                stencil: wgpu::StencilState::default(),
-                bias: helio_core::depth::bias_toward_camera(1, 1.0, 0.0),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let grid_uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Infinite Debug Grid Uniform"),
             size: std::mem::size_of::<InfiniteGridUniform>() as u64,
@@ -1016,7 +1114,6 @@ impl DebugDrawPass {
         self.editor_volume_cache.clear();
         self.editor_volume_cache.extend_from_slice(volume_lines);
     }
-
 }
 
 impl RenderPass for DebugDrawPass {
@@ -1111,7 +1208,8 @@ impl RenderPass for DebugDrawPass {
             vertices.iter().map(|v| v.in_frame(origin)).collect()
         };
         if user_lines_generation != self.cached_line_gen || moved {
-            self.pass.update_lines(ctx.queue, &rebase(&state.user_lines));
+            self.pass
+                .update_lines(ctx.queue, &rebase(&state.user_lines));
             self.cached_line_gen = user_lines_generation;
         }
         if user_tris_generation != self.cached_tri_gen || moved {
@@ -1165,14 +1263,27 @@ impl Renderer {
     pub fn debug_set_editor_volume_bounds(&mut self, bounds: &[[glam::DVec3; 2]]) {
         const COLOR: [f32; 4] = [0.15, 0.8, 1.0, 1.0];
         const EDGES: [(usize, usize); 12] = [
-            (0, 1), (1, 2), (2, 3), (3, 0),
-            (4, 5), (5, 6), (6, 7), (7, 4),
-            (0, 4), (1, 5), (2, 6), (3, 7),
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
         ];
         let mut lines = Vec::with_capacity(bounds.len() * 24);
         for [min, max] in bounds {
             let corner = |x: bool, y: bool, z: bool| {
-                glam::DVec3::new(if x { max.x } else { min.x }, if y { max.y } else { min.y }, if z { max.z } else { min.z })
+                glam::DVec3::new(
+                    if x { max.x } else { min.x },
+                    if y { max.y } else { min.y },
+                    if z { max.z } else { min.z },
+                )
             };
             let corners = [
                 corner(false, false, false),
@@ -1252,11 +1363,24 @@ impl Renderer {
         self.debug_batch(|b| b.line(from, to, color));
     }
 
-    pub fn debug_tri(&mut self, v0: impl WorldPoint, v1: impl WorldPoint, v2: impl WorldPoint, color: [f32; 4]) {
+    pub fn debug_tri(
+        &mut self,
+        v0: impl WorldPoint,
+        v1: impl WorldPoint,
+        v2: impl WorldPoint,
+        color: [f32; 4],
+    ) {
         self.debug_batch(|b| b.tri(v0, v1, v2, color));
     }
 
-    pub fn debug_filled_disk(&mut self, center: impl WorldPoint, normal: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+    pub fn debug_filled_disk(
+        &mut self,
+        center: impl WorldPoint,
+        normal: [f32; 3],
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         self.debug_batch(|b| b.filled_disk(center, normal, radius, color, segments));
     }
 
@@ -1276,11 +1400,23 @@ impl Renderer {
         self.debug_batch(|b| b.filled_box(center, half, color));
     }
 
-    pub fn debug_circle(&mut self, center: impl WorldPoint, radius: f32, color: [f32; 4], segments: u32) {
+    pub fn debug_circle(
+        &mut self,
+        center: impl WorldPoint,
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         self.debug_batch(|b| b.circle(center, radius, color, segments));
     }
 
-    pub fn debug_sphere(&mut self, center: impl WorldPoint, radius: f32, color: [f32; 4], segments: u32) {
+    pub fn debug_sphere(
+        &mut self,
+        center: impl WorldPoint,
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
         self.debug_batch(|b| b.sphere(center, radius, color, segments));
     }
 
@@ -1294,7 +1430,17 @@ impl Renderer {
         major_segments: u32,
         minor_segments: u32,
     ) {
-        self.debug_batch(|b| b.torus(center, normal, major_radius, minor_radius, color, major_segments, minor_segments));
+        self.debug_batch(|b| {
+            b.torus(
+                center,
+                normal,
+                major_radius,
+                minor_radius,
+                color,
+                major_segments,
+                minor_segments,
+            )
+        });
     }
 
     pub fn debug_cylinder(

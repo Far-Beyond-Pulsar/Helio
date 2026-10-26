@@ -74,7 +74,11 @@ impl SpriteSimulatePass {
     ) -> Self {
         let slot_count = initial_velocities.len() as u32;
 
-        let shader = helio_core::shader::module(device, "Sprite Simulate Shader", helio_core::include_wgsl!("../shaders/sprite_simulate.wgsl"));
+        let shader = helio_core::shader::module(
+            device,
+            "Sprite Simulate Shader",
+            helio_core::include_wgsl!("../shaders/sprite_simulate.wgsl"),
+        );
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Simulate BGL"),
@@ -127,14 +131,17 @@ impl SpriteSimulatePass {
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
-        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("Sprite Simulate Pipeline"),
-            layout: Some(&pl),
-            module: &shader,
-            entry_point: Some("cs_simulate"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("Sprite Simulate Pipeline"),
+                layout: Some(&pl),
+                module: &shader,
+                entry_point: Some("cs_simulate"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sprite Simulate Uniforms"),

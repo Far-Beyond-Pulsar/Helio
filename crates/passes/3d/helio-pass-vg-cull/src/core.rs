@@ -10,8 +10,8 @@ use helio_core::CommandRecorder;
 use helio_vg_format::VgMode;
 
 use crate::{
-    mode_bits, state, stats, FLAG_DENSE_MASK, FLAG_MASKED, FLAG_STATS, FLAG_SW_MASKED,
-    FLAG_TWO_PHASE, MAX_BIN_CAPACITY, FLAG_NO_ROOT_SHORTCUT,
+    mode_bits, state, stats, FLAG_DENSE_MASK, FLAG_MASKED, FLAG_NO_ROOT_SHORTCUT, FLAG_STATS,
+    FLAG_SW_MASKED, FLAG_TWO_PHASE, MAX_BIN_CAPACITY,
 };
 
 const ROUND_STRIDE: u64 = 256;
@@ -245,7 +245,11 @@ struct Pipelines {
     finalize: wgpu::ComputePipeline,
 }
 
-type BindCache = Option<(Vec<wgpu::Buffer>, Option<wgpu::TextureView>, wgpu::BindGroup)>;
+type BindCache = Option<(
+    Vec<wgpu::Buffer>,
+    Option<wgpu::TextureView>,
+    wgpu::BindGroup,
+)>;
 
 pub struct VgCullCore {
     pub config: VgCullConfig,
@@ -436,7 +440,11 @@ impl VgCullCore {
         });
         let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("VgCull Dummy HiZ"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -534,7 +542,10 @@ impl VgCullCore {
         let mut queue_cap = b.queue_capacity;
         if let Some(words) = self.pending_capacity_stats.take() {
             let st = |i: u32| words[(state::STATS + i) as usize];
-            let max_bin = (0..crate::BIN_COUNT).map(|i| words[i as usize]).max().unwrap_or(0);
+            let max_bin = (0..crate::BIN_COUNT)
+                .map(|i| words[i as usize])
+                .max()
+                .unwrap_or(0);
             if st(stats::VISIBLE_OVERFLOW) > 0 || max_bin > bin_cap / 4 * 3 {
                 bin_cap = (max_bin.max(bin_cap) * 2)
                     .next_power_of_two()
@@ -562,9 +573,7 @@ impl VgCullCore {
             }
             self.last_stats = Some(words);
         }
-        if bin_cap != b.bin_capacity
-            || queue_cap != b.queue_capacity
-        {
+        if bin_cap != b.bin_capacity || queue_cap != b.queue_capacity {
             self.buffers = Arc::new(VgCullBuffers::new(
                 device,
                 bin_cap,
@@ -626,15 +635,19 @@ impl VgCullCore {
         if rb.copied && !rb.in_flight {
             let ready = rb.ready.clone();
             let buf = rb.staging.clone();
-            rb.staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                if r.is_ok() {
-                    let words: Vec<u32> = {
-                        let Ok(view) = buf.slice(..).get_mapped_range() else { return };
-                        bytemuck::cast_slice::<u8, u32>(&view).to_vec()
-                    };
-                    *ready.lock().unwrap() = Some(words);
-                }
-            });
+            rb.staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    if r.is_ok() {
+                        let words: Vec<u32> = {
+                            let Ok(view) = buf.slice(..).get_mapped_range() else {
+                                return;
+                            };
+                            bytemuck::cast_slice::<u8, u32>(&view).to_vec()
+                        };
+                        *ready.lock().unwrap() = Some(words);
+                    }
+                });
             rb.in_flight = true;
             rb.copied = false;
         }
@@ -677,13 +690,16 @@ impl VgCullCore {
         }
         // Phase 0 trusts last frame's Hi-Z only from the second frame on
         // (frame 1 has no previous depth). Stale-but-valid is still safe.
-        let hiz_valid = self.config.two_phase_occlusion
-            && hiz.is_some()
-            && (phase == 1 || self.frame >= 2);
+        let hiz_valid =
+            self.config.two_phase_occlusion && hiz.is_some() && (phase == 1 || self.frame >= 2);
 
         for r in 0..rounds {
             let (src, mut dst) = if phase == 0 {
-                if r % 2 == 0 { (0, 1) } else { (1, 0) }
+                if r % 2 == 0 {
+                    (0, 1)
+                } else {
+                    (1, 0)
+                }
             } else if r == 0 {
                 (2, 0)
             } else {
@@ -694,16 +710,38 @@ impl VgCullCore {
                 dst = 3;
             }
             let block = phase as u64 * rounds as u64 + r as u64;
-            let round = GpuRound { src, dst, phase, hiz_valid: hiz_valid as u32 };
-            queue.write_buffer(&self.round_buf, block * ROUND_STRIDE, bytemuck::bytes_of(&round));
+            let round = GpuRound {
+                src,
+                dst,
+                phase,
+                hiz_valid: hiz_valid as u32,
+            };
+            queue.write_buffer(
+                &self.round_buf,
+                block * ROUND_STRIDE,
+                bytemuck::bytes_of(&round),
+            );
         }
         let fin_block = 2 * rounds as u64 + phase as u64;
-        let fin = GpuRound { src: 0, dst: 0, phase, hiz_valid: 0 };
-        queue.write_buffer(&self.round_buf, fin_block * ROUND_STRIDE, bytemuck::bytes_of(&fin));
+        let fin = GpuRound {
+            src: 0,
+            dst: 0,
+            phase,
+            hiz_valid: 0,
+        };
+        queue.write_buffer(
+            &self.round_buf,
+            fin_block * ROUND_STRIDE,
+            bytemuck::bytes_of(&fin),
+        );
 
         let bg0 = self.bind_group0(device, camera, inputs, hiz, phase as usize, &b);
         let mut pass = rec.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(if phase == 0 { "VgCull Early" } else { "VgCull Late" }),
+            label: Some(if phase == 0 {
+                "VgCull Early"
+            } else {
+                "VgCull Late"
+            }),
             timestamp_writes: None,
         });
         pass.set_bind_group(0, &bg0, &[]);
@@ -728,7 +766,11 @@ impl VgCullCore {
         pass.dispatch_workgroups(1, 1, 1);
         drop(pass);
 
-        let last = if self.config.two_phase_occlusion { 1 } else { 0 };
+        let last = if self.config.two_phase_occlusion {
+            1
+        } else {
+            0
+        };
         if phase == last && !self.readback.copied && !self.readback.in_flight {
             rec.copy_buffer_to_buffer(
                 &b.state,
@@ -754,7 +796,16 @@ impl VgCullCore {
         let materials = i.materials.unwrap_or(&self.dummy_buf);
         let mut bufs: Vec<&wgpu::Buffer> = vec![camera, &self.params_buf, i.instances, i.objects];
         bufs.extend(i.stream.as_array());
-        bufs.extend([i.gcbvh_nodes, i.gcbvh_header, i.gcbvh_items, dense, &b.state, &b.queues, &b.visible, &b.history]);
+        bufs.extend([
+            i.gcbvh_nodes,
+            i.gcbvh_header,
+            i.gcbvh_items,
+            dense,
+            &b.state,
+            &b.queues,
+            &b.visible,
+            &b.history,
+        ]);
         bufs.push(materials);
         let key: Vec<wgpu::Buffer> = bufs.iter().map(|b| (*b).clone()).collect();
         if let Some((k, v, bg)) = &self.bind_cache[slot] {
@@ -767,14 +818,29 @@ impl VgCullCore {
         // bufs[0..12] = bindings 0..=11, bufs[12..16] = 12..=15, then texture (16),
         // sampler (17), then bufs[16..20] = 18..=21.
         for (n, buf) in bufs.iter().enumerate().take(16) {
-            entries.push(wgpu::BindGroupEntry { binding: n as u32, resource: buf.as_entire_binding() });
+            entries.push(wgpu::BindGroupEntry {
+                binding: n as u32,
+                resource: buf.as_entire_binding(),
+            });
         }
-        entries.push(wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(view) });
-        entries.push(wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.sampler) });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 16,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 17,
+            resource: wgpu::BindingResource::Sampler(&self.sampler),
+        });
         for (n, buf) in bufs.iter().enumerate().skip(16).take(4) {
-            entries.push(wgpu::BindGroupEntry { binding: n as u32 + 2, resource: buf.as_entire_binding() });
+            entries.push(wgpu::BindGroupEntry {
+                binding: n as u32 + 2,
+                resource: buf.as_entire_binding(),
+            });
         }
-        entries.push(wgpu::BindGroupEntry { binding: 22, resource: bufs[20].as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 22,
+            resource: bufs[20].as_entire_binding(),
+        });
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VgCull BG0"),
             layout: &self.bgl0,

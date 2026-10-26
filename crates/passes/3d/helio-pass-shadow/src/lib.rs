@@ -179,13 +179,19 @@ impl ShadowPass {
     ) -> Self {
         let atlas_layers = 1;
         // ── Shader ────────────────────────────────────────────────────────────
-        let depth_materials = helio_pass_gbuffer::depth_material::DepthMaterialBindings::new(device);
+        let depth_materials =
+            helio_pass_gbuffer::depth_material::DepthMaterialBindings::new(device);
         let source = depth_materials.shader_source(include_str!("../shaders/shadow.wgsl"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shadow cutout"), source: wgpu::ShaderSource::Wgsl(source.into()),
+            label: Some("Shadow cutout"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
 
-        let clear_shader = helio_core::shader::module(device, "Shadow/DepthClear", helio_core::include_wgsl!("../shaders/depth_clear.wgsl"));
+        let clear_shader = helio_core::shader::module(
+            device,
+            "Shadow/DepthClear",
+            helio_core::include_wgsl!("../shaders/depth_clear.wgsl"),
+        );
 
         // ── Bind Group Layout 0 ───────────────────────────────────────────────
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -250,20 +256,32 @@ impl ShadowPass {
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
                 // binding 7: per-face dirty page masks of the dynamic layer
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
                     visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -276,60 +294,76 @@ impl ShadowPass {
             immediate_size: 0,
         });
 
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Shadow Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                // Shared mesh vertex buffer layout (stride = 40 bytes, matches GBuffer pass).
-                // Only position (Float32x3 at offset 0) is needed for depth projection.
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 40,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }, wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 1 }],
-                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
-            },
-            // Depth-only: no colour outputs, no fragment shader.
-            // The GPU writes depth from the vertex clip position automatically.
-            fragment: Some(wgpu::FragmentState {
-                module: &shader, entry_point: Some("fs_main"), compilation_options: Default::default(), targets: &[],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // Front-face culling: light "looks into" the scene; culling the faces
-                // visible to the light prevents writing depth for lit-surface geometry
-                // directly, eliminating shadow acne.  Identical convention to UE4/Unity.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                // slope_scale compensates for FP depth precision on surfaces at
-                // grazing angles to the light.  Without it the shadow map depth for
-                // a surface can be equal-to or less-than the depth reconstructed in
-                // the lighting shader for that same surface, causing self-shadowing
-                // on every light independently (making each light appear to inherit
-                // every other light's shadow geometry).
-                // constant is left at 0 — that was the source of the visible offset.
-                bias: wgpu::DepthBiasState {
-                    constant: 0,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Shadow Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    // Shared mesh vertex buffer layout (stride = 40 bytes, matches GBuffer pass).
+                    // Only position (Float32x3 at offset 0) is needed for depth projection.
+                    buffers: &[
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: 40,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x3,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 16,
+                                    shader_location: 1,
+                                },
+                            ],
+                        }),
+                        Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT),
+                    ],
                 },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+                // Depth-only: no colour outputs, no fragment shader.
+                // The GPU writes depth from the vertex clip position automatically.
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // Front-face culling: light "looks into" the scene; culling the faces
+                    // visible to the light prevents writing depth for lit-surface geometry
+                    // directly, eliminating shadow acne.  Identical convention to UE4/Unity.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    // slope_scale compensates for FP depth precision on surfaces at
+                    // grazing angles to the light.  Without it the shadow map depth for
+                    // a surface can be equal-to or less-than the depth reconstructed in
+                    // the lighting shader for that same surface, causing self-shadowing
+                    // on every light independently (making each light appear to inherit
+                    // every other light's shadow geometry).
+                    // constant is left at 0 — that was the source of the visible offset.
+                    bias: wgpu::DepthBiasState {
+                        constant: 0,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
 
         // ── Depth-clear pipeline ───────────────────────────────────────────────
         // GPU-clear individual shadow atlas faces: renders a full-screen triangle
@@ -342,36 +376,40 @@ impl ShadowPass {
                 immediate_size: 0,
             });
 
-        let depth_clear_pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Shadow/DepthClear Pipeline"),
-            layout: Some(&depth_clear_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &clear_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
+        let depth_clear_pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Shadow/DepthClear Pipeline"),
+                layout: Some(&depth_clear_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &clear_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: None,
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
-        let mut face_idx_data = vec![0u8; FACE_REGIONS * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
+        let mut face_idx_data =
+            vec![0u8; FACE_REGIONS * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
         for i in 0..FACE_REGIONS * MAX_SHADOW_FACES {
             let offset = i * FACE_BUF_STRIDE as usize;
             face_idx_data[offset..offset + 4]
@@ -490,7 +528,13 @@ impl ShadowPass {
 
 impl RenderPass for ShadowPass {
     fn scene_buffers(&self) -> &'static [&'static str] {
-        &["builtin_mesh_index", "builtin_mesh_vertex", "materials", "skeletal_bone_palette", "skeletal_skin_vertices"]
+        &[
+            "builtin_mesh_index",
+            "builtin_mesh_vertex",
+            "materials",
+            "skeletal_bone_palette",
+            "skeletal_skin_vertices",
+        ]
     }
 
     fn render_pass_descriptor<'a>(
@@ -551,7 +595,9 @@ impl RenderPass for ShadowPass {
             self.face_static_gen.fill(u64::MAX);
             self.face_light_gen.fill(u64::MAX);
         }
-        if self.depth_materials.group.is_none() { return Ok(()); }
+        if self.depth_materials.group.is_none() {
+            return Ok(());
+        }
         let Some(batch) = ctx
             .registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
@@ -586,8 +632,12 @@ impl RenderPass for ShadowPass {
             return Ok(());
         };
         let desired = data.desired_matrices.unwrap_or(data.shadow_matrices);
-        let skin = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices"));
-        let palette = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette"));
+        let skin = ctx
+            .scene_buffers
+            .get(BufferKey::of("skeletal_skin_vertices"));
+        let palette = ctx
+            .scene_buffers
+            .get(BufferKey::of("skeletal_bone_palette"));
         let key = [
             desired.clone(),
             batch.instances.clone(),
@@ -625,9 +675,18 @@ impl RenderPass for ShadowPass {
                         binding: 4,
                         resource: self.face_dirty_buf.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry { binding: 5, resource: key[3].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: key[4].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: self.face_pages_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: key[3].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: key[4].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.face_pages_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bg_0_key = Some(key);

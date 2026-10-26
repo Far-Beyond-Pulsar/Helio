@@ -49,7 +49,11 @@ pub fn solve(sums: &[f64; STEPS], budget: f64) -> (f32, f64) {
     for k in 1..STEPS {
         if sums[k] <= budget {
             let (hi, lo) = (sums[k - 1].max(1.0).ln(), sums[k].max(1.0).ln());
-            let t = if hi > lo { ((hi - budget.max(1.0).ln()) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 };
+            let t = if hi > lo {
+                ((hi - budget.max(1.0).ln()) / (hi - lo)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
             let scale = candidate(k - 1) * (t as f32 / STEP_DIV).exp2();
             return (scale, budget.min(sums[k - 1]));
         }
@@ -68,7 +72,9 @@ pub fn slew(prev: f32, wanted: f32) -> f32 {
     if prev < 1.0 {
         return wanted;
     }
-    wanted.clamp(prev * SLEW_DOWN, prev * SLEW_UP).clamp(1.0, MAX_SCALE)
+    wanted
+        .clamp(prev * SLEW_DOWN, prev * SLEW_UP)
+        .clamp(1.0, MAX_SCALE)
 }
 
 /// Ratio of the triangles the cut really selects to the predicted ones
@@ -105,7 +111,11 @@ impl VisibleFraction {
             return;
         }
         let seen = (observed / predicted).clamp(Self::MIN, Self::MAX);
-        self.keep = if seen > self.keep { seen } else { self.keep + (seen - self.keep) * Self::RELEASE };
+        self.keep = if seen > self.keep {
+            seen
+        } else {
+            self.keep + (seen - self.keep) * Self::RELEASE
+        };
     }
 
     /// Triangles the prediction may reach for `budget` visible ones.
@@ -162,7 +172,10 @@ mod tests {
             let budget = sums[0] * 0.3;
             let (g, predicted) = solve(&sums, budget);
             assert!(g >= 1.0 && g <= MAX_SCALE);
-            assert!(predicted <= budget * 1.0001 || g == MAX_SCALE, "{predicted} > {budget}");
+            assert!(
+                predicted <= budget * 1.0001 || g == MAX_SCALE,
+                "{predicted} > {budget}"
+            );
             let _ = last;
             last = g;
         }

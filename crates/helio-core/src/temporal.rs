@@ -73,8 +73,7 @@ mod tests {
     #[test]
     fn ray_offsets_match_the_engines_jittered_projection() {
         for size in [[960, 540], [1280, 720], [513, 701]] {
-            let projection =
-                crate::depth::perspective(1.0, size[0] as f32 / size[1] as f32, 0.1);
+            let projection = crate::depth::perspective(1.0, size[0] as f32 / size[1] as f32, 0.1);
             for frame in [0, 1, 2, 63, 127, 10000] {
                 let j = r1_r2_jitter(frame);
                 let ndc = [j[0] * 2.0 / size[0] as f32, j[1] * 2.0 / size[1] as f32];

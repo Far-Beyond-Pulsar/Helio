@@ -61,7 +61,16 @@ pub fn hw_masked_source(binding: helio_mats::MaterialBindingConfig) -> String {
     format!(
         "{}{}",
         helio_mats::vg_alpha::module_header(binding),
-        join(&[FORMAT, BINDINGS, &db, DECODE, &alpha, helio_mats::vg_alpha::WGSL, helio_mats::vg_alpha::UV_WGSL, HW_RASTER_MASKED])
+        join(&[
+            FORMAT,
+            BINDINGS,
+            &db,
+            DECODE,
+            &alpha,
+            helio_mats::vg_alpha::WGSL,
+            helio_mats::vg_alpha::UV_WGSL,
+            HW_RASTER_MASKED
+        ])
     )
 }
 /// Tier 2 masked module (64-bit atomics); the alpha bindings are group 2 starting at binding 0.
@@ -71,7 +80,18 @@ pub fn sw_masked_source(binding: helio_mats::MaterialBindingConfig) -> String {
     format!(
         "{}{}",
         helio_mats::vg_alpha::module_header(binding),
-        join(&[FORMAT, BINDINGS, &db, DECODE, RASTER_COMMON, TRI_COVER, &alpha, helio_mats::vg_alpha::WGSL, helio_mats::vg_alpha::UV_WGSL, SW_RASTER_MASKED])
+        join(&[
+            FORMAT,
+            BINDINGS,
+            &db,
+            DECODE,
+            RASTER_COMMON,
+            TRI_COVER,
+            &alpha,
+            helio_mats::vg_alpha::WGSL,
+            helio_mats::vg_alpha::UV_WGSL,
+            SW_RASTER_MASKED
+        ])
     )
 }
 /// Dense-bin overlap estimate kernel.
@@ -85,8 +105,14 @@ pub fn tile_classify_source() -> String {
 
 /// Every module with a label, for validation.
 pub fn all_sources() -> Vec<(&'static str, String)> {
-    let bindless = helio_mats::MaterialBindingConfig { mode: helio_mats::MaterialBindingMode::BindingArray, max_textures: 256 };
-    let expanded = helio_mats::MaterialBindingConfig { mode: helio_mats::MaterialBindingMode::Expanded, max_textures: 11 };
+    let bindless = helio_mats::MaterialBindingConfig {
+        mode: helio_mats::MaterialBindingMode::BindingArray,
+        max_textures: 256,
+    };
+    let expanded = helio_mats::MaterialBindingConfig {
+        mode: helio_mats::MaterialBindingMode::Expanded,
+        max_textures: 11,
+    };
     vec![
         ("vg_hw_raster_masked (bindless)", hw_masked_source(bindless)),
         ("vg_hw_raster_masked (expanded)", hw_masked_source(expanded)),

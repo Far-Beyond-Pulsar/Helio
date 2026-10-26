@@ -45,7 +45,12 @@ impl Gpu {
     fn trace(&self, encoder: &mut wgpu::CommandEncoder, tlas: &wgpu::Tlas) -> wgpu::Buffer {
         self.trace_opacity(encoder, tlas, true)
     }
-    fn trace_opacity(&self, encoder: &mut wgpu::CommandEncoder, tlas: &wgpu::Tlas, force_opaque: bool) -> wgpu::Buffer {
+    fn trace_opacity(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        tlas: &wgpu::Tlas,
+        force_opaque: bool,
+    ) -> wgpu::Buffer {
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("known world-space ray segments"),
             source: wgpu::ShaderSource::Wgsl(r#"
@@ -313,27 +318,47 @@ fn padded_pool_vertices_copy_the_complete_stride() {
 fn transmission_rows_expire_with_their_acceleration_frame() {
     let gpu = Gpu::new();
     let tlas = gpu.device.create_tlas(&wgpu::CreateTlasDescriptor {
-        label: Some("frame material lifetime"), max_instances: 1,
+        label: Some("frame material lifetime"),
+        max_instances: 1,
         flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
         update_mode: wgpu::AccelerationStructureUpdateMode::Build,
     });
     let rows = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("transmission rows"), size: 16,
-        usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
+        label: Some("transmission rows"),
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
     });
     let mut frame = helio_core::FrameAcceleration::default();
-    let rays = |tlas, transmission, instances| helio_core::RayFrame { tlas, transmission, instances, proxies: None };
+    let rays = |tlas, transmission, instances| helio_core::RayFrame {
+        tlas,
+        transmission,
+        instances,
+        proxies: None,
+    };
     frame.publish(7, rays(Some(&tlas), Some(&rows), Some(&rows)));
     assert_eq!(frame.transmission(7), Some(&rows));
     assert_eq!(frame.instances(7), Some(&rows));
     assert!(frame.transmission(6).is_none());
     assert!(frame.transmission(8).is_none());
     frame.publish(8, rays(Some(&tlas), None, None));
-    assert!(frame.transmission(8).is_none(), "opaque publication retained stale glass");
-    assert!(frame.instances(8).is_none(), "publication retained stale instance rows");
+    assert!(
+        frame.transmission(8).is_none(),
+        "opaque publication retained stale glass"
+    );
+    assert!(
+        frame.instances(8).is_none(),
+        "publication retained stale instance rows"
+    );
     frame.publish(9, rays(None, Some(&rows), Some(&rows)));
-    assert!(frame.transmission(9).is_none(), "materials published without their TLAS");
-    assert!(frame.instances(9).is_none(), "instance rows published without their TLAS");
+    assert!(
+        frame.transmission(9).is_none(),
+        "materials published without their TLAS"
+    );
+    assert!(
+        frame.instances(9).is_none(),
+        "instance rows published without their TLAS"
+    );
 }
 
 #[test]
@@ -345,9 +370,17 @@ fn changing_blas_opacity_rebuilds_and_changes_hardware_candidate_handling() {
     let vertices = gpu.buffer(&triangle(0.0));
     for (opaque, rebuild) in [(true, true), (false, true), (false, false), (true, true)] {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        assert_eq!(blas.build_from_buffers_with_opacity(1, &mut encoder, geometry(&vertices, 0), opaque).unwrap(), rebuild);
-        tlas.build(&mut encoder, &[instance(1, 0.0)], &blas).unwrap();
+        assert_eq!(
+            blas.build_from_buffers_with_opacity(1, &mut encoder, geometry(&vertices, 0), opaque)
+                .unwrap(),
+            rebuild
+        );
+        tlas.build(&mut encoder, &[instance(1, 0.0)], &blas)
+            .unwrap();
         let results = gpu.trace_opacity(&mut encoder, tlas.tlas().unwrap(), false);
-        assert_eq!(gpu.read(encoder, &results), vec![u32::from(opaque), 0, 0, 0]);
+        assert_eq!(
+            gpu.read(encoder, &results),
+            vec![u32::from(opaque), 0, 0, 0]
+        );
     }
 }

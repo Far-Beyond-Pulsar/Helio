@@ -18,7 +18,7 @@ use helio::{
 };
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
-    box_mesh, build_default_renderer, cube_mesh, directional_light, make_material,
+    box_mesh, build_default_renderer_with_context, cube_mesh, directional_light, make_material,
     new_scene_db_with_gpu_mirror, plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh,
     spawn_object, spawn_sky, update_light,
 };
@@ -95,67 +95,27 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("Failed to create surface");
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("Failed to find adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Main Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("Failed to create device");
-
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
-        }));
-        let info = adapter.get_info();
-        println!(
-            "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
-            info.backend, info.name, info.driver
-        );
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-
         let size = window.inner_size();
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-        surface.configure(&device, &config);
+        let mut graphics = pollster::block_on(helio::HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            helio::HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Render V2 Sky".into(),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let format = graphics.surface_config.format;
+        let surface_format = format;
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
+        let mut renderer = build_default_renderer_with_context(&scene_db, &mut graphics, config);
+        let surface = graphics.surface;
 
         let mat = spawn_material(
             &mut scene_db.world,
@@ -425,15 +385,6 @@ impl AppState {
             (0.7 + sun_elev * 0.3).clamp(0.0, 1.0),
         ];
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return,
-        };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
         // Update dynamic sun light
         update_light(
             &mut self.scene_db.world,
@@ -443,10 +394,8 @@ impl AppState {
         // Upload this frame's SceneDB writes to the GPU mirror; without it they
         // are never visible to the renderer (Helio#266).
         v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
-        if let Err(e) = self.renderer.render(&camera, &view) {
+        if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render error: {:?}", e);
         }
-
-        self.queue.present(output);
     }
 }

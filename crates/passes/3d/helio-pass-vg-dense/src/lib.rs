@@ -150,17 +150,17 @@ pub mod rt_tier;
 pub mod stats_readback;
 
 pub use collect::{Candidate, CollectResult, RtCollect, CAND_CAPACITY};
-pub use rt_tier::{RtEnv, RtPrep, RtTier, RtTierConfig};
 pub use common::{read_buffer, DenseBuffers, DenseFrame, DenseParamsGpu, DenseStats};
 pub use config::DenseConfig;
 pub use graph::{VgDenseFrameData, VgDensePass, KEY_DENSE};
 pub use mode::{rt_available, AutoPolicy, Tier3Backend, Tier3Selector};
 pub use nonrt::{DenseError, DenseNonRtInputs, DenseNonRtPass};
 pub use rt::{
-    pixels_per_unit, pixels_per_unit_from_proj, proxy_mesh_id, select_proxy_lod, DenseRtPass, DenseVisibleGpu, ProxyAsset,
-    ProxyLod, ProxySelection, RtError, RtFrameInfo, RtInstanceGpu, RtInstanceRequest,
-    DENSE_RT_VISIBLE_BASE,
+    pixels_per_unit, pixels_per_unit_from_proj, proxy_mesh_id, select_proxy_lod, DenseRtPass,
+    DenseVisibleGpu, ProxyAsset, ProxyLod, ProxySelection, RtError, RtFrameInfo, RtInstanceGpu,
+    RtInstanceRequest, DENSE_RT_VISIBLE_BASE,
 };
+pub use rt_tier::{RtEnv, RtPrep, RtTier, RtTierConfig};
 
 /// The visible-cluster record (`helio_vg_format::GpuVisibleCluster`).
 pub type DenseVisible = DenseVisibleGpu;
@@ -220,19 +220,29 @@ mod tests {
             .iter()
             .find(|(_, t)| t.name.as_deref() == Some("DenseParams"))
             .unwrap();
-        assert_eq!(layouter[h].size as usize, std::mem::size_of::<DenseParamsGpu>());
+        assert_eq!(
+            layouter[h].size as usize,
+            std::mem::size_of::<DenseParamsGpu>()
+        );
         let (h, _) = module
             .types
             .iter()
             .find(|(_, t)| t.name.as_deref() == Some("VgVisibleCluster"))
             .unwrap();
-        assert_eq!(layouter[h].size as usize, std::mem::size_of::<DenseVisibleGpu>());
+        assert_eq!(
+            layouter[h].size as usize,
+            std::mem::size_of::<DenseVisibleGpu>()
+        );
     }
 
     #[test]
     fn shared_memory_is_within_budget() {
         let d = DenseConfig::default();
-        assert!((8 * 1024..=16 * 1024).contains(&d.shared_memory_bytes()), "{}", d.shared_memory_bytes());
+        assert!(
+            (8 * 1024..=16 * 1024).contains(&d.shared_memory_bytes()),
+            "{}",
+            d.shared_memory_bytes()
+        );
         let l = DenseConfig::low_shared_memory();
         assert!(l.shared_memory_bytes() < 8 * 1024);
         assert_eq!(DenseConfig::for_workgroup_storage(16384), d);
@@ -253,8 +263,16 @@ mod tests {
                 .filter(|(_, g)| g.space == naga::AddressSpace::WorkGroup)
                 .map(|(_, g)| layouter[g.ty].size)
                 .sum();
-            assert!(bytes <= cfg.shared_memory_bytes(), "declared {bytes} > estimate {}", cfg.shared_memory_bytes());
-            assert!(bytes + 64 >= cfg.shared_memory_bytes(), "estimate {} far above declared {bytes}", cfg.shared_memory_bytes());
+            assert!(
+                bytes <= cfg.shared_memory_bytes(),
+                "declared {bytes} > estimate {}",
+                cfg.shared_memory_bytes()
+            );
+            assert!(
+                bytes + 64 >= cfg.shared_memory_bytes(),
+                "estimate {} far above declared {bytes}",
+                cfg.shared_memory_bytes()
+            );
         }
     }
 

@@ -37,7 +37,9 @@ impl Drop for RenderFrameStorage {
 }
 
 impl RenderFrameStorage {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Release all transient descriptor data and retain the allocation
     /// capacity for the next frame.
@@ -63,8 +65,12 @@ impl RenderFrameStorage {
             .expect("just-retained frame storage value has the expected type")
     }
 
-    pub fn len(&self) -> usize { self.values.len() }
-    pub fn is_empty(&self) -> bool { self.values.is_empty() }
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
 
     /// Retain a boxed slice until the next frame reset and borrow it for the
     /// duration of this storage borrow. This is used for wgpu descriptors whose
@@ -75,9 +81,18 @@ impl RenderFrameStorage {
         let ptr = Box::into_raw(value) as *mut T;
         unsafe fn drop_allocation<T>(ptr: *mut (), len: usize) {
             // SAFETY: ptr/len came from Box<[T]>::into_raw and are consumed once.
-            unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr as *mut T, len))) };
+            unsafe {
+                drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                    ptr as *mut T,
+                    len,
+                )))
+            };
         }
-        self.allocations.push(ErasedAllocation { ptr: ptr.cast(), len, drop_fn: drop_allocation::<T> });
+        self.allocations.push(ErasedAllocation {
+            ptr: ptr.cast(),
+            len,
+            drop_fn: drop_allocation::<T>,
+        });
         // SAFETY: the allocation remains owned by self until reset, and the
         // returned borrow is tied to the mutable storage borrow.
         unsafe { std::slice::from_raw_parts(ptr, len) }

@@ -158,8 +158,16 @@ impl SceneRays {
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             .then_some(())
             .filter(|_| std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"))
-            .map(|_| helio_default_passes::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone()));
-        Self { projection, failed: false }
+            .map(|_| {
+                helio_default_passes::ray_tracing::SceneDbRayTracing::partial(
+                    device.clone(),
+                    queue.clone(),
+                )
+            });
+        Self {
+            projection,
+            failed: false,
+        }
     }
 
     /// Traces `runtime`'s virtual-geometry instances through their assets'
@@ -174,13 +182,18 @@ impl SceneRays {
 
     /// The virtual-geometry proxies' counters.
     pub fn vg_stats(&self) -> helio_default_passes::ray_proxies::VgRayStats {
-        self.projection.as_ref().map(|p| p.vg_stats()).unwrap_or_default()
+        self.projection
+            .as_ref()
+            .map(|p| p.vg_stats())
+            .unwrap_or_default()
     }
 
     /// Publishes this frame's to `renderer`: after flushing SceneDB, before
     /// rendering.
     pub fn publish(&mut self, world: &World, renderer: &mut Renderer) {
-        let Some(projection) = &mut self.projection else { return };
+        let Some(projection) = &mut self.projection else {
+            return;
+        };
         match projection.prepare(world) {
             Ok(_) => renderer.set_ray_tracing_frame(projection.frame()),
             Err(error) => {
@@ -203,21 +216,39 @@ pub struct SurfaceCapture {
 
 impl SurfaceCapture {
     pub fn from_env() -> Self {
-        let at = std::env::var("HELIO_CAPTURE_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(240);
-        Self { path: std::env::var("HELIO_CAPTURE").ok(), at, frame: 0 }
+        let at = std::env::var("HELIO_CAPTURE_FRAME")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(240);
+        Self {
+            path: std::env::var("HELIO_CAPTURE").ok(),
+            at,
+            frame: 0,
+        }
     }
 
     /// The surface's usage: a capture copies from it.
     pub fn usage(&self) -> wgpu::TextureUsages {
-        let copy = if self.path.is_some() { wgpu::TextureUsages::COPY_SRC } else { wgpu::TextureUsages::empty() };
+        let copy = if self.path.is_some() {
+            wgpu::TextureUsages::COPY_SRC
+        } else {
+            wgpu::TextureUsages::empty()
+        };
         wgpu::TextureUsages::RENDER_ATTACHMENT | copy
     }
 
     /// After a frame is rendered into `texture`: on the frame asked for,
     /// saves it (RGBA8 or BGRA8) and returns true (the example then exits).
-    pub fn frame(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> bool {
+    pub fn frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+    ) -> bool {
         self.frame += 1;
-        let Some(path) = self.path.as_deref().filter(|_| self.frame == self.at) else { return false };
+        let Some(path) = self.path.as_deref().filter(|_| self.frame == self.at) else {
+            return false;
+        };
         let (width, height) = (texture.width(), texture.height());
         let row = (width * 4).div_ceil(256) * 256;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -231,19 +262,36 @@ impl SurfaceCapture {
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
             },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit([encoder.finish()]);
-        readback.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let bgra = matches!(texture.format(), wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let bgra = matches!(
+            texture.format(),
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
         let mapped = readback.slice(..).get_mapped_range().unwrap();
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height {
             for p in mapped[(y * row) as usize..][..(width * 4) as usize].chunks_exact(4) {
-                pixels.extend_from_slice(&if bgra { [p[2], p[1], p[0], 255] } else { [p[0], p[1], p[2], 255] });
+                pixels.extend_from_slice(&if bgra {
+                    [p[2], p[1], p[0], 255]
+                } else {
+                    [p[0], p[1], p[2], 255]
+                });
             }
         }
         image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
@@ -285,6 +333,22 @@ pub fn build_default_renderer(
             config.height,
             config.surface_format,
         )
+}
+
+/// Build the standard renderer on Helio's XR-aware device and attach the
+/// OpenXR frame loop when `vr_support` found a runtime.
+pub fn build_default_renderer_with_context(
+    scene_db: &pulsar_scenedb::SceneDb,
+    graphics: &mut helio::HelioGraphicsContext<'_>,
+    config: RendererConfig,
+) -> Renderer {
+    let builder = RendererBuilder::new(config, scene_db_handle(scene_db)).with_pass_build_context(
+        Box::new(helio_default_passes::build_default_graph_external_with_context),
+    );
+    graphics
+        .build_renderer(builder, config)
+        .expect("Helio renderer")
+        .0
 }
 
 pub fn make_material(
@@ -1160,8 +1224,7 @@ pub fn set_volumetric_quality(world: &mut World, quality: u32, max_distance: f32
 
 /// A GPU device with the renderer's required features and no window.
 pub fn headless_gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
-    let instance =
-        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default()

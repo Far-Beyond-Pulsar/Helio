@@ -19,11 +19,15 @@ pub fn recipe_fingerprint(recipe: &PlanetRecipe) -> u64 {
 }
 
 pub(crate) fn fnv64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn fnv32(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(*b)).wrapping_mul(0x0100_0193))
+    bytes.iter().fold(0x811c_9dc5u32, |h, b| {
+        (h ^ u32::from(*b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// Encode `brush` as record `seq` (its 0-based position in its list).
@@ -83,10 +87,20 @@ pub(crate) fn decode(index: usize, r: &[u8]) -> Result<Brush, &'static str> {
     };
     let center = [f64_at(8), f64_at(16), f64_at(24)];
     let radius = f64_at(32);
-    if !center.iter().all(|v| v.is_finite()) || !(radius.is_finite() && radius > 0.0) || !(height.is_finite() && height >= 0.0) {
+    if !center.iter().all(|v| v.is_finite())
+        || !(radius.is_finite() && radius > 0.0)
+        || !(height.is_finite() && height >= 0.0)
+    {
         return Err("brush geometry");
     }
-    Ok(Brush { center, radius, shape, op, material: u32_at(4), height })
+    Ok(Brush {
+        center,
+        radius,
+        shape,
+        op,
+        material: u32_at(4),
+        height,
+    })
 }
 
 #[cfg(test)]
@@ -94,7 +108,14 @@ mod tests {
     use super::*;
 
     fn brush() -> Brush {
-        Brush { center: [1.5, -2.0, 6_371_000.25], radius: 3.0, shape: BrushShape::Cube, op: BrushOp::Add, material: 7, height: 2.5 }
+        Brush {
+            center: [1.5, -2.0, 6_371_000.25],
+            radius: 3.0,
+            shape: BrushShape::Cube,
+            op: BrushOp::Add,
+            material: 7,
+            height: 2.5,
+        }
     }
 
     #[test]

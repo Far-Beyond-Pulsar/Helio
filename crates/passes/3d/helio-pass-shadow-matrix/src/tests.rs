@@ -32,8 +32,12 @@ fn production_shadow_shaders_validate() {
             .replace("__PP_HEAD_VEC4__", "8")
             .replace("__PP_TAIL_VEC4__", "64");
         if source.contains(crate::SUN_OCCLUSION_MARKER) {
-            source = format!("{}
-{}", crate::SUN_OCCLUSION_SNIPPET.source, source);
+            source = format!(
+                "{}
+{}",
+                crate::SUN_OCCLUSION_SNIPPET.source,
+                source
+            );
         }
         if source.contains("//!use pbr_eval") {
             source = format!(
@@ -44,19 +48,31 @@ fn production_shadow_shaders_validate() {
             );
         }
         for (marker, file) in [
-            ("//!use atmosphere_sky_table", "helio-pass-sky/src/shaders/atmosphere_sky_table.wgsl"),
-            ("//!use cloud_shadow", "helio-pass-sky/src/shaders/cloud_shadow.wgsl"),
+            (
+                "//!use atmosphere_sky_table",
+                "helio-pass-sky/src/shaders/atmosphere_sky_table.wgsl",
+            ),
+            (
+                "//!use cloud_shadow",
+                "helio-pass-sky/src/shaders/cloud_shadow.wgsl",
+            ),
         ] {
             if source.contains(marker) {
-                source = format!("{}
-{}", std::fs::read_to_string(root.join(file)).unwrap(), source);
+                source = format!(
+                    "{}
+{}",
+                    std::fs::read_to_string(root.join(file)).unwrap(),
+                    source
+                );
             }
         }
         if source.contains("//!use atmosphere") {
             source = format!(
                 "{}\n{}",
-                std::fs::read_to_string(root.join("helio-pass-sky/src/shaders/atmosphere_common.wgsl"))
-                    .unwrap(),
+                std::fs::read_to_string(
+                    root.join("helio-pass-sky/src/shaders/atmosphere_common.wgsl")
+                )
+                .unwrap(),
                 source
             );
         }
@@ -70,7 +86,10 @@ fn production_shadow_shaders_validate() {
                 .unwrap(),
         );
     }
-    validate("HLFS raster fallback", &helio_core::shader::resolve(&source));
+    validate(
+        "HLFS raster fallback",
+        &helio_core::shader::resolve(&source),
+    );
 }
 
 #[test]
@@ -122,7 +141,8 @@ impl Gpu {
         }))
         .expect("GPU required");
         // Timestamps where the adapter has them (`run_timed`).
-        let timestamps = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let timestamps =
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_limits: adapter.limits(),
             required_features: adapter.features() & timestamps,
@@ -206,7 +226,12 @@ impl Gpu {
         self.run_timed(rows, active, None)
     }
     /// `run`, its solve's GPU time written to timestamps 0 and 1 of `query`.
-    fn run_timed(&self, rows: &[[u32; 32]], active: &ResidencyTable, query: Option<&wgpu::QuerySet>) -> ResidencyTable {
+    fn run_timed(
+        &self,
+        rows: &[[u32; 32]],
+        active: &ResidencyTable,
+        query: Option<&wgpu::QuerySet>,
+    ) -> ResidencyTable {
         self.queue
             .write_buffer(&self.lights, 0, bytemuck::cast_slice(rows));
         self.queue
@@ -570,7 +595,11 @@ fn gpu_ranking_prefers_the_lights_nearest_the_camera() {
     assert_eq!(residents.len(), 64, "the budget is used in full");
     residents.sort_by_key(|r| r.owner);
     let owners: Vec<u32> = residents.iter().map(|r| r.owner).collect();
-    assert_eq!(owners, (1..=64).collect::<Vec<u32>>(), "the 64 nearest lights win");
+    assert_eq!(
+        owners,
+        (1..=64).collect::<Vec<u32>>(),
+        "the 64 nearest lights win"
+    );
     for pair in residents.windows(2) {
         assert!(
             pair[0].resolution >= pair[1].resolution,
@@ -629,14 +658,24 @@ fn gpu_residency_solve_holds_under_pressure() {
 fn gpu_residency_solve_is_cheap_under_pressure() {
     const ROWS: u32 = 4096;
     let mut gpu = Gpu::new(ROWS, 256);
-    let timestamps = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    let timestamps =
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
     if !gpu.device.features().contains(timestamps) {
         return;
     }
     let rows = crowded_lights(&mut gpu, ROWS);
     let mut table = gpu.run(&rows, &ResidencyTable::default());
-    let query = gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("residency solve"), ty: wgpu::QueryType::Timestamp, count: 2 });
-    let resolve = buffer(&gpu.device, "solve times", 16, wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
+    let query = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+        label: Some("residency solve"),
+        ty: wgpu::QueryType::Timestamp,
+        count: 2,
+    });
+    let resolve = buffer(
+        &gpu.device,
+        "solve times",
+        16,
+        wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+    );
     let mut fastest = f64::INFINITY;
     for _ in 0..20 {
         table = gpu.run_timed(&rows, &table, Some(&query));
@@ -644,12 +683,16 @@ fn gpu_residency_solve_is_cheap_under_pressure() {
         e.resolve_query_set(&query, 0..2, &resolve, 0);
         gpu.queue.submit([e.finish()]);
         let t: [u64; 2] = bytemuck::pod_read_unaligned(&gpu.read(&resolve));
-        fastest = fastest.min(t[1].saturating_sub(t[0]) as f64 * f64::from(gpu.queue.get_timestamp_period()) / 1e6);
+        fastest = fastest.min(
+            t[1].saturating_sub(t[0]) as f64 * f64::from(gpu.queue.get_timestamp_period()) / 1e6,
+        );
     }
     eprintln!("residency solve: {fastest:.3} ms on the GPU");
-    assert!(fastest < 2.0, "residency solve took {fastest:.3} ms on the GPU");
+    assert!(
+        fastest < 2.0,
+        "residency solve took {fastest:.3} ms on the GPU"
+    );
 }
-
 
 /// A light that turns out of view keeps its map while the pool has room, so
 /// turning back does not re-render it and fade it in again.
@@ -669,7 +712,11 @@ fn gpu_residency_keeps_lights_that_leave_the_view() {
     rows[0][1] = 0f32.to_bits();
     rows[0][2] = (-8f32).to_bits();
     let table = gpu.run(&rows, &ResidencyTable::default());
-    let slot = table.residents.iter().position(|r| r.owner == 1).expect("visible light is resident");
+    let slot = table
+        .residents
+        .iter()
+        .position(|r| r.owner == 1)
+        .expect("visible light is resident");
     // The light is now committed; the camera turns around.
     rows[0][12] = slot as u32 * 6;
     rows[0][15] = 1 | 4 | 8;
@@ -678,7 +725,10 @@ fn gpu_residency_keeps_lights_that_leave_the_view() {
     gpu.params.inv_view_proj = inv;
     let after = gpu.run(&rows, &table);
     assert!(
-        after.residents.iter().any(|r| r.owner == 1 && r.tiles.iter().any(|t| t.size > 0)),
+        after
+            .residents
+            .iter()
+            .any(|r| r.owner == 1 && r.tiles.iter().any(|t| t.size > 0)),
         "a light behind the camera keeps its tiles while capacity is free"
     );
 }

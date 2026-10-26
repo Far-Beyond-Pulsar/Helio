@@ -16,6 +16,9 @@
 pub struct RenderFrameInputs<'a> {
     pub coordinate_spaces: &'a [glam::Mat4],
     pub projection_counts: Option<[u32; 2]>,
+    /// The host is rendering a view for an XR headset. Passes may use this to
+    /// select stereo-friendly quality paths without depending on an XR crate.
+    pub xr_mode: bool,
 }
 
 /// GPU buffers containing the current and previous coordinate-space tables.

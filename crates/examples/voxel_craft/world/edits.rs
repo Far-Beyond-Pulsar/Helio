@@ -24,20 +24,46 @@ pub fn block_cells(grid: &Grid) -> i32 {
 /// The lattice cube holding `cell`: its first cell.
 pub fn block_origin(grid: &Grid, cell: Cell) -> Cell {
     let n = block_cells(grid);
-    Cell::new(cell.face, cell.i.div_euclid(n) * n, cell.j.div_euclid(n) * n, cell.k.div_euclid(n) * n)
+    Cell::new(
+        cell.face,
+        cell.i.div_euclid(n) * n,
+        cell.j.div_euclid(n) * n,
+        cell.k.div_euclid(n) * n,
+    )
 }
 
 impl Edit {
     /// The brush that makes this edit.
     pub fn brush(&self, grid: &Grid) -> Brush {
         match *self {
-            Edit::Dig(centre) => Brush { center: centre.to_array(), radius: DIG_RADIUS_M, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 },
+            Edit::Dig(centre) => Brush {
+                center: centre.to_array(),
+                radius: DIG_RADIUS_M,
+                shape: BrushShape::Sphere,
+                op: BrushOp::Remove,
+                material: 0,
+                height: 0.0,
+            },
             Edit::Build(cell, block) => {
                 let o = block_origin(grid, cell);
                 let n = f64::from(block_cells(grid));
-                let centre = grid.position(o.face, [f64::from(o.i) + n * 0.5, f64::from(o.j) + n * 0.5, f64::from(o.k) + n * 0.5]);
+                let centre = grid.position(
+                    o.face,
+                    [
+                        f64::from(o.i) + n * 0.5,
+                        f64::from(o.j) + n * 0.5,
+                        f64::from(o.k) + n * 0.5,
+                    ],
+                );
                 let half = n * grid.voxel_size() * 0.5;
-                Brush { center: centre.to_array(), radius: half, shape: BrushShape::Cube, op: BrushOp::Add, material: block.material(), height: half }
+                Brush {
+                    center: centre.to_array(),
+                    radius: half,
+                    shape: BrushShape::Cube,
+                    op: BrushOp::Add,
+                    material: block.material(),
+                    height: half,
+                }
             }
         }
     }
@@ -64,7 +90,14 @@ impl Edit {
             Edit::Build(cell, block) => {
                 let o = block_origin(grid, cell);
                 let n = block_cells(grid);
-                (0..n * n * n).map(|c| (Cell::new(o.face, o.i + c % n, o.j + c / n % n, o.k + c / (n * n)), Some(block))).collect()
+                (0..n * n * n)
+                    .map(|c| {
+                        (
+                            Cell::new(o.face, o.i + c % n, o.j + c / n % n, o.k + c / (n * n)),
+                            Some(block),
+                        )
+                    })
+                    .collect()
             }
         }
     }

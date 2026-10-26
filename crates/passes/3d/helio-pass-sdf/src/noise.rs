@@ -300,4 +300,3 @@ fn terrain_height_at(x: f32, z: f32, config: &TerrainConfig) -> f32 {
     };
     config.height + terrain_height
 }
-

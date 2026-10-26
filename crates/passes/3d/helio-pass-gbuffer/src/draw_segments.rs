@@ -44,8 +44,12 @@ pub struct DrawSegment {
 }
 
 impl DrawSegment {
-    pub fn template_class(&self) -> u32 { self.material_class & 0xffff }
-    pub fn raster_flags(&self) -> u32 { self.material_class >> 16 }
+    pub fn template_class(&self) -> u32 {
+        self.material_class & 0xffff
+    }
+    pub fn raster_flags(&self) -> u32 {
+        self.material_class >> 16
+    }
 }
 
 /// This frame's per-material draw segments.

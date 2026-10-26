@@ -10,7 +10,10 @@ mod common;
 
 use common::{pack, probe};
 use glam::{DVec3, Vec3};
-use helio_core::{BlasGeometry, BlasManager, RayInstance, TlasInstanceInput, TlasManager, RAY_INSTANCE_MASKED, RAY_INSTANCE_TWO_SIDED};
+use helio_core::{
+    BlasGeometry, BlasManager, RayInstance, TlasInstanceInput, TlasManager, RAY_INSTANCE_MASKED,
+    RAY_INSTANCE_TWO_SIDED,
+};
 use helio_pass_gi::{Clipmap, GiConfig, GiMeshTracePass, GiPass, PROBES, RAYS};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -26,7 +29,10 @@ fn gpu() -> Option<&'static Gpu> {
     GPU.get_or_init(|| {
         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        if !adapter
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        {
             eprintln!("no ray queries on {:?}: skipped", adapter.get_info().name);
             return None;
         }
@@ -35,13 +41,19 @@ fn gpu() -> Option<&'static Gpu> {
         let bindless = adapter.features() & helio_mats::BINDLESS_MATERIAL_FEATURES;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | bindless,
-            required_limits: wgpu::Limits { max_buffer_size: limits.max_buffer_size.min(u32::MAX as u64), ..limits },
+            required_limits: wgpu::Limits {
+                max_buffer_size: limits.max_buffer_size.min(u32::MAX as u64),
+                ..limits
+            },
             // These tests exercise wgpu's experimental ray queries on purpose.
             experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
             ..Default::default()
         }))
         .ok()?;
-        Some(Gpu { device: Arc::new(device), queue })
+        Some(Gpu {
+            device: Arc::new(device),
+            queue,
+        })
     })
     .as_ref()
 }
@@ -88,17 +100,53 @@ fn scene(gpu: &Gpu, quads: &[Quad]) -> Scene {
     for q in quads {
         let first_index = indices.len() as u32;
         let base_vertex = (vertices.len() / 10) as u32;
-        for (p, [s, t]) in [(q.corner, [0.0, 0.0]), (q.corner + q.u, [q.uv, 0.0]), (q.corner + q.u + q.v, [q.uv, q.uv]), (q.corner + q.v, [0.0, q.uv])] {
-            vertices.extend_from_slice(&[p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), 1f32.to_bits(), f32::to_bits(s), f32::to_bits(t), 0, 0, snorm8(q.normal), 0]);
+        for (p, [s, t]) in [
+            (q.corner, [0.0, 0.0]),
+            (q.corner + q.u, [q.uv, 0.0]),
+            (q.corner + q.u + q.v, [q.uv, q.uv]),
+            (q.corner + q.v, [0.0, q.uv]),
+        ] {
+            vertices.extend_from_slice(&[
+                p.x.to_bits(),
+                p.y.to_bits(),
+                p.z.to_bits(),
+                1f32.to_bits(),
+                f32::to_bits(s),
+                f32::to_bits(t),
+                0,
+                0,
+                snorm8(q.normal),
+                0,
+            ]);
         }
         indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
-        rows.push(RayInstance { first_index, base_vertex, flags: q.flags, material: q.material, base_color: q.base_color.extend(1.0).to_array(), emissive: q.emissive.extend(0.0).to_array(), transmission: [0.0; 4] });
+        rows.push(RayInstance {
+            first_index,
+            base_vertex,
+            flags: q.flags,
+            material: q.material,
+            base_color: q.base_color.extend(1.0).to_array(),
+            emissive: q.emissive.extend(0.0).to_array(),
+            transmission: [0.0; 4],
+        });
     }
-    let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST;
-    let init = |label, contents: &[u8], usage| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
+    let usage =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::BLAS_INPUT | wgpu::BufferUsages::COPY_DST;
+    let init = |label, contents: &[u8], usage| {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage,
+            })
+    };
     let vertex_buffer = init("mesh vertices", bytemuck::cast_slice(&vertices), usage);
     let index_buffer = init("mesh indices", bytemuck::cast_slice(&indices), usage);
-    let instances = init("ray instances", bytemuck::cast_slice(&rows), wgpu::BufferUsages::STORAGE);
+    let instances = init(
+        "ray instances",
+        bytemuck::cast_slice(&rows),
+        wgpu::BufferUsages::STORAGE,
+    );
     let mut blas = BlasManager::new(gpu.device.clone());
     let mut tlas = TlasManager::new(gpu.device.clone(), quads.len() as u32);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -106,37 +154,97 @@ fn scene(gpu: &Gpu, quads: &[Quad]) -> Scene {
     for (k, row) in rows.iter().enumerate() {
         // Cut-outs are candidates, as the projection builds them.
         let opaque = row.flags & RAY_INSTANCE_MASKED == 0;
-        blas.build_from_buffers_with_opacity(k as u64, &mut encoder, BlasGeometry {
-            revision: 0,
-            vertices: &vertex_buffer,
-            first_vertex: row.base_vertex,
-            vertex_count: 4,
-            vertex_stride: 40,
-            indices: Some(&index_buffer),
-            first_index: row.first_index,
-            index_count: 6,
-        }, opaque)
+        blas.build_from_buffers_with_opacity(
+            k as u64,
+            &mut encoder,
+            BlasGeometry {
+                revision: 0,
+                vertices: &vertex_buffer,
+                first_vertex: row.base_vertex,
+                vertex_count: 4,
+                vertex_stride: 40,
+                indices: Some(&index_buffer),
+                first_index: row.first_index,
+                index_count: 6,
+            },
+            opaque,
+        )
         .unwrap();
-        inputs.push(TlasInstanceInput { mesh_id: k as u64, transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] });
+        inputs.push(TlasInstanceInput {
+            mesh_id: k as u64,
+            transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        });
     }
     tlas.build(&mut encoder, &inputs, &blas).unwrap();
     gpu.queue.submit([encoder.finish()]);
-    Scene { tlas, _blas: blas, instances, vertices: vertex_buffer, indices: index_buffer, materials: None, sky: Vec3::ZERO }
+    Scene {
+        tlas,
+        _blas: blas,
+        instances,
+        vertices: vertex_buffer,
+        indices: index_buffer,
+        materials: None,
+        sky: Vec3::ZERO,
+    }
 }
 
 /// The six inward faces of the box centred at the origin with half extent
 /// `h`: the -x wall `left`, the +x wall `right`, the others `rest`, all
 /// giving off `glow`.
 fn room(h: f32, left: Vec3, right: Vec3, rest: Vec3, glow: Vec3) -> Vec<Quad> {
-    let quad = |corner: Vec3, u: Vec3, v: Vec3, normal: Vec3, base_color: Vec3| Quad { corner, u, v, normal, base_color, emissive: glow, ..Default::default() };
+    let quad = |corner: Vec3, u: Vec3, v: Vec3, normal: Vec3, base_color: Vec3| Quad {
+        corner,
+        u,
+        v,
+        normal,
+        base_color,
+        emissive: glow,
+        ..Default::default()
+    };
     let s = 2.0 * h;
     vec![
-        quad(Vec3::new(-h, -h, -h), Vec3::Y * s, Vec3::Z * s, Vec3::X, left),
-        quad(Vec3::new(h, -h, -h), Vec3::Z * s, Vec3::Y * s, -Vec3::X, right),
-        quad(Vec3::new(-h, -h, -h), Vec3::Z * s, Vec3::X * s, Vec3::Y, rest),
-        quad(Vec3::new(-h, h, -h), Vec3::X * s, Vec3::Z * s, -Vec3::Y, rest),
-        quad(Vec3::new(-h, -h, -h), Vec3::X * s, Vec3::Y * s, Vec3::Z, rest),
-        quad(Vec3::new(-h, -h, h), Vec3::Y * s, Vec3::X * s, -Vec3::Z, rest),
+        quad(
+            Vec3::new(-h, -h, -h),
+            Vec3::Y * s,
+            Vec3::Z * s,
+            Vec3::X,
+            left,
+        ),
+        quad(
+            Vec3::new(h, -h, -h),
+            Vec3::Z * s,
+            Vec3::Y * s,
+            -Vec3::X,
+            right,
+        ),
+        quad(
+            Vec3::new(-h, -h, -h),
+            Vec3::Z * s,
+            Vec3::X * s,
+            Vec3::Y,
+            rest,
+        ),
+        quad(
+            Vec3::new(-h, h, -h),
+            Vec3::X * s,
+            Vec3::Z * s,
+            -Vec3::Y,
+            rest,
+        ),
+        quad(
+            Vec3::new(-h, -h, -h),
+            Vec3::X * s,
+            Vec3::Y * s,
+            Vec3::Z,
+            rest,
+        ),
+        quad(
+            Vec3::new(-h, -h, h),
+            Vec3::Y * s,
+            Vec3::X * s,
+            -Vec3::Z,
+            rest,
+        ),
     ]
 }
 
@@ -146,7 +254,16 @@ const SPACING: f64 = 0.5;
 /// One frame: the probes' update, `tracer` (another tracer, on the CPU:
 /// rays' words in, hits' words out), then the meshes' tracer; the scene's
 /// sky above the horizon, none below.
-fn frame(gpu: &Gpu, pass: &mut GiPass, mesh: &GiMeshTracePass, scene: &Scene, eye: DVec3, n: u64, lights: Option<&wgpu::Buffer>, tracer: Option<&dyn Fn(&[u32]) -> Vec<u32>>) {
+fn frame(
+    gpu: &Gpu,
+    pass: &mut GiPass,
+    mesh: &GiMeshTracePass,
+    scene: &Scene,
+    eye: DVec3,
+    n: u64,
+    lights: Option<&wgpu::Buffer>,
+    tracer: Option<&dyn Fn(&[u32]) -> Vec<u32>>,
+) {
     pass.begin(&gpu.queue, eye, n, scene.sky, Vec3::ZERO);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut cmds = helio_core::CommandRecorder::from_encoder(&mut encoder);
@@ -157,15 +274,31 @@ fn frame(gpu: &Gpu, pass: &mut GiPass, mesh: &GiMeshTracePass, scene: &Scene, ey
     if let Some(trace) = tracer {
         let words = common::read(&gpu.device, &gpu.queue, rays);
         let count = pass.updates().len() * RAYS as usize;
-        gpu.queue.write_buffer(hits, 0, bytemuck::cast_slice(&trace(&words[..count * 8])));
+        gpu.queue
+            .write_buffer(hits, 0, bytemuck::cast_slice(&trace(&words[..count * 8])));
     }
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut cmds = helio_core::CommandRecorder::from_encoder(&mut encoder);
     let eye = eye.as_vec3().to_array();
-    mesh.record(&gpu.device, &gpu.queue, &mut cmds, [frame_buffer, rays, hits, sun, light], scene.tlas.tlas().unwrap(), eye, [&scene.instances, &scene.vertices, &scene.indices], None, scene.materials.as_ref(), lights.map(|l| (l, 1)), None, n as u32);
+    mesh.record(
+        &gpu.device,
+        &gpu.queue,
+        &mut cmds,
+        [frame_buffer, rays, hits, sun, light],
+        scene.tlas.tlas().unwrap(),
+        eye,
+        [&scene.instances, &scene.vertices, &scene.indices],
+        None,
+        scene.materials.as_ref(),
+        lights.map(|l| (l, 1)),
+        None,
+        n as u32,
+    );
     drop(cmds);
     gpu.queue.submit([encoder.finish()]);
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
 }
 
 /// Each updated, active probe strictly inside the box of half extent `h`
@@ -176,12 +309,22 @@ fn inside(words: &[u32], clipmap: &Clipmap, h: f64) -> Vec<(u32, DVec3)> {
             let (_, state) = probe(words, index, Vec3::Y);
             let p = clipmap.position(index);
             let level = (index / helio_pass_gi::LEVEL_PROBES) as usize;
-            (state >> 8 > 0 && state & 1 == 1 && p.abs().max_element() < h - clipmap.spacing(level).min(h * 0.5)).then_some((index, p))
+            (state >> 8 > 0
+                && state & 1 == 1
+                && p.abs().max_element() < h - clipmap.spacing(level).min(h * 0.5))
+            .then_some((index, p))
         })
         .collect()
 }
 
-const DIRECTIONS: [Vec3; 6] = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z];
+const DIRECTIONS: [Vec3; 6] = [
+    Vec3::X,
+    Vec3::NEG_X,
+    Vec3::Y,
+    Vec3::NEG_Y,
+    Vec3::Z,
+    Vec3::NEG_Z,
+];
 
 /// A closed box whose walls give off radiance 1 and reflect nothing: every
 /// probe inside sees radiance 1 everywhere, irradiance / pi 1 in every
@@ -193,7 +336,13 @@ fn a_glowing_box_lights_its_probes_evenly() {
     let mesh = GiMeshTracePass::new(&gpu.device).unwrap();
     let h = 2.1;
     let scene = scene(gpu, &room(h, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ONE));
-    let mut pass = GiPass::new(&gpu.device, GiConfig { finest_spacing: SPACING, needs_tlas: true });
+    let mut pass = GiPass::new(
+        &gpu.device,
+        GiConfig {
+            finest_spacing: SPACING,
+            needs_tlas: true,
+        },
+    );
     let eye = DVec3::new(0.1, 0.3, -0.2);
     // Every probe of the finest levels once (13824 at 680 a frame), those
     // that came in first, in order from the clipmap's far corner.
@@ -207,7 +356,10 @@ fn a_glowing_box_lights_its_probes_evenly() {
     for &(index, p) in &probes {
         for d in DIRECTIONS {
             let e = probe(&words, index, d).0;
-            assert!((e - Vec3::ONE).abs().max_element() < 0.02, "probe {index} at {p} toward {d}: {e}");
+            assert!(
+                (e - Vec3::ONE).abs().max_element() < 0.02,
+                "probe {index} at {p} toward {d}: {e}"
+            );
         }
     }
     // Just outside the middle of a wall, nearly every ray toward the box
@@ -224,7 +376,11 @@ fn a_glowing_box_lights_its_probes_evenly() {
         let middle = a.x + a.y + a.z - a.max_element() - a.min_element() < f64::from(h) - 1.0;
         if state >> 8 > 0 && level == 0 && past > 0.0 && past < 0.5 && middle {
             outside += 1;
-            assert_eq!(state & 1, 0, "probe {index} at {p}, just outside a wall, active");
+            assert_eq!(
+                state & 1,
+                0,
+                "probe {index} at {p}, just outside a wall, active"
+            );
         }
     }
     assert!(outside > 10, "{outside} probes just outside");
@@ -242,7 +398,13 @@ fn bounces_in_a_box_approach_the_furnace_without_gaining_energy() {
     let h = 2.1;
     let half = Vec3::splat(0.5);
     let scene = scene(gpu, &room(h, half, half, half, half));
-    let mut pass = GiPass::new(&gpu.device, GiConfig { finest_spacing: SPACING, needs_tlas: true });
+    let mut pass = GiPass::new(
+        &gpu.device,
+        GiConfig {
+            finest_spacing: SPACING,
+            needs_tlas: true,
+        },
+    );
     let eye = DVec3::new(0.1, 0.3, -0.2);
     let clipmap = Clipmap::around(eye, SPACING);
     let mut means = Vec::new();
@@ -256,7 +418,10 @@ fn bounces_in_a_box_approach_the_furnace_without_gaining_energy() {
             for &(index, p) in &probes {
                 for d in DIRECTIONS {
                     let e = probe(&words, index, d).0;
-                    assert!(e.max_element() < 1.02, "probe {index} at {p} toward {d} gained energy: {e}");
+                    assert!(
+                        e.max_element() < 1.02,
+                        "probe {index} at {p} toward {d} gained energy: {e}"
+                    );
                     sum += f64::from(e.x);
                 }
             }
@@ -264,7 +429,10 @@ fn bounces_in_a_box_approach_the_furnace_without_gaining_energy() {
         }
     }
     eprintln!("mean irradiance / pi by 100 frames: {means:?}");
-    assert!(means.windows(2).all(|w| w[1] >= w[0] - 0.01), "not converging: {means:?}");
+    assert!(
+        means.windows(2).all(|w| w[1] >= w[0] - 0.01),
+        "not converging: {means:?}"
+    );
     assert!(*means.last().unwrap() > 0.85, "{means:?}");
 }
 
@@ -280,11 +448,27 @@ fn a_cornell_box_bleeds_its_walls_colours() {
     let Some(gpu) = gpu() else { return };
     let mesh = GiMeshTracePass::new(&gpu.device).unwrap();
     let h = 2.1;
-    let (red, green, white) = (Vec3::new(0.7, 0.05, 0.05), Vec3::new(0.05, 0.7, 0.05), Vec3::splat(0.7));
+    let (red, green, white) = (
+        Vec3::new(0.7, 0.05, 0.05),
+        Vec3::new(0.05, 0.7, 0.05),
+        Vec3::splat(0.7),
+    );
     let scene = scene(gpu, &room(h, red, green, white, Vec3::ZERO));
     let light = common::point_light(Vec3::new(0.0, 1.6, 0.0), 20.0, 10.0);
-    let lights = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("light"), contents: bytemuck::cast_slice(&light), usage: wgpu::BufferUsages::STORAGE });
-    let mut pass = GiPass::new(&gpu.device, GiConfig { finest_spacing: SPACING, needs_tlas: true });
+    let lights = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("light"),
+            contents: bytemuck::cast_slice(&light),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+    let mut pass = GiPass::new(
+        &gpu.device,
+        GiConfig {
+            finest_spacing: SPACING,
+            needs_tlas: true,
+        },
+    );
     let eye = DVec3::new(0.1, 0.3, -0.2);
     for n in 0..60 {
         frame(gpu, &mut pass, &mesh, &scene, eye, n, Some(&lights), None);
@@ -295,21 +479,33 @@ fn a_cornell_box_bleeds_its_walls_colours() {
     let (mut by_red, mut by_green) = (0, 0);
     for &(index, p) in &probes {
         let mean = (probe(&words, index, Vec3::NEG_Y).0 + probe(&words, index, Vec3::Y).0) * 0.5;
-        assert!(mean.min_element() > 0.05, "probe {index} at {p}: no light ({mean})");
+        assert!(
+            mean.min_element() > 0.05,
+            "probe {index} at {p}: no light ({mean})"
+        );
         if (index / helio_pass_gi::LEVEL_PROBES) != 0 {
             continue;
         }
         if p.x < -1.2 {
             by_red += 1;
             let e = probe(&words, index, Vec3::NEG_X).0;
-            assert!(e.x > 2.0 * e.y && e.x > 2.0 * e.z, "probe {index} at {p}, by the red wall: {e}");
+            assert!(
+                e.x > 2.0 * e.y && e.x > 2.0 * e.z,
+                "probe {index} at {p}, by the red wall: {e}"
+            );
         } else if p.x > 1.2 {
             by_green += 1;
             let e = probe(&words, index, Vec3::X).0;
-            assert!(e.y > 2.0 * e.x && e.y > 2.0 * e.z, "probe {index} at {p}, by the green wall: {e}");
+            assert!(
+                e.y > 2.0 * e.x && e.y > 2.0 * e.z,
+                "probe {index} at {p}, by the green wall: {e}"
+            );
         }
     }
-    assert!(by_red > 20 && by_green > 20, "{by_red} by red, {by_green} by green");
+    assert!(
+        by_red > 20 && by_green > 20,
+        "{by_red} by red, {by_green} by green"
+    );
 }
 
 /// Another tracer's ground (height 0, glowing: radiance about 2 up) over a
@@ -322,9 +518,26 @@ fn the_nearer_of_a_mesh_and_another_tracers_hit_stands() {
     let Some(gpu) = gpu() else { return };
     let mesh = GiMeshTracePass::new(&gpu.device).unwrap();
     // Planes wide enough that no ray up passes beside the ceiling.
-    let plane = |y: f32, normal: Vec3, emissive: f32| Quad { corner: Vec3::new(-4000.0, y, -4000.0), u: Vec3::X * 8000.0, v: Vec3::Z * 8000.0, normal, base_color: Vec3::ZERO, emissive: Vec3::splat(emissive), ..Default::default() };
-    let scene = scene(gpu, &[plane(3.0, Vec3::NEG_Y, 0.0), plane(-1.0, Vec3::Y, 8.0)]);
-    let mut pass = GiPass::new(&gpu.device, GiConfig { finest_spacing: SPACING, needs_tlas: true });
+    let plane = |y: f32, normal: Vec3, emissive: f32| Quad {
+        corner: Vec3::new(-4000.0, y, -4000.0),
+        u: Vec3::X * 8000.0,
+        v: Vec3::Z * 8000.0,
+        normal,
+        base_color: Vec3::ZERO,
+        emissive: Vec3::splat(emissive),
+        ..Default::default()
+    };
+    let scene = scene(
+        gpu,
+        &[plane(3.0, Vec3::NEG_Y, 0.0), plane(-1.0, Vec3::Y, 8.0)],
+    );
+    let mut pass = GiPass::new(
+        &gpu.device,
+        GiConfig {
+            finest_spacing: SPACING,
+            needs_tlas: true,
+        },
+    );
     let eye = DVec3::new(0.1, 1.3, -0.2);
     let ground = |rays: &[u32]| -> Vec<u32> {
         let mut hits = vec![0u32; rays.len() / 2];
@@ -340,7 +553,12 @@ fn the_nearer_of_a_mesh_and_another_tracers_hit_stands() {
             // Albedo 128/255 giving off 4 times it (64 sixteenths) down
             // there; albedo 1 giving off 4 10 km up.
             let hit = if dir.y < 0.0 {
-                [((-origin.y / f64::from(dir.y)) as f32).to_bits(), pack(Vec3::Y), 128 | (128 << 8) | (128 << 16), 1 | (64 << 24)]
+                [
+                    ((-origin.y / f64::from(dir.y)) as f32).to_bits(),
+                    pack(Vec3::Y),
+                    128 | (128 << 8) | (128 << 16),
+                    1 | (64 << 24),
+                ]
             } else {
                 [10_000f32.to_bits(), pack(-dir), 0xff_ff_ff, 1 | (64 << 24)]
             };
@@ -364,10 +582,16 @@ fn the_nearer_of_a_mesh_and_another_tracers_hit_stands() {
         between += 1;
         let down = probe(&words, index, Vec3::NEG_Y).0;
         let up = probe(&words, index, Vec3::Y).0;
-        assert!((down - Vec3::splat(below)).abs().max_element() < 0.05 * below, "probe {index} at {p}: from below {down}, want {below}");
+        assert!(
+            (down - Vec3::splat(below)).abs().max_element() < 0.05 * below,
+            "probe {index} at {p}: from below {down}, want {below}"
+        );
         // 64 rays project the step from the light below to the black above
         // onto L1 harmonics within a few percent (as over flat ground).
-        assert!(up.max_element() < 0.05 * below, "probe {index} at {p}: from above {up}, want the black ceiling");
+        assert!(
+            up.max_element() < 0.05 * below,
+            "probe {index} at {p}: from above {up}, want the black ceiling"
+        );
     }
     assert!(between > 1000, "{between} probes between");
 }
@@ -378,7 +602,11 @@ fn alpha_texture(gpu: &Gpu, size: u32, alpha: impl Fn(u32, u32) -> u8) -> wgpu::
     let levels = size.ilog2() + 1;
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("cut-out alpha"),
-        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -386,15 +614,33 @@ fn alpha_texture(gpu: &Gpu, size: u32, alpha: impl Fn(u32, u32) -> u8) -> wgpu::
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let mut level: Vec<f32> = (0..size * size).map(|i| f32::from(alpha(i % size, i / size)) / 255.0).collect();
+    let mut level: Vec<f32> = (0..size * size)
+        .map(|i| f32::from(alpha(i % size, i / size)) / 255.0)
+        .collect();
     let mut side = size;
     for mip in 0..levels {
-        let texels: Vec<u8> = level.iter().flat_map(|a| [255, 255, 255, (a * 255.0).round() as u8]).collect();
+        let texels: Vec<u8> = level
+            .iter()
+            .flat_map(|a| [255, 255, 255, (a * 255.0).round() as u8])
+            .collect();
         gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: mip, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: mip,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
             &texels,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * side), rows_per_image: None },
-            wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * side),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
         );
         if side == 1 {
             break;
@@ -403,7 +649,11 @@ fn alpha_texture(gpu: &Gpu, size: u32, alpha: impl Fn(u32, u32) -> u8) -> wgpu::
         level = (0..half * half)
             .map(|i| {
                 let (x, y) = (2 * (i % half), 2 * (i / half));
-                (level[(y * side + x) as usize] + level[(y * side + x + 1) as usize] + level[((y + 1) * side + x) as usize] + level[((y + 1) * side + x + 1) as usize]) / 4.0
+                (level[(y * side + x) as usize]
+                    + level[(y * side + x + 1) as usize]
+                    + level[((y + 1) * side + x) as usize]
+                    + level[((y + 1) * side + x + 1) as usize])
+                    / 4.0
             })
             .collect();
         side = half;
@@ -416,7 +666,11 @@ fn alpha_texture(gpu: &Gpu, size: u32, alpha: impl Fn(u32, u32) -> u8) -> wgpu::
 /// the renderer binds it: `GpuMaterial` rows, and the single-row texture
 /// metadata whose `params.w = -1` takes the row's texture ids and cutoff
 /// 0.5.
-fn cut_out_materials(gpu: &Gpu, mesh: &GiMeshTracePass, texture: &wgpu::Texture) -> wgpu::BindGroup {
+fn cut_out_materials(
+    gpu: &Gpu,
+    mesh: &GiMeshTracePass,
+    texture: &wgpu::Texture,
+) -> wgpu::BindGroup {
     let material = helio_mats::GpuMaterial {
         base_color: [0.0, 0.0, 0.0, 1.0],
         emissive: [0.0; 4],
@@ -431,7 +685,14 @@ fn cut_out_materials(gpu: &Gpu, mesh: &GiMeshTracePass, texture: &wgpu::Texture)
         material_class: 0,
         class_params: [0.0; 4],
     };
-    let init = |label, contents: &[u8]| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage: wgpu::BufferUsages::STORAGE });
+    let init = |label, contents: &[u8]| {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    };
     let rows = init("materials", bytemuck::bytes_of(&material));
     let mut metadata = [0u32; helio_mats::vg_alpha::MATERIAL_TEXTURE_WORDS as usize];
     metadata[metadata.len() - 1] = (-1f32).to_bits();
@@ -448,7 +709,16 @@ fn cut_out_materials(gpu: &Gpu, mesh: &GiMeshTracePass, texture: &wgpu::Texture)
     });
     let views = vec![&view; binding.max_textures];
     let samplers = vec![&sampler; binding.max_textures];
-    mesh.materials(&gpu.device, &rows, helio_mats::MaterialTextureBindings { material_textures: &metadata, texture_views: &views, samplers: &samplers, version: 0 })
+    mesh.materials(
+        &gpu.device,
+        &rows,
+        helio_mats::MaterialTextureBindings {
+            material_textures: &metadata,
+            texture_views: &views,
+            samplers: &samplers,
+            version: 0,
+        },
+    )
 }
 
 /// A sky of radiance 1 over a black, alpha-tested, double-sided canopy at
@@ -477,11 +747,27 @@ fn a_cut_out_canopy_shades_its_probes_through_its_holes() {
             ..Default::default()
         };
         // No canopy: a black floor far below, out of the probes' sight up.
-        let quads = if texture.is_some() { vec![canopy] } else { vec![Quad { corner: Vec3::new(-1.0, -500.0, -1.0), u: Vec3::X, v: Vec3::Z, normal: Vec3::Y, ..Default::default() }] };
+        let quads = if texture.is_some() {
+            vec![canopy]
+        } else {
+            vec![Quad {
+                corner: Vec3::new(-1.0, -500.0, -1.0),
+                u: Vec3::X,
+                v: Vec3::Z,
+                normal: Vec3::Y,
+                ..Default::default()
+            }]
+        };
         let mut scene = scene(gpu, &quads);
         scene.sky = Vec3::ONE;
         scene.materials = texture.map(|t| cut_out_materials(gpu, &mesh, &t));
-        let mut pass = GiPass::new(&gpu.device, GiConfig { finest_spacing: SPACING, needs_tlas: true });
+        let mut pass = GiPass::new(
+            &gpu.device,
+            GiConfig {
+                finest_spacing: SPACING,
+                needs_tlas: true,
+            },
+        );
         for n in 0..48 {
             frame(gpu, &mut pass, &mesh, &scene, eye, n, None, None);
         }
@@ -502,10 +788,27 @@ fn a_cut_out_canopy_shades_its_probes_through_its_holes() {
     let (n, open) = under(None);
     assert!(n > 1000 && open > 0.5, "{n} probes, open sky {open}");
     let (n, leaves) = under(Some(alpha_texture(gpu, 64, |_, _| 255)));
-    assert!(n > 1000 && leaves < 0.03 * open, "{n} probes under leaves: {leaves} of the open sky's {open}");
+    assert!(
+        n > 1000 && leaves < 0.03 * open,
+        "{n} probes under leaves: {leaves} of the open sky's {open}"
+    );
     let (n, holes) = under(Some(alpha_texture(gpu, 64, |_, _| 0)));
-    assert!(n > 1000 && (holes - open).abs() < 0.02 * open, "{n} probes under holes: {holes} of the open sky's {open}");
-    let (n, half) = under(Some(alpha_texture(gpu, 64, |x, y| if (x / 8 + y / 8) % 2 == 0 { 255 } else { 0 })));
-    eprintln!("irradiance / pi from above: open {open}, leaves {leaves}, holes {holes}, checker {half}");
-    assert!(n > 1000 && (half / open - 0.5).abs() < 0.1, "{n} probes under the checker: {half} of the open sky's {open}");
+    assert!(
+        n > 1000 && (holes - open).abs() < 0.02 * open,
+        "{n} probes under holes: {holes} of the open sky's {open}"
+    );
+    let (n, half) = under(Some(alpha_texture(gpu, 64, |x, y| {
+        if (x / 8 + y / 8) % 2 == 0 {
+            255
+        } else {
+            0
+        }
+    })));
+    eprintln!(
+        "irradiance / pi from above: open {open}, leaves {leaves}, holes {holes}, checker {half}"
+    );
+    assert!(
+        n > 1000 && (half / open - 0.5).abs() < 0.1,
+        "{n} probes under the checker: {half} of the open sky's {open}"
+    );
 }

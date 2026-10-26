@@ -121,9 +121,7 @@ pub mod reference;
 mod core;
 mod pass;
 
-pub use crate::core::{
-    VgCullBuffers, VgCullConfig, VgCullCore, VgCullFrame, VgCullInputs,
-};
+pub use crate::core::{VgCullBuffers, VgCullConfig, VgCullCore, VgCullFrame, VgCullInputs};
 pub use crate::pass::{
     VgCullDynamic, VgCullEarlyPass, VgCullFrameData, VgCullLatePass, VgCullSettingsSource,
 };
@@ -333,7 +331,9 @@ impl VgCullStats {
             visible_overflow: st(stats::VISIBLE_OVERFLOW),
             peak_queue: st(stats::PEAK_QUEUE),
             root_shortcuts: st(stats::ROOT_SHORTCUT),
-            density_scale: words.get(state::DENSITY as usize).map_or(1.0, |w| f32::from_bits(*w).max(1.0)),
+            density_scale: words
+                .get(state::DENSITY as usize)
+                .map_or(1.0, |w| f32::from_bits(*w).max(1.0)),
             predicted_triangles: words.get(state::PREDICTED as usize).copied().unwrap_or(0),
             tier_clusters,
         })
@@ -341,7 +341,8 @@ impl VgCullStats {
 
     /// Software + dense clusters, and the hardware clusters, of the sample.
     pub fn tier_split(&self) -> (u32, u32, u32) {
-        let hw: u32 = self.tier_clusters[..BIN_SW as usize].iter().sum::<u32>() + self.tier_clusters[BIN_HW_MASKED as usize];
+        let hw: u32 = self.tier_clusters[..BIN_SW as usize].iter().sum::<u32>()
+            + self.tier_clusters[BIN_HW_MASKED as usize];
         (
             hw,
             self.tier_clusters[BIN_SW as usize] + self.tier_clusters[BIN_SW_MASKED as usize],

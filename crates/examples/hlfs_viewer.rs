@@ -1,7 +1,9 @@
 //! Small shared interactive host for architectural RT scenes.
 use crate::v3_demo_common::*;
 use glam::Vec3;
-use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
+use helio::{
+    Camera, HelioGraphicsConfig, HelioGraphicsContext, Renderer, RendererBuilder, RendererConfig,
+};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use std::{collections::HashSet, sync::Arc, time::Instant};
 use winit::{
@@ -54,42 +56,22 @@ impl ApplicationHandler for App {
         let window=Arc::new(event_loop.create_window(Window::default_attributes()
             .with_title(format!("Helio - {} | A/D orbit, W/S zoom, Q/E height | F fog, G quality, L lens, O occluder, M motion, P profile",self.scene.name))
             .with_inner_size(winit::dpi::LogicalSize::new(1280u32,720u32))).expect("window"));
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: helio::required_wgpu_features(adapter.features()),
-            required_limits: helio::required_wgpu_limits(adapter.limits()),
-            experimental_features: helio::required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
         let size = window.inner_size();
-        let caps = surface.get_capabilities(&adapter);
-        let format = *caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .unwrap_or(&caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-        surface.configure(&device, &config);
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            HelioGraphicsConfig {
+                vr_support: true,
+                application_name: format!("Helio {}", self.scene.name),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let config = graphics.surface_config.clone();
+        let format = config.format;
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         (self.scene.populate)(&mut scene_db.world);
         let rt = std::env::var_os("HLFS_RT").is_some();
@@ -122,13 +104,9 @@ impl ApplicationHandler for App {
                 .set_config(&device, hlfs);
             graph
         }))
-        .build(
-            device.clone(),
-            queue.clone(),
-            config.width,
-            config.height,
-            format,
-        );
+        .build_with_graphics_context(&mut graphics)
+        .expect("Helio renderer");
+        let surface = graphics.surface;
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         let acceleration = if rt {
             crate::hlfs_capture::enable_ray_shadows(&mut scene_db.world);
@@ -223,14 +201,6 @@ impl ApplicationHandler for App {
                 if s.window.inner_size().width == 0 || s.window.inner_size().height == 0 {
                     return;
                 }
-                let frame = match s.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(v)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(v) => v,
-                    _ => {
-                        s.surface.configure(&s.device, &s.config);
-                        return;
-                    }
-                };
                 flush_scene_db(&s.scene_db, &s.queue);
                 // The post-process volume is authored in SceneDB and mirrored
                 // to the GPU, but editor wireframes are a separate Helio debug
@@ -249,14 +219,15 @@ impl ApplicationHandler for App {
                     })
                     .collect();
                 s.renderer.debug_set_editor_volume_bounds(&volume_bounds);
-                if let Some(acceleration)=&mut s.acceleration {
-                    acceleration.prepare(&s.scene_db.world).expect("scene acceleration");
+                if let Some(acceleration) = &mut s.acceleration {
+                    acceleration
+                        .prepare(&s.scene_db.world)
+                        .expect("scene acceleration");
                     s.renderer.set_ray_tracing_frame(acceleration.frame());
                 }
                 s.renderer
-                    .render(&camera, &frame.texture.create_view(&Default::default()))
+                    .render_window_frame(&camera, &s.surface)
                     .expect("scene frame");
-                s.queue.present(frame);
             }
             _ => {}
         }

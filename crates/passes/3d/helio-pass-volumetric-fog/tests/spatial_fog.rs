@@ -38,8 +38,7 @@ fn read(device: &wgpu::Device, queue: &wgpu::Queue, source: &wgpu::Buffer, size:
 #[test]
 fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
     pollster::block_on(async {
-        let instance =
-            wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
         let adapter = instance
             .request_adapter(&Default::default())
             .await
@@ -133,8 +132,16 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
         let lights = buffer(&device, &[0; 128], wgpu::BufferUsages::STORAGE);
         let indices = buffer(&device, &[0; 1920], wgpu::BufferUsages::STORAGE);
         let indirect = buffer(&device, &[0; 40], wgpu::BufferUsages::STORAGE);
-        let global_media = buffer(&device, &[0; std::mem::size_of::<helio_pass_volumetric_fog::GlobalFogComponent>()], wgpu::BufferUsages::STORAGE);
-        let local_media = buffer(&device, &[0; std::mem::size_of::<helio_pass_volumetric_fog::LocalFogVolumeComponent>()], wgpu::BufferUsages::STORAGE);
+        let global_media = buffer(
+            &device,
+            &[0; std::mem::size_of::<helio_pass_volumetric_fog::GlobalFogComponent>()],
+            wgpu::BufferUsages::STORAGE,
+        );
+        let local_media = buffer(
+            &device,
+            &[0; std::mem::size_of::<helio_pass_volumetric_fog::LocalFogVolumeComponent>()],
+            wgpu::BufferUsages::STORAGE,
+        );
         let output = buffer(
             &device,
             &[0; 64],

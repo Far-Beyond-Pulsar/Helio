@@ -59,12 +59,19 @@ impl SpectralSampling {
                 let mut o = [0.0f32; 3];
                 for c in 0..3 {
                     // A channel with no spectral support falls back to a box.
-                    o[c] = if sum[c] > 1e-12 { (r[c] / sum[c]) as f32 } else { 1.0 / n as f32 };
+                    o[c] = if sum[c] > 1e-12 {
+                        (r[c] / sum[c]) as f32
+                    } else {
+                        1.0 / n as f32
+                    };
                 }
                 o
             })
             .collect();
-        SpectralSampling { wavelengths_nm, weights }
+        SpectralSampling {
+            wavelengths_nm,
+            weights,
+        }
     }
 
     pub fn len(&self) -> usize {

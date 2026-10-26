@@ -114,8 +114,8 @@ pub(crate) struct RecordedStreams {
     pub(crate) render_pass_open: bool,
 }
 use crate::graph::PipelineRegistry;
-use crate::{Profiler, SceneBufferProjection};
 use crate::GpuCameraUniforms;
+use crate::{Profiler, SceneBufferProjection};
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -236,6 +236,11 @@ pub struct PassContext<'a> {
     /// that cache camera-dependent GPU state (Hi-Z, SSR, ...) use this to
     /// detect the change cheaply instead of comparing matrices.
     pub camera_generation: u64,
+
+    /// World position of the frame's coordinate origin
+    /// (`SceneInput::world_origin`): every frame is camera-relative, frame
+    /// coordinates world positions minus this.
+    pub world_origin: glam::DVec3,
 
     /// Type-erased SceneDB GPU columns supplied by the frontend. The sole
     /// scene-data seam: `helio-core` has zero knowledge of any specific
@@ -593,11 +598,15 @@ impl<'a> PassContext<'a> {
         &'b mut self,
         desc: &'b wgpu::ComputePassDescriptor<'b>,
     ) -> ComputeCmds<'b> {
-        assert!(self.active_render_pass.is_none(),
-            "graphics-stream compute cannot run inside a render pass");
+        assert!(
+            self.active_render_pass.is_none(),
+            "graphics-stream compute cannot run inside a render pass"
+        );
         #[cfg(debug_assertions)]
-        assert!(!self.chain_transparent,
-            "chain-transparent passes cannot use graphics-stream compute");
+        assert!(
+            !self.chain_transparent,
+            "chain-transparent passes cannot use graphics-stream compute"
+        );
         if let Some(recorded) = self.recorded {
             return ComputeCmds::begin_recorded(recorded.graphics, desc);
         }

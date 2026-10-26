@@ -226,8 +226,7 @@ impl Renderer {
             camera_identity: None,
             frame_count: 0,
             ray_frame: Default::default(),
-            prev_view_proj: glam::Mat4::IDENTITY,
-            previous_world_origin: glam::DVec3::ZERO,
+            prev_view_proj_by_view: Default::default(),
             scene_derivations: Vec::new(),
             world_origin: glam::DVec3::ZERO,
             debug_camera_buffer,
@@ -237,6 +236,7 @@ impl Renderer {
             graph_config: config,
             coordinate_spaces: Vec::new(),
             portal_projection_counts: None,
+            xr_mode: false,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
@@ -297,15 +297,11 @@ impl Renderer {
             #[cfg(not(target_arch = "wasm32"))]
             xr_camera: None,
             #[cfg(not(target_arch = "wasm32"))]
-            xr_mirror_pipeline: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            xr_mirror_bgl: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            xr_mirror_sampler: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            xr_mirror_bind_group: None,
+            xr_mirror: None,
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_format: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            xr_mirror_size: [0, 0],
         };
 
         renderer

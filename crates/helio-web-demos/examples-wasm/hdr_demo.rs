@@ -128,10 +128,18 @@ impl HelioWasmApp for Demo {
         );
 
         helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(
-            scene_db.world.gpu_mirror().expect("GPU mirror").store(), 4096, renderer.device());
+            scene_db.world.gpu_mirror().expect("GPU mirror").store(),
+            4096,
+            renderer.device(),
+        );
         let settings_entity = scene_db.world.spawn();
-        scene_db.world.insert(settings_entity, helio_pass_postprocess::CameraPostProcessComponent::new(
-            0, &helio_pass_postprocess::PostProcessSettings::default()));
+        scene_db.world.insert(
+            settings_entity,
+            helio_pass_postprocess::CameraPostProcessComponent::new(
+                0,
+                &helio_pass_postprocess::PostProcessSettings::default(),
+            ),
+        );
         Self {
             settings_entity,
             scene_db: std::mem::take(scene_db),
@@ -214,8 +222,10 @@ impl HelioWasmApp for Demo {
                 settings.tonemap_operator = helio::TonemapOperator::None;
             }
         }
-        self.scene_db.world.insert(self.settings_entity,
-            helio_pass_postprocess::CameraPostProcessComponent::new(camera.view_id, &settings));
+        self.scene_db.world.insert(
+            self.settings_entity,
+            helio_pass_postprocess::CameraPostProcessComponent::new(camera.view_id, &settings),
+        );
         self.scene_db.world.flush_gpu_mirror(renderer.queue());
         camera
     }

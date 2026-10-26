@@ -13,7 +13,9 @@ use helio_vg_format::VgMode;
 /// be nonzero (they are zero unless the application requested them).
 pub fn rt_available(device: &wgpu::Device) -> bool {
     let limits = device.limits();
-    device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+    device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
         && limits.max_tlas_instance_count > 0
         && limits.max_blas_geometry_count > 0
         && limits.max_blas_primitive_count > 0
@@ -50,13 +52,21 @@ impl AutoPolicy {
     /// per tree (hundreds of thousands of dense clusters), where the depth peel
     /// overflows its per-tile lists.
     pub fn dense_regions() -> Self {
-        Self { min_dense_tiles_for_rt: 16, min_dense_fraction_for_rt: 0.004, hysteresis: 0.5 }
+        Self {
+            min_dense_tiles_for_rt: 16,
+            min_dense_fraction_for_rt: 0.004,
+            hysteresis: 0.5,
+        }
     }
 }
 
 impl Default for AutoPolicy {
     fn default() -> Self {
-        Self { min_dense_tiles_for_rt: 256, min_dense_fraction_for_rt: 0.05, hysteresis: 0.5 }
+        Self {
+            min_dense_tiles_for_rt: 256,
+            min_dense_fraction_for_rt: 0.05,
+            hysteresis: 0.5,
+        }
     }
 }
 
@@ -69,7 +79,10 @@ pub struct Tier3Selector {
 
 impl Tier3Selector {
     pub fn new(policy: AutoPolicy) -> Self {
-        Self { policy, on_rt: false }
+        Self {
+            policy,
+            on_rt: false,
+        }
     }
 
     /// Choose the backend for a frame.
@@ -126,35 +139,71 @@ mod tests {
     #[test]
     fn force_modes_never_use_rt() {
         let mut s = Tier3Selector::default();
-        assert_eq!(s.select(VgMode::ForceNonRtFallback, true, true, 10_000, 32_000), Tier3Backend::NonRt);
-        assert_eq!(s.select(VgMode::ForceHwRaster, true, true, 10_000, 32_000), Tier3Backend::Off);
-        assert_eq!(s.select(VgMode::Off, true, true, 10_000, 32_000), Tier3Backend::Off);
+        assert_eq!(
+            s.select(VgMode::ForceNonRtFallback, true, true, 10_000, 32_000),
+            Tier3Backend::NonRt
+        );
+        assert_eq!(
+            s.select(VgMode::ForceHwRaster, true, true, 10_000, 32_000),
+            Tier3Backend::Off
+        );
+        assert_eq!(
+            s.select(VgMode::Off, true, true, 10_000, 32_000),
+            Tier3Backend::Off
+        );
     }
 
     #[test]
     fn auto_requires_hardware_readiness_and_enough_tiles() {
         let mut s = Tier3Selector::default();
-        assert_eq!(s.select(VgMode::Auto, false, true, 10_000, 32_000), Tier3Backend::NonRt);
-        assert_eq!(s.select(VgMode::Auto, true, false, 10_000, 32_000), Tier3Backend::NonRt);
-        assert_eq!(s.select(VgMode::Auto, true, true, 3, 32_000), Tier3Backend::NonRt);
-        assert_eq!(s.select(VgMode::Auto, true, true, 256, 32_000), Tier3Backend::Rt);
+        assert_eq!(
+            s.select(VgMode::Auto, false, true, 10_000, 32_000),
+            Tier3Backend::NonRt
+        );
+        assert_eq!(
+            s.select(VgMode::Auto, true, false, 10_000, 32_000),
+            Tier3Backend::NonRt
+        );
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 3, 32_000),
+            Tier3Backend::NonRt
+        );
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 256, 32_000),
+            Tier3Backend::Rt
+        );
     }
 
     #[test]
     fn auto_has_hysteresis() {
         let mut s = Tier3Selector::default();
-        assert_eq!(s.select(VgMode::Auto, true, true, 300, 32_000), Tier3Backend::Rt);
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 300, 32_000),
+            Tier3Backend::Rt
+        );
         // Below the entry threshold but above the exit one: stays on RT.
-        assert_eq!(s.select(VgMode::Auto, true, true, 200, 32_000), Tier3Backend::Rt);
-        assert_eq!(s.select(VgMode::Auto, true, true, 100, 32_000), Tier3Backend::NonRt);
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 200, 32_000),
+            Tier3Backend::Rt
+        );
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 100, 32_000),
+            Tier3Backend::NonRt
+        );
         // And needs the full threshold to come back.
-        assert_eq!(s.select(VgMode::Auto, true, true, 200, 32_000), Tier3Backend::NonRt);
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 200, 32_000),
+            Tier3Backend::NonRt
+        );
     }
 
     #[test]
     fn small_screens_scale_the_threshold() {
         let mut s = Tier3Selector::default();
         // 400 tiles total: 5% = 20 dense tiles is enough.
-        assert_eq!(s.select(VgMode::Auto, true, true, 20, 400), Tier3Backend::Rt);
+        assert_eq!(
+            s.select(VgMode::Auto, true, true, 20, 400),
+            Tier3Backend::Rt
+        );
     }
 }

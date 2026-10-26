@@ -46,11 +46,17 @@ fn singlet_efl_matches_lensmaker() {
     let rx = plano(Glass::Index(n), t, vec![], 8.0);
     let mut rx = rx;
     rx.surfaces[0].radius = r1;
-    rx.surfaces.push(Surface::spherical(r2, 40.0, Glass::Air, 8.0));
+    rx.surfaces
+        .push(Surface::spherical(r2, 40.0, Glass::Air, 8.0));
     rx.surfaces[0].thickness = t;
     let p = Paraxial::new(&rx, 550.0).unwrap();
     let inv_f = (n - 1.0) * (1.0 / r1 - 1.0 / r2 + (n - 1.0) * t / (n * r1 * r2));
-    assert!((p.efl - 1.0 / inv_f).abs() < 1e-9, "{} vs {}", p.efl, 1.0 / inv_f);
+    assert!(
+        (p.efl - 1.0 / inv_f).abs() < 1e-9,
+        "{} vs {}",
+        p.efl,
+        1.0 / inv_f
+    );
     // BFL from the principal plane: f (1 - (n-1) t / (n R1)).
     let bfl = p.efl * (1.0 - (n - 1.0) * t / (n * r1));
     assert!((p.bfl - bfl).abs() < 1e-9);
@@ -62,8 +68,10 @@ fn flat_plate_shifts_focus_by_t_one_minus_inv_n() {
     let t = 6.0;
     let mut lens = Prescription::ideal_thin_lens(50.0, 5.0, 10.0);
     lens.surfaces[0].thickness = 10.0;
-    lens.surfaces.push(Surface::spherical(0.0, t, Glass::Index(n), 8.0));
-    lens.surfaces.push(Surface::spherical(0.0, 0.0, Glass::Air, 8.0));
+    lens.surfaces
+        .push(Surface::spherical(0.0, t, Glass::Index(n), 8.0));
+    lens.surfaces
+        .push(Surface::spherical(0.0, 0.0, Glass::Air, 8.0));
     let p = Paraxial::new(&lens, 550.0).unwrap();
     assert!((p.focus_z - (50.0 + t * (1.0 - 1.0 / n))).abs() < TOL);
 
@@ -72,7 +80,9 @@ fn flat_plate_shifts_focus_by_t_one_minus_inv_n() {
     lens.surfaces[last].thickness = p.focus_z - lens.vertex_z()[last];
     let tr = Tracer::new(&lens, 550.0).unwrap();
     for h in [1e-3, 2e-3] {
-        let ray = tr.aim(Field::Infinity { tan: [0.0, 0.0] }, [h, 0.0]).unwrap();
+        let ray = tr
+            .aim(Field::Infinity { tan: [0.0, 0.0] }, [h, 0.0])
+            .unwrap();
         let hit = tr.trace(ray).unwrap();
         assert!(hit.origin[0].abs() < 1e-5 * h.max(1.0), "{:?}", hit);
     }
@@ -93,7 +103,14 @@ fn group_focus_refocuses_real_lens() {
     let rx = examples::double_gauss();
     let d = 1000.0;
     let g = rx
-        .focused(d, FocusMode::Group { first: 6, last: rx.surfaces.len() - 1 }, D_LINE_NM)
+        .focused(
+            d,
+            FocusMode::Group {
+                first: 6,
+                last: rx.surfaces.len() - 1,
+            },
+            D_LINE_NM,
+        )
         .unwrap();
     let p = Paraxial::new(&g, D_LINE_NM).unwrap();
     let z = p.image_z(&g, d).unwrap();
@@ -164,7 +181,10 @@ fn plate_leaves_direction_unchanged_and_shifts_ray() {
     let tr = Tracer::new(&rx, 550.0).unwrap();
     let a = 40f64.to_radians();
     let dir = [a.sin(), 0.0, a.cos()];
-    let ray = Ray { origin: [0.0, 0.0, -5.0], dir };
+    let ray = Ray {
+        origin: [0.0, 0.0, -5.0],
+        dir,
+    };
     let mut inside = None;
     let out = tr
         .trace_with(ray, |i, r| {
@@ -188,19 +208,34 @@ fn total_internal_reflection_in_trace() {
         9.9,
     );
     let tr = Tracer::new(&rx, 550.0).unwrap();
-    let ray = Ray { origin: [9.0, 0.0, -1.0], dir: [0.0, 0.0, 1.0] };
+    let ray = Ray {
+        origin: [9.0, 0.0, -1.0],
+        dir: [0.0, 0.0, 1.0],
+    };
     let err = tr.trace(ray).unwrap_err();
-    assert_eq!(err, RayFail { surface: 1, kind: RayFailKind::TotalInternalReflection });
+    assert_eq!(
+        err,
+        RayFail {
+            surface: 1,
+            kind: RayFailKind::TotalInternalReflection
+        }
+    );
 }
 
 #[test]
 fn clear_aperture_vignettes_when_clipped() {
     let rx = Prescription::ideal_thin_lens(50.0, 2.0, 21.6);
-    let ray = Ray { origin: [13.0, 0.0, -1.0], dir: [0.0, 0.0, 1.0] };
+    let ray = Ray {
+        origin: [13.0, 0.0, -1.0],
+        dir: [0.0, 0.0, 1.0],
+    };
     let tr = Tracer::new(&rx, 550.0).unwrap();
     assert_eq!(tr.trace(ray).unwrap_err().kind, RayFailKind::Aperture);
     assert!(tr.trace_unclipped(ray).is_ok());
-    let inside = Ray { origin: [12.0, 0.0, -1.0], dir: [0.0, 0.0, 1.0] };
+    let inside = Ray {
+        origin: [12.0, 0.0, -1.0],
+        dir: [0.0, 0.0, 1.0],
+    };
     assert!(tr.trace(inside).is_ok());
 }
 
@@ -226,7 +261,11 @@ fn asphere_normal_matches_sag_gradient() {
     let gy = (sag(x, y + e) - sag(x, y - e)) / (2.0 * e);
     let n = s.normal(x, y);
     let l = (gx * gx + gy * gy + 1.0).sqrt();
-    assert!((n[0] + gx / l).abs() < 1e-7 && (n[1] + gy / l).abs() < 1e-7 && (n[2] - 1.0 / l).abs() < 1e-7);
+    assert!(
+        (n[0] + gx / l).abs() < 1e-7
+            && (n[1] + gy / l).abs() < 1e-7
+            && (n[2] - 1.0 / l).abs() < 1e-7
+    );
     // Intersection lands on the surface.
     let o = [x, y, -3.0];
     let t = s.intersect(o, [0.0, 0.0, 1.0]).unwrap();
@@ -246,14 +285,18 @@ fn conic_lens_focuses_collimated_light_perfectly() {
     rx.surfaces[last].thickness = p.bfl;
     let tr = Tracer::new(&rx, 550.0).unwrap();
     for h in [1.0, 4.0, 8.0] {
-        let ray = tr.aim(Field::Infinity { tan: [0.0, 0.0] }, [h / 9.0, 0.0]).unwrap();
+        let ray = tr
+            .aim(Field::Infinity { tan: [0.0, 0.0] }, [h / 9.0, 0.0])
+            .unwrap();
         let hit = tr.trace(ray).unwrap();
         assert!(hit.origin[0].abs() < 1e-8, "h={h}: {}", hit.origin[0]);
     }
     // The spherical equivalent is clearly aberrated.
     rx.surfaces[last].conic = 0.0;
     let tr = Tracer::new(&rx, 550.0).unwrap();
-    let ray = tr.aim(Field::Infinity { tan: [0.0, 0.0] }, [8.0 / 9.0, 0.0]).unwrap();
+    let ray = tr
+        .aim(Field::Infinity { tan: [0.0, 0.0] }, [8.0 / 9.0, 0.0])
+        .unwrap();
     assert!(tr.trace(ray).unwrap().origin[0].abs() > 0.05);
 }
 
@@ -267,7 +310,11 @@ fn aim_hits_requested_stop_point() {
             for uv in [[0.0, 0.0], [0.6, 0.0], [-0.3, 0.5]] {
                 let ray = tr.aim(f, uv).unwrap();
                 let h = tr.stop_hit(ray).unwrap();
-                assert!((h[0] - uv[0] * rs).abs() < 1e-6 * rs && (h[1] - uv[1] * rs).abs() < 1e-6 * rs, "{}", rx.name);
+                assert!(
+                    (h[0] - uv[0] * rs).abs() < 1e-6 * rs && (h[1] - uv[1] * rs).abs() < 1e-6 * rs,
+                    "{}",
+                    rx.name
+                );
             }
         }
     }
@@ -287,7 +334,9 @@ fn trace_is_deterministic() {
 fn real_lens_focuses_near_paraxial_focus() {
     for rx in [examples::double_gauss(), examples::cooke_triplet()] {
         let tr = Tracer::new(&rx, D_LINE_NM).unwrap();
-        let ray = tr.aim(Field::Infinity { tan: [0.0, 0.0] }, [1e-3, 0.0]).unwrap();
+        let ray = tr
+            .aim(Field::Infinity { tan: [0.0, 0.0] }, [1e-3, 0.0])
+            .unwrap();
         let hit = tr.trace(ray).unwrap();
         assert!(hit.origin[0].abs() < 1e-4, "{}: {}", rx.name, hit.origin[0]);
     }
@@ -308,7 +357,10 @@ fn spectral_weights_reconstruct_white() {
             assert!((c - 1.0).abs() < 1e-6);
         }
     }
-    assert_eq!(SpectralSampling::uniform(3).wavelengths_nm, vec![450.0, 550.0, 650.0]);
+    assert_eq!(
+        SpectralSampling::uniform(3).wavelengths_nm,
+        vec![450.0, 550.0, 650.0]
+    );
     // Custom wavelengths too.
     let s = SpectralSampling::with_wavelengths(vec![470.0, 520.0, 580.0, 640.0]);
     for sum in s.channel_sums() {
@@ -326,15 +378,25 @@ fn examples_round_trip() {
         assert_eq!(rx, back);
     }
     // Bare data files parse identically to the embedded constants.
-    let on_disk = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/data/double_gauss_50mm_f2.json")).unwrap();
-    assert_eq!(Prescription::from_json(&on_disk).unwrap(), examples::double_gauss());
+    let on_disk = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/double_gauss_50mm_f2.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        Prescription::from_json(&on_disk).unwrap(),
+        examples::double_gauss()
+    );
 }
 
 #[test]
 fn invalid_prescriptions_are_rejected() {
     let mut rx = examples::cooke_triplet();
     rx.surfaces[0].glass = Glass::Catalog("UNOBTAINIUM".into());
-    assert!(matches!(rx.validate(), Err(OpticsError::UnknownGlass { surface: 0 })));
+    assert!(matches!(
+        rx.validate(),
+        Err(OpticsError::UnknownGlass { surface: 0 })
+    ));
     let mut rx = examples::cooke_triplet();
     rx.surfaces[4].stop = false;
     assert!(matches!(rx.validate(), Err(OpticsError::StopCount(0))));
@@ -346,12 +408,20 @@ fn invalid_prescriptions_are_rejected() {
 #[test]
 fn thin_lens_has_zero_distortion_and_cos4_falloff() {
     let rx = examples::thin_lens();
-    let cfg = BakeConfig { field_samples: 11, pupil_samples: 12, ..BakeConfig::coarse() };
+    let cfg = BakeConfig {
+        field_samples: 11,
+        pupil_samples: 12,
+        ..BakeConfig::coarse()
+    };
     let lut = bake_ray_map(&rx, &cfg).unwrap();
     assert_eq!(lut.valid_field, 1.0);
     for w in 0..lut.n_wave {
         for i in 0..lut.n_field {
-            assert!(lut.distortion(w, i).abs() < 1e-6, "w{w} i{i}: {}", lut.distortion(w, i));
+            assert!(
+                lut.distortion(w, i).abs() < 1e-6,
+                "w{w} i{i}: {}",
+                lut.distortion(w, i)
+            );
             let y = rx.sensor_half_diagonal_mm * lut.field_r(i) as f64;
             assert!((lut.tan_theta(w, i) as f64 - y / 50.0).abs() < 1e-6);
         }
@@ -359,7 +429,8 @@ fn thin_lens_has_zero_distortion_and_cos4_falloff() {
     let v = bake_vignetting(&rx, &cfg).unwrap();
     for j in 0..v.n_fnum {
         for i in 0..v.n_field {
-            let theta = (rx.sensor_half_diagonal_mm * i as f64 / (v.n_field - 1) as f64 / 50.0).atan();
+            let theta =
+                (rx.sensor_half_diagonal_mm * i as f64 / (v.n_field - 1) as f64 / 50.0).atan();
             assert!((v.at(j, i) as f64 - theta.cos().powi(4)).abs() < 1e-5);
         }
     }
@@ -367,7 +438,11 @@ fn thin_lens_has_zero_distortion_and_cos4_falloff() {
 
 #[test]
 fn vignetting_is_one_on_axis_and_monotone() {
-    let cfg = BakeConfig { field_samples: 13, pupil_samples: 16, ..BakeConfig::coarse() };
+    let cfg = BakeConfig {
+        field_samples: 13,
+        pupil_samples: 16,
+        ..BakeConfig::coarse()
+    };
     for rx in examples::all() {
         let v = bake_vignetting(&rx, &cfg).unwrap();
         assert!(v.n_fnum >= 2, "{}: expected stop-down rows", rx.name);
@@ -375,7 +450,12 @@ fn vignetting_is_one_on_axis_and_monotone() {
         for j in 0..v.n_fnum {
             assert_eq!(v.at(j, 0), 1.0, "{} f/{}", rx.name, v.f_numbers[j]);
             for i in 1..v.n_field {
-                assert!(v.at(j, i) <= v.at(j, i - 1), "{} f/{} i{i}", rx.name, v.f_numbers[j]);
+                assert!(
+                    v.at(j, i) <= v.at(j, i - 1),
+                    "{} f/{} i{i}",
+                    rx.name,
+                    v.f_numbers[j]
+                );
                 assert!((0.0..=1.0).contains(&v.at(j, i)));
             }
         }
@@ -385,11 +465,20 @@ fn vignetting_is_one_on_axis_and_monotone() {
 #[test]
 fn real_lens_vignettes_wide_open_and_less_stopped_down() {
     let rx = examples::double_gauss();
-    let cfg = BakeConfig { field_samples: 9, pupil_samples: 20, f_numbers: vec![2.0, 8.0], ..BakeConfig::coarse() };
+    let cfg = BakeConfig {
+        field_samples: 9,
+        pupil_samples: 20,
+        f_numbers: vec![2.0, 8.0],
+        ..BakeConfig::coarse()
+    };
     let v = bake_vignetting(&rx, &cfg).unwrap();
     let corner = v.n_field - 1;
     assert!(v.at(0, corner) < 0.7, "open corner {}", v.at(0, corner));
-    assert!(v.at(1, corner) > v.at(0, corner) + 0.05, "stopped corner {}", v.at(1, corner));
+    assert!(
+        v.at(1, corner) > v.at(0, corner) + 0.05,
+        "stopped corner {}",
+        v.at(1, corner)
+    );
 }
 
 #[test]
@@ -415,7 +504,10 @@ fn real_lens_ray_map_is_physical() {
     // Off-axis wavelengths separate (lateral colour) but stay within a few percent.
     assert!((lut.distortion(0, 0) - lut.distortion(2, 0)).abs() < 1e-2);
     let spread = (lut.tan_theta(0, n - 1) - lut.tan_theta(2, n - 1)).abs();
-    assert!(spread > 0.0 && spread < 0.02 * lut.tan_theta(1, n - 1), "{spread}");
+    assert!(
+        spread > 0.0 && spread < 0.02 * lut.tan_theta(1, n - 1),
+        "{spread}"
+    );
 }
 
 #[test]
@@ -436,7 +528,10 @@ fn chromatic_focus_shift_has_normal_sign() {
 #[test]
 fn ideal_lens_has_no_aberration_and_defocus_blur_scales() {
     let rx = examples::thin_lens();
-    let cfg = BakeConfig { defocus_mm: vec![-0.2, 0.0, 0.2], ..BakeConfig::coarse() };
+    let cfg = BakeConfig {
+        defocus_mm: vec![-0.2, 0.0, 0.2],
+        ..BakeConfig::coarse()
+    };
     let psf = bake_psf(&rx, &cfg).unwrap();
     assert_eq!(psf.stride, PSF_FIXED_FIELDS + psf.n_profile);
     for i in 0..psf.n_field {
@@ -444,7 +539,11 @@ fn ideal_lens_has_no_aberration_and_defocus_blur_scales() {
         let (a, b) = (psf.record(i, 0), psf.record(i, 2));
         assert!((a[0] - b[0]).abs() < 1e-6 * a[0].max(1.0));
         // Geometric blur disc: edge radius <= |dz| / (2 N) = 0.05 (grid stops short of the rim).
-        assert!(a[4] as f64 > 0.9 * 0.05 && (a[4] as f64) < 0.05 * 1.001, "edge {}", a[4]);
+        assert!(
+            a[4] as f64 > 0.9 * 0.05 && (a[4] as f64) < 0.05 * 1.001,
+            "edge {}",
+            a[4]
+        );
         assert_eq!(*a.last().unwrap(), 1.0);
     }
     // Uniform disc: encircled energy ~ (r/R)^2.
@@ -465,8 +564,15 @@ fn footprints_show_cats_eye() {
     let fp = bake_footprints(&rx, &cfg).unwrap();
     let centre_area: f32 = fp.mask(0).iter().sum();
     let ideal = std::f32::consts::PI * 12.0 * 12.0;
-    assert!((centre_area - ideal).abs() < 0.06 * ideal, "{centre_area} vs {ideal}");
-    assert!(fp.relative_area(1) < 0.9, "corner area {}", fp.relative_area(1));
+    assert!(
+        (centre_area - ideal).abs() < 0.06 * ideal,
+        "{centre_area} vs {ideal}"
+    );
+    assert!(
+        fp.relative_area(1) < 0.9,
+        "corner area {}",
+        fp.relative_area(1)
+    );
     assert!(fp.relative_area(1) > 0.1);
     assert!(fp.mask(1).iter().all(|v| (0.0..=1.0).contains(v)));
 }
@@ -474,14 +580,35 @@ fn footprints_show_cats_eye() {
 #[test]
 fn full_bake_layouts_are_consistent_and_finite() {
     for rx in examples::all() {
-        let cfg = BakeConfig { pupil_samples: 10, ..BakeConfig::coarse() };
+        let cfg = BakeConfig {
+            pupil_samples: 10,
+            ..BakeConfig::coarse()
+        };
         let b = LensBake::bake(&rx, &cfg).unwrap();
-        assert_eq!(b.ray_map.data.len(), 2 * b.ray_map.n_wave * b.ray_map.n_field);
-        assert_eq!(b.vignetting.data.len(), b.vignetting.n_fnum * b.vignetting.n_field);
-        assert_eq!(b.footprints.data.len(), b.footprints.n_fields * b.footprints.resolution.pow(2));
-        assert_eq!(b.psf.data.len(), b.psf.n_field * b.psf.n_defocus * b.psf.stride);
+        assert_eq!(
+            b.ray_map.data.len(),
+            2 * b.ray_map.n_wave * b.ray_map.n_field
+        );
+        assert_eq!(
+            b.vignetting.data.len(),
+            b.vignetting.n_fnum * b.vignetting.n_field
+        );
+        assert_eq!(
+            b.footprints.data.len(),
+            b.footprints.n_fields * b.footprints.resolution.pow(2)
+        );
+        assert_eq!(
+            b.psf.data.len(),
+            b.psf.n_field * b.psf.n_defocus * b.psf.stride
+        );
         assert_eq!(b.ray_map.as_bytes().len(), b.ray_map.data.len() * 4);
-        for d in [&b.ray_map.data, &b.vignetting.data, &b.footprints.data, &b.psf.data, &b.focus.best_mm] {
+        for d in [
+            &b.ray_map.data,
+            &b.vignetting.data,
+            &b.footprints.data,
+            &b.psf.data,
+            &b.focus.best_mm,
+        ] {
             assert!(d.iter().all(|v| v.is_finite()), "{}", rx.name);
         }
         let again = LensBake::bake(&rx, &cfg).unwrap();
@@ -493,7 +620,12 @@ fn full_bake_layouts_are_consistent_and_finite() {
 #[test]
 fn near_focus_bake_uses_refocused_lens() {
     let rx = examples::double_gauss();
-    let cfg = BakeConfig { focus_distance_mm: Some(500.0), pupil_samples: 10, field_samples: 5, ..BakeConfig::coarse() };
+    let cfg = BakeConfig {
+        focus_distance_mm: Some(500.0),
+        pupil_samples: 10,
+        field_samples: 5,
+        ..BakeConfig::coarse()
+    };
     let b = LensBake::bake(&rx, &cfg).unwrap();
     assert!(b.ray_map.valid_field > 0.9);
     assert!(b.vignetting.data.iter().all(|v| v.is_finite()));

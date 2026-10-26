@@ -72,7 +72,10 @@ fn row(ground: u32, k: Kind) -> FoliageTypeComponent {
         wind_response: [0.7, 0.35, 0.1],
         // Lies flat under a foot (`FoliageInteractorComponent`).
         interaction_stiffness: 1.0,
-        kind_and_flags: pack_kind_and_flags(FoliageKind::Block, FOLIAGE_FLAG_RECEIVES_INTERACTION | FOLIAGE_FLAG_GROUND_COLOUR),
+        kind_and_flags: pack_kind_and_flags(
+            FoliageKind::Block,
+            FOLIAGE_FLAG_RECEIVES_INTERACTION | FOLIAGE_FLAG_GROUND_COLOUR,
+        ),
         ground_mask: 1 << ground,
         lean_range: k.lean,
         curve: k.curve,
@@ -82,7 +85,11 @@ fn row(ground: u32, k: Kind) -> FoliageTypeComponent {
         ..GpuFoliageType::default()
     };
     t.set_blades_per_tuft(k.blades);
-    t.set_material(Some(FoliageMaterial { base_color: k.colour, roughness: 0.9, metallic: 0.0 }));
+    t.set_material(Some(FoliageMaterial {
+        base_color: k.colour,
+        roughness: 0.9,
+        metallic: 0.0,
+    }));
     t.set_tip_color(k.tip.map(|c| c.map(|v| (f32::from(v) / 255.0).powf(2.2))));
     t.into()
 }
@@ -94,78 +101,98 @@ pub fn meadow() -> Meadow {
     let cube = [CUBE_M; 2];
     let types = vec![
         // Short grass everywhere, a touch lighter than the turf.
-        row(grass, Kind {
-            density: 6.0,
-            blades: [6, 11],
-            height: [0.12, 0.3],
-            width: cube,
-            lean: [0.03, 0.35],
-            curve: 0.15,
-            fall: 0.05,
-            colour: [0.58, 0.62, 0.5],
-            tip: None,
-            patch: [12.0, 0.35],
-            reach: 0.0,
-        }),
+        row(
+            grass,
+            Kind {
+                density: 6.0,
+                blades: [6, 11],
+                height: [0.12, 0.3],
+                width: cube,
+                lean: [0.03, 0.35],
+                curve: 0.15,
+                fall: 0.05,
+                colour: [0.58, 0.62, 0.5],
+                tip: None,
+                patch: [12.0, 0.35],
+                reach: 0.0,
+            },
+        ),
         // Tall grass over most of the meadow, thicker in patches, yellower at the tips.
-        row(grass, Kind {
-            density: 5.0,
-            blades: [8, 14],
-            height: [0.3, 0.6],
-            width: cube,
-            lean: [0.03, 0.3],
-            curve: 0.2,
-            fall: 0.1,
-            colour: [0.62, 0.62, 0.45],
-            tip: None,
-            patch: [22.0, 0.5],
-            reach: 0.0,
-        }),
+        row(
+            grass,
+            Kind {
+                density: 5.0,
+                blades: [8, 14],
+                height: [0.3, 0.6],
+                width: cube,
+                lean: [0.03, 0.3],
+                curve: 0.2,
+                fall: 0.1,
+                colour: [0.62, 0.62, 0.45],
+                tip: None,
+                patch: [22.0, 0.5],
+                reach: 0.0,
+            },
+        ),
         // Leafy undergrowth: broad plates fanned low, darker.
-        row(grass, Kind {
-            density: 0.7,
-            blades: [4, 7],
-            height: [0.1, 0.2],
-            width: [CUBE_M, 3.0 * CUBE_M],
-            lean: [0.9, 1.6],
-            curve: 0.3,
-            fall: 0.0,
-            colour: [0.4, 0.52, 0.38],
-            tip: None,
-            patch: [9.0, 0.9],
-            reach: 140.0,
-        }),
+        row(
+            grass,
+            Kind {
+                density: 0.7,
+                blades: [4, 7],
+                height: [0.1, 0.2],
+                width: [CUBE_M, 3.0 * CUBE_M],
+                lean: [0.9, 1.6],
+                curve: 0.3,
+                fall: 0.0,
+                colour: [0.4, 0.52, 0.38],
+                tip: None,
+                patch: [9.0, 0.9],
+                reach: 140.0,
+            },
+        ),
         // Flower clusters, yellow and white, in their own patches.
-        row(grass, Kind {
-            density: 0.35,
-            blades: [3, 6],
-            height: [0.22, 0.4],
-            width: cube,
-            lean: [0.05, 0.3],
-            curve: 0.2,
-            fall: 0.0,
-            colour: [0.45, 0.55, 0.4],
-            tip: Some([236, 206, 58]),
-            patch: [7.0, 0.95],
-            reach: 90.0,
-        }),
-        row(grass, Kind {
-            density: 0.25,
-            blades: [3, 5],
-            height: [0.18, 0.34],
-            width: cube,
-            lean: [0.05, 0.3],
-            curve: 0.2,
-            fall: 0.0,
-            colour: [0.45, 0.55, 0.4],
-            tip: Some([238, 236, 226]),
-            patch: [6.0, 0.95],
-            reach: 90.0,
-        }),
+        row(
+            grass,
+            Kind {
+                density: 0.35,
+                blades: [3, 6],
+                height: [0.22, 0.4],
+                width: cube,
+                lean: [0.05, 0.3],
+                curve: 0.2,
+                fall: 0.0,
+                colour: [0.45, 0.55, 0.4],
+                tip: Some([236, 206, 58]),
+                patch: [7.0, 0.95],
+                reach: 90.0,
+            },
+        ),
+        row(
+            grass,
+            Kind {
+                density: 0.25,
+                blades: [3, 5],
+                height: [0.18, 0.34],
+                width: cube,
+                lean: [0.05, 0.3],
+                curve: 0.2,
+                fall: 0.0,
+                colour: [0.45, 0.55, 0.4],
+                tip: Some([238, 236, 226]),
+                patch: [6.0, 0.95],
+                reach: 90.0,
+            },
+        ),
     ];
     Meadow {
         types,
-        wind: FoliageWindComponent { direction_speed: [1.0, 0.0, 0.3, 1.5], gust: [0.5, 0.2, 0.0, 0.05], time_prev_time: [0.0, 0.0], _pad: [0.0; 2] },
+        wind: FoliageWindComponent {
+            direction_speed: [1.0, 0.0, 0.3, 1.5],
+            gust: [0.5, 0.2, 0.0, 0.05],
+            time_prev_time: [0.0, 0.0],
+            _pad: [0.0; 2],
+        },
         tufts_per_m2: 13.0,
         blades_per_tuft: 9.5,
         range: 200.0,
@@ -176,19 +203,22 @@ impl Meadow {
     /// Stands of tall grass, knee to waist high and yellower, in some places (large
     /// patches with bare meadow between).
     pub fn with_tall_stands(mut self) -> Self {
-        let stand = row(material::GRASS, Kind {
-            density: 4.0,
-            blades: [7, 13],
-            height: [0.6, 1.1],
-            width: [CUBE_M; 2],
-            lean: [0.04, 0.28],
-            curve: 0.25,
-            fall: 0.08,
-            colour: [0.66, 0.64, 0.42],
-            tip: None,
-            patch: [34.0, 0.97],
-            reach: 0.0,
-        });
+        let stand = row(
+            material::GRASS,
+            Kind {
+                density: 4.0,
+                blades: [7, 13],
+                height: [0.6, 1.1],
+                width: [CUBE_M; 2],
+                lean: [0.04, 0.28],
+                curve: 0.25,
+                fall: 0.08,
+                colour: [0.66, 0.64, 0.42],
+                tip: None,
+                patch: [34.0, 0.97],
+                reach: 0.0,
+            },
+        );
         self.types.push(stand);
         self.tufts_per_m2 += 3.0;
         self.blades_per_tuft += 0.5;

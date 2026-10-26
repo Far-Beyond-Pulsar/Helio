@@ -307,6 +307,9 @@ pub struct TextureDescriptor {
 pub struct GraphTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+    /// Layer-zero 2D view for passes whose shader consumes a conventional
+    /// `texture_2d` while XR render attachments use the two-layer `view`.
+    pub view_2d: wgpu::TextureView,
     pub desc: TextureDescriptor,
     allocation_id: usize,
 }
@@ -380,10 +383,17 @@ impl GraphTexturePool {
                             ..Default::default()
                         })
                     };
+                    let view_2d = source_texture.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some(&desc.name),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    });
                     let idx = self.textures.len();
                     self.textures.push(GraphTexture {
                         texture: source_texture,
                         view,
+                        view_2d,
                         desc: desc.clone(),
                         allocation_id: self.textures[source_index].allocation_id,
                     });
@@ -421,6 +431,12 @@ impl GraphTexturePool {
                 ..Default::default()
             })
         };
+        let view_2d = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some(&desc.name),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            array_layer_count: Some(1),
+            ..Default::default()
+        });
 
         let idx = self.textures.len();
         let allocation_id = self.physical_allocations;
@@ -428,6 +444,7 @@ impl GraphTexturePool {
         self.textures.push(GraphTexture {
             texture,
             view,
+            view_2d,
             desc: desc.clone(),
             allocation_id,
         });
@@ -442,6 +459,15 @@ impl GraphTexturePool {
 
     pub fn get_view(&self, name: &str) -> Option<&wgpu::TextureView> {
         self.name_map.get(name).map(|&idx| &self.textures[idx].view)
+    }
+
+    /// Layer-zero 2D view of a graph texture. XR multiview graph textures
+    /// also expose a two-layer array view for render attachments; use this
+    /// accessor for compute and sampling pipelines with `texture_2d` layouts.
+    pub fn get_view_2d(&self, name: &str) -> Option<&wgpu::TextureView> {
+        self.name_map
+            .get(name)
+            .map(|&idx| &self.textures[idx].view_2d)
     }
 
     pub fn get_texture(&self, name: &str) -> Option<&wgpu::Texture> {

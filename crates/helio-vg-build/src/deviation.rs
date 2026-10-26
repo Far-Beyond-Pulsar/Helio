@@ -84,7 +84,14 @@ impl TriGrid {
         let cell = by_area.max(ext / 24.0).max(1e-12);
         let dims: [i32; 3] = std::array::from_fn(|k| (((hi[k] - lo[k]) / cell) as i32 + 1).max(1));
         let ncell = (dims[0] * dims[1] * dims[2]) as usize;
-        let mut g = Self { tris, lo, cell, dims, start: vec![0; ncell + 1], items: Vec::new() };
+        let mut g = Self {
+            tris,
+            lo,
+            cell,
+            dims,
+            start: vec![0; ncell + 1],
+            items: Vec::new(),
+        };
         let ranges: Vec<([i32; 3], [i32; 3])> = g
             .tris
             .iter()
@@ -134,7 +141,9 @@ impl TriGrid {
     }
 
     fn key(&self, p: V3) -> [i32; 3] {
-        std::array::from_fn(|k| (((p[k] - self.lo[k]) / self.cell).floor() as i32).clamp(0, self.dims[k] - 1))
+        std::array::from_fn(|k| {
+            (((p[k] - self.lo[k]) / self.cell).floor() as i32).clamp(0, self.dims[k] - 1)
+        })
     }
 
     /// Nearest triangle to `p`: (distance, index).
@@ -154,7 +163,9 @@ impl TriGrid {
                     while x <= c[0] + r {
                         if x >= 0 && x < self.dims[0] {
                             let cell = self.cell_index(x, y, z);
-                            for &i in &self.items[self.start[cell] as usize..self.start[cell + 1] as usize] {
+                            for &i in &self.items
+                                [self.start[cell] as usize..self.start[cell + 1] as usize]
+                            {
                                 let t = &self.tris[i as usize];
                                 let d = point_tri_dist2(p, t[0], t[1], t[2]).sqrt();
                                 if d < best.0 {
@@ -215,7 +226,11 @@ pub fn measure(refs: &[V3], input: &[[V3; 3]], pieces: &[&[[u32; 3]]], pos: &[V3
         }
     }
     let piece_refs = per_piece.into_iter().map(cap_refs).collect();
-    Measured { forward, error, piece_refs }
+    Measured {
+        forward,
+        error,
+        piece_refs,
+    }
 }
 
 /// Keep at most [`MAX_REFS_PER_CLUSTER`] points: the worst half by measured
@@ -227,7 +242,12 @@ fn cap_refs(mut pts: Vec<(f32, V3)>) -> Vec<V3> {
     }
     let keep_worst = MAX_REFS_PER_CLUSTER / 2;
     let mut idx: Vec<u32> = (0..pts.len() as u32).collect();
-    idx.sort_unstable_by(|&a, &b| pts[b as usize].0.total_cmp(&pts[a as usize].0).then(a.cmp(&b)));
+    idx.sort_unstable_by(|&a, &b| {
+        pts[b as usize]
+            .0
+            .total_cmp(&pts[a as usize].0)
+            .then(a.cmp(&b))
+    });
     let mut taken = vec![false; pts.len()];
     for &i in &idx[..keep_worst] {
         taken[i as usize] = true;

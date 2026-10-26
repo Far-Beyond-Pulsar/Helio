@@ -19,7 +19,8 @@ const TRIANGLE_GLTF: &str = r#"{
 
 #[test]
 fn external_bin_resolves_relative_to_the_gltf_not_the_working_directory() {
-    let dir = std::env::temp_dir().join(format!("helio_asset_compat_ext_bin_{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("helio_asset_compat_ext_bin_{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
     let bytes: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();

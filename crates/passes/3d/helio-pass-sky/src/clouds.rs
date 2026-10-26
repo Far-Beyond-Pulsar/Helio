@@ -104,60 +104,108 @@ const CLOUD_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const CLOUD_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 
 fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None }
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    }
 }
 
 fn sampled(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
-    entry(binding, wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-        view_dimension: dimension,
-        multisampled: false,
-    })
+    entry(
+        binding,
+        wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: dimension,
+            multisampled: false,
+        },
+    )
 }
 
 fn unfilterable(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    entry(binding, wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-        view_dimension: wgpu::TextureViewDimension::D2,
-        multisampled: false,
-    })
+    entry(
+        binding,
+        wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+    )
 }
 
-fn storage_texture(binding: u32, format: wgpu::TextureFormat, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
-    entry(binding, wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: dimension })
+fn storage_texture(
+    binding: u32,
+    format: wgpu::TextureFormat,
+    dimension: wgpu::TextureViewDimension,
+) -> wgpu::BindGroupLayoutEntry {
+    entry(
+        binding,
+        wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format,
+            view_dimension: dimension,
+        },
+    )
 }
 
 fn buffer(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
-    entry(binding, wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None })
+    entry(
+        binding,
+        wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+    )
 }
 
 fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    entry(binding, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering))
+    entry(
+        binding,
+        wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+    )
 }
 
-fn compute_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry_point: &str) -> wgpu::ComputePipeline {
+fn compute_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    entry_point: &str,
+) -> wgpu::ComputePipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(entry_point),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
-    helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-        label: Some(entry_point),
-        layout: Some(&pipeline_layout),
-        module,
-        entry_point: Some(entry_point),
-        compilation_options: Default::default(),
-        cache: None,
-    })
+    helio_core::shader::create_compute_pipeline(
+        &device,
+        wgpu::ComputePipelineDescriptor {
+            label: Some(entry_point),
+            layout: Some(&pipeline_layout),
+            module,
+            entry_point: Some(entry_point),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+    )
 }
 
-fn bind_group(device: &wgpu::Device, label: &str, layout: &wgpu::BindGroupLayout, resources: &[(u32, wgpu::BindingResource)]) -> wgpu::BindGroup {
+fn bind_group(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    resources: &[(u32, wgpu::BindingResource)],
+) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
         entries: &resources
             .iter()
-            .map(|(binding, resource)| wgpu::BindGroupEntry { binding: *binding, resource: resource.clone() })
+            .map(|(binding, resource)| wgpu::BindGroupEntry {
+                binding: *binding,
+                resource: resource.clone(),
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -231,12 +279,21 @@ impl CloudVolumes {
             entries: &[storage_texture(0, NOISE_FORMAT, d3), sampled(1, d3)],
         });
         let downsample = compute_pipeline(device, &noise, &downsample_layout, "downsample");
-        let downsample_spread = compute_pipeline(device, &noise, &downsample_layout, "downsample_spread");
+        let downsample_spread =
+            compute_pipeline(device, &noise, &downsample_layout, "downsample_spread");
         let mut build = Vec::new();
-        let mut volume = |label: &str, side: u32, mips: u32, kernel: &str, downsample: &wgpu::ComputePipeline| {
+        let mut volume = |label: &str,
+                          side: u32,
+                          mips: u32,
+                          kernel: &str,
+                          downsample: &wgpu::ComputePipeline| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: side },
+                size: wgpu::Extent3d {
+                    width: side,
+                    height: side,
+                    depth_or_array_layers: side,
+                },
                 mip_level_count: mips,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D3,
@@ -245,34 +302,70 @@ impl CloudVolumes {
                 view_formats: &[],
             });
             let level = |mip: u32| {
-                texture.create_view(&wgpu::TextureViewDescriptor { base_mip_level: mip, mip_level_count: Some(1), ..Default::default() })
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
             };
             let top = level(0);
             build.push(Dispatch {
                 pipeline: compute_pipeline(device, &noise, &generate_layout, kernel),
-                group: bind_group(device, label, &generate_layout, &[(0, wgpu::BindingResource::TextureView(&top))]),
+                group: bind_group(
+                    device,
+                    label,
+                    &generate_layout,
+                    &[(0, wgpu::BindingResource::TextureView(&top))],
+                ),
                 groups: [side.div_ceil(4); 3],
             });
             for mip in 1..mips {
                 let (out, input) = (level(mip), level(mip - 1));
                 build.push(Dispatch {
                     pipeline: downsample.clone(),
-                    group: bind_group(device, label, &downsample_layout, &[
-                        (0, wgpu::BindingResource::TextureView(&out)),
-                        (1, wgpu::BindingResource::TextureView(&input)),
-                    ]),
+                    group: bind_group(
+                        device,
+                        label,
+                        &downsample_layout,
+                        &[
+                            (0, wgpu::BindingResource::TextureView(&out)),
+                            (1, wgpu::BindingResource::TextureView(&input)),
+                        ],
+                    ),
                     groups: [(side >> mip).max(1).div_ceil(4); 3],
                 });
             }
             texture.create_view(&Default::default())
         };
-        let weather = volume("Cloud weather", WEATHER_SIDE, WEATHER_SIDE.ilog2() + 1, "weather_kernel", &downsample_spread);
-        let shape = volume("Cloud shape", SHAPE_SIDE, SHAPE_SIDE.ilog2() + 1, "shape_kernel", &downsample_spread);
-        let detail = volume("Cloud detail", DETAIL_SIDE, DETAIL_SIDE.ilog2() + 1, "detail_kernel", &downsample);
+        let weather = volume(
+            "Cloud weather",
+            WEATHER_SIDE,
+            WEATHER_SIDE.ilog2() + 1,
+            "weather_kernel",
+            &downsample_spread,
+        );
+        let shape = volume(
+            "Cloud shape",
+            SHAPE_SIDE,
+            SHAPE_SIDE.ilog2() + 1,
+            "shape_kernel",
+            &downsample_spread,
+        );
+        let detail = volume(
+            "Cloud detail",
+            DETAIL_SIDE,
+            DETAIL_SIDE.ilog2() + 1,
+            "detail_kernel",
+            &downsample,
+        );
 
         let planet_weather = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Cloud planet weather"),
-            size: wgpu::Extent3d { width: PLANET_WEATHER_SIDE, height: PLANET_WEATHER_SIDE, depth_or_array_layers: 6 },
+            size: wgpu::Extent3d {
+                width: PLANET_WEATHER_SIDE,
+                height: PLANET_WEATHER_SIDE,
+                depth_or_array_layers: 6,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -299,7 +392,11 @@ impl CloudVolumes {
             entries: &[
                 buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer(1, wgpu::BufferBindingType::Uniform),
-                storage_texture(2, PLANET_WEATHER_FORMAT, wgpu::TextureViewDimension::D2Array),
+                storage_texture(
+                    2,
+                    PLANET_WEATHER_FORMAT,
+                    wgpu::TextureViewDimension::D2Array,
+                ),
             ],
         });
         let bake_params = device.create_buffer(&wgpu::BufferDescriptor {
@@ -310,12 +407,21 @@ impl CloudVolumes {
         });
         let bake = Dispatch {
             pipeline: compute_pipeline(device, &bake_module, &bake_layout, "planet_weather"),
-            group: bind_group(device, "Cloud planet weather", &bake_layout, &[
-                (0, frame.as_entire_binding()),
-                (1, bake_params.as_entire_binding()),
-                (2, wgpu::BindingResource::TextureView(&planet_faces)),
-            ]),
-            groups: [PLANET_WEATHER_SIDE.div_ceil(8), PLANET_WEATHER_SIDE.div_ceil(8), 6],
+            group: bind_group(
+                device,
+                "Cloud planet weather",
+                &bake_layout,
+                &[
+                    (0, frame.as_entire_binding()),
+                    (1, bake_params.as_entire_binding()),
+                    (2, wgpu::BindingResource::TextureView(&planet_faces)),
+                ],
+            ),
+            groups: [
+                PLANET_WEATHER_SIDE.div_ceil(8),
+                PLANET_WEATHER_SIDE.div_ceil(8),
+                6,
+            ],
         };
 
         let shadow_module = helio_core::shader::module_with(
@@ -340,7 +446,11 @@ impl CloudVolumes {
         let shadow_map = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Cloud shadow map"),
-                size: wgpu::Extent3d { width: 2 * CLOUD_SHADOW_SIDE, height: CLOUD_SHADOW_SIDE, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 2 * CLOUD_SHADOW_SIDE,
+                    height: CLOUD_SHADOW_SIDE,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -352,31 +462,52 @@ impl CloudVolumes {
         let shadow_frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Cloud shadow frame"),
             size: CLOUD_SHADOW_FRAME_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let sampler = noise_sampler(device);
         let view = wgpu::BindingResource::TextureView;
-        let shadow_group = bind_group(device, "Cloud shadow map", &shadow_layout, &[
-            (0, frame.as_entire_binding()),
-            (1, view(&weather)),
-            (2, view(&shape)),
-            (3, view(&detail)),
-            (4, wgpu::BindingResource::Sampler(&sampler)),
-            (5, view(&shadow_map)),
-            (6, shadow_frame.as_entire_binding()),
-            (8, view(&planet_weather)),
-        ]);
+        let shadow_group = bind_group(
+            device,
+            "Cloud shadow map",
+            &shadow_layout,
+            &[
+                (0, frame.as_entire_binding()),
+                (1, view(&weather)),
+                (2, view(&shape)),
+                (3, view(&detail)),
+                (4, wgpu::BindingResource::Sampler(&sampler)),
+                (5, view(&shadow_map)),
+                (6, shadow_frame.as_entire_binding()),
+                (8, view(&planet_weather)),
+            ],
+        );
         let shadow = [
             Dispatch {
-                pipeline: compute_pipeline(device, &shadow_module, &shadow_layout, "cloud_shadow_resolve"),
+                pipeline: compute_pipeline(
+                    device,
+                    &shadow_module,
+                    &shadow_layout,
+                    "cloud_shadow_resolve",
+                ),
                 group: shadow_group.clone(),
                 groups: [1, 1, 1],
             },
             Dispatch {
-                pipeline: compute_pipeline(device, &shadow_module, &shadow_layout, "cloud_shadow_kernel"),
+                pipeline: compute_pipeline(
+                    device,
+                    &shadow_module,
+                    &shadow_layout,
+                    "cloud_shadow_kernel",
+                ),
                 group: shadow_group,
-                groups: [(2 * CLOUD_SHADOW_SIDE).div_ceil(8), CLOUD_SHADOW_SIDE.div_ceil(8), 1],
+                groups: [
+                    (2 * CLOUD_SHADOW_SIDE).div_ceil(8),
+                    CLOUD_SHADOW_SIDE.div_ceil(8),
+                    1,
+                ],
             },
         ];
         Self {
@@ -406,9 +537,17 @@ impl CloudVolumes {
         self.weather_rows = rows;
         self.frames = self.frames.wrapping_add(1);
         let params = if self.bake_whole {
-            WeatherBake { phase: 0, stride: 1, _pad: [0; 2] }
+            WeatherBake {
+                phase: 0,
+                stride: 1,
+                _pad: [0; 2],
+            }
         } else {
-            WeatherBake { phase: self.frames % PLANET_WEATHER_STRIDE, stride: PLANET_WEATHER_STRIDE, _pad: [0; 2] }
+            WeatherBake {
+                phase: self.frames % PLANET_WEATHER_STRIDE,
+                stride: PLANET_WEATHER_STRIDE,
+                _pad: [0; 2],
+            }
         };
         ctx.write_buffer(&self.bake_params, 0, bytemuck::bytes_of(&params));
     }
@@ -431,11 +570,19 @@ impl CloudVolumes {
             for dispatch in &self.build {
                 pass.set_pipeline(&dispatch.pipeline);
                 pass.set_bind_group(0, Some(&dispatch.group), &[]);
-                pass.dispatch_workgroups(dispatch.groups[0], dispatch.groups[1], dispatch.groups[2]);
+                pass.dispatch_workgroups(
+                    dispatch.groups[0],
+                    dispatch.groups[1],
+                    dispatch.groups[2],
+                );
             }
             self.built = true;
         }
-        let rows = if self.bake_whole { PLANET_WEATHER_SIDE } else { PLANET_WEATHER_SIDE.div_ceil(PLANET_WEATHER_STRIDE) };
+        let rows = if self.bake_whole {
+            PLANET_WEATHER_SIDE
+        } else {
+            PLANET_WEATHER_SIDE.div_ceil(PLANET_WEATHER_STRIDE)
+        };
         pass.set_pipeline(&self.bake.pipeline);
         pass.set_bind_group(0, Some(&self.bake.group), &[]);
         pass.dispatch_workgroups(self.bake.groups[0], rows.div_ceil(8), self.bake.groups[2]);
@@ -449,7 +596,11 @@ impl CloudVolumes {
     pub(crate) fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         frame.write_texture_binding(CLOUD_SHADOW_MAP, &self.shadow_map, "Atmosphere");
         frame.write_buffer_binding(CLOUD_SHADOW_FRAME, &self.shadow_frame, "Atmosphere");
-        frame.write_texture_binding(ATMOSPHERE_CLOUD_PLANET_WEATHER, &self.planet_weather, "Atmosphere");
+        frame.write_texture_binding(
+            ATMOSPHERE_CLOUD_PLANET_WEATHER,
+            &self.planet_weather,
+            "Atmosphere",
+        );
         frame.write_texture_binding(ATMOSPHERE_CLOUD_WEATHER, &self.weather, "Atmosphere");
         frame.write_texture_binding(ATMOSPHERE_CLOUD_SHAPE, &self.shape, "Atmosphere");
         frame.write_texture_binding(ATMOSPHERE_CLOUD_DETAIL, &self.detail, "Atmosphere");
@@ -462,7 +613,11 @@ pub fn cloud_shadow_fallback(device: &wgpu::Device) -> (wgpu::TextureView, wgpu:
     let map = device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("No cloud shadow"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -515,12 +670,17 @@ impl Targets {
             device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
-                    size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: 1,
+                    },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::STORAGE_BINDING,
                     view_formats: &[],
                 })
                 .create_view(&Default::default())
@@ -531,8 +691,14 @@ impl Targets {
             quarter,
             trace_color: target("Cloud trace", quarter, CLOUD_FORMAT),
             trace_depth: target("Cloud trace depth", quarter, CLOUD_DEPTH_FORMAT),
-            color: [target("Clouds A", half, CLOUD_FORMAT), target("Clouds B", half, CLOUD_FORMAT)],
-            depth: [target("Cloud depth A", half, CLOUD_DEPTH_FORMAT), target("Cloud depth B", half, CLOUD_DEPTH_FORMAT)],
+            color: [
+                target("Clouds A", half, CLOUD_FORMAT),
+                target("Clouds B", half, CLOUD_FORMAT),
+            ],
+            depth: [
+                target("Cloud depth A", half, CLOUD_DEPTH_FORMAT),
+                target("Cloud depth B", half, CLOUD_DEPTH_FORMAT),
+            ],
             sun_visibility: target("Sun visibility", full, CLOUD_FORMAT),
         }
     }
@@ -562,6 +728,7 @@ pub struct CloudTracePass {
     frame: u64,
     /// Whether the last output is a history for this frame.
     history: bool,
+    xr_mode: bool,
     active: bool,
 }
 
@@ -571,16 +738,24 @@ impl CloudTracePass {
             device,
             "Cloud trace",
             helio_core::include_wgsl!("shaders/cloud_trace.wgsl"),
-            &[ATMOSPHERE_SNIPPET, CLOUDS_SNIPPET, ATMOSPHERE_SKY_TABLE_SNIPPET, CLOUD_SHADOW_SNIPPET],
+            &[
+                ATMOSPHERE_SNIPPET,
+                CLOUDS_SNIPPET,
+                ATMOSPHERE_SKY_TABLE_SNIPPET,
+                CLOUD_SHADOW_SNIPPET,
+            ],
         );
         let d2 = wgpu::TextureViewDimension::D2;
         let d3 = wgpu::TextureViewDimension::D3;
         let read_only = wgpu::BufferBindingType::Storage { read_only: true };
-        let depth = entry(6, wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Depth,
-            view_dimension: d2,
-            multisampled: false,
-        });
+        let depth = entry(
+            6,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: d2,
+                multisampled: false,
+            },
+        );
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Cloud trace"),
             entries: &[
@@ -602,21 +777,22 @@ impl CloudTracePass {
                 sampled(25, wgpu::TextureViewDimension::Cube),
             ],
         });
-        let reconstruct_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Cloud reconstruct"),
-            entries: &[
-                buffer(0, read_only),
-                depth,
-                sampler_entry(11),
-                buffer(12, wgpu::BufferBindingType::Uniform),
-                sampled(15, d2),
-                unfilterable(16),
-                sampled(17, d2),
-                unfilterable(18),
-                storage_texture(19, CLOUD_FORMAT, d2),
-                storage_texture(20, CLOUD_DEPTH_FORMAT, d2),
-            ],
-        });
+        let reconstruct_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Cloud reconstruct"),
+                entries: &[
+                    buffer(0, read_only),
+                    depth,
+                    sampler_entry(11),
+                    buffer(12, wgpu::BufferBindingType::Uniform),
+                    sampled(15, d2),
+                    unfilterable(16),
+                    sampled(17, d2),
+                    unfilterable(18),
+                    storage_texture(19, CLOUD_FORMAT, d2),
+                    storage_texture(20, CLOUD_DEPTH_FORMAT, d2),
+                ],
+            });
         let visibility_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sun visibility"),
             entries: &[
@@ -634,7 +810,11 @@ impl CloudTracePass {
         let no_terrain = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("No terrain sun visibility"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -674,6 +854,7 @@ impl CloudTracePass {
             reconstruct_groups: None,
             frame: 0,
             history: false,
+            xr_mode: false,
             active: false,
         }
     }
@@ -690,6 +871,13 @@ impl CloudTracePass {
 }
 
 impl RenderPass for CloudTracePass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+        if self.xr_mode {
+            self.history = false;
+        }
+    }
+
     fn name(&self) -> &'static str {
         "CloudTrace"
     }
@@ -741,7 +929,14 @@ impl RenderPass for CloudTracePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let registry = ctx.registry;
-        self.active = registry.get::<bool>(ResourceKey::new("atmosphere_active")).unwrap_or(false);
+        if self.xr_mode {
+            self.active = false;
+            self.history = false;
+            return Ok(());
+        }
+        self.active = registry
+            .get::<bool>(ResourceKey::new("atmosphere_active"))
+            .unwrap_or(false);
         let resources = (
             registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)),
             registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_SKY_TABLE)),
@@ -776,7 +971,9 @@ impl RenderPass for CloudTracePass {
             self.history = false;
             return Ok(());
         }
-        let Some(targets) = &self.targets else { return Ok(()) };
+        let Some(targets) = &self.targets else {
+            return Ok(());
+        };
         self.frame += 1;
         let current = self.current();
         let params = TraceParams {
@@ -801,77 +998,120 @@ impl RenderPass for CloudTracePass {
             detail.clone(),
         ];
         let buffers = vec![ctx.camera.clone(), frame.clone(), sky_table.clone()];
-        if self.trace_group.as_ref().is_none_or(|(v, b, _)| *v != views || *b != buffers) {
+        if self
+            .trace_group
+            .as_ref()
+            .is_none_or(|(v, b, _)| *v != views || *b != buffers)
+        {
             let view = wgpu::BindingResource::TextureView;
-            let group = bind_group(ctx.device, "Cloud trace", &self.trace_layout, &[
-                (0, ctx.camera.as_entire_binding()),
-                (1, frame.as_entire_binding()),
-                (2, sky_table.as_entire_binding()),
-                (3, view(transmittance)),
-                (4, view(multi)),
-                (5, view(aerial)),
-                (6, view(ctx.depth)),
-                (7, view(weather)),
-                (8, view(shape)),
-                (9, view(detail)),
-                (10, wgpu::BindingResource::Sampler(&self.noise_sampler)),
-                (11, wgpu::BindingResource::Sampler(&self.lut_sampler)),
-                (12, self.params.as_entire_binding()),
-                (13, view(&targets.trace_color)),
-                (14, view(&targets.trace_depth)),
-                (25, view(planet_weather)),
-            ]);
+            let group = bind_group(
+                ctx.device,
+                "Cloud trace",
+                &self.trace_layout,
+                &[
+                    (0, ctx.camera.as_entire_binding()),
+                    (1, frame.as_entire_binding()),
+                    (2, sky_table.as_entire_binding()),
+                    (3, view(transmittance)),
+                    (4, view(multi)),
+                    (5, view(aerial)),
+                    (6, view(ctx.depth)),
+                    (7, view(weather)),
+                    (8, view(shape)),
+                    (9, view(detail)),
+                    (10, wgpu::BindingResource::Sampler(&self.noise_sampler)),
+                    (11, wgpu::BindingResource::Sampler(&self.lut_sampler)),
+                    (12, self.params.as_entire_binding()),
+                    (13, view(&targets.trace_color)),
+                    (14, view(&targets.trace_depth)),
+                    (25, view(planet_weather)),
+                ],
+            );
             self.trace_group = Some((views, buffers, group));
             self.reconstruct_groups = None;
         }
-        if self.reconstruct_groups.as_ref().is_none_or(|(depth, _)| depth != ctx.depth) {
+        if self
+            .reconstruct_groups
+            .as_ref()
+            .is_none_or(|(depth, _)| depth != ctx.depth)
+        {
             let view = wgpu::BindingResource::TextureView;
             let group = |out: usize| {
-                bind_group(ctx.device, "Cloud reconstruct", &self.reconstruct_layout, &[
-                    (0, ctx.camera.as_entire_binding()),
-                    (6, view(ctx.depth)),
-                    (11, wgpu::BindingResource::Sampler(&self.lut_sampler)),
-                    (12, self.params.as_entire_binding()),
-                    (15, view(&targets.trace_color)),
-                    (16, view(&targets.trace_depth)),
-                    (17, view(&targets.color[1 - out])),
-                    (18, view(&targets.depth[1 - out])),
-                    (19, view(&targets.color[out])),
-                    (20, view(&targets.depth[out])),
-                ])
+                bind_group(
+                    ctx.device,
+                    "Cloud reconstruct",
+                    &self.reconstruct_layout,
+                    &[
+                        (0, ctx.camera.as_entire_binding()),
+                        (6, view(ctx.depth)),
+                        (11, wgpu::BindingResource::Sampler(&self.lut_sampler)),
+                        (12, self.params.as_entire_binding()),
+                        (15, view(&targets.trace_color)),
+                        (16, view(&targets.trace_depth)),
+                        (17, view(&targets.color[1 - out])),
+                        (18, view(&targets.depth[1 - out])),
+                        (19, view(&targets.color[out])),
+                        (20, view(&targets.depth[out])),
+                    ],
+                )
             };
             self.reconstruct_groups = Some((ctx.depth.clone(), [group(0), group(1)]));
         }
-        let terrain = registry.texture_binding(DIRECTIONAL_VISIBILITY).unwrap_or(&self.no_terrain);
+        let terrain = registry
+            .texture_binding(DIRECTIONAL_VISIBILITY)
+            .unwrap_or(&self.no_terrain);
         let views = vec![ctx.depth.clone(), shadow_map.clone(), terrain.clone()];
         let buffers = vec![ctx.camera.clone(), frame.clone(), shadow_frame.clone()];
-        if self.visibility_group.as_ref().is_none_or(|(v, b, _)| *v != views || *b != buffers) {
+        if self
+            .visibility_group
+            .as_ref()
+            .is_none_or(|(v, b, _)| *v != views || *b != buffers)
+        {
             let view = wgpu::BindingResource::TextureView;
-            let group = bind_group(ctx.device, "Sun visibility", &self.visibility_layout, &[
-                (0, ctx.camera.as_entire_binding()),
-                (1, frame.as_entire_binding()),
-                (6, view(ctx.depth)),
-                (12, self.params.as_entire_binding()),
-                (21, shadow_frame.as_entire_binding()),
-                (22, view(shadow_map)),
-                (23, view(terrain)),
-                (24, view(&targets.sun_visibility)),
-            ]);
+            let group = bind_group(
+                ctx.device,
+                "Sun visibility",
+                &self.visibility_layout,
+                &[
+                    (0, ctx.camera.as_entire_binding()),
+                    (1, frame.as_entire_binding()),
+                    (6, view(ctx.depth)),
+                    (12, self.params.as_entire_binding()),
+                    (21, shadow_frame.as_entire_binding()),
+                    (22, view(shadow_map)),
+                    (23, view(terrain)),
+                    (24, view(&targets.sun_visibility)),
+                ],
+            );
             self.visibility_group = Some((views, buffers, group));
         }
-        let (Some((_, _, trace_group)), Some((_, reconstruct_groups)), Some((_, _, visibility_group))) =
-            (&self.trace_group, &self.reconstruct_groups, &self.visibility_group)
+        let (
+            Some((_, _, trace_group)),
+            Some((_, reconstruct_groups)),
+            Some((_, _, visibility_group)),
+        ) = (
+            &self.trace_group,
+            &self.reconstruct_groups,
+            &self.visibility_group,
+        )
         else {
             return Ok(());
         };
         let mut cmds = ctx.graphics_cmds();
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Cloud trace"), timestamp_writes: None });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Cloud trace"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.visibility);
         pass.set_bind_group(0, Some(visibility_group), &[]);
         pass.dispatch_workgroups(targets.full[0].div_ceil(8), targets.full[1].div_ceil(8), 1);
         pass.set_pipeline(&self.trace);
         pass.set_bind_group(0, Some(trace_group), &[]);
-        pass.dispatch_workgroups(targets.quarter[0].div_ceil(8), targets.quarter[1].div_ceil(8), 1);
+        pass.dispatch_workgroups(
+            targets.quarter[0].div_ceil(8),
+            targets.quarter[1].div_ceil(8),
+            1,
+        );
         pass.set_pipeline(&self.reconstruct);
         pass.set_bind_group(0, Some(&reconstruct_groups[current]), &[]);
         pass.dispatch_workgroups(targets.half[0].div_ceil(8), targets.half[1].div_ceil(8), 1);
@@ -887,7 +1127,11 @@ impl RenderPass for CloudTracePass {
         }
         let current = self.current();
         frame.write_texture_binding(ATMOSPHERE_CLOUDS, &targets.color[current], "CloudTrace");
-        frame.write_texture_binding(ATMOSPHERE_CLOUD_DEPTH, &targets.depth[current], "CloudTrace");
+        frame.write_texture_binding(
+            ATMOSPHERE_CLOUD_DEPTH,
+            &targets.depth[current],
+            "CloudTrace",
+        );
         frame.write_texture_binding(SUN_VISIBILITY, &targets.sun_visibility, "CloudTrace");
     }
 

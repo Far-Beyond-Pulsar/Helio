@@ -151,51 +151,23 @@ impl ApplicationHandler for App {
         );
 
         // ── wgpu ──────────────────────────────────────────────────────────────
-        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("create surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("no adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("no device");
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-                color_space: wgpu::SurfaceColorSpace::Auto,
+        let mut graphics = pollster::block_on(helio::HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            helio::HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Simple Graph".into(),
+                ..Default::default()
             },
-        );
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let format = graphics.surface_config.format;
+        let surface_format = format;
 
-        // ── renderer with simple graph ────────────────────────────────────────
         let config = RendererConfig::new(size.width, size.height, surface_format);
         // `SimpleCubePass` reads no scene content at all, but SceneDB is the
         // sole scene authority in every `RendererBuilder`, so an (unused)
@@ -203,13 +175,9 @@ impl ApplicationHandler for App {
         let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let renderer = RendererBuilder::new(config, v3_demo_common::scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_simple_graph_with_context))
-            .build(
-                device.clone(),
-                queue.clone(),
-                size.width,
-                size.height,
-                surface_format,
-            );
+            .build_with_graphics_context(&mut graphics)
+            .expect("Helio renderer");
+        let surface = graphics.surface;
 
         // ── initial camera: 4 units back, looking at origin ───────────────────
         self.state = Some(AppState {
@@ -315,18 +283,9 @@ impl ApplicationHandler for App {
                 let size = state.window.inner_size();
                 let camera = state.camera(size.width, size.height);
 
-                let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(texture)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-                    _ => return,
-                };
-                let view = output
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                if let Err(e) = state.renderer.render(&camera, &view) {
-                    log::error!("render error: {:?}", e);
+                if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
+                    log::error!("Render error: {:?}", e);
                 }
-                state.queue.present(output);
             }
 
             _ => {}

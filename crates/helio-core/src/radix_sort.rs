@@ -31,7 +31,10 @@ pub struct RadixSortBinds {
 }
 
 fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
 }
 
 impl RadixSort {
@@ -39,7 +42,11 @@ impl RadixSort {
         let storage = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None },
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
             count: None,
         };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -48,7 +55,11 @@ impl RadixSort {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
                 storage(1, true),
@@ -64,24 +75,43 @@ impl RadixSort {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let module = crate::shader::module(device, "radix sort", crate::include_wgsl!("../shaders/radix_sort.wgsl"));
+        let module = crate::shader::module(
+            device,
+            "radix sort",
+            crate::include_wgsl!("../shaders/radix_sort.wgsl"),
+        );
         let pipeline = |entry: &str| {
-            crate::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            crate::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
-        Self { histogram: pipeline("cs_histogram"), scan: pipeline("cs_scan"), scatter: pipeline("cs_scatter"), layout }
+        Self {
+            histogram: pipeline("cs_histogram"),
+            scan: pipeline("cs_scan"),
+            scatter: pipeline("cs_scatter"),
+            layout,
+        }
     }
 
     /// Binds pairs `keys[0]`/`indices[0]` (input, then the sorted result)
     /// and `keys[1]`/`indices[1]` (scratch), each `capacity` elements, with
     /// the caller's `frame` (`(count, num_blocks)` as two `u32`s).
-    pub fn bind(&self, device: &wgpu::Device, frame: &wgpu::Buffer, keys: [&wgpu::Buffer; 2], indices: [&wgpu::Buffer; 2], capacity: u32) -> RadixSortBinds {
+    pub fn bind(
+        &self,
+        device: &wgpu::Device,
+        frame: &wgpu::Buffer,
+        keys: [&wgpu::Buffer; 2],
+        indices: [&wgpu::Buffer; 2],
+        capacity: u32,
+    ) -> RadixSortBinds {
         let blocks = capacity.div_ceil(RADIX_SORT_BLOCK).max(1);
         let hist = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("radix sort digit counts"),
@@ -115,7 +145,13 @@ impl RadixSort {
 
     /// The sort's 24 dispatches into `pass`; `dispatch` holds the caller's
     /// `(num_blocks, 1, 1)` at `offset`.
-    pub fn record(&self, pass: &mut crate::cmd::ComputeCmds<'_>, binds: &RadixSortBinds, dispatch: &wgpu::Buffer, offset: u64) {
+    pub fn record(
+        &self,
+        pass: &mut crate::cmd::ComputeCmds<'_>,
+        binds: &RadixSortBinds,
+        dispatch: &wgpu::Buffer,
+        offset: u64,
+    ) {
         for group in &binds.passes {
             pass.set_bind_group(0, group, &[]);
             pass.set_pipeline(&self.histogram);

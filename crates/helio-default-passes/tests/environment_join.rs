@@ -70,7 +70,12 @@ impl Transform {
         let p = glam::DVec3::from_array(position);
         let hi = p.as_vec3();
         let lo = (p - hi.as_dvec3()).as_vec3();
-        Self { position_hi: hi.to_array(), position_lo: lo.to_array(), rotation, scale }
+        Self {
+            position_hi: hi.to_array(),
+            position_lo: lo.to_array(),
+            rotation,
+            scale,
+        }
     }
 }
 
@@ -115,7 +120,11 @@ fn scene(device: &wgpu::Device, queue: &wgpu::Queue, far: Transform) -> SceneBuf
         ),
         (KEYS.generations, bytemuck::cast_slice(&[3u32]).to_vec(), 4),
         (KEYS.hidden, bytemuck::cast_slice(&[0u32]).to_vec(), 4),
-        (KEYS.transforms, bytemuck::bytes_of(&far).to_vec(), std::mem::size_of::<Transform>() as u64),
+        (
+            KEYS.transforms,
+            bytemuck::bytes_of(&far).to_vec(),
+            std::mem::size_of::<Transform>() as u64,
+        ),
         (
             KEYS.water_volumes,
             bytemuck::cast_slice(&water).to_vec(),
@@ -212,7 +221,8 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     };
     let far_position = [1000.0, 6_371_002.371, -300.0];
     let far = Transform::at(far_position, [0.0; 3], [1.0; 3]);
-    let far_world = glam::Vec3::from_array(far.position_hi) + glam::Vec3::from_array(far.position_lo);
+    let far_world =
+        glam::Vec3::from_array(far.position_hi) + glam::Vec3::from_array(far.position_lo);
     let inputs = scene(&device, &queue, far);
     let mut join = EnvironmentJoin::new(&device, KEYS);
 
@@ -242,10 +252,25 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     let origin = glam::DVec3::new(1000.25, 6_371_000.125, -290.0);
     let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, origin);
     let offset = (glam::DVec3::from_array(far_position) - origin).as_vec3();
-    assert!((offset - glam::Vec3::new(-0.25, 2.246, -10.0)).abs().max_element() < 1e-6, "{offset}");
-    let near = |a: &[f32], b: glam::Vec3| (glam::Vec3::from_slice(a) - b).abs().max_element() < 1e-5;
-    assert!(near(&water[0..3], offset - glam::Vec3::new(2.0, 1.0, 3.0)), "{:?}", &water[0..3]);
-    assert!(near(&water[4..7], offset + glam::Vec3::new(2.0, 1.0, 3.0)), "{:?}", &water[4..7]);
+    assert!(
+        (offset - glam::Vec3::new(-0.25, 2.246, -10.0))
+            .abs()
+            .max_element()
+            < 1e-6,
+        "{offset}"
+    );
+    let near =
+        |a: &[f32], b: glam::Vec3| (glam::Vec3::from_slice(a) - b).abs().max_element() < 1e-5;
+    assert!(
+        near(&water[0..3], offset - glam::Vec3::new(2.0, 1.0, 3.0)),
+        "{:?}",
+        &water[0..3]
+    );
+    assert!(
+        near(&water[4..7], offset + glam::Vec3::new(2.0, 1.0, 3.0)),
+        "{:?}",
+        &water[4..7]
+    );
     assert!((water[7] - (offset.y + 0.5)).abs() < 1e-5, "surface height");
     // The waves tile the world every 270 m: 1000.25 and -290 into it.
     assert_eq!(&water[60..62], &[190.25, 250.0], "world phase");

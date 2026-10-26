@@ -10,10 +10,14 @@ use helio_pass_vg_bvh::{
 };
 
 fn naga_module(src: &str) -> naga::Module {
-    let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("{e:?}"));
+    let module =
+        naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{e:?}"));
     module
 }
 
@@ -21,7 +25,11 @@ fn naga_module(src: &str) -> naga::Module {
 fn build_shader_validates() {
     let src = format!("{NODES_WGSL}\n{BUILD_WGSL}");
     let module = naga_module(&src);
-    let entries: Vec<&str> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
+    let entries: Vec<&str> = module
+        .entry_points
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
     for expected in [
         "cs_gather_local",
         "cs_block_scan",
@@ -36,7 +44,10 @@ fn build_shader_validates() {
         "cs_refit_leaves",
         "cs_finalize",
     ] {
-        assert!(entries.contains(&expected), "missing entry point {expected}");
+        assert!(
+            entries.contains(&expected),
+            "missing entry point {expected}"
+        );
     }
 }
 
@@ -69,7 +80,11 @@ fn nodes_include_validates_standalone_and_matches_rust() {
     assert_eq!(size("VgBvhHeader"), std::mem::size_of::<GpuBvhHeader>());
 }
 
-fn check(instances: &[helio_vg_format::GpuVgInstance], objects: &[helio_pass_gbuffer::StaticObjectComponent], cfg: &BvhConfig) -> helio_pass_vg_bvh::reference::RefTree {
+fn check(
+    instances: &[helio_vg_format::GpuVgInstance],
+    objects: &[helio_pass_gbuffer::StaticObjectComponent],
+    cfg: &BvhConfig,
+) -> helio_pass_vg_bvh::reference::RefTree {
     let tree = build(instances, objects, cfg);
     let live = tree.items.len() as u32;
     let header = header_of(&tree, live);
@@ -82,7 +97,14 @@ fn trees_are_valid_for_many_sizes() {
     for n in [0usize, 1, 2, 3, 4, 5, 17, 100, 1000, 5000] {
         let (instances, objects) = random_scene(n as u64 + 1, n, 100.0, 0.1, 2.0);
         check(&instances, &objects, &BvhConfig::default());
-        check(&instances, &objects, &BvhConfig { batch_max_instances: 1, ..Default::default() });
+        check(
+            &instances,
+            &objects,
+            &BvhConfig {
+                batch_max_instances: 1,
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -118,7 +140,14 @@ fn tiny_dense_instances_merge_into_batch_leaves() {
         assert!(n.leaf_count() <= 64);
     }
     // Batching off: one leaf per instance.
-    let flat = check(&instances, &objects, &BvhConfig { batch_max_instances: 1, ..Default::default() });
+    let flat = check(
+        &instances,
+        &objects,
+        &BvhConfig {
+            batch_max_instances: 1,
+            ..Default::default()
+        },
+    );
     assert_eq!(flat.leaf_count as usize, flat.items.len());
     assert_eq!(flat.batch_leaf_count, 0);
 }
@@ -127,12 +156,31 @@ fn tiny_dense_instances_merge_into_batch_leaves() {
 fn batch_threshold_is_configurable() {
     let (instances, objects) = city_scene(3, 8, 300);
     let wide = check(&instances, &objects, &BvhConfig::default());
-    let small = check(&instances, &objects, &BvhConfig { batch_max_instances: 8, ..Default::default() });
+    let small = check(
+        &instances,
+        &objects,
+        &BvhConfig {
+            batch_max_instances: 8,
+            ..Default::default()
+        },
+    );
     let m = small.leaf_count as usize;
-    assert!(small.nodes[m - 1..].iter().all(|n| n.leaf_count() <= 8), "batch size cap respected");
+    assert!(
+        small.nodes[m - 1..].iter().all(|n| n.leaf_count() <= 8),
+        "batch size cap respected"
+    );
     assert!(small.batch_leaf_count > 0);
-    assert!(wide.nodes[wide.leaf_count as usize - 1..].iter().any(|n| n.leaf_count() > 8));
-    let strict = check(&instances, &objects, &BvhConfig { tiny_extent: 0.001, ..Default::default() });
+    assert!(wide.nodes[wide.leaf_count as usize - 1..]
+        .iter()
+        .any(|n| n.leaf_count() > 8));
+    let strict = check(
+        &instances,
+        &objects,
+        &BvhConfig {
+            tiny_extent: 0.001,
+            ..Default::default()
+        },
+    );
     assert_eq!(strict.batch_leaf_count, 0);
 }
 

@@ -194,7 +194,12 @@ impl Reprojection {
     /// From this frame's view-projection (`view_proj`) and eye, last frame's
     /// view-projection and view, in this frame's coordinates (all
     /// column-major).
-    fn new(view_proj: [f32; 16], eye: [f32; 3], previous_view_proj: [f32; 16], previous_view: [f32; 16]) -> Self {
+    fn new(
+        view_proj: [f32; 16],
+        eye: [f32; 3],
+        previous_view_proj: [f32; 16],
+        previous_view: [f32; 16],
+    ) -> Self {
         let matrix = |m: [f32; 16]| glam::DMat4::from_cols_array(&m.map(f64::from));
         let clip_to_world = matrix(view_proj).inverse();
         let previous_view_proj = matrix(previous_view_proj);
@@ -216,7 +221,10 @@ impl Reprojection {
 // Matrices use column-major GPU layout; only the translation column changes.
 // Compose in f64, matching the renderer's previous-projection rebasing.
 fn rebase_previous_view(previous: [f32; 16], origin_shift: [f64; 3]) -> [f32; 16] {
-    assert!(origin_shift.iter().all(|v| v.is_finite()), "camera origin shift must be finite");
+    assert!(
+        origin_shift.iter().all(|v| v.is_finite()),
+        "camera origin shift must be finite"
+    );
     let mut rebased = previous;
     for row in 0..4 {
         rebased[12 + row] = (f64::from(previous[row]) * origin_shift[0]
@@ -261,8 +269,14 @@ struct History {
 impl History {
     fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let make = |label| {
-            let texture = output_texture(device, label, width, height, HISTORY_FORMAT,
-                wgpu::TextureUsages::STORAGE_BINDING);
+            let texture = output_texture(
+                device,
+                label,
+                width,
+                height,
+                HISTORY_FORMAT,
+                wgpu::TextureUsages::STORAGE_BINDING,
+            );
             let view = texture.create_view(&Default::default());
             (texture, view)
         };
@@ -270,7 +284,16 @@ impl History {
         let (depth_coarse, depth_coarse_view) = make("TSR History Depth and Coarse Luma");
         let (state, state_view) = make("TSR History State");
         let (noise, noise_view) = make("TSR History Noise");
-        Self { color, color_view, depth_coarse, depth_coarse_view, state, state_view, noise, noise_view }
+        Self {
+            color,
+            color_view,
+            depth_coarse,
+            depth_coarse_view,
+            state,
+            state_view,
+            noise,
+            noise_view,
+        }
     }
 }
 
@@ -284,7 +307,11 @@ fn output_texture(
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -302,7 +329,13 @@ fn output_texture(
 
 /// What the resolve and reconstruction bind groups were made for: colour,
 /// depth, coverage, stochastic mask and motion vectors.
-type ResolveKey = (wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView);
+type ResolveKey = (
+    wgpu::TextureView,
+    wgpu::TextureView,
+    wgpu::TextureView,
+    wgpu::TextureView,
+    wgpu::TextureView,
+);
 
 /// The reconstruction's buffer for `texels` input texels.
 fn nearest_buffer(device: &wgpu::Device, texels: u64) -> wgpu::Buffer {
@@ -321,6 +354,12 @@ fn nearest_buffer(device: &wgpu::Device, texels: u64) -> wgpu::Buffer {
 /// publishes the upsampled, temporally accumulated image as `tsr_color`.
 /// By default it also blits to `ctx.target`.
 pub struct TsrPass {
+    /// A private second instance used only by the right eye in sequential XR.
+    /// It owns independent history textures and camera/jitter tracking; the
+    /// normal instance remains the mono and left-eye path.
+    xr_right: Option<Box<TsrPass>>,
+    active_xr_right: bool,
+    xr_mode: bool,
     color_input: &'static str,
     intermediate_output: bool,
     timing_query: Option<wgpu::QuerySet>,
@@ -387,17 +426,24 @@ pub struct TsrPass {
     reactivity: f32,
 
     quality: TsrQuality,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl TsrPass {
     /// Select the scene-linear image reconstructed by this pass.
     pub fn with_color_input(mut self, key: &'static str) -> Self {
         self.color_input = key;
+        if let Some(right) = &mut self.xr_right {
+            right.color_input = key;
+        }
         self
     }
     /// Publish the HDR resolve for post-processing without a redundant surface blit.
     pub fn with_intermediate_output(mut self) -> Self {
         self.intermediate_output = true;
+        if let Some(right) = &mut self.xr_right {
+            right.intermediate_output = true;
+        }
         self
     }
 
@@ -405,6 +451,9 @@ impl TsrPass {
     /// The resolved RGB is unchanged for zero current/previous coverage.
     pub fn with_transparency_reactivity(mut self) -> Self {
         self.transparency_reactivity = true;
+        if let Some(right) = &mut self.xr_right {
+            right.transparency_reactivity = true;
+        }
         self
     }
 
@@ -424,7 +473,21 @@ impl TsrPass {
         format: wgpu::TextureFormat,
         quality: TsrQuality,
     ) -> Self {
-        let tsr_shader = helio_core::shader::module(device, "TSR Shader", helio_core::include_wgsl!("../shaders/tsr_main.wgsl"));
+        Self::new_inner(device, output_width, output_height, format, quality)
+    }
+
+    fn new_inner(
+        device: &wgpu::Device,
+        output_width: u32,
+        output_height: u32,
+        format: wgpu::TextureFormat,
+        quality: TsrQuality,
+    ) -> Self {
+        let tsr_shader = helio_core::shader::module(
+            device,
+            "TSR Shader",
+            helio_core::include_wgsl!("../shaders/tsr_main.wgsl"),
+        );
         let blit_shader = helio_core::shader::module(device, "TSR Blit Shader", BLIT_WGSL);
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -450,23 +513,40 @@ impl TsrPass {
             History::new(device, output_width, output_height),
             History::new(device, output_width, output_height),
         ];
-        let output_texture = output_texture(device, "TSR Output", output_width, output_height, OUTPUT_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let output_texture = output_texture(
+            device,
+            "TSR Output",
+            output_width,
+            output_height,
+            OUTPUT_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
         let output_view = output_texture.create_view(&Default::default());
 
         // Zero-initialized fallback keeps graphs without transparency unchanged.
         let reactivity_fallback = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("TSR zero reactivity"),
-            size: wgpu::Extent3d {width:1,height:1,depth_or_array_layers:1},
-            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
-            format:wgpu::TextureFormat::R8Unorm,usage:wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats:&[],
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
         });
         let reactivity_fallback_view = reactivity_fallback.create_view(&Default::default());
         // Zero: no texel has a motion vector (w = 0), all move with the camera.
         let motion_fallback = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("TSR no motion vectors"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -493,26 +573,31 @@ impl TsrPass {
                 tex_entry(13, wgpu::TextureSampleType::Float { filterable: true }), // stochastic_mask
                 tex_entry(14, wgpu::TextureSampleType::Float { filterable: true }), // motion_vectors
                 buffer_entry(15, true), // previous_nearest
-                storage_entry(16), // out_color
-                storage_entry(17), // out_depth_coarse
-                storage_entry(18), // out_state
-                storage_entry(19), // out_noise
+                storage_entry(16),      // out_color
+                storage_entry(17),      // out_depth_coarse
+                storage_entry(18),      // out_state
+                storage_entry(19),      // out_noise
             ],
         });
         let reconstruct_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("TSR Reconstruct BGL"),
             entries: &[
-                tex_entry(2, wgpu::TextureSampleType::Depth),                      // depth_tex
-                uniform_entry(6),                                                  // tsr
+                tex_entry(2, wgpu::TextureSampleType::Depth), // depth_tex
+                uniform_entry(6),                             // tsr
                 tex_entry(14, wgpu::TextureSampleType::Float { filterable: true }), // motion_vectors
                 buffer_entry(20, false), // reconstructed_nearest
             ],
         });
         let sharpen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("TSR Sharpen BGL"),
-            entries: &[tex_entry(10, wgpu::TextureSampleType::Float { filterable: true })],
+            entries: &[tex_entry(
+                10,
+                wgpu::TextureSampleType::Float { filterable: true },
+            )],
         });
-        let sharpen_bind_groups = histories.each_ref().map(|history| make_sharpen_bg(device, &sharpen_bgl, history));
+        let sharpen_bind_groups = histories
+            .each_ref()
+            .map(|history| make_sharpen_bg(device, &sharpen_bgl, history));
 
         // ── Blit BGL ──────────────────────────────────────────────────────────
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -526,73 +611,112 @@ impl TsrPass {
         let blit_bind_group = make_blit_bg(device, &blit_bgl, &output_view, &linear_sampler);
 
         // ── Pipelines ─────────────────────────────────────────────────────────
-        let fullscreen = |label: &'static str, layout: &wgpu::BindGroupLayout, module: &wgpu::ShaderModule,
-                          vs: &'static str, fs: &'static str, targets: &[Option<wgpu::ColorTargetState>]| {
+        let fullscreen = |label: &'static str,
+                          layout: &wgpu::BindGroupLayout,
+                          module: &wgpu::ShaderModule,
+                          vs: &'static str,
+                          fs: &'static str,
+                          targets: &[Option<wgpu::ColorTargetState>]| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[Some(layout)],
                 immediate_size: 0,
             });
-            helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some(vs),
-                    buffers: &[],
-                    compilation_options: Default::default(),
+            helio_core::shader::create_render_pipeline(
+                &device,
+                wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module,
+                        entry_point: Some(vs),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets,
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets,
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
+            )
+        };
+        let target = |format| {
+            Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
             })
         };
-        let target = |format| Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL });
-        let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("TSR Resolve Pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
                 label: Some("TSR Resolve Pipeline"),
-                bind_group_layouts: &[Some(&bgl)],
-                immediate_size: 0,
-            })),
-            module: &tsr_shader,
-            entry_point: Some("cs_main"),
-            // Every invocation fills its share of the tile before the barrier;
-            // naga would otherwise zero it from a single invocation first.
-            compilation_options: wgpu::PipelineCompilationOptions {
-                zero_initialize_workgroup_memory: false,
-                ..Default::default()
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("TSR Resolve Pipeline"),
+                        bind_group_layouts: &[Some(&bgl)],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &tsr_shader,
+                entry_point: Some("cs_main"),
+                // Every invocation fills its share of the tile before the barrier;
+                // naga would otherwise zero it from a single invocation first.
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: false,
+                    ..Default::default()
+                },
+                cache: None,
             },
-            cache: None,
-        });
-        let reconstruct_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("TSR Reconstruct Pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        );
+        let reconstruct_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
                 label: Some("TSR Reconstruct Pipeline"),
-                bind_group_layouts: &[Some(&reconstruct_bgl)],
-                immediate_size: 0,
-            })),
-            module: &tsr_shader,
-            entry_point: Some("cs_reconstruct"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let sharpen_pipeline = fullscreen("TSR Sharpen Pipeline", &sharpen_bgl, &tsr_shader, "vs_main", "fs_sharpen",
-            &[target(OUTPUT_FORMAT)]);
-        let blit_pipeline = fullscreen("TSR Blit Pipeline", &blit_bgl, &blit_shader, "vs_blit", "fs_blit", &[target(format)]);
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("TSR Reconstruct Pipeline"),
+                        bind_group_layouts: &[Some(&reconstruct_bgl)],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &tsr_shader,
+                entry_point: Some("cs_reconstruct"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        let sharpen_pipeline = fullscreen(
+            "TSR Sharpen Pipeline",
+            &sharpen_bgl,
+            &tsr_shader,
+            "vs_main",
+            "fs_sharpen",
+            &[target(OUTPUT_FORMAT)],
+        );
+        let blit_pipeline = fullscreen(
+            "TSR Blit Pipeline",
+            &blit_bgl,
+            &blit_shader,
+            "vs_blit",
+            "fs_blit",
+            &[target(format)],
+        );
 
-        Self {
+        let pass = Self {
+            xr_right: None,
+            active_xr_right: false,
+            xr_mode: false,
             color_input: "pre_aa",
             intermediate_output: false,
             timing_query: None,
@@ -633,7 +757,9 @@ impl TsrPass {
             previous_view_id: None,
             reactivity: 0.0,
             quality,
-        }
+            surface_format: format,
+        };
+        pass
     }
 
     // ── Public reactivity API ─────────────────────────────────────────────────
@@ -644,12 +770,17 @@ impl TsrPass {
     /// change where stale history would cause visible ghosting.
     pub fn reset_history(&mut self) {
         self.first_frame = true;
+        if let Some(right) = &mut self.xr_right {
+            right.reset_history();
+        }
     }
 
     /// Optional GPU timestamps: before the resolve, after it, after the
     /// sharpening draw and after the final blit.
     pub fn enable_timing(&mut self, device: &wgpu::Device) -> bool {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+        if !device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
             return false;
         }
         self.timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -657,6 +788,9 @@ impl TsrPass {
             ty: wgpu::QueryType::Timestamp,
             count: 4,
         }));
+        if let Some(right) = &mut self.xr_right {
+            right.enable_timing(device);
+        }
         true
     }
 
@@ -668,6 +802,9 @@ impl TsrPass {
     /// the resolve reads zero (all shading deterministic).
     pub fn with_stochastic_mask(mut self) -> Self {
         self.stochastic_mask = true;
+        if let Some(right) = &mut self.xr_right {
+            right.stochastic_mask = true;
+        }
         self
     }
 
@@ -677,6 +814,9 @@ impl TsrPass {
         if self.stochastic_mask != enabled {
             self.stochastic_mask = enabled;
             self.bind_group_key = None;
+            if let Some(right) = &mut self.xr_right {
+                right.set_stochastic_mask(enabled);
+            }
         }
     }
 
@@ -684,6 +824,9 @@ impl TsrPass {
     /// every texel moves with the camera.
     pub fn with_motion_vectors(mut self) -> Self {
         self.motion_vectors = true;
+        if let Some(right) = &mut self.xr_right {
+            right.motion_vectors = true;
+        }
         self
     }
 
@@ -694,6 +837,9 @@ impl TsrPass {
             self.transparency_reactivity = enabled;
             self.reset_history();
             self.bind_group_key = None;
+            if let Some(right) = &mut self.xr_right {
+                right.set_transparency_reactivity(enabled);
+            }
         }
     }
 
@@ -708,6 +854,9 @@ impl TsrPass {
     /// can have different TSR responsiveness.
     pub fn set_reactivity(&mut self, factor: f32) {
         self.reactivity = factor.clamp(0.0, 1.0);
+        if let Some(right) = &mut self.xr_right {
+            right.set_reactivity(factor);
+        }
     }
 
     /// The quality preset this pass was constructed with.
@@ -719,7 +868,8 @@ impl TsrPass {
 // ── BGL entry helpers ─────────────────────────────────────────────────────────
 
 // The resolve is a compute shader; sharpening and blit are fragment shaders.
-const VISIBILITY: wgpu::ShaderStages = wgpu::ShaderStages::COMPUTE.union(wgpu::ShaderStages::FRAGMENT);
+const VISIBILITY: wgpu::ShaderStages =
+    wgpu::ShaderStages::COMPUTE.union(wgpu::ShaderStages::FRAGMENT);
 
 fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -821,7 +971,11 @@ fn make_blit_bg(
     })
 }
 
-fn make_sharpen_bg(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout, history: &History) -> wgpu::BindGroup {
+fn make_sharpen_bg(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    history: &History,
+) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("TSR Sharpen BG"),
         layout: bgl,
@@ -854,23 +1008,74 @@ fn make_resolve_bg(
         label: Some("TSR BG"),
         layout: bgl,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: view(color) },
-            wgpu::BindGroupEntry { binding: 1, resource: view(&previous.color_view) },
-            wgpu::BindGroupEntry { binding: 2, resource: view(depth) },
-            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
-            wgpu::BindGroupEntry { binding: 5, resource: camera.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: uniform.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: view(&previous.depth_coarse_view) },
-            wgpu::BindGroupEntry { binding: 8, resource: view(reactive) },
-            wgpu::BindGroupEntry { binding: 9, resource: view(&previous.state_view) },
-            wgpu::BindGroupEntry { binding: 11, resource: view(&previous.noise_view) },
-            wgpu::BindGroupEntry { binding: 13, resource: view(stochastic) },
-            wgpu::BindGroupEntry { binding: 14, resource: view(motion) },
-            wgpu::BindGroupEntry { binding: 15, resource: nearest.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 16, resource: view(&next.color_view) },
-            wgpu::BindGroupEntry { binding: 17, resource: view(&next.depth_coarse_view) },
-            wgpu::BindGroupEntry { binding: 18, resource: view(&next.state_view) },
-            wgpu::BindGroupEntry { binding: 19, resource: view(&next.noise_view) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: view(color),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: view(&previous.color_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: view(depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: camera.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: view(&previous.depth_coarse_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: view(reactive),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: view(&previous.state_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: view(&previous.noise_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: view(stochastic),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: view(motion),
+            },
+            wgpu::BindGroupEntry {
+                binding: 15,
+                resource: nearest.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: view(&next.color_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 17,
+                resource: view(&next.depth_coarse_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: view(&next.state_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 19,
+                resource: view(&next.noise_view),
+            },
         ],
     })
 }
@@ -889,10 +1094,22 @@ fn make_reconstruct_bg(
         label: Some("TSR Reconstruct BG"),
         layout: bgl,
         entries: &[
-            wgpu::BindGroupEntry { binding: 2, resource: view(depth) },
-            wgpu::BindGroupEntry { binding: 6, resource: uniform.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 14, resource: view(motion) },
-            wgpu::BindGroupEntry { binding: 20, resource: nearest.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: view(depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 14,
+                resource: view(motion),
+            },
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: nearest.as_entire_binding(),
+            },
         ],
     })
 }
@@ -911,10 +1128,17 @@ fn dispatch_resolve(
     width: u32,
     height: u32,
 ) {
-    let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("TSR Resolve"), timestamp_writes: None });
+    let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("TSR Resolve"),
+        timestamp_writes: None,
+    });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind_group, &[]);
-    pass.dispatch_workgroups(width.div_ceil(RESOLVE_TILE[0]), height.div_ceil(RESOLVE_TILE[1]), 1);
+    pass.dispatch_workgroups(
+        width.div_ceil(RESOLVE_TILE[0]),
+        height.div_ceil(RESOLVE_TILE[1]),
+        1,
+    );
 }
 
 /// Fullscreen draw of `pipeline` into `targets` (all cleared first).
@@ -955,16 +1179,32 @@ fn draw_fullscreen(
 // ── RenderPass impl ───────────────────────────────────────────────────────────
 
 impl RenderPass for TsrPass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+    }
+
     fn name(&self) -> &'static str {
         "TSR"
     }
 
-    fn writes(&self) -> &'static [&'static str] { &["tsr_color"] }
+    fn writes(&self) -> &'static [&'static str] {
+        &["tsr_color"]
+    }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         // The pass owns this view for the graph lifetime; frame registries
         // cannot outlive it. Resize replaces it before the next publication.
-        let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.output_view) };
+        let view: &'a wgpu::TextureView = unsafe {
+            std::mem::transmute(if self.active_xr_right {
+                &self
+                    .xr_right
+                    .as_ref()
+                    .expect("right-eye TSR state")
+                    .output_view
+            } else {
+                &self.output_view
+            })
+        };
         frame.write(helio_core::ResourceKey::new("tsr_color"), view, "TSR");
     }
 
@@ -985,13 +1225,24 @@ impl RenderPass for TsrPass {
         builder.read(self.color_input);
         // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
         // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" { builder.read("pre_aa"); }
-        if self.transparency_reactivity { builder.read("transparency_reactivity"); }
-        if self.stochastic_mask { builder.read(STOCHASTIC_MASK); }
-        if self.motion_vectors { builder.read(MOTION_VECTORS); }
+        if self.color_input == "fogged_hdr" {
+            builder.read("pre_aa");
+        }
+        if self.transparency_reactivity {
+            builder.read("transparency_reactivity");
+        }
+        if self.stochastic_mask {
+            builder.read(STOCHASTIC_MASK);
+        }
+        if self.motion_vectors {
+            builder.read(MOTION_VECTORS);
+        }
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if let Some(right) = &mut self.xr_right {
+            right.on_resize(device, width, height);
+        }
         self.output_width = width.max(1);
         self.output_height = height.max(1);
 
@@ -999,11 +1250,25 @@ impl RenderPass for TsrPass {
             History::new(device, self.output_width, self.output_height),
             History::new(device, self.output_width, self.output_height),
         ];
-        self.output_texture = output_texture(device, "TSR Output", self.output_width, self.output_height,
-            OUTPUT_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        self.output_texture = output_texture(
+            device,
+            "TSR Output",
+            self.output_width,
+            self.output_height,
+            OUTPUT_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
         self.output_view = self.output_texture.create_view(&Default::default());
-        self.sharpen_bind_groups = self.histories.each_ref().map(|history| make_sharpen_bg(device, &self.sharpen_bgl, history));
-        self.blit_bind_group = make_blit_bg(device, &self.blit_bgl, &self.output_view, &self.linear_sampler);
+        self.sharpen_bind_groups = self
+            .histories
+            .each_ref()
+            .map(|history| make_sharpen_bg(device, &self.sharpen_bgl, history));
+        self.blit_bind_group = make_blit_bg(
+            device,
+            &self.blit_bgl,
+            &self.output_view,
+            &self.linear_sampler,
+        );
 
         // The resolve bind groups reference the replaced histories.
         self.bind_groups = [None, None];
@@ -1014,6 +1279,31 @@ impl RenderPass for TsrPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.active_xr_right = self.xr_mode && ctx.camera_data.jitter_frame[3].to_bits() == 2;
+        if self.active_xr_right {
+            if self.xr_right.is_none() {
+                let mut right = Self::new_inner(
+                    ctx.device,
+                    self.output_width,
+                    self.output_height,
+                    self.surface_format,
+                    self.quality,
+                );
+                right.color_input = self.color_input;
+                right.intermediate_output = self.intermediate_output;
+                right.transparency_reactivity = self.transparency_reactivity;
+                right.stochastic_mask = self.stochastic_mask;
+                right.motion_vectors = self.motion_vectors;
+                right.reactivity = self.reactivity;
+                if self.timing_query.is_some() {
+                    right.enable_timing(ctx.device);
+                }
+                self.xr_right = Some(Box::new(right));
+            }
+            if let Some(right) = &mut self.xr_right {
+                return right.prepare(ctx);
+            }
+        }
         // The camera is the sample authority. Reconstructing a separate
         // sequence here breaks manual offsets and externally owned frame clocks.
         let ndc = ctx.camera_data.jitter_frame;
@@ -1023,18 +1313,23 @@ impl RenderPass for TsrPass {
         ];
         let world_origin = ctx.world_origin.to_array();
         let view_id = ndc[3].to_bits();
-        let view_changed = self.previous_view_id.is_some_and(|previous| previous != view_id);
+        let view_changed = self
+            .previous_view_id
+            .is_some_and(|previous| previous != view_id);
         let reset = u32::from(self.first_frame || view_changed);
         self.first_frame = false;
         let previous_view = if reset != 0 {
             ctx.camera_data.view
         } else {
             match self.previous_world_origin {
-                Some(previous) => rebase_previous_view(self.previous_view, [
-                    world_origin[0] - previous[0],
-                    world_origin[1] - previous[1],
-                    world_origin[2] - previous[2],
-                ]),
+                Some(previous) => rebase_previous_view(
+                    self.previous_view,
+                    [
+                        world_origin[0] - previous[0],
+                        world_origin[1] - previous[1],
+                        world_origin[2] - previous[2],
+                    ],
+                ),
                 None => self.previous_view,
             }
         };
@@ -1045,9 +1340,16 @@ impl RenderPass for TsrPass {
             flags: reset | (u32::from(self.transparency_reactivity) << 1),
             previous_jitter_uv: self.previous_jitter_uv,
             _pad: [0.0; 2],
-            reprojection: Reprojection::new(ctx.camera_data.view_proj,
-                [ctx.camera_data.position_near[0], ctx.camera_data.position_near[1], ctx.camera_data.position_near[2]],
-                ctx.camera_data.prev_view_proj, previous_view),
+            reprojection: Reprojection::new(
+                ctx.camera_data.view_proj,
+                [
+                    ctx.camera_data.position_near[0],
+                    ctx.camera_data.position_near[1],
+                    ctx.camera_data.position_near[2],
+                ],
+                ctx.camera_data.prev_view_proj,
+                previous_view,
+            ),
         };
 
         ctx.queue
@@ -1063,48 +1365,98 @@ impl RenderPass for TsrPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.active_xr_right {
+            if let Some(right) = &mut self.xr_right {
+                return right.execute(ctx);
+            }
+        }
         // ── 1. Lazy bind groups ────────────────────────────────────────────────
-        let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new(self.color_input), "TSR").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
-            )
-        })?;
+        let pre_aa_view: &wgpu::TextureView = ctx
+            .registry
+            .read(helio_core::ResourceKey::new(self.color_input), "TSR")
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
+                )
+            })?;
 
         let reactive_view = if self.transparency_reactivity {
-            ctx.registry.read_texture_view(helio_core::ResourceKey::new("transparency_reactivity"), "TSR")
-                .ok_or_else(|| helio_core::Error::InvalidPassConfig(
-                    "TSR coverage mode requires transparency_reactivity".into()))?
-        } else { &self.reactivity_fallback_view };
+            ctx.registry
+                .read_texture_view(
+                    helio_core::ResourceKey::new("transparency_reactivity"),
+                    "TSR",
+                )
+                .ok_or_else(|| {
+                    helio_core::Error::InvalidPassConfig(
+                        "TSR coverage mode requires transparency_reactivity".into(),
+                    )
+                })?
+        } else {
+            &self.reactivity_fallback_view
+        };
         // A frame no pass published the mask for (its writer has nothing
         // drawn yet) reads zero: deterministic shading.
         let stochastic_view = if self.stochastic_mask {
-            ctx.registry.read_texture_view(helio_core::ResourceKey::new(STOCHASTIC_MASK), "TSR")
+            ctx.registry
+                .read_texture_view(helio_core::ResourceKey::new(STOCHASTIC_MASK), "TSR")
                 .unwrap_or(&self.reactivity_fallback_view)
-        } else { &self.reactivity_fallback_view };
-        let motion = self.motion_vectors
-            .then(|| ctx.registry.read_texture_view(helio_core::ResourceKey::new(MOTION_VECTORS), "TSR"))
+        } else {
+            &self.reactivity_fallback_view
+        };
+        let motion = self
+            .motion_vectors
+            .then(|| {
+                ctx.registry
+                    .read_texture_view(helio_core::ResourceKey::new(MOTION_VECTORS), "TSR")
+            })
             .flatten();
         let motion_bound = motion.is_some();
         let motion_view = motion.unwrap_or(&self.motion_fallback_view);
         // Queue writes land before this frame's commands run.
-        ctx.queue.write_buffer(&self.uniform_buf, std::mem::offset_of!(TsrUniform, flags) as u64,
-            bytemuck::bytes_of(&(self.flags | (u32::from(motion_bound) << 2))));
+        ctx.queue.write_buffer(
+            &self.uniform_buf,
+            std::mem::offset_of!(TsrUniform, flags) as u64,
+            bytemuck::bytes_of(&(self.flags | (u32::from(motion_bound) << 2))),
+        );
         // The reconstruction holds a word per input texel.
         let texels = u64::from(ctx.width) * u64::from(ctx.height);
         if self.nearest.size() < texels * 4 {
             self.nearest = nearest_buffer(ctx.device, texels);
             self.bind_group_key = None;
         }
-        let key = (pre_aa_view.clone(), ctx.depth.clone(), reactive_view.clone(), stochastic_view.clone(),
-            motion_view.clone());
+        let key = (
+            pre_aa_view.clone(),
+            ctx.depth.clone(),
+            reactive_view.clone(),
+            stochastic_view.clone(),
+            motion_view.clone(),
+        );
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_groups = [1, 0].map(|read| {
-                Some(make_resolve_bg(ctx.device, &self.bgl, &self.histories[read], &self.histories[read ^ 1],
-                    pre_aa_view, ctx.depth, reactive_view, stochastic_view, motion_view, &self.nearest,
-                    &self.linear_sampler, ctx.camera, &self.uniform_buf))
+                Some(make_resolve_bg(
+                    ctx.device,
+                    &self.bgl,
+                    &self.histories[read],
+                    &self.histories[read ^ 1],
+                    pre_aa_view,
+                    ctx.depth,
+                    reactive_view,
+                    stochastic_view,
+                    motion_view,
+                    &self.nearest,
+                    &self.linear_sampler,
+                    ctx.camera,
+                    &self.uniform_buf,
+                ))
             });
-            self.reconstruct_bind_group = Some(make_reconstruct_bg(ctx.device, &self.reconstruct_bgl, ctx.depth,
-                motion_view, &self.nearest, &self.uniform_buf));
+            self.reconstruct_bind_group = Some(make_reconstruct_bg(
+                ctx.device,
+                &self.reconstruct_bgl,
+                ctx.depth,
+                motion_view,
+                &self.nearest,
+                &self.uniform_buf,
+            ));
             self.bind_group_key = Some(key);
         }
         let write = self.write;
@@ -1127,15 +1479,24 @@ impl RenderPass for TsrPass {
                 });
                 pass.set_pipeline(&self.reconstruct_pipeline);
                 pass.set_bind_group(0, self.reconstruct_bind_group.as_ref().unwrap(), &[]);
-                pass.dispatch_workgroups(ctx.width.div_ceil(RECONSTRUCT_GROUP[0]), ctx.height.div_ceil(RECONSTRUCT_GROUP[1]), 1);
+                pass.dispatch_workgroups(
+                    ctx.width.div_ceil(RECONSTRUCT_GROUP[0]),
+                    ctx.height.div_ceil(RECONSTRUCT_GROUP[1]),
+                    1,
+                );
             }
             ctx.end_gpu_scope(&mut cmds, "TSR: reconstruct");
         }
 
         // ── 3. Resolve → histories[write] ─────────────────────────────────────
         ctx.begin_gpu_scope(&mut cmds, "TSR: resolve");
-        dispatch_resolve(&mut cmds, &self.pipeline, self.bind_groups[write].as_ref().unwrap(),
-            self.output_width, self.output_height);
+        dispatch_resolve(
+            &mut cmds,
+            &self.pipeline,
+            self.bind_groups[write].as_ref().unwrap(),
+            self.output_width,
+            self.output_height,
+        );
         ctx.end_gpu_scope(&mut cmds, "TSR: resolve");
         if let Some(query) = &self.timing_query {
             cmds.write_timestamp(query, 1);
@@ -1143,8 +1504,13 @@ impl RenderPass for TsrPass {
 
         // ── 4. Sharpen → output_view (tsr_color) ──────────────────────────────
         ctx.begin_gpu_scope(&mut cmds, "TSR: sharpen");
-        draw_fullscreen(&mut cmds, "TSR Sharpen", &[&self.output_view], &self.sharpen_pipeline,
-            &self.sharpen_bind_groups[write]);
+        draw_fullscreen(
+            &mut cmds,
+            "TSR Sharpen",
+            &[&self.output_view],
+            &self.sharpen_pipeline,
+            &self.sharpen_bind_groups[write],
+        );
         ctx.end_gpu_scope(&mut cmds, "TSR: sharpen");
         if let Some(query) = &self.timing_query {
             cmds.write_timestamp(query, 2);
@@ -1153,7 +1519,13 @@ impl RenderPass for TsrPass {
         // ── 5. Blit output_view → ctx.target ──────────────────────────────────
         if !self.intermediate_output {
             ctx.begin_gpu_scope(&mut cmds, "TSR: blit");
-            draw_fullscreen(&mut cmds, "TSR Blit", &[ctx.target], &self.blit_pipeline, &self.blit_bind_group);
+            draw_fullscreen(
+                &mut cmds,
+                "TSR Blit",
+                &[ctx.target],
+                &self.blit_pipeline,
+                &self.blit_bind_group,
+            );
             ctx.end_gpu_scope(&mut cmds, "TSR: blit");
         }
 

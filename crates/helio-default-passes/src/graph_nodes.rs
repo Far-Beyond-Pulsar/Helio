@@ -20,7 +20,9 @@ use std::sync::{Arc, Mutex};
 
 use helio::{DebugDrawState, RendererConfig};
 use helio_graph_asset::resources::intern;
-use helio_graph_asset::{BuildEnv, MarkerFn, NodeBuild, NodeDescriptor, NodeRegistry, ParamDesc, PinType};
+use helio_graph_asset::{
+    BuildEnv, MarkerFn, NodeBuild, NodeDescriptor, NodeRegistry, ParamDesc, PinType,
+};
 use helio_pass_perf_overlay::PerfOverlayShared;
 
 use crate::{
@@ -37,8 +39,12 @@ use crate::{
 
 /// Resources the renderer supplies every frame. Each has a host node that
 /// declares it; the passes that read one get a Scene input for it.
-pub const HOST_INPUTS: &[&str] =
-    &["material_textures", "render_environment", "billboards", "corona_emitters"];
+pub const HOST_INPUTS: &[&str] = &[
+    "material_textures",
+    "render_environment",
+    "billboards",
+    "corona_emitters",
+];
 
 /// The kind of the node for pass `name`.
 pub fn kind(name: &str) -> String {
@@ -60,7 +66,9 @@ struct PerfState(Arc<Mutex<PerfOverlayShared>>);
 
 fn perf(env: &mut BuildEnv<'_>) -> Arc<Mutex<PerfOverlayShared>> {
     let (device, (width, height)) = (env.device, env.internal_size());
-    env.shared(|| PerfState(PerfOverlayShared::new(device, width, height))).0.clone()
+    env.shared(|| PerfState(PerfOverlayShared::new(device, width, height)))
+        .0
+        .clone()
 }
 
 /// The shadow-dirty flags the shadow matrix pass fills and the dirty pass reads.
@@ -170,9 +178,13 @@ pub fn register_passes(registry: &mut NodeRegistry) {
     let marker: MarkerFn = Arc::new(move |build: &mut NodeBuild<'_, '_>, node_kind: &str| {
         let perf = perf(build.env);
         if node_kind == deferred_light {
-            build.graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
+            build
+                .graph
+                .add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
         }
-        build.graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf)));
+        build
+            .graph
+            .add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf)));
     });
     registry.set_marker(marker);
 }
@@ -180,19 +192,19 @@ pub fn register_passes(registry: &mut NodeRegistry) {
 fn register_scene_prep(registry: &mut NodeRegistry) {
     const CATEGORY: &str = "Passes: Scene Prep";
 
-    registry.register(
-        pass_node(
-            "object_batch",
-            "Scene: Object Batches",
-            CATEGORY,
-            "Gathers the scene's objects into GPU-driven batches every other pass reads.",
-            |build| {
-                let c = ctx(build.env);
-                build.graph.add_pass(Box::new(ObjectBatchPass::new(c.device)));
-                Ok(())
-            },
-        ),
-    );
+    registry.register(pass_node(
+        "object_batch",
+        "Scene: Object Batches",
+        CATEGORY,
+        "Gathers the scene's objects into GPU-driven batches every other pass reads.",
+        |build| {
+            let c = ctx(build.env);
+            build
+                .graph
+                .add_pass(Box::new(ObjectBatchPass::new(c.device)));
+            Ok(())
+        },
+    ));
 
     registry.register(pass_node(
         "atmosphere",
@@ -278,7 +290,9 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
                 .shared_existing::<ShadowDirtyBuffer>()
                 .map(|shared| Arc::clone(&shared.0))
                 .ok_or_else(|| missing("Shadow Dirty Flags", "Shadow Matrices"))?;
-            build.graph.add_pass(Box::new(ShadowDirtyPass::new(c.device, dirty)));
+            build
+                .graph
+                .add_pass(Box::new(ShadowDirtyPass::new(c.device, dirty)));
             Ok(())
         },
     ));
@@ -341,50 +355,50 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
         "Prepares the indirect dispatch arguments the culling passes use.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(IndirectDispatchPass::new(c.device, c.cull_stats.clone())));
+            build.graph.add_pass(Box::new(IndirectDispatchPass::new(
+                c.device,
+                c.cull_stats.clone(),
+            )));
             Ok(())
         },
     ));
 
-    registry.register(
-        pass_node(
-            "hiz",
-            "Culling: Depth Pyramid (Hi-Z)",
-            CATEGORY,
-            "Builds the hierarchical depth pyramid occlusion culling tests against.",
-            |build| {
-                let c = ctx(build.env);
-                build.graph.add_pass(Box::new(HiZBuildPass::new(c.device, c.queue, c.iw, c.ih)));
-                Ok(())
-            },
-        ),
-    );
+    registry.register(pass_node(
+        "hiz",
+        "Culling: Depth Pyramid (Hi-Z)",
+        CATEGORY,
+        "Builds the hierarchical depth pyramid occlusion culling tests against.",
+        |build| {
+            let c = ctx(build.env);
+            build
+                .graph
+                .add_pass(Box::new(HiZBuildPass::new(c.device, c.queue, c.iw, c.ih)));
+            Ok(())
+        },
+    ));
 
-    registry.register(
-        pass_node(
-            "occlusion_cull",
-            "Culling: Frustum + Occlusion",
-            CATEGORY,
-            "Frustum and Hi-Z occlusion culling of the object batch.",
-            |build| {
-                let c = ctx(build.env);
-                let sampler = build
-                    .graph
-                    .find_pass::<HiZBuildPass>()
-                    .map(|hiz| Arc::clone(&hiz.hiz_sampler))
-                    .ok_or_else(|| missing("Occlusion Cull", "Hi-Z Build"))?;
-                build.graph.add_pass(Box::new(OcclusionCullPass::new(
-                    c.device,
-                    sampler,
-                    c.iw,
-                    c.ih,
-                    c.cull_stats.clone(),
-                )));
-                Ok(())
-            },
-        )
-        .with_marker_after(),
-    );
+    registry.register(pass_node(
+        "occlusion_cull",
+        "Culling: Frustum + Occlusion",
+        CATEGORY,
+        "Frustum and Hi-Z occlusion culling of the object batch.",
+        |build| {
+            let c = ctx(build.env);
+            let sampler = build
+                .graph
+                .find_pass::<HiZBuildPass>()
+                .map(|hiz| Arc::clone(&hiz.hiz_sampler))
+                .ok_or_else(|| missing("Occlusion Cull", "Hi-Z Build"))?;
+            build.graph.add_pass(Box::new(OcclusionCullPass::new(
+                c.device,
+                sampler,
+                c.iw,
+                c.ih,
+                c.cull_stats.clone(),
+            )));
+            Ok(())
+        },
+    ));
 
     registry.register(pass_node(
         "portal_cull",
@@ -393,10 +407,13 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
         "Culls portals and compacts the ones to draw. Portal Instance reads its buffers.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(PortalCullPass::new(c.device)));
+            build
+                .graph
+                .add_pass(Box::new(PortalCullPass::new(c.device)));
             Ok(())
         },
-    ));
+    )
+    .with_marker_after());
 
     registry.register(pass_node(
         "light_cull",
@@ -405,7 +422,9 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
         "Bins the scene's lights into screen tiles.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(LightCullPass::new(c.device, c.iw, c.ih)));
+            build
+                .graph
+                .add_pass(Box::new(LightCullPass::new(c.device, c.iw, c.ih)));
             Ok(())
         },
     ));
@@ -431,20 +450,17 @@ fn register_geometry(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(
-        pass_node(
-            "gbuffer",
-            "Geometry: GBuffer",
-            CATEGORY,
-            "Opaque geometry into the GBuffer and the scene depth.",
-            |build| {
-                let c = ctx(build.env);
-                build.graph.add_pass(Box::new(GBufferPass::new(c.device)));
-                Ok(())
-            },
-        )
-        .with_marker_after(),
-    );
+    registry.register(pass_node(
+        "gbuffer",
+        "Geometry: GBuffer",
+        CATEGORY,
+        "Opaque geometry into the GBuffer and the scene depth.",
+        |build| {
+            let c = ctx(build.env);
+            build.graph.add_pass(Box::new(GBufferPass::new(c.device)));
+            Ok(())
+        },
+    ));
 
     registry.register(pass_node(
         "portal_mask",
@@ -453,7 +469,9 @@ fn register_geometry(registry: &mut NodeRegistry) {
         "Stamps each portal's visible footprint, respecting real occluders.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(PortalMaskPass::new(c.device)));
+            build
+                .graph
+                .add_pass(Box::new(PortalMaskPass::new(c.device)));
             Ok(())
         },
     ));
@@ -484,38 +502,47 @@ fn register_geometry(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(pass_node(
-        "foliage_gbuffer",
-        "Foliage: Draw to GBuffer",
-        CATEGORY,
-        "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
-        |build| {
-            let c = ctx(build.env);
-            let draw = build
-                .env
-                .shared_existing::<PendingFoliageDraw>()
-                .and_then(|pending| pending.0.take())
-                .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
-            build.graph.add_pass(Box::new(draw));
-            Ok(())
-        },
-    ));
+    registry.register(
+        pass_node(
+            "foliage_gbuffer",
+            "Foliage: Draw to GBuffer",
+            CATEGORY,
+            "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
+            |build| {
+                let c = ctx(build.env);
+                let draw = build
+                    .env
+                    .shared_existing::<PendingFoliageDraw>()
+                    .and_then(|pending| pending.0.take())
+                    .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
+                build.graph.add_pass(Box::new(draw));
+                Ok(())
+            },
+        )
+        .with_marker_after(),
+    );
 
-    registry.register(pass_node(
-        "forward_lit",
-        "Geometry: Forward Lit",
-        CATEGORY,
-        "Lit opaque geometry in one forward pass, for pipelines without a GBuffer.",
-        |build| {
-            let c = ctx(build.env);
-            let render_all_opaque = build.boolean("render_all_opaque");
-            let mut pass = ForwardLitPass::new(c.device, c.config.surface_format);
-            pass.render_all_opaque = render_all_opaque;
-            build.graph.add_pass(Box::new(pass));
-            Ok(())
-        },
-    )
-    .with_param(ParamDesc::boolean("render_all_opaque", "Render all opaque", false)));
+    registry.register(
+        pass_node(
+            "forward_lit",
+            "Geometry: Forward Lit",
+            CATEGORY,
+            "Lit opaque geometry in one forward pass, for pipelines without a GBuffer.",
+            |build| {
+                let c = ctx(build.env);
+                let render_all_opaque = build.boolean("render_all_opaque");
+                let mut pass = ForwardLitPass::new(c.device, c.config.surface_format);
+                pass.render_all_opaque = render_all_opaque;
+                build.graph.add_pass(Box::new(pass));
+                Ok(())
+            },
+        )
+        .with_param(ParamDesc::boolean(
+            "render_all_opaque",
+            "Render all opaque",
+            false,
+        )),
+    );
 }
 
 fn register_lighting(registry: &mut NodeRegistry) {
@@ -528,46 +555,58 @@ fn register_lighting(registry: &mut NodeRegistry) {
         "Projects decals into the GBuffer.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(DecalPass::new(c.device, c.queue, c.camera, c.iw, c.ih)));
-            Ok(())
-        },
-    ));
-
-    registry.register(pass_node(
-        "ssr",
-        "Reflections: Screen-Space",
-        CATEGORY,
-        "Traces glossy reflections in screen space. One of the most expensive passes.",
-        |build| {
-            let c = ctx(build.env);
-            if !helio_core::REFLECTIONS_SUPPORTED {
-                log::warn!("Screen-space reflections are not supported on this platform");
-                return Ok(());
-            }
-            build.graph.add_pass(Box::new(SsrPass::new(c.device, c.queue, c.camera, c.iw, c.ih)));
-            Ok(())
-        },
-    ));
-
-    registry.register(pass_node(
-        "planar_reflection",
-        "Reflections: Planar",
-        CATEGORY,
-        "Reflects the scene across world-space planes.",
-        |build| {
-            let c = ctx(build.env);
-            if !helio_core::REFLECTIONS_SUPPORTED {
-                log::warn!("Planar reflections are not supported on this platform");
-                return Ok(());
-            }
-            build.graph.add_pass(Box::new(PlanarReflectionPass::new(
-                c.device,
-                c.camera,
-                c.config.surface_format,
+            build.graph.add_pass(Box::new(DecalPass::new(
+                c.device, c.queue, c.camera, c.iw, c.ih,
             )));
             Ok(())
         },
     ));
+
+    const MISSING_REFLECTIONS: &str = "reflections are not supported on this platform";
+
+    registry.register(
+        pass_node(
+            "ssr",
+            "Reflections: Screen-Space",
+            CATEGORY,
+            "Traces glossy reflections in screen space. One of the most expensive passes.",
+            |build| {
+                let c = ctx(build.env);
+                if !helio_core::REFLECTIONS_SUPPORTED {
+                    log::warn!("Screen-space reflections are not supported on this platform");
+                    return Ok(());
+                }
+                build.graph.add_pass(Box::new(SsrPass::new(
+                    c.device, c.queue, c.camera, c.iw, c.ih,
+                )));
+                Ok(())
+            },
+        )
+        .with_unsupported_when(helio_core::REFLECTIONS_SUPPORTED, MISSING_REFLECTIONS),
+    );
+
+    registry.register(
+        pass_node(
+            "planar_reflection",
+            "Reflections: Planar",
+            CATEGORY,
+            "Reflects the scene across world-space planes.",
+            |build| {
+                let c = ctx(build.env);
+                if !helio_core::REFLECTIONS_SUPPORTED {
+                    log::warn!("Planar reflections are not supported on this platform");
+                    return Ok(());
+                }
+                build.graph.add_pass(Box::new(PlanarReflectionPass::new(
+                    c.device,
+                    c.camera,
+                    c.config.surface_format,
+                )));
+                Ok(())
+            },
+        )
+        .with_unsupported_when(helio_core::REFLECTIONS_SUPPORTED, MISSING_REFLECTIONS),
+    );
 
     registry.register(
         pass_node(
@@ -577,7 +616,8 @@ fn register_lighting(registry: &mut NodeRegistry) {
             "Lights the GBuffer with every light, shadow, reflection and the atmosphere.",
             |build| {
                 let c = ctx(build.env);
-                let mut pass = DeferredLightPass::new(c.device, c.queue, c.camera, FOGGED_HDR_FORMAT);
+                let mut pass =
+                    DeferredLightPass::new(c.device, c.queue, c.camera, FOGGED_HDR_FORMAT);
                 pass.set_shadow_quality(c.config.shadow_quality, c.queue);
                 pass.debug_mode = c.config.debug_mode;
                 pass.set_env_reflections(c.config.enable_environment_reflections);
@@ -599,7 +639,10 @@ fn register_overlays(registry: &mut NodeRegistry) {
         "Composites the sky and aerial perspective over the lit scene.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(AtmosphereCompositePass::new(c.device, FOGGED_HDR_FORMAT)));
+            build.graph.add_pass(Box::new(AtmosphereCompositePass::new(
+                c.device,
+                FOGGED_HDR_FORMAT,
+            )));
             Ok(())
         },
     ));
@@ -661,7 +704,10 @@ fn register_overlays(registry: &mut NodeRegistry) {
             "Editor-only checkerboard over each portal's opening.",
             |build| {
                 let c = ctx(build.env);
-                build.graph.add_pass(Box::new(PortalEditorOverlayPass::new(c.device, FOGGED_HDR_FORMAT)));
+                build.graph.add_pass(Box::new(PortalEditorOverlayPass::new(
+                    c.device,
+                    FOGGED_HDR_FORMAT,
+                )));
                 Ok(())
             },
         )
@@ -719,7 +765,9 @@ fn register_post(registry: &mut NodeRegistry) {
         "Blends the post-process volumes around the camera.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(c.device)));
+            build
+                .graph
+                .add_pass(Box::new(PostProcessVolumeBlendPass::new(c.device)));
             Ok(())
         },
     ));
@@ -731,7 +779,9 @@ fn register_post(registry: &mut NodeRegistry) {
         "Accumulates volumetric fog lit by the shadowed lights.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(VolumetricFogPass::new(c.device)));
+            build
+                .graph
+                .add_pass(Box::new(VolumetricFogPass::new(c.device)));
             Ok(())
         },
     ));
@@ -743,7 +793,10 @@ fn register_post(registry: &mut NodeRegistry) {
         "Composites the fog over the scene into the fogged HDR colour.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(FogCompositePass::with_format(c.device, FOGGED_HDR_FORMAT)));
+            build.graph.add_pass(Box::new(FogCompositePass::with_format(
+                c.device,
+                FOGGED_HDR_FORMAT,
+            )));
             Ok(())
         },
     ));
@@ -772,19 +825,24 @@ fn register_post(registry: &mut NodeRegistry) {
             |build| {
                 let c = ctx(build.env);
                 let quality = tsr_quality(&build.text("quality"));
-                build.graph.add_pass(Box::new(
-                    TsrPass::new(
-                        c.device,
-                        c.iw,
-                        c.ih,
-                        c.config.width,
-                        c.config.height,
-                        c.config.surface_format,
-                        quality,
-                    )
-                    .with_color_input(FOGGED_HDR)
-                    .with_intermediate_output(),
-                ));
+                let tsr = TsrPass::new(
+                    c.device,
+                    c.iw,
+                    c.ih,
+                    c.config.width,
+                    c.config.height,
+                    c.config.surface_format,
+                    quality,
+                )
+                .with_color_input(FOGGED_HDR)
+                .with_intermediate_output()
+                .with_motion_vectors();
+                let tsr = if build.boolean("stochastic_mask") {
+                    tsr.with_stochastic_mask()
+                } else {
+                    tsr
+                };
+                build.graph.add_pass(Box::new(tsr));
                 Ok(())
             },
         )
@@ -793,6 +851,11 @@ fn register_post(registry: &mut NodeRegistry) {
             "Quality",
             &["performance", "balanced", "quality", "native"],
             "balanced",
+        ))
+        .with_param(ParamDesc::boolean(
+            "stochastic_mask",
+            "Stochastic mask",
+            false,
         )),
     );
 
@@ -898,10 +961,12 @@ fn register_output(registry: &mut NodeRegistry) {
         "Depth and normal debug views, over the final image. Inert unless one is selected.",
         |build| {
             let c = ctx(build.env);
-            build.graph.add_pass(Box::new(helio_pass_buffer_view::BufferViewPass::new(
-                c.device,
-                c.config.surface_format,
-            )));
+            build
+                .graph
+                .add_pass(Box::new(helio_pass_buffer_view::BufferViewPass::new(
+                    c.device,
+                    c.config.surface_format,
+                )));
             Ok(())
         },
     ));
@@ -943,22 +1008,20 @@ fn register_output(registry: &mut NodeRegistry) {
         .with_marker_after(),
     );
 
-    registry.register(
-        pass_node(
-            "perf_overlay",
-            "Output: Performance Overlay",
-            CATEGORY,
-            "Draws the performance overlay over the final image.",
-            |build| {
-                let c = ctx(build.env);
-                let shared = perf(build.env);
-                let mut pass = PerfOverlayPass::new(c.device, shared, c.config.surface_format);
-                pass.set_mode(crate::convert_perf_mode(c.config.perf_overlay_mode));
-                build.graph.add_pass(Box::new(pass));
-                Ok(())
-            },
-        ),
-    );
+    registry.register(pass_node(
+        "perf_overlay",
+        "Output: Performance Overlay",
+        CATEGORY,
+        "Draws the performance overlay over the final image.",
+        |build| {
+            let c = ctx(build.env);
+            let shared = perf(build.env);
+            let mut pass = PerfOverlayPass::new(c.device, shared, c.config.surface_format);
+            pass.set_mode(crate::convert_perf_mode(c.config.perf_overlay_mode));
+            build.graph.add_pass(Box::new(pass));
+            Ok(())
+        },
+    ));
 
     registry.register(pass_node(
         "debug_draw",

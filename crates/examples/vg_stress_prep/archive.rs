@@ -68,10 +68,7 @@ fn skip<R: Read>(r: &mut R, mut n: u64) -> Result<(), String> {
     Ok(())
 }
 
-pub fn find_tar_member<R: Read>(
-    mut r: R,
-    member: &str,
-) -> Result<std::io::Take<R>, String> {
+pub fn find_tar_member<R: Read>(mut r: R, member: &str) -> Result<std::io::Take<R>, String> {
     let suffix = format!("/{member}");
     let mut long_name: Option<String> = None;
     let mut header = [0u8; 512];
@@ -93,7 +90,10 @@ pub fn find_tar_member<R: Read>(
                 } else if kind == b'x' {
                     // "<len> path=<name>\n" records.
                     for rec in text.split('\n') {
-                        if let Some(p) = rec.split_once(' ').and_then(|(_, kv)| kv.strip_prefix("path=")) {
+                        if let Some(p) = rec
+                            .split_once(' ')
+                            .and_then(|(_, kv)| kv.strip_prefix("path="))
+                        {
                             long_name = Some(p.to_string());
                         }
                     }
@@ -180,7 +180,10 @@ pub mod tests {
         let plain = dir.join("a.gz");
         std::fs::write(&plain, gzip(b"hello world")).unwrap();
         let mut s = String::new();
-        open_gz(&plain, None).unwrap().read_to_string(&mut s).unwrap();
+        open_gz(&plain, None)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
         assert_eq!(s, "hello world");
         let tgz = dir.join("b.tar.gz");
         std::fs::write(&tgz, gzip(&sample_tar())).unwrap();

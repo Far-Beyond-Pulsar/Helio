@@ -8,7 +8,10 @@ use crate::config::{self, DenseConfig};
 pub enum DenseError {
     InvalidConfig(String),
     /// The device offers less workgroup storage than the peel kernel declares.
-    InsufficientWorkgroupStorage { needed: u32, available: u32 },
+    InsufficientWorkgroupStorage {
+        needed: u32,
+        available: u32,
+    },
 }
 
 impl std::fmt::Display for DenseError {
@@ -16,7 +19,10 @@ impl std::fmt::Display for DenseError {
         match self {
             Self::InvalidConfig(m) => write!(f, "invalid dense config: {m}"),
             Self::InsufficientWorkgroupStorage { needed, available } => {
-                write!(f, "peel kernel needs {needed} B workgroup storage, device has {available} B")
+                write!(
+                    f,
+                    "peel kernel needs {needed} B workgroup storage, device has {available} B"
+                )
             }
         }
     }
@@ -237,7 +243,11 @@ impl DenseNonRtPass {
     /// (Re)allocate the owned buffers for `viewport`. Done lazily by
     /// [`DenseNonRtPass::record`]; exposed so callers can pre-size.
     pub fn ensure_buffers(&mut self, device: &wgpu::Device, viewport: [u32; 2]) -> &DenseBuffers {
-        if !self.buffers.as_ref().is_some_and(|b| b.matches(&self.cfg, viewport)) {
+        if !self
+            .buffers
+            .as_ref()
+            .is_some_and(|b| b.matches(&self.cfg, viewport))
+        {
             self.buffers = Some(DenseBuffers::new(device, &self.cfg, viewport, true));
         }
         self.buffers.as_ref().unwrap()
@@ -270,7 +280,16 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
-        self.record_stages(device, queue, encoder, frame, inputs, true, true, &mut GpuScopes::none());
+        self.record_stages(
+            device,
+            queue,
+            encoder,
+            frame,
+            inputs,
+            true,
+            true,
+            &mut GpuScopes::none(),
+        );
     }
 
     /// Only the cheap front half: counter reset, dense-tile compaction and the
@@ -285,7 +304,16 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
-        self.record_stages(device, queue, encoder, frame, inputs, true, false, &mut GpuScopes::none());
+        self.record_stages(
+            device,
+            queue,
+            encoder,
+            frame,
+            inputs,
+            true,
+            false,
+            &mut GpuScopes::none(),
+        );
     }
 
     /// [`Self::record_setup_rec`] with per-kernel GPU timestamp scopes.
@@ -358,7 +386,16 @@ impl DenseNonRtPass {
         frame: &DenseFrame,
         inputs: &DenseNonRtInputs<'_>,
     ) {
-        self.record_stages(device, queue, encoder, frame, inputs, false, true, &mut GpuScopes::none());
+        self.record_stages(
+            device,
+            queue,
+            encoder,
+            frame,
+            inputs,
+            false,
+            true,
+            &mut GpuScopes::none(),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -377,7 +414,11 @@ impl DenseNonRtPass {
         let masked_only = self.masked_only;
         let out_key = self.out_override.clone();
         let b = self.buffers.as_ref().unwrap();
-        b.write_params_flags(queue, frame, u32::from(masked_only) | (u32::from(self.dense_bin_only) << 1));
+        b.write_params_flags(
+            queue,
+            frame,
+            u32::from(masked_only) | (u32::from(self.dense_bin_only) << 1),
+        );
         let key_buf = out_key.as_ref().unwrap_or(&b.dense_key);
         // Counters only; the tile list tail is rewritten by `compact`.
         if setup {

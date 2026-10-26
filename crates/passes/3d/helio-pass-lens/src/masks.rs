@@ -15,7 +15,10 @@ pub fn mask_array(
     layers: &[&[u8]],
 ) -> wgpu::TextureView {
     use wgpu::util::DeviceExt;
-    let data: Vec<u8> = layers.iter().flat_map(|layer| layer.iter().copied()).collect();
+    let data: Vec<u8> = layers
+        .iter()
+        .flat_map(|layer| layer.iter().copied())
+        .collect();
     device
         .create_texture_with_data(
             queue,
@@ -85,8 +88,14 @@ pub fn water_drop_mask(size: u32, drops: u32, radius: [f32; 2], seed: u64) -> Ve
     for _ in 0..drops {
         let (cx, cy) = (rng.unit() * size as f32, rng.unit() * size as f32);
         let r = (lo + (hi - lo) * rng.unit()) * size as f32;
-        let (x0, x1) = ((cx - r - 1.0).floor().max(0.0) as usize, ((cx + r + 1.0).ceil() as usize).min(n));
-        let (y0, y1) = ((cy - r - 1.0).floor().max(0.0) as usize, ((cy + r + 1.0).ceil() as usize).min(n));
+        let (x0, x1) = (
+            (cx - r - 1.0).floor().max(0.0) as usize,
+            ((cx + r + 1.0).ceil() as usize).min(n),
+        );
+        let (y0, y1) = (
+            (cy - r - 1.0).floor().max(0.0) as usize,
+            ((cy + r + 1.0).ceil() as usize).min(n),
+        );
         for y in y0..y1 {
             for x in x0..x1 {
                 let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);

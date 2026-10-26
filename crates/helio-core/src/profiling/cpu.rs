@@ -215,7 +215,9 @@ mod tests {
     fn prepare_execute_and_repeated_labels_accumulate() {
         let mut profiler = CpuProfiler::new();
         profiler.record_external("pass", Duration::from_millis(2));
-        { let _scope = profiler.scope("pass"); }
+        {
+            let _scope = profiler.scope("pass");
+        }
         profiler.record_external("pass", Duration::from_millis(3));
         assert!(profiler.get_timings()["pass"] >= Duration::from_millis(5));
         profiler.clear();

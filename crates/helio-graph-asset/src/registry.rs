@@ -36,7 +36,12 @@ pub struct ParamDesc {
 
 impl ParamDesc {
     pub fn new(key: &str, label: &str, ty: ParamType, default: Value) -> Self {
-        Self { key: key.into(), label: label.into(), ty, default }
+        Self {
+            key: key.into(),
+            label: label.into(),
+            ty,
+            default,
+        }
     }
 
     pub fn text(key: &str, label: &str, default: &str) -> Self {
@@ -48,7 +53,12 @@ impl ParamDesc {
     }
 
     pub fn int(key: &str, label: &str, min: i64, max: i64, default: i64) -> Self {
-        Self::new(key, label, ParamType::Int { min, max }, Value::from(default))
+        Self::new(
+            key,
+            label,
+            ParamType::Int { min, max },
+            Value::from(default),
+        )
     }
 
     pub fn choice(key: &str, label: &str, options: &[&str], default: &str) -> Self {
@@ -117,7 +127,9 @@ impl<'e> BuildEnv<'e> {
 
     /// The shared value of type `T`, if an earlier node created it.
     pub fn shared_existing<T: Any>(&mut self) -> Option<&mut T> {
-        self.shared.get_mut(&TypeId::of::<T>()).and_then(|value| value.downcast_mut::<T>())
+        self.shared
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_mut::<T>())
     }
 
     /// State shared between the nodes of one build, created on first use by
@@ -143,15 +155,25 @@ pub struct NodeBuild<'a, 'e> {
 
 impl NodeBuild<'_, '_> {
     pub fn text(&self, key: &str) -> String {
-        self.params.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+        self.params
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
     }
 
     pub fn int(&self, key: &str) -> i64 {
-        self.params.get(key).and_then(Value::as_i64).unwrap_or_default()
+        self.params
+            .get(key)
+            .and_then(Value::as_i64)
+            .unwrap_or_default()
     }
 
     pub fn boolean(&self, key: &str) -> bool {
-        self.params.get(key).and_then(Value::as_bool).unwrap_or_default()
+        self.params
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or_default()
     }
 }
 
@@ -179,6 +201,10 @@ pub struct NodeDescriptor {
     /// Inputs the node can also take, beyond what its passes declare by default:
     /// the pass author lists them where a parameter chooses between resources.
     pub alternative_inputs: Vec<(String, PinType)>,
+    /// Why the node builds nothing where a capability it needs is absent (a
+    /// platform, say): validation reports it so the graph that claims the pass
+    /// is detectably short of it. `None` when the node always builds.
+    pub unsupported: Option<&'static str>,
     pins: PinsFn,
     build: BuildFn,
 }
@@ -201,6 +227,7 @@ impl NodeDescriptor {
             marker_after: false,
             data_only: false,
             alternative_inputs: Vec::new(),
+            unsupported: None,
             pins: Arc::new(|_| NodePins::default()),
             build: Arc::new(build),
         }
@@ -212,7 +239,10 @@ impl NodeDescriptor {
     }
 
     pub fn with_pins(mut self, inputs: Vec<PinDesc>, outputs: Vec<PinDesc>) -> Self {
-        self.pins = Arc::new(move |_| NodePins { inputs: inputs.clone(), outputs: outputs.clone() });
+        self.pins = Arc::new(move |_| NodePins {
+            inputs: inputs.clone(),
+            outputs: outputs.clone(),
+        });
         self
     }
 
@@ -234,9 +264,25 @@ impl NodeDescriptor {
         self
     }
 
+    /// Registers why this node builds nothing where the capability it needs
+    /// is absent; validation reports it as a warning.
+    pub fn with_unsupported(mut self, reason: &'static str) -> Self {
+        self.unsupported = Some(reason);
+        self
+    }
+
+    /// [`with_unsupported`](Self::with_unsupported) where `supported` is false.
+    pub fn with_unsupported_when(mut self, supported: bool, reason: &'static str) -> Self {
+        if !supported {
+            self.unsupported = Some(reason);
+        }
+        self
+    }
+
     /// Resources this node can also read, as optional inputs of type `ty`.
     pub fn with_alternative_inputs(mut self, names: &[&str], ty: PinType) -> Self {
-        self.alternative_inputs.extend(names.iter().map(|name| (name.to_string(), ty)));
+        self.alternative_inputs
+            .extend(names.iter().map(|name| (name.to_string(), ty)));
         self
     }
 
@@ -253,7 +299,8 @@ impl NodeDescriptor {
     pub fn effective_params(&self, params: &Params) -> Params {
         let mut out = params.clone();
         for param in &self.params {
-            out.entry(param.key.clone()).or_insert_with(|| param.default.clone());
+            out.entry(param.key.clone())
+                .or_insert_with(|| param.default.clone());
         }
         out
     }
@@ -321,13 +368,15 @@ impl NodeRegistry {
                     });
                 for (name, ty) in &alternatives {
                     if !pins.inputs.iter().any(|pin| pin.resource == *name) {
-                        pins.inputs.push(PinDesc::resource(*ty, name.clone()).optional());
+                        pins.inputs
+                            .push(PinDesc::resource(*ty, name.clone()).optional());
                     }
                 }
                 pins
             });
         }
-        self.nodes.insert(descriptor.kind.clone(), Arc::new(descriptor));
+        self.nodes
+            .insert(descriptor.kind.clone(), Arc::new(descriptor));
     }
 
     /// Sets the pins of the generated node of `kind`.
@@ -339,16 +388,21 @@ impl NodeRegistry {
 
     /// Every generated node's pins, in kind order.
     pub fn generated_pins(&self) -> Vec<NodePins> {
-        self.pin_table.read().map_or_else(|_| Vec::new(), |table| {
-            let mut kinds: Vec<_> = table.iter().collect();
-            kinds.sort_by(|a, b| a.0.cmp(b.0));
-            kinds.into_iter().map(|(_, pins)| pins.clone()).collect()
-        })
+        self.pin_table.read().map_or_else(
+            |_| Vec::new(),
+            |table| {
+                let mut kinds: Vec<_> = table.iter().collect();
+                kinds.sort_by(|a, b| a.0.cmp(b.0));
+                kinds.into_iter().map(|(_, pins)| pins.clone()).collect()
+            },
+        )
     }
 
     /// Whether any generated pins have been set (a probe has run).
     pub fn has_generated_pins(&self) -> bool {
-        self.pin_table.read().map_or(false, |table| !table.is_empty())
+        self.pin_table
+            .read()
+            .map_or(false, |table| !table.is_empty())
     }
 
     /// Sets what adds a performance marker after nodes built `with_marker_after`.

@@ -810,18 +810,33 @@ const _: () = assert!(std::mem::offset_of!(LensElementComponent, region) == 96);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LensRegion<'a> {
     FullFrame,
-    HalfPlane { angle: f32, offset: f32 },
-    Ellipse { center: [f32; 2], radii: [f32; 2], rotation: f32 },
+    HalfPlane {
+        angle: f32,
+        offset: f32,
+    },
+    Ellipse {
+        center: [f32; 2],
+        radii: [f32; 2],
+        rotation: f32,
+    },
     /// Convex, 3 to 8 vertices.
     Polygon(&'a [[f32; 2]]),
-    RadialBand { r0: f32, r1: f32, center: [f32; 2] },
+    RadialBand {
+        r0: f32,
+        r1: f32,
+        center: [f32; 2],
+    },
     /// Channel 0 (red) of layer 0 of the mask array; see
     /// [`LensRegion::MaskChannel`].
     Mask,
     /// One channel (0 red .. 3 alpha) of a layer of the mask array, covering
     /// where it is bright (`invert`: dark). Refine the mapping with
     /// [`LensElementComponent::with_mask_transform`].
-    MaskChannel { layer: u32, channel: u32, invert: bool },
+    MaskChannel {
+        layer: u32,
+        channel: u32,
+        invert: bool,
+    },
 }
 
 impl LensElementComponent {
@@ -839,7 +854,11 @@ impl LensElementComponent {
             LensRegion::HalfPlane { angle, offset } => {
                 set(region_kind::HALF_PLANE, &[angle, offset])
             }
-            LensRegion::Ellipse { center, radii, rotation } => set(
+            LensRegion::Ellipse {
+                center,
+                radii,
+                rotation,
+            } => set(
                 region_kind::ELLIPSE,
                 &[center[0], center[1], radii[0], radii[1], rotation],
             ),
@@ -853,7 +872,11 @@ impl LensElementComponent {
                 set(region_kind::RADIAL_BAND, &[r0, r1, center[0], center[1]])
             }
             LensRegion::Mask => set(region_kind::MASK, &[]),
-            LensRegion::MaskChannel { layer, channel, invert } => set(
+            LensRegion::MaskChannel {
+                layer,
+                channel,
+                invert,
+            } => set(
                 region_kind::MASK,
                 &[layer as f32, channel as f32, if invert { 1.0 } else { 0.0 }],
             ),
@@ -987,7 +1010,13 @@ impl LensElementComponent {
 
     /// A star filter of `points` spikes `length` image heights long taking
     /// `intensity` of the light, the first at `rotation` radians.
-    pub fn star_filter(points: u32, rotation: f32, length: f32, intensity: f32, region: LensRegion<'_>) -> Self {
+    pub fn star_filter(
+        points: u32,
+        rotation: f32,
+        length: f32,
+        intensity: f32,
+        region: LensRegion<'_>,
+    ) -> Self {
         let mut params = [0.0; 16];
         params[star::POINTS] = points as f32;
         params[star::ROTATION] = rotation;
@@ -1077,7 +1106,12 @@ impl LensElementComponent {
     /// channel inside `region`. Negative red and blue against zero green
     /// focus them farther than green: purple foreground fringes, green
     /// background ones.
-    pub fn longitudinal_ca(red_dpt: f32, green_dpt: f32, blue_dpt: f32, region: LensRegion<'_>) -> Self {
+    pub fn longitudinal_ca(
+        red_dpt: f32,
+        green_dpt: f32,
+        blue_dpt: f32,
+        region: LensRegion<'_>,
+    ) -> Self {
         let mut params = [0.0; 16];
         params[0] = red_dpt;
         params[1] = green_dpt;
@@ -1410,7 +1444,8 @@ fn clear_lens_row(mirror: &pulsar_scenedb::gpu::GpuMirrorHandle, row: u32) {
     let zero: LensComponent = bytemuck::Zeroable::zeroed();
     mirror.store().mark_gpu_row_dirty(
         pulsar_scenedb::component::component_id::<__ScenedbGpuPacked_LensComponent>(),
-        row, bytemuck::bytes_of(&zero),
+        row,
+        bytemuck::bytes_of(&zero),
     );
 }
 
@@ -1424,6 +1459,7 @@ fn clear_element_row(mirror: &pulsar_scenedb::gpu::GpuMirrorHandle, row: u32) {
     let zero: LensElementComponent = bytemuck::Zeroable::zeroed();
     mirror.store().mark_gpu_row_dirty(
         pulsar_scenedb::component::component_id::<__ScenedbGpuPacked_LensElementComponent>(),
-        row, bytemuck::bytes_of(&zero),
+        row,
+        bytemuck::bytes_of(&zero),
     );
 }

@@ -91,7 +91,10 @@ mod tests {
     fn presets_are_monotonic() {
         for pair in ALL.windows(2) {
             let (lower, higher) = (pair[0], pair[1]);
-            assert!(higher.range() > lower.range(), "{higher:?} must reach further than {lower:?}");
+            assert!(
+                higher.range() > lower.range(),
+                "{higher:?} must reach further than {lower:?}"
+            );
             assert!(higher.density_multiplier() > lower.density_multiplier());
             assert!(higher.lod_distance_scale() > lower.lod_distance_scale());
             assert!(higher.cluster_granularity() <= lower.cluster_granularity());
@@ -103,8 +106,15 @@ mod tests {
         for quality in ALL {
             let granularity = quality.cluster_granularity();
             let edge = (granularity as f64).sqrt() as u32;
-            assert_eq!(edge * edge, granularity, "{quality:?} clusters are not square");
-            assert!((16..=32).contains(&granularity), "{quality:?} granularity {granularity}");
+            assert_eq!(
+                edge * edge,
+                granularity,
+                "{quality:?} clusters are not square"
+            );
+            assert!(
+                (16..=32).contains(&granularity),
+                "{quality:?} granularity {granularity}"
+            );
         }
     }
 }

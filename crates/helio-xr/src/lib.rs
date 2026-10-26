@@ -29,16 +29,18 @@ pub mod error;
 pub mod graphics;
 pub mod input;
 pub mod instance;
+pub mod runtime;
 pub mod session;
 pub mod swapchain;
 
-pub use camera::{view_to_world_matrix, xr_view_to_camera, ViewPose};
+pub use camera::{ViewPose, view_to_world_matrix, xr_view_to_camera};
 pub use context::{create_wgpu_device, create_wgpu_instance};
 pub use error::XrError;
 pub use graphics::WgpuGraphics;
-pub use input::{ControllerState, XrInput};
+pub use input::{ControllerState, TrackingState, XrInput};
 pub use instance::XrInstance;
 pub use openxr::Time;
+pub use runtime::XrRuntime;
 pub use session::{LocatedViews, SessionEvent, XrSession};
 pub use swapchain::XrSwapchain;
 

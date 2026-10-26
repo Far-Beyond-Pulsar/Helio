@@ -120,10 +120,18 @@ fn lower_graph_texture_samples(source: &str, max_textures: usize) -> String {
     let mut helpers = std::collections::BTreeSet::new();
     let mut cursor = 0;
     while cursor < source.len() {
-        let next = ["textureSample(", "textureSampleLevel(", "textureSampleGrad("]
-            .into_iter()
-            .filter_map(|name| source[cursor..].find(name).map(|offset| (cursor + offset, name)))
-            .min_by_key(|(offset, _)| *offset);
+        let next = [
+            "textureSample(",
+            "textureSampleLevel(",
+            "textureSampleGrad(",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            source[cursor..]
+                .find(name)
+                .map(|offset| (cursor + offset, name))
+        })
+        .min_by_key(|(offset, _)| *offset);
         let Some((start, name)) = next else {
             rewritten.push_str(&source[cursor..]);
             break;
@@ -378,7 +386,9 @@ fn graph(material: GpuMaterial, uv: vec2<f32>) -> vec4<f32> {
         assert!(fixed.contains("let dx = dpdx(uv);"));
         assert!(fixed.contains("textureSampleGrad(scene_texture_0, scene_sampler_0, uv, dx, dy)"));
         assert!(fixed.contains("pulsar_graph_sample_level(material.tex_normal, uv, 2.0)"));
-        assert!(fixed.contains("pulsar_graph_sample_grad(material.tex_roughness, uv, vec2<f32>(1.0), vec2<f32>(1.0))"));
+        assert!(fixed.contains(
+            "pulsar_graph_sample_grad(material.tex_roughness, uv, vec2<f32>(1.0), vec2<f32>(1.0))"
+        ));
     }
 
     #[test]

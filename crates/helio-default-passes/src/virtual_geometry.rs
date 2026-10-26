@@ -33,7 +33,8 @@ use std::sync::Arc;
 use helio::RendererConfig;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
-    BufferKey, PassContext, PrepareContext, RenderGraph, RenderPass, ResourceKey, Result as HelioResult,
+    BufferKey, PassContext, PrepareContext, RenderGraph, RenderPass, ResourceKey,
+    Result as HelioResult,
 };
 use helio_pass_vg_bvh::{keys as bvh_keys, VgBvhPass};
 use helio_pass_vg_cull::{
@@ -58,7 +59,9 @@ pub fn virtual_geometry_supported(device: &wgpu::Device) -> bool {
     limits.max_storage_buffers_per_shader_stage >= 20
         && limits.max_storage_textures_per_shader_stage >= 8
         && limits.max_bind_groups >= 4
-        && device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+        && device
+            .features()
+            .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
 }
 
 fn lock_free_stream<'a>(buffers: &'a StreamSnapshot) -> VgStreamBuffers<'a> {
@@ -149,14 +152,23 @@ impl RenderPass for VgInputsPass {
         let settings = self.runtime.settings();
         let debug = std::env::var_os("VG_DEBUG").is_some();
         if settings.mode == VgMode::Off || !self.runtime.any_ready() {
-            if debug { eprintln!("VgInputs: idle (mode {:?}, ready {})", settings.mode, self.runtime.any_ready()); }
+            if debug {
+                eprintln!(
+                    "VgInputs: idle (mode {:?}, ready {})",
+                    settings.mode,
+                    self.runtime.any_ready()
+                );
+            }
             return Ok(());
         }
         let (Some(instances), Some(objects)) = (
             ctx.scene_buffers.get(BufferKey::of(bvh_keys::INSTANCES)),
-            ctx.scene_buffers.get(BufferKey::of(bvh_keys::STATIC_OBJECTS)),
+            ctx.scene_buffers
+                .get(BufferKey::of(bvh_keys::STATIC_OBJECTS)),
         ) else {
-            if debug { eprintln!("VgInputs: vg_instances / static_objects not published"); }
+            if debug {
+                eprintln!("VgInputs: vg_instances / static_objects not published");
+            }
             return Ok(());
         };
         let reg = ctx.registry;
@@ -169,23 +181,33 @@ impl RenderPass for VgInputsPass {
         };
         let Some(stream) = self.runtime.with_store(|store| {
             let b = store.stream_buffers();
-            StreamSnapshot { stream: b.as_array().map(|buffer| buffer.clone()) }
+            StreamSnapshot {
+                stream: b.as_array().map(|buffer| buffer.clone()),
+            }
         }) else {
             return Ok(());
         };
-        self.raster.ensure_targets(ctx.device, ctx.width, ctx.height);
+        self.raster
+            .ensure_targets(ctx.device, ctx.width, ctx.height);
         let (dense_mask, dense_tiles) = match self.raster.dense_mask_last_frame() {
-            Some((mask, tiles)) if self.dense_enabled && settings.tier3 && self.runtime.tier3_stats().engaged => {
+            Some((mask, tiles))
+                if self.dense_enabled && settings.tier3 && self.runtime.tier3_stats().engaged =>
+            {
                 (Some(mask), tiles)
             }
             Some((_, tiles)) => (None, tiles),
             None => (None, [1, 1]),
         };
         if debug {
-            eprintln!("VgInputs: ACTIVE, instance rows {}", instances.buffer.size() / 16);
+            eprintln!(
+                "VgInputs: ACTIVE, instance rows {}",
+                instances.buffer.size() / 16
+            );
         }
         self.snapshot = Some(InputsSnapshot {
-            instance_count: (instances.buffer.size() / std::mem::size_of::<helio_vg_format::GpuVgInstance>() as u64) as u32,
+            instance_count: (instances.buffer.size()
+                / std::mem::size_of::<helio_vg_format::GpuVgInstance>() as u64)
+                as u32,
             instances: instances.buffer.clone(),
             objects: objects.buffer.clone(),
             stream,
@@ -193,7 +215,10 @@ impl RenderPass for VgInputsPass {
             header: header.clone(),
             items: items.clone(),
             dense_mask,
-            materials: ctx.scene_buffers.get(BufferKey::of("materials")).map(|m| m.buffer.clone()),
+            materials: ctx
+                .scene_buffers
+                .get(BufferKey::of("materials"))
+                .map(|m| m.buffer.clone()),
             dense_tiles,
         });
         Ok(())
@@ -243,10 +268,18 @@ impl RenderPass for VgStreamEndPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.registry.get::<VgCullInputs<'_>>(ResourceKey::new(KEY_INPUTS)).is_none() {
+        if ctx
+            .registry
+            .get::<VgCullInputs<'_>>(ResourceKey::new(KEY_INPUTS))
+            .is_none()
+        {
             return Ok(());
         }
-        let Some(plan) = self.runtime.with_store(|store| store.begin_feedback_readback()).flatten() else {
+        let Some(plan) = self
+            .runtime
+            .with_store(|store| store.begin_feedback_readback())
+            .flatten()
+        else {
             return Ok(());
         };
         let mut rec = ctx.graphics_cmds();
@@ -300,7 +333,10 @@ pub(crate) fn add_virtual_geometry_passes(
     runtime.update_tier3_stats(|s| s.tier2_tile_fallback = tile_fallback);
 
     let source_runtime = runtime.clone();
-    let cull_config = VgCullConfig { sw_masked: !raster.shared.uses_tile_fallback(), ..VgCullConfig::default() };
+    let cull_config = VgCullConfig {
+        sw_masked: !raster.shared.uses_tile_fallback(),
+        ..VgCullConfig::default()
+    };
     let (cull_early, cull_late) = VgCullEarlyPass::pair(device, cull_config);
     let cull_early =
         cull_early.with_settings_source(Arc::new(move || cull_settings(&source_runtime)));
@@ -312,19 +348,27 @@ pub(crate) fn add_virtual_geometry_passes(
         device,
         Box::new(move || {
             let settings = mode_runtime.settings();
-            if settings.tier3 { settings.mode } else { VgMode::Off }
+            if settings.tier3 {
+                settings.mode
+            } else {
+                VgMode::Off
+            }
         }),
     ) {
         // The runtime gives Tier 3 the stream store (proxy sources, page
         // residency) so it can use the ray-traced backend where supported.
         Ok(dense) => Some(dense.with_runtime(runtime.clone())),
         Err(error) => {
-            log::warn!("virtual geometry: Tier 3 unavailable ({error}); dense tiles stay on Tier 1/2");
+            log::warn!(
+                "virtual geometry: Tier 3 unavailable ({error}); dense tiles stay on Tier 1/2"
+            );
             None
         }
     };
 
-    graph.add_pass(Box::new(VgStreamBeginPass { runtime: runtime.clone() }));
+    graph.add_pass(Box::new(VgStreamBeginPass {
+        runtime: runtime.clone(),
+    }));
     graph.add_pass(Box::new(VgBvhPass::new(device)));
     graph.add_pass(Box::new(VgInputsPass {
         runtime: runtime.clone(),
@@ -344,7 +388,8 @@ pub(crate) fn add_virtual_geometry_passes(
         graph.add_pass(Box::new(dense));
     }
     graph.add_pass(Box::new(
-        VgShadePass::new(device, has_dense).with_tau_source(Arc::new(move || tau_runtime.settings().tau_px)),
+        VgShadePass::new(device, has_dense)
+            .with_tau_source(Arc::new(move || tau_runtime.settings().tau_px)),
     ));
     true
 }

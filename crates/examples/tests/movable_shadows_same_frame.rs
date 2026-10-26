@@ -20,8 +20,7 @@ const SIZE: u32 = 64;
 
 #[test]
 fn spawned_and_despawned_movable_casters_shadow_in_the_next_frame() {
-    let instance =
-        wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
+    let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor().with_env());
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
         eprintln!("skipping: no GPU adapter available");
         return;

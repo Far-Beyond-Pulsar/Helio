@@ -449,10 +449,9 @@ impl PortalProjectionBridge {
                 self.config.max_chains,
                 view_projection,
             )?,
-            (None, None) => resolver.resolve_chains_bounded(
-                self.max_chain_depth(),
-                self.config.max_chains,
-            )?,
+            (None, None) => {
+                resolver.resolve_chains_bounded(self.max_chain_depth(), self.config.max_chains)?
+            }
             (None, Some(_)) => unreachable!("camera position requires a view projection"),
         };
         for projection in &projections {
@@ -530,8 +529,8 @@ impl PortalProjectionBridge {
                 .iter()
                 .map(|projection| {
                     *projection_indices
-                    .get(&PortalProjectionKey::from_projection(projection))
-                    .expect("chain projection was included in projection rows")
+                        .get(&PortalProjectionKey::from_projection(projection))
+                        .expect("chain projection was included in projection rows")
                 })
                 .collect();
             portal_chains.push(PortalChainComponent { portals });
@@ -579,7 +578,10 @@ impl CoordinateSpaceAllocator for LocalSpaces {
         if let Some(&slot) = self.slots.get(&key) {
             return Some(slot);
         }
-        if self.maximum.is_some_and(|maximum| self.matrices.len() >= maximum) {
+        if self
+            .maximum
+            .is_some_and(|maximum| self.matrices.len() >= maximum)
+        {
             return None;
         }
         let slot = self.matrices.len() as u32;
@@ -699,7 +701,12 @@ mod tests {
         }
         let frame_matrix = |x: f32| Mat4::from_translation(glam::vec3(x, 100.0, 0.0));
         let mut host = Host {
-            matrices: vec![Mat4::IDENTITY, frame_matrix(1.0), frame_matrix(2.0), frame_matrix(3.0)],
+            matrices: vec![
+                Mat4::IDENTITY,
+                frame_matrix(1.0),
+                frame_matrix(2.0),
+                frame_matrix(3.0),
+            ],
         };
 
         let mut world = pulsar_scenedb::World::new();
@@ -735,11 +742,26 @@ mod tests {
             .build_into(&resolver, &mut host)
             .unwrap();
 
-        assert_eq!(host.matrices.len(), 6, "world, 3 frames, 2 projection spaces");
-        assert_eq!(host.matrices[1], frame_matrix(1.0), "the frames are untouched");
-        assert_eq!(frame.coordinate_spaces, vec![Mat4::IDENTITY], "the host owns the matrices");
+        assert_eq!(
+            host.matrices.len(),
+            6,
+            "world, 3 frames, 2 projection spaces"
+        );
+        assert_eq!(
+            host.matrices[1],
+            frame_matrix(1.0),
+            "the frames are untouched"
+        );
+        assert_eq!(
+            frame.coordinate_spaces,
+            vec![Mat4::IDENTITY],
+            "the host owns the matrices"
+        );
         assert!(
-            frame.portal_views.iter().all(|view| view.coordinate_space >= 4),
+            frame
+                .portal_views
+                .iter()
+                .all(|view| view.coordinate_space >= 4),
             "no view uses a slot a frame holds"
         );
         assert_eq!(frame.counts.coordinate_space_count, 6);
@@ -784,10 +806,7 @@ mod tests {
             .portal_views
             .iter()
             .all(|view| view._pad != PortalViewComponent::FLAG_MASK_HIDDEN));
-        assert!(frame
-            .portal_views
-            .iter()
-            .any(|view| view._pad == 0));
+        assert!(frame.portal_views.iter().any(|view| view._pad == 0));
     }
 
     #[test]

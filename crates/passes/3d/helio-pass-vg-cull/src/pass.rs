@@ -41,7 +41,9 @@ pub(crate) fn make_passes(
     let core = Arc::new(Mutex::new(core));
     (
         VgCullEarlyPass {
-            core: core.clone(), buffers: buffers.clone(), settings: None,
+            core: core.clone(),
+            buffers: buffers.clone(),
+            settings: None,
             base_tau_px,
             visible: helio_vg_format::density::VisibleFraction::default(),
             last_selection_feedback_revision: 0,
@@ -53,8 +55,11 @@ pub(crate) fn make_passes(
 impl VgCullEarlyPass {
     /// Latest asynchronously completed GPU sample; never waits for the GPU.
     pub fn selected_triangle_count(&self) -> Option<u32> {
-        self.core.lock().ok()?.last_state_words()
-            .and_then(|words| words.get((crate::state::STATS + crate::stats::TRIANGLES) as usize).copied())
+        self.core.lock().ok()?.last_state_words().and_then(|words| {
+            words
+                .get((crate::state::STATS + crate::stats::TRIANGLES) as usize)
+                .copied()
+        })
     }
 
     /// Latest asynchronously completed stats sample (never waits for the GPU).
@@ -141,12 +146,17 @@ impl RenderPass for VgCullEarlyPass {
         let mut core = self.core.lock().unwrap();
         if let Some(source) = &self.settings {
             let s = source();
-            self.base_tau_px = if s.tau_px.is_finite() { s.tau_px.max(0.01) } else { 1.0 };
-            core.config.selection_triangles_per_pixel = if s.selection_triangles_per_pixel.is_finite() {
-                s.selection_triangles_per_pixel.clamp(0.25, 32.0)
+            self.base_tau_px = if s.tau_px.is_finite() {
+                s.tau_px.max(0.01)
             } else {
-                2.0
+                1.0
             };
+            core.config.selection_triangles_per_pixel =
+                if s.selection_triangles_per_pixel.is_finite() {
+                    s.selection_triangles_per_pixel.clamp(0.25, 32.0)
+                } else {
+                    2.0
+                };
             core.config.selection_sensitivity = if s.selection_sensitivity.is_finite() {
                 s.selection_sensitivity.clamp(0.0, 1.0)
             } else {
@@ -161,8 +171,7 @@ impl RenderPass for VgCullEarlyPass {
             // nearly everything in the smallest hardware class; an even 1/8 split
             // dropped 475k clusters of a 100k-instance view). Clamped to MAX_BIN_CAPACITY
             // by the core, so bin * capacity stays under the 24-bit visible index.
-            core.config.max_bin_capacity =
-                (s.max_visible_clusters / 4).max(16).next_power_of_two();
+            core.config.max_bin_capacity = (s.max_visible_clusters / 4).max(16).next_power_of_two();
         }
         let revision = core.stats_revision();
         if revision != self.last_selection_feedback_revision {
@@ -171,7 +180,10 @@ impl RenderPass for VgCullEarlyPass {
                     .get((crate::state::STATS + crate::stats::TRIANGLES) as usize)
                     .copied()
                     .unwrap_or(0);
-                let predicted = words.get(crate::state::PREDICTED as usize).copied().unwrap_or(0);
+                let predicted = words
+                    .get(crate::state::PREDICTED as usize)
+                    .copied()
+                    .unwrap_or(0);
                 // The GPU predicts the frustum-visible triangles from the asset
                 // tables; occlusion removes some. Learn that share from the
                 // frame's own counts (they arrive a few frames late).
@@ -194,7 +206,10 @@ impl RenderPass for VgCullEarlyPass {
         core.begin_frame(
             ctx.device,
             ctx.queue,
-            &VgCullFrame { width: ctx.width, height: ctx.height },
+            &VgCullFrame {
+                width: ctx.width,
+                height: ctx.height,
+            },
             &inputs,
         );
         self.buffers = core.buffers().clone();
@@ -230,7 +245,11 @@ impl RenderPass for VgCullLatePass {
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let buffers: &'a VgCullBuffers = unsafe { std::mem::transmute(&*self.buffers) };
-        frame.write(ResourceKey::new(crate::KEY_CULL), frame_data(buffers, 1), "VgCullLate");
+        frame.write(
+            ResourceKey::new(crate::KEY_CULL),
+            frame_data(buffers, 1),
+            "VgCullLate",
+        );
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {

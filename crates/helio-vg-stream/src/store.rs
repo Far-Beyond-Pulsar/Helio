@@ -47,21 +47,39 @@ struct GrowBuf {
 impl GrowBuf {
     fn new(device: &wgpu::Device, label: &'static str, size: u64) -> Self {
         let size = size.max(16).next_multiple_of(4);
-        Self { buffer: Self::make(device, label, size), size, version: 1, label }
+        Self {
+            buffer: Self::make(device, label, size),
+            size,
+            version: 1,
+            label,
+        }
     }
     fn make(device: &wgpu::Device, label: &'static str, size: u64) -> wgpu::Buffer {
-        device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: USAGE, mapped_at_creation: false })
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: USAGE,
+            mapped_at_creation: false,
+        })
     }
     /// Grow to at least `needed` bytes (geometric), copying the old contents
     /// when `keep`. Returns whether the buffer was replaced.
-    fn ensure(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, needed: u64, keep: bool) -> bool {
+    fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        needed: u64,
+        keep: bool,
+    ) -> bool {
         if needed <= self.size {
             return false;
         }
         let new_size = needed.max(self.size * 2).next_multiple_of(4);
         let new = Self::make(device, self.label, new_size);
         if keep {
-            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("vg-stream grow") });
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vg-stream grow"),
+            });
             enc.copy_buffer_to_buffer(&self.buffer, 0, &new, 0, self.size);
             queue.submit(Some(enc.finish()));
         }
@@ -143,25 +161,59 @@ fn make_staging(device: &wgpu::Device, bytes: u64) -> wgpu::Buffer {
 impl VgAssetStore {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, cfg: VgStreamConfig) -> Self {
         let limits = device.limits();
-        let device_bytes = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
+        let device_bytes =
+            u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
         let device_slots = (device_bytes / u64::from(PAGE_BYTES)).min(u64::from(u32::MAX)) as u32;
-        let budget_slots = (u64::from(cfg.budget_mb) * 1024 * 1024 / u64::from(PAGE_BYTES)).max(1) as u32;
+        let budget_slots =
+            (u64::from(cfg.budget_mb) * 1024 * 1024 / u64::from(PAGE_BYTES)).max(1) as u32;
         let slot_limit = budget_slots.min(device_slots).max(1);
         let core = StoreCore::new(cfg.clone(), slot_limit);
 
-        let pool = GrowBuf::new(device, "vg-stream page pool", u64::from(core.slot_capacity()) * u64::from(PAGE_BYTES));
+        let pool = GrowBuf::new(
+            device,
+            "vg-stream page pool",
+            u64::from(core.slot_capacity()) * u64::from(PAGE_BYTES),
+        );
         let page_cap = core.page_alloc.capacity();
         let residency = GrowBuf::new(device, "vg-stream residency table", u64::from(page_cap) * 4);
         queue.write_buffer(&residency.buffer, 0, bytemuck::cast_slice(core.table()));
-        let nodes = GrowBuf::new(device, "vg-stream hierarchy", u64::from(core.node_alloc.capacity()) * 96);
-        let group_refs = GrowBuf::new(device, "vg-stream group refs", u64::from(core.ref_alloc.capacity()) * 8);
-        let headers = GrowBuf::new(device, "vg-stream asset headers", u64::from(core.asset_slot_capacity) * HEADER_BYTES);
-        let bases = GrowBuf::new(device, "vg-stream asset bases", u64::from(core.asset_slot_capacity) * 16);
-        let quant = GrowBuf::new(device, "vg-stream asset quant", u64::from(core.asset_slot_capacity) * 16);
-        queue.write_buffer(&quant.buffer, 0, &vec![0u8; (quant.size as usize).min(1 << 20)]);
+        let nodes = GrowBuf::new(
+            device,
+            "vg-stream hierarchy",
+            u64::from(core.node_alloc.capacity()) * 96,
+        );
+        let group_refs = GrowBuf::new(
+            device,
+            "vg-stream group refs",
+            u64::from(core.ref_alloc.capacity()) * 8,
+        );
+        let headers = GrowBuf::new(
+            device,
+            "vg-stream asset headers",
+            u64::from(core.asset_slot_capacity) * HEADER_BYTES,
+        );
+        let bases = GrowBuf::new(
+            device,
+            "vg-stream asset bases",
+            u64::from(core.asset_slot_capacity) * 16,
+        );
+        let quant = GrowBuf::new(
+            device,
+            "vg-stream asset quant",
+            u64::from(core.asset_slot_capacity) * 16,
+        );
+        queue.write_buffer(
+            &quant.buffer,
+            0,
+            &vec![0u8; (quant.size as usize).min(1 << 20)],
+        );
         let fb_layout = FeedbackLayout::new(cfg.request_capacity.max(1), page_cap);
         let feedback = GrowBuf::new(device, "vg-stream feedback", fb_layout.total_bytes());
-        queue.write_buffer(&feedback.buffer, 0, bytemuck::cast_slice(&fb_layout.initial_words()));
+        queue.write_buffer(
+            &feedback.buffer,
+            0,
+            bytemuck::cast_slice(&fb_layout.initial_words()),
+        );
         let staging = make_staging(device, fb_layout.total_bytes());
         Self {
             device: device.clone(),
@@ -188,20 +240,43 @@ impl VgAssetStore {
     /// Register an asset (or add a reference to one with the same content id).
     /// Hierarchy, group refs and header upload now; root pages stream in over
     /// the following `update` calls. Poll [`Self::is_ready`].
-    pub fn register(&mut self, source: Arc<dyn VgeoSource>) -> Result<VgAssetHandle, VgStreamError> {
+    pub fn register(
+        &mut self,
+        source: Arc<dyn VgeoSource>,
+    ) -> Result<VgAssetHandle, VgStreamError> {
         let reg = self.core.register(source)?;
         self.sync_capacities();
         if let Some((nodes, refs)) = &reg.data {
             let a = self.core.asset(reg.slot).expect("registered asset");
-            self.queue.write_buffer(&self.nodes.buffer, u64::from(reg.nodes.start) * 96, bytemuck::cast_slice(nodes));
-            self.queue.write_buffer(&self.group_refs.buffer, u64::from(reg.group_refs.start) * 8, bytemuck::cast_slice(refs));
+            self.queue.write_buffer(
+                &self.nodes.buffer,
+                u64::from(reg.nodes.start) * 96,
+                bytemuck::cast_slice(nodes),
+            );
+            self.queue.write_buffer(
+                &self.group_refs.buffer,
+                u64::from(reg.group_refs.start) * 8,
+                bytemuck::cast_slice(refs),
+            );
             // GPU view of the header: root leaves (+1) in the words no shader reads,
             // see `helio_vg_format::gpu_header_with_root_leaves`.
             let gpu_header = helio_vg_format::gpu_header_with_root_leaves(a.header, nodes);
-            self.queue.write_buffer(&self.headers.buffer, u64::from(reg.slot) * HEADER_BYTES, bytemuck::bytes_of(&gpu_header));
+            self.queue.write_buffer(
+                &self.headers.buffer,
+                u64::from(reg.slot) * HEADER_BYTES,
+                bytemuck::bytes_of(&gpu_header),
+            );
             let bases = [reg.nodes.start, reg.group_refs.start, reg.page_base, 0u32];
-            self.queue.write_buffer(&self.bases.buffer, u64::from(reg.slot) * 16, bytemuck::cast_slice(&bases));
-            self.queue.write_buffer(&self.quant.buffer, u64::from(reg.slot) * 16, bytemuck::bytes_of(&reg.quant));
+            self.queue.write_buffer(
+                &self.bases.buffer,
+                u64::from(reg.slot) * 16,
+                bytemuck::cast_slice(&bases),
+            );
+            self.queue.write_buffer(
+                &self.quant.buffer,
+                u64::from(reg.slot) * 16,
+                bytemuck::bytes_of(&reg.quant),
+            );
             self.content_version += 1;
         }
         Ok(VgAssetHandle(reg.slot))
@@ -215,11 +290,21 @@ impl VgAssetStore {
             return;
         }
         for (page, value) in rel.table_writes {
-            self.queue.write_buffer(&self.residency.buffer, u64::from(page) * 4, bytemuck::bytes_of(&value));
+            self.queue.write_buffer(
+                &self.residency.buffer,
+                u64::from(page) * 4,
+                bytemuck::bytes_of(&value),
+            );
         }
-        self.queue.write_buffer(&self.headers.buffer, u64::from(rel.slot) * HEADER_BYTES, &[0u8; HEADER_BYTES as usize]);
-        self.queue.write_buffer(&self.bases.buffer, u64::from(rel.slot) * 16, &[0u8; 16]);
-        self.queue.write_buffer(&self.quant.buffer, u64::from(rel.slot) * 16, &[0u8; 16]);
+        self.queue.write_buffer(
+            &self.headers.buffer,
+            u64::from(rel.slot) * HEADER_BYTES,
+            &[0u8; HEADER_BYTES as usize],
+        );
+        self.queue
+            .write_buffer(&self.bases.buffer, u64::from(rel.slot) * 16, &[0u8; 16]);
+        self.queue
+            .write_buffer(&self.quant.buffer, u64::from(rel.slot) * 16, &[0u8; 16]);
         self.content_version += 1;
     }
 
@@ -230,7 +315,11 @@ impl VgAssetStore {
 
     /// See [`StoreCore::asset_ready_rows`]; upload the result as the
     /// `vg_asset_ready` scene buffer whenever [`Self::content_version`] changes.
-    pub fn asset_ready_rows(&self, mapping: &[([u64; 2], u32, u32)], min_rows: usize) -> Vec<VgAssetReadyRow> {
+    pub fn asset_ready_rows(
+        &self,
+        mapping: &[([u64; 2], u32, u32)],
+        min_rows: usize,
+    ) -> Vec<VgAssetReadyRow> {
         self.core.asset_ready_rows(mapping, min_rows)
     }
 
@@ -256,7 +345,11 @@ impl VgAssetStore {
             Some(u64::from(l.bits_words) * 8),
         );
         let (tx, rx) = mpsc::channel();
-        self.pending = Some(Pending { rx, tx: Some(tx), layout: l });
+        self.pending = Some(Pending {
+            rx,
+            tx: Some(tx),
+            layout: l,
+        });
     }
 
     /// Call after the submit that contained [`Self::record_feedback_readback`]:
@@ -264,9 +357,11 @@ impl VgAssetStore {
     pub fn after_submit(&mut self) {
         let Some(p) = &mut self.pending else { return };
         let Some(tx) = p.tx.take() else { return };
-        self.staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
+        self.staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
     }
 
     /// Non-blocking: collect a finished readback, if any, into the scheduler.
@@ -314,14 +409,23 @@ impl VgAssetStore {
         self.sync_capacities();
         for u in &ops.uploads {
             let off = u64::from(u.slot) * u64::from(PAGE_BYTES);
-            self.queue.write_buffer(&self.pool.buffer, off, &u.payload.0);
+            self.queue
+                .write_buffer(&self.pool.buffer, off, &u.payload.0);
         }
         for &(page, value) in &ops.table_writes {
-            self.queue.write_buffer(&self.residency.buffer, u64::from(page) * 4, bytemuck::bytes_of(&value));
+            self.queue.write_buffer(
+                &self.residency.buffer,
+                u64::from(page) * 4,
+                bytemuck::bytes_of(&value),
+            );
         }
         for &(slot, ready) in &ops.ready_changed {
             let w = u32::from(ready);
-            self.queue.write_buffer(&self.bases.buffer, u64::from(slot) * 16 + 12, bytemuck::bytes_of(&w));
+            self.queue.write_buffer(
+                &self.bases.buffer,
+                u64::from(slot) * 16 + 12,
+                bytemuck::bytes_of(&w),
+            );
             self.content_version += 1;
         }
     }
@@ -329,21 +433,43 @@ impl VgAssetStore {
     /// Grow GPU buffers to match the CPU-side capacities.
     fn sync_capacities(&mut self) {
         let (d, q) = (&self.device, &self.queue);
-        self.pool.ensure(d, q, u64::from(self.core.slot_capacity()) * u64::from(PAGE_BYTES), true);
-        self.nodes.ensure(d, q, u64::from(self.core.node_alloc.capacity()) * 96, true);
-        self.group_refs.ensure(d, q, u64::from(self.core.ref_alloc.capacity()) * 8, true);
-        self.headers.ensure(d, q, u64::from(self.core.asset_slot_capacity) * HEADER_BYTES, true);
-        self.bases.ensure(d, q, u64::from(self.core.asset_slot_capacity) * 16, true);
-        self.quant.ensure(d, q, u64::from(self.core.asset_slot_capacity) * 16, true);
+        self.pool.ensure(
+            d,
+            q,
+            u64::from(self.core.slot_capacity()) * u64::from(PAGE_BYTES),
+            true,
+        );
+        self.nodes
+            .ensure(d, q, u64::from(self.core.node_alloc.capacity()) * 96, true);
+        self.group_refs
+            .ensure(d, q, u64::from(self.core.ref_alloc.capacity()) * 8, true);
+        self.headers.ensure(
+            d,
+            q,
+            u64::from(self.core.asset_slot_capacity) * HEADER_BYTES,
+            true,
+        );
+        self.bases
+            .ensure(d, q, u64::from(self.core.asset_slot_capacity) * 16, true);
+        self.quant
+            .ensure(d, q, u64::from(self.core.asset_slot_capacity) * 16, true);
         let page_cap = self.core.page_alloc.capacity();
         if self.residency.ensure(d, q, u64::from(page_cap) * 4, false) {
-            q.write_buffer(&self.residency.buffer, 0, bytemuck::cast_slice(self.core.table()));
+            q.write_buffer(
+                &self.residency.buffer,
+                0,
+                bytemuck::cast_slice(self.core.table()),
+            );
         }
         let want = FeedbackLayout::new(self.fb_layout.list_capacity, page_cap);
         if want.bits_words > self.fb_layout.bits_words {
             self.fb_layout = want;
             self.feedback.recreate(d, want.total_bytes());
-            q.write_buffer(&self.feedback.buffer, 0, bytemuck::cast_slice(&want.initial_words()));
+            q.write_buffer(
+                &self.feedback.buffer,
+                0,
+                bytemuck::cast_slice(&want.initial_words()),
+            );
             self.staging = make_staging(d, want.total_bytes());
             self.pending = None; // layout changed under it
         }
@@ -363,10 +489,19 @@ impl VgAssetStore {
     /// Sum of all buffer versions: rebuild bind groups when it changes.
     pub fn bind_version(&self) -> u64 {
         use VgBuffer::*;
-        [PagePool, Residency, Hierarchy, GroupRefs, AssetHeaders, AssetBases, AssetQuant, Feedback]
-            .iter()
-            .map(|&b| self.buffer_version(b))
-            .sum()
+        [
+            PagePool,
+            Residency,
+            Hierarchy,
+            GroupRefs,
+            AssetHeaders,
+            AssetBases,
+            AssetQuant,
+            Feedback,
+        ]
+        .iter()
+        .map(|&b| self.buffer_version(b))
+        .sum()
     }
 
     /// Increments when an asset is registered/released or becomes ready:
@@ -396,7 +531,11 @@ impl VgAssetStore {
     ) -> wgpu::BindGroupLayout {
         let vis = match kind {
             VgBindKind::Compute => wgpu::ShaderStages::COMPUTE,
-            VgBindKind::ReadOnly => wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+            VgBindKind::ReadOnly => {
+                wgpu::ShaderStages::VERTEX
+                    | wgpu::ShaderStages::FRAGMENT
+                    | wgpu::ShaderStages::COMPUTE
+            }
         };
         let count = if kind == VgBindKind::Compute { 8 } else { 7 };
         let entries: Vec<wgpu::BindGroupLayoutEntry> = (0..count)
@@ -411,7 +550,10 @@ impl VgAssetStore {
                 count: None,
             })
             .collect();
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("vg-stream"), entries: &entries })
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vg-stream"),
+            entries: &entries,
+        })
     }
 
     /// Bind group over the current buffers. Rebuild when [`Self::bind_version`] changes.
@@ -422,14 +564,30 @@ impl VgAssetStore {
         first_binding: u32,
     ) -> wgpu::BindGroup {
         use VgBuffer::*;
-        let order = [PagePool, Residency, Hierarchy, GroupRefs, AssetHeaders, AssetBases, AssetQuant, Feedback];
+        let order = [
+            PagePool,
+            Residency,
+            Hierarchy,
+            GroupRefs,
+            AssetHeaders,
+            AssetBases,
+            AssetQuant,
+            Feedback,
+        ];
         let count = if kind == VgBindKind::Compute { 8 } else { 7 };
         let entries: Vec<wgpu::BindGroupEntry> = order[..count]
             .iter()
             .enumerate()
-            .map(|(i, &b)| wgpu::BindGroupEntry { binding: first_binding + i as u32, resource: self.buffer(b).as_entire_binding() })
+            .map(|(i, &b)| wgpu::BindGroupEntry {
+                binding: first_binding + i as u32,
+                resource: self.buffer(b).as_entire_binding(),
+            })
             .collect();
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("vg-stream"), layout, entries: &entries })
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vg-stream"),
+            layout,
+            entries: &entries,
+        })
     }
 
     pub fn stats(&self) -> VgPoolStats {
@@ -544,11 +702,18 @@ impl VgAssetStore {
             bytes: l.total_bytes(),
             clears: [
                 (0, 4),
-                (u64::from(l.request_bits_offset_words()) * 4, u64::from(l.bits_words) * 8),
+                (
+                    u64::from(l.request_bits_offset_words()) * 4,
+                    u64::from(l.bits_words) * 8,
+                ),
             ],
         };
         let (tx, rx) = mpsc::channel();
-        self.pending = Some(Pending { rx, tx: Some(tx), layout: l });
+        self.pending = Some(Pending {
+            rx,
+            tx: Some(tx),
+            layout: l,
+        });
         Some(plan)
     }
 }

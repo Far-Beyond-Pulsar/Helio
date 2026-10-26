@@ -218,7 +218,10 @@ impl RangeReadback {
         }
 
         if self.gens.len() < GENERATIONS
-            || self.gens.iter().any(|gen| gen.range_capacity() != self.range_capacity)
+            || self
+                .gens
+                .iter()
+                .any(|gen| gen.range_capacity() != self.range_capacity)
         {
             // (Re)build generations sized to the current range capacity.
             // Any maps in flight against the old (about to be dropped)
@@ -323,13 +326,7 @@ impl RangeReadback {
         {
             let gen = &self.gens[slot];
             encoder.copy_buffer_to_buffer(&scratch.group_count, 0, &gen.counts_staging, 0, 4);
-            encoder.copy_buffer_to_buffer(
-                &scratch.range_count,
-                0,
-                &gen.counts_staging,
-                4,
-                12,
-            );
+            encoder.copy_buffer_to_buffer(&scratch.range_count, 0, &gen.counts_staging, 4, 12);
             encoder.copy_buffer_to_buffer(&scratch.shadow_counts, 0, &gen.counts_staging, 16, 8);
             // `frame_uniform`'s first u32 is `count` -- the gather's live
             // instance count (see `FrameUniformGpu`'s doc in `src/lib.rs`).

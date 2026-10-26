@@ -36,7 +36,11 @@ impl Worker {
                 let mut dirty = false;
                 let mut last_sent = Instant::now() - SNAPSHOT_INTERVAL;
                 loop {
-                    let wait = if dirty { Duration::from_millis(1) } else { Duration::from_millis(100) };
+                    let wait = if dirty {
+                        Duration::from_millis(1)
+                    } else {
+                        Duration::from_millis(100)
+                    };
                     let mut jobs = Vec::new();
                     match job_rx.recv_timeout(wait) {
                         Ok(job) => jobs.push(job),

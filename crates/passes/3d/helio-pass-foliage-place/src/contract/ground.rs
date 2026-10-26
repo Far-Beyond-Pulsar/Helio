@@ -114,7 +114,10 @@ impl GpuTileFrame {
     /// Render-space position of `(u, v)` at height `h` (the CPU mirror of
     /// `foliage_frame_point` in the shaders).
     pub fn point(&self, u: f32, v: f32, h: f32) -> Vec3 {
-        Vec3::from(self.origin) + Vec3::from(self.axis_u) * u + Vec3::from(self.axis_v) * v + Vec3::from(self.up) * h
+        Vec3::from(self.origin)
+            + Vec3::from(self.axis_u) * u
+            + Vec3::from(self.axis_v) * v
+            + Vec3::from(self.up) * h
     }
 }
 
@@ -146,7 +149,12 @@ pub struct GpuGroundHit {
 }
 
 impl GpuGroundHit {
-    pub const MISS: Self = Self { distance: 0xbf80_0000, normal: 0, ground: GROUND_NONE, colour: 0 };
+    pub const MISS: Self = Self {
+        distance: 0xbf80_0000,
+        normal: 0,
+        ground: GROUND_NONE,
+        colour: 0,
+    };
 }
 
 /// The header of a frame's queries: the answering dispatch's workgroups (an indirect
@@ -164,7 +172,8 @@ pub fn pack_octahedral(n: Vec3) -> u32 {
     let n = n / (n.x.abs() + n.y.abs() + n.z.abs()).max(1e-20);
     let mut p = glam::Vec2::new(n.x, n.y);
     if n.z < 0.0 {
-        p = (glam::Vec2::ONE - glam::Vec2::new(p.y.abs(), p.x.abs())) * glam::Vec2::new(p.x.signum(), p.y.signum());
+        p = (glam::Vec2::ONE - glam::Vec2::new(p.y.abs(), p.x.abs()))
+            * glam::Vec2::new(p.x.signum(), p.y.signum());
     }
     let s = |x: f32| ((x.clamp(-1.0, 1.0) * 32767.0).round() as i32 as u32) & 0xffff;
     s(p.x) | (s(p.y) << 16)
@@ -176,7 +185,8 @@ pub fn unpack_octahedral(packed: u32) -> Vec3 {
     let p = glam::Vec2::new(s(packed), s(packed >> 16));
     let mut n = Vec3::new(p.x, p.y, 1.0 - p.x.abs() - p.y.abs());
     if n.z < 0.0 {
-        let q = (glam::Vec2::ONE - glam::Vec2::new(n.y.abs(), n.x.abs())) * glam::Vec2::new(n.x.signum(), n.y.signum());
+        let q = (glam::Vec2::ONE - glam::Vec2::new(n.y.abs(), n.x.abs()))
+            * glam::Vec2::new(n.x.signum(), n.y.signum());
         n = Vec3::new(q.x, q.y, n.z);
     }
     n.normalize_or(Vec3::Y)
@@ -222,7 +232,10 @@ pub struct PlaneGround;
 
 impl GroundGeometry for PlaneGround {
     fn chart(&self, eye: DVec3) -> Option<GroundChart> {
-        Some(GroundChart { id: 0, eye: [eye.x, eye.z] })
+        Some(GroundChart {
+            id: 0,
+            eye: [eye.x, eye.z],
+        })
     }
     fn tile_frame(&self, _chart: u64, coord: [i32; 2], span: u32) -> Option<TileFrame> {
         Some(TileFrame::flat(coord, span))
@@ -270,13 +283,21 @@ struct LinkState {
 impl GroundLink {
     /// A ground whose queries placement answers itself (a heightfield).
     pub fn built_in(geometry: Box<dyn GroundGeometry>) -> Self {
-        Self { geometry, external: false, state: Mutex::default() }
+        Self {
+            geometry,
+            external: false,
+            state: Mutex::default(),
+        }
     }
 
     /// A ground whose queries another pass answers ([`Self::take_question`],
     /// [`Self::answer`]).
     pub fn answered_elsewhere(geometry: Box<dyn GroundGeometry>) -> Self {
-        Self { geometry, external: true, state: Mutex::default() }
+        Self {
+            geometry,
+            external: true,
+            state: Mutex::default(),
+        }
     }
 
     pub fn geometry(&self) -> &dyn GroundGeometry {
@@ -290,7 +311,11 @@ impl GroundLink {
     /// The ground changed in these world boxes (axis-aligned, min and max): the tiles
     /// under them are placed again.
     pub fn push_changes(&self, boxes: impl IntoIterator<Item = [DVec3; 2]>) {
-        self.state.lock().expect("ground link").changes.extend(boxes);
+        self.state
+            .lock()
+            .expect("ground link")
+            .changes
+            .extend(boxes);
     }
 
     /// The changes pushed since the last call.
@@ -334,7 +359,13 @@ mod tests {
 
     #[test]
     fn octahedral_normals_round_trip() {
-        for n in [Vec3::Y, -Vec3::Y, Vec3::X, Vec3::new(0.3, 0.9, -0.2).normalize(), Vec3::new(-0.6, -0.1, -0.79).normalize()] {
+        for n in [
+            Vec3::Y,
+            -Vec3::Y,
+            Vec3::X,
+            Vec3::new(0.3, 0.9, -0.2).normalize(),
+            Vec3::new(-0.6, -0.1, -0.79).normalize(),
+        ] {
             let back = unpack_octahedral(pack_octahedral(n));
             assert!((back - n).length() < 1e-3, "{n} -> {back}");
         }
@@ -348,10 +379,15 @@ mod tests {
         // A far band's tile spans several base tiles from its corner.
         let big = TileFrame::flat([-4, 4], 4).gpu(DVec3::ZERO);
         assert_eq!(big.point(1.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 64.0));
-        let block = TileFrame::flat([0, 0], 4).part([0.5, 0.25], [0.75, 0.5]).gpu(DVec3::ZERO);
+        let block = TileFrame::flat([0, 0], 4)
+            .part([0.5, 0.25], [0.75, 0.5])
+            .gpu(DVec3::ZERO);
         assert_eq!(block.point(0.0, 0.0, 0.0), Vec3::new(16.0, 0.0, 8.0));
         assert_eq!(block.point(1.0, 1.0, 0.0), Vec3::new(24.0, 0.0, 16.0));
-        assert_eq!(PlaneGround.chart(DVec3::new(1.0, 2.0, 3.0)).unwrap().eye, [1.0, 3.0]);
+        assert_eq!(
+            PlaneGround.chart(DVec3::new(1.0, 2.0, 3.0)).unwrap().eye,
+            [1.0, 3.0]
+        );
     }
 
     #[test]

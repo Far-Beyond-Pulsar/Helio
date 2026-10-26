@@ -25,21 +25,31 @@ fn gpu() -> Option<Gpu> {
         ..Default::default()
     }))
     .ok()?;
-    Some(Gpu { device: Arc::new(device), queue })
+    Some(Gpu {
+        device: Arc::new(device),
+        queue,
+    })
 }
 
 fn buf(g: &Gpu, bytes: &[u8]) -> wgpu::Buffer {
     let b = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: (bytes.len() as u64).max(16).next_multiple_of(4),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     g.queue.write_buffer(&b, 0, bytes);
     b
 }
 
-const IDENTITY: [[f32; 4]; 4] = [[1., 0., 0., 0.], [0., 1., 0., 0.], [0., 0., 1., 0.], [0., 0., 0., 1.]];
+const IDENTITY: [[f32; 4]; 4] = [
+    [1., 0., 0., 0.],
+    [0., 1., 0., 0.],
+    [0., 0., 1., 0.],
+    [0., 0., 0., 1.],
+];
 
 /// Instance `i` is the matrix scale `1 + 0.1 i`, translated by `(0, 0, 0.01 i)`
 /// (column-major, as `static_objects` stores it).
@@ -72,18 +82,33 @@ const VIEWPORT: [u32; 2] = [64, 48];
 fn scene(g: &Gpu, dense_everywhere: bool) -> Scene {
     let tris = [[0u8, 1, 2]];
     let positions = [[-0.5f32, -0.5, 0.5], [0.5, -0.5, 0.5], [0.0, 0.5, 0.5]];
-    let clusters: Vec<TestCluster<'_>> =
-        (0..3).map(|_| TestCluster { positions: &positions, tris: &tris, material: 0, attrs: None }).collect();
+    let clusters: Vec<TestCluster<'_>> = (0..3)
+        .map(|_| TestCluster {
+            positions: &positions,
+            tris: &tris,
+            material: 0,
+            attrs: None,
+        })
+        .collect();
     let page = TestPage::build(0, &clusters);
-    let visible: Vec<GpuVisibleCluster> =
-        (0..3).map(|i| GpuVisibleCluster { instance: i, cluster_slot: page.slots[i as usize] }).collect();
+    let visible: Vec<GpuVisibleCluster> = (0..3)
+        .map(|i| GpuVisibleCluster {
+            instance: i,
+            cluster_slot: page.slots[i as usize],
+        })
+        .collect();
     let tiles = VIEWPORT[0].div_ceil(16) * VIEWPORT[1].div_ceil(16);
     let mask: Vec<u32> = (0..tiles).map(|_| dense_everywhere as u32).collect();
     let mut cull_state = vec![0u32; 128];
     // Phase 0, bin 0: {first 0, count 3}.
     cull_state[helio_vg_format::CULL_STATE_RANGES as usize + 1] = 3;
     let instances: Vec<GpuVgInstance> = (0..3)
-        .map(|i| GpuVgInstance { asset_slot: 7, flags: INST_ENABLED, lod_error_scale: 1.0 + i as f32, object_row: i })
+        .map(|i| GpuVgInstance {
+            asset_slot: 7,
+            flags: INST_ENABLED,
+            lod_error_scale: 1.0 + i as f32,
+            object_row: i,
+        })
         .collect();
     let mut objects = Vec::new();
     for i in 0..3 {
@@ -101,7 +126,12 @@ fn scene(g: &Gpu, dense_everywhere: bool) -> Scene {
     }
 }
 
-fn run_frame(g: &Gpu, pass: &mut DenseNonRtPass, collect: &mut RtCollect, s: &Scene) -> CollectResult {
+fn run_frame(
+    g: &Gpu,
+    pass: &mut DenseNonRtPass,
+    collect: &mut RtCollect,
+    s: &Scene,
+) -> CollectResult {
     let frame = DenseFrame {
         view_proj: IDENTITY,
         inv_view_proj: IDENTITY,
@@ -123,7 +153,14 @@ fn run_frame(g: &Gpu, pass: &mut DenseNonRtPass, collect: &mut RtCollect, s: &Sc
     {
         let mut rec = helio_core::CommandRecorder::from_encoder(&mut enc);
         pass.record_setup_rec(&g.device, &g.queue, &mut rec, &frame, &inputs);
-        collect.record_rec(&g.device, &g.queue, &mut rec, pass.buffers().unwrap(), &inputs, 3);
+        collect.record_rec(
+            &g.device,
+            &g.queue,
+            &mut rec,
+            pass.buffers().unwrap(),
+            &inputs,
+            3,
+        );
     }
     g.queue.submit([enc.finish()]);
     // The next frame's prepare: start mapping, then wait for the result (a
@@ -159,9 +196,25 @@ fn collect_reports_each_dense_instance_once_with_its_transform() {
         assert_eq!(c.asset_slot, 7);
         assert_eq!(c.lod_error_scale, 1.0 + i as f32);
         // Row-major 3x4: scale on the diagonal, translation in the last column.
-        let want = [sc, 0.0, 0.0, 0.0, 0.0, sc, 0.0, 0.0, 0.0, 0.0, 1.0, 0.01 * i as f32];
+        let want = [
+            sc,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            sc,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.01 * i as f32,
+        ];
         for (k, (a, b)) in c.transform.iter().zip(&want).enumerate() {
-            assert!((a - b).abs() < 1e-6, "instance {i} transform[{k}]: {a} vs {b}");
+            assert!(
+                (a - b).abs() < 1e-6,
+                "instance {i} transform[{k}]: {a} vs {b}"
+            );
         }
     }
 

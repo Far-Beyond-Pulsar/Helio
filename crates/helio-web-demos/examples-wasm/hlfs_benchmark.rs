@@ -43,40 +43,25 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         let world = &mut scene_db.world;
-        let mat_white = crate::common::spawn_material(world, make_material(
-            [0.9, 0.9, 0.9, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_red = crate::common::spawn_material(world, make_material(
-            [0.8, 0.1, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_green = crate::common::spawn_material(world, make_material(
-            [0.1, 0.7, 0.1, 1.0],
-            0.9,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_cube = crate::common::spawn_material(world, make_material(
-            [0.8, 0.78, 0.72, 1.0],
-            0.85,
-            0.0,
-            [0.0; 3],
-            0.0,
-        ));
+        let mat_white = crate::common::spawn_material(
+            world,
+            make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0),
+        );
+        let mat_red = crate::common::spawn_material(
+            world,
+            make_material([0.8, 0.1, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0),
+        );
+        let mat_green = crate::common::spawn_material(
+            world,
+            make_material([0.1, 0.7, 0.1, 1.0], 0.9, 0.0, [0.0; 3], 0.0),
+        );
+        let mat_cube = crate::common::spawn_material(
+            world,
+            make_material([0.8, 0.78, 0.72, 1.0], 0.85, 0.0, [0.0; 3], 0.0),
+        );
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let mesh = crate::common::spawn_mesh(world, box_mesh(
-                    [cx, cy, cz],
-                    [hx, hy, hz],
-                ));
+            let mesh = crate::common::spawn_mesh(world, box_mesh([cx, cy, cz], [hx, hy, hz]));
             let _ = insert_object(
                 world,
                 mesh,
@@ -100,9 +85,7 @@ impl HelioWasmApp for Demo {
         let mut ids: Vec<pulsar_scenedb::Entity> = LIGHT_BASE
             .iter()
             .map(|&(position, color, intensity, range)| {
-                crate::common::spawn_light(world, point_light(
-                        position, color, intensity, range,
-                    ))
+                crate::common::spawn_light(world, point_light(position, color, intensity, range))
             })
             .collect();
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];

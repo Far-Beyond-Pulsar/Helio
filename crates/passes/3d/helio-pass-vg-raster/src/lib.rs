@@ -75,8 +75,8 @@ pub mod shaders;
 pub mod stream;
 
 pub use pass::{
-    optional_features, supports_int64_atomics, VgDenseInputs, VgMaskedInputs, VgRaster, VgRasterConfig,
-    VgRasterInputs, VgTargets, DEPTH_FORMAT, VIS_FORMAT,
+    optional_features, supports_int64_atomics, VgDenseInputs, VgMaskedInputs, VgRaster,
+    VgRasterConfig, VgRasterInputs, VgTargets, DEPTH_FORMAT, VIS_FORMAT,
 };
 
 pub use graph::{

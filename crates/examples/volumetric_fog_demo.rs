@@ -36,10 +36,10 @@ use helio::{
 use helio_pass_postprocess::FogMode;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
-    box_mesh, build_default_renderer, directional_light, make_material,
-    new_scene_db_with_gpu_mirror, plane_mesh, set_volumetric_quality, spawn_light, spawn_local_fog,
-    spawn_material, spawn_mesh, spawn_object, update_light, volumetric_light, GlobalFogComponent,
-    SHADOW_BASES,
+    box_mesh, build_default_renderer, build_default_renderer_with_context, directional_light,
+    make_material, new_scene_db_with_gpu_mirror, plane_mesh, set_volumetric_quality, spawn_light,
+    spawn_local_fog, spawn_material, spawn_mesh, spawn_object, update_light, volumetric_light,
+    GlobalFogComponent, SHADOW_BASES,
 };
 
 use winit::{
@@ -126,63 +126,21 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("Failed to create surface");
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: true,
-        }))
-        .expect("Failed to find adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Main Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("Failed to create device");
-
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
-        }));
-        let info = adapter.get_info();
-        println!(
-            "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
-            info.backend, info.name, info.driver
-        );
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-
         let size = window.inner_size();
-        let cfg = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width,
-            height: size.height,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-        surface.configure(&device, &cfg);
+        let mut graphics = pollster::block_on(helio::HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            helio::HelioGraphicsConfig {
+                vr_support: true,
+                application_name: "Volumetric Fog Demo".into(),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
+        let surface_format = graphics.surface_config.format;
 
         // Full internal resolution. RendererConfig defaults to render_scale 0.75,
         // which upscales 960x540 -> 1280x720 and shows as soft, stair-stepped
@@ -192,7 +150,9 @@ impl ApplicationHandler for App {
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
         let (scene_db, renderer, sun_light_id, haze) =
-            build_scene(device.clone(), queue.clone(), config);
+            build_scene(device.clone(), queue.clone(), config, Some(&mut graphics));
+
+        let surface = graphics.surface;
 
         print_help();
 
@@ -469,18 +429,6 @@ impl AppState {
             }),
         );
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => t,
-            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            _ => {
-                log::warn!("surface acquire failed");
-                return;
-            }
-        };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
         let mut sun = volumetric_light(
             directional_light(sun_light_dir(self.sun_angle), [1.0, 0.9, 0.75], 4.0),
             SHADOW_BASES[0],
@@ -490,11 +438,9 @@ impl AppState {
         update_light(&mut self.scene_db.world, self.sun_light_id, sun);
 
         v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
-        if let Err(e) = self.renderer.render(&camera, &view) {
+        if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render error: {:?}", e);
         }
-
-        self.renderer.queue().present(output);
     }
 }
 
@@ -503,6 +449,7 @@ fn build_scene(
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     config: RendererConfig,
+    graphics: Option<&mut helio::HelioGraphicsContext<'_>>,
 ) -> (
     SceneDb,
     Renderer,
@@ -510,7 +457,11 @@ fn build_scene(
     pulsar_scenedb::Entity,
 ) {
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-    let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
+    let mut renderer = if let Some(graphics) = graphics {
+        build_default_renderer_with_context(&scene_db, graphics, config)
+    } else {
+        build_default_renderer(&scene_db, device.clone(), queue.clone(), config)
+    };
 
     let stone = spawn_material(
         &mut scene_db.world,
@@ -637,7 +588,7 @@ fn probe() {
         config.debug_mode = mode;
     }
     let (mut scene_db, mut renderer, sun_light_id, haze) =
-        build_scene(device.clone(), queue.clone(), config);
+        build_scene(device.clone(), queue.clone(), config, None);
     let sun_intensity = std::env::var("PROBE_SUN")
         .ok()
         .and_then(|v| v.parse().ok())

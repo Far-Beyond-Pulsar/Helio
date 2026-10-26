@@ -82,12 +82,19 @@ fn instance(scale: f32, lod: f32, flags: u32) -> RefInstance {
     RefInstance::translated_scaled(
         [0.0, 0.0, 0.0],
         scale,
-        GpuVgInstance { asset_slot: 0, flags: INST_ENABLED | flags, lod_error_scale: lod, object_row: 0 },
+        GpuVgInstance {
+            asset_slot: 0,
+            flags: INST_ENABLED | flags,
+            lod_error_scale: lod,
+            object_row: 0,
+        },
     )
 }
 
 fn lcg(seed: &mut u64) -> u64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *seed >> 33
 }
 
@@ -99,12 +106,15 @@ fn every_leaf_to_root_path_draws_exactly_one_cluster() {
         let dag = build(64, interleave);
         let all = vec![true; dag.page_count()];
         let root_only = dag.close_upward(
-            &(0..dag.page_count()).map(|g| g == dag.root_group()).collect::<Vec<_>>(),
+            &(0..dag.page_count())
+                .map(|g| g == dag.root_group())
+                .collect::<Vec<_>>(),
         );
         let mut residencies = vec![all, root_only];
         for _ in 0..6 {
-            let seedv: Vec<bool> =
-                (0..dag.page_count()).map(|g| g == dag.root_group() || lcg(&mut seed) % 3 == 0).collect();
+            let seedv: Vec<bool> = (0..dag.page_count())
+                .map(|g| g == dag.root_group() || lcg(&mut seed) % 3 == 0)
+                .collect();
             residencies.push(dag.close_upward(&seedv));
         }
         for resident in &residencies {
@@ -127,7 +137,10 @@ fn every_leaf_to_root_path_draws_exactly_one_cluster() {
                             "{what}: hierarchy traversal differs from the per-cluster rule"
                         );
                         for p in &sel.requested_pages {
-                            assert!(!resident[*p as usize], "{what}: requested resident page {p}");
+                            assert!(
+                                !resident[*p as usize],
+                                "{what}: requested resident page {p}"
+                            );
                         }
                         if resident.iter().all(|&r| r) {
                             assert!(sel.requested_pages.is_empty(), "{what}");
@@ -166,7 +179,12 @@ fn force_root_only_draws_only_roots_whatever_the_distance() {
     let asset = dag.asset(&slots, &lookup);
     let top = dag.level.iter().copied().max().unwrap();
     for dist in [1.0, 50.0, 5000.0] {
-        let sel = select_clusters(&asset, &view(dist), 0.5, &instance(1.0, 1.0, INST_FORCE_ROOT_ONLY));
+        let sel = select_clusters(
+            &asset,
+            &view(dist),
+            0.5,
+            &instance(1.0, 1.0, INST_FORCE_ROOT_ONLY),
+        );
         assert!(!sel.drawn.is_empty());
         for s in &sel.drawn {
             assert_eq!(dag.level[dag.index_of(*s)], top);
@@ -178,13 +196,18 @@ fn force_root_only_draws_only_roots_whatever_the_distance() {
 fn missing_child_page_is_replaced_by_the_resident_parent_and_requested() {
     let dag = build(32, false);
     // Only the root group's page is resident: the roots stand in for all.
-    let resident: Vec<bool> = (0..dag.page_count()).map(|g| g == dag.root_group()).collect();
+    let resident: Vec<bool> = (0..dag.page_count())
+        .map(|g| g == dag.root_group())
+        .collect();
     let (slots, lookup) = (dag.slots(&resident), dag.lookup());
     let asset = dag.asset(&slots, &lookup);
     let sel = select_clusters(&asset, &view(2.0), 1.0e-4, &instance(1.0, 1.0, 0));
     let top = dag.level.iter().copied().max().unwrap();
     assert!(sel.drawn.iter().all(|&s| dag.level[dag.index_of(s)] == top));
-    assert!(!sel.requested_pages.is_empty(), "the finer pages must be requested");
+    assert!(
+        !sel.requested_pages.is_empty(),
+        "the finer pages must be requested"
+    );
     check_paths(&dag, &sel.drawn, "root only");
 }
 
@@ -193,7 +216,11 @@ fn projection_is_monotone_in_the_containing_sphere() {
     let v = view(100.0);
     let inner = project_error(&v, 3.0, [10.0, 0.0, 0.0], 1.0);
     // A sphere containing the inner one projects at least as large.
-    for (c, r) in [([10.0, 0.0, 0.0], 1.0), ([12.0, 0.0, 5.0], 6.5), ([10.0, 3.0, 40.0], 41.0)] {
+    for (c, r) in [
+        ([10.0, 0.0, 0.0], 1.0),
+        ([12.0, 0.0, 5.0], 6.5),
+        ([10.0, 3.0, 40.0], 41.0),
+    ] {
         assert!(project_error(&v, 3.0, c, r) >= inner);
     }
     assert_eq!(project_error(&v, INF_ERROR, [0.0; 3], 1.0), 3.0e38);
@@ -208,7 +235,10 @@ fn tier_binning_rules() {
     let c = dag.clusters[0]; // 32-128 tris, radius 1
     let auto = instance(1.0, 1.0, 0);
     // Far away the average triangle is sub-pixel: software.
-    assert_eq!(choose_bin(&view(5000.0), &auto, &c, VgMode::Auto, 2.0, false), BIN_SW);
+    assert_eq!(
+        choose_bin(&view(5000.0), &auto, &c, VgMode::Auto, 2.0, false),
+        BIN_SW
+    );
     // Dense mask promotes SW clusters only.
     assert_eq!(
         choose_bin(&view(5000.0), &auto, &c, VgMode::Auto, 2.0, true),
@@ -220,22 +250,41 @@ fn tier_binning_rules() {
         helio_pass_vg_cull::hw_bin_for_tris(c.tri_count())
     );
     let big = dag.clusters.iter().find(|c| c.tri_count() == 128).unwrap();
-    assert_eq!(choose_bin(&view(3.0), &auto, big, VgMode::Auto, 2.0, false), 3);
+    assert_eq!(
+        choose_bin(&view(3.0), &auto, big, VgMode::Auto, 2.0, false),
+        3
+    );
     // Mode and lock overrides.
     assert_eq!(
         choose_bin(&view(5000.0), &auto, &c, VgMode::ForceHwRaster, 2.0, true),
         helio_pass_vg_cull::hw_bin_for_tris(c.tri_count())
     );
     let locked = RefInstance {
-        inst: GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row: 0 }
-            .with_tier_lock(TierLock::Dense),
+        inst: GpuVgInstance {
+            asset_slot: 0,
+            flags: INST_ENABLED,
+            lod_error_scale: 1.0,
+            object_row: 0,
+        }
+        .with_tier_lock(TierLock::Dense),
         ..auto
     };
-    assert_eq!(choose_bin(&v, &locked, &c, VgMode::Auto, 2.0, false), helio_pass_vg_cull::BIN_DENSE);
+    assert_eq!(
+        choose_bin(&v, &locked, &c, VgMode::Auto, 2.0, false),
+        helio_pass_vg_cull::BIN_DENSE
+    );
     let sw = RefInstance {
-        inst: GpuVgInstance { asset_slot: 0, flags: INST_ENABLED, lod_error_scale: 1.0, object_row: 0 }
-            .with_tier_lock(TierLock::SwRaster),
+        inst: GpuVgInstance {
+            asset_slot: 0,
+            flags: INST_ENABLED,
+            lod_error_scale: 1.0,
+            object_row: 0,
+        }
+        .with_tier_lock(TierLock::SwRaster),
         ..auto
     };
-    assert_eq!(choose_bin(&view(3.0), &sw, &c, VgMode::Auto, 2.0, false), BIN_SW);
+    assert_eq!(
+        choose_bin(&view(3.0), &sw, &c, VgMode::Auto, 2.0, false),
+        BIN_SW
+    );
 }

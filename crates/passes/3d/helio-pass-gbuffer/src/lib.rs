@@ -47,9 +47,9 @@ pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
 pub use draw_segments::{DrawSegment, DrawSegments, ShadingBucket};
 pub use draw_slots::{DrawSlots, DRAW_SLOT_LAYOUT, DRAW_SLOT_LOCATION};
+use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
 pub use object_batch_frame_data::{IndirectDispatchArgs, ObjectBatchFrameData};
-use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 
 /// Debug mode id of the wireframe view (needs `POLYGON_MODE_LINE`).
 const WIREFRAME_DEBUG_MODE: u32 = 40;
@@ -57,8 +57,8 @@ use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
-use std::collections::HashMap;
 use pulsar_scenedb::gpu::BufferKey;
+use std::collections::HashMap;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ pub struct GBufferPass {
     bind_group_0_key: Option<[wgpu::Buffer; 7]>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_version: Option<(u64,u64)>,
+    bind_group_1_version: Option<(u64, u64)>,
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
     /// CSM cascade split distances. Must match the values used in shadow_matrices.wgsl
@@ -292,8 +292,13 @@ impl GBufferPass {
 
         // ── Bind Group Layout 1: material + textures ──────────────────────────
         let bind_group_layout_1 = create_material_bgl(device, material_binding);
-        let (uv_grid_texture, uv_grid_pixels, uv_grid_extent, uv_grid_bind_group_layout,
-            uv_grid_bind_group) = create_uv_grid(device);
+        let (
+            uv_grid_texture,
+            uv_grid_pixels,
+            uv_grid_extent,
+            uv_grid_bind_group_layout,
+            uv_grid_bind_group,
+        ) = create_uv_grid(device);
 
         // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -340,13 +345,14 @@ impl GBufferPass {
         // params.w = -1 marks the descriptor-only fallback. Shaders derive
         // basic texture slots from SceneDB material rows instead of indexing
         // this single row by arbitrary material IDs.
-        let mut fallback_words=[0u32;88];
-        fallback_words[87]=(-1.0f32).to_bits();
-        let fallback_material_textures = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Fallback Material Texture Slots"),
-            contents: bytemuck::cast_slice(&fallback_words),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let mut fallback_words = [0u32; 88];
+        fallback_words[87] = (-1.0f32).to_bits();
+        let fallback_material_textures =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Fallback Material Texture Slots"),
+                contents: bytemuck::cast_slice(&fallback_words),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
 
         Self {
             draw_slots: DrawSlots::default(),
@@ -439,7 +445,14 @@ impl GBufferPass {
 
 impl RenderPass for GBufferPass {
     fn scene_buffers(&self) -> &'static [&'static str] {
-        &["builtin_mesh_index", "builtin_mesh_vertex", "materials", "scene_lights", "skeletal_bone_palette", "skeletal_skin_vertices"]
+        &[
+            "builtin_mesh_index",
+            "builtin_mesh_vertex",
+            "materials",
+            "scene_lights",
+            "skeletal_bone_palette",
+            "skeletal_skin_vertices",
+        ]
     }
 
     fn name(&self) -> &'static str {
@@ -457,15 +470,12 @@ impl RenderPass for GBufferPass {
     ) {
         // SAFETY: these buffers are owned by the GBuffer pass, which is owned
         // by the RenderGraph for longer than the current frame registry.
-        let coordinate_spaces: &'a wgpu::Buffer = unsafe {
-            std::mem::transmute(&self.coordinate_spaces)
-        };
-        let coordinate_spaces_prev: &'a wgpu::Buffer = unsafe {
-            std::mem::transmute(&self.coordinate_spaces_prev)
-        };
-        let fallback_material_textures: &'a wgpu::Buffer = unsafe {
-            std::mem::transmute(&self.fallback_material_textures)
-        };
+        let coordinate_spaces: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.coordinate_spaces) };
+        let coordinate_spaces_prev: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.coordinate_spaces_prev) };
+        let fallback_material_textures: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&self.fallback_material_textures) };
         frame.write(
             helio_core::resource_keys::coordinate_spaces(),
             helio_core::CoordinateSpacesFrameData {
@@ -547,8 +557,11 @@ impl RenderPass for GBufferPass {
         // the `write_group` call in `declare_resources` above.
         if group_name == "gbuffer" {
             if let [albedo, normal, orm, emissive] = *views {
-                frame.write(helio_core::ResourceKey::new("gbuffer"), 
-                    helio_core::ViewGroup::<4> { views: [albedo, normal, orm, emissive] },
+                frame.write(
+                    helio_core::ResourceKey::new("gbuffer"),
+                    helio_core::ViewGroup::<4> {
+                        views: [albedo, normal, orm, emissive],
+                    },
                     "GBufferPass",
                 );
             }
@@ -562,13 +575,21 @@ impl RenderPass for GBufferPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer"), "GBuffer")?;
-        let lightmap_uv = resources.read(helio_core::ResourceKey::new("gbuffer_lightmap_uv"), "GBuffer")?;
+        let gbuffer = resources.read::<helio_core::ViewGroup<'_, 4>>(
+            helio_core::ResourceKey::new("gbuffer"),
+            "GBuffer",
+        )?;
+        let lightmap_uv = resources.read(
+            helio_core::ResourceKey::new("gbuffer_lightmap_uv"),
+            "GBuffer",
+        )?;
         let sss_target = resources.read(helio_core::ResourceKey::new("gbuffer_sss"), "GBuffer")?;
-        let extra_target = resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "GBuffer")?;
-        let velocity_target = resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "GBuffer")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([
+        let extra_target =
+            resources.read(helio_core::ResourceKey::new("gbuffer_extra"), "GBuffer")?;
+        let velocity_target =
+            resources.read(helio_core::ResourceKey::new("gbuffer_velocity"), "GBuffer")?;
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
                     view: gbuffer.views[0],
                     resolve_target: None,
@@ -653,10 +674,12 @@ impl RenderPass for GBufferPass {
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: self.timing_query.as_ref().map(|query| wgpu::RenderPassTimestampWrites {
-                query_set: query,
-                beginning_of_pass_write_index: Some(0),
-                end_of_pass_write_index: Some(1),
+            timestamp_writes: self.timing_query.as_ref().map(|query| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set: query,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }
             }),
             occlusion_query_set: None,
             multiview_mask: None,
@@ -715,21 +738,24 @@ impl RenderPass for GBufferPass {
         }
         // Read per-scene values from the frame registry so the GBuffer globals match
         // what the renderer configured (ambient light).
-        let (ambient_color, ambient_intensity) =
-            if let Some(ref environment) = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment()).as_ref() {
-                (
-                    [
-                        environment.ambient_color[0],
-                        environment.ambient_color[1],
-                        environment.ambient_color[2],
-                        1.0,
-                    ],
-                    environment.ambient_intensity,
-                )
-            } else {
-                // Fallback for headless / test usage without a full renderer.
-                ([0.1, 0.1, 0.15, 1.0], 0.1)
-            };
+        let (ambient_color, ambient_intensity) = if let Some(ref environment) = ctx
+            .registry
+            .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment())
+            .as_ref()
+        {
+            (
+                [
+                    environment.ambient_color[0],
+                    environment.ambient_color[1],
+                    environment.ambient_color[2],
+                    1.0,
+                ],
+                environment.ambient_intensity,
+            )
+        } else {
+            // Fallback for headless / test usage without a full renderer.
+            ([0.1, 0.1, 0.15, 1.0], 0.1)
+        };
 
         // Upload per-frame globals (O(1) — fixed-size struct).
         let globals = GBufferGlobals {
@@ -752,28 +778,36 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.registry.get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx
+            .registry
+            .get::<crate::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
+        else {
             return Ok(());
         };
-        let Some(culled) = ctx.registry.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
+        let Some(culled) = ctx
+            .registry
+            .get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch"))
+        else {
             return Ok(());
         };
         let (max_draws, draw_count) = batch.all_draws();
         if max_draws == 0 {
             return Ok(());
         }
-        let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "GBuffer") else {
-            return Ok(());
-        };
-        let Some(vertices_handle) = ctx
-            .scene_buffers
-            .get(BufferKey::of("builtin_mesh_vertex"))
+        let Some(material_textures) = ctx
+            .registry
+            .read::<helio_mats::MaterialTextureBindings<'_>>(
+                helio_core::resource_keys::material_textures(),
+                "GBuffer",
+            )
         else {
             return Ok(());
         };
-        let Some(indices_handle) = ctx
-            .scene_buffers
-            .get(BufferKey::of("builtin_mesh_index"))
+        let Some(vertices_handle) = ctx.scene_buffers.get(BufferKey::of("builtin_mesh_vertex"))
+        else {
+            return Ok(());
+        };
+        let Some(indices_handle) = ctx.scene_buffers.get(BufferKey::of("builtin_mesh_index"))
         else {
             return Ok(());
         };
@@ -781,15 +815,21 @@ impl RenderPass for GBufferPass {
         let indices = &indices_handle.buffer;
 
         // Rebuild bind group 0 when camera or instances buffers change (GrowableBuffer realloc).
-        let coord_spaces = ctx.registry.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces());
+        let coord_spaces = ctx.registry.get::<crate::CoordinateSpacesFrameData<'_>>(
+            helio_core::resource_keys::coordinate_spaces(),
+        );
         let coordinate_spaces_buf = coord_spaces
             .map(|c| c.coordinate_spaces)
             .unwrap_or(ctx.camera);
         let coordinate_spaces_prev_buf = coord_spaces
             .map(|c| c.coordinate_spaces_prev)
             .unwrap_or(ctx.camera);
-        let skin_handle = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices"));
-        let palette_handle = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette"));
+        let skin_handle = ctx
+            .scene_buffers
+            .get(BufferKey::of("skeletal_skin_vertices"));
+        let palette_handle = ctx
+            .scene_buffers
+            .get(BufferKey::of("skeletal_bone_palette"));
         let skin_buf = skin_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_skeletal_storage);
@@ -862,9 +902,8 @@ impl RenderPass for GBufferPass {
         let materials_epoch = materials_handle.map(|handle| handle.epoch).unwrap_or(0);
 
         // Rebuild bind group 1 when material textures version changes.
-        let needs_rebuild = self.bind_group_1_version != Some(
-            (material_textures.version, materials_epoch),
-        )
+        let needs_rebuild = self.bind_group_1_version
+            != Some((material_textures.version, materials_epoch))
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("GBuffer: rebuilding bind group 1 (material textures version changed)");
@@ -896,7 +935,10 @@ impl RenderPass for GBufferPass {
         // The slot indexes `compacted_indices`.
         let slots = self
             .draw_slots
-            .buffer(&ctx.device, DrawSlots::len_of(culled.compacted_indices.size(), 4))
+            .buffer(
+                &ctx.device,
+                DrawSlots::len_of(culled.compacted_indices.size(), 4),
+            )
             .clone();
 
         let mut pass = ctx.render_cmds().unwrap();
@@ -905,10 +947,7 @@ impl RenderPass for GBufferPass {
         pass.set_bind_group(2, &self.uv_grid_bind_group, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_vertex_buffer(1, slots.slice(..));
-        pass.set_index_buffer(
-            indices.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         // One draw per material segment, at its fixed offset with this
         // frame's GPU count (see `DrawSegments`).
@@ -996,9 +1035,13 @@ impl RenderPass for GBufferPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["material_textures", "render_environment", "object_batch", "culled_batch"]
+        &[
+            "material_textures",
+            "render_environment",
+            "object_batch",
+            "culled_batch",
+        ]
     }
-
 }
 
 impl GBufferPass {
@@ -1062,8 +1105,7 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            let wireframe =
-                self.wireframe_supported && self.debug_mode == WIREFRAME_DEBUG_MODE;
+            let wireframe = self.wireframe_supported && self.debug_mode == WIREFRAME_DEBUG_MODE;
             let registered_graph;
             let graph_wgsl = if graph_wgsl.is_empty() && key.graph_hash != 0 {
                 registered_graph = helio_mats::graph_source(key.graph_hash);
@@ -1115,127 +1157,137 @@ impl GBufferPass {
                 self.material_binding,
                 "GBuffer Shader",
             );
-            let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-                label: Some("GBuffer Pipeline"),
-                layout: Some(&self.pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    // Full vertex layout (stride = 40 bytes, matching shared mesh buffer).
-                    //   offset  0 — position       Float32x3  location 0
-                    //   offset 12 — bitangent_sign Float32    location 1
-                    //   offset 16 — tex_coords0   Float32x2  location 2  (UV0: material/albedo)
-                    //   offset 24 — tex_coords1   Float32x2  location 5  (UV1: lightmap)
-                    //   offset 32 — normal        Uint32     location 3
-                    //   offset 36 — tangent       Uint32     location 4
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: 40,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 16,
-                                shader_location: 2,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 24,
-                                shader_location: 5,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 32,
-                                shader_location: 3,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 36,
-                                shader_location: 4,
-                            },
+            let pipeline = helio_core::shader::create_render_pipeline(
+                &device,
+                wgpu::RenderPipelineDescriptor {
+                    label: Some("GBuffer Pipeline"),
+                    layout: Some(&self.pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        // Full vertex layout (stride = 40 bytes, matching shared mesh buffer).
+                        //   offset  0 — position       Float32x3  location 0
+                        //   offset 12 — bitangent_sign Float32    location 1
+                        //   offset 16 — tex_coords0   Float32x2  location 2  (UV0: material/albedo)
+                        //   offset 24 — tex_coords1   Float32x2  location 5  (UV1: lightmap)
+                        //   offset 32 — normal        Uint32     location 3
+                        //   offset 36 — tangent       Uint32     location 4
+                        buffers: &[
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 40,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[
+                                    wgpu::VertexAttribute {
+                                        format: wgpu::VertexFormat::Float32x3,
+                                        offset: 0,
+                                        shader_location: 0,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        format: wgpu::VertexFormat::Float32,
+                                        offset: 12,
+                                        shader_location: 1,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        format: wgpu::VertexFormat::Float32x2,
+                                        offset: 16,
+                                        shader_location: 2,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        format: wgpu::VertexFormat::Float32x2,
+                                        offset: 24,
+                                        shader_location: 5,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        format: wgpu::VertexFormat::Uint32,
+                                        offset: 32,
+                                        shader_location: 3,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        format: wgpu::VertexFormat::Uint32,
+                                        offset: 36,
+                                        shader_location: 4,
+                                    },
+                                ],
+                            }),
+                            Some(crate::DRAW_SLOT_LAYOUT),
                         ],
-                    }), Some(crate::DRAW_SLOT_LAYOUT)],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rg16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                    ],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: if wireframe || key.feature_flags & helio_mats::FLAG_DOUBLE_SIDED != 0 {
-                        None
-                    } else { Some(wgpu::Face::Back) },
-                    polygon_mode: if wireframe {
-                        wgpu::PolygonMode::Line
-                    } else {
-                        wgpu::PolygonMode::Fill
                     },
-                    ..Default::default()
+                    fragment: Some(wgpu::FragmentState {
+                        module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rg16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                        ],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: if wireframe
+                            || key.feature_flags & helio_mats::FLAG_DOUBLE_SIDED != 0
+                        {
+                            None
+                        } else {
+                            Some(wgpu::Face::Back)
+                        },
+                        polygon_mode: if wireframe {
+                            wgpu::PolygonMode::Line
+                        } else {
+                            wgpu::PolygonMode::Fill
+                        },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+            );
             self.pipelines.insert(key, pipeline);
         }
         self.pipelines.get(&key).unwrap()
@@ -1322,7 +1374,13 @@ fn create_uv_grid(
             },
         ],
     });
-    (texture, decoded.into_raw(), (width, height), layout, bind_group)
+    (
+        texture,
+        decoded.into_raw(),
+        (width, height),
+        layout,
+        bind_group,
+    )
 }
 
 pub fn create_material_bgl(
@@ -1358,5 +1416,3 @@ pub fn create_material_bgl(
         entries: &entries,
     })
 }
-
-

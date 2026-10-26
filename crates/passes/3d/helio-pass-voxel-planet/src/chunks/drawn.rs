@@ -72,8 +72,14 @@ struct Content {
 }
 
 impl Content {
-    const NOTHING: Self = Self { lo: [64; 3], hi: [0; 3] };
-    const FULL: Self = Self { lo: [0; 3], hi: [64; 3] };
+    const NOTHING: Self = Self {
+        lo: [64; 3],
+        hi: [0; 3],
+    };
+    const FULL: Self = Self {
+        lo: [0; 3],
+        hi: [64; 3],
+    };
 
     fn is_empty(&self) -> bool {
         (0..3).any(|a| self.lo[a] >= self.hi[a])
@@ -86,7 +92,10 @@ impl Content {
         if self.is_empty() {
             return o;
         }
-        Self { lo: [0, 1, 2].map(|a| self.lo[a].min(o.lo[a])), hi: [0, 1, 2].map(|a| self.hi[a].max(o.hi[a])) }
+        Self {
+            lo: [0, 1, 2].map(|a| self.lo[a].min(o.lo[a])),
+            hi: [0, 1, 2].map(|a| self.hi[a].max(o.hi[a])),
+        }
     }
 
     /// A child's content (child `n`: bit 0 x, 1 y, 2 z) in its parent's
@@ -96,7 +105,10 @@ impl Content {
             return Self::NOTHING;
         }
         let at = [(n & 1) as i32, ((n >> 1) & 1) as i32, ((n >> 2) & 1) as i32];
-        Self { lo: [0, 1, 2].map(|a| at[a] * 32 + self.lo[a].div_euclid(2)), hi: [0, 1, 2].map(|a| at[a] * 32 + (self.hi[a] + 1).div_euclid(2)) }
+        Self {
+            lo: [0, 1, 2].map(|a| at[a] * 32 + self.lo[a].div_euclid(2)),
+            hi: [0, 1, 2].map(|a| at[a] * 32 + (self.hi[a] + 1).div_euclid(2)),
+        }
     }
 
     fn packed(&self) -> (i32, i32) {
@@ -118,7 +130,10 @@ struct Drawn {
 impl Drawn {
     fn content(&self) -> Content {
         match (self.kind, self.chunk) {
-            (Kind::Mixed, Some(c)) => Content { lo: [0, 0, c.z.0.floor() as i32], hi: [64, 64, c.z.1.ceil() as i32] },
+            (Kind::Mixed, Some(c)) => Content {
+                lo: [0, 0, c.z.0.floor() as i32],
+                hi: [64, 64, c.z.1.ceil() as i32],
+            },
             (Kind::Mixed, None) | (Kind::Empty, _) => Content::NOTHING,
             (Kind::Solid | Kind::Buried, _) => Content::FULL,
         }
@@ -181,7 +196,18 @@ pub fn key_hash(k: [i32; 4]) -> u32 {
 
 /// The eight possible children of `key` (whether or not on its face).
 fn children(key: NodeKey) -> impl Iterator<Item = (usize, NodeKey)> {
-    (0..8usize).filter(move |_| key.level > 0).map(move |n| (n, NodeKey { face: key.face, level: key.level - 1, cx: key.cx * 2 + (n & 1) as i32, cy: key.cy * 2 + ((n >> 1) & 1) as i32, cz: key.cz * 2 + (n >> 2) as i32 }))
+    (0..8usize).filter(move |_| key.level > 0).map(move |n| {
+        (
+            n,
+            NodeKey {
+                face: key.face,
+                level: key.level - 1,
+                cx: key.cx * 2 + (n & 1) as i32,
+                cy: key.cy * 2 + ((n >> 1) & 1) as i32,
+                cz: key.cz * 2 + (n >> 2) as i32,
+            },
+        )
+    })
 }
 
 pub struct DrawnSet {
@@ -247,20 +273,46 @@ impl DrawnSet {
     /// `changed` take their chunks again, nodes `added` are drawn as their
     /// kind with the chunk `chunk_of` gives. A node replaced by finer or
     /// coarser ones fades out as they fade in.
-    pub fn update(&mut self, added: &[(NodeKey, Kind)], removed: &[NodeKey], changed: &FxHashSet<NodeKey>, frame: u64, mut chunk_of: impl FnMut(NodeKey) -> Option<NodeChunk>) {
-        let ended: Vec<NodeKey> = self.fades.iter().filter(|(_, f)| frame >= f.start + FADE_FRAMES).map(|(k, _)| *k).collect();
+    pub fn update(
+        &mut self,
+        added: &[(NodeKey, Kind)],
+        removed: &[NodeKey],
+        changed: &FxHashSet<NodeKey>,
+        frame: u64,
+        mut chunk_of: impl FnMut(NodeKey) -> Option<NodeChunk>,
+    ) {
+        let ended: Vec<NodeKey> = self
+            .fades
+            .iter()
+            .filter(|(_, f)| frame >= f.start + FADE_FRAMES)
+            .map(|(k, _)| *k)
+            .collect();
         for key in ended {
             self.end_fade(key);
         }
         // A switch the plan changes again, or whose nodes change, ends at
         // once (with every switch it overlaps).
         if !self.fades.is_empty() {
-            let touching: Vec<NodeKey> = added.iter().map(|a| a.0).chain(removed.iter().copied()).chain(changed.iter().filter(|k| self.fades.contains_key(k)).copied()).collect();
+            let touching: Vec<NodeKey> = added
+                .iter()
+                .map(|a| a.0)
+                .chain(removed.iter().copied())
+                .chain(
+                    changed
+                        .iter()
+                        .filter(|k| self.fades.contains_key(k))
+                        .copied(),
+                )
+                .collect();
             for key in touching {
                 self.snap(key);
             }
         }
-        let gone: FxHashSet<NodeKey> = removed.iter().filter(|k| self.drawn.contains_key(k)).copied().collect();
+        let gone: FxHashSet<NodeKey> = removed
+            .iter()
+            .filter(|k| self.drawn.contains_key(k))
+            .copied()
+            .collect();
         // A node drawn as something else is removed, then added.
         let came: FxHashMap<NodeKey, Kind> = added.iter().copied().collect();
         let gone_above = self.ancestors_of(gone.iter().copied());
@@ -273,7 +325,14 @@ impl DrawnSet {
             // Finer nodes came under it, or a coarser one over it.
             let coarse = came_above.contains(&key);
             if coarse || self.ancestors(key).any(|a| came.contains_key(&a)) {
-                self.start_fade(key, Fade { start: frame, incoming: false, coarse });
+                self.start_fade(
+                    key,
+                    Fade {
+                        start: frame,
+                        incoming: false,
+                        coarse,
+                    },
+                );
                 self.touched.push(key);
             } else {
                 self.drop_node(key);
@@ -282,7 +341,13 @@ impl DrawnSet {
         for key in changed {
             if let Some(d) = self.drawn.get(key).copied() {
                 self.drop_node(*key);
-                self.add_node(*key, Drawn { kind: d.kind, chunk: chunk_of(*key) });
+                self.add_node(
+                    *key,
+                    Drawn {
+                        kind: d.kind,
+                        chunk: chunk_of(*key),
+                    },
+                );
             }
         }
         for (&key, &kind) in &came {
@@ -291,9 +356,20 @@ impl DrawnSet {
             }
             let coarse = gone_above.contains(&key);
             if !gone.contains(&key) && (coarse || self.ancestors(key).any(|a| gone.contains(&a))) {
-                self.start_fade(key, Fade { start: frame, incoming: true, coarse });
+                self.start_fade(
+                    key,
+                    Fade {
+                        start: frame,
+                        incoming: true,
+                        coarse,
+                    },
+                );
             }
-            let chunk = if kind == Kind::Mixed { chunk_of(key) } else { None };
+            let chunk = if kind == Kind::Mixed {
+                chunk_of(key)
+            } else {
+                None
+            };
             self.add_node(key, Drawn { kind, chunk });
         }
         self.settle_entries();
@@ -333,7 +409,10 @@ impl DrawnSet {
     fn snap(&mut self, key: NodeKey) {
         let mut work = vec![key];
         while let Some(t) = work.pop() {
-            let mut hit: Vec<NodeKey> = std::iter::once(t).chain(self.ancestors(t)).filter(|k| self.fades.contains_key(k)).collect();
+            let mut hit: Vec<NodeKey> = std::iter::once(t)
+                .chain(self.ancestors(t))
+                .filter(|k| self.fades.contains_key(k))
+                .collect();
             if self.fade_below.contains_key(&t) {
                 let mut down = vec![t];
                 while let Some(d) = down.pop() {
@@ -373,7 +452,11 @@ impl DrawnSet {
     }
 
     fn state_of(&self, key: NodeKey) -> i32 {
-        self.fades.get(&key).map_or(1, |f| 2 + (((f.start & START_MASK) as i32) << 2) + i32::from(f.incoming) + 2 * i32::from(f.coarse))
+        self.fades.get(&key).map_or(1, |f| {
+            2 + (((f.start & START_MASK) as i32) << 2)
+                + i32::from(f.incoming)
+                + 2 * i32::from(f.coarse)
+        })
     }
 
     /// Whether `node` is drawn.
@@ -388,7 +471,10 @@ impl DrawnSet {
 
     /// Drawn Solid and Buried nodes.
     pub fn uniform_nodes(&self) -> impl Iterator<Item = NodeKey> + '_ {
-        self.drawn.iter().filter(|(_, d)| d.kind != Kind::Mixed).map(|(k, _)| *k)
+        self.drawn
+            .iter()
+            .filter(|(_, d)| d.kind != Kind::Mixed)
+            .map(|(k, _)| *k)
     }
 
     /// What `node` is drawn as.
@@ -400,7 +486,13 @@ impl DrawnSet {
     /// drawn, 0 an ancestor, else fading) and its fade (start, incoming,
     /// coarse side).
     pub fn describe(&self, node: NodeKey) -> (bool, Option<i32>, Option<(u64, bool, bool)>) {
-        (self.drawn.contains_key(&node), self.entries.get(&node).map(|e| e.value[1]), self.fades.get(&node).map(|f| (f.start, f.incoming, f.coarse)))
+        (
+            self.drawn.contains_key(&node),
+            self.entries.get(&node).map(|e| e.value[1]),
+            self.fades
+                .get(&node)
+                .map(|f| (f.start, f.incoming, f.coarse)),
+        )
     }
 
     /// Nodes drawn.
@@ -452,7 +544,8 @@ impl DrawnSet {
     /// Recompute the touched entries, finest first, and their ancestors
     /// while they change; an entry with nothing drawn under it leaves.
     fn settle_entries(&mut self) {
-        let mut by_level: Vec<FxHashSet<NodeKey>> = vec![Default::default(); self.top_level as usize + 1];
+        let mut by_level: Vec<FxHashSet<NodeKey>> =
+            vec![Default::default(); self.top_level as usize + 1];
         for key in std::mem::take(&mut self.touched) {
             by_level[key.level as usize].insert(key);
         }
@@ -460,15 +553,28 @@ impl DrawnSet {
             for key in std::mem::take(&mut by_level[level]) {
                 let old = self.entries.get(&key).copied();
                 let drawn = self.drawn.get(&key).copied();
-                let below = children(key).filter_map(|(n, c)| self.entries.get(&c).map(|e| e.content.in_parent(n))).reduce(Content::union);
+                let below = children(key)
+                    .filter_map(|(n, c)| self.entries.get(&c).map(|e| e.content.in_parent(n)))
+                    .reduce(Content::union);
                 let new = match (drawn, below) {
                     (None, None) => None,
                     (d, b) => {
-                        let content = d.map_or(Content::NOTHING, |d| d.content()).union(b.unwrap_or(Content::NOTHING));
+                        let content = d
+                            .map_or(Content::NOTHING, |d| d.content())
+                            .union(b.unwrap_or(Content::NOTHING));
                         let (lo, hi) = content.packed();
-                        let under = if self.ancestors(key).any(|a| self.drawn.contains_key(&a)) { UNDER_DRAWN } else { 0 };
+                        let under = if self.ancestors(key).any(|a| self.drawn.contains_key(&a)) {
+                            UNDER_DRAWN
+                        } else {
+                            0
+                        };
                         let value = match d {
-                            Some(d) => [d.chunk.map_or(-1, |c| c.slot as i32), self.state_of(key), d.kind_code() | under | (lo << 8), hi],
+                            Some(d) => [
+                                d.chunk.map_or(-1, |c| c.slot as i32),
+                                self.state_of(key),
+                                d.kind_code() | under | (lo << 8),
+                                hi,
+                            ],
                             None => [-1, 0, KIND_ANCESTOR | under | (lo << 8), hi],
                         };
                         Some(Entry { content, value })
@@ -534,7 +640,11 @@ impl DrawnSet {
             }
             let home = key_hash(k) & self.mask;
             // The entry at j may move to i unless its home lies in (i, j].
-            let stays = if i <= j { i < home && home <= j } else { i < home || home <= j };
+            let stays = if i <= j {
+                i < home && home <= j
+            } else {
+                i < home || home <= j
+            };
             if !stays {
                 self.table[2 * i as usize] = k;
                 self.table[2 * i as usize + 1] = self.table[2 * j as usize + 1];
@@ -556,7 +666,16 @@ impl DrawnSet {
         let mut dirty = std::mem::take(&mut self.dirty);
         dirty.sort_unstable();
         dirty.dedup();
-        dirty.into_iter().flat_map(|i| [[i as i32, 0, 0, 0], self.table[2 * i as usize], self.table[2 * i as usize + 1]]).collect()
+        dirty
+            .into_iter()
+            .flat_map(|i| {
+                [
+                    [i as i32, 0, 0, 0],
+                    self.table[2 * i as usize],
+                    self.table[2 * i as usize + 1],
+                ]
+            })
+            .collect()
     }
 
     /// Entry `key`'s value (as the GPU lookup finds it).
@@ -590,7 +709,13 @@ mod tests {
     }
 
     fn node(level: u32, cx: i32, cy: i32, cz: i32) -> NodeKey {
-        NodeKey { face: 0, level, cx, cy, cz }
+        NodeKey {
+            face: 0,
+            level,
+            cx,
+            cy,
+            cz,
+        }
     }
 
     /// A random cut of a level-`top` root: refined with probability 2/3
@@ -602,23 +727,42 @@ mod tests {
             if k.level > 0 && next() % 3 != 0 {
                 open.extend(children(k).map(|c| c.1));
             } else if next() % 3 != 0 {
-                drawn.push((k, if next() % 4 == 0 { Kind::Solid } else { Kind::Mixed }));
+                drawn.push((
+                    k,
+                    if next() % 4 == 0 {
+                        Kind::Solid
+                    } else {
+                        Kind::Mixed
+                    },
+                ));
             }
         }
         drawn
     }
 
     fn diff(a: &[(NodeKey, Kind)], b: &[(NodeKey, Kind)]) -> (Vec<(NodeKey, Kind)>, Vec<NodeKey>) {
-        (a.iter().filter(|x| !b.contains(x)).copied().collect(), b.iter().filter(|x| !a.contains(x)).map(|x| x.0).collect())
+        (
+            a.iter().filter(|x| !b.contains(x)).copied().collect(),
+            b.iter().filter(|x| !a.contains(x)).map(|x| x.0).collect(),
+        )
     }
 
     /// The shown node over level-0 cell `p` for dither `r`, searched as the
     /// draw does: coarser while no entry says otherwise, finer through
     /// ancestors; a refined node without an entry for the child: air.
-    fn search(set: &DrawnSet, p: [i32; 3], from: u32, r: i32, frame: u64) -> Option<Option<NodeKey>> {
+    fn search(
+        set: &DrawnSet,
+        p: [i32; 3],
+        from: u32,
+        r: i32,
+        frame: u64,
+    ) -> Option<Option<NodeKey>> {
         let at = |l: u32| node(l, p[0] >> l, p[1] >> l, p[2] >> l);
         let state = |l: u32| set.find(at(l).table_key()).map(|v| v[1]);
-        let under = |l: u32| set.find(at(l).table_key()).is_some_and(|v| v[2] & UNDER_DRAWN != 0);
+        let under = |l: u32| {
+            set.find(at(l).table_key())
+                .is_some_and(|v| v[2] & UNDER_DRAWN != 0)
+        };
         let mut level = from;
         // Up to an entry.
         while state(level).is_none() {
@@ -648,8 +792,14 @@ mod tests {
         // through them; a missing node below is air.
         let mut way = 0;
         for _ in 0..64 {
-            let Some(s) = state(level) else { return if way < 0 { Some(None) } else { None } };
-            let go = if s == 0 && way > 0 { 2 } else { choice(s, r, frame) };
+            let Some(s) = state(level) else {
+                return if way < 0 { Some(None) } else { None };
+            };
+            let go = if s == 0 && way > 0 {
+                2
+            } else {
+                choice(s, r, frame)
+            };
             match go {
                 1 => return Some(Some(at(level))),
                 0 if level > 0 && way <= 0 => {
@@ -682,7 +832,10 @@ mod tests {
             let (added, removed) = diff(&drawn, &last);
             set.update(&added, &removed, &Default::default(), frame, |_| {
                 slot = (slot + 1) % (1 << 14);
-                Some(NodeChunk { slot, z: (0.0, 64.0) })
+                Some(NodeChunk {
+                    slot,
+                    z: (0.0, 64.0),
+                })
             });
             last = drawn;
             for _ in 0..(next() % 20) {
@@ -690,18 +843,50 @@ mod tests {
                 set.update(&[], &[], &Default::default(), frame, |_| None);
                 for r in [0, 1, 511, 512, 1023] {
                     for _ in 0..40 {
-                        let p = [(next() % 8) as i32, (next() % 8) as i32, (next() % 8) as i32];
+                        let p = [
+                            (next() % 8) as i32,
+                            (next() % 8) as i32,
+                            (next() % 8) as i32,
+                        ];
                         // Nodes shown over p by their state.
-                        let shown: Vec<NodeKey> = set.drawn.keys().filter(|k| (0..3).all(|a| [p[0], p[1], p[2]][a] >> k.level == [k.cx, k.cy, k.cz][a]) && choice(set.find(k.table_key()).unwrap()[1], r, frame) == 1).copied().collect();
+                        let shown: Vec<NodeKey> = set
+                            .drawn
+                            .keys()
+                            .filter(|k| {
+                                (0..3).all(|a| {
+                                    [p[0], p[1], p[2]][a] >> k.level == [k.cx, k.cy, k.cz][a]
+                                }) && choice(set.find(k.table_key()).unwrap()[1], r, frame) == 1
+                            })
+                            .copied()
+                            .collect();
                         assert!(shown.len() <= 1, "round {round}: {shown:?}");
                         // Each entry knows whether a strict ancestor is drawn.
                         for key in set.entries.keys() {
                             let under = set.find(key.table_key()).unwrap()[2] & UNDER_DRAWN != 0;
-                            assert_eq!(under, set.ancestors(*key).any(|a| set.drawn.contains_key(&a)), "round {round} {key:?}");
+                            assert_eq!(
+                                under,
+                                set.ancestors(*key).any(|a| set.drawn.contains_key(&a)),
+                                "round {round} {key:?}"
+                            );
                         }
                         for from in 0..=3 {
-                            let chain: Vec<_> = (0..=3u32).map(|l| { let k = node(l, p[0] >> l, p[1] >> l, p[2] >> l); (l, set.find(k.table_key()).map(|v| (v[1], choice(v[1], r, frame))), set.fades.get(&k).map(|f| (f.start, f.incoming, f.coarse)), set.drawn.get(&k).map(|d| d.kind)) }).collect();
-                            assert_eq!(search(&set, p, from, r, frame), Some(shown.first().copied()), "round {round} frame {frame} r {r} at {p:?} from {from}: {chain:?}");
+                            let chain: Vec<_> = (0..=3u32)
+                                .map(|l| {
+                                    let k = node(l, p[0] >> l, p[1] >> l, p[2] >> l);
+                                    (
+                                        l,
+                                        set.find(k.table_key())
+                                            .map(|v| (v[1], choice(v[1], r, frame))),
+                                        set.fades.get(&k).map(|f| (f.start, f.incoming, f.coarse)),
+                                        set.drawn.get(&k).map(|d| d.kind),
+                                    )
+                                })
+                                .collect();
+                            assert_eq!(
+                                search(&set, p, from, r, frame),
+                                Some(shown.first().copied()),
+                                "round {round} frame {frame} r {r} at {p:?} from {from}: {chain:?}"
+                            );
                         }
                     }
                 }
@@ -719,13 +904,31 @@ mod tests {
         for round in 0..100 {
             let drawn = random_cut(3, &mut next);
             let (added, removed) = diff(&drawn, &last);
-            let layers: FxHashMap<NodeKey, (f64, f64)> = drawn.iter().map(|d| (d.0, ((next() % 30) as f64, 34.0 + (next() % 30) as f64))).collect();
+            let layers: FxHashMap<NodeKey, (f64, f64)> = drawn
+                .iter()
+                .map(|d| (d.0, ((next() % 30) as f64, 34.0 + (next() % 30) as f64)))
+                .collect();
             // Frames FADE_FRAMES apart: no fade under way.
-            set.update(&added, &removed, &drawn.iter().map(|d| d.0).collect(), round * FADE_FRAMES, |k| {
-                slot = (slot + 1) % (1 << 14);
-                Some(NodeChunk { slot, z: layers[&k] })
-            });
-            set.update(&[], &[], &Default::default(), (round + 1) * FADE_FRAMES, |_| None);
+            set.update(
+                &added,
+                &removed,
+                &drawn.iter().map(|d| d.0).collect(),
+                round * FADE_FRAMES,
+                |k| {
+                    slot = (slot + 1) % (1 << 14);
+                    Some(NodeChunk {
+                        slot,
+                        z: layers[&k],
+                    })
+                },
+            );
+            set.update(
+                &[],
+                &[],
+                &Default::default(),
+                (round + 1) * FADE_FRAMES,
+                |_| None,
+            );
             last = drawn.clone();
             // The expected content of every node over the cut, in level-0 cells.
             for (key, e) in &set.entries {
@@ -740,17 +943,43 @@ mod tests {
                         continue;
                     }
                     let s = 1 << k.level;
-                    let z = if *kind == Kind::Mixed { (layers[k].0 as i32, layers[k].1 as i32) } else { (0, 64) };
+                    let z = if *kind == Kind::Mixed {
+                        (layers[k].0 as i32, layers[k].1 as i32)
+                    } else {
+                        (0, 64)
+                    };
                     let lo = [k.cx * 64 * s, k.cy * 64 * s, k.cz * 64 * s + z.0 * s];
-                    let hi = [k.cx * 64 * s + 64 * s, k.cy * 64 * s + 64 * s, k.cz * 64 * s + z.1 * s];
-                    want = Some(want.map_or((lo, hi), |(a, b)| ([0, 1, 2].map(|i| a[i].min(lo[i])), [0, 1, 2].map(|i| b[i].max(hi[i])))));
+                    let hi = [
+                        k.cx * 64 * s + 64 * s,
+                        k.cy * 64 * s + 64 * s,
+                        k.cz * 64 * s + z.1 * s,
+                    ];
+                    want = Some(want.map_or((lo, hi), |(a, b)| {
+                        (
+                            [0, 1, 2].map(|i| a[i].min(lo[i])),
+                            [0, 1, 2].map(|i| b[i].max(hi[i])),
+                        )
+                    }));
                 }
                 let (lo, hi) = want.expect("an entry has something drawn under it");
-                let origin = [key.cx * 64 * scale, key.cy * 64 * scale, key.cz * 64 * scale];
+                let origin = [
+                    key.cx * 64 * scale,
+                    key.cy * 64 * scale,
+                    key.cz * 64 * scale,
+                ];
                 for a in 0..3 {
                     // Rounded out to the node's cells, never inside.
-                    assert!(origin[a] + e.content.lo[a] * scale <= lo[a] && origin[a] + e.content.hi[a] * scale >= hi[a], "round {round} {key:?} axis {a}: {:?} vs {lo:?}..{hi:?}", e.content);
-                    assert!(lo[a] - (origin[a] + e.content.lo[a] * scale) < scale * 2 && origin[a] + e.content.hi[a] * scale - hi[a] < scale * 2, "round {round} {key:?} axis {a}: loose");
+                    assert!(
+                        origin[a] + e.content.lo[a] * scale <= lo[a]
+                            && origin[a] + e.content.hi[a] * scale >= hi[a],
+                        "round {round} {key:?} axis {a}: {:?} vs {lo:?}..{hi:?}",
+                        e.content
+                    );
+                    assert!(
+                        lo[a] - (origin[a] + e.content.lo[a] * scale) < scale * 2
+                            && origin[a] + e.content.hi[a] * scale - hi[a] < scale * 2,
+                        "round {round} {key:?} axis {a}: loose"
+                    );
                 }
             }
         }
@@ -764,15 +993,31 @@ mod tests {
         let at = |n: i32| node(0, n, n / 3, n % 5);
         let mut last: Vec<(NodeKey, Kind)> = Vec::new();
         for round in 0..200 {
-            let drawn: Vec<(NodeKey, Kind)> = (0..300).filter(|_| next() % 2 == 0).map(|n| (at(n), Kind::Mixed)).collect();
-            let changed: FxHashSet<NodeKey> = drawn.iter().filter(|_| next() % 7 == 0).map(|d| d.0).collect();
+            let drawn: Vec<(NodeKey, Kind)> = (0..300)
+                .filter(|_| next() % 2 == 0)
+                .map(|n| (at(n), Kind::Mixed))
+                .collect();
+            let changed: FxHashSet<NodeKey> = drawn
+                .iter()
+                .filter(|_| next() % 7 == 0)
+                .map(|d| d.0)
+                .collect();
             let (added, removed) = diff(&drawn, &last);
-            set.update(&added, &removed, &changed, round, |k| Some(NodeChunk { slot: k.cx as u32, z: (0.0, 64.0) }));
+            set.update(&added, &removed, &changed, round, |k| {
+                Some(NodeChunk {
+                    slot: k.cx as u32,
+                    z: (0.0, 64.0),
+                })
+            });
             last = drawn.clone();
             set.take_changes();
             assert_eq!(set.list.len(), drawn.len(), "round {round}");
             for (k, _) in &drawn {
-                assert_eq!(set.find(k.table_key()).map(|v| (v[0], v[1])), Some((k.cx, 1)), "round {round}");
+                assert_eq!(
+                    set.find(k.table_key()).map(|v| (v[0], v[1])),
+                    Some((k.cx, 1)),
+                    "round {round}"
+                );
             }
             for n in 0..300 {
                 if !drawn.iter().any(|d| d.0 == at(n)) {

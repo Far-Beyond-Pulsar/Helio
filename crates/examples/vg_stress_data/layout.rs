@@ -263,7 +263,10 @@ impl MuseumLayout {
     }
 
     pub fn tree_count(&self) -> usize {
-        self.placements.iter().filter(|p| p.asset.contains('#')).count()
+        self.placements
+            .iter()
+            .filter(|p| p.asset.contains('#'))
+            .count()
     }
 }
 
@@ -341,8 +344,14 @@ impl Builder<'_> {
         if let Some(piece) = pedestal {
             let height = pedestal_height(piece);
             self.add(
-                Placement::kit(format!("Pedestal {tag}"), "Pedestals", piece, [x, base_y, z], 0.0)
-                    .with_marble(Mat::MarbleCartago),
+                Placement::kit(
+                    format!("Pedestal {tag}"),
+                    "Pedestals",
+                    piece,
+                    [x, base_y, z],
+                    0.0,
+                )
+                .with_marble(Mat::MarbleCartago),
             );
             top += height;
         }
@@ -686,8 +695,14 @@ pub fn museum_layout_with(d: &Dims, config: &Config) -> MuseumLayout {
         }
         for (zi, z) in [-4.8f32, 4.8].into_iter().enumerate() {
             b.add(
-                Placement::kit(format!("Bench {tag} {}", zi + 1), "Props", "bench", [sx * amb_x, floor, z], sx * 90.0)
-                    .with_marble(Mat::MarbleGrey),
+                Placement::kit(
+                    format!("Bench {tag} {}", zi + 1),
+                    "Props",
+                    "bench",
+                    [sx * amb_x, floor, z],
+                    sx * 90.0,
+                )
+                .with_marble(Mat::MarbleGrey),
             );
         }
     }
@@ -696,8 +711,14 @@ pub fn museum_layout_with(d: &Dims, config: &Config) -> MuseumLayout {
         let x = sx * 3.3;
         let z = d.cella_z + d.cella_wall_t / 2.0 + 1.0;
         b.add(
-            Placement::kit(format!("Stele {tag}"), "Pedestals", "stele", [x, floor, z], 0.0)
-                .with_marble(Mat::MarbleGrey),
+            Placement::kit(
+                format!("Stele {tag}"),
+                "Pedestals",
+                "stele",
+                [x, floor, z],
+                0.0,
+            )
+            .with_marble(Mat::MarbleGrey),
         );
         b.exhibit(
             MANUSCRIPT,
@@ -954,7 +975,14 @@ pub fn museum_layout_with(d: &Dims, config: &Config) -> MuseumLayout {
 }
 
 /// Statue table: (definition, weight).
-const CROWD: &[(StatueDef, u32)] = &[(THAI, 3), (DRAGON, 3), (HAPPY, 2), (XYZ_DRAGON, 2), (MANUSCRIPT, 1), (LUCY, 1)];
+const CROWD: &[(StatueDef, u32)] = &[
+    (THAI, 3),
+    (DRAGON, 3),
+    (HAPPY, 2),
+    (XYZ_DRAGON, 2),
+    (MANUSCRIPT, 1),
+    (LUCY, 1),
+];
 
 fn pick_statue(rng: &mut Rng, table: &[(StatueDef, u32)]) -> StatueDef {
     let total: u32 = table.iter().map(|e| e.1).sum();
@@ -976,7 +1004,11 @@ fn scatter_statuary(b: &mut Builder, config: &Config, amb_x: f32, floor: f32) {
     // Hall: along both ambulatories, skipping the original exhibits and benches.
     let blocked = [-8.0f32, -4.8, 4.8, 8.0];
     let mut slots: Vec<(f32, f32, f32)> = Vec::new(); // x, z, yaw base
-    let rows: &[f32] = if density > 1.5 { &[-0.55, 0.55] } else { &[0.0] };
+    let rows: &[f32] = if density > 1.5 {
+        &[-0.55, 0.55]
+    } else {
+        &[0.0]
+    };
     for sx in [-1.0f32, 1.0] {
         for (ri, dx) in rows.iter().enumerate() {
             let mut z = -16.5 + if ri == 1 { 0.95 } else { 0.0 };
@@ -1044,13 +1076,22 @@ fn scatter_statuary(b: &mut Builder, config: &Config, amb_x: f32, floor: f32) {
         // A third of the crowd stands on a plinth.
         if rng.below(3) == 0 {
             b.add(
-                Placement::kit(format!("Plinth {placed}"), "Pedestals", "pedestal_small", [x, 0.0, z], 0.0)
-                    .with_marble(Mat::MarbleGrey),
+                Placement::kit(
+                    format!("Plinth {placed}"),
+                    "Pedestals",
+                    "pedestal_small",
+                    [x, 0.0, z],
+                    0.0,
+                )
+                .with_marble(Mat::MarbleGrey),
             );
             p.position[1] = f64::from(pedestal_height("pedestal_small"));
         }
         b.add(p);
-        b.out.statues.push(StatueInstance { def, name: format!("{} Crowd {placed}", def.label) });
+        b.out.statues.push(StatueInstance {
+            def,
+            name: format!("{} Crowd {placed}", def.label),
+        });
     }
 }
 
@@ -1069,21 +1110,45 @@ fn scatter_trees(b: &mut Builder, config: &Config) {
         .flat_map(|t| (0..t.variants.len()).map(move |v| (*t, v)))
         .collect();
     let mut tallest = all.clone();
-    tallest.sort_by(|a, b| b.0.variants[b.1].height.total_cmp(&a.0.variants[a.1].height));
+    tallest.sort_by(|a, b| {
+        b.0.variants[b.1]
+            .height
+            .total_cmp(&a.0.variants[a.1].height)
+    });
     let heroes: Vec<_> = tallest.iter().take(4).copied().collect();
     let big: Vec<_> = all.iter().copied().filter(|(t, _)| t.large).collect();
     let small: Vec<_> = all.iter().copied().filter(|(t, _)| !t.large).collect();
     let mut n = 0;
     let mut hero_spots: Vec<(f32, f32)> = Vec::new();
     // Hero trees flank the approach; small trees are scaled up to hero size.
-    let spots = [(27.0, 30.0), (-27.0, 33.0), (29.0, 47.0), (-29.0, 50.0), (27.0, 63.0), (-27.0, 62.0), (11.0, 73.0), (-11.0, 74.0)];
+    let spots = [
+        (27.0, 30.0),
+        (-27.0, 33.0),
+        (29.0, 47.0),
+        (-29.0, 50.0),
+        (27.0, 63.0),
+        (-27.0, 62.0),
+        (11.0, 73.0),
+        (-11.0, 74.0),
+    ];
     for (i, &(x, z)) in spots.iter().enumerate() {
         let (tree, variant) = heroes[i % heroes.len()];
         let height = tree.variants[variant].height;
-        let scale = if tree.large { rng.range(0.95, 1.15) } else { 11.0 / height };
+        let scale = if tree.large {
+            rng.range(0.95, 1.15)
+        } else {
+            11.0 / height
+        };
         n += 1;
         hero_spots.push((x, z));
-        b.add(Placement::tree(format!("Hero Tree {n}"), tree, variant, [x, 0.0, z], rng.range(0.0, 360.0), scale));
+        b.add(Placement::tree(
+            format!("Hero Tree {n}"),
+            tree,
+            variant,
+            [x, 0.0, z],
+            rng.range(0.0, 360.0),
+            scale,
+        ));
     }
     // Courtyard accents just outside the plaza edge.
     let accents = (96.0 * density).round() as usize;
@@ -1094,7 +1159,10 @@ fn scatter_trees(b: &mut Builder, config: &Config) {
         let side = if rng.below(2) == 0 { -1.0f32 } else { 1.0 };
         let x = side * rng.range(23.5, 36.0);
         let z = rng.range(18.0, 68.0);
-        if hero_spots.iter().any(|&(hx, hz)| (hx - x).hypot(hz - z) < 8.0) {
+        if hero_spots
+            .iter()
+            .any(|&(hx, hz)| (hx - x).hypot(hz - z) < 8.0)
+        {
             continue;
         }
         let pool = if small.is_empty() { &all } else { &small };
@@ -1102,7 +1170,14 @@ fn scatter_trees(b: &mut Builder, config: &Config) {
         placed += 1;
         n += 1;
         let s = rng.range(tree.forest_scale.0, tree.forest_scale.1);
-        b.add(Placement::tree(format!("Courtyard Tree {n}"), tree, variant, [x, 0.0, z], rng.range(0.0, 360.0), s));
+        b.add(Placement::tree(
+            format!("Courtyard Tree {n}"),
+            tree,
+            variant,
+            [x, 0.0, z],
+            rng.range(0.0, 360.0),
+            s,
+        ));
     }
     // Forests: denser with distance from the temple; the approach stays open.
     let forest = (2000.0 * density).round() as usize;
@@ -1134,7 +1209,14 @@ fn scatter_trees(b: &mut Builder, config: &Config) {
         placed += 1;
         n += 1;
         let s = rng.range(tree.forest_scale.0, tree.forest_scale.1);
-        b.add(Placement::tree(format!("Forest Tree {n}"), tree, variant, [x, 0.0, z], rng.range(0.0, 360.0), s));
+        b.add(Placement::tree(
+            format!("Forest Tree {n}"),
+            tree,
+            variant,
+            [x, 0.0, z],
+            rng.range(0.0, 360.0),
+            s,
+        ));
     }
 }
 
@@ -1228,7 +1310,10 @@ mod tests {
 
     #[test]
     fn layout_is_deterministic() {
-        assert_eq!(layout(1.0, "full").placements, layout(1.0, "full").placements);
+        assert_eq!(
+            layout(1.0, "full").placements,
+            layout(1.0, "full").placements
+        );
     }
 
     #[test]
@@ -1236,11 +1321,19 @@ mod tests {
         let l = layout(1.0, "full");
         let (kit, statues, trees, total) = l.triangle_report();
         assert_eq!(kit + statues + trees, total);
-        assert!(l.tree_count() >= 1800 && l.tree_count() <= 2600, "{}", l.tree_count());
+        assert!(
+            l.tree_count() >= 1800 && l.tree_count() <= 2600,
+            "{}",
+            l.tree_count()
+        );
         assert!(l.statues.len() > 60, "{}", l.statues.len());
         assert!(trees > 100_000_000, "{trees}");
         assert!(kit > 100_000, "{kit}");
-        eprintln!("default: trees {} statues {} tris kit {kit} statues {statues} trees {trees} total {total}", l.tree_count(), l.statues.len());
+        eprintln!(
+            "default: trees {} statues {} tris kit {kit} statues {statues} trees {trees} total {total}",
+            l.tree_count(),
+            l.statues.len()
+        );
     }
 
     #[test]
@@ -1251,21 +1344,44 @@ mod tests {
         assert!(low.tree_count() < mid.tree_count() && mid.tree_count() < high.tree_count());
         assert!(low.statues.len() < mid.statues.len() && mid.statues.len() < high.statues.len());
         let small = layout(1.0, "small");
-        assert!(small.placements.iter().all(|p| !p.asset.contains("pine_tree") && !p.asset.contains("fir_tree")));
+        assert!(small
+            .placements
+            .iter()
+            .all(|p| !p.asset.contains("pine_tree") && !p.asset.contains("fir_tree")));
         assert!(small.tree_count() > 100);
         assert_eq!(layout(1.0, "none").tree_count(), 0);
-        let sm = layout(1.0, "small"); let ins = layout(8.0, "full");
-        eprintln!("small: trees {} tris {:?}; insane: trees {} statues {} tris {:?}", sm.tree_count(), sm.triangle_report(), ins.tree_count(), ins.statues.len(), ins.triangle_report());
-        eprintln!("high: trees {} statues {} total tris {}", high.tree_count(), high.statues.len(), high.triangle_report().3);
+        let sm = layout(1.0, "small");
+        let ins = layout(8.0, "full");
+        eprintln!(
+            "small: trees {} tris {:?}; insane: trees {} statues {} tris {:?}",
+            sm.tree_count(),
+            sm.triangle_report(),
+            ins.tree_count(),
+            ins.statues.len(),
+            ins.triangle_report()
+        );
+        eprintln!(
+            "high: trees {} statues {} total tris {}",
+            high.tree_count(),
+            high.statues.len(),
+            high.triangle_report().3
+        );
     }
 
     #[test]
     fn tree_placements_have_every_slot_and_stay_off_the_temple() {
         let l = layout(2.0, "full");
         for p in l.placements.iter().filter(|p| p.asset.contains('#')) {
-            let tree = catalog::TREES.iter().find(|t| p.asset.contains(t.id)).unwrap();
+            let tree = catalog::TREES
+                .iter()
+                .find(|t| p.asset.contains(t.id))
+                .unwrap();
             assert_eq!(p.slots.len(), tree.slots.len(), "{}", p.name);
-            assert!(!(p.position[0].abs() < 14.0 && p.position[2].abs() < 26.0), "{} inside the temple", p.name);
+            assert!(
+                !(p.position[0].abs() < 14.0 && p.position[2].abs() < 26.0),
+                "{} inside the temple",
+                p.name
+            );
             assert!(p.virtual_geometry && p.triangles > 100_000);
         }
     }
@@ -1274,7 +1390,14 @@ mod tests {
     fn marbles_map_to_each_surface() {
         let l = layout(1.0, "none");
         let slot = |name: &str, slot: &str| {
-            l.placements.iter().find(|p| p.name == name).unwrap().slots.iter().find(|s| s.0 == slot).map(|s| s.1)
+            l.placements
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .slots
+                .iter()
+                .find(|s| s.0 == slot)
+                .map(|s| s.1)
         };
         assert_eq!(slot("Floor", "marble"), Some(Mat::MarbleCartago));
         assert_eq!(slot("Floor", "marble_green"), Some(Mat::MarbleMosaic));

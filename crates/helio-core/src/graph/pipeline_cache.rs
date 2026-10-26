@@ -402,8 +402,7 @@ impl PipelineFormatCache {
         path: impl Into<std::path::PathBuf>,
     ) -> Self {
         let path = path.into();
-        let (driver_cache, persistent_path, persist_lock) =
-            shared_driver_cache(device, Some(path));
+        let (driver_cache, persistent_path, persist_lock) = shared_driver_cache(device, Some(path));
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             build_lock: Arc::new(Mutex::new(())),
@@ -662,10 +661,10 @@ impl PipelineFormatCache {
         let Some(path) = &self.persistent_path else {
             return Ok(());
         };
-        let _persist_guard = self
-            .persist_lock
-            .as_ref()
-            .map(|lock| lock.lock().expect("driver pipeline cache persist lock poisoned"));
+        let _persist_guard = self.persist_lock.as_ref().map(|lock| {
+            lock.lock()
+                .expect("driver pipeline cache persist lock poisoned")
+        });
         let Some(data) = self
             .driver_cache
             .as_ref()

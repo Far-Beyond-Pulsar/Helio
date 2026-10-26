@@ -67,7 +67,10 @@ fn main() {
                                     log::info!(
                                         "  column {:?}: rows_reflected = {}",
                                         col.get("type_name"),
-                                        serde_json::to_string(reflected.unwrap_or(&serde_json::Value::Null)).unwrap_or_default()
+                                        serde_json::to_string(
+                                            reflected.unwrap_or(&serde_json::Value::Null)
+                                        )
+                                        .unwrap_or_default()
                                     );
                                 }
                             }

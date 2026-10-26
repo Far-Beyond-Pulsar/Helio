@@ -10,7 +10,11 @@ fn the_bundled_lenses_bake_in_layer_order() {
     println!(
         "bundled bake ({} lenses, {}): {:?}",
         bakes.len(),
-        if cfg!(debug_assertions) { "debug" } else { "release" },
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         started.elapsed()
     );
     assert_eq!(bakes.len(), BundledLens::ALL.len());
@@ -26,7 +30,11 @@ fn the_bundled_lenses_bake_in_layer_order() {
     let bank = PrescriptionBank::new(&rig.device, &refs);
     assert_eq!(bank.len(), BundledLens::ALL.len());
     for layer in 0..bank.len() {
-        assert!((bank.efl_mm(layer) - 50.0).abs() < 1.0, "layer {layer}: {} mm", bank.efl_mm(layer));
+        assert!(
+            (bank.efl_mm(layer) - 50.0).abs() < 1.0,
+            "layer {layer}: {} mm",
+            bank.efl_mm(layer)
+        );
     }
     assert_eq!(bank.rays(), bundled_rays());
     assert!(bundled_bakes_ready().is_some());
@@ -45,7 +53,11 @@ fn the_bundled_iris_shapes_are_distinct_shapes_inside_the_pupil() {
     for (shape, layer) in BundledAperture::ALL.into_iter().zip(&layers) {
         assert_eq!(layer.len(), n * n);
         let area: f32 = layer.iter().map(|&c| f32::from(c) / 255.0).sum();
-        assert!(area > 0.25 * disc && area < 0.95 * disc, "{shape:?} covers {} of the pupil", area / disc);
+        assert!(
+            area > 0.25 * disc && area < 0.95 * disc,
+            "{shape:?} covers {} of the pupil",
+            area / disc
+        );
         // Nothing in the square's corners, outside the pupil circle.
         for corner in [0, n - 1, n * (n - 1), n * n - 1] {
             assert_eq!(layer[corner], 0, "{shape:?}");
@@ -64,7 +76,8 @@ fn the_bundled_mask_layer_holds_water_drops() {
     assert_eq!(layers.len(), 1);
     let layer = &layers[WATER_DROP_MASK_LAYER as usize];
     assert_eq!(layer.len(), (MASK_SIZE * MASK_SIZE * 4) as usize);
-    let covered = layer.chunks(4).filter(|t| t[3] > 127).count() as f32 / (MASK_SIZE * MASK_SIZE) as f32;
+    let covered =
+        layer.chunks(4).filter(|t| t[3] > 127).count() as f32 / (MASK_SIZE * MASK_SIZE) as f32;
     assert!(covered > 0.02 && covered < 0.4, "drops cover {covered}");
     // The same bytes every time: a level looks the same on every run.
     assert_eq!(layers, bundled_mask_layers());

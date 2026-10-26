@@ -83,7 +83,8 @@ pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 144 * 4;
 /// `CameraPostProcessSourceRow`: the `CameraPostProcessComponent` pass row.
 pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 136 * 4;
 /// `CameraLensSourceRow`: the `helio_pass_lens::LensComponent` pass row.
-pub const CAMERA_LENS_SOURCE_ROW_BYTES: u64 = std::mem::size_of::<helio_pass_lens::LensComponent>() as u64;
+pub const CAMERA_LENS_SOURCE_ROW_BYTES: u64 =
+    std::mem::size_of::<helio_pass_lens::LensComponent>() as u64;
 /// `WaterVolumeSourceRow`: local size (`w`: surface height above the
 /// owner), then the water volume row after its bounds (56 words).
 pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
@@ -92,7 +93,8 @@ pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
 /// wind row (12 words).
 pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 48 * 4;
 /// Words of a foliage type row (`helio_pass_foliage_place::GpuFoliageType`).
-const FOLIAGE_TYPE_WORDS: u32 = (std::mem::size_of::<helio_pass_foliage_place::GpuFoliageType>() / 4) as u32;
+const FOLIAGE_TYPE_WORDS: u32 =
+    (std::mem::size_of::<helio_pass_foliage_place::GpuFoliageType>() / 4) as u32;
 /// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
 /// row, its centre in the owner's space.
 pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = ATMOSPHERE_WORDS as u64 * 4;
@@ -498,17 +500,23 @@ impl EnvironmentJoin {
     pub fn new(device: &wgpu::Device, keys: EnvironmentJoinKeys) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Environment Join"),
-            source: wgpu::ShaderSource::Wgsl(crate::scene_join::join_source(include_str!("../shaders/environment_join.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                crate::scene_join::join_source(include_str!("../shaders/environment_join.wgsl"))
+                    .into(),
+            ),
         });
         let pipeline = |entry_point| {
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some("Environment Join"),
-                layout: None,
-                module: &module,
-                entry_point: Some(entry_point),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some("Environment Join"),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
         let volume = SPATIAL | GATE_HIDDEN;
         let specs = [

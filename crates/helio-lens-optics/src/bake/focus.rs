@@ -95,7 +95,10 @@ fn best_focus(rays: &[Ray]) -> Option<(f64, f64, f64)> {
     let n = rays.len() as f64;
     let mean = |f: &dyn Fn(&Ray) -> f64| rays.iter().map(f).sum::<f64>() / n;
     let (mx, my) = (mean(&|r| r.origin[0]), mean(&|r| r.origin[1]));
-    let (msx, msy) = (mean(&|r| r.dir[0] / r.dir[2]), mean(&|r| r.dir[1] / r.dir[2]));
+    let (msx, msy) = (
+        mean(&|r| r.dir[0] / r.dir[2]),
+        mean(&|r| r.dir[1] / r.dir[2]),
+    );
     let (mut cx, mut cy, mut sx, mut sy) = (0.0, 0.0, 0.0, 0.0);
     for r in rays {
         let (dx, dy) = (r.origin[0] - mx, r.origin[1] - my);
@@ -107,7 +110,11 @@ fn best_focus(rays: &[Ray]) -> Option<(f64, f64, f64)> {
     }
     let t = if sx > 1e-30 { -cx / sx } else { 0.0 };
     let s = if sy > 1e-30 { -cy / sy } else { 0.0 };
-    let b = if sx + sy > 1e-30 { -(cx + cy) / (sx + sy) } else { 0.0 };
+    let b = if sx + sy > 1e-30 {
+        -(cx + cy) / (sx + sy)
+    } else {
+        0.0
+    };
     Some((t, s, b))
 }
 
@@ -138,7 +145,9 @@ pub fn bake_focus(rx: &Prescription, config: &BakeConfig) -> Result<FocusData, O
     let base = Tracer::new(rx, config.reference_wavelength_nm)?;
     let (mut tang, mut sag, mut best) = (vec![0.0f32; n], vec![0.0f32; n], vec![0.0f32; n]);
     for i in 0..n {
-        let Some(field) = field_for(&base, analysis_field_r(i, n), dist) else { continue };
+        let Some(field) = field_for(&base, analysis_field_r(i, n), dist) else {
+            continue;
+        };
         let rays = trace_pupil(&base, field, &grid);
         if let Some((t, s, b)) = best_focus(&rays) {
             tang[i] = t as f32;
@@ -170,14 +179,23 @@ pub fn bake_psf(rx: &Prescription, config: &BakeConfig) -> Result<PsfTable, Opti
     let tracer = Tracer::new(rx, config.reference_wavelength_nm)?;
     let mut data = vec![0.0f32; n * defocus.len() * stride];
     for i in 0..n {
-        let Some(field) = field_for(&tracer, analysis_field_r(i, n), dist) else { continue };
-        let Ok(chief) = tracer.chief_ray(field) else { continue };
+        let Some(field) = field_for(&tracer, analysis_field_r(i, n), dist) else {
+            continue;
+        };
+        let Ok(chief) = tracer.chief_ray(field) else {
+            continue;
+        };
         let rays = trace_pupil(&tracer, field, &grid);
         if rays.is_empty() {
             continue;
         }
         for (k, &dz) in defocus.iter().enumerate() {
-            let at = |r: &Ray| (r.origin[0] + dz * r.dir[0] / r.dir[2], r.origin[1] + dz * r.dir[1] / r.dir[2]);
+            let at = |r: &Ray| {
+                (
+                    r.origin[0] + dz * r.dir[0] / r.dir[2],
+                    r.origin[1] + dz * r.dir[1] / r.dir[2],
+                )
+            };
             let c = at(&chief);
             let pts: Vec<(f64, f64)> = rays
                 .iter()
@@ -187,7 +205,10 @@ pub fn bake_psf(rx: &Prescription, config: &BakeConfig) -> Result<PsfTable, Opti
                 })
                 .collect();
             let m = pts.len() as f64;
-            let (mx, my) = (pts.iter().map(|p| p.0).sum::<f64>() / m, pts.iter().map(|p| p.1).sum::<f64>() / m);
+            let (mx, my) = (
+                pts.iter().map(|p| p.0).sum::<f64>() / m,
+                pts.iter().map(|p| p.1).sum::<f64>() / m,
+            );
             let vx = pts.iter().map(|p| (p.0 - mx).powi(2)).sum::<f64>() / m;
             let vy = pts.iter().map(|p| (p.1 - my).powi(2)).sum::<f64>() / m;
             let radii: Vec<f64> = pts.iter().map(|p| p.0.hypot(p.1)).collect();

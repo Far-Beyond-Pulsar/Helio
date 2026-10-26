@@ -21,16 +21,15 @@ mod vg_stress_data {
 }
 
 use helio::{
-    Camera, Renderer, RendererBuilder, RendererConfig,
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
+    Camera, HelioGraphicsConfig, HelioGraphicsContext, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_core::{
     BufferHandle, BufferKey, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
 };
 use helio_default_passes::build_default_graph_external_with_context;
 use helio_vg_format::{
-    GpuVgInstance, VgAssetReadyRow, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS, INST_SHADOW_CASTER,
-    VG_ASSET_READY_FLAG_READY,
+    GpuVgInstance, VgAssetReadyRow, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS,
+    INST_SHADOW_CASTER, VG_ASSET_READY_FLAG_READY,
 };
 use helio_vg_stream::{VgRuntime, VgRuntimeSettings};
 use pulsar_scenedb::{Entity, SceneDb};
@@ -111,7 +110,11 @@ struct VgSceneTargets {
 /// targets whose asset reports ready (root pages resident). Everything else
 /// draws nothing, because VG parts own no classic geometry; `classic[row]` is
 /// set for the object rows VG now owns. Pure, so the gating is unit tested.
-fn select_visible(targets: &[VgTarget], ready: &[VgAssetReadyRow], classic: &mut [u32]) -> Vec<GpuVgInstance> {
+fn select_visible(
+    targets: &[VgTarget],
+    ready: &[VgAssetReadyRow],
+    classic: &mut [u32],
+) -> Vec<GpuVgInstance> {
     let slots: HashMap<(u32, u32), u32> = ready
         .iter()
         .filter(|row| row.flags & VG_ASSET_READY_FLAG_READY != 0)
@@ -264,10 +267,14 @@ impl SceneDerivation for SceneVgDerivation {
             let count = [instances.len() as u32, 0, 0, 0];
             targets.visible = instances.len();
             instances.resize(self.instance_capacity as usize, GpuVgInstance::zeroed());
-            ctx.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-            ctx.queue.write_buffer(&self.count, 0, bytemuck::cast_slice(&count));
-            ctx.queue.write_buffer(&self.ready, 0, bytemuck::cast_slice(&ready_rows));
-            ctx.queue.write_buffer(&self.classic, 0, bytemuck::cast_slice(&classic));
+            ctx.queue
+                .write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+            ctx.queue
+                .write_buffer(&self.count, 0, bytemuck::cast_slice(&count));
+            ctx.queue
+                .write_buffer(&self.ready, 0, bytemuck::cast_slice(&ready_rows));
+            ctx.queue
+                .write_buffer(&self.classic, 0, bytemuck::cast_slice(&classic));
             self.content_generation = self.content_generation.wrapping_add(1);
         }
 
@@ -296,7 +303,12 @@ impl SceneDerivation for SceneVgDerivation {
                 ),
                 (
                     SCENE_OBJECTS_STRUCTURE,
-                    BufferHandle { buffer: self.structure_marker.clone(), epoch: 1, row_bytes: 16, content_generation: structure },
+                    BufferHandle {
+                        buffer: self.structure_marker.clone(),
+                        epoch: 1,
+                        row_bytes: 16,
+                        content_generation: structure,
+                    },
                 ),
             ],
             ..Default::default()
@@ -415,7 +427,8 @@ fn prepare_requested() -> bool {
 fn prepare() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let config = vg_stress_prep::catalog::Config::from_env_and_args();
-    let layout = vg_stress_data::layout::museum_layout_with(&vg_stress_data::dims::Dims::load(), &config);
+    let layout =
+        vg_stress_data::layout::museum_layout_with(&vg_stress_data::dims::Dims::load(), &config);
     print_scene_report(&layout, &config, &root);
     let tau = parse_tau(std::env::var("VG_STRESS_TAU").ok().as_deref());
     let loader = vg_stress_loading::start(root, &layout.placements, true, config, tau, true);
@@ -529,34 +542,33 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("Helio – VG Museum | starting")
-                        .with_visible(std::env::var_os("HELIO_VG_SMOKE_SECONDS").is_none() && capture_options.is_none())
+                        .with_visible(
+                            std::env::var_os("HELIO_VG_SMOKE_SECONDS").is_none()
+                                && capture_options.is_none(),
+                        )
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
         );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            flags: wgpu::InstanceFlags::empty(),
-            ..helio_core::wgpu_instance_descriptor()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            apply_limit_buckets: false,
-        }))
-        .expect("adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("Device"),
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            experimental_features: required_experimental_features(adapter.features()),
-            ..Default::default()
-        }))
-        .expect("device");
-
+        let mut size = window.inner_size();
+        if let Some(options) = &capture_options {
+            size = winit::dpi::PhysicalSize::new(options.size.0, options.size.1);
+        }
+        let mut graphics = pollster::block_on(HelioGraphicsContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            HelioGraphicsConfig {
+                vr_support: capture_options.is_none(),
+                application_name: "Helio VG Museum".into(),
+                ..Default::default()
+            },
+        ))
+        .expect("Helio graphics context");
+        let adapter = graphics.adapter.clone();
+        let device = graphics.device.clone();
+        let queue = graphics.queue.clone();
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
@@ -565,54 +577,46 @@ impl ApplicationHandler for App {
             "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
             info.backend, info.name, info.driver
         );
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
-        let mut size = window.inner_size();
-        let format = if capture_options.is_some() { wgpu::TextureFormat::Rgba8UnormSrgb } else { format };
-        if let Some(o) = &capture_options {
-            size = winit::dpi::PhysicalSize::new(o.size.0, o.size.1);
-        }
-        if capture_options.is_none() {
-            surface.configure(
-                &device,
-                &wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format,
-                    width: size.width,
-                    height: size.height,
-                    present_mode: wgpu::PresentMode::Fifo,
-                    alpha_mode: caps.alpha_modes[0],
-                    view_formats: vec![],
-                    desired_maximum_frame_latency: 2,
-                    color_space: wgpu::SurfaceColorSpace::Auto,
-                },
-            );
-        }
+        let format = if capture_options.is_some() {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            graphics.surface_config.format
+        };
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let runtime = VgRuntime::default();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let tau = parse_tau(std::env::var("VG_STRESS_TAU").ok().as_deref());
-        let mode = match std::env::var("VG_STRESS_MODE").ok().as_deref().map(str::trim) {
+        let mode = match std::env::var("VG_STRESS_MODE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
             Some("hw") => helio_vg_format::VgMode::ForceHwRaster,
             Some("nonrt") => helio_vg_format::VgMode::ForceNonRtFallback,
             Some("off") => helio_vg_format::VgMode::Off,
             _ => helio_vg_format::VgMode::Auto,
         };
         let tier3 = std::env::var_os("VG_STRESS_TIER3").is_some_and(|v| v != "0");
-        let page_budget_mb = std::env::var("VG_STRESS_PAGE_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or_else(|| runtime.settings().page_budget_mb);
-        runtime.set_settings(VgRuntimeSettings { tau_px: tau, mode, tier3, page_budget_mb, ..runtime.settings() });
+        let page_budget_mb = std::env::var("VG_STRESS_PAGE_MB")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or_else(|| runtime.settings().page_budget_mb);
+        runtime.set_settings(VgRuntimeSettings {
+            tau_px: tau,
+            mode,
+            tier3,
+            page_budget_mb,
+            ..runtime.settings()
+        });
         println!("[Museum] VG mode {mode:?} (VG_STRESS_MODE=auto|hw|nonrt|off)");
-        println!("[Museum] Tier 3 dense tiles {} (VG_STRESS_TIER3=1 enables)", if tier3 { "ON" } else { "off" });
-        println!("[Museum] VG error tolerance tau = {tau} px (VG_STRESS_TAU; - and = keys change it live)");
+        println!(
+            "[Museum] Tier 3 dense tiles {} (VG_STRESS_TIER3=1 enables)",
+            if tier3 { "ON" } else { "off" }
+        );
+        println!(
+            "[Museum] VG error tolerance tau = {tau} px (VG_STRESS_TAU; - and = keys change it live)"
+        );
         let museum_config = vg_stress_prep::catalog::Config::from_env_and_args();
         let mut layout = vg_stress_data::layout::museum_layout_with(
             &vg_stress_data::dims::Dims::load(),
@@ -623,7 +627,13 @@ impl ApplicationHandler for App {
         if let Some(b) = &bench_cfg {
             layout.placements = b.placements();
             layout.lights.clear();
-            println!("[Bench] {} instances of {:?}, grid {:.0} m, seed {}", b.instances, b.asset, b.extent(), b.seed);
+            println!(
+                "[Bench] {} instances of {:?}, grid {:.0} m, seed {}",
+                b.instances,
+                b.asset,
+                b.extent(),
+                b.seed
+            );
         }
         print_scene_report(&layout, &museum_config, &root);
         let textures = Arc::new(RwLock::new(pulsar_scenedb::gpu::TextureStore::new(1024)));
@@ -636,17 +646,17 @@ impl ApplicationHandler for App {
         for material in Mat::all(&museum_config) {
             let surface = material.surface();
             let mut row = make_material(
-                surface.base_color, surface.roughness, surface.metallic,
-                surface.emissive_color, surface.emissive_intensity,
+                surface.base_color,
+                surface.roughness,
+                surface.metallic,
+                surface.emissive_color,
+                surface.emissive_intensity,
             );
             if material.tree_part().is_some_and(|(_, slot)| slot.masked) {
                 // The catalogue's leaf materials are cutouts, not blended glass.
                 row.flags |= helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_DOUBLE_SIDED;
             }
-            let entity = spawn_material(
-                &mut scene_db.world,
-                row,
-            );
+            let entity = spawn_material(&mut scene_db.world, row);
             materials.insert(material, entity);
         }
         spawn_sky(&mut scene_db.world, [1.0, 1.0, 1.0]);
@@ -658,7 +668,10 @@ impl ApplicationHandler for App {
             v3_demo_common::set_volumetric_quality(&mut scene_db.world, 1, 260.0);
             v3_demo_common::spawn_global_fog(
                 &mut scene_db.world,
-                v3_demo_common::GlobalFogComponent { enabled: 0, ..Default::default() },
+                v3_demo_common::GlobalFogComponent {
+                    enabled: 0,
+                    ..Default::default()
+                },
             )
         });
         for light in &layout.lights {
@@ -703,16 +716,22 @@ impl ApplicationHandler for App {
         }
         let derivation =
             SceneVgDerivation::new(&device, runtime.clone(), targets.clone(), vg_supported);
-        let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .with_scene_derivation(Box::new(derivation))
-            .build(
+            .with_scene_derivation(Box::new(derivation));
+        let mut renderer = if capture_options.is_none() {
+            builder
+                .build_with_graphics_context(&mut graphics)
+                .expect("Helio renderer")
+        } else {
+            builder.build(
                 device.clone(),
                 queue.clone(),
                 size.width,
                 size.height,
                 format,
-            );
+            )
+        };
         renderer.set_material_sampler(&material_sampler());
         renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
         renderer.set_clear_color([0.018, 0.022, 0.035, 1.0]);
@@ -743,7 +762,9 @@ impl ApplicationHandler for App {
             .collect::<HashSet<_>>()
             .len();
         let capture = capture_options.map(|o| {
-            let shots = bench_cfg.as_ref().map_or_else(|| vg_stress_capture::load_shots(&root), |b| b.shots());
+            let shots = bench_cfg
+                .as_ref()
+                .map_or_else(|| vg_stress_capture::load_shots(&root), |b| b.shots());
             vg_stress_capture::Capture::new(o, shots)
         });
         let adapter_name = info.name.clone();
@@ -760,7 +781,9 @@ impl ApplicationHandler for App {
             layout.placements.len(),
             layout.statues.len()
         );
-        let rays = v3_demo_common::SceneRays::new(&device, &queue).with_virtual_geometry(runtime.clone());
+        let rays =
+            v3_demo_common::SceneRays::new(&device, &queue).with_virtual_geometry(runtime.clone());
+        let surface = graphics.surface;
         self.state = Some(AppState {
             window,
             surface,
@@ -1060,11 +1083,21 @@ impl AppState {
         if self.profile {
             self.frame_samples.sort_by(f32::total_cmp);
             let n = self.frame_samples.len();
-            let percentile = |p: usize| if n == 0 { 0.0 } else { self.frame_samples[((n - 1) * p) / 100] };
+            let percentile = |p: usize| {
+                if n == 0 {
+                    0.0
+                } else {
+                    self.frame_samples[((n - 1) * p) / 100]
+                }
+            };
             let timing = self.renderer.timing_snapshot();
             let mut passes = timing.passes.clone();
             passes.sort_by(|a, b| b.gpu_ms.unwrap_or(0.0).total_cmp(&a.gpu_ms.unwrap_or(0.0)));
-            let top: Vec<_> = passes.iter().take(6).map(|p| format!("{}={:.2}ms", p.name, p.gpu_ms.unwrap_or(0.0))).collect();
+            let top: Vec<_> = passes
+                .iter()
+                .take(6)
+                .map(|p| format!("{}={:.2}ms", p.name, p.gpu_ms.unwrap_or(0.0)))
+                .collect();
             let pool = self
                 .runtime
                 .with_store(|store| {
@@ -1076,9 +1109,19 @@ impl AppState {
                     )
                 })
                 .unwrap_or_default();
-            eprintln!("[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {} | {}",
-                self.started.elapsed().as_secs_f32(), self.frames, self.loader.is_some(), percentile(50), percentile(99),
-                self.frame_samples.last().copied().unwrap_or(0.0), timing.total_gpu_ms, timing.gpu_lag_frames, top.join(" "), pool);
+            eprintln!(
+                "[Museum profile] t={:.2} frames={} loader={} p50={:.2} p99={:.2} max={:.2} gpu={:?} lag={:?} {} | {}",
+                self.started.elapsed().as_secs_f32(),
+                self.frames,
+                self.loader.is_some(),
+                percentile(50),
+                percentile(99),
+                self.frame_samples.last().copied().unwrap_or(0.0),
+                timing.total_gpu_ms,
+                timing.gpu_lag_frames,
+                top.join(" "),
+                pool
+            );
             self.frame_samples.clear();
         }
         let vg_triangles = self
@@ -1117,12 +1160,20 @@ impl AppState {
     /// Benchmark scene: a ground plane, plus `VG_STRESS_BENCH_CLASSIC` copies of one
     /// small classic mesh (the hardware-instancing check) beside the grid.
     fn bench_ground(&mut self) {
-        let Some(cfg) = self.bench.as_ref().map(|b| b.cfg.clone()) else { return };
+        let Some(cfg) = self.bench.as_ref().map(|b| b.cfg.clone()) else {
+            return;
+        };
         let ext = cfg.extent() * 0.75 + 200.0;
         let material = self.materials[&Mat::StatueLimestone];
         let (ground, _, _) = self.upload_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], ext));
-        spawn_object(&mut self.scene_db.world, ground, material, glam::Mat4::IDENTITY, ext * 1.5)
-            .expect("bench ground");
+        spawn_object(
+            &mut self.scene_db.world,
+            ground,
+            material,
+            glam::Mat4::IDENTITY,
+            ext * 1.5,
+        )
+        .expect("bench ground");
         if cfg.classic > 0 {
             let classic_material = self.materials[&Mat::StatueGreenStone];
             let (quad, _, _) = self.upload_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 0.8));
@@ -1130,7 +1181,8 @@ impl AppState {
             let origin = glam::Vec3::new(-(side as f32), 0.5, cfg.extent() * 0.5 + 10.0);
             for i in 0..cfg.classic {
                 let t = vg_stress_bench::classic_transform(i, side, 2.0, origin);
-                spawn_object(&mut self.scene_db.world, quad, classic_material, t, 1.2).expect("bench classic");
+                spawn_object(&mut self.scene_db.world, quad, classic_material, t, 1.2)
+                    .expect("bench classic");
             }
             if let Some(b) = &mut self.bench {
                 b.classic_objects = cfg.classic;
@@ -1146,8 +1198,9 @@ impl AppState {
     fn upload_mesh(&mut self, upload: helio::MeshUpload) -> (Entity, u32, u32) {
         let mesh = spawn_mesh(&mut self.scene_db.world, upload);
         let mirror = scene_db_handle(&self.scene_db);
-        let vertices = helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
-            .expect("uploaded mesh vertex range");
+        let vertices =
+            helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+                .expect("uploaded mesh vertex range");
         (mesh, vertices.offset, vertices.count)
     }
 
@@ -1211,7 +1264,8 @@ impl AppState {
                 self.vg_objects += 1;
             } else {
                 self.classic_objects += 1;
-                self.classic_batches.insert((mesh.index(), self.materials[&material].index()));
+                self.classic_batches
+                    .insert((mesh.index(), self.materials[&material].index()));
             }
             self.loaded_objects += 1;
         }
@@ -1225,11 +1279,12 @@ impl AppState {
         }
     }
 
-
     fn adjust_tau(&mut self, factor: f32) {
         self.tau = (self.tau * factor).clamp(TAU_RANGE.0, TAU_RANGE.1);
-        self.runtime
-            .set_settings(VgRuntimeSettings { tau_px: self.tau, ..self.runtime.settings() });
+        self.runtime.set_settings(VgRuntimeSettings {
+            tau_px: self.tau,
+            ..self.runtime.settings()
+        });
         println!("[Museum] VG tau = {:.2} px", self.tau);
         self.update_title();
     }
@@ -1269,7 +1324,9 @@ impl AppState {
             match event {
                 Event::Part(part) => {
                     // Classic geometry: an architecture kit piece (one mesh).
-                    let Some(upload) = part.lods.into_iter().next() else { break };
+                    let Some(upload) = part.lods.into_iter().next() else {
+                        break;
+                    };
                     let (mesh, offset, count) = self.upload_mesh(upload);
                     self.classic_meshes += 1;
                     self.place_instances(&part.asset, &part.meta, mesh, (offset, count), false);
@@ -1278,7 +1335,9 @@ impl AppState {
                 Event::VgAsset { asset, parts } => {
                     // The asset is fully cooked: only now do its instances exist.
                     for part in parts {
-                        let Some(words) = part.meta.content else { continue };
+                        let Some(words) = part.meta.content else {
+                            continue;
+                        };
                         let content = vg_stress_loading::content_id(words);
                         let (mesh, offset, count) = match self.vg_meshes.get(&content) {
                             Some(&found) => found,
@@ -1287,9 +1346,15 @@ impl AppState {
                                 // a zero-area placeholder whose interned vertex
                                 // range is the identity of the VG asset.
                                 self.placeholder_ordinal += 1;
-                                let (mesh, offset, count) =
-                                    self.upload_mesh(vg_stress_cook::placeholder_mesh(self.placeholder_ordinal));
-                                self.runtime.request_asset(content, offset, count, part.vgeo.clone());
+                                let (mesh, offset, count) = self.upload_mesh(
+                                    vg_stress_cook::placeholder_mesh(self.placeholder_ordinal),
+                                );
+                                self.runtime.request_asset(
+                                    content,
+                                    offset,
+                                    count,
+                                    part.vgeo.clone(),
+                                );
                                 self.vg_meshes.insert(content, (mesh, offset, count));
                                 (mesh, offset, count)
                             }
@@ -1394,7 +1459,9 @@ impl AppState {
     }
 
     fn render(&mut self, dt: f32) {
-        if self.profile && self.frame_samples.len() < 1024 { self.frame_samples.push(dt * 1000.0); }
+        if self.profile && self.frame_samples.len() < 1024 {
+            self.frame_samples.push(dt * 1000.0);
+        }
         self.poll_loader();
         let dt = dt.min(0.1);
         const SPEED: f32 = 6.0;
@@ -1440,20 +1507,12 @@ impl AppState {
             250.0,
         );
 
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            _ => return,
-        };
-        let view = output.texture.create_view(&Default::default());
-
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         self.rays.publish(&self.scene_db.world, &mut self.renderer);
-        if let Err(e) = self.renderer.render(&camera, &view) {
+        if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render: {:?}", e);
             self.render_errors += 1;
         }
-        self.queue.present(output);
         self.frames += 1;
         if self.last_title.elapsed() >= std::time::Duration::from_millis(250) {
             self.update_title();
@@ -1474,11 +1533,20 @@ mod gating_tests {
     use super::*;
 
     fn target(offset: u32, row: u32) -> VgTarget {
-        VgTarget { vertex_offset: offset, vertex_count: 3, object_row: row }
+        VgTarget {
+            vertex_offset: offset,
+            vertex_count: 3,
+            object_row: row,
+        }
     }
 
     fn ready(offset: u32, slot: u32, flags: u32) -> VgAssetReadyRow {
-        VgAssetReadyRow { vertex_offset: offset, vertex_count: 3, asset_slot: slot, flags }
+        VgAssetReadyRow {
+            vertex_offset: offset,
+            vertex_count: 3,
+            asset_slot: slot,
+            flags,
+        }
     }
 
     #[test]
@@ -1498,11 +1566,20 @@ mod gating_tests {
         // A becomes ready: exactly its two rows appear, B stays hidden.
         let a_ready = [ready(100, 5, VG_ASSET_READY_FLAG_READY), ready(200, 1, 0)];
         let visible = select_visible(&targets, &a_ready, &mut classic);
-        assert_eq!(visible.iter().map(|i| (i.asset_slot, i.object_row)).collect::<Vec<_>>(), [(5, 0), (5, 1)]);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|i| (i.asset_slot, i.object_row))
+                .collect::<Vec<_>>(),
+            [(5, 0), (5, 1)]
+        );
         assert_eq!(classic, [1, 1, 0]);
 
         // Both ready, with the other part of the same asset key space unaffected.
-        let both = [ready(100, 5, VG_ASSET_READY_FLAG_READY), ready(200, 7, VG_ASSET_READY_FLAG_READY)];
+        let both = [
+            ready(100, 5, VG_ASSET_READY_FLAG_READY),
+            ready(200, 7, VG_ASSET_READY_FLAG_READY),
+        ];
         let mut classic = vec![0u32; 3];
         assert_eq!(select_visible(&targets, &both, &mut classic).len(), 3);
         assert_eq!(classic, [1, 1, 1]);
@@ -1516,7 +1593,6 @@ mod gating_tests {
         assert_eq!(parse_tau(Some("-3")), 1.0);
         assert_eq!(parse_tau(Some("1000")), TAU_RANGE.1);
     }
-
 }
 
 #[cfg(test)]

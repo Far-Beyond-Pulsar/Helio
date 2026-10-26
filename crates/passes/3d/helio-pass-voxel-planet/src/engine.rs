@@ -19,9 +19,11 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float,
 ];
 
-/// One published view of the planet. `eye` is the planet-centred camera
-/// position. The pass traces relative to this precise eye internally; the
-/// host's shared camera and scene geometry can remain in world space.
+/// One published view of the planet. `eye` is the host's planet-centred
+/// camera sample, used for residency. When the renderer supplies a world
+/// origin, ChunkPass traces from the active camera's absolute eye instead
+/// (including predicted stereo poses). Otherwise this is also the trace eye
+/// for hosts supplying an already eye-relative camera.
 #[derive(Clone)]
 pub struct PlanetFrame {
     pub eye: DVec3,
@@ -108,12 +110,31 @@ pub(crate) struct MaterialGpu {
 
 /// The shading table of `appearance` (linear colours; sRGB is public, so
 /// convert once, not per pixel) and its detail weights.
-pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; MATERIALS], [f32; 4]) {
-    let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
-    let linear = |c: [f32; 4]| [clean(c[0]).powf(2.2), clean(c[1]).powf(2.2), clean(c[2]).powf(2.2), clean(c[3])];
+pub(crate) fn material_table(
+    appearance: &TerrainAppearance,
+) -> ([MaterialGpu; MATERIALS], [f32; 4]) {
+    let clean = |v: f32| {
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let linear = |c: [f32; 4]| {
+        [
+            clean(c[0]).powf(2.2),
+            clean(c[1]).powf(2.2),
+            clean(c[2]).powf(2.2),
+            clean(c[3]),
+        ]
+    };
     let materials = std::array::from_fn(|id| {
         let m = &appearance.materials[id];
-        let link = |other: Option<u8>| other.filter(|&o| usize::from(o) < MATERIALS).map_or(id as u32, u32::from);
+        let link = |other: Option<u8>| {
+            other
+                .filter(|&o| usize::from(o) < MATERIALS)
+                .map_or(id as u32, u32::from)
+        };
         let rgb = |c: [f32; 3]| linear([c[0], c[1], c[2], 1.0]);
         let mut patches = [[0.0; 4]; 3];
         if let Some(p) = m.patches {
@@ -124,8 +145,22 @@ pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; M
         MaterialGpu {
             colour: linear(m.colour),
             patches,
-            links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
-            light: [clean(m.transmission), if m.emission.is_finite() { m.emission.clamp(0.0, 64.0) } else { 0.0 }, 0.0, 0.0],
+            links: [
+                link(m.lip),
+                link(fleck),
+                link(m.speck_host),
+                (share * 65_536.0) as u32,
+            ],
+            light: [
+                clean(m.transmission),
+                if m.emission.is_finite() {
+                    m.emission.clamp(0.0, 64.0)
+                } else {
+                    0.0
+                },
+                0.0,
+                0.0,
+            ],
         }
     });
     (materials, appearance.detail.map(clean))
@@ -148,7 +183,12 @@ impl WorldGpu {
     pub(crate) fn new(planet: &Planet) -> Self {
         let g = planet.grid();
         Self {
-            grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
+            grid: [
+                g.reference_cells(),
+                g.layer_mm() as i32,
+                g.cells(),
+                g.level_offset() as i32,
+            ],
             scale: {
                 let (inv, shift, layer_q16) = g.volume_constants();
                 [g.domain_scale(), inv, shift, layer_q16]
@@ -174,12 +214,18 @@ pub(crate) fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
 /// (shader validation without a device).
 pub fn validation_sources() -> Vec<(String, String)> {
     let grid = crate::grid::Grid::new(6_371_000.0, 0.1).expect("Earth grid");
-    let field = crate::layers::TerrainLayers::earth().field(&grid, 1).expect("Earth terrain");
+    let field = crate::layers::TerrainLayers::earth()
+        .field(&grid, 1)
+        .expect("Earth terrain");
     let program = crate::terrain::TerrainField::program(&field);
     [(false, false), (true, false), (false, true), (true, true)]
         .into_iter()
         .flat_map(|(plane, wide64)| {
-            let form = format!("{}{}", if plane { "plane" } else { "sphere" }, if wide64 { ", int64" } else { "" });
+            let form = format!(
+                "{}{}",
+                if plane { "plane" } else { "sphere" },
+                if wide64 { ", int64" } else { "" }
+            );
             crate::chunks::shader_sources(plane, &program, wide64, wide64)
                 .into_iter()
                 .map(move |(label, source)| (format!("{label} ({form})"), source))
@@ -191,8 +237,12 @@ pub fn validation_sources() -> Vec<(String, String)> {
 /// replaced by `wide64.wgsl`. The markers are matched without their line
 /// ends: checkouts may convert them to CRLF.
 fn hardware_wide(noise: &str) -> String {
-    let (head, rest) = noise.split_once("// wide:begin").expect("noise.wgsl wide region");
-    let (_, tail) = rest.split_once("// wide:end").expect("noise.wgsl wide region end");
+    let (head, rest) = noise
+        .split_once("// wide:begin")
+        .expect("noise.wgsl wide region");
+    let (_, tail) = rest
+        .split_once("// wide:end")
+        .expect("noise.wgsl wide region end");
     format!("{head}{}{tail}", include_str!("../shaders/wide64.wgsl"))
 }
 
@@ -203,19 +253,32 @@ fn hardware_wide(noise: &str) -> String {
 /// noise library's wide products use hardware 64-bit integers
 /// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms,
 /// declared here (group 0, bindings 1 and 16).
-pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool, generation: bool) -> String {
+pub(crate) fn terrain_source(
+    plane: bool,
+    program: &TerrainProgram,
+    wide64: bool,
+    generation: bool,
+) -> String {
     let noise = include_str!("../shaders/noise.wgsl");
-    let mut s = if wide64 { hardware_wide(noise) } else { String::from(noise) };
+    let mut s = if wide64 {
+        hardware_wide(noise)
+    } else {
+        String::from(noise)
+    };
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
     if !program.wgsl.contains("fn terrain_surface") {
         // No surface word: columns store none (`World::sphere.w`).
-        s.push_str("fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n");
+        s.push_str(
+            "fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n",
+        );
     }
     if !program.wgsl.contains("fn terrain_density") {
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
-        s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
+        s.push_str(
+            "fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n",
+        );
         s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
     if !program.wgsl.contains("fn terrain_lean") {
@@ -224,9 +287,11 @@ pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool
         s.push_str("fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
     }
     s.push_str(&column_source(program, generation));
-    s.push_str("@group(0) @binding(1) var<uniform> world: World;
+    s.push_str(
+        "@group(0) @binding(1) var<uniform> world: World;
 @group(0) @binding(16) var<uniform> terrain: TerrainConstants;
-");
+",
+    );
     // World shape: 0 sphere, 1 plane.
     s.push_str(&format!("const SHAPE: u32 = {};\nconst PLANE_FACE: u32 = 2u;\nfn is_plane() -> bool {{ return SHAPE == 1u; }}\n", if plane { "1u" } else { "0u" }));
     s
@@ -235,7 +300,13 @@ pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool
 /// Words of a node of `program`'s two-rate field (`TERRAIN_NODE_WORDS`;
 /// 0 when the program does not define it).
 pub(crate) fn node_words(program: &TerrainProgram) -> u32 {
-    program.wgsl.split("const TERRAIN_NODE_WORDS: u32 = ").nth(1).and_then(|r| r.split('u').next()).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+    program
+        .wgsl
+        .split("const TERRAIN_NODE_WORDS: u32 = ")
+        .nth(1)
+        .and_then(|r| r.split('u').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// Columns between a two-rate field's nodes (`landform::NODE_COLUMNS`), and
@@ -268,7 +339,10 @@ pub(crate) const NODE_SCRATCH: u32 = HALO_GROUPS * 64;
 /// private variable an entry point can reach at each invocation, and the
 /// hot kernels would clear them for nothing.
 fn column_source(program: &TerrainProgram, generation: bool) -> String {
-    assert!(node_words(program) > 0, "terrain programs define TERRAIN_NODE_WORDS (the two-rate column, `terrain`)");
+    assert!(
+        node_words(program) > 0,
+        "terrain programs define TERRAIN_NODE_WORDS (the two-rate column, `terrain`)"
+    );
     let mut s = String::new();
     s.push_str(&format!(
         "const NODE_COLUMNS: i32 = {NODE_COLUMNS};
@@ -429,7 +503,12 @@ fn generation_grid_column(base: u32, row: u32, origin: vec2<i32>, face: u32, i: 
 /// `samples` pseudo-random columns (every level, face edges included) and
 /// ground-material inputs. Generator authors run this in their tests; it
 /// returns the first disagreement.
-pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, samples: u32) -> Result<(), String> {
+pub fn verify_field(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    planet: &Planet,
+    samples: u32,
+) -> Result<(), String> {
     let grid = *planet.grid();
     let field = planet.field();
     let program = field.program();
@@ -447,9 +526,16 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     for s in 0..samples {
         let level = (next() % u64::from(grid.levels())) as u32;
         let cells = (grid.cells() >> level).max(1) as u64;
-        let face = if grid.is_plane() { i32::from(crate::grid::PLANE_FACE) } else { (next() % 6) as i32 };
+        let face = if grid.is_plane() {
+            i32::from(crate::grid::PLANE_FACE)
+        } else {
+            (next() % 6) as i32
+        };
         let (i, j) = if s % 4 == 0 {
-            ((next() % 2) as i32 * (cells as i32 - 1), (next() % cells) as i32)
+            (
+                (next() % 2) as i32 * (cells as i32 - 1),
+                (next() % cells) as i32,
+            )
         } else {
             ((next() % cells) as i32, (next() % cells) as i32)
         };
@@ -490,21 +576,51 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let module = helio_core::shader::module(
         device,
         "terrain verification",
-        &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64), false) + kernel),
+        &(terrain_source(
+            grid.is_plane(),
+            &program,
+            device.features().contains(wgpu::Features::SHADER_INT64),
+            false,
+        ) + kernel),
     );
-    let pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-        label: Some("terrain verification"),
-        layout: None,
-        module: &module,
-        entry_point: Some("verify"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let init = |label, contents: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
-    let world = init("verify world", bytemuck::bytes_of(&WorldGpu::new(planet)), wgpu::BufferUsages::UNIFORM);
-    let terrain = init("verify terrain", &terrain_bytes(&program), wgpu::BufferUsages::UNIFORM);
-    let ins = init("verify inputs", bytemuck::cast_slice(&inputs), wgpu::BufferUsages::STORAGE);
-    let ext = init("verify extra", bytemuck::cast_slice(&extra), wgpu::BufferUsages::STORAGE);
+    let pipeline = helio_core::shader::create_compute_pipeline(
+        &device,
+        wgpu::ComputePipelineDescriptor {
+            label: Some("terrain verification"),
+            layout: None,
+            module: &module,
+            entry_point: Some("verify"),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+    );
+    let init = |label, contents: &[u8], usage| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage,
+        })
+    };
+    let world = init(
+        "verify world",
+        bytemuck::bytes_of(&WorldGpu::new(planet)),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let terrain = init(
+        "verify terrain",
+        &terrain_bytes(&program),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let ins = init(
+        "verify inputs",
+        bytemuck::cast_slice(&inputs),
+        wgpu::BufferUsages::STORAGE,
+    );
+    let ext = init(
+        "verify extra",
+        bytemuck::cast_slice(&extra),
+        wgpu::BufferUsages::STORAGE,
+    );
     let bytes = u64::from(samples) * 16;
     let out = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("verify out"),
@@ -522,11 +638,26 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         label: Some("terrain verification"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
-            wgpu::BindGroupEntry { binding: 1, resource: world.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 16, resource: terrain.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 20, resource: ins.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 21, resource: ext.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 22, resource: out.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: world.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: terrain.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: ins.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 21,
+                resource: ext.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 22,
+                resource: out.as_entire_binding(),
+            },
         ],
     });
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -539,21 +670,42 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     encoder.copy_buffer_to_buffer(&out, 0, &read, 0, bytes.max(8));
     queue.submit([encoder.finish()]);
     let (tx, rx) = std::sync::mpsc::channel();
-    read.slice(..).map_async(wgpu::MapMode::Read, move |r| drop(tx.send(r)));
-    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
-    rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-    let data = read.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+    read.slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| drop(tx.send(r)));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| e.to_string())?;
+    rx.recv()
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let data = read
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|e| e.to_string())?;
     let gpu: &[[i32; 4]] = bytemuck::cast_slice(&data[..bytes as usize]);
     for ((a, e), g) in inputs.iter().zip(&extra).zip(gpu) {
         let level = a.w as u32;
         let p = grid.domain_point(a.x as u8, a.y, a.z, level);
-        let column = crate::terrain::Column { face: a.x as u8, i: a.y, j: a.z, level };
+        let column = crate::terrain::Column {
+            face: a.x as u8,
+            i: a.y,
+            j: a.z,
+            level,
+        };
         let height = field.height(column);
         let top = crate::terrain::top_cells(&grid, height, level);
         let (below, above) = field.extent(p, level);
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
         let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
-        let density = field.density(p, q, level, top, height, height.wrapping_add(e.z & 8191).wrapping_sub(4096), k);
+        let density = field.density(
+            p,
+            q,
+            level,
+            top,
+            height,
+            height.wrapping_add(e.z & 8191).wrapping_sub(4096),
+            k,
+        );
         let lean = field.lean(level);
         let offset = field.lean_offset(p, a.y, a.z, k, level);
         let surface = field.surface(column, height) & 0xff;
@@ -561,11 +713,19 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
             density,
-            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919).wrapping_add(below.wrapping_mul(65599)).wrapping_add(above.wrapping_mul(257))
-                .wrapping_add(lean.0 * 7).wrapping_add(lean.1 * 13).wrapping_add(offset.0.wrapping_mul(31)).wrapping_add(offset.1.wrapping_mul(131)),
+            (q.x ^ q.y ^ q.z)
+                .wrapping_add(surface as i32 * 7919)
+                .wrapping_add(below.wrapping_mul(65599))
+                .wrapping_add(above.wrapping_mul(257))
+                .wrapping_add(lean.0 * 7)
+                .wrapping_add(lean.1 * 13)
+                .wrapping_add(offset.0.wrapping_mul(31))
+                .wrapping_add(offset.1.wrapping_mul(131)),
         ];
         if *g != cpu {
-            return Err(format!("column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"));
+            return Err(format!(
+                "column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"
+            ));
         }
     }
     Ok(())
@@ -576,7 +736,10 @@ mod wide_tests {
     #[test]
     fn hardware_wide_replaces_the_region_with_either_line_end() {
         let noise = include_str!("../shaders/noise.wgsl");
-        for text in [noise.replace("\r\n", "\n"), noise.replace("\r\n", "\n").replace('\n', "\r\n")] {
+        for text in [
+            noise.replace("\r\n", "\n"),
+            noise.replace("\r\n", "\n").replace('\n', "\r\n"),
+        ] {
             let s = super::hardware_wide(&text);
             assert!(s.contains("u64(a) * u64(b)") && !s.contains("mid_carry"));
         }

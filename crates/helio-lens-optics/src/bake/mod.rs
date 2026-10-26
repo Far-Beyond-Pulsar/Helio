@@ -132,7 +132,11 @@ impl LensBake {
         let focused;
         let rx = match config.focus_distance_mm {
             Some(d) => {
-                focused = rx.focused(d, crate::paraxial::FocusMode::Sensor, config.reference_wavelength_nm)?;
+                focused = rx.focused(
+                    d,
+                    crate::paraxial::FocusMode::Sensor,
+                    config.reference_wavelength_nm,
+                )?;
                 &focused
             }
             None => rx,
@@ -167,7 +171,12 @@ pub(crate) fn pupil_grid(n: usize) -> Vec<[f64; 2]> {
 /// pass every clear aperture (`passed`) and the number attempted.
 pub(crate) fn trace_pupil(tracer: &Tracer, field: Field, grid: &[[f64; 2]]) -> Vec<Ray> {
     grid.iter()
-        .filter_map(|uv| tracer.aim(field, *uv).ok().and_then(|r| tracer.trace(r).ok()))
+        .filter_map(|uv| {
+            tracer
+                .aim(field, *uv)
+                .ok()
+                .and_then(|r| tracer.trace(r).ok())
+        })
         .collect()
 }
 

@@ -19,7 +19,10 @@ impl App {
     fn capture(game: &mut Game, capture: bool) {
         let window = &game.gfx.window;
         if capture {
-            let ok = window.set_cursor_grab(CursorGrabMode::Locked).or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined)).is_ok();
+            let ok = window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+                .is_ok();
             window.set_cursor_visible(!ok);
             game.input.captured = ok;
         } else {
@@ -40,17 +43,26 @@ impl ApplicationHandler for App {
         // known resolution); otherwise 1600 x 900 logical.
         let size = std::env::var("VOXEL_CRAFT_SIZE")
             .ok()
-            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))))
-            .map_or(Size::Logical(LogicalSize::new(1600.0, 900.0)), |(w, h)| Size::Physical(PhysicalSize::new(w, h)));
+            .and_then(|v| {
+                v.split_once('x')
+                    .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+            })
+            .map_or(Size::Logical(LogicalSize::new(1600.0, 900.0)), |(w, h)| {
+                Size::Physical(PhysicalSize::new(w, h))
+            });
         let window: Arc<Window> = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("Voxel Craft: building the world...").with_inner_size(size))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Voxel Craft: building the world...")
+                        .with_inner_size(size),
+                )
                 .expect("window"),
         );
         let mut game = Game::new(|planet| Gfx::new(window.clone(), planet));
         // A tour takes no input (its shots compare), so it leaves the cursor
         // to whoever is at the machine.
-        if !game.touring() {
+        if !game.touring() && !game.gfx.vr_active() {
             Self::capture(&mut game, true);
         }
         self.game = Some(game);
@@ -76,14 +88,21 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } if input => {
-                if !game.input.captured && state == ElementState::Pressed && button == MouseButton::Left {
+                if !game.gfx.vr_active()
+                    && !game.input.captured
+                    && state == ElementState::Pressed
+                    && button == MouseButton::Left
+                {
                     Self::capture(game, true);
                 } else {
                     game.input.button(button, state);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } if input => game.input.wheel(delta),
-            WindowEvent::Focused(false) => Self::capture(game, false),
+            WindowEvent::Focused(false) => {
+                game.input.release_all();
+                Self::capture(game, false);
+            }
             WindowEvent::RedrawRequested => {
                 game.frame();
                 if game.quit {
@@ -96,7 +115,8 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
-        if let (Some(game), DeviceEvent::MouseMotion { delta: (dx, dy) }) = (&mut self.game, event) {
+        if let (Some(game), DeviceEvent::MouseMotion { delta: (dx, dy) }) = (&mut self.game, event)
+        {
             if !game.touring() {
                 game.input.mouse_motion(dx, dy);
             }

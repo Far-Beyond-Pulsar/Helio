@@ -27,7 +27,9 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
-use helio_core::{PassContext, RenderGraph, RenderPass, ResourceKey, ResourceRegistry, Result as HelioResult};
+use helio_core::{
+    PassContext, RenderGraph, RenderPass, ResourceKey, ResourceRegistry, Result as HelioResult,
+};
 use helio_pass_gbuffer::{CoordinateSpacesFrameData, IndirectDispatchArgs, ObjectBatchFrameData};
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_indirect_dispatch::IndirectDispatchFrameData;
@@ -81,7 +83,12 @@ impl RenderPass for SceneInjectorPass {
         // scheduler put this pass in an earlier layer than `HiZBuildPass`
         // instead of racing them in the same parallel layer (no other
         // declared name links them, since "depth_texture" isn't one).
-        &["object_batch", "indirect_dispatch", "coordinate_spaces", "depth"]
+        &[
+            "object_batch",
+            "indirect_dispatch",
+            "coordinate_spaces",
+            "depth",
+        ]
     }
 
     fn render_pass_descriptor<'a>(
@@ -109,8 +116,7 @@ impl RenderPass for SceneInjectorPass {
             unsafe { std::mem::transmute(&*self.compacted_indices) };
         let coordinate_spaces: &'a wgpu::Buffer =
             unsafe { std::mem::transmute(&*self.coordinate_spaces) };
-        let depth_texture: &'a wgpu::Texture =
-            unsafe { std::mem::transmute(&*self.depth_texture) };
+        let depth_texture: &'a wgpu::Texture = unsafe { std::mem::transmute(&*self.depth_texture) };
         let group_dispatch: &'a wgpu::Buffer =
             unsafe { std::mem::transmute(&*self.group_dispatch) };
 
@@ -164,7 +170,11 @@ impl RenderPass for SceneInjectorPass {
             },
             "SceneInjector",
         );
-        frame.write(ResourceKey::new("depth_texture"), depth_texture, "SceneInjector");
+        frame.write(
+            ResourceKey::new("depth_texture"),
+            depth_texture,
+            "SceneInjector",
+        );
     }
 }
 
@@ -244,7 +254,9 @@ fn read_buffer_u32(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Bu
         .recv()
         .expect("receive map result")
         .expect("readback buffer must map");
-    let mapped = slice.get_mapped_range().expect("read mapped readback bytes");
+    let mapped = slice
+        .get_mapped_range()
+        .expect("read mapped readback bytes");
     let data: Vec<u32> = bytemuck::cast_slice(&mapped).to_vec();
     drop(mapped);
     readback.unmap();
@@ -263,10 +275,18 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
         let queue = Arc::new(queue);
 
         let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
-        let proj = helio_core::depth::perspective(60f32.to_radians(), WIDTH as f32 / HEIGHT as f32, 0.1);
+        let proj =
+            helio_core::depth::perspective(60f32.to_radians(), WIDTH as f32 / HEIGHT as f32, 0.1);
         let view_proj = proj * view;
         let camera = helio_core::GpuCameraUniforms::new(
-            view, proj, Vec3::ZERO, 0.1, 1000.0, 0, [0.0, 0.0], view_proj,
+            view,
+            proj,
+            Vec3::ZERO,
+            0.1,
+            1000.0,
+            0,
+            [0.0, 0.0],
+            view_proj,
         );
 
         let mut scene_input = support::TestSceneInput::new(Arc::clone(&device), Arc::clone(&queue));
@@ -284,37 +304,52 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
             off_axis,
         ];
         let draw_calls = [draw_call(0), draw_call(1), draw_call(2), draw_call(3)];
-        let indirect = [indirect_args(0), indirect_args(1), indirect_args(2), indirect_args(3)];
+        let indirect = [
+            indirect_args(0),
+            indirect_args(1),
+            indirect_args(2),
+            indirect_args(3),
+        ];
         let compacted_indices: [u32; 4] = [0, 1, 2, 3];
         let identity = Mat4::IDENTITY.to_cols_array();
 
-        let instances_buf = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Test Instances"),
-            contents: bytemuck::cast_slice(&instances),
-            usage: wgpu::BufferUsages::STORAGE,
-        }));
-        let draw_calls_buf = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Test Draw Calls"),
-            contents: bytemuck::cast_slice(&draw_calls),
-            usage: wgpu::BufferUsages::STORAGE,
-        }));
-        let indirect_buf = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Test Indirect"),
-            contents: bytemuck::cast_slice(&indirect),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        }));
-        let compacted_indices_buf =
-            Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let instances_buf = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Test Instances"),
+                contents: bytemuck::cast_slice(&instances),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        ));
+        let draw_calls_buf = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Test Draw Calls"),
+                contents: bytemuck::cast_slice(&draw_calls),
+                usage: wgpu::BufferUsages::STORAGE,
+            },
+        ));
+        let indirect_buf = Arc::new(
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Test Indirect"),
+                contents: bytemuck::cast_slice(&indirect),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            }),
+        );
+        let compacted_indices_buf = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("Test Compacted Indices"),
                 contents: bytemuck::cast_slice(&compacted_indices),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            }));
-        let coordinate_spaces_buf =
-            Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            },
+        ));
+        let coordinate_spaces_buf = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("Test Coordinate Spaces"),
                 contents: bytemuck::bytes_of(&identity),
                 usage: wgpu::BufferUsages::STORAGE,
-            }));
+            },
+        ));
         let depth_texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Test Depth"),
             size: wgpu::Extent3d {
@@ -366,11 +401,13 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
             compacted_indices: compacted_indices_buf,
             coordinate_spaces: coordinate_spaces_buf,
             depth_texture,
-            group_dispatch: Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Test Group Dispatch"),
-                contents: bytemuck::cast_slice(&[4u32, 1, 1]),
-                usage: wgpu::BufferUsages::INDIRECT,
-            })),
+            group_dispatch: Arc::new(device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Test Group Dispatch"),
+                    contents: bytemuck::cast_slice(&[4u32, 1, 1]),
+                    usage: wgpu::BufferUsages::INDIRECT,
+                },
+            )),
             draw_count: 4,
             instance_count: 4,
         };
@@ -383,7 +420,8 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let occlusion_pass = OcclusionCullPass::new(&device, hiz_sampler, WIDTH, HEIGHT, cull_stats_buf);
+        let occlusion_pass =
+            OcclusionCullPass::new(&device, hiz_sampler, WIDTH, HEIGHT, cull_stats_buf);
 
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(injector));
@@ -409,8 +447,16 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
         // DrawIndexedIndirectArgs is 5 u32s; instance_count is word 1 of each.
         let instance_count = |slot: usize| words[slot * 5 + 1];
 
-        assert_eq!(instance_count(0), 1, "front object (in front of the wall) must stay visible");
-        assert_eq!(instance_count(1), 0, "behind object (behind the wall) must be culled");
+        assert_eq!(
+            instance_count(0),
+            1,
+            "front object (in front of the wall) must stay visible"
+        );
+        assert_eq!(
+            instance_count(1),
+            0,
+            "behind object (behind the wall) must be culled"
+        );
         assert_eq!(instance_count(3), 1, "off-axis sphere intersects the front of the wall: camera-ray near point must not falsely cull it");
         assert_eq!(
             instance_count(2),
@@ -423,13 +469,19 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
         queue.write_buffer(&indirect_buf, 0, bytemuck::cast_slice(&indirect));
         graph.execute(&scene_input, &target, &depth).unwrap();
         let words = read_buffer_u32(&device, &queue, &indirect_buf);
-        assert_eq!(words[6], 1, "changed camera must not reject against stale history");
+        assert_eq!(
+            words[6], 1,
+            "changed camera must not reject against stale history"
+        );
         for _ in 0..8 {
             queue.write_buffer(&indirect_buf, 0, bytemuck::cast_slice(&indirect));
             graph.execute(&scene_input, &target, &depth).unwrap();
             let words = read_buffer_u32(&device, &queue, &indirect_buf);
             assert_eq!(words[6], 0, "stable camera resumes occlusion");
-            assert_eq!(words[16], 1, "off-axis visible sphere must not alternate visibility");
+            assert_eq!(
+                words[16], 1,
+                "off-axis visible sphere must not alternate visibility"
+            );
         }
     });
 }

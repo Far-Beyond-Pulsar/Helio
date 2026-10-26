@@ -14,21 +14,20 @@ pub use attachments::{
     DepthAttachmentIntent,
 };
 pub use executor::{
-    DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData, GraphTimelineData,
-    GraphTimelinePass, RenderGraph,
-    DeclaredKind, DeclaredResource, PassDeclaration,
+    DebugPassInfo, DebugResourceInfo, DeclaredKind, DeclaredResource, FinishSegment,
+    FrameDebugData, GraphTimelineData, GraphTimelinePass, PassDeclaration, RenderGraph,
 };
-pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
+pub(crate) use pipeline_cache::driver_cache_for_device;
 pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
     PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
 };
-pub(crate) use pipeline_cache::driver_cache_for_device;
-pub use swap::{
-    align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity,
-    SwapPlan, SwapPolicy,
-};
+pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,
     ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize, TextureDescriptor,
+};
+pub use swap::{
+    align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity, SwapPlan,
+    SwapPolicy,
 };

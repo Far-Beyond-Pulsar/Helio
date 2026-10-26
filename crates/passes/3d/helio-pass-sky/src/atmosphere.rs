@@ -43,8 +43,9 @@ use pulsar_scenedb::gpu::BufferKey;
 use pulsar_scenedb_derive::SceneStore;
 
 use crate::clouds::{
-    CloudVolumes, ATMOSPHERE_CLOUDS, ATMOSPHERE_CLOUD_DEPTH, ATMOSPHERE_CLOUD_DETAIL, ATMOSPHERE_CLOUD_PLANET_WEATHER,
-    ATMOSPHERE_CLOUD_SHAPE, ATMOSPHERE_CLOUD_WEATHER, CLOUD_SHADOW_FRAME, CLOUD_SHADOW_MAP,
+    CloudVolumes, ATMOSPHERE_CLOUDS, ATMOSPHERE_CLOUD_DEPTH, ATMOSPHERE_CLOUD_DETAIL,
+    ATMOSPHERE_CLOUD_PLANET_WEATHER, ATMOSPHERE_CLOUD_SHAPE, ATMOSPHERE_CLOUD_WEATHER,
+    CLOUD_SHADOW_FRAME, CLOUD_SHADOW_MAP,
 };
 
 /// Graph key of the per-frame atmosphere buffer (`AtmosphereFrame`).
@@ -81,8 +82,10 @@ pub const ATMOSPHERE_SKY_TABLE_MARKER: &str = "//!use atmosphere_sky_table";
 /// The sky over a surface anywhere in the atmosphere from the published
 /// sky table (`atmosphere_sky_table_eval`); with [`ATMOSPHERE_SNIPPET`],
 /// for a shader binding the table as `atmosphere_sky_table`.
-pub const ATMOSPHERE_SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::wgsl_snippet!(ATMOSPHERE_SKY_TABLE_MARKER, "shaders/atmosphere_sky_table.wgsl");
+pub const ATMOSPHERE_SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
+    ATMOSPHERE_SKY_TABLE_MARKER,
+    "shaders/atmosphere_sky_table.wgsl"
+);
 
 /// Where an atmosphere's planet is.
 pub mod placement {
@@ -292,7 +295,10 @@ impl AtmosphereComponent {
             albedo: self.cloud_albedo,
             erosion: self.cloud_erosion,
             representation: if self.cloud_voxel_size > 0.0 {
-                CloudRepresentation::Voxels { cell_m: self.cloud_voxel_size * 1000.0, fill: self.cloud_voxel_fill }
+                CloudRepresentation::Voxels {
+                    cell_m: self.cloud_voxel_size * 1000.0,
+                    fill: self.cloud_voxel_fill,
+                }
             } else {
                 CloudRepresentation::Volumetric
             },
@@ -442,7 +448,11 @@ impl PlanetWeather {
     /// cells of tens of kilometres, cirrus at 9 km; still.
     pub fn earth() -> Self {
         Self {
-            pole: [0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2],
+            pole: [
+                0.0,
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ],
             circulation: 1.0,
             circulation_cells: 3.0,
             synoptic_km: 1500.0,
@@ -458,7 +468,12 @@ impl PlanetWeather {
     /// No weather systems or bands: the layer's coverage everywhere, its
     /// cells and groups alone; no cirrus.
     pub fn calm() -> Self {
-        Self { circulation: 0.0, storminess: 0.0, cirrus: 0.0, ..Self::earth() }
+        Self {
+            circulation: 0.0,
+            storminess: 0.0,
+            cirrus: 0.0,
+            ..Self::earth()
+        }
     }
 }
 
@@ -490,7 +505,14 @@ impl CloudLayer {
 
     /// A low, flat, grey deck.
     pub fn overcast() -> Self {
-        Self { bottom_km: 1.0, top_km: 2.2, coverage: 0.95, kind: 0.2, extinction: 30.0, ..Self::cumulus() }
+        Self {
+            bottom_km: 1.0,
+            top_km: 2.2,
+            coverage: 0.95,
+            kind: 0.2,
+            extinction: 30.0,
+            ..Self::cumulus()
+        }
     }
 
     fn write(&self, row: &mut AtmosphereComponent) {
@@ -519,7 +541,9 @@ impl CloudLayer {
         row.cloud_seed = w.seed;
         (row.cloud_voxel_size, row.cloud_voxel_fill) = match self.representation {
             CloudRepresentation::Volumetric => (0.0, 0.5),
-            CloudRepresentation::Voxels { cell_m, fill } => ((cell_m * 0.001).max(1e-4), fill.clamp(0.0, 1.0)),
+            CloudRepresentation::Voxels { cell_m, fill } => {
+                ((cell_m * 0.001).max(1e-4), fill.clamp(0.0, 1.0))
+            }
         };
     }
 }
@@ -538,11 +562,20 @@ struct ResolveUniform {
     clock: [f32; 4],
 }
 
-fn lut(device: &wgpu::Device, label: &str, size: [u32; 3], dimension: wgpu::TextureDimension) -> wgpu::TextureView {
+fn lut(
+    device: &wgpu::Device,
+    label: &str,
+    size: [u32; 3],
+    dimension: wgpu::TextureDimension,
+) -> wgpu::TextureView {
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: size[2] },
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: size[2],
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension,
@@ -553,7 +586,10 @@ fn lut(device: &wgpu::Device, label: &str, size: [u32; 3], dimension: wgpu::Text
         .create_view(&Default::default())
 }
 
-fn storage_texture(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
+fn storage_texture(
+    binding: u32,
+    dimension: wgpu::TextureViewDimension,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -566,7 +602,11 @@ fn storage_texture(binding: u32, dimension: wgpu::TextureViewDimension) -> wgpu:
     }
 }
 
-fn sampled_texture(binding: u32, visibility: wgpu::ShaderStages, dimension: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
+fn sampled_texture(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    dimension: wgpu::TextureViewDimension,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
@@ -579,11 +619,19 @@ fn sampled_texture(binding: u32, visibility: wgpu::ShaderStages, dimension: wgpu
     }
 }
 
-fn buffer_entry(binding: u32, visibility: wgpu::ShaderStages, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
+fn buffer_entry(
+    binding: u32,
+    visibility: wgpu::ShaderStages,
+    ty: wgpu::BufferBindingType,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility,
-        ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
         count: None,
     }
 }
@@ -616,6 +664,7 @@ pub struct AtmospherePass {
     sky_table: wgpu::Buffer,
     rows: helio_core::SceneBufferLiveness,
     active: bool,
+    xr_mode: bool,
     /// `(epoch, content_generation)` of the atmosphere rows the
     /// parameter-only tables (transmittance, multiple scattering, the sky
     /// irradiance table) were last built from; `None` rebuilds them.
@@ -654,11 +703,31 @@ impl AtmospherePass {
             ],
         });
         let d2 = wgpu::TextureViewDimension::D2;
-        let transmittance = lut(device, "Atmosphere transmittance", [TRANSMITTANCE[0], TRANSMITTANCE[1], 1], wgpu::TextureDimension::D2);
-        let multi = lut(device, "Atmosphere multiple scattering", [MULTI_SCATTERING, MULTI_SCATTERING, 1], wgpu::TextureDimension::D2);
+        let transmittance = lut(
+            device,
+            "Atmosphere transmittance",
+            [TRANSMITTANCE[0], TRANSMITTANCE[1], 1],
+            wgpu::TextureDimension::D2,
+        );
+        let multi = lut(
+            device,
+            "Atmosphere multiple scattering",
+            [MULTI_SCATTERING, MULTI_SCATTERING, 1],
+            wgpu::TextureDimension::D2,
+        );
         let multi_scattering = multi.clone();
-        let sky_view = lut(device, "Atmosphere sky view", [SKY_VIEW[0], SKY_VIEW[1], 1], wgpu::TextureDimension::D2);
-        let aerial = lut(device, "Atmosphere aerial perspective", [AERIAL; 3], wgpu::TextureDimension::D3);
+        let sky_view = lut(
+            device,
+            "Atmosphere sky view",
+            [SKY_VIEW[0], SKY_VIEW[1], 1],
+            wgpu::TextureDimension::D2,
+        );
+        let aerial = lut(
+            device,
+            "Atmosphere aerial perspective",
+            [AERIAL; 3],
+            wgpu::TextureDimension::D3,
+        );
         let sky_table = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Atmosphere sky table"),
             size: ATMOSPHERE_SKY_TABLE_BYTES,
@@ -675,18 +744,23 @@ impl AtmospherePass {
                 bind_group_layouts: &groups,
                 immediate_size: 0,
             });
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
         // Each kernel binds only its own outputs and inputs: a texture may
         // not be written and sampled in one dispatch.
-        let kernel = |entry: &str, entries: &[(wgpu::BindGroupLayoutEntry, wgpu::BindingResource)], groups: [u32; 3]| {
+        let kernel = |entry: &str,
+                      entries: &[(wgpu::BindGroupLayoutEntry, wgpu::BindingResource)],
+                      groups: [u32; 3]| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(entry),
                 entries: &entries.iter().map(|(e, _)| *e).collect::<Vec<_>>(),
@@ -696,23 +770,45 @@ impl AtmospherePass {
                 layout: &layout,
                 entries: &entries
                     .iter()
-                    .map(|(e, r)| wgpu::BindGroupEntry { binding: e.binding, resource: r.clone() })
+                    .map(|(e, r)| wgpu::BindGroupEntry {
+                        binding: e.binding,
+                        resource: r.clone(),
+                    })
                     .collect::<Vec<_>>(),
             });
-            Kernel { pipeline: pipeline(Some(&layout), entry), group: Some(group), groups, params_only: false }
+            Kernel {
+                pipeline: pipeline(Some(&layout), entry),
+                group: Some(group),
+                groups,
+                params_only: false,
+            }
         };
         let view = wgpu::BindingResource::TextureView;
-        let params_only = |kernel: Kernel| Kernel { params_only: true, ..kernel };
+        let params_only = |kernel: Kernel| Kernel {
+            params_only: true,
+            ..kernel
+        };
         let kernels = vec![
             params_only(kernel(
                 "transmittance_lut_kernel",
                 &[(storage_texture(0, d2), view(&transmittance))],
-                [TRANSMITTANCE[0].div_ceil(8), TRANSMITTANCE[1].div_ceil(8), 1],
+                [
+                    TRANSMITTANCE[0].div_ceil(8),
+                    TRANSMITTANCE[1].div_ceil(8),
+                    1,
+                ],
             )),
             params_only(kernel(
                 "multi_scattering_kernel",
-                &[(sampled_texture(1, compute, d2), view(&transmittance)), (storage_texture(2, d2), view(&multi))],
-                [MULTI_SCATTERING.div_ceil(8), MULTI_SCATTERING.div_ceil(8), 1],
+                &[
+                    (sampled_texture(1, compute, d2), view(&transmittance)),
+                    (storage_texture(2, d2), view(&multi)),
+                ],
+                [
+                    MULTI_SCATTERING.div_ceil(8),
+                    MULTI_SCATTERING.div_ceil(8),
+                    1,
+                ],
             )),
             kernel(
                 "sky_view_kernel",
@@ -728,17 +824,27 @@ impl AtmospherePass {
                 &[
                     (sampled_texture(1, compute, d2), view(&transmittance)),
                     (sampled_texture(3, compute, d2), view(&multi)),
-                    (storage_texture(6, wgpu::TextureViewDimension::D3), view(&aerial)),
+                    (
+                        storage_texture(6, wgpu::TextureViewDimension::D3),
+                        view(&aerial),
+                    ),
                 ],
                 [AERIAL.div_ceil(8), AERIAL.div_ceil(8), 1],
             ),
-            kernel("irradiance_kernel", &[(sampled_texture(5, compute, d2), view(&sky_view))], [1, 1, 1]),
+            kernel(
+                "irradiance_kernel",
+                &[(sampled_texture(5, compute, d2), view(&sky_view))],
+                [1, 1, 1],
+            ),
             params_only(kernel(
                 "sky_table_kernel",
                 &[
                     (sampled_texture(1, compute, d2), view(&transmittance)),
                     (sampled_texture(3, compute, d2), view(&multi)),
-                    (buffer_entry(7, compute, storage(false)), sky_table.as_entire_binding()),
+                    (
+                        buffer_entry(7, compute, storage(false)),
+                        sky_table.as_entire_binding(),
+                    ),
                 ],
                 [SKY_TABLE_ENTRIES as u32, 1, 1],
             )),
@@ -747,7 +853,10 @@ impl AtmospherePass {
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Atmosphere frame"),
             size: ATMOSPHERE_FRAME_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let clouds = CloudVolumes::new(device, &frame);
@@ -793,6 +902,7 @@ impl AtmospherePass {
                 row.len() >= 112 && row[108..112].iter().any(|&b| b != 0)
             }),
             active: false,
+            xr_mode: false,
             params_tables: None,
             trace: std::env::var_os("HELIO_ATMOSPHERE_TRACE").map(|_| Vec::new()),
             frame_index: 0,
@@ -802,12 +912,19 @@ impl AtmospherePass {
 
     /// The pass that composites this atmosphere over the lit scene, in
     /// `format` (the lighting target's).
-    pub fn composite(device: &wgpu::Device, format: wgpu::TextureFormat) -> AtmosphereCompositePass {
+    pub fn composite(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> AtmosphereCompositePass {
         AtmosphereCompositePass::new(device, format)
     }
 }
 
 impl RenderPass for AtmospherePass {
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.xr_mode = inputs.xr_mode;
+    }
+
     fn scene_buffers(&self) -> &'static [&'static str] {
         &["atmospheres", "scene_lights"]
     }
@@ -855,7 +972,10 @@ impl RenderPass for AtmospherePass {
             ctx.write_buffer(self.clouds.shadow_frame(), 0, &[0u8; 16]);
         }
         if active {
-            self.clouds.prepare(ctx, rows.map(|handle| (handle.epoch, handle.content_generation)));
+            self.clouds.prepare(
+                ctx,
+                rows.map(|handle| (handle.epoch, handle.content_generation)),
+            );
         } else {
             self.params_tables = None;
             self.clouds.forget_weather();
@@ -867,7 +987,7 @@ impl RenderPass for AtmospherePass {
         let uniform = ResolveUniform {
             origin_hi: hi.extend(0.0).to_array(),
             origin_lo: lo.extend(0.0).to_array(),
-            clock: [ctx.time_delta, 0.0, 0.0, 0.0],
+            clock: [ctx.time_delta, f32::from(self.xr_mode), 0.0, 0.0],
         };
         ctx.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
         Ok(())
@@ -877,26 +997,53 @@ impl RenderPass for AtmospherePass {
         if !self.active {
             return Ok(());
         }
-        let atmospheres = ctx.scene_buffers.get(BufferKey::of("atmospheres")).map_or(&self.no_rows, |h| &h.buffer);
-        let lights = ctx.scene_buffers.get(BufferKey::of("scene_lights")).map_or(&self.no_rows, |h| &h.buffer);
+        let atmospheres = ctx
+            .scene_buffers
+            .get(BufferKey::of("atmospheres"))
+            .map_or(&self.no_rows, |h| &h.buffer);
+        let lights = ctx
+            .scene_buffers
+            .get(BufferKey::of("scene_lights"))
+            .map_or(&self.no_rows, |h| &h.buffer);
         let key = (atmospheres.clone(), lights.clone(), ctx.camera.clone());
         if self.shared_key.as_ref() != Some(&key) {
             self.shared_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Atmosphere shared"),
                 layout: &self.shared_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: atmospheres.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: lights.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: ctx.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: self.frame.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: atmospheres.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: ctx.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.frame.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
                 ],
             }));
             self.shared_key = Some(key);
         }
         let mut cmds = ctx.graphics_cmds();
-        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Atmosphere"), timestamp_writes: None });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Atmosphere"),
+            timestamp_writes: None,
+        });
         pass.set_bind_group(0, self.shared_group.as_ref(), &[]);
         pass.set_pipeline(&self.resolve);
         pass.dispatch_workgroups(1, 1, 1);
@@ -917,7 +1064,11 @@ impl RenderPass for AtmospherePass {
             pass.set_bind_group(1, kernel.group.as_ref(), &[]);
             pass.dispatch_workgroups(kernel.groups[0], kernel.groups[1], kernel.groups[2]);
         }
-        self.clouds.record(&mut pass);
+        // In XR the sky-view LUT provides the baked cloudless sky. Avoid
+        // generating cloud weather, shadows and volumes for each eye.
+        if !self.xr_mode {
+            self.clouds.record(&mut pass);
+        }
         drop(pass);
         self.frame_index += 1;
         if let Some(trace) = &mut self.trace {
@@ -1043,38 +1194,41 @@ impl AtmosphereCompositePass {
             dst_factor: wgpu::BlendFactor::SrcAlpha,
             operation: wgpu::BlendOperation::Add,
         };
-        let pipeline = helio_core::shader::create_render_pipeline(&device, wgpu::RenderPipelineDescriptor {
-            label: Some("Atmosphere composite"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
+        let pipeline = helio_core::shader::create_render_pipeline(
+            &device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("Atmosphere composite"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_composite"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState {
+                            color: blend,
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_composite"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState {
-                        color: blend,
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::Zero,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Atmosphere composite"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1084,7 +1238,11 @@ impl AtmosphereCompositePass {
         let no_clouds = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("No clouds"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -1093,7 +1251,15 @@ impl AtmosphereCompositePass {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        Self { pipeline, layout, sampler, group: None, key: None, active: false, no_clouds }
+        Self {
+            pipeline,
+            layout,
+            sampler,
+            group: None,
+            key: None,
+            active: false,
+            no_clouds,
+        }
     }
 }
 
@@ -1125,7 +1291,10 @@ impl RenderPass for AtmosphereCompositePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.active = ctx.registry.get::<bool>(ResourceKey::new("atmosphere_active")).unwrap_or(false);
+        self.active = ctx
+            .registry
+            .get::<bool>(ResourceKey::new("atmosphere_active"))
+            .unwrap_or(false);
         Ok(())
     }
 
@@ -1140,12 +1309,15 @@ impl RenderPass for AtmosphereCompositePass {
             return None;
         }
         let target = resources.texture_view(ResourceKey::new("pre_aa"))?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
+            .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Atmosphere composite"),
@@ -1161,19 +1333,32 @@ impl RenderPass for AtmosphereCompositePass {
         if !self.active {
             return Ok(());
         }
-        let Some(mut pass) = ctx.render_cmds() else { return Ok(()) };
+        let Some(mut pass) = ctx.render_cmds() else {
+            return Ok(());
+        };
         let registry = ctx.registry;
-        let (Some(frame), Some(transmittance), Some(multi_scattering), Some(sky_view), Some(aerial)) = (
+        let (
+            Some(frame),
+            Some(transmittance),
+            Some(multi_scattering),
+            Some(sky_view),
+            Some(aerial),
+        ) = (
             registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)),
             registry.get::<&wgpu::TextureView>(ResourceKey::new(ATMOSPHERE_TRANSMITTANCE)),
             registry.get::<&wgpu::TextureView>(ResourceKey::new(ATMOSPHERE_MULTI_SCATTERING)),
             registry.get::<&wgpu::TextureView>(ResourceKey::new(ATMOSPHERE_SKY_VIEW)),
             registry.get::<&wgpu::TextureView>(ResourceKey::new(ATMOSPHERE_AERIAL)),
-        ) else {
+        )
+        else {
             return Ok(());
         };
-        let clouds = registry.texture_binding(ATMOSPHERE_CLOUDS).unwrap_or(&self.no_clouds);
-        let cloud_depth = registry.texture_binding(ATMOSPHERE_CLOUD_DEPTH).unwrap_or(&self.no_clouds);
+        let clouds = registry
+            .texture_binding(ATMOSPHERE_CLOUDS)
+            .unwrap_or(&self.no_clouds);
+        let cloud_depth = registry
+            .texture_binding(ATMOSPHERE_CLOUD_DEPTH)
+            .unwrap_or(&self.no_clouds);
         let key = (
             ctx.camera.clone(),
             frame.clone(),
@@ -1192,16 +1377,46 @@ impl RenderPass for AtmosphereCompositePass {
                 label: Some("Atmosphere composite"),
                 layout: &self.layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ctx.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: frame.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(transmittance) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(sky_view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(aerial) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(multi_scattering) },
-                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(clouds) },
-                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(cloud_depth) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: frame.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(transmittance),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(sky_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(aerial),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(multi_scattering),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(clouds),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::TextureView(cloud_depth),
+                    },
                 ],
             }));
             self.key = Some(key);

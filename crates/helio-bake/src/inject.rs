@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_core::ResourceRegistry;
+use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 use crate::data::BakedData;
 
@@ -67,36 +67,65 @@ impl RenderPass for BakeInjectPass {
         // out of `self.data: Arc<BakedData>`, which outlives any single frame.
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO
         if let Some(ref view) = self.data.ao_view {
-            frame.write(helio_core::ResourceKey::new("baked_ao"), unsafe { extend_lifetime(view.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_ao"),
+                unsafe { extend_lifetime(view.as_ref()) },
+                "BakeInject",
+            );
         }
         if let Some(ref sampler) = self.data.ao_sampler {
-            frame.write(helio_core::ResourceKey::new("baked_ao_sampler"), unsafe { extend_lifetime(sampler.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_ao_sampler"),
+                unsafe { extend_lifetime(sampler.as_ref()) },
+                "BakeInject",
+            );
         }
 
         // Lightmap atlas
         if let Some(ref view) = self.data.lightmap_view {
-            frame.write(helio_core::ResourceKey::new("baked_lightmap"), unsafe { extend_lifetime(view.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_lightmap"),
+                unsafe { extend_lifetime(view.as_ref()) },
+                "BakeInject",
+            );
         }
         if let Some(ref sampler) = self.data.lightmap_sampler {
-            frame.write(helio_core::ResourceKey::new("baked_lightmap_sampler"), unsafe { extend_lifetime(sampler.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_lightmap_sampler"),
+                unsafe { extend_lifetime(sampler.as_ref()) },
+                "BakeInject",
+            );
         }
 
         // Reflection cubemap
         if let Some(ref view) = self.data.reflection_view {
-            frame.write(helio_core::ResourceKey::new("baked_reflection"), unsafe { extend_lifetime(view.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_reflection"),
+                unsafe { extend_lifetime(view.as_ref()) },
+                "BakeInject",
+            );
         }
         if let Some(ref sampler) = self.data.reflection_sampler {
-            frame.write(helio_core::ResourceKey::new("baked_reflection_sampler"), unsafe { extend_lifetime(sampler.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_reflection_sampler"),
+                unsafe { extend_lifetime(sampler.as_ref()) },
+                "BakeInject",
+            );
         }
 
         // Irradiance SH GPU buffer
         if let Some(ref buf) = self.data.irradiance_sh_buf {
-            frame.write(helio_core::ResourceKey::new("baked_irradiance_sh"), unsafe { extend_lifetime(buf.as_ref()) }, "BakeInject");
+            frame.write(
+                helio_core::ResourceKey::new("baked_irradiance_sh"),
+                unsafe { extend_lifetime(buf.as_ref()) },
+                "BakeInject",
+            );
         }
 
         // PVS — CPU-side bitfield for visibility queries
         if let Some(ref pvs) = self.data.pvs {
-            frame.write(helio_core::ResourceKey::new("baked_pvs"),
+            frame.write(
+                helio_core::ResourceKey::new("baked_pvs"),
                 helio_bake_types::BakedPvsRef {
                     world_min: pvs.world_min,
                     world_max: pvs.world_max,

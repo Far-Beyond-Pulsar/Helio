@@ -33,7 +33,8 @@ pub use gpu_types::*;
 
 mod volume_blend;
 pub use volume_blend::{
-    PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE, FOG_SETTINGS_MAYBE_ACTIVE,
+    PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE,
+    FOG_SETTINGS_MAYBE_ACTIVE,
 };
 
 mod fog_composite;
@@ -57,8 +58,10 @@ const WG_EXPOSURE_X: u32 = 16;
 const WG_EXPOSURE_Y: u32 = 16;
 const EXPOSURE_STRIDE: u32 = 4;
 fn exposure_groups(width: u32, height: u32) -> (u32, u32) {
-    (width.max(1).div_ceil(EXPOSURE_STRIDE * WG_EXPOSURE_X),
-     height.max(1).div_ceil(EXPOSURE_STRIDE * WG_EXPOSURE_Y))
+    (
+        width.max(1).div_ceil(EXPOSURE_STRIDE * WG_EXPOSURE_X),
+        height.max(1).div_ceil(EXPOSURE_STRIDE * WG_EXPOSURE_Y),
+    )
 }
 fn exposure_partial_buffer(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Buffer {
     let (gx, gy) = exposure_groups(width, height);
@@ -112,7 +115,11 @@ impl LocalExposureGrid {
         let blurred = grid("PostProcess Local Exposure Blurred Grid");
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PostProcess Local Exposure Curves"),
-            size: wgpu::Extent3d { width: cells.0, height: cells.1, depth_or_array_layers: LE_BINS },
+            size: wgpu::Extent3d {
+                width: cells.0,
+                height: cells.1,
+                depth_or_array_layers: LE_BINS,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
@@ -122,13 +129,23 @@ impl LocalExposureGrid {
         });
         let storage_view = texture.create_view(&Default::default());
         let sampled_view = texture.create_view(&Default::default());
-        Self { cells, raw, blurred, _texture: texture, storage_view, sampled_view }
+        Self {
+            cells,
+            raw,
+            blurred,
+            _texture: texture,
+            storage_view,
+            sampled_view,
+        }
     }
 
     /// Workgroups of `cs_local_exposure_grid` (one a screen cell), then of
     /// `cs_local_exposure_blur` and `cs_local_exposure_curve`.
     fn workgroups(&self) -> [[u32; 3]; 3] {
-        let (x, y) = (self.cells.0.div_ceil(WG_LE_BLUR), self.cells.1.div_ceil(WG_LE_BLUR));
+        let (x, y) = (
+            self.cells.0.div_ceil(WG_LE_BLUR),
+            self.cells.1.div_ceil(WG_LE_BLUR),
+        );
         [[self.cells.0, self.cells.1, 1], [x, y, LE_BINS], [x, y, 1]]
     }
 }
@@ -263,37 +280,44 @@ fn uber_pipelines(
     format: wgpu::TextureFormat,
 ) -> [wgpu::RenderPipeline; 2] {
     [false, true].map(|debug_view| {
-        helio_core::shader::create_render_pipeline(device, wgpu::RenderPipelineDescriptor {
-            label: Some(if debug_view { "PostProcess Uber (debug view)" } else { "PostProcess Uber" }),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module,
-                entry_point: Some("fs_uber"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &[("DEBUG_VIEW", f64::from(u8::from(debug_view)))],
+        helio_core::shader::create_render_pipeline(
+            device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some(if debug_view {
+                    "PostProcess Uber (debug view)"
+                } else {
+                    "PostProcess Uber"
+                }),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs_uber"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("DEBUG_VIEW", f64::from(u8::from(debug_view)))],
+                        ..Default::default()
+                    },
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
                     ..Default::default()
                 },
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
             },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        })
+        )
     })
 }
 
@@ -317,7 +341,9 @@ impl PostProcessPass {
 
     /// Optional GPU timestamps around the full-screen tonemap and effects pass.
     pub fn enable_uber_timing(&mut self, device: &wgpu::Device) -> bool {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+        if !device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
             return false;
         }
         self.uber_timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -335,7 +361,9 @@ impl PostProcessPass {
     /// Optional GPU timestamps around the compute work: [0] start, [1] after
     /// exposure, [2] after local exposure, [3] after bloom.
     pub fn enable_compute_timing(&mut self, device: &wgpu::Device) -> bool {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS) {
+        if !device.features().contains(
+            wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+        ) {
             return false;
         }
         self.compute_timing_query = Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -594,23 +622,24 @@ impl PostProcessPass {
         });
 
         // ── bloom_upsample_bgl: mip i + coarser sum sampled, sum i dst ────
-        let bloom_upsample_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("PostProcess Bloom Upsample BGL"),
-            entries: &[
-                sampled_tex_entry(0, cv, false),
-                sampled_tex_entry(1, cv, false),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: cv,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+        let bloom_upsample_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("PostProcess Bloom Upsample BGL"),
+                entries: &[
+                    sampled_tex_entry(0, cv, false),
+                    sampled_tex_entry(1, cv, false),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: cv,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
         let bloom_upsample_bgs = Self::make_bloom_upsample_bgs(
             device,
             &bloom_upsample_bgl,
@@ -651,43 +680,66 @@ impl PostProcessPass {
         });
 
         let mk_compute = |label: &str, entry: &str, layout: &wgpu::PipelineLayout| {
-            helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                module: &shader,
-                entry_point: Some(entry),
-                compilation_options: Default::default(),
-                cache: None,
-            })
+            helio_core::shader::create_compute_pipeline(
+                &device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
         };
 
         let exposure_pipeline = mk_compute("PostProcess Exposure", "cs_exposure", &exposure_pl);
-        let exposure_reduce_pipeline = mk_compute("PostProcess Exposure Reduce", "cs_exposure_reduce", &exposure_pl);
-        let exposure_adapt_pipeline = mk_compute("PostProcess Exposure Adapt", "cs_exposure_adapt", &exposure_pl);
+        let exposure_reduce_pipeline = mk_compute(
+            "PostProcess Exposure Reduce",
+            "cs_exposure_reduce",
+            &exposure_pl,
+        );
+        let exposure_adapt_pipeline = mk_compute(
+            "PostProcess Exposure Adapt",
+            "cs_exposure_adapt",
+            &exposure_pl,
+        );
         // Zeroes its own bins: naga's zeroing would do it from one invocation.
-        let local_exposure_grid_pipeline = helio_core::shader::create_compute_pipeline(&device, wgpu::ComputePipelineDescriptor {
-            label: Some("PostProcess Local Exposure Grid"),
-            layout: Some(&exposure_pl),
-            module: &shader,
-            entry_point: Some("cs_local_exposure_grid"),
-            compilation_options: wgpu::PipelineCompilationOptions {
-                zero_initialize_workgroup_memory: false,
-                ..Default::default()
+        let local_exposure_grid_pipeline = helio_core::shader::create_compute_pipeline(
+            &device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("PostProcess Local Exposure Grid"),
+                layout: Some(&exposure_pl),
+                module: &shader,
+                entry_point: Some("cs_local_exposure_grid"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    zero_initialize_workgroup_memory: false,
+                    ..Default::default()
+                },
+                cache: None,
             },
-            cache: None,
-        });
-        let local_exposure_blur_pipeline =
-            mk_compute("PostProcess Local Exposure Blur", "cs_local_exposure_blur", &exposure_pl);
-        let local_exposure_curve_pipeline =
-            mk_compute("PostProcess Local Exposure Curve", "cs_local_exposure_curve", &exposure_pl);
+        );
+        let local_exposure_blur_pipeline = mk_compute(
+            "PostProcess Local Exposure Blur",
+            "cs_local_exposure_blur",
+            &exposure_pl,
+        );
+        let local_exposure_curve_pipeline = mk_compute(
+            "PostProcess Local Exposure Curve",
+            "cs_local_exposure_curve",
+            &exposure_pl,
+        );
         let bloom_extract_pipeline = mk_compute(
             "PostProcess Bloom Extract",
             "cs_bloom_down_extract",
             &bloom_pl,
         );
         let bloom_down_pipeline = mk_compute("PostProcess Bloom Down", "cs_bloom_down", &bloom_pl);
-        let bloom_upsample_pipeline =
-            mk_compute("PostProcess Bloom Upsample", "cs_bloom_upsample", &bloom_upsample_pl);
+        let bloom_upsample_pipeline = mk_compute(
+            "PostProcess Bloom Upsample",
+            "cs_bloom_upsample",
+            &bloom_upsample_pl,
+        );
 
         let uber_pipelines = uber_pipelines(&device, &render_pl, &shader, format);
 
@@ -1116,12 +1168,17 @@ impl PostProcessPass {
         sums: &[BloomSum],
     ) -> Vec<wgpu::BindGroup> {
         fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
-            wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) }
+            wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            }
         }
         (0..sums.len())
             .map(|i| {
                 // The coarsest sum adds the last mip, which has nothing below it.
-                let coarser = sums.get(i + 1).map_or(&bloom_sampled_views[i + 1], |sum| &sum.sampled_view);
+                let coarser = sums
+                    .get(i + 1)
+                    .map_or(&bloom_sampled_views[i + 1], |sum| &sum.sampled_view);
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(&format!("PostProcess Bloom Upsample BG {i}")),
                     layout: bloom_upsample_bgl,
@@ -1307,7 +1364,6 @@ impl PostProcessPass {
             (self.analysis_size.1 >> (mip + 1)).max(1),
         )
     }
-
 }
 
 impl RenderPass for PostProcessPass {
@@ -1321,11 +1377,36 @@ impl RenderPass for PostProcessPass {
 
     fn reads(&self) -> &'static [&'static str] {
         match self.color_input {
-            "lens_color" => &["lens_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
-            "fxaa_color" => &["fxaa_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
-            "tsr_color" => &["tsr_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
-            "fogged_hdr" => &["fogged_hdr", "postprocess_uniforms", "lens_output", "color_grading_lut"],
-            _ => &["pre_aa", "postprocess_uniforms", "lens_output", "color_grading_lut"],
+            "lens_color" => &[
+                "lens_color",
+                "postprocess_uniforms",
+                "lens_output",
+                "color_grading_lut",
+            ],
+            "fxaa_color" => &[
+                "fxaa_color",
+                "postprocess_uniforms",
+                "lens_output",
+                "color_grading_lut",
+            ],
+            "tsr_color" => &[
+                "tsr_color",
+                "postprocess_uniforms",
+                "lens_output",
+                "color_grading_lut",
+            ],
+            "fogged_hdr" => &[
+                "fogged_hdr",
+                "postprocess_uniforms",
+                "lens_output",
+                "color_grading_lut",
+            ],
+            _ => &[
+                "pre_aa",
+                "postprocess_uniforms",
+                "lens_output",
+                "color_grading_lut",
+            ],
         }
     }
 
@@ -1342,7 +1423,9 @@ impl RenderPass for PostProcessPass {
         builder.read(self.color_input);
         // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
         // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == crate::FOGGED_HDR { builder.read("pre_aa"); }
+        if self.color_input == crate::FOGGED_HDR {
+            builder.read("pre_aa");
+        }
         // Resolved camera + volume settings from PostProcessVolumeBlendPass.
         builder.read("postprocess_uniforms");
         // Optional: graphs without a LensFlarePass never publish this, and the
@@ -1406,9 +1489,15 @@ impl PostProcessPass {
     fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Adaptation inputs for cs_exposure_adapt: frame time and whether the
         // adapted value is valid history (otherwise the first meter snaps).
-        let adaptation = [ctx.delta_time.max(0.0), if self.exposure_history { 1.0 } else { 0.0 }];
-        ctx.queue
-            .write_buffer(&self.avg_luminance_buf, 8, bytemuck::cast_slice(&adaptation));
+        let adaptation = [
+            ctx.delta_time.max(0.0),
+            if self.exposure_history { 1.0 } else { 0.0 },
+        ];
+        ctx.queue.write_buffer(
+            &self.avg_luminance_buf,
+            8,
+            bytemuck::cast_slice(&adaptation),
+        );
         self.exposure_history = true;
 
         // Deferred shader rebuild: if a snippet was queued, apply it now.
@@ -1443,15 +1532,24 @@ impl PostProcessPass {
 
     fn execute_frame(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let input_key = self.color_input;
-        let pre_aa_view = match ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new(input_key)) {
+        let pre_aa_view = match ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(input_key))
+        {
             Some(v) => v,
             None => return Ok(()),
         };
-        let input_size = (pre_aa_view.texture().width(), pre_aa_view.texture().height());
+        let input_size = (
+            pre_aa_view.texture().width(),
+            pre_aa_view.texture().height(),
+        );
         if input_size != self.analysis_size {
             self.resize_analysis(ctx.device, input_size.0, input_size.1);
         }
-        let postprocess_buf = match ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("postprocess_uniforms")) {
+        let postprocess_buf = match ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("postprocess_uniforms"))
+        {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -1462,9 +1560,15 @@ impl PostProcessPass {
         // binds the 1x1 black fallback. Part of the key so that a lens pass
         // being added, removed, or resized rebuilds the group instead of
         // leaving b17 pointing at a stale view.
-        let lens_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("lens_output"));
-        let velocity_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"));
-        let lut_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("color_grading_lut"));
+        let lens_view = ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("lens_output"));
+        let velocity_view = ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"));
+        let lut_view = ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("color_grading_lut"));
 
         let bg_key = (
             pre_aa_view.clone(),
@@ -1583,7 +1687,8 @@ impl PostProcessPass {
                 &self.local_exposure_blur_pipeline,
                 &self.local_exposure_curve_pipeline,
             ];
-            for (pipeline, [x, y, z]) in pipelines.into_iter().zip(self.local_exposure.workgroups()) {
+            for (pipeline, [x, y, z]) in pipelines.into_iter().zip(self.local_exposure.workgroups())
+            {
                 cpass.set_pipeline(pipeline);
                 cpass.dispatch_workgroups(x, y, z);
             }
@@ -1699,7 +1804,9 @@ struct BloomSum {
 impl BloomSum {
     /// Sums for mips 0..BLOOM_MIPS-1; the last mip is its own sum.
     fn chain(device: &wgpu::Device, width: u32, height: u32) -> Vec<Self> {
-        (0..BLOOM_MIPS - 1).map(|mip| Self::new(device, mip, width, height)).collect()
+        (0..BLOOM_MIPS - 1)
+            .map(|mip| Self::new(device, mip, width, height))
+            .collect()
     }
 
     fn new(device: &wgpu::Device, mip: u32, width: u32, height: u32) -> Self {
@@ -1719,6 +1826,10 @@ impl BloomSum {
         });
         let sampled_view = texture.create_view(&Default::default());
         let storage_view = texture.create_view(&Default::default());
-        Self { _texture: texture, sampled_view, storage_view }
+        Self {
+            _texture: texture,
+            sampled_view,
+            storage_view,
+        }
     }
 }

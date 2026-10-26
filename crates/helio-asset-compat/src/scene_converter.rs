@@ -539,7 +539,11 @@ fn merge_sectioned(name: String, subs: &[&ConvertedMesh]) -> ConvertedSectionedM
         let xform = sub.node_transform;
         let normal_mat = glam::Mat3::from_mat4(xform.inverse().transpose());
         let tangent_mat = glam::Mat3::from_mat4(xform);
-        let handedness_sign = if xform.determinant() < 0.0 { -1.0_f32 } else { 1.0 };
+        let handedness_sign = if xform.determinant() < 0.0 {
+            -1.0_f32
+        } else {
+            1.0
+        };
 
         for v in &sub.vertices {
             let pos = xform.transform_point3(glam::Vec3::from(v.position));

@@ -123,9 +123,11 @@ impl RenderPipelineRegistry {
 
     /// A new pipeline for `id`, or the default when `id` is `None` or unknown.
     pub fn create(&self, id: Option<&str>) -> Option<Box<dyn IntoGraph>> {
-        let entry = id
-            .and_then(|id| self.entries.get(id))
-            .or_else(|| self.default_id.as_deref().and_then(|id| self.entries.get(id)))?;
+        let entry = id.and_then(|id| self.entries.get(id)).or_else(|| {
+            self.default_id
+                .as_deref()
+                .and_then(|id| self.entries.get(id))
+        })?;
         Some((entry.factory)())
     }
 

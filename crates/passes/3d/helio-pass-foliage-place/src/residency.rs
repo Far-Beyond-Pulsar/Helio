@@ -186,9 +186,15 @@ impl TileRing {
 
     /// Resident tile coordinates within the inclusive tile bounds `lo..=hi`.
     pub fn resident_within(&self, lo: [i32; 2], hi: [i32; 2]) -> Vec<[i32; 2]> {
-        let span = (i64::from(hi[0]) - i64::from(lo[0]) + 1).max(0) * (i64::from(hi[1]) - i64::from(lo[1]) + 1).max(0);
+        let span = (i64::from(hi[0]) - i64::from(lo[0]) + 1).max(0)
+            * (i64::from(hi[1]) - i64::from(lo[1]) + 1).max(0);
         if span > self.occupied.len() as i64 {
-            return self.occupied.keys().filter(|c| c[0] >= lo[0] && c[0] <= hi[0] && c[1] >= lo[1] && c[1] <= hi[1]).copied().collect();
+            return self
+                .occupied
+                .keys()
+                .filter(|c| c[0] >= lo[0] && c[0] <= hi[0] && c[1] >= lo[1] && c[1] <= hi[1])
+                .copied()
+                .collect();
         }
         let mut out = Vec::new();
         for x in lo[0]..=hi[0] {
@@ -301,8 +307,12 @@ impl TileRing {
 
         let (placed, evicted) = self.drain_pending();
         // Tiles placed again share the budget, after the entering ones.
-        while (self.place_queue.len() + self.refresh_queue.len()) < self.max_tiles_per_frame as usize {
-            let Some(coord) = self.refresh.pop_front() else { break };
+        while (self.place_queue.len() + self.refresh_queue.len())
+            < self.max_tiles_per_frame as usize
+        {
+            let Some(coord) = self.refresh.pop_front() else {
+                break;
+            };
             self.refresh_set.remove(&coord);
             if let Some(&slot) = self.occupied.get(&coord) {
                 if !self.place_queue.contains(&slot) {
