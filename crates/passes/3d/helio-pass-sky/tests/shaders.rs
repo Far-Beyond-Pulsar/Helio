@@ -17,6 +17,7 @@ fn sky_shaders_validate() {
         ("atmosphere_luts", include_str!("../src/shaders/atmosphere_luts.wgsl")),
         ("atmosphere_composite", include_str!("../src/shaders/atmosphere_composite.wgsl")),
         ("cloud_noise", include_str!("../src/shaders/cloud_noise.wgsl")),
+        ("cloud_planet_weather", include_str!("../src/shaders/cloud_planet_weather.wgsl")),
         ("cloud_shadow_map", include_str!("../src/shaders/cloud_shadow_map.wgsl")),
         ("cloud_trace", include_str!("../src/shaders/cloud_trace.wgsl")),
     ] {

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use glam::Vec3;
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig};
 use helio_default_passes::{build_default_graph_external_with_lighting_passes, VoxelPassFactory};
-use helio_pass_sky::{AtmosphereComponent, CloudLayer};
+use helio_pass_sky::{AtmosphereComponent, CloudLayer, PlanetWeather};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
@@ -175,10 +175,21 @@ fn camera(eye: Vec3, forward: Vec3, fov_deg: f32, aspect: f32) -> Camera {
 }
 
 fn band() -> CloudLayer {
-    CloudLayer { bottom_km: 1.5, top_km: 2.5, coverage: 0.8, kind: 0.6, wind: [0.0; 3], ..CloudLayer::cumulus() }
+    CloudLayer {
+        bottom_km: 1.5,
+        top_km: 2.5,
+        coverage: 0.8,
+        kind: 0.6,
+        wind: [0.0; 3],
+        // Calm, with small cells: no region (a clear high, a hole between
+        // cells) wider than the views.
+        weather: PlanetWeather { mesoscale_km: 8.0, ..PlanetWeather::calm() },
+        ..CloudLayer::cumulus()
+    }
 }
 
-/// Over flat ground, the layer between 1.5 and 2.5 km changes the view
+/// Over flat ground, the layer between 1.5 and 2.5 km (calm, its cells
+/// small: its coverage wherever the view looks) changes the view
 /// wherever a ray crosses the band and nowhere else: looking up from below
 /// and down from above (onto the planet's analytic ground) the clouds show;
 /// looking up from above them, or down from below, the sky is the clear
@@ -194,7 +205,8 @@ fn clouds_appear_in_their_band_and_nowhere_else() {
     let level = Vec3::new(1.0, 0.0, 0.3);
     let cases = [
         ("below_up", Vec3::new(0.0, 300.0, 0.0), up, true),
-        ("inside_level", Vec3::new(0.0, 2000.0, 0.0), level, true),
+        // Low in the band, where its form's clouds are thickest.
+        ("inside_level", Vec3::new(0.0, 1800.0, 0.0), level, true),
         ("above_down", Vec3::new(0.0, 4000.0, 0.0), down, true),
         ("above_up", Vec3::new(0.0, 4000.0, 0.0), up, false),
         ("below_down", Vec3::new(0.0, 300.0, 0.0), down, false),
@@ -442,10 +454,74 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
     assert!(pollster::block_on(validation.pop()).is_none());
 }
 
-/// What the clouds cost at 1080p looking at a cloudy horizon: their trace
-/// (`CloudTrace`, the sun's visibility included) and the atmosphere pass's
-/// extra (noise once, the shadow map each frame) and the composite,
-/// against the same view without clouds. Printed; bounded loosely, as test
+/// From far away the cover is the planet's weather, not a tile: an
+/// Earth-sized planet seen whole, its clouds' cover (cloudy against clear)
+/// averaged over blocks some 800 km across varies from block to block
+/// (systems, bands, clear highs), where a calm sky's (the layer's coverage
+/// everywhere, its cells and groups alone) is about even.
+#[test]
+fn from_far_away_the_cover_is_weather_not_a_tile() {
+    const SIZE: u32 = 192;
+    const BLOCK: usize = 12;
+    let Some(mut view) = view(SIZE, SIZE, false) else { return };
+    let validation = view.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let radius = 6_371_000.0f64;
+    let distance = 4.0 * radius;
+    let towards = glam::DVec3::new(0.3, 0.6, 1.0).normalize();
+    let eye = towards * distance;
+    let fov = 2.0 * (radius / distance).asin() as f32 * 1.1;
+    let camera = Camera::perspective_look_to(eye, -towards.as_vec3(), Vec3::Y, fov, 1.0, 1000.0, 1.0e9);
+    let sun = (towards.as_vec3() + Vec3::new(0.3, 0.2, 0.0)).normalize();
+    let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+    let clouds = CloudLayer { wind: [0.0; 3], ..CloudLayer::cumulus() };
+    let mut images = Vec::new();
+    for air in [air, air.with_clouds(clouds), air.with_clouds(CloudLayer { weather: PlanetWeather::calm(), ..clouds })] {
+        view.set_sky(sun, air);
+        images.push(view.settle(&camera, 24));
+    }
+    view.capture("far_clear", &images[0]);
+    view.capture("far_weather", &images[1]);
+    view.capture("far_calm", &images[2]);
+    // Blocks well inside the disk (its middle half across).
+    let n = SIZE as usize;
+    let variation = |cloudy: &[[u8; 4]]| {
+        let mut means = Vec::new();
+        for by in (0..n).step_by(BLOCK) {
+            for bx in (0..n).step_by(BLOCK) {
+                let centre = ((bx + BLOCK / 2) as f64 / n as f64 - 0.5, (by + BLOCK / 2) as f64 / n as f64 - 0.5);
+                if (centre.0 * centre.0 + centre.1 * centre.1).sqrt() > 0.22 {
+                    continue;
+                }
+                let mut sum = 0.0;
+                for y in by..by + BLOCK {
+                    for x in bx..bx + BLOCK {
+                        sum += (luminance(cloudy[y * n + x]) - luminance(images[0][y * n + x])).abs();
+                    }
+                }
+                means.push(sum / (BLOCK * BLOCK) as f64);
+            }
+        }
+        let mean = means.iter().sum::<f64>() / means.len() as f64;
+        let std = (means.iter().map(|m| (m - mean) * (m - mean)).sum::<f64>() / means.len() as f64).sqrt();
+        (mean, std / mean.max(1e-6), means.len())
+    };
+    let (weather_mean, weather, blocks) = variation(&images[1]);
+    let (calm_mean, calm, _) = variation(&images[2]);
+    eprintln!(
+        "CLOUD_FAR {blocks} blocks: weather cover {weather_mean:.1}, variation {weather:.3}; calm cover {calm_mean:.1}, variation {calm:.3}"
+    );
+    assert!(weather_mean > 4.0 && calm_mean > 4.0, "no clouds from afar ({weather_mean:.1}, {calm_mean:.1})");
+    assert!(weather > 0.15, "the weather's cover is even from afar: {weather:.3}");
+    assert!(weather > 2.0 * calm, "the weather varies no more than a calm sky: {weather:.3} vs {calm:.3}");
+    assert!(pollster::block_on(validation.pop()).is_none());
+}
+
+/// What the clouds cost at 1080p looking at a cloudy horizon from the
+/// ground and from orbit (400 km over an Earth-sized planet, down towards
+/// its horizon): their trace (`CloudTrace`, the sun's visibility included)
+/// and the atmosphere pass's extra (noise once, the planet's weather, the
+/// shadow map each frame) and the composite, against the same view without
+/// clouds. Printed; bounded loosely, as test
 /// machines differ (the target is under 1 ms on the dev GPU).
 #[test]
 fn clouds_cost() {
@@ -456,12 +532,12 @@ fn clouds_cost() {
     }
     let sun = Vec3::new(0.5, 0.35, 0.2).normalize();
     let camera = camera(Vec3::new(0.0, 300.0, 0.0), Vec3::new(1.0, 0.25, 0.3), 70.0, 16.0 / 9.0);
-    let measure = |view: &mut View, air: AtmosphereComponent| {
+    let measure = |view: &mut View, camera: &Camera, air: AtmosphereComponent| {
         view.set_sky(sun, air);
         let mut samples: std::collections::HashMap<&'static str, Vec<f32>> = Default::default();
         let mut last = None;
         for frame in 0..240 {
-            view.render(&camera);
+            view.render(camera);
             let snapshot = view.renderer.timing_snapshot();
             if frame < 60 || snapshot.gpu_frame_index == last {
                 continue;
@@ -481,17 +557,25 @@ fn clouds_cost() {
             })
             .collect::<std::collections::HashMap<_, _>>()
     };
-    let clear = measure(&mut view, AtmosphereComponent::earth());
-    let cloudy = measure(&mut view, AtmosphereComponent::earth().with_clouds(CloudLayer::cumulus()));
     let get = |m: &std::collections::HashMap<&str, f32>, k: &str| m.get(k).copied().unwrap_or(0.0);
-    let trace = get(&cloudy, "CloudTrace");
-    let atmosphere = get(&cloudy, "Atmosphere") - get(&clear, "Atmosphere");
-    let composite = get(&cloudy, "AtmosphereComposite") - get(&clear, "AtmosphereComposite");
-    let total = trace + atmosphere.max(0.0) + composite.max(0.0);
-    eprintln!(
-        "CLOUD_COST 1920x1080: trace {trace:.3} ms (clear sky {:.3}), shadow map +{atmosphere:.3} ms, composite +{composite:.3} ms, total {total:.3} ms",
-        get(&clear, "CloudTrace")
-    );
-    assert!(trace > 0.0, "no timing for the cloud trace");
-    assert!(total < 4.0, "clouds cost {total:.3} ms");
+    let radius = 6_371_000.0f64;
+    let orbit = Camera::perspective_look_to(glam::DVec3::new(0.0, radius + 400_000.0, 0.0), Vec3::new(1.0, -0.55, 0.2), Vec3::Y, 70f32.to_radians(), 16.0 / 9.0, 1.0, 1.0e9);
+    let views = [
+        ("ground", camera, AtmosphereComponent::earth()),
+        ("orbit", orbit, AtmosphereComponent::earth().around_planet([0.0; 3], radius)),
+    ];
+    for (name, camera, air) in views {
+        let clear = measure(&mut view, &camera, air);
+        let cloudy = measure(&mut view, &camera, air.with_clouds(CloudLayer::cumulus()));
+        let trace = get(&cloudy, "CloudTrace");
+        let atmosphere = get(&cloudy, "Atmosphere") - get(&clear, "Atmosphere");
+        let composite = get(&cloudy, "AtmosphereComposite") - get(&clear, "AtmosphereComposite");
+        let total = trace + atmosphere.max(0.0) + composite.max(0.0);
+        eprintln!(
+            "CLOUD_COST {name} 1920x1080: trace {trace:.3} ms (clear sky {:.3}), atmosphere +{atmosphere:.3} ms, composite +{composite:.3} ms, total {total:.3} ms",
+            get(&clear, "CloudTrace")
+        );
+        assert!(trace > 0.0, "{name}: no timing for the cloud trace");
+        assert!(total < 4.0, "{name}: clouds cost {total:.3} ms");
+    }
 }

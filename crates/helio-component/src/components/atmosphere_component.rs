@@ -9,7 +9,7 @@
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_sky::AtmosphereComponent as AtmosphereRow;
 use helio_pass_sky::atmosphere::placement;
-use helio_pass_sky::CloudLayer;
+use helio_pass_sky::{CloudLayer, CloudRepresentation, PlanetWeather};
 use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,7 @@ impl Default for AtmospherePlacement {
 #[category("Planet", category_color = "#8F8F8F")]
 #[category("Scattering", category_color = "#9FB7D1")]
 #[category("Clouds", category_color = "#C9D3DE")]
+#[category("Weather", category_color = "#A9B8C8")]
 #[serde(default)]
 pub struct AtmosphereComponent {
     #[property(category = "Atmosphere")]
@@ -84,16 +85,18 @@ pub struct AtmosphereComponent {
     pub cloud_bottom_km: f32,
     #[property(min = 0.0, max = 100.0, step = 0.05, category = "Clouds")]
     pub cloud_top_km: f32,
-    /// Share of the sky covered: 0 clear, 1 overcast.
+    /// The planet's mean share of sky covered: 0 clear, 1 overcast (the
+    /// weather varies it from region to region).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Clouds")]
     pub cloud_coverage: f32,
-    /// The clouds' form: 0 flat stratus, 1 towering cumulus.
+    /// The clouds' mean form: 0 flat stratus, 1 towering cumulus (the
+    /// weather's regimes vary it).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Clouds")]
     pub cloud_type: f32,
     /// How dense a cloud is inside: extinction per kilometre.
     #[property(min = 0.0, max = 1000.0, step = 1.0, category = "Clouds")]
     pub cloud_extinction_per_km: f32,
-    /// Size of the weather: where clouds gather and where the sky is clear.
+    /// Size of the groups cumulus gather in: the finest weather.
     #[property(min = 0.01, max = 10000.0, step = 0.5, category = "Clouds")]
     pub cloud_weather_km: f32,
     /// Size of the clouds' billows.
@@ -111,6 +114,50 @@ pub struct AtmosphereComponent {
     /// Share of light the clouds scatter rather than absorb.
     #[property(category = "Clouds")]
     pub cloud_albedo: [f32; 3],
+    /// Blocky clouds: cubic cells, each filled or empty, instead of smooth
+    /// volumes (the same weather, shadows and fog).
+    #[property(category = "Clouds")]
+    pub cloud_voxels: bool,
+    /// The voxel cells' side.
+    #[property(min = 0.1, max = 10000.0, step = 1.0, category = "Clouds")]
+    pub cloud_voxel_m: f32,
+    /// The density a voxel cell is filled from.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Clouds")]
+    pub cloud_voxel_fill: f32,
+    /// The planet's axis (world direction) the weather's latitudes are
+    /// measured from.
+    #[property(category = "Weather")]
+    pub cloud_pole: [f32; 3],
+    /// How strongly the circulation bands the cover by latitude: the
+    /// tropical convergence and the storm tracks cloudy, the subtropics
+    /// clear.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Weather")]
+    pub cloud_circulation: f32,
+    /// Circulation cells from the equator to each pole (Earth's three).
+    #[property(min = 1.0, max = 12.0, step = 1.0, category = "Weather")]
+    pub cloud_circulation_cells: f32,
+    /// Size of the weather systems: cyclones, fronts and highs.
+    #[property(min = 1.0, max = 100000.0, step = 10.0, category = "Weather")]
+    pub cloud_synoptic_km: f32,
+    /// How deep and frequent the cyclones are.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Weather")]
+    pub cloud_storminess: f32,
+    /// Size of the mesoscale cells the clouds organise in.
+    #[property(min = 0.01, max = 10000.0, step = 1.0, category = "Weather")]
+    pub cloud_mesoscale_km: f32,
+    /// How much high cirrus the weather brings.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Weather")]
+    pub cloud_cirrus: f32,
+    /// Height of the cirrus sheet above the surface.
+    #[property(min = 0.0, max = 100.0, step = 0.1, category = "Weather")]
+    pub cloud_cirrus_km: f32,
+    /// How fast the weather evolves: 0 still, 1 real time, more a time
+    /// lapse.
+    #[property(min = 0.0, max = 100000.0, step = 1.0, category = "Weather")]
+    pub cloud_evolution: f32,
+    /// Which weather: each seed lays out other systems.
+    #[property(min = 0.0, max = 65535.0, step = 1.0, category = "Weather")]
+    pub cloud_seed: u32,
 }
 
 impl Default for AtmosphereComponent {
@@ -149,6 +196,19 @@ impl AtmosphereComponent {
             cloud_erosion: row.cloud_erosion,
             cloud_wind: row.cloud_wind,
             cloud_albedo: row.cloud_albedo,
+            cloud_voxels: row.cloud_voxel_size > 0.0,
+            cloud_voxel_m: if row.cloud_voxel_size > 0.0 { row.cloud_voxel_size * 1000.0 } else { 32.0 },
+            cloud_voxel_fill: row.cloud_voxel_fill,
+            cloud_pole: row.cloud_pole,
+            cloud_circulation: row.cloud_circulation,
+            cloud_circulation_cells: row.cloud_circulation_cells,
+            cloud_synoptic_km: row.cloud_synoptic_scale,
+            cloud_storminess: row.cloud_storminess,
+            cloud_mesoscale_km: row.cloud_mesoscale_scale,
+            cloud_cirrus: row.cloud_cirrus,
+            cloud_cirrus_km: row.cloud_cirrus_height,
+            cloud_evolution: row.cloud_evolution,
+            cloud_seed: row.cloud_seed,
         }
     }
 
@@ -166,6 +226,23 @@ impl AtmosphereComponent {
             wind: self.cloud_wind,
             albedo: self.cloud_albedo,
             erosion: self.cloud_erosion,
+            representation: if self.cloud_voxels {
+                CloudRepresentation::Voxels { cell_m: self.cloud_voxel_m, fill: self.cloud_voxel_fill }
+            } else {
+                CloudRepresentation::Volumetric
+            },
+            weather: PlanetWeather {
+                pole: self.cloud_pole,
+                circulation: self.cloud_circulation,
+                circulation_cells: self.cloud_circulation_cells,
+                synoptic_km: self.cloud_synoptic_km,
+                storminess: self.cloud_storminess,
+                mesoscale_km: self.cloud_mesoscale_km,
+                cirrus: self.cloud_cirrus,
+                cirrus_km: self.cloud_cirrus_km,
+                evolution: self.cloud_evolution,
+                seed: self.cloud_seed,
+            },
         }
     }
 
@@ -271,6 +348,19 @@ impl AtmosphereComponent {
             cloud_erosion: self.cloud_erosion,
             cloud_wind: self.cloud_wind,
             cloud_albedo: self.cloud_albedo,
+            cloud_voxels: self.cloud_voxels,
+            cloud_voxel_m: self.cloud_voxel_m,
+            cloud_voxel_fill: self.cloud_voxel_fill,
+            cloud_pole: self.cloud_pole,
+            cloud_circulation: self.cloud_circulation,
+            cloud_circulation_cells: self.cloud_circulation_cells,
+            cloud_synoptic_km: self.cloud_synoptic_km,
+            cloud_storminess: self.cloud_storminess,
+            cloud_mesoscale_km: self.cloud_mesoscale_km,
+            cloud_cirrus: self.cloud_cirrus,
+            cloud_cirrus_km: self.cloud_cirrus_km,
+            cloud_evolution: self.cloud_evolution,
+            cloud_seed: self.cloud_seed,
             ..preset
         })
     }

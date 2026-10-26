@@ -61,7 +61,7 @@ pub use helio_pass_object_batch::{
 pub use helio_mats::GpuMaterial;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_pass_shadow_matrix::ShadowQuality;
-pub use helio_pass_sky::CloudLayer;
+pub use helio_pass_sky::{CloudLayer, CloudRepresentation, PlanetWeather};
 
 /// Project a SceneDB world into the [`SceneGeometry`] a bake reads
 /// (Helio#256): every drawn object (`StaticObjectComponent` and the
