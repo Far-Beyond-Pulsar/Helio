@@ -586,7 +586,9 @@ impl EnvironmentJoin {
                 FOLIAGE_LAYERS_KEY,
                 Source::Foliage,
                 8,
-                GATE_HIDDEN | LAYER,
+                // Placement tests its points in render space: relative to
+                // the world origin in camera-relative frames.
+                GATE_HIDDEN | LAYER | RELATIVE,
             )
             .packed(MAX_FOLIAGE_LAYERS)
             .slice(FOLIAGE_TYPE_WORDS, 0)

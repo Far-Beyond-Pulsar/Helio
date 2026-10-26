@@ -157,20 +157,26 @@ fn placed(row: u32) -> bool {
 
 /// A foliage layer: a world-aligned square of half extent `source[0]`
 /// (scaled by the owner's X and Z scale) centred on the owner, spanning the
-/// authored altitudes `source[2]..source[3]` in Y; `source[1]` is the
+/// authored world altitudes `source[2]..source[3]` in Y; `source[1]` is the
 /// infinite-extent flag, which the placement pass reads from `bounds_max.w`.
+/// Written where placement tests its points: relative to the world origin in
+/// a camera-relative frame (`RELATIVE`), the altitudes included.
 fn write_layer(row: u32, output: u32) {
     let source = source_base(row);
     let t = transforms[owners[row].owner_index];
-    let center = object_position(t);
+    let center = placed_position(t);
     let scale = abs(object_scale(t));
     let half = bitcast<f32>(sources[source]);
+    var origin_y = 0.0;
+    if (u.flags & RELATIVE) != 0u {
+        origin_y = u.origin_hi.y + u.origin_lo.y;
+    }
     rows_out[output] = bitcast<u32>(center.x - half * scale.x);
-    rows_out[output + 1u] = sources[source + 2u];
+    rows_out[output + 1u] = bitcast<u32>(bitcast<f32>(sources[source + 2u]) - origin_y);
     rows_out[output + 2u] = bitcast<u32>(center.z - half * scale.z);
     rows_out[output + 3u] = 0u;
     rows_out[output + 4u] = bitcast<u32>(center.x + half * scale.x);
-    rows_out[output + 5u] = sources[source + 3u];
+    rows_out[output + 5u] = bitcast<u32>(bitcast<f32>(sources[source + 3u]) - origin_y);
     rows_out[output + 6u] = bitcast<u32>(center.z + half * scale.z);
     rows_out[output + 7u] = sources[source + 1u];
 }
