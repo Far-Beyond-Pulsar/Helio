@@ -645,8 +645,7 @@ fn run(
             // the camera moves every frame (camera-dependent caches rebuild).
             let offset = Vec3::new((frame as f32 * 0.25).sin() * 0.4, 0.0, 0.0);
             let mut moved = camera.clone();
-            moved.view = camera.view * Mat4::from_translation(-offset);
-            moved.position = camera.position + offset;
+            moved.eye += offset.as_dvec3();
             moved
         } else {
             camera.clone()

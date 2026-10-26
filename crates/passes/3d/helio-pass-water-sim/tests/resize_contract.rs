@@ -262,6 +262,9 @@ impl TestSceneInput {
 }
 
 impl SceneInput for TestSceneInput {
+    fn world_origin(&self) -> glam::DVec3 {
+        glam::DVec3::ZERO
+    }
     fn device(&self) -> &Arc<wgpu::Device> {
         &self.device
     }

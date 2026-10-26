@@ -42,7 +42,6 @@ fn resolver_matches_the_rust_blender_property_by_property() {
             entry(15, storage(true)),
             entry(16, storage(false)),
             entry(20, storage(true)),
-            entry(22, wgpu::BufferBindingType::Uniform),
         ],
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -83,7 +82,6 @@ fn resolver_matches_the_rust_blender_property_by_property() {
         &[0u8; std::mem::size_of::<CameraPostProcessComponent>()],
         wgpu::BufferUsages::STORAGE,
     );
-    let origin = buffer("origin", &[0u8; 32], wgpu::BufferUsages::UNIFORM);
     let output = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("output"),
         size,
@@ -118,7 +116,6 @@ fn resolver_matches_the_rust_blender_property_by_property() {
                 wgpu::BindGroupEntry { binding: 15, resource: volumes.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 16, resource: output.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 20, resource: camera_rows.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 22, resource: origin.as_entire_binding() },
             ],
         });
         let mut encoder = device.create_command_encoder(&Default::default());

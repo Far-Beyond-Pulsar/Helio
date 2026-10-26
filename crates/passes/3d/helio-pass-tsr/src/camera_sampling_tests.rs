@@ -111,7 +111,7 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
             delta_time: time,
             time: 0.0,
             time_delta: 0.0,
-            world_origin: None,
+            world_origin: glam::DVec3::ZERO,
             owns_device: true,
         })
         .unwrap();

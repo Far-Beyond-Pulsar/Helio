@@ -17,10 +17,6 @@ use pulsar_scenedb::{Entity, SceneDb};
 use std::sync::{Arc, Mutex};
 use winit::window::Window;
 
-/// Side of the cells the renderer's world origin snaps to (Pulsar's
-/// `WORLD_ORIGIN_CELL`): scene positions stay small near the camera.
-const ORIGIN_CELL: f64 = 1024.0;
-
 pub struct Gfx {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -344,11 +340,6 @@ impl Gfx {
         self.renderer.find_pass::<ChunkPass>().is_none_or(ChunkPass::settled)
     }
 
-    /// Where the renderer's origin is for a camera at `eye`.
-    pub fn origin_for(eye: DVec3) -> DVec3 {
-        (eye / ORIGIN_CELL).round() * ORIGIN_CELL
-    }
-
     /// Draws a frame of `view`.
     pub fn draw(&mut self, view: &View) {
         let (planet, eye, forward) = (view.planet, view.eye, view.look);
@@ -371,8 +362,7 @@ impl Gfx {
         );
         self.renderer.set_frame_clock_delta(Some((view.weather - self.clock).clamp(0.0, 0.1) as f32));
         self.clock = view.weather;
-        self.origin = Self::origin_for(eye);
-        self.renderer.set_world_origin(Some(self.origin));
+        self.origin = self.renderer.origin_for(eye);
         let origin = self.origin;
         // The character and what it holds, and the targeted block's outline.
         self.avatar.pose(&mut self.scene.world, &mut self.renderer, view.player, (eye, forward), origin, view.time);
@@ -381,7 +371,7 @@ impl Gfx {
         }
         self.renderer.debug_clear();
         for (a, b) in view.outline {
-            self.renderer.debug_line((*a - origin).as_vec3().to_array(), (*b - origin).as_vec3().to_array(), [0.05, 0.05, 0.05, 1.0]);
+            self.renderer.debug_line(*a, *b, [0.05, 0.05, 0.05, 1.0]);
         }
         // A crosshair fixed in front of the eye.
         if !view.player.third_person {
@@ -391,7 +381,7 @@ impl Gfx {
             let centre = eye + look * 0.6;
             let reach = 0.0045;
             for (a, b) in [(-right, right), (-above, above)] {
-                self.renderer.debug_line(((centre + a * reach) - origin).as_vec3().to_array(), ((centre + b * reach) - origin).as_vec3().to_array(), [1.0, 1.0, 1.0, 0.9]);
+                self.renderer.debug_line(centre + a * reach, centre + b * reach, [1.0, 1.0, 1.0, 0.9]);
             }
         }
 
@@ -405,10 +395,7 @@ impl Gfx {
         let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
         let near = (planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let mut camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, 70f32.to_radians(), aspect, near, 40_000_000.0);
-        let local = eye - origin;
-        camera.position = local.as_vec3();
-        camera.view = (camera.view.as_dmat4() * DMat4::from_translation(-local)).as_mat4();
+        let camera = Camera::perspective_look_to(eye, forward, up, 70f32.to_radians(), aspect, near, 40_000_000.0);
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,

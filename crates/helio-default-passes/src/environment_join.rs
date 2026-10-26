@@ -178,8 +178,6 @@ const SUN: u32 = 128;
 const WATER_WIND: u32 = 256;
 const HITBOX: u32 = 512;
 const SPRITE: u32 = 1024;
-/// Positions relative to the frame's world origin (`environment_join.wgsl`).
-const RELATIVE: u32 = 2048;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -296,11 +294,11 @@ struct Uniforms {
     /// Particles the emitter ranges are allocated from (`EMITTER` tables).
     pool: u32,
     _pad: [u32; 3],
-    /// The frame's world origin as an f32 pair, which `RELATIVE` tables
-    /// subtract from positions.
+    /// The frame's world origin as an f32 pair, subtracted from placed
+    /// positions: every table is in the frame's space.
     origin_hi: [f32; 4],
     origin_lo: [f32; 4],
-    /// [`water_phase`] of the origin, for `RELATIVE` water rows.
+    /// [`water_phase`] of the origin, for water rows.
     water_phase: [f32; 4],
 }
 
@@ -308,8 +306,7 @@ struct Uniforms {
 /// (`GpuWaterVolume::world_phase`): its X and Z modulo
 /// [`helio_pass_water_sim::WATER_WORLD_PERIOD`], taken in f64 so it is
 /// exact however far the origin is.
-fn water_phase(origin: Option<glam::DVec3>) -> [f32; 4] {
-    let origin = origin.unwrap_or(glam::DVec3::ZERO);
+fn water_phase(origin: glam::DVec3) -> [f32; 4] {
     let period = helio_pass_water_sim::WATER_WORLD_PERIOD;
     [
         origin.x.rem_euclid(period) as f32,
@@ -404,9 +401,10 @@ impl Spec {
         self.flags & HITBOX != 0
     }
 
-    /// Whether this table's positions follow the frame's world origin.
-    fn relative(&self) -> bool {
-        self.flags & RELATIVE != 0
+    /// Whether this table holds positions, which follow the frame's world
+    /// origin.
+    fn follows_origin(&self) -> bool {
+        self.flags & (SPATIAL | SURFACE | LAYER | DECAL | EMITTER | HITBOX) != 0
     }
 
     fn reads_transforms(&self) -> bool {
@@ -556,7 +554,7 @@ impl EnvironmentJoin {
                 WATER_VOLUMES_KEY,
                 Source::WaterVolumes,
                 64,
-                volume | SURFACE | SUN | RELATIVE,
+                volume | SURFACE | SUN,
             )
             .packed(MAX_WATER_VOLUMES)
             .over(
@@ -586,9 +584,7 @@ impl EnvironmentJoin {
                 FOLIAGE_LAYERS_KEY,
                 Source::Foliage,
                 8,
-                // Placement tests its points in render space: relative to
-                // the world origin in camera-relative frames.
-                GATE_HIDDEN | LAYER | RELATIVE,
+                GATE_HIDDEN | LAYER,
             )
             .packed(MAX_FOLIAGE_LAYERS)
             .slice(FOLIAGE_TYPE_WORDS, 0)
@@ -641,7 +637,7 @@ impl EnvironmentJoin {
                 DECALS_KEY,
                 Source::Decals,
                 32,
-                GATE_HIDDEN | DECAL | RELATIVE,
+                GATE_HIDDEN | DECAL,
             )
             .packed(MAX_DECALS),
             // The pass reads a fixed number of rows; each placed emitter
@@ -651,7 +647,7 @@ impl EnvironmentJoin {
                 CORONA_EMITTERS_KEY,
                 Source::CoronaEmitters,
                 60,
-                GATE_HIDDEN | EMITTER | RELATIVE,
+                GATE_HIDDEN | EMITTER,
             )
             .packed(MAX_CORONA_EMITTERS)
             .gated_on(CORONA_COUNT_WORD),
@@ -662,7 +658,7 @@ impl EnvironmentJoin {
                 WATER_HITBOXES_KEY,
                 Source::WaterHitboxes,
                 20,
-                HITBOX | RELATIVE,
+                HITBOX,
             )
             .packed(MAX_WATER_HITBOXES)
             .gated_on(WATER_HITBOX_GATE_WORD),
@@ -768,10 +764,9 @@ impl SceneDerivation for EnvironmentJoin {
             .map(|source| self.input(inputs, source.key(&keys), source.row_bytes()))
             .collect();
         let mut recorded = false;
-        let join_origin = crate::scene_join::join_origin(ctx);
-        let (origin_hi, origin_lo) = crate::scene_join::origin_pair(join_origin);
+        let (origin_hi, origin_lo) = crate::scene_join::origin_pair(ctx.world_origin);
         let water_phase = water_phase(ctx.world_origin);
-        let origin_key = crate::scene_join::origin_bits(join_origin)
+        let origin_key = crate::scene_join::origin_bits(ctx.world_origin)
             .iter()
             .fold(0u64, |key, bits| key.rotate_left(21) ^ bits);
         for table in &mut self.tables {
@@ -813,10 +808,10 @@ impl SceneDerivation for EnvironmentJoin {
                     .iter()
                     .map(|(layer, _)| sources[layer.source as usize]),
             );
-            // A moved origin moves every position a relative table holds.
-            let relative =
-                table.spec.relative() || table.layers.iter().any(|(layer, _)| layer.relative());
-            let extra = if relative {
+            // A moved origin moves every position a table holds.
+            let follows = table.spec.follows_origin()
+                || table.layers.iter().any(|(layer, _)| layer.follows_origin());
+            let extra = if follows {
                 table.epoch ^ origin_key.rotate_left(1)
             } else {
                 table.epoch

@@ -70,13 +70,16 @@ pub struct Renderer {
     pub(crate) frame_count: u64,
     pub(crate) ray_frame: helio_core::FrameAcceleration,
     pub(crate) prev_view_proj: glam::Mat4,
-    /// World origin used to express the previous local camera projection.
-    pub(crate) previous_world_origin: Option<glam::DVec3>,
+    /// World origin the previous frame's camera projection is expressed in.
+    pub(crate) previous_world_origin: glam::DVec3,
     /// GPU work deriving drawable scene buffers from the frontend's authored
     /// ones, run each frame between the SceneDB snapshot and the graph. See
     /// `helio_core::scene_derivation`.
     pub(crate) scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
-    pub(crate) world_origin: Option<glam::DVec3>,
+    /// This frame's world origin: every frame is camera-relative, its
+    /// coordinates world positions minus this. Follows the eye
+    /// ([`Renderer::origin_for`]).
+    pub(crate) world_origin: glam::DVec3,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     pub(crate) output_width: u32,
@@ -256,19 +259,14 @@ impl Renderer {
     }
 
     pub(crate) fn upload_camera(&mut self, camera: &Camera) {
-        let previous_projection = match (self.previous_world_origin, self.world_origin) {
-            (Some(previous), Some(current)) => helio_core::temporal::rebase_previous_projection(
-                self.prev_view_proj,
-                current - previous,
-            ),
-            (None, None) => self.prev_view_proj,
-            // Switching coordinate spaces invalidates the old projection.
-            _ => camera.proj * camera.view,
-        };
+        let previous_projection = helio_core::temporal::rebase_previous_projection(
+            self.prev_view_proj,
+            self.world_origin - self.previous_world_origin,
+        );
         let uniforms = helio_core::GpuCameraUniforms::new(
-            camera.view,
+            camera.view_in(self.world_origin),
             camera.proj,
-            camera.position,
+            camera.position_in(self.world_origin),
             camera.near,
             camera.far,
             self.frame_count as u32,
@@ -299,10 +297,20 @@ impl Renderer {
         }
     }
 
-    /// Set the double-precision world origin for camera-relative frames.
-    /// Geometry submitted to this frame must use the same local coordinates.
-    pub fn set_world_origin(&mut self, origin: Option<glam::DVec3>) {
-        self.world_origin = origin;
+    /// The world origin of the next frame, for a camera with its eye at
+    /// `eye`: the origin follows the eye in cells of
+    /// [`crate::camera::WORLD_ORIGIN_CELL`] and moves only when the eye leaves
+    /// its cell. [`Renderer::render`] calls it with the camera's eye; a host
+    /// that writes data in frame coordinates (relative to the origin) calls it
+    /// first, with the same eye, to know the origin.
+    pub fn origin_for(&mut self, eye: glam::DVec3) -> glam::DVec3 {
+        self.world_origin = crate::camera::follow_origin(Some(self.world_origin), eye);
+        self.world_origin
+    }
+
+    /// The world origin of the last (or current) frame.
+    pub fn world_origin(&self) -> glam::DVec3 {
+        self.world_origin
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -836,9 +844,9 @@ impl Renderer {
 /// the per-frame jitter and frame counter, which change every frame by design.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct CameraIdentity {
-    view: glam::Mat4,
+    eye: glam::DVec3,
+    rotation: glam::Mat4,
     proj: glam::Mat4,
-    position: glam::Vec3,
     near: f32,
     far: f32,
     view_id: u32,
@@ -847,9 +855,9 @@ pub(crate) struct CameraIdentity {
 impl CameraIdentity {
     pub(crate) fn of(camera: &crate::Camera) -> Self {
         Self {
-            view: camera.view,
+            eye: camera.eye,
+            rotation: camera.rotation,
             proj: camera.proj,
-            position: camera.position,
             near: camera.near,
             far: camera.far,
             view_id: camera.view_id,
@@ -860,7 +868,7 @@ impl CameraIdentity {
 #[cfg(test)]
 mod camera_identity_tests {
     use super::CameraIdentity;
-    use glam::{Mat4, Vec3};
+    use glam::{DVec3, Mat4, Vec3};
 
     fn camera() -> crate::Camera {
         crate::Camera::perspective_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y, 1.0, 16.0 / 9.0, 0.1, 100.0)
@@ -878,10 +886,13 @@ mod camera_identity_tests {
     fn moving_or_reprojecting_is() {
         let still = camera();
         let mut moved = still.clone();
-        moved.view = Mat4::from_translation(Vec3::X) * moved.view;
+        moved.eye += DVec3::X;
+        let mut turned = still.clone();
+        turned.rotation = Mat4::from_rotation_y(0.1) * turned.rotation;
         let mut zoomed = still.clone();
         zoomed.proj = helio_core::depth::perspective(0.5, 16.0 / 9.0, 0.1);
         assert!(CameraIdentity::of(&still) != CameraIdentity::of(&moved));
+        assert!(CameraIdentity::of(&still) != CameraIdentity::of(&turned));
         assert!(CameraIdentity::of(&still) != CameraIdentity::of(&zoomed));
     }
 }

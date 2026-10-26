@@ -17,4 +17,5 @@ pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
 
 [dev-dependencies]
+glam = { workspace = true }
 pollster = { workspace = true }

@@ -177,7 +177,7 @@ fn derive(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     inputs: &SceneBufferProjection,
-    origin: Option<glam::DVec3>,
+    origin: glam::DVec3,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut encoder = device.create_command_encoder(&Default::default());
     let output = join.derive(
@@ -216,8 +216,8 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     let inputs = scene(&device, &queue, far);
     let mut join = EnvironmentJoin::new(&device, KEYS);
 
-    // World space: rows at the owner, no water phase.
-    let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, None);
+    // The frame's origin at the world's: rows at the owner, no water phase.
+    let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, glam::DVec3::ZERO);
     assert_eq!(
         &layer,
         &[992.0, 6_371_000.0, -308.0, 0.0, 1008.0, 6_371_010.0, -292.0, 0.0],
@@ -228,7 +228,7 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     assert_eq!(
         &water[60..62],
         &[0.0, 0.0],
-        "world-space water has no phase"
+        "water at the world's origin has no phase"
     );
     let world_to_decal = glam::Mat4::from_cols_slice(&decal[..16]);
     let center = world_to_decal.transform_point3(far_world);
@@ -237,10 +237,10 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
         "the decal box is centred on its owner: {center}"
     );
 
-    // Camera-relative: the same rows, less the f64 origin, exact for these
-    // small offsets where world space is 0.5 m out.
+    // An origin near the owner: the same rows, less the f64 origin, exact for
+    // these small offsets where world positions are 0.5 m out.
     let origin = glam::DVec3::new(1000.25, 6_371_000.125, -290.0);
-    let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, Some(origin));
+    let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, origin);
     let offset = (glam::DVec3::from_array(far_position) - origin).as_vec3();
     assert!((offset - glam::Vec3::new(-0.25, 2.246, -10.0)).abs().max_element() < 1e-6, "{offset}");
     let near = |a: &[f32], b: glam::Vec3| (glam::Vec3::from_slice(a) - b).abs().max_element() < 1e-5;
@@ -260,7 +260,7 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
 
     // A moved origin re-derives them, though no input row changed.
     let moved = origin + glam::DVec3::new(1024.0, 0.0, 0.0);
-    let (water, _, layer) = derive(&mut join, &device, &queue, &inputs, Some(moved));
+    let (water, _, layer) = derive(&mut join, &device, &queue, &inputs, moved);
     assert_eq!(layer[0], offset.x - 1024.0 - 8.0);
     assert_eq!(water[0], offset.x - 1024.0 - 2.0);
     assert_eq!(water[60], 134.25, "(1000.25 + 1024) mod 270");

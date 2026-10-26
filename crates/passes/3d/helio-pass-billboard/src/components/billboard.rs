@@ -13,6 +13,9 @@ use pulsar_scenedb_derive::SceneStore;
 #[repr(C)]
 #[gpu(layout = packed, buffer = "billboard_instances")]
 pub struct BillboardComponent {
+    /// Where the billboard is, in the frame's space, as every position in a
+    /// pass row: metres from the frame's world origin
+    /// (`Renderer::world_origin`).
     #[gpu]
     pub world_pos: [f32; 4],
     #[gpu]

@@ -345,7 +345,7 @@ impl ApplicationHandler for App {
         let projection_frame = projection_bridge
             .build_visible_from_camera(
                 &resolver,
-                initial_camera.proj * initial_camera.view,
+                initial_camera.view_proj_in(glam::DVec3::ZERO),
                 initial_position,
             )
             .expect("portal_cube authored portal graph");
@@ -593,7 +593,7 @@ impl AppState {
 
         let projection_result = self.portal_projection_bridge.build_visible_from_camera(
             &self.portal_resolver,
-            camera.proj * camera.view,
+            camera.view_proj_in(glam::DVec3::ZERO),
             self.cam_pos,
         );
         match projection_result {

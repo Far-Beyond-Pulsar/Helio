@@ -3,15 +3,13 @@
 // supplies `ObjectTransform` (positions as f32 pairs), `object_rotation`,
 // `object_scale`, `position_hi` and `position_lo`.
 //
-// Output rows are relative to the frame's world origin (`origin_hi + origin_lo`,
-// zero outside camera-relative frames): chains compose in f32 pairs and the
-// origin comes off pair-wise last, so an object 6371 km out keeps its
-// millimetres whichever of its ancestors are far from the origin.
+// Output rows are world positions as f32 pairs, like the frontend's: chains
+// compose in pair arithmetic, so an object 6371 km out keeps its millimetres
+// whichever of its ancestors are far from the world's origin.
 //
 // Two results per row:
-// - world: the transform composed through every ancestor, relative to the
-//   frame's world origin. What lights, environment volumes and anything else
-//   that is not frame-aware read.
+// - world: the transform composed through every ancestor. What lights,
+//   environment volumes and anything else that is not frame-aware read.
 // - placement: the transform composed only up to the nearest *rigid frame*
 //   ancestor (not including it), plus that frame's slot (the object's space).
 //   Objects drawn through the coordinate-space table read this: a frame moving
@@ -40,8 +38,6 @@ struct ResolveUniforms {
     one: f32,
     _pad1: u32,
     _pad2: u32,
-    origin_hi: vec4<f32>,
-    origin_lo: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: ResolveUniforms;
@@ -49,7 +45,7 @@ struct ResolveUniforms {
 @group(0) @binding(1) var<storage, read> local_transforms: array<ObjectTransform>;
 /// Per object: the parent's entity index plus one, zero for none.
 @group(0) @binding(2) var<storage, read> parents: array<u32>;
-/// World-space (origin-relative) result, for readers that are not frame-aware.
+/// World-space result, for readers that are not frame-aware.
 @group(0) @binding(3) var<storage, read_write> world_transforms: array<ObjectTransform>;
 /// `[count, rows..]`: the rows a column's last flush wrote.
 @group(0) @binding(4) var<storage, read> flushed: array<u32>;
@@ -144,20 +140,12 @@ struct Composed {
 
 /// Row `index`'s transform composed up its parent chain, its position in
 /// f32 pairs. With `stop_at_frames` the chain ends below the nearest rigid
-/// frame (the result is relative to it, no origin removed); otherwise it
-/// runs to the world and is relative to the world origin (removed pair-wise
-/// last, exact however far the chain's members are from it).
+/// frame (the result is relative to it); otherwise it runs to the world.
 fn compose_row(index: u32, stop_at_frames: bool) -> Composed {
     let own = local_transforms[index];
     var parent = parent_of(index);
-    let origin_hi = -u.origin_hi.xyz;
-    let origin_lo = -u.origin_lo.xyz;
     if parent == 0u {
-        var root = own;
-        let p = pair_add(position_hi(own), position_lo(own), origin_hi, origin_lo);
-        root.position_hi = array<f32, 3>(p[0].x, p[0].y, p[0].z);
-        root.position_lo = array<f32, 3>(p[1].x, p[1].y, p[1].z);
-        return Composed(root, 0u);
+        return Composed(own, 0u);
     }
     var lin = linear_part(own);
     // The position so far, as an f32 pair: a parent on a planet is far from
@@ -189,11 +177,6 @@ fn compose_row(index: u32, stop_at_frames: bool) -> Composed {
         lo = sum[1];
         lin = up_lin * lin;
         parent = parent_of(at);
-    }
-    if space == 0u {
-        let p = pair_add(hi, lo, origin_hi, origin_lo);
-        hi = p[0];
-        lo = p[1];
     }
     return Composed(decompose(lin, hi, lo), space);
 }

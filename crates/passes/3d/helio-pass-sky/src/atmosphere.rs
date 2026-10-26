@@ -101,7 +101,10 @@ pub mod placement {
 #[repr(C)]
 #[gpu(layout = packed, buffer = "atmospheres")]
 pub struct AtmosphereComponent {
-    /// Planet centre in world metres (with [`placement::CENTER`]).
+    /// Planet centre in world metres (with [`placement::CENTER`]). Planet
+    /// centres are world anchors: unlike the other positions in pass rows,
+    /// which are in the frame's space, the pass rebases them by the frame's
+    /// world origin.
     #[gpu]
     pub center: [f32; 3],
     /// [`placement`].
@@ -684,7 +687,7 @@ impl RenderPass for AtmospherePass {
             self.params_tables = None;
         }
         self.active = active;
-        let origin = ctx.world_origin.unwrap_or_default();
+        let origin = ctx.world_origin;
         let hi = origin.as_vec3();
         let lo = (origin - hi.as_dvec3()).as_vec3();
         let uniform = ResolveUniform {

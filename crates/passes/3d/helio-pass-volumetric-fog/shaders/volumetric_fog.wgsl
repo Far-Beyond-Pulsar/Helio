@@ -100,9 +100,15 @@ struct FogGlobals {
     delta_time: f32,
     grid: vec3<u32>,
     enabled: u32,
-    // Media are authored in world space; samples are in the frame's
-    // coordinates (the world origin is the camera in camera-relative frames).
-    world_origin: vec4<f32>,
+    // Samples, volume bounds and the camera are in the frame's space:
+    // relative to the frame's world origin, an f32 pair (hi + lo). Planet
+    // centres are world anchors, rebased by it, and heights along world Y
+    // add it back.
+    origin_hi: vec4<f32>,
+    origin_lo: vec4<f32>,
+    // The world origin modulo SMOKE_PERIOD (m): smoke noise is anchored to
+    // the world.
+    noise_phase: vec4<f32>,
 }
 
 const LIGHT_DIRECTIONAL: u32 = 0u;
@@ -242,15 +248,15 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     // Bounded media must never be cut by the grid's far plane: moving away from
     // a volume would otherwise shear it off slice by slice until nothing is
     // left. The grid range grows to hold every active volume.
-    let camera_world = cameras[0].position_near.xyz + fog_globals.world_origin.xyz;
+    let camera = cameras[0].position_near.xyz;
     for (var i = lid; i < arrayLength(&volumes); i += SCAN_THREADS) {
         if legacy_volume_active(volumes[i]) {
-            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera_world, volumes[i].bounds_min.xyz, volumes[i].bounds_max.xyz)));
+            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera, volumes[i].bounds_min.xyz, volumes[i].bounds_max.xyz)));
         }
     }
     for (var i = lid; i < arrayLength(&local_media); i += SCAN_THREADS) {
         if local_medium_active(local_media[i]) {
-            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera_world, local_media[i].bounds_min.xyz, local_media[i].bounds_max.xyz)));
+            atomicMax(&wg_media_far, bitcast<u32>(farthest_corner_distance(camera, local_media[i].bounds_min.xyz, local_media[i].bounds_max.xyz)));
         }
     }
     for (var i = lid; i < arrayLength(&legacy_media); i += SCAN_THREADS) {
@@ -551,16 +557,21 @@ fn cs_cull(@builtin(global_invocation_id) tile: vec3<u32>) {
 // No planet: heights along world Y (the post-process media).
 const FLAT: vec4<f32> = vec4<f32>(0.0);
 
-// Height of world point `p`: its altitude over `planet` (centre, radius), or
-// its Y without one.
-fn medium_height(p: vec3<f32>, planet: vec4<f32>) -> f32 {
-    if planet.w > 0.0 { return length(p - planet.xyz) - planet.w; }
-    return p.y;
+// A world position in the frame's space; the large terms cancel first.
+fn in_frame(world: vec3<f32>) -> vec3<f32> {
+    return (world - fog_globals.origin_hi.xyz) - fog_globals.origin_lo.xyz;
 }
 
-// Up at world point `p`: away from `planet`'s centre, or +Y without one.
+// Height of frame point `p`: its altitude over `planet` (world centre,
+// radius), or its world Y without one.
+fn medium_height(p: vec3<f32>, planet: vec4<f32>) -> f32 {
+    if planet.w > 0.0 { return length(p - in_frame(planet.xyz)) - planet.w; }
+    return (p.y + fog_globals.origin_hi.y) + fog_globals.origin_lo.y;
+}
+
+// Up at frame point `p`: away from `planet`'s centre, or +Y without one.
 fn medium_up(p: vec3<f32>, planet: vec4<f32>) -> vec3<f32> {
-    if planet.w > 0.0 { return normalize(p - planet.xyz); }
+    if planet.w > 0.0 { return normalize(p - in_frame(planet.xyz)); }
     return vec3<f32>(0.0, 1.0, 0.0);
 }
 
@@ -574,7 +585,7 @@ fn density_at(p: vec3<f32>, config: FogUniforms, planet: vec4<f32>) -> f32 {
         density *= exp(-max(h, 0.0) * max(config.fog_height_falloff, 0.0));
     }
     if config.fog_mode == 2u {
-        let advected = p * SMOKE_SCALE - SMOKE_DRIFT * fog_globals.time;
+        let advected = (p + fog_globals.noise_phase.xyz) * SMOKE_SCALE - SMOKE_DRIFT * fog_globals.time;
         let coarse = smoke_noise(advected);
         let detail = smoke_noise(advected * 2.07 + vec3<f32>(coarse * 1.7));
         let billow = smoothstep(0.25, 0.72, coarse * 0.7 + detail * 0.3);
@@ -651,8 +662,7 @@ fn add_world_medium(accum: Medium, m: WorldMedium, p: vec3<f32>, shape: f32) -> 
     return result;
 }
 
-fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
-    let p = frame_p + fog_globals.world_origin.xyz;
+fn medium_at(p: vec3<f32>, view_depth: f32) -> Medium {
     var m: Medium;
     if fog.fog_enabled != 0u && view_depth >= fog.fog_start_distance {
         m.extinction = density_at(p, fog, FLAT);
@@ -744,8 +754,7 @@ fn global_optical_depth(config: FogUniforms, planet: vec4<f32>, p: vec3<f32>, di
     return tau;
 }
 
-fn medium_transmittance(frame_p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
-    let p = frame_p + fog_globals.world_origin.xyz;
+fn medium_transmittance(p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
     var tau = 0.0;
     if fog.fog_enabled != 0u { tau += global_optical_depth(fog, FLAT, p, dir, distance); }
     for (var i = 0u; i < global_count(); i++) {

@@ -152,7 +152,7 @@ fn run(
     scene: &Scene,
     generation: u64,
 ) -> SceneBufferProjection {
-    run_at(join, device, queue, scene, generation, None)
+    run_at(join, device, queue, scene, generation, glam::DVec3::ZERO)
 }
 
 /// [`run`] in a frame with `world_origin`.
@@ -162,7 +162,7 @@ fn run_at(
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
     generation: u64,
-    world_origin: Option<glam::DVec3>,
+    world_origin: glam::DVec3,
 ) -> SceneBufferProjection {
     let mut projection = scene.projection(device, queue, generation);
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -454,11 +454,10 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
     );
 }
 
-/// In a camera-relative frame, positions come out relative to the world
-/// origin, exactly: at Earth radius an f32 world position steps by 0.5 m,
-/// so a world-space model matrix would snap every vertex to that grid
-/// (Pulsar-Native#1127). The billboard pass subtracts the origin itself, so
-/// a light's billboard stays in world space.
+/// Positions come out relative to the frame's world origin, exactly: at
+/// Earth radius an f32 world position steps by 0.5 m, so a world-space model
+/// matrix would snap every vertex to that grid (Pulsar-Native#1127). A
+/// light's billboard is in the frame's space with it.
 #[test]
 fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
     let Some((device, queue)) = device() else {
@@ -481,7 +480,7 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
     );
     let origin = glam::DVec3::new(0.75, 6_371_000.125, -2.0);
     let mut join = SceneJoin::new(&device, KEYS, true);
-    let out = run_at(&mut join, &device, &queue, &scene, 1, Some(origin));
+    let out = run_at(&mut join, &device, &queue, &scene, 1, origin);
 
     // The f64 offset to the f32 rounding of a small number (a millimetre's
     // millionths), where an f32 world position would be 0.5 m out.
@@ -509,12 +508,11 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
         &queue,
         &out.get(BufferKey::of("billboard_instances")).unwrap().buffer,
     );
-    let world = glam::Vec3::from_array(far.position_hi) + glam::Vec3::from_array(far.position_lo);
-    assert_eq!(&billboards[2][..3], &world.to_array(), "the billboard stays in world space");
+    assert!((glam::Vec3::from_slice(&billboards[2][..3]) - offset).abs().max_element() < 1e-6, "billboard position");
 
     // A moved origin moves every position, though no input row changed.
     let moved = origin + glam::DVec3::new(0.0, 1.0, 0.0);
-    let out = run_at(&mut join, &device, &queue, &scene, 1, Some(moved));
+    let out = run_at(&mut join, &device, &queue, &scene, 1, moved);
     let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
         &device,
         &queue,
@@ -605,7 +603,7 @@ fn unchanged_inputs_record_nothing_and_keep_the_outputs() {
                 device: &device,
                 queue: &queue,
                 inputs: &projection,
-                world_origin: None,
+                world_origin: glam::DVec3::ZERO,
             },
             &mut encoder,
         );
@@ -656,7 +654,7 @@ fn moving_objects_moves_the_objects_but_not_the_structure() {
                 device: &device,
                 queue: &queue,
                 inputs: &projection,
-                world_origin: None,
+                world_origin: glam::DVec3::ZERO,
             },
             &mut encoder,
         );

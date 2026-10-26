@@ -45,7 +45,8 @@ pub struct GlobalFogComponent {
     pub _pad_emission: f32,
     /// The planet heights are measured above: its centre (world metres) and
     /// radius (m), so `height` is an altitude over its surface; radius 0:
-    /// heights along world Y.
+    /// heights along world Y. Planet centres are world anchors, which the
+    /// pass rebases by the frame's origin.
     #[gpu]
     pub planet: [f32; 4],
 }
@@ -78,7 +79,8 @@ impl Default for GlobalFogComponent {
     }
 }
 
-/// Axis-aligned world volume. `medium` and `medium_planet` store raw bytes in
+/// Axis-aligned volume, its bounds in the frame's space (relative to
+/// `Renderer::world_origin`, as every position in a pass row). `medium` and `medium_planet` store raw bytes in
 /// reflection-supported float arrays (not numeric float conversions), with the
 /// GlobalFogComponent layout (its first 16 words, then `planet`); use `new` /
 /// `set_medium` instead of packing words manually. `edge_fade` is an

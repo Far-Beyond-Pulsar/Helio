@@ -24,7 +24,7 @@ pub use config::{
     PerfOverlayMode, RenderMode, RendererConfig,
 };
 pub use settings::TsrSetting;
-pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};
+pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, WorldPoint, WorldVertex};
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use shader_reload::{ReloadMode, ShaderReloadStatus};
 pub use renderer_impl::{

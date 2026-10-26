@@ -43,11 +43,12 @@ struct JoinUniforms {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    // The frame's world origin (hi + lo); see `RELATIVE`.
+    // The frame's world origin (hi + lo): placed positions are written
+    // relative to it, the frame's space every pass draws in.
     origin_hi: vec4<f32>,
     origin_lo: vec4<f32>,
     // The world origin's X and Z modulo the water's world period (`xy`),
-    // which `RELATIVE` water rows carry as their world phase.
+    // which water rows carry as their world phase.
     water_phase: vec4<f32>,
 }
 
@@ -62,11 +63,6 @@ const SUN: u32 = 128u;
 const WATER_WIND: u32 = 256u;
 const HITBOX: u32 = 512u;
 const SPRITE: u32 = 1024u;
-// Positions relative to the frame's world origin, for passes that draw in
-// the frame's space (Pulsar-Native#1127). Tables whose pass adds or
-// subtracts the origin itself (fog, post-process volumes, atmospheres)
-// stay in world space.
-const RELATIVE: u32 = 2048u;
 // `helio_pass_water_sim::GpuWaterVolume`: `sun_direction` and `wind_params`
 // (`w`: the volume opts out of the global wind).
 const WATER_SUN_WORD: u32 = 44u;
@@ -159,8 +155,8 @@ fn placed(row: u32) -> bool {
 /// (scaled by the owner's X and Z scale) centred on the owner, spanning the
 /// authored world altitudes `source[2]..source[3]` in Y; `source[1]` is the
 /// infinite-extent flag, which the placement pass reads from `bounds_max.w`.
-/// Written where placement tests its points: relative to the world origin in
-/// a camera-relative frame (`RELATIVE`), the altitudes included.
+/// Written in the frame's space, where placement tests its points, the
+/// altitudes included.
 fn write_layer(row: u32, output: u32) {
     let source = source_base(row);
     let t = transforms[owners[row].owner_index];
@@ -177,23 +173,17 @@ fn write_layer(row: u32, output: u32) {
     rows_out[output + 7u] = sources[source + 1u];
 }
 
-/// A world altitude as this table places rows: less the origin's Y for a
-/// `RELATIVE` table. Authored altitudes are f32: far from the world origin
-/// they hold only their own step (0.5 m at Earth's radius), which this keeps.
+/// A world altitude in the frame's space: less the origin's Y. Authored
+/// altitudes are f32: far from the world origin they hold only their own
+/// step (0.5 m at Earth's radius), which this keeps.
 fn placed_altitude(y: f32) -> f32 {
-    if (u.flags & RELATIVE) != 0u {
-        return y - (u.origin_hi.y + u.origin_lo.y);
-    }
-    return y;
+    return y - (u.origin_hi.y + u.origin_lo.y);
 }
 
-/// The owner's position as this table places rows: relative to the world
-/// origin for a `RELATIVE` table, in world space otherwise.
+/// The owner's position in the frame's space: relative to the world origin,
+/// subtracted pair-wise, so it is exact however far the owner is.
 fn placed_position(t: ObjectTransform) -> vec3<f32> {
-    if (u.flags & RELATIVE) != 0u {
-        return object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
-    }
-    return object_position(t);
+    return object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
 }
 
 /// A decal's world-to-decal transform (`mat4x4`, column-major, words 0..15
@@ -455,19 +445,16 @@ fn write_row(row: u32, slot: u32) {
         write_sun(output);
     }
     if (u.flags & SURFACE) != 0u {
-        // Zero in world space, where positions are already world positions.
-        var phase = vec2<f32>(0.0);
-        if (u.flags & RELATIVE) != 0u {
-            phase = u.water_phase.xy;
-        }
-        rows_out[output + WATER_PHASE_WORD] = bitcast<u32>(phase.x);
-        rows_out[output + WATER_PHASE_WORD + 1u] = bitcast<u32>(phase.y);
+        rows_out[output + WATER_PHASE_WORD] = bitcast<u32>(u.water_phase.x);
+        rows_out[output + WATER_PHASE_WORD + 1u] = bitcast<u32>(u.water_phase.y);
         rows_out[output + WATER_PHASE_WORD + 2u] = 0u;
         rows_out[output + WATER_PHASE_WORD + 3u] = 0u;
     }
     if (u.flags & SPRITE) != 0u {
         write_sprite_placement(row, output);
     }
+    // Planet centres are world anchors (`AtmosphereComponent::center`),
+    // which the pass rebases.
     if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
         let center = object_position(transforms[owners[row].owner_index]);
         rows_out[output] = bitcast<u32>(bitcast<f32>(sources[source]) + center.x);

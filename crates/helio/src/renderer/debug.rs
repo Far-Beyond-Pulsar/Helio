@@ -22,26 +22,25 @@ pub struct DebugVertex {
 
 pub struct DebugDrawState {
     pub editor_enabled: bool,
-    /// Double-precision world position of the frame's coordinate origin for
-    /// camera-relative frames (see `Renderer::set_world_origin`). Editor
-    /// overlays defined in world space (the grid plane at world y = 0) are
-    /// placed relative to it.
-    pub world_origin: Option<glam::DVec3>,
-    pub user_lines: Vec<DebugVertex>,
+    /// Double-precision world position of the frame's coordinate origin (see
+    /// `Renderer::origin_for`). Overlays defined in world space (the grid
+    /// plane at world y = 0, debug lines) are placed relative to it.
+    pub world_origin: glam::DVec3,
+    pub user_lines: Vec<WorldVertex>,
     pub user_lines_generation: u64,
-    pub user_tris: Vec<DebugVertex>,
+    pub user_tris: Vec<WorldVertex>,
     pub user_tris_generation: u64,
     /// Wireframe bounds of every scene volume, rebuilt by the renderer while
     /// the editor overlay is on. Kept separate from `user_lines` because the
     /// editor path deliberately ignores those.
-    pub editor_volume_lines: Vec<DebugVertex>,
+    pub editor_volume_lines: Vec<WorldVertex>,
     /// Bumped whenever `editor_volume_lines` changes, so the pass can keep
     /// caching its uploads instead of re-sending the set every frame.
     pub editor_volume_generation: u64,
     /// Named sets of world-space editor lines, each owned by one producer
     /// (e.g. `"splines"` from SceneDB spline components). Drawn with the
     /// volume bounds, so they sit in the scene and follow the camera.
-    pub editor_line_layers: std::collections::BTreeMap<String, Vec<DebugVertex>>,
+    pub editor_line_layers: std::collections::BTreeMap<String, Vec<WorldVertex>>,
     /// Bumped whenever any of `editor_line_layers` changes.
     pub editor_layers_generation: u64,
     /// Color-blind mode for axis/gizmo colors:
@@ -49,6 +48,65 @@ pub struct DebugDrawState {
     pub color_blind_mode: u8,
 }
 
+/// A world-space position for the debug-draw API, in f32 or f64. Debug
+/// geometry is kept in double precision and drawn relative to the frame's
+/// world origin, so a line on a planet's surface lands where it is.
+pub trait WorldPoint {
+    fn world(self) -> glam::DVec3;
+}
+
+impl WorldPoint for glam::DVec3 {
+    fn world(self) -> glam::DVec3 {
+        self
+    }
+}
+
+impl WorldPoint for glam::Vec3 {
+    fn world(self) -> glam::DVec3 {
+        self.as_dvec3()
+    }
+}
+
+impl WorldPoint for [f64; 3] {
+    fn world(self) -> glam::DVec3 {
+        glam::DVec3::from_array(self)
+    }
+}
+
+impl WorldPoint for [f32; 3] {
+    fn world(self) -> glam::DVec3 {
+        glam::Vec3::from_array(self).as_dvec3()
+    }
+}
+
+/// A debug-geometry vertex in world space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldVertex {
+    pub position: glam::DVec3,
+    pub color: [f32; 4],
+}
+
+impl WorldVertex {
+    pub fn new(position: impl WorldPoint, color: [f32; 4]) -> Self {
+        Self { position: position.world(), color }
+    }
+
+    /// This vertex in the frame of `origin`, for the GPU.
+    fn in_frame(&self, origin: glam::DVec3) -> DebugVertex {
+        DebugVertex { position: (self.position - origin).as_vec3().to_array(), _pad: 0.0, color: self.color }
+    }
+}
+
+/// A unit vector perpendicular to `n` and another perpendicular to both.
+fn basis(n: glam::Vec3) -> (glam::Vec3, glam::Vec3) {
+    let up = if n.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
+    let tangent = n.cross(up).normalize_or_zero();
+    (tangent, n.cross(tangent).normalize_or_zero())
+}
+
+/// Debug geometry submitted under one lock. Shapes are placed at a world
+/// anchor (`impl WorldPoint`) and built from f32 offsets to it, so they keep
+/// their shape however far from the world's origin they are.
 pub struct DebugBatch<'a> {
     pub(crate) state: &'a mut DebugDrawState,
     pub(crate) lines_changed: bool,
@@ -56,158 +114,197 @@ pub struct DebugBatch<'a> {
 }
 
 impl<'a> DebugBatch<'a> {
-    pub fn line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
-        self.state.user_lines.push(DebugVertex {
-            position: from,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_lines.push(DebugVertex {
-            position: to,
-            _pad: 0.0,
-            color,
-        });
+    pub fn line(&mut self, from: impl WorldPoint, to: impl WorldPoint, color: [f32; 4]) {
+        self.state.user_lines.push(WorldVertex::new(from, color));
+        self.state.user_lines.push(WorldVertex::new(to, color));
         self.lines_changed = true;
     }
 
-    pub fn tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
-        self.state.user_tris.push(DebugVertex {
-            position: v0,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_tris.push(DebugVertex {
-            position: v1,
-            _pad: 0.0,
-            color,
-        });
-        self.state.user_tris.push(DebugVertex {
-            position: v2,
-            _pad: 0.0,
-            color,
-        });
+    pub fn tri(&mut self, v0: impl WorldPoint, v1: impl WorldPoint, v2: impl WorldPoint, color: [f32; 4]) {
+        self.state.user_tris.push(WorldVertex::new(v0, color));
+        self.state.user_tris.push(WorldVertex::new(v1, color));
+        self.state.user_tris.push(WorldVertex::new(v2, color));
         self.tris_changed = true;
     }
 
-    pub fn sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+    /// A line between two offsets from `anchor`.
+    fn line_at(&mut self, anchor: glam::DVec3, a: glam::Vec3, b: glam::Vec3, color: [f32; 4]) {
+        self.line(anchor + a.as_dvec3(), anchor + b.as_dvec3(), color);
+    }
+
+    /// A triangle of three offsets from `anchor`.
+    fn tri_at(&mut self, anchor: glam::DVec3, a: glam::Vec3, b: glam::Vec3, c: glam::Vec3, color: [f32; 4]) {
+        self.tri(anchor + a.as_dvec3(), anchor + b.as_dvec3(), anchor + c.as_dvec3(), color);
+    }
+
+    /// The circle of `radius` about `center` in the plane spanned by
+    /// `tangent` and `bitangent`, as offsets from `center`.
+    fn ring(tangent: glam::Vec3, bitangent: glam::Vec3, radius: f32, segments: u32) -> impl Iterator<Item = (glam::Vec3, glam::Vec3)> {
+        let at = move |i: u32| {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            (tangent * theta.cos() + bitangent * theta.sin()) * radius
+        };
+        (1..=segments).map(move |i| (at(i - 1), at(i)))
+    }
+
+    pub fn circle(&mut self, center: impl WorldPoint, radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 {
+            return;
+        }
+        let c = center.world();
+        for (a, b) in Self::ring(glam::Vec3::X, glam::Vec3::Z, radius, segments) {
+            self.line_at(c, a, b, color);
+        }
+    }
+
+    pub fn sphere(&mut self, center: impl WorldPoint, radius: f32, color: [f32; 4], segments: u32) {
         if segments < 4 {
             return;
         }
-        for plane in 0..3 {
-            let mut prev = glam::Vec3::ZERO;
-            for i in 0..=segments {
-                let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-                let pos = match plane {
-                    0 => glam::Vec3::new(radius * theta.cos(), radius * theta.sin(), 0.0),
-                    1 => glam::Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin()),
-                    _ => glam::Vec3::new(0.0, radius * theta.cos(), radius * theta.sin()),
-                } + glam::Vec3::from(center);
-                if i > 0 {
-                    self.line(prev.to_array(), pos.to_array(), color);
-                }
-                prev = pos;
+        let c = center.world();
+        for (u, v) in [(glam::Vec3::X, glam::Vec3::Y), (glam::Vec3::X, glam::Vec3::Z), (glam::Vec3::Y, glam::Vec3::Z)] {
+            for (a, b) in Self::ring(u, v, radius, segments) {
+                self.line_at(c, a, b, color);
             }
         }
     }
 
-    pub fn cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
+    pub fn filled_disk(&mut self, center: impl WorldPoint, normal: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
         if segments < 3 {
             return;
         }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.line(prev.to_array(), cur.to_array(), color);
-            self.line(cur.to_array(), apex_v.to_array(), color);
-            prev = cur;
+        let c = center.world();
+        let (tangent, bitangent) = basis(glam::Vec3::from(normal).normalize_or_zero());
+        for (a, b) in Self::ring(tangent, bitangent, radius, segments) {
+            self.tri_at(c, glam::Vec3::ZERO, a, b, color);
         }
     }
 
-    pub fn filled_cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
+    pub fn cone(&mut self, apex: impl WorldPoint, axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
         if segments < 3 {
             return;
         }
-        let apex_v = glam::Vec3::from(apex);
+        let apex = apex.world();
         let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.tri(apex_v.to_array(), prev.to_array(), cur.to_array(), color);
-            self.tri(base.to_array(), cur.to_array(), prev.to_array(), color);
-            prev = cur;
+        let base = dir * height;
+        let (tangent, bitangent) = basis(dir);
+        for (a, b) in Self::ring(tangent, bitangent, base_radius, segments) {
+            self.line_at(apex, base + a, base + b, color);
+            self.line_at(apex, base + b, glam::Vec3::ZERO, color);
         }
     }
 
-    pub fn filled_box(&mut self, center: [f32; 3], half: f32, color: [f32; 4]) {
-        let c = glam::Vec3::from(center);
+    pub fn filled_cone(&mut self, apex: impl WorldPoint, axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 {
+            return;
+        }
+        let apex = apex.world();
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let base = dir * height;
+        let (tangent, bitangent) = basis(dir);
+        for (a, b) in Self::ring(tangent, bitangent, base_radius, segments) {
+            self.tri_at(apex, glam::Vec3::ZERO, base + a, base + b, color);
+            self.tri_at(apex, base, base + b, base + a, color);
+        }
+    }
+
+    pub fn cylinder(&mut self, base_center: impl WorldPoint, axis: [f32; 3], height: f32, radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 {
+            return;
+        }
+        let base = base_center.world();
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let top = dir * height;
+        let (tangent, bitangent) = basis(dir);
+        for (a, b) in Self::ring(tangent, bitangent, radius, segments) {
+            self.line_at(base, a, b, color);
+            self.line_at(base, top + a, top + b, color);
+            self.line_at(base, a, top + a, color);
+        }
+    }
+
+    pub fn torus(
+        &mut self,
+        center: impl WorldPoint,
+        normal: [f32; 3],
+        major_radius: f32,
+        minor_radius: f32,
+        color: [f32; 4],
+        major_segments: u32,
+        minor_segments: u32,
+    ) {
+        if major_segments < 3 || minor_segments < 3 {
+            return;
+        }
+        let c = center.world();
+        let n = glam::Vec3::from(normal).normalize_or_zero();
+        let (tangent, bitangent) = basis(n);
+        let ring_point = |theta: f32, phi: f32| {
+            let radial = tangent * theta.cos() + bitangent * theta.sin();
+            radial * major_radius + (n * phi.cos() + radial * phi.sin()) * minor_radius
+        };
+        let angle = |i: u32, of: u32| i as f32 / of as f32 * std::f32::consts::TAU;
+        for j in 0..major_segments {
+            let (theta0, theta1) = (angle(j, major_segments), angle(j + 1, major_segments));
+            for i in 0..minor_segments {
+                let (phi0, phi1) = (angle(i, minor_segments), angle(i + 1, minor_segments));
+                self.line_at(c, ring_point(theta0, phi0), ring_point(theta0, phi1), color);
+                self.line_at(c, ring_point(theta0, phi0), ring_point(theta1, phi0), color);
+            }
+        }
+    }
+
+    pub fn filled_box(&mut self, center: impl WorldPoint, half: f32, color: [f32; 4]) {
+        let c = center.world();
         let h = half;
         let corners = [
-            c + glam::Vec3::new(-h, -h, -h),
-            c + glam::Vec3::new(h, -h, -h),
-            c + glam::Vec3::new(h, h, -h),
-            c + glam::Vec3::new(-h, h, -h),
-            c + glam::Vec3::new(-h, -h, h),
-            c + glam::Vec3::new(h, -h, h),
-            c + glam::Vec3::new(h, h, h),
-            c + glam::Vec3::new(-h, h, h),
+            glam::Vec3::new(-h, -h, -h),
+            glam::Vec3::new(h, -h, -h),
+            glam::Vec3::new(h, h, -h),
+            glam::Vec3::new(-h, h, -h),
+            glam::Vec3::new(-h, -h, h),
+            glam::Vec3::new(h, -h, h),
+            glam::Vec3::new(h, h, h),
+            glam::Vec3::new(-h, h, h),
         ];
-        let quads: [[usize; 4]; 6] = [
-            [0, 3, 2, 1],
-            [4, 5, 6, 7],
-            [0, 4, 7, 3],
-            [1, 2, 6, 5],
-            [0, 1, 5, 4],
-            [3, 7, 6, 2],
-        ];
-        for [a, b, cc, d] in quads {
-            self.tri(
-                corners[a].to_array(),
-                corners[b].to_array(),
-                corners[cc].to_array(),
-                color,
-            );
-            self.tri(
-                corners[a].to_array(),
-                corners[cc].to_array(),
-                corners[d].to_array(),
-                color,
-            );
+        const QUADS: [[usize; 4]; 6] = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 4, 7, 3], [1, 2, 6, 5], [0, 1, 5, 4], [3, 7, 6, 2]];
+        for [a, b, cc, d] in QUADS {
+            self.tri_at(c, corners[a], corners[b], corners[cc], color);
+            self.tri_at(c, corners[a], corners[cc], corners[d], color);
+        }
+    }
+
+    pub fn frustum(
+        &mut self,
+        origin: impl WorldPoint,
+        forward: [f32; 3],
+        up: [f32; 3],
+        fov_y: f32,
+        aspect: f32,
+        near: f32,
+        far: f32,
+        color: [f32; 4],
+    ) {
+        let o = origin.world();
+        let fwd = glam::Vec3::from(forward).normalize_or_zero();
+        let upv = glam::Vec3::from(up).normalize_or_zero();
+        let rightv = fwd.cross(upv).normalize_or_zero();
+        let corners = |distance: f32| {
+            let h = (fov_y * 0.5).tan() * distance;
+            let w = h * aspect;
+            let centre = fwd * distance;
+            [
+                centre + upv * h - rightv * w,
+                centre + upv * h + rightv * w,
+                centre - upv * h + rightv * w,
+                centre - upv * h - rightv * w,
+            ]
+        };
+        let (n, f) = (corners(near), corners(far));
+        for i in 0..4 {
+            self.line_at(o, n[i], n[(i + 1) % 4], color);
+            self.line_at(o, f[i], f[(i + 1) % 4], color);
+            self.line_at(o, n[i], f[i], color);
         }
     }
 
@@ -225,7 +322,7 @@ impl Default for DebugDrawState {
     fn default() -> Self {
         Self {
             editor_enabled: false,
-            world_origin: None,
+            world_origin: glam::DVec3::ZERO,
             user_lines: Vec::new(),
             user_lines_generation: 0,
             user_tris: Vec::new(),
@@ -767,7 +864,7 @@ pub struct DebugDrawPass {
     grid_depth_test: bool,
     cached_line_gen: u64,
     cached_tri_gen: u64,
-    editor_volume_cache: Vec<DebugVertex>,
+    editor_volume_cache: Vec<WorldVertex>,
     /// Frame origin the uploaded editor overlay lines were rebased to.
     editor_origin: Option<glam::DVec3>,
     /// Frame origin the uploaded user geometry was rebased to.
@@ -877,12 +974,11 @@ impl DebugDrawPass {
         }
     }
 
-    fn update_infinite_grid(&self, ctx: &PrepareContext, world_origin: Option<glam::DVec3>) {
+    fn update_infinite_grid(&self, ctx: &PrepareContext, origin: glam::DVec3) {
         let camera = ctx.camera_data;
-        // Frame coordinates are relative to `world_origin`; the grid lies on
+        // Frame coordinates are relative to `origin`; the grid lies on
         // world y = 0. Line positions only need the origin modulo the largest
         // grid period, which keeps them exact in f32 far from the origin.
-        let origin = world_origin.unwrap_or(glam::DVec3::ZERO);
         let period = 1.0e7;
         let uniform = InfiniteGridUniform {
             inv_view_proj: camera.inv_view_proj,
@@ -913,7 +1009,7 @@ impl DebugDrawPass {
         self.pass.set_depth_test(enabled);
     }
 
-    fn rebuild_editor_volume_cache(&mut self, volume_lines: &[DebugVertex]) {
+    fn rebuild_editor_volume_cache(&mut self, volume_lines: &[WorldVertex]) {
         // The grid is generated only by `infinite_grid.wgsl`. This cache is
         // exclusively for finite scene-volume bounds, which remain ordinary
         // debug geometry and must not be folded into the grid draw.
@@ -972,13 +1068,9 @@ impl RenderPass for DebugDrawPass {
             self.update_infinite_grid(ctx, state.world_origin);
 
             // Overlay lines (volume bounds, editor line layers) are world
-            // space. A camera-relative frame draws them relative to its
-            // origin, subtracted in double precision; they are re-uploaded
-            // when the origin moves. (Uploading world positions placed them
-            // by the camera's offset from the world origin, and a marker
-            // drawn at the viewing camera itself showed as a cross through
-            // the middle of every view.)
-            let origin = state.world_origin.unwrap_or(glam::DVec3::ZERO);
+            // space, drawn relative to the frame origin (subtracted in double
+            // precision) and re-uploaded when the origin moves.
+            let origin = state.world_origin;
             let layers_gen = state.editor_layers_generation;
             let rebuilt = self.editor_last_volume_gen != Some((volume_gen, layers_gen));
             if rebuilt {
@@ -993,10 +1085,7 @@ impl RenderPass for DebugDrawPass {
                 let lines: Vec<DebugVertex> = self
                     .editor_volume_cache
                     .iter()
-                    .map(|v| DebugVertex {
-                        position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin).as_vec3().to_array(),
-                        ..*v
-                    })
+                    .map(|v| v.in_frame(origin))
                     .collect();
                 self.pass.update_lines(ctx.queue, &lines);
                 self.editor_origin = Some(origin);
@@ -1016,16 +1105,10 @@ impl RenderPass for DebugDrawPass {
         let user_lines_generation = state.user_lines_generation;
         let user_tris_generation = state.user_tris_generation;
         // User geometry is world space too (see the editor overlay above).
-        let origin = state.world_origin.unwrap_or(glam::DVec3::ZERO);
+        let origin = state.world_origin;
         let moved = self.user_origin != Some(origin);
-        let rebase = |vertices: &[DebugVertex]| -> Vec<DebugVertex> {
-            vertices
-                .iter()
-                .map(|v| DebugVertex {
-                    position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin).as_vec3().to_array(),
-                    ..*v
-                })
-                .collect()
+        let rebase = |vertices: &[WorldVertex]| -> Vec<DebugVertex> {
+            vertices.iter().map(|v| v.in_frame(origin)).collect()
         };
         if user_lines_generation != self.cached_line_gen || moved {
             self.pass.update_lines(ctx.queue, &rebase(&state.user_lines));
@@ -1074,32 +1157,36 @@ struct InfiniteGridUniform {
 }
 
 impl Renderer {
-    /// Rebuild the editor-only wireframe cache for bounded post-process volumes.
+    /// Rebuild the editor-only wireframe cache for bounded post-process volumes
+    /// (world-space boxes, `[min, max]`).
     ///
     /// The cache is consumed by `DebugDrawPass` only in editor mode, so this is
     /// intentionally kept separate from transient user debug geometry.
-    pub fn debug_set_editor_volume_bounds(&mut self, bounds: &[[[f32; 3]; 2]]) {
+    pub fn debug_set_editor_volume_bounds(&mut self, bounds: &[[glam::DVec3; 2]]) {
         const COLOR: [f32; 4] = [0.15, 0.8, 1.0, 1.0];
+        const EDGES: [(usize, usize); 12] = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
         let mut lines = Vec::with_capacity(bounds.len() * 24);
-        for [[min_x, min_y, min_z], [max_x, max_y, max_z]] in bounds {
+        for [min, max] in bounds {
+            let corner = |x: bool, y: bool, z: bool| {
+                glam::DVec3::new(if x { max.x } else { min.x }, if y { max.y } else { min.y }, if z { max.z } else { min.z })
+            };
             let corners = [
-                [*min_x, *min_y, *min_z],
-                [*max_x, *min_y, *min_z],
-                [*max_x, *max_y, *min_z],
-                [*min_x, *max_y, *min_z],
-                [*min_x, *min_y, *max_z],
-                [*max_x, *min_y, *max_z],
-                [*max_x, *max_y, *max_z],
-                [*min_x, *max_y, *max_z],
-            ];
-            const EDGES: [(usize, usize); 12] = [
-                (0, 1), (1, 2), (2, 3), (3, 0),
-                (4, 5), (5, 6), (6, 7), (7, 4),
-                (0, 4), (1, 5), (2, 6), (3, 7),
+                corner(false, false, false),
+                corner(true, false, false),
+                corner(true, true, false),
+                corner(false, true, false),
+                corner(false, false, true),
+                corner(true, false, true),
+                corner(true, true, true),
+                corner(false, true, true),
             ];
             for (a, b) in EDGES {
-                lines.push(DebugVertex { position: corners[a], _pad: 0.0, color: COLOR });
-                lines.push(DebugVertex { position: corners[b], _pad: 0.0, color: COLOR });
+                lines.push(WorldVertex::new(corners[a], COLOR));
+                lines.push(WorldVertex::new(corners[b], COLOR));
             }
         }
 
@@ -1114,7 +1201,7 @@ impl Renderer {
     /// Replace the editor line layer `layer` with `lines` (world space, as
     /// pairs). An empty set removes the layer. Consumed by `DebugDrawPass`
     /// in editor mode only, and re-uploaded only when a layer changes.
-    pub fn debug_set_editor_lines(&mut self, layer: &str, lines: Vec<DebugVertex>) {
+    pub fn debug_set_editor_lines(&mut self, layer: &str, lines: Vec<WorldVertex>) {
         let Ok(mut state) = self.debug_state.lock() else {
             return;
         };
@@ -1144,6 +1231,8 @@ impl Renderer {
         }
     }
 
+    /// Submit debug geometry under one lock (see [`DebugBatch`]). The
+    /// `debug_*` shape methods each submit one shape this way.
     pub fn debug_batch<F>(&mut self, f: F)
     where
         F: FnOnce(&mut DebugBatch<'_>),
@@ -1159,180 +1248,45 @@ impl Renderer {
         }
     }
 
-    pub fn debug_line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
-        if let Ok(mut s) = self.debug_state.lock() {
-            s.user_lines.push(DebugVertex {
-                position: from,
-                _pad: 0.0,
-                color,
-            });
-            s.user_lines.push(DebugVertex {
-                position: to,
-                _pad: 0.0,
-                color,
-            });
-            s.user_lines_generation = s.user_lines_generation.wrapping_add(1);
-        }
+    pub fn debug_line(&mut self, from: impl WorldPoint, to: impl WorldPoint, color: [f32; 4]) {
+        self.debug_batch(|b| b.line(from, to, color));
     }
 
-    pub fn debug_tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
-        if let Ok(mut s) = self.debug_state.lock() {
-            s.user_tris.push(DebugVertex {
-                position: v0,
-                _pad: 0.0,
-                color,
-            });
-            s.user_tris.push(DebugVertex {
-                position: v1,
-                _pad: 0.0,
-                color,
-            });
-            s.user_tris.push(DebugVertex {
-                position: v2,
-                _pad: 0.0,
-                color,
-            });
-            s.user_tris_generation = s.user_tris_generation.wrapping_add(1);
-        }
+    pub fn debug_tri(&mut self, v0: impl WorldPoint, v1: impl WorldPoint, v2: impl WorldPoint, color: [f32; 4]) {
+        self.debug_batch(|b| b.tri(v0, v1, v2, color));
     }
 
-    pub fn debug_filled_disk(
-        &mut self,
-        center: [f32; 3],
-        normal: [f32; 3],
-        radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
-        let c = glam::Vec3::from(center);
-        let n = glam::Vec3::from(normal).normalize_or_zero();
-        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-5) {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = n.cross(up).normalize_or_zero();
-        let bitangent = n.cross(tangent).normalize_or_zero();
-        let mut prev = c + tangent * radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = c + (tangent * theta.cos() + bitangent * theta.sin()) * radius;
-            self.debug_tri(c.to_array(), prev.to_array(), cur.to_array(), color);
-            prev = cur;
-        }
+    pub fn debug_filled_disk(&mut self, center: impl WorldPoint, normal: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+        self.debug_batch(|b| b.filled_disk(center, normal, radius, color, segments));
     }
 
     pub fn debug_filled_cone(
         &mut self,
-        apex: [f32; 3],
+        apex: impl WorldPoint,
         axis: [f32; 3],
         height: f32,
         base_radius: f32,
         color: [f32; 4],
         segments: u32,
     ) {
-        if segments < 3 {
-            return;
-        }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.debug_tri(apex_v.to_array(), prev.to_array(), cur.to_array(), color);
-            self.debug_tri(base.to_array(), cur.to_array(), prev.to_array(), color);
-            prev = cur;
-        }
+        self.debug_batch(|b| b.filled_cone(apex, axis, height, base_radius, color, segments));
     }
 
-    pub fn debug_filled_box(&mut self, center: [f32; 3], half: f32, color: [f32; 4]) {
-        let c = glam::Vec3::from(center);
-        let h = half;
-        let corners = [
-            c + glam::Vec3::new(-h, -h, -h),
-            c + glam::Vec3::new(h, -h, -h),
-            c + glam::Vec3::new(h, h, -h),
-            c + glam::Vec3::new(-h, h, -h),
-            c + glam::Vec3::new(-h, -h, h),
-            c + glam::Vec3::new(h, -h, h),
-            c + glam::Vec3::new(h, h, h),
-            c + glam::Vec3::new(-h, h, h),
-        ];
-        let quads: [[usize; 4]; 6] = [
-            [0, 3, 2, 1],
-            [4, 5, 6, 7],
-            [0, 4, 7, 3],
-            [1, 2, 6, 5],
-            [0, 1, 5, 4],
-            [3, 7, 6, 2],
-        ];
-        for [a, b, cc, d] in quads {
-            self.debug_tri(
-                corners[a].to_array(),
-                corners[b].to_array(),
-                corners[cc].to_array(),
-                color,
-            );
-            self.debug_tri(
-                corners[a].to_array(),
-                corners[cc].to_array(),
-                corners[d].to_array(),
-                color,
-            );
-        }
+    pub fn debug_filled_box(&mut self, center: impl WorldPoint, half: f32, color: [f32; 4]) {
+        self.debug_batch(|b| b.filled_box(center, half, color));
     }
 
-    pub fn debug_circle(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 {
-            return;
-        }
-        let (cx, cy, cz) = (center[0], center[1], center[2]);
-        let step = std::f32::consts::TAU / segments as f32;
-        let mut last = (cx + radius, cy, cz);
-        for i in 1..=segments {
-            let theta = i as f32 * step;
-            let next = (cx + radius * theta.cos(), cy, cz + radius * theta.sin());
-            self.debug_line([last.0, last.1, last.2], [next.0, next.1, next.2], color);
-            last = next;
-        }
+    pub fn debug_circle(&mut self, center: impl WorldPoint, radius: f32, color: [f32; 4], segments: u32) {
+        self.debug_batch(|b| b.circle(center, radius, color, segments));
     }
 
-    pub fn debug_sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 4 {
-            return;
-        }
-        for plane in 0..3 {
-            let mut prev = glam::Vec3::ZERO;
-            for i in 0..=segments {
-                let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-                let pos = match plane {
-                    0 => glam::Vec3::new(radius * theta.cos(), radius * theta.sin(), 0.0),
-                    1 => glam::Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin()),
-                    _ => glam::Vec3::new(0.0, radius * theta.cos(), radius * theta.sin()),
-                } + glam::Vec3::from(center);
-                if i > 0 {
-                    self.debug_line(prev.to_array(), pos.to_array(), color);
-                }
-                prev = pos;
-            }
-        }
+    pub fn debug_sphere(&mut self, center: impl WorldPoint, radius: f32, color: [f32; 4], segments: u32) {
+        self.debug_batch(|b| b.sphere(center, radius, color, segments));
     }
 
     pub fn debug_torus(
         &mut self,
-        center: [f32; 3],
+        center: impl WorldPoint,
         normal: [f32; 3],
         major_radius: f32,
         minor_radius: f32,
@@ -1340,122 +1294,36 @@ impl Renderer {
         major_segments: u32,
         minor_segments: u32,
     ) {
-        if major_segments < 3 || minor_segments < 3 {
-            return;
-        }
-        let c = glam::Vec3::from(center);
-        let n = glam::Vec3::from(normal).normalize_or_zero();
-        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-6) {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = n.cross(up).normalize_or_zero();
-        let bitangent = n.cross(tangent).normalize_or_zero();
-
-        for j in 0..major_segments {
-            let theta0 = 2.0 * std::f32::consts::TAU * (j as f32) / (major_segments as f32);
-            let theta1 = 2.0 * std::f32::consts::TAU * ((j + 1) as f32) / (major_segments as f32);
-            let center0 = c + (tangent * theta0.cos() + bitangent * theta0.sin()) * major_radius;
-            let center1 = c + (tangent * theta1.cos() + bitangent * theta1.sin()) * major_radius;
-
-            let mut pprev0 = center0 + (n * minor_radius);
-            let mut pprev1 = center1 + (n * minor_radius);
-            for i in 1..=minor_segments {
-                let phi = 2.0 * std::f32::consts::TAU * (i as f32) / (minor_segments as f32);
-                let offset = (n * phi.cos()
-                    + (tangent * theta0.cos() + bitangent * theta0.sin()) * phi.sin())
-                .normalize_or_zero()
-                    * minor_radius;
-                let cur0 = center0 + offset;
-                let offset1 = (n * phi.cos()
-                    + (tangent * theta1.cos() + bitangent * theta1.sin()) * phi.sin())
-                .normalize_or_zero()
-                    * minor_radius;
-                let cur1 = center1 + offset1;
-
-                self.debug_line(pprev0.to_array(), cur0.to_array(), color);
-                self.debug_line(pprev1.to_array(), cur1.to_array(), color);
-                self.debug_line(pprev0.to_array(), pprev1.to_array(), color);
-
-                pprev0 = cur0;
-                pprev1 = cur1;
-            }
-        }
+        self.debug_batch(|b| b.torus(center, normal, major_radius, minor_radius, color, major_segments, minor_segments));
     }
 
     pub fn debug_cylinder(
         &mut self,
-        base_center: [f32; 3],
+        base_center: impl WorldPoint,
         axis: [f32; 3],
         height: f32,
         radius: f32,
         color: [f32; 4],
         segments: u32,
     ) {
-        if segments < 3 {
-            return;
-        }
-        let base = glam::Vec3::from(base_center);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let top = base + dir * height;
-        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev_base = base + tangent * radius;
-        let mut prev_top = top + tangent * radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let dir_circle = tangent * theta.cos() + bitangent * theta.sin();
-            let cur_base = base + dir_circle * radius;
-            let cur_top = top + dir_circle * radius;
-            self.debug_line(prev_base.to_array(), cur_base.to_array(), color);
-            self.debug_line(prev_top.to_array(), cur_top.to_array(), color);
-            self.debug_line(prev_base.to_array(), prev_top.to_array(), color);
-            prev_base = cur_base;
-            prev_top = cur_top;
-        }
+        self.debug_batch(|b| b.cylinder(base_center, axis, height, radius, color, segments));
     }
 
     pub fn debug_cone(
         &mut self,
-        apex: [f32; 3],
+        apex: impl WorldPoint,
         axis: [f32; 3],
         height: f32,
         base_radius: f32,
         color: [f32; 4],
         segments: u32,
     ) {
-        if segments < 3 {
-            return;
-        }
-        let apex_v = glam::Vec3::from(apex);
-        let dir = glam::Vec3::from(axis).normalize_or_zero();
-        let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
-        let tangent = dir.cross(up).normalize_or_zero();
-        let bitangent = dir.cross(tangent).normalize_or_zero();
-        let mut prev = base + tangent * base_radius;
-        for i in 1..=segments {
-            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
-            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
-            self.debug_line(prev.to_array(), cur.to_array(), color);
-            self.debug_line(cur.to_array(), apex_v.to_array(), color);
-            prev = cur;
-        }
+        self.debug_batch(|b| b.cone(apex, axis, height, base_radius, color, segments));
     }
 
     pub fn debug_frustum(
         &mut self,
-        origin: [f32; 3],
+        origin: impl WorldPoint,
         forward: [f32; 3],
         up: [f32; 3],
         fov_y: f32,
@@ -1464,34 +1332,6 @@ impl Renderer {
         far: f32,
         color: [f32; 4],
     ) {
-        let o = glam::Vec3::from(origin);
-        let fwd = glam::Vec3::from(forward).normalize_or_zero();
-        let upv = glam::Vec3::from(up).normalize_or_zero();
-        let rightv = fwd.cross(upv).normalize_or_zero();
-        let n_center = o + fwd * near;
-        let f_center = o + fwd * far;
-        let nh = (fov_y * 0.5).tan() * near;
-        let nw = nh * aspect;
-        let fh = (fov_y * 0.5).tan() * far;
-        let fw = fh * aspect;
-
-        let n = [
-            n_center + upv * nh - rightv * nw,
-            n_center + upv * nh + rightv * nw,
-            n_center - upv * nh + rightv * nw,
-            n_center - upv * nh - rightv * nw,
-        ];
-        let f = [
-            f_center + upv * fh - rightv * fw,
-            f_center + upv * fh + rightv * fw,
-            f_center - upv * fh + rightv * fw,
-            f_center - upv * fh - rightv * fw,
-        ];
-
-        for i in 0..4 {
-            self.debug_line(n[i].to_array(), n[(i + 1) % 4].to_array(), color);
-            self.debug_line(f[i].to_array(), f[(i + 1) % 4].to_array(), color);
-            self.debug_line(n[i].to_array(), f[i].to_array(), color);
-        }
+        self.debug_batch(|b| b.frustum(origin, forward, up, fov_y, aspect, near, far, color));
     }
 }

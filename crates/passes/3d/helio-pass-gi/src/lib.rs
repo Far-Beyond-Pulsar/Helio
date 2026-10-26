@@ -87,7 +87,7 @@ pub const GI_SAMPLE_SNIPPET: helio_core::shader::ShaderSnippet =
 /// The eye's world position this frame: the frame's origin and the
 /// camera's position in it.
 pub fn eye(ctx: &PrepareContext) -> DVec3 {
-    ctx.world_origin.unwrap_or_default() + Vec3::from_slice(&ctx.camera_data.position_near[..3]).as_dvec3()
+    ctx.world_origin + Vec3::from_slice(&ctx.camera_data.position_near[..3]).as_dvec3()
 }
 
 /// Where each level's probes are: the world coordinates (in its spacings)

@@ -153,9 +153,12 @@ impl RenderPass for PlanarReflectionPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Default: the XZ plane at the world's origin, 50-unit half-extents,
+        // normal tolerance cos(15 deg). In the frame's space, like the G-buffer
+        // positions it is tested against.
+        let plane = (-ctx.world_origin).as_vec3();
         let globals = PlanarGlobals {
-            // Default: XZ plane at origin, 50-unit half-extents, normal tolerance cos(15 deg)
-            plane_pos: [0.0, 0.0, 0.0, 0.0],
+            plane_pos: [plane.x, plane.y, plane.z, 0.0],
             plane_normal: [0.0, 1.0, 0.0, 0.0],
             half_extents: [50.0, 50.0, 1.0, 0.0],
             cos_angle_threshold: 0.9659, // cos(15 deg)
