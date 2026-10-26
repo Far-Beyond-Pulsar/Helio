@@ -103,10 +103,17 @@ pub type Fallback = fn(PassBuildContext<'_>) -> RenderGraph;
 /// An asset that fails to build is logged and replaced by `fallback`, so a
 /// broken graph never leaves the viewport without a renderer; the editor
 /// reports the same diagnostics where they can be fixed.
+///
+/// `swap_policy` is what shader hot reload may swap on its own (see
+/// [`helio_core::SwapPolicy`]); a graph built only of pass nodes whose
+/// constructors share builder-created resources the same way carries the
+/// legacy default graphs' policy. None leaves the graph unswappable (the host
+/// rebuilds it whole on a shader reload).
 pub struct GraphAssetPipeline {
     asset: Arc<GraphAsset>,
     registry: Arc<NodeRegistry>,
     fallback: Fallback,
+    swap_policy: Option<helio_core::SwapPolicy>,
 }
 
 impl GraphAssetPipeline {
@@ -115,13 +122,27 @@ impl GraphAssetPipeline {
             asset,
             registry,
             fallback,
+            swap_policy: None,
         }
+    }
+
+    /// Stores the [`helio_core::SwapPolicy`] the built graph reports to shader
+    /// hot reload.
+    pub fn with_swap_policy(mut self, swap_policy: helio_core::SwapPolicy) -> Self {
+        self.swap_policy = Some(swap_policy);
+        self
     }
 }
 
 impl IntoGraph for GraphAssetPipeline {
     fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph {
-        build(&self.asset, &self.registry, self.fallback, ctx)
+        build(
+            &self.asset,
+            &self.registry,
+            self.fallback,
+            self.swap_policy.as_ref(),
+            ctx,
+        )
     }
 }
 
@@ -129,6 +150,7 @@ fn build(
     asset: &Arc<GraphAsset>,
     registry: &Arc<NodeRegistry>,
     fallback: Fallback,
+    swap_policy: Option<&helio_core::SwapPolicy>,
     ctx: PassBuildContext<'_>,
 ) -> RenderGraph {
     let mut env = BuildEnv::new(
@@ -144,17 +166,22 @@ fn build(
     );
     match compile(asset, registry, &mut env) {
         Ok(mut graph) => {
+            if let Some(swap_policy) = swap_policy {
+                graph.set_swap_policy(swap_policy.clone());
+            }
             // Resize and shader reload rebuild from the same asset.
             let asset = Arc::clone(asset);
             let registry = Arc::clone(registry);
             let owns_device = ctx.owns_device;
             let scene_db = ctx.scene_db.clone();
+            let swap_policy = swap_policy.cloned();
             let rebuilder: GraphRebuilder = Arc::new(
                 move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
                     build(
                         &asset,
                         &registry,
                         fallback,
+                        swap_policy.as_ref(),
                         PassBuildContext {
                             device,
                             queue,

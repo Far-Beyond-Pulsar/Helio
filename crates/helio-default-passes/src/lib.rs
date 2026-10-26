@@ -182,7 +182,7 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
 /// ones a resize already has: none of these constructors spawns a thread,
 /// registers into a global or shared registry, or writes a file, and the
 /// replacement graph's pipeline cache has no persistence path.
-fn default_swap_policy() -> helio_core::SwapPolicy {
+pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
     use helio_core::graph::type_name_of as name;
     helio_core::SwapPolicy::new()
         .independent::<ObjectBatchPass>()

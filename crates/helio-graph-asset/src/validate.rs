@@ -134,6 +134,15 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     for node in &asset.nodes {
         match registry.get(&node.kind) {
             Some(descriptor) => {
+                if let Some(reason) = descriptor.unsupported {
+                    if !is_disabled(node) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Warning,
+                            node: Some(node.id.clone()),
+                            message: format!("builds nothing: {reason}"),
+                        });
+                    }
+                }
                 let node_pins = descriptor.pins(&node.params);
                 for pin in node_pins.inputs.iter().chain(&node_pins.outputs) {
                     if pin.ty.kind != PinKind::Flow && pin.resource.trim().is_empty() {
@@ -492,6 +501,35 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.severity == Severity::Warning && d.message.contains("disabled")));
+    }
+
+    #[test]
+    fn an_unsupported_node_is_reported_but_still_builds() {
+        let mut registry = registry();
+        registry.register(
+            NodeDescriptor::new("t.caps", "Caps", "Test", "", |_| Ok(()))
+                .with_pins(vec![PinDesc::flow("in")], vec![PinDesc::flow("out")])
+                .with_unsupported("the platform cannot do this"),
+        );
+        let mut asset = graph();
+        asset.nodes.push(node("caps", "t.caps", None));
+        asset
+            .connections
+            .push(wire("start", "out", "caps", "in"));
+        asset
+            .connections
+            .push(wire("caps", "out", "out", "in"));
+        let validation = validate(&asset, &registry);
+        let warned = validation.diagnostics.iter().any(|d| {
+            d.severity == Severity::Warning && d.message.contains("builds nothing") && d.node.as_deref() == Some("caps")
+        });
+        assert!(warned, "{:?}", validation.diagnostics);
+        assert!(!validation.has_errors());
+        assert!(validate(&asset, &registry).plan.is_some());
+
+        asset.nodes[2].params.insert("enabled".into(), json!(false));
+        let validation = validate(&asset, &registry);
+        assert!(validation.diagnostics.iter().all(|d| d.node.as_deref() != Some("caps")));
     }
 
     #[test]

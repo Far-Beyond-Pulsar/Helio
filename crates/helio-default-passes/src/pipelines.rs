@@ -123,11 +123,14 @@ pub fn register_builtin_pipelines(registry: &mut RenderPipelineRegistry) {
         },
         Arc::new(|| {
             let registry = crate::graphs::base_registry();
-            Box::new(helio_graph_asset::GraphAssetPipeline::new(
-                Arc::new(crate::graphs::deferred_graph_asset(&registry)),
-                Arc::new(registry),
-                crate::build_default_graph_external_with_context,
-            )) as Box<dyn IntoGraph>
+            Box::new(
+                helio_graph_asset::GraphAssetPipeline::new(
+                    Arc::new(crate::graphs::deferred_graph_asset(&registry)),
+                    Arc::new(registry),
+                    crate::build_default_graph_external_with_context,
+                )
+                .with_swap_policy(crate::default_swap_policy()),
+            ) as Box<dyn IntoGraph>
         }),
     );
     registry.set_default(DEFAULT);

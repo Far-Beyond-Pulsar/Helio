@@ -377,31 +377,28 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(
-        pass_node(
-            "occlusion_cull",
-            "Culling: Frustum + Occlusion",
-            CATEGORY,
-            "Frustum and Hi-Z occlusion culling of the object batch.",
-            |build| {
-                let c = ctx(build.env);
-                let sampler = build
-                    .graph
-                    .find_pass::<HiZBuildPass>()
-                    .map(|hiz| Arc::clone(&hiz.hiz_sampler))
-                    .ok_or_else(|| missing("Occlusion Cull", "Hi-Z Build"))?;
-                build.graph.add_pass(Box::new(OcclusionCullPass::new(
-                    c.device,
-                    sampler,
-                    c.iw,
-                    c.ih,
-                    c.cull_stats.clone(),
-                )));
-                Ok(())
-            },
-        )
-        .with_marker_after(),
-    );
+    registry.register(pass_node(
+        "occlusion_cull",
+        "Culling: Frustum + Occlusion",
+        CATEGORY,
+        "Frustum and Hi-Z occlusion culling of the object batch.",
+        |build| {
+            let c = ctx(build.env);
+            let sampler = build
+                .graph
+                .find_pass::<HiZBuildPass>()
+                .map(|hiz| Arc::clone(&hiz.hiz_sampler))
+                .ok_or_else(|| missing("Occlusion Cull", "Hi-Z Build"))?;
+            build.graph.add_pass(Box::new(OcclusionCullPass::new(
+                c.device,
+                sampler,
+                c.iw,
+                c.ih,
+                c.cull_stats.clone(),
+            )));
+            Ok(())
+        },
+    ));
 
     registry.register(pass_node(
         "portal_cull",
@@ -415,7 +412,8 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
                 .add_pass(Box::new(PortalCullPass::new(c.device)));
             Ok(())
         },
-    ));
+    )
+    .with_marker_after());
 
     registry.register(pass_node(
         "light_cull",
@@ -452,20 +450,17 @@ fn register_geometry(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(
-        pass_node(
-            "gbuffer",
-            "Geometry: GBuffer",
-            CATEGORY,
-            "Opaque geometry into the GBuffer and the scene depth.",
-            |build| {
-                let c = ctx(build.env);
-                build.graph.add_pass(Box::new(GBufferPass::new(c.device)));
-                Ok(())
-            },
-        )
-        .with_marker_after(),
-    );
+    registry.register(pass_node(
+        "gbuffer",
+        "Geometry: GBuffer",
+        CATEGORY,
+        "Opaque geometry into the GBuffer and the scene depth.",
+        |build| {
+            let c = ctx(build.env);
+            build.graph.add_pass(Box::new(GBufferPass::new(c.device)));
+            Ok(())
+        },
+    ));
 
     registry.register(pass_node(
         "portal_mask",
@@ -507,22 +502,25 @@ fn register_geometry(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(pass_node(
-        "foliage_gbuffer",
-        "Foliage: Draw to GBuffer",
-        CATEGORY,
-        "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
-        |build| {
-            let c = ctx(build.env);
-            let draw = build
-                .env
-                .shared_existing::<PendingFoliageDraw>()
-                .and_then(|pending| pending.0.take())
-                .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
-            build.graph.add_pass(Box::new(draw));
-            Ok(())
-        },
-    ));
+    registry.register(
+        pass_node(
+            "foliage_gbuffer",
+            "Foliage: Draw to GBuffer",
+            CATEGORY,
+            "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
+            |build| {
+                let c = ctx(build.env);
+                let draw = build
+                    .env
+                    .shared_existing::<PendingFoliageDraw>()
+                    .and_then(|pending| pending.0.take())
+                    .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
+                build.graph.add_pass(Box::new(draw));
+                Ok(())
+            },
+        )
+        .with_marker_after(),
+    );
 
     registry.register(
         pass_node(
@@ -564,43 +562,51 @@ fn register_lighting(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(pass_node(
-        "ssr",
-        "Reflections: Screen-Space",
-        CATEGORY,
-        "Traces glossy reflections in screen space. One of the most expensive passes.",
-        |build| {
-            let c = ctx(build.env);
-            if !helio_core::REFLECTIONS_SUPPORTED {
-                log::warn!("Screen-space reflections are not supported on this platform");
-                return Ok(());
-            }
-            build.graph.add_pass(Box::new(SsrPass::new(
-                c.device, c.queue, c.camera, c.iw, c.ih,
-            )));
-            Ok(())
-        },
-    ));
+    const MISSING_REFLECTIONS: &str = "reflections are not supported on this platform";
 
-    registry.register(pass_node(
-        "planar_reflection",
-        "Reflections: Planar",
-        CATEGORY,
-        "Reflects the scene across world-space planes.",
-        |build| {
-            let c = ctx(build.env);
-            if !helio_core::REFLECTIONS_SUPPORTED {
-                log::warn!("Planar reflections are not supported on this platform");
-                return Ok(());
-            }
-            build.graph.add_pass(Box::new(PlanarReflectionPass::new(
-                c.device,
-                c.camera,
-                c.config.surface_format,
-            )));
-            Ok(())
-        },
-    ));
+    registry.register(
+        pass_node(
+            "ssr",
+            "Reflections: Screen-Space",
+            CATEGORY,
+            "Traces glossy reflections in screen space. One of the most expensive passes.",
+            |build| {
+                let c = ctx(build.env);
+                if !helio_core::REFLECTIONS_SUPPORTED {
+                    log::warn!("Screen-space reflections are not supported on this platform");
+                    return Ok(());
+                }
+                build.graph.add_pass(Box::new(SsrPass::new(
+                    c.device, c.queue, c.camera, c.iw, c.ih,
+                )));
+                Ok(())
+            },
+        )
+        .with_unsupported_when(helio_core::REFLECTIONS_SUPPORTED, MISSING_REFLECTIONS),
+    );
+
+    registry.register(
+        pass_node(
+            "planar_reflection",
+            "Reflections: Planar",
+            CATEGORY,
+            "Reflects the scene across world-space planes.",
+            |build| {
+                let c = ctx(build.env);
+                if !helio_core::REFLECTIONS_SUPPORTED {
+                    log::warn!("Planar reflections are not supported on this platform");
+                    return Ok(());
+                }
+                build.graph.add_pass(Box::new(PlanarReflectionPass::new(
+                    c.device,
+                    c.camera,
+                    c.config.surface_format,
+                )));
+                Ok(())
+            },
+        )
+        .with_unsupported_when(helio_core::REFLECTIONS_SUPPORTED, MISSING_REFLECTIONS),
+    );
 
     registry.register(
         pass_node(
@@ -819,19 +825,24 @@ fn register_post(registry: &mut NodeRegistry) {
             |build| {
                 let c = ctx(build.env);
                 let quality = tsr_quality(&build.text("quality"));
-                build.graph.add_pass(Box::new(
-                    TsrPass::new(
-                        c.device,
-                        c.iw,
-                        c.ih,
-                        c.config.width,
-                        c.config.height,
-                        c.config.surface_format,
-                        quality,
-                    )
-                    .with_color_input(FOGGED_HDR)
-                    .with_intermediate_output(),
-                ));
+                let tsr = TsrPass::new(
+                    c.device,
+                    c.iw,
+                    c.ih,
+                    c.config.width,
+                    c.config.height,
+                    c.config.surface_format,
+                    quality,
+                )
+                .with_color_input(FOGGED_HDR)
+                .with_intermediate_output()
+                .with_motion_vectors();
+                let tsr = if build.boolean("stochastic_mask") {
+                    tsr.with_stochastic_mask()
+                } else {
+                    tsr
+                };
+                build.graph.add_pass(Box::new(tsr));
                 Ok(())
             },
         )
@@ -840,6 +851,11 @@ fn register_post(registry: &mut NodeRegistry) {
             "Quality",
             &["performance", "balanced", "quality", "native"],
             "balanced",
+        ))
+        .with_param(ParamDesc::boolean(
+            "stochastic_mask",
+            "Stochastic mask",
+            false,
         )),
     );
 

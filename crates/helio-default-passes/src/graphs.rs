@@ -219,6 +219,7 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
             add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
         }
         auto_layout(&mut asset, registry);
+        helio_graph_asset::sections::sectionize(&mut asset, registry);
         return asset;
     }
 
@@ -341,7 +342,24 @@ mod tests {
         assert!(at("portal_cull") < at("portal_instance"));
         assert!(at("gbuffer") < at("deferred_light"));
         assert!(at("deferred_light") < at("post_process"));
-        assert_eq!(ids.last(), Some(&"output"));
+        // The execution chain — the nodes with flow pins — ends at the Output; the
+        // host declarations are data-only nodes and build after the chain.
+        let chain: Vec<&str> = plan
+            .order
+            .iter()
+            .filter(|i| {
+                let node = &flat.nodes[**i];
+                registry.get(&node.kind).is_some_and(|d| {
+                    let pins = d.pins(&node.params);
+                    pins.inputs
+                        .iter()
+                        .chain(&pins.outputs)
+                        .any(|pin| pin.ty.kind == PinKind::Flow)
+                })
+            })
+            .map(|i| flat.nodes[*i].id.as_str())
+            .collect();
+        assert_eq!(chain.last(), Some(&"output"), "{chain:?}");
         // Laid out: each lane is a section, and the main graph is the chain through them.
         assert!(asset.sections.len() >= 4, "{:?}", asset.sections.len());
         assert!(asset.nodes.iter().any(|n| asset.section_of(n).is_some()));
@@ -422,9 +440,11 @@ mod tests {
             ("get:scenedb.materials@gbuffer", "scenedb.materials"),
             ("gbuffer", "scenedb.materials")
         ));
-        assert!(!all
+        // Nothing is wired from one pass to another but the chain's flow wire.
+        assert!(all
             .iter()
-            .any(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull"));
+            .filter(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull")
+            .all(|c| c.from.pin == "out" && c.to.pin == "in"));
 
         // The buffers resolve: occlusion cull reads what Hi-Z set, and Hi-Z reads the
         // depth the GBuffer sets later in the frame (history).

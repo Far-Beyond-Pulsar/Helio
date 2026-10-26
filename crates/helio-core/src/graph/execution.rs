@@ -216,6 +216,8 @@ pub struct DeclaredResource {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PassDeclaration {
     pub pass: &'static str,
+    /// The Rust type path of the pass ([`RenderPass::type_name`]).
+    pub type_name: &'static str,
     pub reads: Vec<DeclaredResource>,
     pub writes: Vec<DeclaredResource>,
     /// SceneDB buffer keys the pass consumes ([`RenderPass::scene_buffers`]).
@@ -1144,6 +1146,12 @@ impl RenderGraph {
         self.passes.len()
     }
 
+    /// The size passes are prepared and recorded at, set by
+    /// [`lock`](Self::lock).
+    pub fn internal_size(&self) -> (u32, u32) {
+        (self.internal_w, self.internal_h)
+    }
+
     /// What pass `index` declares, for tools: the resources it reads and
     /// writes (from `reads()`/`writes()` and `declare_resources`) with their
     /// kind where the pass declares one, and the SceneDB buffers it consumes.
@@ -1151,6 +1159,7 @@ impl RenderGraph {
         let pass = self.passes.get(index)?;
         let mut declaration = PassDeclaration {
             pass: pass.name(),
+            type_name: pass.type_name(),
             reads: Vec::new(),
             writes: Vec::new(),
             scene_buffers: pass.scene_buffers().to_vec(),

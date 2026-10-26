@@ -214,6 +214,9 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
 
     // Wires that order the graph: flow and data, not history.
     let mut forward: Vec<(usize, usize)> = Vec::new();
+    // Every wire, history ones too: a data node sits beside whoever it feeds
+    // even when that read is last frame's value.
+    let mut wired: Vec<(usize, usize)> = Vec::new();
     for connection in &asset.connections {
         let (Some(&from), Some(&to)) = (
             index.get(connection.from.node.as_str()),
@@ -226,8 +229,11 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
             .iter()
             .find(|pin| pin.name == connection.to.pin)
             .is_some_and(|pin| pin.history);
-        if !history && from != to && !forward.contains(&(from, to)) {
-            forward.push((from, to));
+        if from != to && !wired.contains(&(from, to)) {
+            wired.push((from, to));
+            if !history && !forward.contains(&(from, to)) {
+                forward.push((from, to));
+            }
         }
     }
 
@@ -245,9 +251,9 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
     let mut sets: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut unused: Vec<usize> = Vec::new();
     for node in (0..count).filter(|i| !items[*i].executes) {
-        if let Some(user) = first_user(node, &forward, &position_in_order) {
+        if let Some(user) = first_user(node, &wired, &position_in_order) {
             reads.entry(user).or_default().push(node);
-        } else if let Some(producer) = last_producer(node, &forward, &position_in_order) {
+        } else if let Some(producer) = last_producer(node, &wired, &position_in_order) {
             sets.entry(producer).or_default().push(node);
         } else {
             unused.push(node);
@@ -672,9 +678,12 @@ mod tests {
         let mut asset = sample();
         auto_layout(&mut asset, &registry);
         let x = |id: &str| asset.node(id).unwrap().position[0];
-        assert!(x("start") < x("a") && x("a") < x("b") && x("b") < x("out"));
+        let y = |id: &str| asset.node(id).unwrap().position[1];
+        assert!(x("start") < x("a") && y("start") == y("a"));
+        assert!(x("b") < x("out") && y("b") == y("out"));
+        assert!(y("a") < y("b"), "Beta runs on the row below Alpha");
         // A source is left of the node it feeds, and in the same lane row.
-        assert!(x("src_a") < x("a"));
+        assert!(x("src_a") < x("a") && y("src_a") == y("a"));
         assert!(x("src_b1") < x("b") && x("src_b2") < x("b"));
         assert_eq!(x("src_b1"), x("src_b2"), "one column");
         assert_ne!(
@@ -762,11 +771,12 @@ mod tests {
         asset.connections.push(wire("a", "y", "sink", "y"));
         auto_layout(&mut asset, &registry);
         let x = |id: &str| asset.node(id).unwrap().position[0];
+        let y = |id: &str| asset.node(id).unwrap().position[1];
         assert!(
             x("sink") > x("a"),
             "a Set sits after the node that produces it"
         );
-        assert!(x("sink") < x("b"), "and before the next node");
+        assert!(y("sink") == y("a"), "and in its row");
         for other in ["a", "b", "start", "out", "src_a", "src_b1"] {
             assert!(
                 !overlap(

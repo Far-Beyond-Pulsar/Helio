@@ -201,6 +201,10 @@ pub struct NodeDescriptor {
     /// Inputs the node can also take, beyond what its passes declare by default:
     /// the pass author lists them where a parameter chooses between resources.
     pub alternative_inputs: Vec<(String, PinType)>,
+    /// Why the node builds nothing where a capability it needs is absent (a
+    /// platform, say): validation reports it so the graph that claims the pass
+    /// is detectably short of it. `None` when the node always builds.
+    pub unsupported: Option<&'static str>,
     pins: PinsFn,
     build: BuildFn,
 }
@@ -223,6 +227,7 @@ impl NodeDescriptor {
             marker_after: false,
             data_only: false,
             alternative_inputs: Vec::new(),
+            unsupported: None,
             pins: Arc::new(|_| NodePins::default()),
             build: Arc::new(build),
         }
@@ -256,6 +261,21 @@ impl NodeDescriptor {
     /// A performance marker is inserted after this node by the registry's marker.
     pub fn with_marker_after(mut self) -> Self {
         self.marker_after = true;
+        self
+    }
+
+    /// Registers why this node builds nothing where the capability it needs
+    /// is absent; validation reports it as a warning.
+    pub fn with_unsupported(mut self, reason: &'static str) -> Self {
+        self.unsupported = Some(reason);
+        self
+    }
+
+    /// [`with_unsupported`](Self::with_unsupported) where `supported` is false.
+    pub fn with_unsupported_when(mut self, supported: bool, reason: &'static str) -> Self {
+        if !supported {
+            self.unsupported = Some(reason);
+        }
         self
     }
 
