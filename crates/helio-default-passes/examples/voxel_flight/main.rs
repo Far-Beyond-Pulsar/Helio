@@ -5,7 +5,7 @@
 //! cargo run -p helio-default-passes --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
-//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye`
+//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye|altitude`
 //!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`;
 //!   `feature` the nearest feature, `HELIO_VOXEL_FLIGHT_FEATURE=<material>`'s)
 //!   and holds it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS`: drawn by
@@ -1847,6 +1847,14 @@ fn main() {
             "eye" => {
                 let v: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_EYE").expect("HELIO_VOXEL_FLIGHT_EYE").split(',').map(|x| x.trim().parse().unwrap()).collect();
                 (DVec3::new(v[0], v[1], v[2]), DVec3::new(v[3], v[4], v[5]).normalize().as_vec3())
+            }
+            // `HELIO_VOXEL_FLIGHT_ALTITUDE=m` (2000) over the spawn, pitched
+            // `HELIO_VOXEL_FLIGHT_PITCH=deg` (-12) along the heading: the
+            // sky and its clouds from any height, up to orbit.
+            "altitude" => {
+                let env = |key: &str, default: f64| std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+                let eye = flight.planet.surface_point(ground, env("HELIO_VOXEL_FLIGHT_ALTITUDE", 2000.0));
+                (eye, look(eye, heading, env("HELIO_VOXEL_FLIGHT_PITCH", -12.0)))
             }
             // 40 m from the +Y face's edge, looking across it.
             "face_edge" => {
