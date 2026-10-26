@@ -95,7 +95,9 @@ pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 48 * 4;
 const FOLIAGE_TYPE_WORDS: u32 = (std::mem::size_of::<helio_pass_foliage_place::GpuFoliageType>() / 4) as u32;
 /// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
 /// row, its centre in the owner's space.
-pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 44 * 4;
+pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = ATMOSPHERE_WORDS as u64 * 4;
+/// Words of the atmosphere row (`helio_pass_sky::AtmosphereComponent`).
+const ATMOSPHERE_WORDS: u32 = (std::mem::size_of::<helio_pass_sky::AtmosphereComponent>() / 4) as u32;
 /// `DecalSourceRow`: local size vec4, then the `helio_pass_decal`
 /// `DecalComponent` row (32 words) with its transform left to the join.
 pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
@@ -632,7 +634,7 @@ impl EnvironmentJoin {
                 "Environment Join Atmospheres",
                 ATMOSPHERES_KEY,
                 Source::Atmospheres,
-                44,
+                ATMOSPHERE_WORDS,
                 CENTERED,
             ),
             // The pass walks a fixed number of rows.

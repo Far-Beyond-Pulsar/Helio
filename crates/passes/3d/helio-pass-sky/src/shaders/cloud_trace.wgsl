@@ -8,9 +8,9 @@
 //
 // `trace` marches one pixel of each 2x2 block of half-resolution pixels (a
 // different one each frame, in a 4-frame cycle) through the layer, up to
-// the farthest geometry under the pixel: the light the clouds scatter
-// towards the eye, through the air in front of them (aerial perspective),
-// and their transmittance. `reconstruct` fills every half-resolution pixel:
+// the farthest geometry under the pixel, and crosses the cirrus sheet: the
+// light the clouds scatter towards the eye, through the air in front of
+// them (aerial perspective), and their transmittance. `reconstruct` fills every half-resolution pixel:
 // the traced ones blend into their reprojected history, the others keep it,
 // clamped to the traced neighbourhood (or take the trace's interpolation
 // where there is no history).
@@ -64,6 +64,7 @@ struct TraceParams {
 @group(0) @binding(22) var cloud_shadow_map: texture_2d<f32>;
 @group(0) @binding(23) var directional_visibility: texture_2d<f32>;
 @group(0) @binding(24) var sun_visibility_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(25) var cloud_planet_weather: texture_cube<f32>;
 
 // Stored as the limit of a footprint that reaches the sky (km).
 const CLOUD_UNLIMITED: f32 = 60000.0;
@@ -73,10 +74,25 @@ const CLOUD_MAX_STEPS: f32 = 96.0;
 const CLOUD_STEPS_PER_THICKNESS: f32 = 40.0;
 // The farthest span marched (km): grazing rays along the layer stop there.
 const CLOUD_MAX_SPAN_THICKNESSES: f32 = 40.0;
-// Steps towards the sun, the first and the growth of their lengths.
+// Steps towards the sun, the first (in layer thicknesses) and the growth of
+// their lengths; footprints wider than CLOUD_LIGHT_COARSE thicknesses take
+// the coarse set, as far through the layer in a third of the steps.
 const CLOUD_LIGHT_STEPS: u32 = 6u;
 const CLOUD_LIGHT_FIRST: f32 = 0.05;
 const CLOUD_LIGHT_GROWTH: f32 = 1.8;
+const CLOUD_LIGHT_COARSE: f32 = 0.06;
+const CLOUD_LIGHT_COARSE_STEPS: u32 = 2u;
+const CLOUD_LIGHT_COARSE_FIRST: f32 = 0.25;
+const CLOUD_LIGHT_COARSE_GROWTH: f32 = 3.0;
+// Steps at least, where the noise under a pixel is resolved by fewer.
+const CLOUD_FEWEST_STEPS: f32 = 6.0;
+// Empty space: where the weather covers less than this share of the sky
+// under a pixel, the march looks CLOUD_LEAP_STEPS steps wide, and leaps
+// half of that where the cover there is as thin.
+const CLOUD_LEAP_COVER: f32 = 1e-3;
+const CLOUD_LEAP_STEPS: f32 = 16.0;
+// Primary steps sharing one lookup of the weather.
+const CLOUD_WEATHER_REUSE: f32 = 3.0;
 // How much of the history a traced pixel keeps: each pixel is traced every
 // fourth frame, so it averages about 4 / (1 - weight) frames.
 const CLOUD_HISTORY_WEIGHT: f32 = 0.85;
@@ -120,21 +136,25 @@ fn geometry_limit(depth: f32, ray_len: f32) -> f32 {
     return min(ray_len * helio_view_depth(cameras[0].proj, depth) * 0.001, CLOUD_UNLIMITED);
 }
 
-// Optical depth towards the sun from `x` (a cloud sample under `weather`):
-// steps growing away from it, the wisps only on the first two.
-fn light_optical_depth(c: CloudLayerParams, x: vec3<f32>, weather: vec2<f32>, lod: f32) -> f32 {
+// Optical depth towards the sun from `x` (a cloud sample under `weather`,
+// for a footprint of `footprint` km): steps growing away from it, the
+// wisps only on the first two.
+fn light_optical_depth(c: CloudLayerParams, x: vec3<f32>, weather: vec2<f32>, footprint: f32) -> f32 {
     let sun = frame.sun.xyz;
-    var step = CLOUD_LIGHT_FIRST / c.inv_thickness;
+    let coarse = footprint * c.inv_thickness > CLOUD_LIGHT_COARSE;
+    let count = select(CLOUD_LIGHT_STEPS, CLOUD_LIGHT_COARSE_STEPS, coarse);
+    let growth = select(CLOUD_LIGHT_GROWTH, CLOUD_LIGHT_COARSE_GROWTH, coarse);
+    var step = select(CLOUD_LIGHT_FIRST, CLOUD_LIGHT_COARSE_FIRST, coarse) / c.inv_thickness;
     var travelled = 0.0;
     var od = 0.0;
-    for (var j = 0u; j < CLOUD_LIGHT_STEPS; j++) {
+    for (var j = 0u; j < count; j++) {
         let p = x + sun * (travelled + 0.5 * step);
         let h = cloud_height(c, p);
         if h >= 1.0 { break; }
         // The weather is large: the sample's own holds along the short path.
-        od += cloud_density_under(c, p, h, weather, lod + f32(j) * 0.5, j < 2u) * step;
+        od += cloud_density_under(c, p, h, weather, footprint * exp2(f32(j) * 0.5), j < 2u) * step;
         travelled += step;
-        step *= CLOUD_LIGHT_GROWTH;
+        step *= growth;
     }
     return od * c.extinction;
 }
@@ -144,24 +164,55 @@ struct CloudTrace {
     front: f32,
 }
 
+// The cirrus sheet seen along `d` (unit) from the eye, crossed `t` km away
+// with `footprint` km pixels: rgb its radiance, w its transmittance.
+fn trace_cirrus(c: CloudLayerParams, d: vec3<f32>, t: f32, footprint: f32) -> vec4<f32> {
+    let x = frame.eye.xyz + d * t;
+    let depth = cirrus_depth(c, x, footprint);
+    if depth <= 0.0 { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+    let up = normalize(x);
+    let sun = frame.sun.xyz;
+    // Slanted through the sheet, the view and the light cross more of it.
+    let od = depth / max(abs(dot(d, up)), 0.08);
+    let od_sun = depth / max(dot(sun, up), 0.08);
+    let sunlight = atmosphere_sun_transmittance_lut(frame.params, transmittance_lut, lut_sampler, length(x), dot(up, sun))
+        * frame.sun_illuminance.rgb;
+    let sky = atmosphere_sky_table_eval(frame, d * t, up, vec3<f32>(1.0));
+    let source = c.albedo * (sunlight * cloud_sun_scattering(dot(d, sun), od_sun) + 0.5 * sky);
+    let opacity = 1.0 - exp(-od);
+    return vec4<f32>(source * opacity, 1.0 - opacity);
+}
+
 fn trace_clouds(d: vec3<f32>, limit: f32, uv: vec2<f32>, jitter: f32) -> CloudTrace {
     var out: CloudTrace;
     out.color = vec4<f32>(0.0);
     out.front = limit;
     let c = cloud_layer_params(frame);
     let eye = frame.eye.xyz;
+    // Radians between traced rays (a quarter-resolution pixel), for the
+    // noise's mips: finer noise would alias between them.
+    let pixel_angle = 2.0 / (cameras[0].proj[1][1] * f32(params.quarter.y));
+    let cirrus_t = cirrus_crossing(c, eye, d);
+    var cirrus = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if c.cirrus > 0.0 && cirrus_t > 0.0 && cirrus_t < limit {
+        cirrus = trace_cirrus(c, d, cirrus_t, cirrus_t * pixel_angle);
+    }
     let segment = cloud_layer_segment(c, eye, d);
     let thickness = 1.0 / c.inv_thickness;
     let t0 = segment.x;
     let t1 = min(min(segment.y, limit), t0 + CLOUD_MAX_SPAN_THICKNESSES * thickness);
-    if t1 <= t0 { return out; }
-    let span = t1 - t0;
-    let steps = clamp(ceil(span * c.inv_thickness * CLOUD_STEPS_PER_THICKNESS), CLOUD_MIN_STEPS, CLOUD_MAX_STEPS);
-    let dt = span / steps;
-    // Radians between traced rays (a quarter-resolution pixel), for the
-    // noise's mips: finer noise would alias between them.
-    let pixel_angle = 2.0 / (cameras[0].proj[1][1] * f32(params.quarter.y));
-    let texels_per_km = c.inv_shape * CLOUD_SHAPE_TEXELS;
+    let marched = c.covered && t1 > t0;
+    if !marched && cirrus.w >= 1.0 { return out; }
+    let span = max(t1 - t0, 0.0);
+    // Voxel cells near enough to see take a step each at most.
+    let per_cell = select(0.0, span / max(c.voxel, 1e-6), c.voxel > 0.0 && t0 * pixel_angle < c.voxel);
+    // No finer than half the footprint of a pixel where the layer begins:
+    // from afar the noise under a pixel is its mean (the mips' spread).
+    let resolved = ceil(span / max(0.5 * t0 * pixel_angle, 1e-4));
+    let wanted = max(min(ceil(span * c.inv_thickness * CLOUD_STEPS_PER_THICKNESS), resolved), per_cell);
+    let fewest = clamp(resolved, CLOUD_FEWEST_STEPS, CLOUD_MIN_STEPS);
+    let steps = select(0.0, clamp(wanted, fewest, CLOUD_MAX_STEPS), marched);
+    let dt = span / max(steps, 1.0);
     let sun = frame.sun.xyz;
     let cos_theta = dot(d, sun);
     // The sky's light on the layer, from its middle along the ray: above
@@ -174,14 +225,39 @@ fn trace_clouds(d: vec3<f32>, limit: f32, uv: vec2<f32>, jitter: f32) -> CloudTr
     var transmittance = 1.0;
     var depth_sum = 0.0;
     var weight_sum = 0.0;
+    // The weather, looked up every CLOUD_WEATHER_REUSE steps while those
+    // steps lie within a texel of its finest noise (it changes over
+    // kilometres, short steps over tens of metres); every step otherwise,
+    // or long grazing steps band it.
+    let reuse = select(1.0, CLOUD_WEATHER_REUSE, dt * CLOUD_WEATHER_REUSE < 1.0 / c.groups_texels);
+    var weather = vec2<f32>(0.0);
+    var weather_age = reuse;
     for (var i = 0.0; i < steps; i += 1.0) {
         let t = t0 + (i + jitter) * dt;
-        let x = eye + d * t;
-        let lod = max(log2(t * pixel_angle * texels_per_km), 0.0);
-        let sample = cloud_density(c, x, lod, true);
-        if sample.x <= 0.0 { continue; }
+        let x = cloud_point(c, eye + d * t);
+        let footprint = t * pixel_angle;
+        let r_x = length(x);
+        let h_x = (r_x - c.inner) * c.inv_thickness;
+        if h_x <= 0.0 || h_x >= 1.0 { continue; }
+        if weather_age >= reuse {
+            weather = cloud_weather_at(c, x * (c.inner / r_x), footprint);
+            weather_age = 0.0;
+        }
+        weather_age += 1.0;
+        let sample = vec4<f32>(cloud_density_under(c, x, h_x, weather, footprint, true), h_x, weather);
+        if sample.x <= 0.0 {
+            // Clear weather: leap ahead while it stays clear wider round.
+            if sample.z < CLOUD_LEAP_COVER {
+                let wide = max(CLOUD_LEAP_STEPS * dt, footprint);
+                if cloud_weather_at(c, x * (c.inner / length(x)), wide).x < CLOUD_LEAP_COVER {
+                    i += max(floor(0.5 * wide / dt) - 1.0, 0.0);
+                    weather_age = reuse;
+                }
+            }
+            continue;
+        }
         let sigma = sample.x * c.extinction;
-        let od = light_optical_depth(c, x, sample.zw, lod);
+        let od = light_optical_depth(c, x, sample.zw, footprint);
         let r = length(x);
         let sunlight = atmosphere_sun_transmittance_lut(frame.params, transmittance_lut, lut_sampler, r, dot(x / r, sun))
             * frame.sun_illuminance.rgb;
@@ -197,6 +273,20 @@ fn trace_clouds(d: vec3<f32>, limit: f32, uv: vec2<f32>, jitter: f32) -> CloudTr
         weight_sum += weight;
         transmittance *= step_t;
         if transmittance < 0.01 { break; }
+    }
+    // The cirrus, in front of the layer or behind it.
+    if cirrus.w < 1.0 {
+        let weight = 1.0 - cirrus.w;
+        if cirrus_t < t0 || !marched {
+            radiance = cirrus.rgb + cirrus.w * radiance;
+            depth_sum = depth_sum * cirrus.w + cirrus_t * weight;
+            weight_sum = weight_sum * cirrus.w + weight;
+        } else {
+            radiance += transmittance * cirrus.rgb;
+            depth_sum += transmittance * weight * cirrus_t;
+            weight_sum += transmittance * weight;
+        }
+        transmittance *= cirrus.w;
     }
     if weight_sum <= 0.0 { return out; }
     out.front = depth_sum / weight_sum;

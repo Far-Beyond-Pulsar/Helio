@@ -22,7 +22,7 @@
 //! | [`CameraPostProcessSourceRow`] | 136: the row | `helio_pass_postprocess::CameraPostProcessComponent` (136) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
 //! | [`FoliageSourceRow`] | 32 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (32), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
-//! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell + 16 clouds: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (44) |
+//! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell + 32 clouds: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (60) |
 //! | [`DecalSourceRow`] | 4 size + 32: the row, its transform left to the join | `helio_pass_decal::DecalComponent` (32), packed into its leading rows |
 //! | [`GlobalWindSourceRow`] | 12: the wind row, marked global | `helio_pass_foliage_place`'s `FoliageWindComponent` (12), over the foliage components' own wind |
 //! | [`CoronaEmitterSourceRow`] | 60: the row, its transform and pool range left to the join (word 46: the requested range) | `helio_pass_corona::CoronaEmitterComponent` (60), packed into its leading rows |
@@ -168,7 +168,7 @@ impl DecalSourceRow {
 /// owner), Rayleigh and Mie scattering, Mie and ozone absorption (`media`),
 /// ground albedo and ozone width (`ground`), and planet and atmosphere
 /// radii, sun size and enabled flag (`shell`; `enabled` 0 when the authored
-/// component is disabled), and the cloud layer (`clouds`). The placement and
+/// component is disabled), and the cloud layer and its weather (`clouds`). The placement and
 /// enabled words are `u32`s, kept as bits.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -183,7 +183,7 @@ pub struct AtmosphereSourceRow {
     #[gpu]
     pub shell: [f32; 4],
     #[gpu]
-    pub clouds: [f32; 16],
+    pub clouds: [f32; 32],
 }
 
 impl AtmosphereSourceRow {
