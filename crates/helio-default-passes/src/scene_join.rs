@@ -145,11 +145,12 @@ struct Uniforms {
 }
 
 /// `origin` as an f32 hi/lo pair, so positions near it subtract to their
-/// offset from it without the f32 rounding of either.
+/// offset from it without the f32 rounding of either. The hi half's `w` is
+/// 1.0, the shaders' guard against reassociated floats (`object_relative`).
 pub(crate) fn origin_pair(origin: glam::DVec3) -> ([f32; 4], [f32; 4]) {
     let hi = origin.as_vec3();
     let lo = (origin - hi.as_dvec3()).as_vec3();
-    (hi.extend(0.0).to_array(), lo.extend(0.0).to_array())
+    (hi.extend(1.0).to_array(), lo.extend(0.0).to_array())
 }
 
 /// The bits of `origin`, for an input signature: a moved origin moves

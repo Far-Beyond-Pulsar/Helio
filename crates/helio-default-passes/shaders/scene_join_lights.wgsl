@@ -69,7 +69,7 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let t = transforms[index];
-    let relative = object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
+    let relative = object_relative(t, u.origin_hi, u.origin_lo);
     let direction = object_rotation(t) * vec3<f32>(0.0, -1.0, 0.0);
     light.position_range[0] = relative.x;
     light.position_range[1] = relative.y;

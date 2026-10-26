@@ -183,7 +183,7 @@ fn placed_altitude(y: f32) -> f32 {
 /// The owner's position in the frame's space: relative to the world origin,
 /// subtracted pair-wise, so it is exact however far the owner is.
 fn placed_position(t: ObjectTransform) -> vec3<f32> {
-    return object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
+    return object_relative(t, u.origin_hi, u.origin_lo);
 }
 
 /// A decal's world-to-decal transform (`mat4x4`, column-major, words 0..15
