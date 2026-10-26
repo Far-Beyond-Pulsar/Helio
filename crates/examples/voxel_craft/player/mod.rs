@@ -94,6 +94,12 @@ impl Player {
         self.heading = rotate(frame.forward, frame.up, yaw);
         self.pitch = (self.pitch - controls.look.1 * sensitivity).clamp(-1.52, 1.52);
         let frame = self.frame();
+        // The body waits while the world around it streams in (a spawn, a
+        // teleport): it is not moved against space not resident yet.
+        if !world.loaded() {
+            self.velocity = DVec3::ZERO;
+            return;
+        }
 
         // Double-tapping jump toggles flight, as in the original.
         self.jump_tap += dt;
@@ -214,6 +220,8 @@ mod tests {
             }
         }
         world.edit(&edits);
+        world.follow(plate);
+        world.settle();
         let mut player = Player::new(plate + frame.up * 1.0);
         let controls = Controls::default();
         let mut rest = Vec::new();

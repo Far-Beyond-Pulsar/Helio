@@ -5,7 +5,7 @@
 use crate::player::avatar::Avatar;
 use crate::palette;
 use crate::v3_demo_common::{directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle, set_camera_postprocess, spawn_light, update_light, SceneRays};
-use glam::{DMat4, DVec3, Vec3};
+use glam::{DVec3, Vec3};
 use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_foliage_place::components::FoliageInteractorComponent;

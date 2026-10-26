@@ -697,6 +697,31 @@ impl<'a> FeatureEval<'a> {
         out
     }
 
+    /// [`Self::cell`] of every base cell of the `n`^3 brick at `origin`, into
+    /// `out` (index `((dj * n) + di) * n + dk`, left alone where nothing
+    /// is): each spawn's placements near the brick listed once, not per
+    /// cell, and written in the same order, so a cell keeps the last
+    /// placement holding it.
+    pub fn brick(&mut self, face: u8, origin: [i32; 3], n: i32, out: &mut [Option<Option<u32>>]) {
+        let [i0, j0, k0] = origin;
+        for s in 0..self.features.spawns.len() {
+            for p in self.placements_near(s, face, [i0, i0 + n], [j0, j0 + n]) {
+                let (fi, fj) = p.footprint(self.features);
+                let stamp = &self.features.stamps[p.stamp as usize];
+                for j in fj[0].max(j0)..fj[1].min(j0 + n) {
+                    for i in fi[0].max(i0)..fi[1].min(i0 + n) {
+                        let column = (((j - j0) * n + (i - i0)) * n) as usize;
+                        for k in k0..k0 + n {
+                            if let Some(v) = stamp.at(p.local([i - p.i, k - p.k, j - p.j])) {
+                                out[column + (k - k0) as usize] = Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// What the near spawns make of cell `(i, j, k)` of `level`: the last
     /// placement whose stamp holds its centre (`stamp::coarse_of`).
     pub fn coarse_cell(&mut self, face: u8, level: u32, i: i32, j: i32, k: i32) -> Option<Option<u32>> {

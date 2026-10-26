@@ -5,33 +5,21 @@
 //! Applying brushes needs the planet by `&mut`, while the renderer and the
 //! player read shared snapshots, so (as Pulsar's voxel backend does) edits are
 //! applied to a private copy on a thread and handed over as a new
-//! `Arc<Planet>`. A snapshot carries the ticket of the last player batch it
-//! includes.
+//! `Arc<Planet>`.
 
 use helio_pass_voxel_planet::{Brush, Planet};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Edits to apply, numbered so snapshots can say how far they got.
-pub struct Batch {
-    pub ticket: u64,
-    pub brushes: Vec<Brush>,
-}
-
 pub enum Job {
-    Edit(Batch),
-}
-
-/// A planet with every batch up to `ticket` applied.
-pub struct Snapshot {
-    pub ticket: u64,
-    pub planet: Arc<Planet>,
+    /// Brushes to apply, in order.
+    Edit(Vec<Brush>),
 }
 
 pub struct Worker {
     jobs: Sender<Job>,
-    results: Receiver<Snapshot>,
+    results: Receiver<Arc<Planet>>,
 }
 
 /// Snapshots are copied at most this often while edits stream in.
@@ -41,11 +29,10 @@ impl Worker {
     /// Starts the thread; it owns `planet`.
     pub fn spawn(mut planet: Planet) -> Self {
         let (jobs, job_rx) = channel::<Job>();
-        let (result_tx, results) = channel::<Snapshot>();
+        let (result_tx, results) = channel::<Arc<Planet>>();
         std::thread::Builder::new()
             .name("voxel-craft-world".into())
             .spawn(move || {
-                let mut ticket = 0;
                 let mut dirty = false;
                 let mut last_sent = Instant::now() - SNAPSHOT_INTERVAL;
                 loop {
@@ -60,9 +47,8 @@ impl Worker {
                         jobs.push(job);
                     }
                     for job in jobs {
-                        let Job::Edit(batch) = job;
-                        ticket = batch.ticket;
-                        for brush in batch.brushes {
+                        let Job::Edit(brushes) = job;
+                        for brush in brushes {
                             if let Err(error) = planet.apply(brush) {
                                 log::warn!("brush rejected: {error}");
                             }
@@ -70,8 +56,7 @@ impl Worker {
                         dirty = true;
                     }
                     if dirty && last_sent.elapsed() >= SNAPSHOT_INTERVAL {
-                        let snapshot = Snapshot { ticket, planet: Arc::new(planet.clone()) };
-                        if result_tx.send(snapshot).is_err() {
+                        if result_tx.send(Arc::new(planet.clone())).is_err() {
                             break;
                         }
                         dirty = false;
@@ -88,7 +73,7 @@ impl Worker {
     }
 
     /// The newest finished snapshot, if there is one.
-    pub fn latest(&self) -> Option<Snapshot> {
+    pub fn latest(&self) -> Option<Arc<Planet>> {
         let mut newest = None;
         while let Ok(snapshot) = self.results.try_recv() {
             newest = Some(snapshot);
