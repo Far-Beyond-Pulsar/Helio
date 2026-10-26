@@ -1,54 +1,79 @@
-//! The world the game sees: a voxel planet with edits applied off-thread
-//! and block queries that include edits not yet in the latest snapshot. Its
-//! decoration (trees, structures) is the planet's features (`decorate`),
-//! part of its recipe.
+//! The world the game sees: a voxel planet with edits applied off-thread,
+//! read through the planet's query service (`WorldQueries`): bricks of
+//! cells sampled by workers around the player, edits shown on them at
+//! once. Its decoration (trees, structures) is the planet's features
+//! (`decorate`), part of its recipe.
 
 pub mod decorate;
 pub mod edits;
 mod worker;
 
 use crate::blocks::Block;
-use crate::config::VOXEL_M;
 use edits::Edit;
 use glam::DVec3;
-use helio_pass_voxel_planet::{Cell, Planet, RayHit};
-use std::collections::HashMap;
+use helio_pass_voxel_planet::queries::{Resident, WorldQueries};
+use helio_pass_voxel_planet::{Cell, Matter, Planet, RayHit};
 use std::sync::Arc;
-use worker::{Batch, Job, Worker};
+use worker::{Job, Worker};
+
+/// The query focus that follows the player.
+const PLAYER: u64 = 1;
+/// How far around the player the world is kept resident: its collision,
+/// reach and third-person camera, with room to move.
+pub const PLAYER_FOCUS_M: f64 = 10.0;
 
 pub struct World {
     snapshot: Arc<Planet>,
     worker: Worker,
-    next_ticket: u64,
-    /// Edits submitted but not yet in the snapshot, by cell: the ticket of the
-    /// batch and what the cell is (`None`: air).
-    pending: HashMap<Cell, (u64, Option<Block>)>,
-    snapshot_ticket: u64,
+    queries: WorldQueries,
 }
 
 impl World {
     pub fn new(planet: Planet) -> Self {
         let snapshot = Arc::new(planet.clone());
+        let threads = std::thread::available_parallelism()
+            .map_or(2, |n| n.get().saturating_sub(2).clamp(1, 4));
         Self {
+            queries: WorldQueries::new(snapshot.clone(), threads),
             snapshot,
             worker: Worker::spawn(planet),
-            next_ticket: 1,
-            pending: HashMap::new(),
-            snapshot_ticket: 0,
         }
     }
 
-    /// The latest finished planet, for drawing and for queries.
+    /// The latest finished planet, for drawing.
     pub fn planet(&self) -> &Arc<Planet> {
         &self.snapshot
     }
 
     /// Takes finished snapshots from the worker. Call once a frame.
     pub fn update(&mut self) {
-        if let Some(done) = self.worker.latest() {
-            self.snapshot = done.planet;
-            self.snapshot_ticket = done.ticket;
-            self.pending.retain(|_, (ticket, _)| *ticket > done.ticket);
+        if let Some(planet) = self.worker.latest() {
+            self.snapshot = planet;
+            self.queries.publish(self.snapshot.clone());
+        }
+    }
+
+    /// Keep the world around the player (at `position`) resident.
+    pub fn follow(&self, position: DVec3) {
+        self.queries.focus(PLAYER, position, PLAYER_FOCUS_M);
+    }
+
+    /// Whether the world within `radius` of `position` is resident (it is
+    /// asked for when not).
+    pub fn loaded_around(&self, position: DVec3, radius: f64) -> bool {
+        self.queries.resident_within(position, radius)
+    }
+
+    /// Whether the whole world around the player is resident.
+    pub fn loaded(&self) -> bool {
+        self.queries.loading() == 0
+    }
+
+    /// Wait until the world around the player is resident (loading a game,
+    /// tests).
+    pub fn settle(&self) {
+        while self.queries.loading() > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
@@ -57,31 +82,27 @@ impl World {
         if edits.is_empty() {
             return;
         }
-        let ticket = self.next_ticket;
-        self.next_ticket += 1;
         let grid = *self.snapshot.grid();
-        let brushes = edits.iter().map(|e| e.brush(&grid)).collect();
-        for e in edits {
-            for (cell, block) in e.cells(&grid) {
-                self.pending.insert(cell, (ticket, block));
-            }
-        }
-        self.worker.submit(Job::Edit(Batch { ticket, brushes }));
+        let brushes: Vec<_> = edits.iter().map(|e| e.brush(&grid)).collect();
+        self.queries.edit(&brushes);
+        self.worker.submit(Job::Edit(brushes));
     }
 
+    /// Whether `cell` is solid. Space not resident yet is: the player
+    /// waits at its edge rather than falling into it.
     pub fn is_solid(&self, cell: Cell) -> bool {
-        match self.pending.get(&cell) {
-            Some((_, block)) => block.is_some(),
-            None => self.snapshot.solid(cell),
-        }
+        self.queries
+            .solid(cell, Matter::All)
+            .ready()
+            .unwrap_or(true)
     }
 
-    /// The block at `cell` (`None`: air or ground the game has no block for).
+    /// The block at `cell` (`None`: air, ground the game has no block for,
+    /// or not resident yet).
     pub fn block_at(&self, cell: Cell) -> Option<Block> {
-        match self.pending.get(&cell) {
-            Some((_, block)) => *block,
-            None if self.snapshot.solid(cell) => Block::from_material(self.snapshot.material(cell)),
-            None => None,
+        match self.queries.material(cell) {
+            Resident::Ready(m) if self.is_solid(cell) => Block::from_material(m),
+            _ => None,
         }
     }
 
@@ -94,57 +115,12 @@ impl World {
         self.snapshot.grid().cell_center(cell)
     }
 
-    /// The first solid cell along a ray, as edited (pending edits included
-    /// near the ray: re-checked against the cells they touch).
+    /// The first solid cell along a ray, as edited, within the resident
+    /// world (`None` past it).
     pub fn raycast(&self, origin: DVec3, direction: DVec3, max: f64) -> Option<RayHit> {
-        let hit = self.snapshot.raycast(origin, direction, max);
-        // A pending edit may have removed the hit or added something nearer:
-        // walk the ray in half-block steps over the pending cells.
-        if self.pending.is_empty() {
-            return hit;
-        }
-        let end = hit.as_ref().map_or(max, |h| h.distance);
-        let step = VOXEL_M * 0.25;
-        let mut t = 0.0;
-        let mut previous = self.cell_at(origin);
-        while t < end {
-            let cell = self.cell_at(origin + direction * t);
-            if cell != previous {
-                if self.pending.get(&cell).is_some_and(|(_, b)| b.is_some()) {
-                    return Some(RayHit {
-                        cell,
-                        previous,
-                        distance: t,
-                        normal: self.face_normal(previous, cell),
-                    });
-                }
-                previous = cell;
-            }
-            t += step;
-        }
-        match hit {
-            Some(h) if matches!(self.pending.get(&h.cell), Some((_, None))) => {
-                self.raycast_past(origin, direction, max, h.distance)
-            }
-            other => other,
-        }
-    }
-
-    /// The ray's next hit after a removed cell: the planet's, from just past.
-    fn raycast_past(&self, origin: DVec3, direction: DVec3, max: f64, from: f64) -> Option<RayHit> {
-        let start = from + VOXEL_M * 0.6;
-        if start >= max {
-            return None;
-        }
-        self.snapshot
-            .raycast(origin + direction * start, direction, max - start)
-            .map(|mut h| {
-                h.distance += start;
-                h
-            })
-    }
-
-    fn face_normal(&self, from: Cell, to: Cell) -> DVec3 {
-        (self.cell_centre(from) - self.cell_centre(to)).normalize_or_zero()
+        self.queries
+            .raycast(origin, direction, max, Matter::All)
+            .ready()
+            .flatten()
     }
 }

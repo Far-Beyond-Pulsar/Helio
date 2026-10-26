@@ -5,7 +5,7 @@
 //! cargo run -p helio-default-passes --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
-//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye`
+//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye|altitude`
 //!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`;
 //!   `feature` the nearest feature, `HELIO_VOXEL_FLIGHT_FEATURE=<material>`'s)
 //!   and holds it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS`: drawn by
@@ -53,10 +53,6 @@ use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, Sce
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-
-/// Side of the cells the engine frames' world origin snaps to (Pulsar's
-/// `WORLD_ORIGIN_CELL`).
-const ORIGIN_CELL: f64 = 1024.0;
 
 const FRAMES_IN_FLIGHT: usize = 2;
 
@@ -336,10 +332,6 @@ impl Flight {
             kept: None,
             export: None,
         });
-        // As a host's camera-relative frames: the origin stays on a cell
-        // corner while the camera moves within the cell, off the origin.
-        let origin = (eye / ORIGIN_CELL).round() * ORIGIN_CELL;
-        self.renderer.set_world_origin(Some(origin));
         let up = up_for(eye);
         let forward = forward.normalize();
         let up = if forward.dot(up).abs() > 0.999 {
@@ -349,8 +341,8 @@ impl Flight {
         };
         let near = (self.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let mut camera = Camera::perspective_look_at(
-            Vec3::ZERO,
+        let camera = Camera::perspective_look_to(
+            eye,
             forward,
             up,
             std::f32::consts::FRAC_PI_4,
@@ -358,9 +350,6 @@ impl Flight {
             near,
             40_000_000.0,
         );
-        let local = eye - origin;
-        camera.position = local.as_vec3();
-        camera.view = (camera.view.as_dmat4() * glam::DMat4::from_translation(-local)).as_mat4();
         self.renderer
             .render(&camera, &self.target.create_view(&Default::default()))
             .unwrap();
@@ -715,8 +704,8 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
                 &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
                 *frame,
                 eye,
-                camera.proj * camera.view,
-                camera.proj * camera.view,
+                camera.proj * camera.rotation,
+                camera.proj * camera.rotation,
                 [glam::Vec2::ZERO; 2],
                 near,
                 flight.sun_at(eye),
@@ -780,8 +769,8 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
             frame,
             eye,
-            camera.proj * camera.view,
-            camera.proj * camera.view,
+            camera.proj * camera.rotation,
+            camera.proj * camera.rotation,
             [glam::Vec2::ZERO; 2],
             near,
             flight.sun_at(eye),
@@ -829,8 +818,8 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
             frame,
             eye,
-            camera.proj * camera.view,
-            camera.proj * camera.view,
+            camera.proj * camera.rotation,
+            camera.proj * camera.rotation,
             [glam::Vec2::ZERO; 2],
             near,
             flight.sun_at(eye),
@@ -847,8 +836,8 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
                 &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
                 frame + 1,
                 eye,
-                camera.proj * camera.view,
-                camera.proj * camera.view,
+                camera.proj * camera.rotation,
+                camera.proj * camera.rotation,
                 [glam::Vec2::ZERO; 2],
                 near,
                 flight.sun_at(eye),
@@ -930,7 +919,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         };
         let targets = world.targets().unwrap();
         let (visibility, distance) = (&targets.visibility, &targets.distance);
-        let inverse = (camera.proj * camera.view).inverse();
+        let inverse = (camera.proj * camera.rotation).inverse();
         for probe in probes.split(';') {
             let xy: Vec<u32> = probe
                 .split(',')
@@ -1026,8 +1015,8 @@ fn chunk_dig(
             &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
             *frame,
             eye,
-            camera.proj * camera.view,
-            camera.proj * camera.view,
+            camera.proj * camera.rotation,
+            camera.proj * camera.rotation,
             [glam::Vec2::ZERO; 2],
             near,
             flight.sun_at(eye),
@@ -1087,7 +1076,7 @@ fn chunk_dig(
     // Down the centre column, the chunk hit against the exact CPU raycast
     // of `planet`: the largest difference (m).
     let worst = |world: &ChunkWorld, planet: &Planet, rows: std::ops::Range<u32>| -> (f64, u32) {
-        let inverse = (camera.proj * camera.view).inverse();
+        let inverse = (camera.proj * camera.rotation).inverse();
         let mut worst = (0.0f64, 0u32);
         for y in rows.step_by(12) {
             let ndc = Vec3::new(0.5 / w as f32, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
@@ -1113,7 +1102,7 @@ fn chunk_dig(
     step(&mut world, &planet, &mut frame);
     // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: those pixels against the CPU raycast.
     if let Ok(probes) = std::env::var("HELIO_VOXEL_CHUNKS_PROBE") {
-        let inverse = (camera.proj * camera.view).inverse();
+        let inverse = (camera.proj * camera.rotation).inverse();
         for probe in probes.split(';') {
             let xy: Vec<u32> = probe
                 .split(',')
@@ -2212,8 +2201,8 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
             &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
             frame,
             eye,
-            camera.proj * camera.view,
-            camera.proj * camera.view,
+            camera.proj * camera.rotation,
+            camera.proj * camera.rotation,
             [glam::Vec2::ZERO; 2],
             near,
             flight.sun_at(eye),
@@ -2735,6 +2724,24 @@ fn main() {
                 (
                     DVec3::new(v[0], v[1], v[2]),
                     DVec3::new(v[3], v[4], v[5]).normalize().as_vec3(),
+                )
+            }
+            // `HELIO_VOXEL_FLIGHT_ALTITUDE=m` (2000) over the spawn, pitched
+            // `HELIO_VOXEL_FLIGHT_PITCH=deg` (-12) along the heading: the
+            // sky and its clouds from any height, up to orbit.
+            "altitude" => {
+                let env = |key: &str, default: f64| {
+                    std::env::var(key)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(default)
+                };
+                let eye = flight
+                    .planet
+                    .surface_point(ground, env("HELIO_VOXEL_FLIGHT_ALTITUDE", 2000.0));
+                (
+                    eye,
+                    look(eye, heading, env("HELIO_VOXEL_FLIGHT_PITCH", -12.0)),
                 )
             }
             // 40 m from the +Y face's edge, looking across it.

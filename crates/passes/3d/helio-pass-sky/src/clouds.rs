@@ -1,17 +1,29 @@
 //! Volumetric clouds, part of the atmosphere: a layer of clouds in a band of
-//! altitudes over the planet's surface (or flat ground), described by the
+//! altitudes over the planet's surface (or flat ground) and a sheet of
+//! cirrus above it, described by the
 //! [`AtmosphereComponent`](crate::AtmosphereComponent) row's cloud fields
-//! ([`CloudLayer`](crate::atmosphere::CloudLayer)). Their density is noise
-//! (`shaders/clouds_common.wgsl`, after Schneider's Nubis): the weather
-//! decides where clouds gather, billows shape them, wisps erode their edges,
-//! and the wind carries all three. They are lit by the sun through the air
-//! (the atmosphere's transmittance), with multiple scattering by octaves
-//! (Wrenninge, as Hillaire 2016), and by the sky's light from the
-//! atmosphere's sky table.
+//! ([`CloudLayer`](crate::atmosphere::CloudLayer), its weather
+//! [`PlanetWeather`](crate::atmosphere::PlanetWeather)). Their density is
+//! noise (`shaders/clouds_common.wgsl`, after Schneider's Nubis): the
+//! weather decides where clouds gather, billows shape them, wisps erode
+//! their edges, and the wind carries them. The weather has the planet's
+//! scales and the clouds' own: a map of the planet's circulation and
+//! synoptic systems (`shaders/cloud_planet_weather.wgsl`: bands by
+//! latitude, cyclones, fronts, highs, regimes from stratocumulus decks to
+//! cumulus fields, and cirrus), then mesoscale cells, then the groups the
+//! cumulus gather in, so the cover reads as weather from orbit and nothing
+//! repeats; every scale's noise keeps the spread its mips hide, so the
+//! share of sky it covers holds at any distance. They are lit by the sun
+//! through the air (the atmosphere's transmittance), with multiple
+//! scattering by octaves (Wrenninge, as Hillaire 2016), and by the sky's
+//! light from the atmosphere's sky table.
 //!
-//! [`AtmospherePass`](crate::AtmospherePass) builds the noise once and,
-//! each frame, the clouds' shadow: an orthographic map along the sun around
-//! the camera ([`CLOUD_SHADOW_MAP`], a Beer shadow map, and
+//! [`AtmospherePass`](crate::AtmospherePass) builds the noise once, the
+//! planet's weather when the rows change (refreshing a sixteenth of it each
+//! frame while it evolves) and, each frame, the clouds' shadow:
+//! orthographic maps along the sun around the camera, a near cascade
+//! marching the billows and a far one out to the horizon taking the
+//! weather's cover ([`CLOUD_SHADOW_MAP`], a Beer shadow map, and
 //! [`CLOUD_SHADOW_FRAME`]). Passes lighting anything under the clouds opt
 //! into [`CLOUD_SHADOW_SNIPPET`] (`//!use cloud_shadow`) and multiply the
 //! sun by `cloud_shadow(p)`, as the volumetric fog's shafts do.
@@ -40,8 +52,9 @@ pub const CLOUD_SHADOW_MAP: &str = "cloud_shadow_map";
 /// `shaders/cloud_shadow.wgsl`).
 pub const CLOUD_SHADOW_FRAME: &str = "cloud_shadow_frame";
 pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-pub const CLOUD_SHADOW_FRAME_BYTES: u64 = 64;
-/// Texels along each side of the shadow map.
+pub const CLOUD_SHADOW_FRAME_BYTES: u64 = 80;
+/// Texels along each side of each of the shadow map's cascades (the map is
+/// two of them wide).
 pub const CLOUD_SHADOW_SIDE: u32 = 256;
 /// Marker opting a shader into [`CLOUD_SHADOW_SNIPPET`].
 pub const CLOUD_SHADOW_MARKER: &str = "//!use cloud_shadow";
@@ -66,12 +79,21 @@ pub const ATMOSPHERE_CLOUD_DEPTH: &str = "atmosphere_cloud_depth";
 pub const SUN_VISIBILITY: &str = "sun_visibility";
 /// Graph key of the terrain's sun visibility a voxel pass publishes.
 pub const DIRECTIONAL_VISIBILITY: &str = "directional_visibility";
-/// Graph keys of the clouds' noise volumes.
+/// Graph keys of the clouds' noise volumes and of the planet's weather (a
+/// cube map, `shaders/cloud_planet_weather.wgsl`).
+pub const ATMOSPHERE_CLOUD_PLANET_WEATHER: &str = "atmosphere_cloud_planet_weather";
 pub const ATMOSPHERE_CLOUD_WEATHER: &str = "atmosphere_cloud_weather";
 pub const ATMOSPHERE_CLOUD_SHAPE: &str = "atmosphere_cloud_shape";
 pub const ATMOSPHERE_CLOUD_DETAIL: &str = "atmosphere_cloud_detail";
 
 const WEATHER_SIDE: u32 = 64;
+/// Texels along each side of each face of the planet's weather: about 20 km
+/// on Earth, finer than its finest scale.
+const PLANET_WEATHER_SIDE: u32 = 512;
+const PLANET_WEATHER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// While the weather evolves, each frame refreshes every this-many-th row
+/// of the planet's weather.
+const PLANET_WEATHER_STRIDE: u32 = 16;
 const SHAPE_SIDE: u32 = 128;
 const DETAIL_SIDE: u32 = 32;
 const NOISE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -202,6 +224,15 @@ fn noise_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     })
 }
 
+/// `WeatherBake` (`cloud_planet_weather.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct WeatherBake {
+    phase: u32,
+    stride: u32,
+    _pad: [u32; 2],
+}
+
 /// A dispatch of one kernel.
 struct Dispatch {
     pipeline: wgpu::ComputePipeline,
@@ -217,6 +248,14 @@ pub(crate) struct CloudVolumes {
     /// The noise's kernels, recorded once.
     build: Vec<Dispatch>,
     built: bool,
+    planet_weather: wgpu::TextureView,
+    bake: Dispatch,
+    bake_params: wgpu::Buffer,
+    /// The rows (`epoch`, `content_generation`) the planet's weather was
+    /// built from whole, and whether this frame rebuilds it whole.
+    weather_rows: Option<(u64, u64)>,
+    bake_whole: bool,
+    frames: u32,
     shadow_map: wgpu::TextureView,
     shadow_frame: wgpu::Buffer,
     shadow: [Dispatch; 2],
@@ -240,8 +279,14 @@ impl CloudVolumes {
             entries: &[storage_texture(0, NOISE_FORMAT, d3), sampled(1, d3)],
         });
         let downsample = compute_pipeline(device, &noise, &downsample_layout, "downsample");
+        let downsample_spread =
+            compute_pipeline(device, &noise, &downsample_layout, "downsample_spread");
         let mut build = Vec::new();
-        let mut volume = |label: &str, side: u32, mips: u32, kernel: &str| {
+        let mut volume = |label: &str,
+                          side: u32,
+                          mips: u32,
+                          kernel: &str,
+                          downsample: &wgpu::ComputePipeline| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
@@ -292,19 +337,92 @@ impl CloudVolumes {
             }
             texture.create_view(&Default::default())
         };
-        let weather = volume("Cloud weather", WEATHER_SIDE, 1, "weather_kernel");
+        let weather = volume(
+            "Cloud weather",
+            WEATHER_SIDE,
+            WEATHER_SIDE.ilog2() + 1,
+            "weather_kernel",
+            &downsample_spread,
+        );
         let shape = volume(
             "Cloud shape",
             SHAPE_SIDE,
             SHAPE_SIDE.ilog2() + 1,
             "shape_kernel",
+            &downsample_spread,
         );
         let detail = volume(
             "Cloud detail",
             DETAIL_SIDE,
             DETAIL_SIDE.ilog2() + 1,
             "detail_kernel",
+            &downsample,
         );
+
+        let planet_weather = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Cloud planet weather"),
+            size: wgpu::Extent3d {
+                width: PLANET_WEATHER_SIDE,
+                height: PLANET_WEATHER_SIDE,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PLANET_WEATHER_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let planet_faces = planet_weather.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let planet_weather = planet_weather.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        let bake_module = helio_core::shader::module_with(
+            device,
+            "Cloud planet weather",
+            helio_core::include_wgsl!("shaders/cloud_planet_weather.wgsl"),
+            &[ATMOSPHERE_SNIPPET],
+        );
+        let bake_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Cloud planet weather"),
+            entries: &[
+                buffer(0, wgpu::BufferBindingType::Storage { read_only: true }),
+                buffer(1, wgpu::BufferBindingType::Uniform),
+                storage_texture(
+                    2,
+                    PLANET_WEATHER_FORMAT,
+                    wgpu::TextureViewDimension::D2Array,
+                ),
+            ],
+        });
+        let bake_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cloud planet weather bake"),
+            size: std::mem::size_of::<WeatherBake>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bake = Dispatch {
+            pipeline: compute_pipeline(device, &bake_module, &bake_layout, "planet_weather"),
+            group: bind_group(
+                device,
+                "Cloud planet weather",
+                &bake_layout,
+                &[
+                    (0, frame.as_entire_binding()),
+                    (1, bake_params.as_entire_binding()),
+                    (2, wgpu::BindingResource::TextureView(&planet_faces)),
+                ],
+            ),
+            groups: [
+                PLANET_WEATHER_SIDE.div_ceil(8),
+                PLANET_WEATHER_SIDE.div_ceil(8),
+                6,
+            ],
+        };
 
         let shadow_module = helio_core::shader::module_with(
             device,
@@ -322,13 +440,14 @@ impl CloudVolumes {
                 sampler_entry(4),
                 storage_texture(5, CLOUD_SHADOW_FORMAT, wgpu::TextureViewDimension::D2),
                 buffer(6, wgpu::BufferBindingType::Storage { read_only: false }),
+                sampled(8, wgpu::TextureViewDimension::Cube),
             ],
         });
         let shadow_map = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Cloud shadow map"),
                 size: wgpu::Extent3d {
-                    width: CLOUD_SHADOW_SIDE,
+                    width: 2 * CLOUD_SHADOW_SIDE,
                     height: CLOUD_SHADOW_SIDE,
                     depth_or_array_layers: 1,
                 },
@@ -362,6 +481,7 @@ impl CloudVolumes {
                 (4, wgpu::BindingResource::Sampler(&sampler)),
                 (5, view(&shadow_map)),
                 (6, shadow_frame.as_entire_binding()),
+                (8, view(&planet_weather)),
             ],
         );
         let shadow = [
@@ -384,7 +504,7 @@ impl CloudVolumes {
                 ),
                 group: shadow_group,
                 groups: [
-                    CLOUD_SHADOW_SIDE.div_ceil(8),
+                    (2 * CLOUD_SHADOW_SIDE).div_ceil(8),
                     CLOUD_SHADOW_SIDE.div_ceil(8),
                     1,
                 ],
@@ -396,10 +516,46 @@ impl CloudVolumes {
             detail,
             build,
             built: false,
+            planet_weather,
+            bake,
+            bake_params,
+            weather_rows: None,
+            bake_whole: true,
+            frames: 0,
             shadow_map,
             shadow_frame,
             shadow,
         }
+    }
+
+    /// Plans this frame's planet weather: whole when the atmosphere's rows
+    /// (`rows`: their epoch and content generation) changed since it was
+    /// last built whole, otherwise a sixteenth of its rows (written only
+    /// while the weather evolves).
+    pub(crate) fn prepare(&mut self, ctx: &PrepareContext, rows: Option<(u64, u64)>) {
+        self.bake_whole = rows.is_none() || self.weather_rows != rows;
+        self.weather_rows = rows;
+        self.frames = self.frames.wrapping_add(1);
+        let params = if self.bake_whole {
+            WeatherBake {
+                phase: 0,
+                stride: 1,
+                _pad: [0; 2],
+            }
+        } else {
+            WeatherBake {
+                phase: self.frames % PLANET_WEATHER_STRIDE,
+                stride: PLANET_WEATHER_STRIDE,
+                _pad: [0; 2],
+            }
+        };
+        ctx.write_buffer(&self.bake_params, 0, bytemuck::bytes_of(&params));
+    }
+
+    /// Forgets the planet weather's rows: the next active frame builds it
+    /// whole.
+    pub(crate) fn forget_weather(&mut self) {
+        self.weather_rows = None;
     }
 
     /// The map's frame, zeroed while no atmosphere is active.
@@ -422,6 +578,14 @@ impl CloudVolumes {
             }
             self.built = true;
         }
+        let rows = if self.bake_whole {
+            PLANET_WEATHER_SIDE
+        } else {
+            PLANET_WEATHER_SIDE.div_ceil(PLANET_WEATHER_STRIDE)
+        };
+        pass.set_pipeline(&self.bake.pipeline);
+        pass.set_bind_group(0, Some(&self.bake.group), &[]);
+        pass.dispatch_workgroups(self.bake.groups[0], rows.div_ceil(8), self.bake.groups[2]);
         for dispatch in &self.shadow {
             pass.set_pipeline(&dispatch.pipeline);
             pass.set_bind_group(0, Some(&dispatch.group), &[]);
@@ -432,6 +596,11 @@ impl CloudVolumes {
     pub(crate) fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         frame.write_texture_binding(CLOUD_SHADOW_MAP, &self.shadow_map, "Atmosphere");
         frame.write_buffer_binding(CLOUD_SHADOW_FRAME, &self.shadow_frame, "Atmosphere");
+        frame.write_texture_binding(
+            ATMOSPHERE_CLOUD_PLANET_WEATHER,
+            &self.planet_weather,
+            "Atmosphere",
+        );
         frame.write_texture_binding(ATMOSPHERE_CLOUD_WEATHER, &self.weather, "Atmosphere");
         frame.write_texture_binding(ATMOSPHERE_CLOUD_SHAPE, &self.shape, "Atmosphere");
         frame.write_texture_binding(ATMOSPHERE_CLOUD_DETAIL, &self.detail, "Atmosphere");
@@ -605,6 +774,7 @@ impl CloudTracePass {
                 buffer(12, wgpu::BufferBindingType::Uniform),
                 storage_texture(13, CLOUD_FORMAT, d2),
                 storage_texture(14, CLOUD_DEPTH_FORMAT, d2),
+                sampled(25, wgpu::TextureViewDimension::Cube),
             ],
         });
         let reconstruct_layout =
@@ -720,6 +890,7 @@ impl RenderPass for CloudTracePass {
             ATMOSPHERE_TRANSMITTANCE,
             ATMOSPHERE_MULTI_SCATTERING,
             ATMOSPHERE_AERIAL,
+            ATMOSPHERE_CLOUD_PLANET_WEATHER,
             ATMOSPHERE_CLOUD_WEATHER,
             ATMOSPHERE_CLOUD_SHAPE,
             ATMOSPHERE_CLOUD_DETAIL,
@@ -772,6 +943,7 @@ impl RenderPass for CloudTracePass {
             registry.texture_view(ResourceKey::new(ATMOSPHERE_TRANSMITTANCE)),
             registry.texture_view(ResourceKey::new(ATMOSPHERE_MULTI_SCATTERING)),
             registry.texture_view(ResourceKey::new(ATMOSPHERE_AERIAL)),
+            registry.texture_binding(ATMOSPHERE_CLOUD_PLANET_WEATHER),
             registry.texture_binding(ATMOSPHERE_CLOUD_WEATHER),
             registry.texture_binding(ATMOSPHERE_CLOUD_SHAPE),
             registry.texture_binding(ATMOSPHERE_CLOUD_DETAIL),
@@ -784,6 +956,7 @@ impl RenderPass for CloudTracePass {
             Some(transmittance),
             Some(multi),
             Some(aerial),
+            Some(planet_weather),
             Some(weather),
             Some(shape),
             Some(detail),
@@ -819,6 +992,7 @@ impl RenderPass for CloudTracePass {
             transmittance.clone(),
             multi.clone(),
             aerial.clone(),
+            planet_weather.clone(),
             weather.clone(),
             shape.clone(),
             detail.clone(),
@@ -850,6 +1024,7 @@ impl RenderPass for CloudTracePass {
                     (12, self.params.as_entire_binding()),
                     (13, view(&targets.trace_color)),
                     (14, view(&targets.trace_depth)),
+                    (25, view(planet_weather)),
                 ],
             );
             self.trace_group = Some((views, buffers, group));

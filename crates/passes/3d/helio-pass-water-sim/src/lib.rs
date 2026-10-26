@@ -762,12 +762,9 @@ impl RenderPass for WaterSimPass {
             ctx.write_buffer(&self.normal_bufs[ci], 0, bytemuck::bytes_of(&delta));
         }
 
-        // Hitbox rows of a camera-relative frame are relative to its world
-        // origin; the previous rows are relative to the one they were
-        // captured at.
-        let origin = ctx
-            .world_origin
-            .map_or([0.0; 3], |origin| origin.to_array());
+        // Hitbox rows are relative to the frame's world origin; the previous
+        // rows are relative to the one they were captured at.
+        let origin = ctx.world_origin.to_array();
         for axis in 0..3 {
             self.hitbox_prev_shift[axis] += origin[axis] - self.hitbox_origin[axis];
         }

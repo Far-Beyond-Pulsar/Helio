@@ -98,9 +98,14 @@ fn resolve() {
     frame.params = params;
     // The wind carries the clouds' noise; each offset wraps to its noise's
     // period, so it never loses precision however long the clock runs.
+    // The planet's weather's phase advances by the clock times the
+    // evolution's time lapse.
     let drift = params.cloud_wind * (resolve_input.clock.x * 0.001);
-    frame.cloud_weather_offset = vec4<f32>(fract(frame.cloud_weather_offset.xyz - drift / max(params.cloud_weather_scale, 1e-3)), 0.0);
-    frame.cloud_climate_offset = vec4<f32>(fract(frame.cloud_climate_offset.xyz - drift / max(params.cloud_weather_scale * CLOUD_CLIMATE, 1e-3)), 0.0);
+    let phase = fract(frame.cloud_groups_offset.w + resolve_input.clock.x * max(params.cloud_evolution, 0.0) / WEATHER_PERIOD_S);
+    frame.cloud_groups_offset = vec4<f32>(fract(frame.cloud_groups_offset.xyz - drift / max(params.cloud_weather_scale, 1e-3)), phase);
+    let meso = drift / max(params.cloud_mesoscale_scale, 1e-3);
+    frame.cloud_meso_offset = vec4<f32>(fract(frame.cloud_meso_offset.xyz - CLOUD_MESO_TURN_A * meso), 0.0);
+    frame.cloud_meso_fine_offset = vec4<f32>(fract(frame.cloud_meso_fine_offset.xyz - CLOUD_MESO_TURN_B * (meso * CLOUD_MESO_RATIO)), 0.0);
     frame.cloud_shape_offset = vec4<f32>(fract(frame.cloud_shape_offset.xyz - drift / max(params.cloud_shape_scale, 1e-3)), 0.0);
     frame.cloud_detail_offset = vec4<f32>(fract(frame.cloud_detail_offset.xyz - drift / max(params.cloud_detail_scale, 1e-3)), 0.0);
 }

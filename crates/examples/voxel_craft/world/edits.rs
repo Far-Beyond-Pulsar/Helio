@@ -68,8 +68,7 @@ impl Edit {
         }
     }
 
-    /// The cells the edit makes (`None`: air), for queries before the
-    /// planet has it.
+    /// The cells the edit makes (`None`: air).
     pub fn cells(&self, grid: &Grid) -> Vec<(Cell, Option<Block>)> {
         match *self {
             Edit::Dig(centre) => {

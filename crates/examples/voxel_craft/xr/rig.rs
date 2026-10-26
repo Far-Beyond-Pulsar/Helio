@@ -239,7 +239,7 @@ mod tests {
             let right = stage.transform_point3(head + DVec3::X * 0.032);
             assert!(((right - left).length() - 0.064).abs() < 1e-9);
             // Subtract the floating origin before narrowing to f32.
-            let origin = crate::gfx::Gfx::origin_for(before);
+            let origin = helio::follow_origin(None, before);
             let relative = (DMat4::from_translation(-origin) * stage).as_mat4();
             let rendered = relative.transform_point3(head.as_vec3()).as_dvec3() + origin;
             assert!((rendered - before).length() < 0.0002);

@@ -23,10 +23,6 @@ use pulsar_scenedb::{Entity, SceneDb};
 use std::sync::{Arc, Mutex};
 use winit::window::Window;
 
-/// Side of the cells the renderer's world origin snaps to (Pulsar's
-/// `WORLD_ORIGIN_CELL`): scene positions stay small near the camera.
-const ORIGIN_CELL: f64 = 1024.0;
-
 pub struct Gfx {
     #[cfg(not(target_arch = "wasm32"))]
     xr_input: Option<HelioXrInput>,
@@ -532,11 +528,6 @@ impl Gfx {
             .is_none_or(ChunkPass::settled)
     }
 
-    /// Where the renderer's origin is for a camera at `eye`.
-    pub fn origin_for(eye: DVec3) -> DVec3 {
-        (eye / ORIGIN_CELL).round() * ORIGIN_CELL
-    }
-
     /// Draws a frame of `view`.
     pub fn draw(&mut self, view: &View) {
         let (planet, eye, forward) = (view.planet, view.eye, view.look);
@@ -577,8 +568,7 @@ impl Gfx {
         let weather_delta = (view.weather - self.clock).clamp(0.0, 0.1) as f32;
         self.renderer.set_frame_clock_delta(Some(weather_delta));
         self.clock = view.weather;
-        self.origin = Self::origin_for(render_eye);
-        self.renderer.set_world_origin(Some(self.origin));
+        self.origin = self.renderer.origin_for(render_eye);
         let origin = self.origin;
         // The character and what it holds, and the targeted block's outline.
         #[cfg(not(target_arch = "wasm32"))]
@@ -605,11 +595,7 @@ impl Gfx {
         }
         self.renderer.debug_clear();
         for (a, b) in view.outline {
-            self.renderer.debug_line(
-                (*a - origin).as_vec3().to_array(),
-                (*b - origin).as_vec3().to_array(),
-                [0.05, 0.05, 0.05, 1.0],
-            );
+            self.renderer.debug_line(*a, *b, [0.05, 0.05, 0.05, 1.0]);
         }
         // A crosshair fixed in front of the eye.
         if !view.player.third_person && !self.vr_active() {
@@ -620,8 +606,8 @@ impl Gfx {
             let reach = 0.0045;
             for (a, b) in [(-right, right), (-above, above)] {
                 self.renderer.debug_line(
-                    ((centre + a * reach) - origin).as_vec3().to_array(),
-                    ((centre + b * reach) - origin).as_vec3().to_array(),
+                    centre + a * reach,
+                    centre + b * reach,
                     [1.0, 1.0, 1.0, 0.9],
                 );
             }
@@ -638,19 +624,11 @@ impl Gfx {
             let end = view
                 .target
                 .unwrap_or(start + direction * crate::config::REACH);
-            self.renderer.debug_line(
-                (start - origin).as_vec3().to_array(),
-                (end - origin).as_vec3().to_array(),
-                [0.3, 0.85, 1.0, 0.8],
-            );
+            self.renderer.debug_line(start, end, [0.3, 0.85, 1.0, 0.8]);
             for grip in vr.grips.iter().flatten() {
-                let a = grip.transform_point3(DVec3::new(0.0, 0.0, 0.04)) - origin;
-                let b = grip.transform_point3(DVec3::new(0.0, 0.0, -0.12)) - origin;
-                self.renderer.debug_line(
-                    a.as_vec3().to_array(),
-                    b.as_vec3().to_array(),
-                    [0.9, 0.9, 0.95, 1.0],
-                );
+                let a = grip.transform_point3(DVec3::new(0.0, 0.0, 0.04));
+                let b = grip.transform_point3(DVec3::new(0.0, 0.0, -0.12));
+                self.renderer.debug_line(a, b, [0.9, 0.9, 0.95, 1.0]);
             }
             if let Some(input) = &self.xr_input {
                 let world_from_stage =
@@ -672,8 +650,8 @@ impl Gfx {
         };
         let near = (planet.air_clearance(render_eye) * 0.25).clamp(0.05, 50_000.0) as f32;
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let mut camera = Camera::perspective_look_at(
-            Vec3::ZERO,
+        let camera = Camera::perspective_look_to(
+            render_eye,
             forward,
             up,
             70f32.to_radians(),
@@ -681,9 +659,6 @@ impl Gfx {
             near,
             40_000_000.0,
         );
-        let local = render_eye - origin;
-        camera.position = local.as_vec3();
-        camera.view = (camera.view.as_dmat4() * DMat4::from_translation(-local)).as_mat4();
 
         // Let Helio own the ordinary window frame and its XR mirror. Screenshot
         // capture is the sole path that needs the acquired surface texture.

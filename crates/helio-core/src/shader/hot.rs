@@ -39,7 +39,9 @@
 //! list of candidate roots (`HELIO_SHADER_ROOT` first, then the manifest dir,
 //! then the ancestors of the current dir and executable) until a file exists.
 //! A shader that cannot be located is skipped (not hot reloadable) and
-//! logged once.
+//! logged once. With `HELIO_SHADER_FROM_DISK=1` every located file starts
+//! from its text on disk rather than the text built in, so a binary runs
+//! against edited shaders without a rebuild.
 //!
 //! # Limits
 //!
@@ -263,6 +265,19 @@ impl State {
             }
         }
         self.paths.insert(path_key(file), found.clone());
+        // `HELIO_SHADER_FROM_DISK=1`: the file as it is on disk now, not as
+        // it was built (a binary run against edited shaders, no rebuild).
+        if let Some(path) = &found {
+            if from_disk() && !self.overrides.contains_key(path) {
+                match std::fs::read_to_string(path) {
+                    Ok(text) if text != file.embedded => {
+                        log::info!("[helio-shader] {} read from disk", path.display());
+                        self.overrides.insert(path.clone(), text);
+                    }
+                    _ => {}
+                }
+            }
+        }
         found
     }
 
@@ -841,6 +856,13 @@ pub fn enabled() -> bool {
             )
         })
     })
+}
+
+/// Whether shaders start from their files on disk (`HELIO_SHADER_FROM_DISK`
+/// set, not `0`); read once.
+fn from_disk() -> bool {
+    static FROM_DISK: OnceLock<bool> = OnceLock::new();
+    *FROM_DISK.get_or_init(|| std::env::var("HELIO_SHADER_FROM_DISK").is_ok_and(|value| value.trim() != "0"))
 }
 
 /// Whether any shader has registered as hot-reloadable. One relaxed load, so

@@ -36,6 +36,10 @@ fn sky_shaders_validate() {
             include_str!("../src/shaders/cloud_noise.wgsl"),
         ),
         (
+            "cloud_planet_weather",
+            include_str!("../src/shaders/cloud_planet_weather.wgsl"),
+        ),
+        (
             "cloud_shadow_map",
             include_str!("../src/shaders/cloud_shadow_map.wgsl"),
         ),

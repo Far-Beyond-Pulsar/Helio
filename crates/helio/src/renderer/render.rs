@@ -195,8 +195,9 @@ impl Renderer {
         } else {
             (glam::Mat4::IDENTITY, 0.0, 0.0)
         };
+        let origin = self.origin_for(camera.eye);
         // Output-resolution editor handles must align with unjittered pointer rays.
-        let col = (camera.proj * camera.view).to_cols_array();
+        let col = camera.view_proj_in(origin).to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {
             view_proj: [
                 [col[0], col[1], col[2], col[3]],
@@ -224,7 +225,7 @@ impl Renderer {
 
         // Target clear + per-frame uploads + graph execution + cull-stats
         // readback, all shared with the XR path.
-        self.submit_frame(camera, target, false)?;
+        self.submit_frame(target, false)?;
         Ok(())
     }
 
@@ -233,10 +234,8 @@ impl Renderer {
     /// [`helio_core::ResourceRegistry`], clear `target`, execute the graph and kick
     /// off the cull-stats readback. Shared by the mono and XR render paths.
     ///
-    /// `camera` supplies the post-process settings and the camera position used
-    /// for debug-state tracking. It must have been
-    /// written to the scene already (`update_camera` / `update_stereo_cameras`)
-    /// and `scene.flush()` called before this runs.
+    /// The camera must have been uploaded already (`upload_camera` /
+    /// `upload_stereo_camera`) and the frontend's SceneDB flushed.
     ///
     /// `multiview` selects a `multiview_mask = 0b11` clear pass, required when
     /// `target` is a two-layer array view (the OpenXR swapchain image). In
@@ -244,12 +243,7 @@ impl Renderer {
     /// the renderer's two-layer XR depth target; otherwise they get the
     /// single-layer desktop target. Sampling passes use `depth_sampler_view`,
     /// which exposes layer 0 as a plain D2 view in XR.
-    fn submit_frame(
-        &mut self,
-        camera: &Camera,
-        target: &wgpu::TextureView,
-        multiview: bool,
-    ) -> HelioResult<()> {
+    fn submit_frame(&mut self, target: &wgpu::TextureView, multiview: bool) -> HelioResult<()> {
         helio_core::cpu_scope!("Helio::Renderer::submit_frame");
         self.last_submission = None;
         #[cfg(not(target_arch = "wasm32"))]
@@ -768,10 +762,34 @@ impl Renderer {
             swapchain.acquire_image().map_err(xr_error)?
         };
 
-        let mut representative = self.default_xr_camera(near_far.0, near_far.1);
         for (eye, pose) in located.view_poses.iter().enumerate() {
-            let eye_uniform = helio_xr::xr_view_to_camera(pose, pose, near_far.0, near_far.1)[0]
-                .with_view_id(eye as u32 + 1);
+            // This eye's camera. The stage (`xr_stage_transform`) is placed
+            // relative to the frame's world origin, which the host chose with
+            // `origin_for` before placing it: the poses are in the frame's
+            // space, and the eye's world position is the origin plus its own.
+            let mut eye_camera = Camera::from_matrices(
+                pose.view_matrix(),
+                pose.projection(near_far.0),
+                pose.eye_position,
+                near_far.0,
+                near_far.1,
+            );
+            eye_camera.eye += self.world_origin;
+            // Each eye its own view (`upload_stereo_camera` keeps each eye's
+            // history).
+            eye_camera.view_id = eye as u32 + 1;
+            let origin = self.world_origin;
+            let eye_uniform = helio_core::GpuCameraUniforms::new(
+                eye_camera.view_in(origin),
+                eye_camera.proj,
+                eye_camera.position_in(origin),
+                near_far.0,
+                near_far.1,
+                0,
+                [0.0, 0.0],
+                eye_camera.view_proj_in(origin),
+            )
+            .with_view_id(eye_camera.view_id);
 
             // `cameras[0]` (the slot every shader samples) is this eye's camera.
             // Writing both slots to the same value keeps the storage buffer
@@ -781,8 +799,8 @@ impl Renderer {
             // Both of these are per-eye. They used to be computed only for eye 0, which
             // left the right eye drawing with the left eye's camera:
             //
-            // - `representative` is the CPU-side camera handed to `submit_frame`, so a
-            //   left-only value culls the right eye against the wrong frustum.
+            // - the uploaded camera, so a left-only value culls the right eye
+            //   against the wrong frustum.
             // - `debug_camera_buffer` is what `DebugDrawPass` projects with. It is a
             //   *separate* uniform from the scene camera, so updating the stereo cameras
             //   above does not update it, and every debug line in the right eye was
@@ -790,21 +808,6 @@ impl Renderer {
             //   fixed inter-eye offset applied to a moving camera, it presents as debug
             //   geometry sliding and shearing against the world as you move — while the
             //   left eye looks perfect.
-            representative = match (&self.xr_camera, pose) {
-                (Some(template), _) => {
-                    let mut cam = template.clone();
-                    cam.view = pose.view_matrix();
-                    cam.proj = pose.projection(near_far.0);
-                    cam.position = pose.eye_position;
-                    cam.view_id = eye as u32 + 1;
-                    cam.near = near_far.0;
-                    cam.far = near_far.1;
-                    cam.jitter = [0.0, 0.0];
-                    cam
-                }
-                _ => self.default_xr_camera(near_far.0, near_far.1),
-            };
-
             let col = eye_uniform.view_proj;
             let debug_camera_uniform = DebugCameraUniform {
                 view_proj: [
@@ -831,20 +834,23 @@ impl Renderer {
                     .map_err(xr_error)?
                     .clone()
             };
-            self.submit_frame(&representative, &layer_view, false)?;
+            self.submit_frame(&layer_view, false)?;
         }
 
         // ── 5. Optional PC mirror: render both eyes before acquiring the
         // ──    short-lived window image, then composite before releasing the
         // ──    headset swapchain image back to OpenXR.
-        let mirror_output = mirror_surface.and_then(|surface| match surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
-            _ => {
-                log::debug!("XR mirror surface did not provide a frame; presenting headset only");
-                None
-            }
-        });
+        let mirror_output =
+            mirror_surface.and_then(|surface| match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                _ => {
+                    log::debug!(
+                        "XR mirror surface did not provide a frame; presenting headset only"
+                    );
+                    None
+                }
+            });
         if let Some(output) = &mirror_output {
             let size = output.texture.size();
             self.xr_mirror_size = [size.width, size.height];
@@ -886,7 +892,6 @@ impl Renderer {
         Ok(mirror_output)
     }
 
-    /// A fallback camera template used when no `xr_camera` was provided.
     /// Render one headset frame and, when a mirror surface is supplied,
     /// automatically blit the two eye images side-by-side and present the PC
     /// window. A temporarily unavailable mirror image never prevents the XR
@@ -901,18 +906,6 @@ impl Renderer {
             self.queue.present(output);
         }
         Ok(())
-    }
-
-    fn default_xr_camera(&self, near: f32, far: f32) -> Camera {
-        Camera::perspective_look_at(
-            glam::Vec3::new(0.0, 1.6, 0.0),
-            glam::Vec3::new(0.0, 1.6, -1.0),
-            glam::Vec3::Y,
-            std::f32::consts::FRAC_PI_4,
-            1.0,
-            near,
-            far,
-        )
     }
 
     /// Blit the last acquired XR swapchain image (a 2-layer array: eye 0 left,

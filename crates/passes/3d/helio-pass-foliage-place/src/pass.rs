@@ -1081,7 +1081,7 @@ impl RenderPass for FoliagePlacePass {
 
         // The ground's chart around the eye. Tiles of one chart only are resident: a new
         // chart (another cube face under the eye, another ground) places every tile again.
-        let world_origin = ctx.world_origin.unwrap_or(DVec3::ZERO);
+        let world_origin = ctx.world_origin;
         // The interactors are gathered against this frame's origin.
         {
             let hi = world_origin.as_vec3();

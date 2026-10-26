@@ -14,5 +14,5 @@
 
 pub mod atmosphere;
 pub mod clouds;
-pub use atmosphere::{AtmosphereComponent, AtmosphereCompositePass, AtmospherePass, CloudLayer};
+pub use atmosphere::{AtmosphereComponent, AtmosphereCompositePass, AtmospherePass, CloudLayer, CloudRepresentation, PlanetWeather};
 pub use clouds::CloudTracePass;

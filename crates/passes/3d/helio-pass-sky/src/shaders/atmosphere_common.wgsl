@@ -23,9 +23,13 @@ struct AtmosphereParams {
     top_radius: f32,
     sun_angular_radius: f32,
     enabled: u32,
-    // The cloud layer (`CloudLayer`): band above the surface (km),
-    // coverage, form, extinction (per km), weather / billow / wisp sizes
-    // (km), wind (world m/s), albedo, erosion.
+    // The cloud layer (`CloudLayer`): band above the surface (km), mean
+    // coverage and form, extinction (per km), cumulus group / billow /
+    // wisp sizes (km), wind (world m/s), albedo, erosion; then the planet's
+    // weather (`PlanetWeather`): the pole, the circulation's strength and
+    // cells, the synoptic systems' size (km) and storminess, the
+    // mesoscale's size (km), the cirrus' amount and height (km), the
+    // weather's evolution (time lapse) and seed; the representation.
     cloud_bottom: f32,
     cloud_top: f32,
     cloud_coverage: f32,
@@ -38,6 +42,21 @@ struct AtmosphereParams {
     clouds_enabled: u32,
     cloud_albedo: vec3<f32>,
     cloud_erosion: f32,
+    cloud_pole: vec3<f32>,
+    cloud_circulation: f32,
+    cloud_circulation_cells: f32,
+    cloud_synoptic_scale: f32,
+    cloud_storminess: f32,
+    cloud_mesoscale_scale: f32,
+    cloud_cirrus: f32,
+    cloud_cirrus_height: f32,
+    cloud_evolution: f32,
+    cloud_seed: u32,
+    // How the clouds are drawn: 0 smooth, otherwise voxels of this side
+    // (km), filled from density `cloud_voxel_fill`.
+    cloud_voxel_size: f32,
+    cloud_voxel_fill: f32,
+    cloud_reserved: vec2<f32>,
 }
 
 // Per frame, resolved on the GPU (`resolve`).
@@ -58,19 +77,23 @@ struct AtmosphereFrame {
     // Seen from the eye; surfaces take their own sky from the sky table
     // (`atmosphere_sky_table`).
     irradiance: array<vec4<f32>, 9>,
-    // Where the wind has carried the clouds: offsets of the weather (at its
-    // scale and at the climate's, CLOUD_CLIMATE times larger), billow and
-    // wisp noise in their own texture coordinates (`resolve` integrates the
-    // wind each frame, wrapped to the noise's period); w unused.
-    cloud_weather_offset: vec4<f32>,
-    cloud_climate_offset: vec4<f32>,
+    // Where the wind has carried the clouds: offsets of the cumulus groups,
+    // the mesoscale, billow and wisp noise in their own texture coordinates
+    // (`resolve` integrates the wind each frame, wrapped to the noise's
+    // period; the mesoscale's two lookups' in their own turned
+    // coordinates). `cloud_groups_offset.w`: the planet's weather's phase in
+    // its period (0..1, WEATHER_PERIOD_S); other w unused.
+    cloud_groups_offset: vec4<f32>,
+    cloud_meso_offset: vec4<f32>,
+    cloud_meso_fine_offset: vec4<f32>,
     cloud_shape_offset: vec4<f32>,
     cloud_detail_offset: vec4<f32>,
 }
 
 // Whether the frame draws clouds.
 fn atmosphere_has_clouds(frame: AtmosphereFrame) -> bool {
-    return frame.planet.w > 0.5 && frame.params.clouds_enabled != 0u && frame.params.cloud_coverage > 0.0
+    return frame.planet.w > 0.5 && frame.params.clouds_enabled != 0u
+        && (frame.params.cloud_coverage > 0.0 || frame.params.cloud_cirrus > 0.0)
         && frame.params.cloud_extinction > 0.0 && frame.params.cloud_top > frame.params.cloud_bottom;
 }
 
@@ -90,10 +113,15 @@ const TRANSMITTANCE_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
 const MULTI_SCATTERING_SIZE: f32 = 32.0;
 const SKY_VIEW_SIZE: vec2<f32> = vec2<f32>(192.0, 108.0);
 const AERIAL_SLICES: f32 = 32.0;
-// The climate (the weather's large-scale modulation: fronts and clear
-// regions hundreds of kilometres across on Earth) is this many times larger
-// than the weather.
-const CLOUD_CLIMATE: f32 = 12.0;
+// The period the planet's weather evolves over (s): its systems' lives and
+// drift repeat after it, so its phase wraps without a seam.
+const WEATHER_PERIOD_S: f32 = 2592000.0;
+// The mesoscale's two lookups (`clouds_common.wgsl`): turned apart (and
+// from the groups' axes), the second CLOUD_MESO_RATIO times finer, so the
+// noise never repeats in their sum.
+const CLOUD_MESO_TURN_A: mat3x3<f32> = mat3x3<f32>(0.0, 0.8, 0.6, -0.8, 0.36, -0.48, -0.6, -0.48, 0.64);
+const CLOUD_MESO_TURN_B: mat3x3<f32> = mat3x3<f32>(0.64, -0.6, 0.48, 0.48, 0.8, 0.36, -0.6, 0.0, 0.8);
+const CLOUD_MESO_RATIO: f32 = 1.618034;
 
 struct Medium {
     rayleigh: vec3<f32>,

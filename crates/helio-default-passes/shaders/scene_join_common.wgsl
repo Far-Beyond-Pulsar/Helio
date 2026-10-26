@@ -57,11 +57,16 @@ fn object_position(t: ObjectTransform) -> vec3<f32> {
     return position_hi(t) + position_lo(t);
 }
 
-/// The object's position relative to the world origin `hi + lo` (the f64
-/// origin's f32 pair), part by part: near the origin `position_hi - hi` is
-/// exact, so the offset keeps the f64 position's precision.
-fn object_relative(t: ObjectTransform, hi: vec3<f32>, lo: vec3<f32>) -> vec3<f32> {
-    return (position_hi(t) - hi) + (position_lo(t) - lo);
+/// The object's position relative to the world origin `origin_hi +
+/// origin_lo` (the f64 origin's f32 pair, `scene_join::origin_pair`), part by
+/// part: near the origin `position_hi - hi` is exact, so the offset keeps the
+/// f64 position's precision. Each part goes through `origin_hi.w` (1.0,
+/// unknown to the compiler): a driver reassociating the sum to
+/// `(hi + lo) - origin` rounds the low part away (NVIDIA's Vulkan driver
+/// does, in some shaders).
+fn object_relative(t: ObjectTransform, origin_hi: vec4<f32>, origin_lo: vec4<f32>) -> vec3<f32> {
+    let one = origin_hi.w;
+    return (position_hi(t) - origin_hi.xyz) * one + (position_lo(t) - origin_lo.xyz) * one;
 }
 
 fn object_scale(t: ObjectTransform) -> vec3<f32> {

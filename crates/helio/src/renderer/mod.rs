@@ -19,7 +19,10 @@ pub use config::{
     required_wgpu_features, required_wgpu_limits, usable_adapter_features, PerfOverlayMode,
     RenderMode, RendererConfig,
 };
-pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};
+pub use debug::{
+    DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, WorldPoint,
+    WorldVertex,
+};
 pub use pipeline::{
     IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry,
 };

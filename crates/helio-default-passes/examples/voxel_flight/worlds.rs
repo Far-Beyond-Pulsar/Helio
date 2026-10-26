@@ -71,17 +71,53 @@ impl Preset {
         FeatureRecipe::appearance(base)
     }
 
-    /// The air (none on the Moon), around a planet of `radius` m.
+    /// The air (none on the Moon), around a planet of `radius` m. Its
+    /// clouds are smooth volumes, or with
+    /// `HELIO_VOXEL_FLIGHT_CLOUDS=voxel[:cell_m[,fill]]` voxels (32 m cells
+    /// filled from density 0.3). `HELIO_VOXEL_FLIGHT_CLOUD_SEED` picks
+    /// another weather.
     pub fn sky(self, radius: f64) -> Option<helio_pass_sky::AtmosphereComponent> {
-        use helio_pass_sky::{AtmosphereComponent, CloudLayer};
+        use helio_pass_sky::{AtmosphereComponent, CloudLayer, CloudRepresentation, PlanetWeather};
         let clouds = std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLOUDS").is_none();
+        let representation = match std::env::var("HELIO_VOXEL_FLIGHT_CLOUDS").ok().as_deref() {
+            Some(v) if v.starts_with("voxel") => {
+                let args: Vec<f32> = v.split_once(':').map_or(Vec::new(), |(_, a)| {
+                    a.split(',').map(|x| x.trim().parse().unwrap()).collect()
+                });
+                CloudRepresentation::Voxels {
+                    cell_m: args.first().copied().unwrap_or(32.0),
+                    fill: args.get(1).copied().unwrap_or(0.3),
+                }
+            }
+            _ => CloudRepresentation::Volumetric,
+        };
+        let seed = std::env::var("HELIO_VOXEL_FLIGHT_CLOUD_SEED")
+            .ok()
+            .map(|v| v.parse().unwrap());
+        let layer = |layer: CloudLayer| CloudLayer {
+            representation,
+            weather: PlanetWeather {
+                seed: seed.unwrap_or(layer.weather.seed),
+                ..layer.weather
+            },
+            ..layer
+        };
         match self {
             Preset::Moon => None,
-            // Earth's air with fair-weather cumulus.
+            // Earth's air with cumulus, under weather (seed 2) that leaves
+            // the spawn broken cumulus rather than inside a deck.
             Preset::Earth => {
                 let sky = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+                let cumulus = CloudLayer::cumulus();
+                let cumulus = CloudLayer {
+                    weather: PlanetWeather {
+                        seed: 2,
+                        ..cumulus.weather
+                    },
+                    ..cumulus
+                };
                 Some(if clouds {
-                    sky.with_clouds(CloudLayer::cumulus())
+                    sky.with_clouds(layer(cumulus))
                 } else {
                     sky
                 })
@@ -105,7 +141,11 @@ impl Preset {
                     kind: 0.4,
                     ..CloudLayer::cumulus()
                 };
-                Some(if clouds { sky.with_clouds(high) } else { sky })
+                Some(if clouds {
+                    sky.with_clouds(layer(high))
+                } else {
+                    sky
+                })
             }
         }
     }

@@ -1311,28 +1311,26 @@ impl RenderPass for TsrPass {
             ndc[0] * ctx.width as f32 * 0.5,
             ndc[1] * ctx.height as f32 * 0.5,
         ];
-        let world_origin = ctx.world_origin.map(|origin| origin.to_array());
+        let world_origin = ctx.world_origin.to_array();
         let view_id = ndc[3].to_bits();
-        let coordinate_mode_changed =
-            self.previous_world_origin.is_some() != world_origin.is_some();
         let view_changed = self
             .previous_view_id
             .is_some_and(|previous| previous != view_id);
-        let reset = u32::from(self.first_frame || coordinate_mode_changed || view_changed);
+        let reset = u32::from(self.first_frame || view_changed);
         self.first_frame = false;
         let previous_view = if reset != 0 {
             ctx.camera_data.view
         } else {
-            match (self.previous_world_origin, world_origin) {
-                (Some(previous), Some(current)) => rebase_previous_view(
+            match self.previous_world_origin {
+                Some(previous) => rebase_previous_view(
                     self.previous_view,
                     [
-                        current[0] - previous[0],
-                        current[1] - previous[1],
-                        current[2] - previous[2],
+                        world_origin[0] - previous[0],
+                        world_origin[1] - previous[1],
+                        world_origin[2] - previous[2],
                     ],
                 ),
-                _ => self.previous_view,
+                None => self.previous_view,
             }
         };
 
@@ -1361,7 +1359,7 @@ impl RenderPass for TsrPass {
         // Retain the raw matrix and its origin, not this frame's rebased
         // history matrix, so successive shifts are never applied twice.
         self.previous_view = ctx.camera_data.view;
-        self.previous_world_origin = world_origin;
+        self.previous_world_origin = Some(world_origin);
         self.previous_view_id = Some(view_id);
         Ok(())
     }

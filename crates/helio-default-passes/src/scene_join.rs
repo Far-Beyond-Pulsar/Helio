@@ -154,40 +154,24 @@ struct Uniforms {
     second: u32,
     _pad: [u32; 2],
     /// The frame's world origin as an f32 pair (`origin_hi + origin_lo`),
-    /// subtracted from positions in camera-relative frames; zero otherwise.
+    /// subtracted pair-wise from the world positions of the rows.
     origin_hi: [f32; 4],
     origin_lo: [f32; 4],
 }
 
 /// `origin` as an f32 hi/lo pair, so positions near it subtract to their
-/// offset from it without the f32 rounding of either. Zero for none.
-pub(crate) fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
-    let origin = origin.unwrap_or(glam::DVec3::ZERO);
+/// offset from it without the f32 rounding of either. The hi half's `w` is
+/// 1.0, the shaders' guard against reassociated floats (`object_relative`).
+pub(crate) fn origin_pair(origin: glam::DVec3) -> ([f32; 4], [f32; 4]) {
     let hi = origin.as_vec3();
     let lo = (origin - hi.as_dvec3()).as_vec3();
-    (hi.extend(0.0).to_array(), lo.extend(0.0).to_array())
+    (hi.extend(1.0).to_array(), lo.extend(0.0).to_array())
 }
 
 /// The bits of `origin`, for an input signature: a moved origin moves
 /// every output position.
-pub(crate) fn origin_bits(origin: Option<glam::DVec3>) -> [u64; 3] {
-    origin.map_or([u64::MAX; 3], |o| {
-        [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()]
-    })
-}
-/// Published (as an empty marker buffer) by `HierarchyResolve` when the
-/// transform rows it republishes are already relative to the frame's world
-/// origin. Joins then must not subtract the origin a second time.
-pub const TRANSFORMS_ORIGIN_RELATIVE_KEY: BufferKey = BufferKey::of("transforms_origin_relative");
-
-/// The world origin a join subtracts from the transform rows it reads: the
-/// frame's, unless the rows were already made origin-relative upstream.
-pub(crate) fn join_origin(ctx: &SceneDerivationContext<'_>) -> Option<glam::DVec3> {
-    if ctx.inputs.contains(TRANSFORMS_ORIGIN_RELATIVE_KEY) {
-        None
-    } else {
-        ctx.world_origin
-    }
+pub(crate) fn origin_bits(origin: glam::DVec3) -> [u64; 3] {
+    [origin.x.to_bits(), origin.y.to_bits(), origin.z.to_bits()]
 }
 
 /// A buffer the join owns and publishes.
@@ -586,7 +570,7 @@ impl SceneJoin {
         self.moved.current = next;
         self.moved.previous_complete = true;
         self.moved.run = self.moved.run.wrapping_add(1).max(1);
-        let (origin_hi, origin_lo) = origin_pair(join_origin(ctx));
+        let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
         ctx.queue.write_buffer(
             &self.moved.uniforms,
             0,
@@ -774,8 +758,8 @@ impl SceneDerivation for SceneJoin {
         };
         let spaces = self.input(inputs, crate::hierarchy_resolve::OBJECT_SPACE_KEY, 4);
         let mut recorded = false;
-        let (origin_hi, origin_lo) = origin_pair(join_origin(ctx));
-        let [ox, oy, oz] = origin_bits(join_origin(ctx));
+        let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
+        let [ox, oy, oz] = origin_bits(ctx.world_origin);
 
         // ── Meshes ──────────────────────────────────────────────────────
         let instance_rows = section_handles.map_or(0, |h| rows_of(h, HANDLE_ROW_BYTES));

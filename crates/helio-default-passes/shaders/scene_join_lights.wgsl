@@ -69,9 +69,7 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let t = transforms[index];
-    // World space: the billboard pass subtracts the origin itself.
-    let position = object_position(t);
-    let relative = object_relative(t, u.origin_hi.xyz, u.origin_lo.xyz);
+    let relative = object_relative(t, u.origin_hi, u.origin_lo);
     let direction = object_rotation(t) * vec3<f32>(0.0, -1.0, 0.0);
     light.position_range[0] = relative.x;
     light.position_range[1] = relative.y;
@@ -83,7 +81,7 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
     lights_out[row] = light;
     if u.billboards != 0u && row < arrayLength(&billboards_out) {
         billboards_out[row] = Billboard(
-            array<f32, 4>(position.x, position.y, position.z, 0.0),
+            array<f32, 4>(relative.x, relative.y, relative.z, 0.0),
             array<f32, 4>(0.04, 0.04, 1.0, 0.0),
             array<f32, 4>(light.color_intensity[0], light.color_intensity[1], light.color_intensity[2], 1.0),
         );

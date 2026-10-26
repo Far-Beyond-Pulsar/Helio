@@ -31,6 +31,7 @@ pub mod layers;
 pub mod meadow;
 pub mod noise;
 pub mod planet;
+pub mod queries;
 pub mod record;
 mod ridge_envelope;
 pub mod snapshot;
@@ -39,5 +40,5 @@ pub mod terrain;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};
-pub use planet::{Planet, PlanetRecipe, RayHit};
+pub use planet::{BrickCell, Matter, Planet, PlanetRecipe, RayHit, Walked};
 pub use terrain::{GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, TerrainSource};

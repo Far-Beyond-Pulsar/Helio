@@ -881,7 +881,7 @@ fn align_up(n: u32, align: u32) -> u32 {
 /// camera's own axes so the rig always illuminates the visible faces regardless
 /// of ViewDirection.
 fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
-    let forward = (target - camera.position).normalize();
+    let forward = (target - camera.eye.as_vec3()).normalize();
     let right = forward.cross(Vec3::Y).normalize();
     let up = right.cross(forward).normalize();
 

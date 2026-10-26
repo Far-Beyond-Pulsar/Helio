@@ -445,8 +445,7 @@ impl RenderPass for PortalEditorOverlayPass {
         // An absent active count therefore means no authored/projected
         // portals, not "draw the whole reserve".
         self.portal_count = self.active_portal_count.unwrap_or(0);
-        let world_origin = ctx.world_origin.map(|origin| origin.to_array());
-        let origin = world_origin.unwrap_or([0.0; 3]);
+        let origin = ctx.world_origin.to_array();
         let glyphs = self
             .debug_texts
             .iter()
@@ -467,7 +466,7 @@ impl RenderPass for PortalEditorOverlayPass {
             }
             ctx.queue.write_buffer(&self.glyph_buffer, 0, bytes);
         }
-        if self.ghost_geometry_dirty || self.ghost_world_origin != world_origin {
+        if self.ghost_geometry_dirty || self.ghost_world_origin != Some(origin) {
             let gpu_vertices: Vec<[f32; 4]> = self
                 .ghost_vertices
                 .iter()
@@ -496,7 +495,7 @@ impl RenderPass for PortalEditorOverlayPass {
                 ctx.queue.write_buffer(&self.ghost_buffer, 0, bytes);
             }
             self.ghost_geometry_dirty = false;
-            self.ghost_world_origin = world_origin;
+            self.ghost_world_origin = Some(origin);
         }
         Ok(())
     }

@@ -117,7 +117,7 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        let offset = (self.scene.camera)(0.0, config.width as f32 / config.height as f32).position
+        let offset = (self.scene.camera)(0.0, config.width as f32 / config.height as f32).eye.as_vec3()
             - self.scene.orbit_target;
         self.state = Some(State {
             window,
@@ -206,7 +206,7 @@ impl ApplicationHandler for App {
                 // to the GPU, but editor wireframes are a separate Helio debug
                 // stream. Keep that stream synchronized from the same rows so
                 // the editor overlay has actual volume vertices to draw.
-                let volume_bounds: Vec<[[f32; 3]; 2]> = s
+                let volume_bounds: Vec<[glam::DVec3; 2]> = s
                     .scene_db
                     .world
                     .query::<&helio_pass_postprocess::PostProcessVolumeComponent>()
@@ -214,18 +214,8 @@ impl ApplicationHandler for App {
                         if volume.blend_weight <= 0.0 || volume.unbound != 0 {
                             return None;
                         }
-                        Some([
-                            [
-                                volume.bounds_min[0],
-                                volume.bounds_min[1],
-                                volume.bounds_min[2],
-                            ],
-                            [
-                                volume.bounds_max[0],
-                                volume.bounds_max[1],
-                                volume.bounds_max[2],
-                            ],
-                        ])
+                        let corner = |c: [f32; 4]| glam::Vec3::from_slice(&c[..3]).as_dvec3();
+                        Some([corner(volume.bounds_min), corner(volume.bounds_max)])
                     })
                     .collect();
                 s.renderer.debug_set_editor_volume_bounds(&volume_bounds);

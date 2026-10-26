@@ -15,7 +15,7 @@ mod renderer;
 #[cfg(target_arch = "wasm32")]
 mod wasm_cpp_alloc;
 
-pub use camera::Camera;
+pub use camera::{follow_origin, Camera, WORLD_ORIGIN_CELL};
 /// Unified window, WGPU, and optional OpenXR startup (native targets only).
 #[cfg(not(target_arch = "wasm32"))]
 pub use graphics_context::{
@@ -50,7 +50,7 @@ pub use helio_pass_portal_cull::{
 pub use helio_pass_portal_instances::PortalDebugText;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_pass_shadow_matrix::ShadowQuality;
-pub use helio_pass_sky::CloudLayer;
+pub use helio_pass_sky::{CloudLayer, CloudRepresentation, PlanetWeather};
 pub use helio_pass_tsr::TsrQuality;
 pub use helio_settings;
 /// Ids, names and keys of the virtual-geometry debug views.
@@ -60,10 +60,11 @@ pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridg
 pub use renderer::{
     ray_queries_usable, recommended_instance_flags, required_experimental_features,
     required_wgpu_features, required_wgpu_limits, usable_adapter_features, BillboardInstance,
-    DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GraphRebuilder, IntoGraph,
-    PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory, PipelineInfo,
-    PipelineOrigin, RenderMode, RenderPipelineRegistry, Renderer, RendererBuilder, RendererConfig,
-    SceneDbHandle, StereoMirror, TsrSetting, XrMirrorStats,
+    DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GraphRebuilder,
+    IntoGraph, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory,
+    PipelineInfo, PipelineOrigin, RenderMode, RenderPipelineRegistry, Renderer, RendererBuilder,
+    RendererConfig, SceneDbHandle, StereoMirror, TsrSetting, WorldPoint, WorldVertex,
+    XrMirrorStats,
 };
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use renderer::{ReloadMode, ShaderReloadStatus};

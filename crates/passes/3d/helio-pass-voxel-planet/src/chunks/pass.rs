@@ -529,7 +529,7 @@ impl ChunkPass {
         // it remains useful for residency, but cannot anchor the traced view.
         let at = Vec3::from_slice(&camera.position_near[..3]);
         let (trace_eye, view_proj, prev_view_proj) =
-            trace_camera(camera, ctx.world_origin, frame.eye);
+            trace_camera(camera, ctx.world_origin);
         let proj = Mat4::from_cols_array(&camera.proj);
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
         let jitter = [
@@ -552,7 +552,7 @@ impl ChunkPass {
             forward: glam::Vec3::from_slice(&camera.forward_far[..3])
                 .as_dvec3()
                 .normalize(),
-            cos_half: frustum_cos_half(proj),
+            cos_half: frustum_cos_half(proj, Vec2::from_slice(&camera.jitter_frame[..2])),
         };
         self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
@@ -700,16 +700,11 @@ impl ChunkPass {
 
 /// The voxel shader unprojects a direction from zero (`pixel_ray`), unlike
 /// mesh projection which accepts geometry relative to any origin. Pair that
-/// eye-relative matrix with the active camera's absolute position. Hosts which
-/// supply an already eye-relative camera without a world origin retain their
-/// explicit planet-space eye.
-fn trace_camera(
-    camera: &helio_core::GpuCameraUniforms,
-    world_origin: Option<DVec3>,
-    planet_eye: DVec3,
-) -> (DVec3, Mat4, Mat4) {
+/// eye-relative matrix with the active camera's absolute position: the
+/// frame's world origin plus the camera's position in the frame.
+fn trace_camera(camera: &helio_core::GpuCameraUniforms, world_origin: DVec3) -> (DVec3, Mat4, Mat4) {
     let at = Vec3::from_slice(&camera.position_near[..3]);
-    let eye = world_origin.map_or(planet_eye, |origin| origin + at.as_dvec3());
+    let eye = world_origin + at.as_dvec3();
     let from_eye = Mat4::from_translation(at);
     (
         eye,
@@ -720,8 +715,12 @@ fn trace_camera(
 }
 
 /// XR frusta are asymmetric: include the offset on each axis so chunks at the
-/// wider edge of either eye are not rejected by the residency cone.
-fn frustum_cos_half(proj: Mat4) -> f64 {
+/// wider edge of either eye are not rejected by the residency cone. The
+/// projection's per-frame jitter (an NDC translation, `jitter`) is not part of
+/// the frustum: it would change the view every frame, and a view that changes
+/// is planned again and never settles.
+fn frustum_cos_half(proj: Mat4, jitter: Vec2) -> f64 {
+    let proj = Mat4::from_translation(-jitter.extend(0.0)) * proj;
     let tan_x = (1.0 + f64::from(proj.z_axis.x).abs()) / f64::from(proj.x_axis.x).abs();
     let tan_y = (1.0 + f64::from(proj.z_axis.y).abs()) / f64::from(proj.y_axis.y).abs();
     (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos()
@@ -737,7 +736,6 @@ mod stereo_tests {
         let old_head = Vec3::new(7.0, 2.0, -3.0);
         // Keep the app's earlier input pose unchanged while rendering newer
         // translated/rotated eyes, as OpenXR's predicted display poses do.
-        let stale_planet_eye = origin + old_head.as_dvec3();
         let landmarks = [
             Vec3::new(8.0, 1.0, -10.0),
             Vec3::new(4.0, 4.0, -12.0),
@@ -764,7 +762,7 @@ mod stereo_tests {
                         [0.0; 2],
                         proj * view,
                     );
-                    let (eye, vp, _) = trace_camera(&camera, Some(origin), stale_planet_eye);
+                    let (eye, vp, _) = trace_camera(&camera, origin);
                     assert!(eye.distance(origin + at.as_dvec3()) < 1e-9);
                     let rays = super::super::ray_plane(vp, [128, 128]);
                     for point in landmarks {
@@ -816,14 +814,12 @@ mod stereo_tests {
             [0.0; 2],
             rebased_previous,
         );
-        let (eye, _, previous) = trace_camera(&camera, Some(origin), origin);
+        let (eye, _, previous) = trace_camera(&camera, origin);
         let landmark = origin + DVec3::new(1.0, 2.0, -8.0);
         let expected = old_vp.project_point3((landmark - old_origin).as_vec3());
         let actual = previous.project_point3((landmark - eye).as_vec3());
         assert!(actual.distance(expected) < 1e-5);
 
-        // Hosts with no origin explicitly supply a high-precision planet eye.
-        assert_eq!(trace_camera(&camera, None, landmark).0, landmark);
     }
 
     #[test]
@@ -833,7 +829,7 @@ mod stereo_tests {
             proj.z_axis.x = offset;
             proj.z_axis.y = 0.2;
             let inverse = proj.inverse();
-            let cos_half = frustum_cos_half(proj);
+            let cos_half = frustum_cos_half(proj, Vec2::ZERO);
             for x in [-1.0, 1.0] {
                 for y in [-1.0, 1.0] {
                     let ray = inverse.project_point3(Vec3::new(x, y, 1.0)).normalize();
@@ -843,6 +839,18 @@ mod stereo_tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn residency_cone_ignores_projection_jitter() {
+        let proj = helio_core::depth::perspective(1.2, 16.0 / 9.0, 0.05);
+        let still = frustum_cos_half(proj, Vec2::ZERO);
+        for frame in 0..8 {
+            let [x, y] = helio_core::temporal::r1_r2_jitter(frame);
+            let jitter = Vec2::new(x * 2.0 / 1600.0, y * 2.0 / 900.0);
+            let jittered = Mat4::from_translation(jitter.extend(0.0)) * proj;
+            assert_eq!(frustum_cos_half(jittered, jitter), still);
         }
     }
 }

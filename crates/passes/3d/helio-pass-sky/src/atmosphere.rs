@@ -44,7 +44,8 @@ use pulsar_scenedb_derive::SceneStore;
 
 use crate::clouds::{
     CloudVolumes, ATMOSPHERE_CLOUDS, ATMOSPHERE_CLOUD_DEPTH, ATMOSPHERE_CLOUD_DETAIL,
-    ATMOSPHERE_CLOUD_SHAPE, ATMOSPHERE_CLOUD_WEATHER, CLOUD_SHADOW_FRAME, CLOUD_SHADOW_MAP,
+    ATMOSPHERE_CLOUD_PLANET_WEATHER, ATMOSPHERE_CLOUD_SHAPE, ATMOSPHERE_CLOUD_WEATHER,
+    CLOUD_SHADOW_FRAME, CLOUD_SHADOW_MAP,
 };
 
 /// Graph key of the per-frame atmosphere buffer (`AtmosphereFrame`).
@@ -56,7 +57,7 @@ pub const ATMOSPHERE_AERIAL: &str = "atmosphere_aerial";
 /// Bytes of `AtmosphereFrame`. The buffer is usable as a uniform as well as
 /// storage: consumers already at the per-stage storage-buffer limit (the
 /// deferred lighting pass) bind it as a uniform.
-pub const ATMOSPHERE_FRAME_BYTES: u64 = 448;
+pub const ATMOSPHERE_FRAME_BYTES: u64 = 528;
 /// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
 /// `atmosphere_common.wgsl`): the sky over a surface anywhere in the air,
 /// by its altitude and sun angle. Usable as a uniform.
@@ -103,7 +104,10 @@ pub mod placement {
 #[repr(C)]
 #[gpu(layout = packed, buffer = "atmospheres")]
 pub struct AtmosphereComponent {
-    /// Planet centre in world metres (with [`placement::CENTER`]).
+    /// Planet centre in world metres (with [`placement::CENTER`]). Planet
+    /// centres are world anchors: unlike the other positions in pass rows,
+    /// which are in the frame's space, the pass rebases them by the frame's
+    /// world origin.
     #[gpu]
     pub center: [f32; 3],
     /// [`placement`].
@@ -151,18 +155,18 @@ pub struct AtmosphereComponent {
     /// Top of the cloud layer above the surface (km).
     #[gpu]
     pub cloud_top: f32,
-    /// Share of the sky the clouds cover: 0 clear, 1 overcast.
+    /// The planet's mean share of sky the clouds cover: 0 clear, 1
+    /// overcast. The weather varies it from region to region.
     #[gpu]
     pub cloud_coverage: f32,
-    /// The clouds' form: 0 flat stratus low in the layer, 1 cumulus
-    /// towering through it.
+    /// The clouds' mean form: 0 flat stratus low in the layer, 1 cumulus
+    /// towering through it. The weather's regimes vary it.
     #[gpu]
     pub cloud_type: f32,
     /// Extinction inside a cloud at full density (per km).
     #[gpu]
     pub cloud_extinction: f32,
-    /// Size of the weather: where clouds gather and where the sky is
-    /// clear (km).
+    /// Size of the finest weather: the groups cumulus gather in (km).
     #[gpu]
     pub cloud_weather_scale: f32,
     /// Size of the clouds' billows (km).
@@ -183,9 +187,52 @@ pub struct AtmosphereComponent {
     /// How far the detail erodes the clouds' edges (0..1).
     #[gpu]
     pub cloud_erosion: f32,
+    /// The planet's axis (world direction) the circulation's latitudes
+    /// are measured from.
+    #[gpu]
+    pub cloud_pole: [f32; 3],
+    /// How strongly the circulation bands the cover by latitude (0..1).
+    #[gpu]
+    pub cloud_circulation: f32,
+    /// Circulation cells from the equator to each pole (Earth's three:
+    /// Hadley, Ferrel, polar).
+    #[gpu]
+    pub cloud_circulation_cells: f32,
+    /// Size of the weather systems: cyclones, fronts and highs (km).
+    #[gpu]
+    pub cloud_synoptic_scale: f32,
+    /// How deep and frequent the cyclones are (0..1).
+    #[gpu]
+    pub cloud_storminess: f32,
+    /// Size of the mesoscale cells and clusters (km).
+    #[gpu]
+    pub cloud_mesoscale_scale: f32,
+    /// How much high cirrus the weather brings (0..1).
+    #[gpu]
+    pub cloud_cirrus: f32,
+    /// Height of the cirrus sheet above the surface (km).
+    #[gpu]
+    pub cloud_cirrus_height: f32,
+    /// How fast the weather evolves: 0 still, 1 real time, more a time
+    /// lapse.
+    #[gpu]
+    pub cloud_evolution: f32,
+    /// Which weather: each seed lays out other systems.
+    #[gpu]
+    pub cloud_seed: u32,
+    /// How the clouds are drawn: 0 smooth volumes, otherwise voxels of this
+    /// side (km), each cell filled or empty ([`CloudRepresentation`]).
+    #[gpu]
+    pub cloud_voxel_size: f32,
+    /// The density (0..1) a voxel cell is filled from.
+    #[gpu]
+    pub cloud_voxel_fill: f32,
+    /// Unused: the row stays a whole number of vec4s.
+    #[gpu]
+    pub cloud_reserved: [f32; 2],
 }
 
-const _: () = assert!(std::mem::size_of::<AtmosphereComponent>() == 176);
+const _: () = assert!(std::mem::size_of::<AtmosphereComponent>() == 240);
 
 impl Default for AtmosphereComponent {
     fn default() -> Self {
@@ -247,6 +294,26 @@ impl AtmosphereComponent {
             wind: self.cloud_wind,
             albedo: self.cloud_albedo,
             erosion: self.cloud_erosion,
+            representation: if self.cloud_voxel_size > 0.0 {
+                CloudRepresentation::Voxels {
+                    cell_m: self.cloud_voxel_size * 1000.0,
+                    fill: self.cloud_voxel_fill,
+                }
+            } else {
+                CloudRepresentation::Volumetric
+            },
+            weather: PlanetWeather {
+                pole: self.cloud_pole,
+                circulation: self.cloud_circulation,
+                circulation_cells: self.cloud_circulation_cells,
+                synoptic_km: self.cloud_synoptic_scale,
+                storminess: self.cloud_storminess,
+                mesoscale_km: self.cloud_mesoscale_scale,
+                cirrus: self.cloud_cirrus,
+                cirrus_km: self.cloud_cirrus_height,
+                evolution: self.cloud_evolution,
+                seed: self.cloud_seed,
+            },
         })
     }
 
@@ -283,20 +350,23 @@ impl AtmosphereComponent {
 
 /// A layer of clouds in the atmosphere (the cloud fields of
 /// [`AtmosphereComponent`]): a band of altitudes over the planet's surface
-/// where clouds form, gathered by the weather, shaped by billows and eroded
-/// into wisps, carried by the wind.
+/// where clouds form, gathered by the weather ([`PlanetWeather`] and the
+/// cumulus groups), shaped by billows and eroded into wisps, carried by the
+/// wind; and a sheet of cirrus above it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CloudLayer {
     /// The band, above the surface (km).
     pub bottom_km: f32,
     pub top_km: f32,
-    /// Share of the sky covered: 0 clear, 1 overcast.
+    /// The planet's mean share of sky covered: 0 clear, 1 overcast. The
+    /// weather varies it from region to region.
     pub coverage: f32,
-    /// Form: 0 stratus, 1 cumulus.
+    /// The mean form: 0 stratus, 1 cumulus. The weather's regimes vary it.
     pub kind: f32,
     /// Extinction inside a cloud at full density (per km).
     pub extinction: f32,
-    /// Sizes of the weather, of the billows and of the wisps (km).
+    /// Sizes of the cumulus groups (the finest weather), of the billows and
+    /// of the wisps (km).
     pub weather_km: f32,
     pub shape_km: f32,
     pub detail_km: f32,
@@ -306,6 +376,105 @@ pub struct CloudLayer {
     pub albedo: [f32; 3],
     /// How far the wisps erode the edges (0..1).
     pub erosion: f32,
+    /// How the clouds are drawn.
+    pub representation: CloudRepresentation,
+    /// The weather's larger scales.
+    pub weather: PlanetWeather,
+}
+
+/// How a [`CloudLayer`]'s clouds are drawn, from the same weather and
+/// density: their trace, shadow, the sun's visibility and the fog's shafts
+/// all read the one density, so every representation shades alike.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CloudRepresentation {
+    /// Smooth volumes: billows eroded into wisps.
+    Volumetric,
+    /// Blocky clouds of cubic cells `cell_m` metres on a side (on a lattice
+    /// fixed to the planet), each filled where the smooth density at its
+    /// centre reaches `fill` (0..1) and empty elsewhere. Cells too small to
+    /// see at a distance blend back into the smooth density's cover.
+    Voxels { cell_m: f32, fill: f32 },
+}
+
+impl Default for CloudRepresentation {
+    fn default() -> Self {
+        Self::Volumetric
+    }
+}
+
+/// The weather's scales larger than the cumulus groups, over the whole
+/// planet (`shaders/cloud_planet_weather.wgsl`): the circulation's bands by
+/// latitude, the synoptic systems (cyclones spiralling the cover with their
+/// fronts, highs clearing it), regimes from stratocumulus decks to open
+/// cumulus cells, the mesoscale's cells, and cirrus. A flat world lies at
+/// one place of its planet (the ground at the origin), under that place's
+/// weather. Planets too small to hold a few systems have none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanetWeather {
+    /// The planet's axis (world direction): the latitudes the circulation
+    /// bands. Earth's default tilts it 45 degrees from world up, so a flat
+    /// world and the top of a planet at the origin lie at mid-latitudes.
+    pub pole: [f32; 3],
+    /// How strongly the circulation bands the cover by latitude (0..1).
+    pub circulation: f32,
+    /// Circulation cells from the equator to each pole (Earth's three).
+    pub circulation_cells: f32,
+    /// Size of the synoptic systems (km).
+    pub synoptic_km: f32,
+    /// How deep and frequent the cyclones are (0..1).
+    pub storminess: f32,
+    /// Size of the mesoscale cells (km).
+    pub mesoscale_km: f32,
+    /// How much cirrus the weather brings (0..1), and the height of their
+    /// sheet above the surface (km).
+    pub cirrus: f32,
+    pub cirrus_km: f32,
+    /// How fast the weather evolves: 0 still, 1 real time (systems living a
+    /// few days, drifting with the westerlies and the trades), more a time
+    /// lapse.
+    pub evolution: f32,
+    /// Which weather: each seed lays out other systems.
+    pub seed: u32,
+}
+
+impl Default for PlanetWeather {
+    fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl PlanetWeather {
+    /// Earth's: three cells a hemisphere, systems 1500 km across, mesoscale
+    /// cells of tens of kilometres, cirrus at 9 km; still.
+    pub fn earth() -> Self {
+        Self {
+            pole: [
+                0.0,
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ],
+            circulation: 1.0,
+            circulation_cells: 3.0,
+            synoptic_km: 1500.0,
+            storminess: 0.6,
+            mesoscale_km: 80.0,
+            cirrus: 0.5,
+            cirrus_km: 9.0,
+            evolution: 0.0,
+            seed: 0,
+        }
+    }
+
+    /// No weather systems or bands: the layer's coverage everywhere, its
+    /// cells and groups alone; no cirrus.
+    pub fn calm() -> Self {
+        Self {
+            circulation: 0.0,
+            storminess: 0.0,
+            cirrus: 0.0,
+            ..Self::earth()
+        }
+    }
 }
 
 impl Default for CloudLayer {
@@ -329,6 +498,8 @@ impl CloudLayer {
             wind: [8.0, 0.0, 3.0],
             albedo: [0.99; 3],
             erosion: 0.45,
+            representation: CloudRepresentation::Volumetric,
+            weather: PlanetWeather::earth(),
         }
     }
 
@@ -357,6 +528,23 @@ impl CloudLayer {
         row.clouds_enabled = 1;
         row.cloud_albedo = self.albedo.map(|a| a.clamp(0.0, 1.0));
         row.cloud_erosion = self.erosion.clamp(0.0, 1.0);
+        let w = &self.weather;
+        row.cloud_pole = w.pole;
+        row.cloud_circulation = w.circulation.clamp(0.0, 1.0);
+        row.cloud_circulation_cells = w.circulation_cells.round().max(1.0);
+        row.cloud_synoptic_scale = w.synoptic_km.max(1.0);
+        row.cloud_storminess = w.storminess.clamp(0.0, 1.0);
+        row.cloud_mesoscale_scale = w.mesoscale_km.max(0.01);
+        row.cloud_cirrus = w.cirrus.clamp(0.0, 1.0);
+        row.cloud_cirrus_height = w.cirrus_km.max(row.cloud_top + 0.1);
+        row.cloud_evolution = w.evolution.max(0.0);
+        row.cloud_seed = w.seed;
+        (row.cloud_voxel_size, row.cloud_voxel_fill) = match self.representation {
+            CloudRepresentation::Volumetric => (0.0, 0.5),
+            CloudRepresentation::Voxels { cell_m, fill } => {
+                ((cell_m * 0.001).max(1e-4), fill.clamp(0.0, 1.0))
+            }
+        };
     }
 }
 
@@ -755,6 +943,7 @@ impl RenderPass for AtmospherePass {
             ATMOSPHERE_AERIAL,
             CLOUD_SHADOW_MAP,
             CLOUD_SHADOW_FRAME,
+            ATMOSPHERE_CLOUD_PLANET_WEATHER,
             ATMOSPHERE_CLOUD_WEATHER,
             ATMOSPHERE_CLOUD_SHAPE,
             ATMOSPHERE_CLOUD_DETAIL,
@@ -782,11 +971,17 @@ impl RenderPass for AtmospherePass {
             ctx.write_buffer(&self.frame, 0, &[0u8; 16]);
             ctx.write_buffer(self.clouds.shadow_frame(), 0, &[0u8; 16]);
         }
-        if !active {
+        if active {
+            self.clouds.prepare(
+                ctx,
+                rows.map(|handle| (handle.epoch, handle.content_generation)),
+            );
+        } else {
             self.params_tables = None;
+            self.clouds.forget_weather();
         }
         self.active = active;
-        let origin = ctx.world_origin.unwrap_or_default();
+        let origin = ctx.world_origin;
         let hi = origin.as_vec3();
         let lo = (origin - hi.as_dvec3()).as_vec3();
         let uniform = ResolveUniform {

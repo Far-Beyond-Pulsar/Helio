@@ -894,7 +894,7 @@ impl RenderPass for CoronaPass {
             });
         self.max_particles = DEFAULT_MAX_PARTICLES;
 
-        let origin = ctx.world_origin.unwrap_or(glam::DVec3::ZERO);
+        let origin = ctx.world_origin;
         self.pending_shift += origin - self.particles_origin;
         self.particles_origin = origin;
 
