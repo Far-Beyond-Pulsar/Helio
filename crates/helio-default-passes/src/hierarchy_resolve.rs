@@ -19,20 +19,18 @@
 //!
 //! # Precision
 //!
-//! World rows are published **relative to the frame's world origin** (the same
-//! hi/lo pair the joins use): positions are f32 pairs (the frontend's f64),
-//! chains compose in pair arithmetic and the origin comes off pair-wise last,
-//! so an object far from the origin keeps its millimetres whichever of its
-//! ancestors are far. The
-//! derivation says so by publishing [`TRANSFORMS_ORIGIN_RELATIVE_KEY`], which
-//! makes the joins skip their own origin subtraction. Placement rows inside a
-//! frame are relative to the frame and small; the frame's own (f64) position
-//! is the coordinate-space table's business.
+//! World rows stay **world positions as f32 pairs**, like the frontend's rows
+//! they replace (the frontend's f64): chains compose in pair arithmetic, so an
+//! object far from the world's origin keeps its millimetres whichever of its
+//! ancestors are far, and every consumer reads the rows as it reads a flat
+//! scene's (the joins take the frame origin off pair-wise). Placement rows
+//! inside a frame are relative to the frame and small; the frame's own (f64)
+//! position is the coordinate-space table's business.
 //!
 //! # Cost
 //!
 //! Moving a parent is one row write. The first resolve (and any resolve after
-//! a reallocation, a gap in SceneDB's flush records or an origin change)
+//! a reallocation or a gap in SceneDB's flush records)
 //! recomposes every row. Otherwise only rows whose own transform or any
 //! ancestor's changed are recomposed: SceneDB's flushed-row records of the
 //! transform, parent and frame columns seed a changed set, and each row looks
@@ -54,7 +52,7 @@ pub use helio_core::{
 };
 
 use crate::scene_join::{
-    join_source, origin_bits, origin_pair, TRANSFORMS_ORIGIN_RELATIVE_KEY, TRANSFORM_ROW_BYTES,
+    join_source, TRANSFORM_ROW_BYTES,
 };
 
 /// An object's parent: its entity index plus one, `0` for none (`u32`).
@@ -94,8 +92,6 @@ struct Uniforms {
     /// 1.0 (the shader's guard against reassociated floats).
     one: f32,
     _pad: [u32; 2],
-    origin_hi: [f32; 4],
-    origin_lo: [f32; 4],
 }
 
 /// How one column's flush record relates to the last one this resolve saw.
@@ -126,7 +122,6 @@ struct Seen {
     transforms_size: u64,
     parents_size: u64,
     frames_size: u64,
-    origin: [u64; 3],
 }
 
 /// See the module doc.
@@ -145,7 +140,6 @@ pub struct HierarchyResolve {
     /// Bound as the flushed list where a dispatch does not read one, and as
     /// the frame column when the frontend has none.
     empty: wgpu::Buffer,
-    marker: wgpu::Buffer,
     rows: u32,
     epoch: u64,
     content_generation: u64,
@@ -267,7 +261,6 @@ impl HierarchyResolve {
                     | wgpu::BufferUsages::COPY_SRC,
             ),
             empty: buffer(device, "Hierarchy Resolve Empty", 16, wgpu::BufferUsages::STORAGE),
-            marker: buffer(device, "Hierarchy Resolve Marker", 16, wgpu::BufferUsages::STORAGE),
             rows: 1,
             epoch: 0,
             content_generation: 0,
@@ -384,7 +377,6 @@ impl SceneDerivation for HierarchyResolve {
             reallocated = true;
         }
 
-        let origin = origin_bits(ctx.world_origin);
         let seen = Seen {
             rows,
             transforms_epoch: transforms.epoch,
@@ -393,7 +385,6 @@ impl SceneDerivation for HierarchyResolve {
             transforms_size: transforms.buffer.size(),
             parents_size: parents.buffer.size(),
             frames_size: frames.map_or(0, |f| f.buffer.size()),
-            origin,
         };
         let transforms_now = ctx.inputs.flushed_rows(self.keys.transforms).cloned();
         let parents_now = ctx.inputs.flushed_rows(self.keys.parents).cloned();
@@ -435,7 +426,6 @@ impl SceneDerivation for HierarchyResolve {
         let mut output = SceneDerivationOutput::default();
         if full || !lists.is_empty() {
             helio_core::cpu_scope!("HierarchyResolve");
-            let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
             ctx.queue.write_buffer(
                 &self.uniforms,
                 0,
@@ -443,8 +433,6 @@ impl SceneDerivation for HierarchyResolve {
                     rows,
                     one: 1.0,
                     _pad: [0; 2],
-                    origin_hi,
-                    origin_lo,
                 }),
             );
             // The moved list starts empty either way: a full resolve moves
@@ -512,15 +500,6 @@ impl SceneDerivation for HierarchyResolve {
         output.buffers.push((
             OBJECT_SPACE_KEY,
             self.handle(&self.spaces, 4, self.spaces_generation),
-        ));
-        output.buffers.push((
-            TRANSFORMS_ORIGIN_RELATIVE_KEY,
-            BufferHandle {
-                buffer: self.marker.clone(),
-                epoch: 0,
-                row_bytes: 0,
-                content_generation: 1,
-            },
         ));
         // Say which placements moved, so a consumer follows the changes
         // instead of redoing every row. After a full resolve the list is empty

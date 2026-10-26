@@ -12,6 +12,10 @@ use crate::input::Controls;
 use crate::world::World;
 use glam::DVec3;
 
+/// How far around its feet the player's body needs the world resident to
+/// move: its height, a step and a frame's fall.
+const BODY_REACH_M: f64 = 3.0;
+
 pub struct Player {
     /// The soles of the feet, planet-centred.
     pub position: DVec3,
@@ -94,6 +98,12 @@ impl Player {
         self.heading = rotate(frame.forward, frame.up, yaw);
         self.pitch = (self.pitch - controls.look.1 * sensitivity).clamp(-1.52, 1.52);
         let frame = self.frame();
+        // The body waits while the space it moves in streams in (a spawn, a
+        // teleport): it is not moved against space not resident yet.
+        if !world.loaded_around(self.position, BODY_REACH_M) {
+            self.velocity = DVec3::ZERO;
+            return;
+        }
 
         // Double-tapping jump toggles flight, as in the original.
         self.jump_tap += dt;
@@ -214,6 +224,8 @@ mod tests {
             }
         }
         world.edit(&edits);
+        world.follow(plate);
+        world.settle();
         let mut player = Player::new(plate + frame.up * 1.0);
         let controls = Controls::default();
         let mut rest = Vec::new();

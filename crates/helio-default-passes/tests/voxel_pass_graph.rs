@@ -92,14 +92,12 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         });
         let view = target.create_view(&Default::default());
 
-        // The camera sits at the world origin, which the renderer places at
-        // the planet eye.
+        // The camera at the planet eye; the frame's origin follows it.
         let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
         let eye = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 1.7);
         let up = eye.normalize().as_vec3();
         let forward = (up.any_orthonormal_vector() - up * 0.2).normalize();
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 640.0 / 360.0, 0.05, 40_000_000.0);
-        renderer.set_world_origin(Some(eye));
+        let camera = Camera::perspective_look_to(eye, forward, up, std::f32::consts::FRAC_PI_4, 640.0 / 360.0, 0.05, 40_000_000.0);
 
         // Without a planet frame the pass is inert.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -366,9 +364,8 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     for step in 0..120 {
         let eye = ground + up * (0.02 + 0.004 * f64::from(step % 10));
         editor.source.lock().unwrap().as_mut().unwrap().eye = eye;
-        editor.renderer.set_world_origin(Some(eye));
         let camera =
-            Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+            Camera::perspective_look_to(eye, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
         editor.render(&camera);
         if step % 20 == 19 {
             let (axis, _) = editor.overlay_fractions();
@@ -377,10 +374,9 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     }
     assert!(pollster::block_on(validation.pop()).is_none());
 
-    // World-space frames still show the grid: above an empty scene, looking
+    // Near the world's origin the grid shows: above an empty scene, looking
     // down at the origin, the lines and both axes appear.
     *editor.source.lock().unwrap() = None;
-    editor.renderer.set_world_origin(None);
     let eye = Vec3::new(3.0, 6.0, 3.0);
     let camera = Camera::perspective_look_at(eye, Vec3::ZERO, Vec3::Y, std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1, 1000.0);
     for _ in 0..4 {
@@ -414,7 +410,7 @@ fn capture(editor: &Editor, name: &str, pixels: &[[u8; 4]]) {
 
 /// The same local camera and sun at two poles must see the same sky, and a
 /// resize must not reset it. The atmosphere is a scene row; the sun is the
-/// scene's directional light; the world origin is the eye.
+/// scene's directional light; the frame's origin follows the eye.
 #[test]
 fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
     let Some(mut editor) = editor(256, 144) else { return };
@@ -428,8 +424,7 @@ fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
     let mut means = Vec::new();
     for (eye, forward, up, sun) in cases {
         editor.set_sky(sun.normalize(), Some(earth_air()));
-        editor.renderer.set_world_origin(Some(eye));
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
+        let camera = Camera::perspective_look_to(eye, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
         for _ in 0..8 { editor.render(&camera); }
         let pixels = editor.rgba();
         capture(&editor, if up == Vec3::Y { "rotated_y" } else { "rotated_x" }, &pixels);
@@ -446,7 +441,8 @@ fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[],
     });
-    let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(0.8,-0.6,0.0), Vec3::X, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
+    let (eye, forward, up, _) = cases[1];
+    let camera = Camera::perspective_look_to(eye, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
     for _ in 0..8 { editor.render(&camera); }
     let mean = mean_rgb(&editor.rgba());
     for c in 0..3 { assert!((mean[c] - means[1][c]).abs() < 6.0, "sky reset during resize: {mean:?} vs {:?}", means[1]); }
@@ -476,8 +472,7 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
         let outer_angle = ((radius + AIR_THICKNESS) / distance).asin();
         let half_fov_tan = outer_angle.tan() * 1.25;
         editor.set_sky(up, Some(earth_air()));
-        editor.renderer.set_world_origin(Some(eye));
-        let camera = Camera::perspective_look_at(Vec3::ZERO, -up, up.any_orthonormal_vector(),
+        let camera = Camera::perspective_look_to(eye, -up, up.any_orthonormal_vector(),
             (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 400_000_000.0);
         for _ in 0..4 { editor.render(&camera); }
         let pixels = editor.rgba();
@@ -528,8 +523,7 @@ fn terminator_is_smooth_and_the_night_side_is_dark() {
     let radius = EARTH_RADIUS;
     let distance = radius * 1.5;
     let half_fov_tan = (((radius + AIR_THICKNESS) / distance).asin()).tan() * 1.25;
-    editor.renderer.set_world_origin(Some(glam::DVec3::Y * distance));
-    let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
+    let camera = Camera::perspective_look_to(glam::DVec3::Y * distance, -Vec3::Y, Vec3::Z,
         (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 40_000_000.0);
     let mut means = Vec::new();
     for (case, elevation) in [("twilight_before", -0.005), ("twilight", 0.0), ("twilight_after", 0.005)] {
@@ -616,8 +610,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
     }).unwrap());
     let eye = glam::DVec3::Y * 20.0;
     *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, picks: None, kept: None, export: None });
-    editor.renderer.set_world_origin(Some(eye));
-    let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
+    let camera = Camera::perspective_look_to(eye, -Vec3::Y, Vec3::Z,
         std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 1000.0);
     let started = std::time::Instant::now();
     let mut frames = 0;
@@ -678,9 +671,8 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
     for height in [2.0, 25.0, 300.0, 20_000.0] {
         let eye = planet.surface_point(dir, height);
         *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, picks: None, kept: None, export: None });
-        editor.renderer.set_world_origin(Some(eye));
         let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+        let camera = Camera::perspective_look_to(eye, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
         let started = std::time::Instant::now();
         loop {
             editor.render(&camera);
@@ -729,9 +721,8 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     }
     let planet = Arc::new(planet);
     let eye = ground + up * 6.0;
-    editor.renderer.set_world_origin(Some(eye));
     let forward = (fwd - up * 0.3).normalize().as_vec3();
-    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+    let camera = Camera::perspective_look_to(eye, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
     let frame = |planet: &Arc<Planet>, kept: Option<Arc<KeptChunks>>, export| {
         Some(PlanetFrame { eye, planet: planet.clone(), sun: up.as_vec3(), picks: None, kept, export })
     };

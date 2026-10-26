@@ -10,4 +10,5 @@ bytemuck = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+glam = { workspace = true }
 pollster = { workspace = true }

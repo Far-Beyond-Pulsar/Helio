@@ -197,11 +197,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 (2.0, 0, 0.0, 1.0 / 60.0, 0, 0),
                 (10.0, 1, 0.0, 1.0 / 60.0, 0, 0),
                 // Changed active views must reset even with matching geometry.
-                // Mode-switch depths match the stale, unrebased view, so a
-                // failure to reset cannot hide behind depth rejection.
                 (10.0, 0, 0.0, 1.0 / 60.0, 0, 0), // changed active view ID
-                (12.5, 0, 0.0, 1.0 / 60.0, 0, 0), // Some origin -> None
-                (12.5, 0, 0.0, 1.0 / 60.0, 0, 0), // None -> Some origin
                 (10.0, 0, 0.0, 1.0 / 60.0, 0, 0), // rotated positive-pole origin, nonzero local eye
                 (2.0, 0, 0.0, 1.0 / 60.0, 0, 0),
                 (10.0, 1, 0.0, 1.0 / 60.0, 0, 0),
@@ -281,9 +277,9 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 } else {
                     [0.0625, 0.0, 2.5]
                 };
-                let sign = if (18..=20).contains(&case) { -1.0 } else { 1.0 };
+                let sign = if (16..=18).contains(&case) { -1.0 } else { 1.0 };
                 let origin: [f64; 3] = [0.25, sign * 6_371_000.125, 0.375];
-                let world_delta = if case >= 12 {
+                let world_delta = if case >= 10 {
                     [delta[0], sign * delta[2], -sign * delta[1]]
                 } else {
                     delta
@@ -298,7 +294,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 previous.inv_view_proj = identity;
                 previous.inv_view_proj[10] = -100.0;
                 previous.prev_view_proj = previous.proj;
-                if case >= 12 {
+                if case >= 10 {
                     // Looking towards the centre from either pole: worldY
                     // maps to signed viewZ. A nonzero local eye tests translation
                     // in addition to the orientation of the origin correction.
@@ -366,11 +362,6 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 pass.set_reactivity(reactivity);
                 let scene_buffers = helio_core::SceneBufferProjection::empty();
                 let registry = helio_core::ResourceRegistry::empty();
-                let previous_origin = if case == 11 {
-                    None
-                } else {
-                    Some(origin.into())
-                };
                 pass.prepare(&PrepareContext {
                     device: &device,
                     queue: &queue,
@@ -386,7 +377,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     delta_time: time_delta,
                     time: 0.0,
                     time_delta: 0.0,
-                    world_origin: previous_origin,
+                    world_origin: origin.into(),
                     owns_device: true,
                 })
                 .unwrap();
@@ -400,11 +391,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 if flags & 1 != 0 {
                     pass.reset_history();
                 }
-                let next_origin = if case == 10 {
-                    None
-                } else {
-                    Some(current_origin.into())
-                };
+                let next_origin: glam::DVec3 = current_origin.into();
                 pass.prepare(&PrepareContext {
                     device: &device,
                     queue: &queue,
@@ -424,7 +411,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     owns_device: true,
                 })
                 .unwrap();
-                let successive = (15..=17).contains(&case);
+                let successive = (13..=15).contains(&case);
                 if successive {
                     // History now belongs to the middle camera, independently
                     // supplied at12.5m. Reapplying both earlier origin shifts
@@ -449,12 +436,12 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         delta_time: time_delta,
                         time: 0.0,
                         time_delta: 0.0,
-                        world_origin: Some(final_origin.into()),
+                        world_origin: final_origin.into(),
                         owns_device: true,
                     })
                     .unwrap();
                 }
-                if case == 21 {
+                if case == 19 {
                     pass.on_resize(&device, 64, 8);
                     bind = create_bind(&pass);
                     probe_bind = create_probe_bind(&pass);
@@ -533,7 +520,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
             read.unmap();
         }
         if translated_origin {
-            for index in [1, 3, 4, 5, 9, 10, 11, 13, 14, 19, 20, 21] {
+            for index in [1, 3, 4, 5, 9, 11, 12, 17, 18, 19] {
                 assert_eq!(
                     &results[index][..3],
                     &results[2][..3],
@@ -545,19 +532,19 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 &results[8][..3],
                 "reverse-motion wrong depth must reject history"
             );
-            for (accepted, reset) in [(0, 2), (6, 8), (12, 14), (15, 17), (18, 20)] {
+            for (accepted, reset) in [(0, 2), (6, 8), (10, 12), (13, 15), (16, 18)] {
                 assert!((results[accepted][0]-results[reset][0]).abs()>0.0001,
                     "actual prepare discarded a correct translated-origin history sample: case{accepted}, {results:?}");
             }
             assert_eq!(
-                &results[16][..3],
-                &results[17][..3],
+                &results[14][..3],
+                &results[15][..3],
                 "successive-shift wrong history depth must reject"
             );
             for (index, result) in results.iter().enumerate() {
                 let current_depth = if (6..=8).contains(&index) {
                     7.5
-                } else if (15..=17).contains(&index) {
+                } else if (13..=15).contains(&index) {
                     15.0
                 } else {
                     12.5
@@ -565,7 +552,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 assert!((result[4]-current_depth).abs()<0.00001,
                     "origin translation changed actual current view depth at case{index}:{result:?}");
             }
-            eprintln!("TSR translated-origin actual prepare: both motion directions and rotated pole origins retain correct10m history; successive shifts retain12.5m history; wrong depth, cuts, coverage, view/mode switches and resize reject");
+            eprintln!("TSR translated-origin actual prepare: both motion directions and rotated pole origins retain correct10m history; successive shifts retain12.5m history; wrong depth, cuts, coverage, view switches and resize reject");
         } else {
             assert_eq!(
                 results[1], results[2],

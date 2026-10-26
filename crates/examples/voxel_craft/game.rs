@@ -76,6 +76,9 @@ impl Game {
         let e1 = up.any_orthonormal_vector();
         let e2 = up.cross(e1);
         let world = World::new(planet);
+        // The world around the spawn, before the first step.
+        world.follow(spawn);
+        world.settle();
         let mut player = Player::new(spawn);
         player.heading = e2;
         let tour = std::env::var("VOXEL_CRAFT_SHOTS").ok().map(Tour::new);
@@ -158,6 +161,7 @@ impl Game {
 
         let controls = self.input.controls();
         self.world.update();
+        self.world.follow(self.player.position);
         self.player.update(&self.world, &controls, dt);
         self.interaction.update(&mut self.player, &mut self.world, &controls, dt);
 
@@ -185,7 +189,8 @@ impl Game {
                 }
             }
         }
-        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, self.gfx.settled(), &mut self.quit));
+        let settled = self.gfx.settled() && self.world.loaded();
+        let shot = self.tour.as_mut().and_then(|t| t.step(&mut self.player, &mut self.world, settled, &mut self.quit));
         let (eye, look) = self.player.camera(&self.world);
         let outline = self.interaction.outline(&self.world);
         let view = View {
@@ -321,11 +326,12 @@ impl Tour {
             let (f, r, u) = (frame.forward, frame.right, frame.up);
             flight.start = player.position + u * 1.0;
             flight.along = r;
-            // The ground under a point, and blocks stacked on it.
+            // The ground under a point (past the resident world: the
+            // snapshot's, once), and blocks stacked on it.
             let mut edits = Vec::new();
             for (ahead, side, height) in [(7.0, -1.0, 3), (7.0, 5.0, 2), (12.0, 9.0, 1)] {
                 let above = flight.start + f * ahead + r * side + u * 6.0;
-                if let Some(hit) = world.raycast(above, -u, 30.0) {
+                if let Some(hit) = world.planet().raycast(above, -u, 30.0) {
                     let base = world.cell_centre(hit.previous);
                     for k in 0..height {
                         edits.push(Edit::Build(world.cell_at(base + u * (BLOCK_M * f64::from(k))), Block::Glowstone));
@@ -428,15 +434,18 @@ impl Tour {
     }
 }
 
-/// The nearest wood block within `reach` blocks of `from`, as (cell, block).
+/// The nearest wood block within `reach` blocks of `from`, as (cell, block):
+/// a search past the resident world, of the snapshot.
 fn nearest_wood(world: &World, from: Cell, reach: i32) -> Option<(Cell, Block)> {
     let logs = [Block::OakLog, Block::BirchLog, Block::SpruceLog, Block::JungleLog];
+    let planet = world.planet();
     let mut best: Option<(i32, Cell, Block)> = None;
     for di in -reach..=reach {
         for dj in -reach..=reach {
             for dk in 0..16 {
                 let cell = Cell::new(from.face, from.i + di, from.j + dj, from.k + dk);
-                if let Some(block) = world.block_at(cell).filter(|b| logs.contains(b)) {
+                let block = planet.solid(cell).then(|| Block::from_material(planet.material(cell))).flatten();
+                if let Some(block) = block.filter(|b| logs.contains(b)) {
                     let d = di * di + dj * dj + dk * dk;
                     if best.is_none_or(|(bd, _, _)| d < bd) {
                         best = Some((d, cell, block));
@@ -460,6 +469,9 @@ mod tests {
         let planet = Planet::new(terrain::recipe::recipe()).unwrap();
         let spawn = find_spawn(&planet);
         let world = World::new(planet);
+        // The world around the spawn, before the first step.
+        world.follow(spawn);
+        world.settle();
         let mut player = Player::new(spawn);
         let controls = crate::input::Controls::default();
         let mut rest = Vec::new();

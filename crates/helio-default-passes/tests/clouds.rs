@@ -352,8 +352,8 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     view.capture("shadow_sky_cloudy", &cloudy_sky);
     let (mut darkening, mut cover, mut cover_above) = (Vec::new(), Vec::new(), Vec::new());
     let n = SIZE as usize;
-    let down_inverse = (down.proj * down.view).inverse();
-    let up_projection = up.proj * up.view;
+    let down_inverse = down.view_proj_in(glam::DVec3::ZERO).inverse();
+    let up_projection = up.view_proj_in(glam::DVec3::ZERO);
     let clouds_middle = 3750.0;
     for y in 0..n {
         for x in 0..n {
@@ -425,8 +425,7 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
     };
     let altitude = 400_000.0;
     let eye = below + up * altitude;
-    view.renderer.set_world_origin(Some(eye));
-    let camera = Camera::perspective_look_at(Vec3::ZERO, -up.as_vec3(), up.any_orthonormal_vector().as_vec3(),
+    let camera = Camera::perspective_look_to(eye, -up.as_vec3(), up.any_orthonormal_vector().as_vec3(),
         // About 14 km of ground.
         2.0 * (7000.0 / altitude as f32).atan(), 1.0, 1.0, 1.0e9);
     let source = view.ground.clone().unwrap();

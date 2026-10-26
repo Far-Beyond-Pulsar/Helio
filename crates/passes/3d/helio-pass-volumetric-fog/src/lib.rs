@@ -116,10 +116,19 @@ struct FogGlobals {
     delta_time: f32,
     grid: [u32; 3],
     enabled: u32,
-    /// The frame's world origin (camera-relative frames): media are authored
-    /// in world space, samples are taken in the frame's coordinates.
-    world_origin: [f32; 4],
+    /// The frame's world origin as an f32 pair (hi, lo): samples and volume
+    /// bounds are in the frame's space; planet centres (world anchors) are
+    /// rebased by it and heights along world Y add it back.
+    origin_hi: [f32; 4],
+    origin_lo: [f32; 4],
+    /// The world origin modulo [`SMOKE_PERIOD`], which anchors smoke noise to
+    /// the world.
+    noise_phase: [f32; 4],
 }
+
+/// Smoke noise repeats every this many metres of world position, so the frame
+/// origin's phase in it is exact in f32 however far the origin is.
+const SMOKE_PERIOD: f64 = 4096.0;
 
 /// Bytes of the pass's globals uniform (binding 2), for callers that bind
 /// the fog shader directly.
@@ -833,6 +842,7 @@ impl RenderPass for VolumetricFogPass {
             });
         self.previous_camera = Some(*ctx.camera_data);
 
+        let origin_hi = ctx.world_origin.as_vec3();
         let globals = FogGlobals {
             csm_splits: helio_pass_shadow_matrix::CSM_SPLITS,
             _reserved: 0,
@@ -844,7 +854,9 @@ impl RenderPass for VolumetricFogPass {
             delta_time: ctx.delta_time.clamp(0.0, 0.25),
             grid: self.grid,
             enabled: self.active as u32,
-            world_origin: ctx.world_origin.map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
+            origin_hi: origin_hi.extend(0.0).to_array(),
+            origin_lo: (ctx.world_origin - origin_hi.as_dvec3()).as_vec3().extend(0.0).to_array(),
+            noise_phase: ctx.world_origin.map(|x| x.rem_euclid(SMOKE_PERIOD)).as_vec3().extend(0.0).to_array(),
         };
         ctx.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));

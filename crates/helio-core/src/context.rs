@@ -766,10 +766,10 @@ pub struct PrepareContext<'a> {
     /// host's clock is paused or frozen).
     pub time_delta: f32,
 
-    /// World position of the frame's coordinate origin for camera-relative
-    /// frames (`SceneInput::world_origin`). Passes that consume world-space
-    /// data (SceneDB rows in world coordinates) subtract it.
-    pub world_origin: Option<glam::DVec3>,
+    /// World position of the frame's coordinate origin
+    /// (`SceneInput::world_origin`). Every frame is camera-relative: frame
+    /// coordinates are world positions minus this, in double precision.
+    pub world_origin: glam::DVec3,
 
     /// When `false`, Helio does not own the wgpu device: the host shares it
     /// (and submits to it every frame), so passes must not `device.poll` it.

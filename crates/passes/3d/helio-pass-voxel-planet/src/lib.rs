@@ -28,6 +28,7 @@ pub mod landform;
 pub mod layers;
 pub mod noise;
 pub mod planet;
+pub mod queries;
 mod ridge_envelope;
 pub mod terrain;
 #[cfg(feature = "engine")]
@@ -39,5 +40,5 @@ pub mod meadow;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};
-pub use planet::{Matter, Planet, PlanetRecipe, RayHit};
+pub use planet::{BrickCell, Matter, Planet, PlanetRecipe, RayHit, Walked};
 pub use terrain::{GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, TerrainSource};

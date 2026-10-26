@@ -2150,6 +2150,7 @@ name = "helio-pass-radiance-cascades-2d"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "log",
  "pollster 0.4.0",
@@ -2486,6 +2487,7 @@ name = "helio-pass-water-sim"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
  "helio-pass-hiz",
  "pollster 0.4.0",

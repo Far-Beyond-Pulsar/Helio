@@ -184,7 +184,7 @@ fn derive(
 ) -> (Vec<GpuVgInstance>, Vec<u32>, bool) {
     let mut encoder = device.create_command_encoder(&Default::default());
     let output = derivation.derive(
-        &SceneDerivationContext { device, queue, inputs: projection, world_origin: None },
+        &SceneDerivationContext { device, queue, inputs: projection, world_origin: glam::DVec3::ZERO },
         &mut encoder,
     );
     queue.submit([encoder.finish()]);

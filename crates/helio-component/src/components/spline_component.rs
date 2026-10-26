@@ -461,7 +461,7 @@ const TANGENT_COLOR: [f32; 4] = [0.35, 0.85, 1.0, 0.8];
 /// Every visible spline in `world` as world-space debug lines for the
 /// editor overlay: the sampled curve, plus control points, control polygon
 /// and tangent handles on selected splines.
-pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVertex> {
+pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::WorldVertex> {
     let mut lines = Vec::new();
     for (_, owner, spline) in
         pulsar_scene_model::attachments::enabled_components::<SplineComponent>(world)
@@ -479,7 +479,7 @@ fn owner_view(
     world: &pulsar_scenedb::World,
     owner: pulsar_scenedb::Entity,
     spline: &SplineComponent,
-) -> Option<(glam::Mat4, bool)> {
+) -> Option<(glam::DMat4, bool)> {
     if world
         .get::<pulsar_scene_model::Visibility>(owner)
         .is_some_and(|v| !v.visible)
@@ -487,9 +487,10 @@ fn owner_view(
     {
         return None;
     }
-    // The spline's owner placed in the world, under any parents.
-    // Lines draw in world space (f32).
-    let model = pulsar_scene_model::hierarchy_transform::world_matrix_of(world, owner)?.as_mat4();
+    // The spline's owner placed in the world, under any parents. Lines are
+    // world positions in f64 (the overlay draws them relative to the frame's
+    // origin, exact on a planet).
+    let model = pulsar_scene_model::hierarchy_transform::world_matrix_of(world, owner)?;
     let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
     Some((model, selected))
 }
@@ -500,7 +501,7 @@ struct CachedSpline {
     /// The curve sampled in local space; `None` once its points changed.
     samples: Option<Vec<[f32; 3]>>,
     /// Its world-space lines; `None` once it or its owner changed.
-    lines: Option<Vec<helio::DebugVertex>>,
+    lines: Option<Vec<helio::WorldVertex>>,
 }
 
 /// The editor's spline lines, rebuilt only when what they show changed.
@@ -541,7 +542,7 @@ impl SplineLines {
     }
 
     /// The lines to draw, when they changed since the last poll.
-    pub fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::DebugVertex>> {
+    pub fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::WorldVertex>> {
         if world.revision() < self.revision {
             *self = Self::new(world);
         }
@@ -627,9 +628,9 @@ impl SplineLines {
 }
 
 fn append_spline_lines(
-    lines: &mut Vec<helio::DebugVertex>,
+    lines: &mut Vec<helio::WorldVertex>,
     spline: &SplineComponent,
-    model: glam::Mat4,
+    model: glam::DMat4,
     selected: bool,
 ) {
     append_sampled_lines(lines, spline, &spline.samples(), model, selected);
@@ -637,20 +638,17 @@ fn append_spline_lines(
 
 /// `spline`'s lines, from its local-space `samples`.
 fn append_sampled_lines(
-    lines: &mut Vec<helio::DebugVertex>,
+    lines: &mut Vec<helio::WorldVertex>,
     spline: &SplineComponent,
     samples: &[[f32; 3]],
-    model: glam::Mat4,
+    model: glam::DMat4,
     selected: bool,
 ) {
-    let world_point = |p: [f32; 3]| model.transform_point3(Vec3::from_array(p));
-    let mut segment = |a: Vec3, b: Vec3, color: [f32; 4]| {
+    use glam::DVec3;
+    let world_point = |p: [f32; 3]| model.transform_point3(Vec3::from_array(p).as_dvec3());
+    let mut segment = |a: DVec3, b: DVec3, color: [f32; 4]| {
         for position in [a, b] {
-            lines.push(helio::DebugVertex {
-                position: position.to_array(),
-                _pad: 0.0,
-                color,
-            });
+            lines.push(helio::WorldVertex { position, color });
         }
     };
     let curve_color = if selected {
@@ -658,14 +656,14 @@ fn append_sampled_lines(
     } else {
         CURVE_COLOR
     };
-    let samples: Vec<Vec3> = samples.iter().copied().map(world_point).collect();
+    let samples: Vec<DVec3> = samples.iter().copied().map(world_point).collect();
     for pair in samples.windows(2) {
         segment(pair[0], pair[1], curve_color);
     }
     if !selected {
         return;
     }
-    let controls: Vec<Vec3> = spline
+    let controls: Vec<DVec3> = spline
         .points
         .iter()
         .map(|p| world_point(p.position))
@@ -683,13 +681,13 @@ fn append_sampled_lines(
     // Control points as small crosses, sized to the curve's own scale.
     let extent = controls
         .iter()
-        .fold(None::<(Vec3, Vec3)>, |acc, p| {
+        .fold(None::<(DVec3, DVec3)>, |acc, p| {
             Some(acc.map_or((*p, *p), |(lo, hi)| (lo.min(*p), hi.max(*p))))
         })
         .map_or(1.0, |(lo, hi)| (hi - lo).length());
     let r = (extent * 0.01).clamp(0.05, 0.5);
     for p in &controls {
-        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
             segment(*p - axis * r, *p + axis * r, SELECTED_CURVE_COLOR);
         }
     }
@@ -806,9 +804,9 @@ mod tests {
         let mut spline = line();
         spline.algorithm = CurveAlgorithm::Bezier;
         let mut plain = Vec::new();
-        append_spline_lines(&mut plain, &spline, glam::Mat4::IDENTITY, false);
+        append_spline_lines(&mut plain, &spline, glam::DMat4::IDENTITY, false);
         let mut selected = Vec::new();
-        append_spline_lines(&mut selected, &spline, glam::Mat4::IDENTITY, true);
+        append_spline_lines(&mut selected, &spline, glam::DMat4::IDENTITY, true);
         assert!(!plain.is_empty() && plain.len() % 2 == 0);
         assert!(selected.len() > plain.len());
     }
@@ -927,10 +925,10 @@ mod tests {
         let mut lines = Checked(&mut inner);
         struct Checked<'a>(&'a mut SplineLines);
         impl Checked<'_> {
-            fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::DebugVertex>> {
+            fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::WorldVertex>> {
                 let lines = self.0.poll(world)?;
                 let fresh = spline_debug_lines(world);
-                let key = |l: &[helio::DebugVertex]| {
+                let key = |l: &[helio::WorldVertex]| {
                     l.iter().map(|v| (v.position, v.color)).collect::<Vec<_>>()
                 };
                 assert_eq!(

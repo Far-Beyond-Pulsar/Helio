@@ -6,6 +6,9 @@ fn accepts_generic_scene_input(_input: &dyn SceneInput) {}
 struct FrontendProjection;
 
 impl SceneInput for FrontendProjection {
+    fn world_origin(&self) -> glam::DVec3 {
+        glam::DVec3::ZERO
+    }
     fn device(&self) -> &Arc<wgpu::Device> {
         todo!()
     }

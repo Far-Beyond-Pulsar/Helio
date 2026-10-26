@@ -149,10 +149,12 @@ pub trait SceneInput {
     /// keys. This keeps the graph on one SceneDB input path rather than
     /// retaining a legacy/no-SceneDB branch.
     fn scene_buffers(&self) -> &SceneBufferProjection;
-    /// Double-precision world position of this frame's coordinate origin
-    /// when the frame is camera-relative (camera and geometry expressed
-    /// relative to it), `None` when frame coordinates are world coordinates.
-    fn world_origin(&self) -> Option<glam::DVec3> {
-        None
-    }
+    /// Double-precision world position of this frame's coordinate origin.
+    /// Frames are always camera-relative: the camera and every position in a
+    /// pass row are relative to it (the frame's space), so f32 keeps its
+    /// precision near the eye however far from the world's origin it is.
+    /// Frontends write rows in that space (joins take the origin off f64 or
+    /// f32-pair world positions). Planet centres are the one exception:
+    /// world anchors, which the passes rebase by this origin.
+    fn world_origin(&self) -> glam::DVec3;
 }

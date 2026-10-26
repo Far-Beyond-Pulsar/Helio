@@ -17,7 +17,7 @@ pub(crate) struct SceneInputAdapter<'a> {
     camera_generation: u64,
     frame_count: u64,
     buffers: SceneBufferProjection,
-    world_origin: Option<glam::DVec3>,
+    world_origin: glam::DVec3,
 }
 
 impl<'a> SceneInputAdapter<'a> {
@@ -27,7 +27,7 @@ impl<'a> SceneInputAdapter<'a> {
         camera_data: &'a GpuCameraUniforms,
         camera_generation: u64,
         frame_count: u64,
-        world_origin: Option<glam::DVec3>,
+        world_origin: glam::DVec3,
     ) -> Self {
         Self {
             device: mirror.store().device_arc(),
@@ -121,7 +121,7 @@ impl SceneInput for SceneInputAdapter<'_> {
         &self.buffers
     }
 
-    fn world_origin(&self) -> Option<glam::DVec3> {
+    fn world_origin(&self) -> glam::DVec3 {
         self.world_origin
     }
 }

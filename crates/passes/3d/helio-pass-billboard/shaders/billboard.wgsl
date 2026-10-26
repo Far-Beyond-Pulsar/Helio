@@ -21,9 +21,6 @@ struct Globals {
     delta_time: f32,
     ambient_intensity: f32,
     _padding: f32,
-    // World position of the frame origin: camera-relative frames place the
-    // camera near it, while instance positions stay in world space.
-    world_origin: vec4<f32>,
 }
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: Globals;
@@ -67,7 +64,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     let quad_position = quad_positions[vertex_index];
     let quad_uv = quad_uvs[vertex_index];
     let inst = instances[instance_index];
-    let world_pos    = inst.world_pos_pad.xyz - globals.world_origin.xyz;
+    // In the frame's space, like the camera.
+    let world_pos    = inst.world_pos_pad.xyz;
     let scale        = inst.scale_flags.xy;
     let screen_scale = inst.scale_flags.z > 0.5;
 

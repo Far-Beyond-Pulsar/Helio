@@ -128,8 +128,6 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
             &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES],
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        // World space: the frame's origin (hi, lo) is zero.
-        let world_origin = buffer(&device, &[0; 32], wgpu::BufferUsages::UNIFORM);
         // No CameraPostProcessComponent rows: the resolver uses its baseline.
         let no_camera_rows = buffer(&device, &[0; 608], wgpu::BufferUsages::STORAGE);
         let lights = buffer(&device, &[0; 128], wgpu::BufferUsages::STORAGE);
@@ -227,7 +225,6 @@ fn cs_probe() {
                     (15, &volume.buffer),
                     (16, &blended),
                     (20, &no_camera_rows),
-                    (22, &world_origin),
                 ],
             );
             let mut encoder = device.create_command_encoder(&Default::default());

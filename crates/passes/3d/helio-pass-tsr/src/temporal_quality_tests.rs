@@ -248,6 +248,9 @@ struct Input {
 }
 
 impl helio_core::SceneInput for Input {
+    fn world_origin(&self) -> glam::DVec3 {
+        glam::DVec3::ZERO
+    }
     fn device(&self) -> &Arc<wgpu::Device> { &self.device }
     fn queue(&self) -> &Arc<wgpu::Queue> { &self.queue }
     fn frame_count(&self) -> u64 { self.frame }

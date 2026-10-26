@@ -105,9 +105,8 @@ impl Harness {
 
     /// `frames` frames of `planet` seen from `eye` looking along `forward`.
     fn run(&mut self, planet: &Arc<Planet>, eye: DVec3, forward: DVec3, frames: usize) {
-        self.renderer.set_world_origin(Some(eye));
         let up = eye.normalize().as_vec3();
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward.as_vec3(), up, std::f32::consts::FRAC_PI_4, SIZE[0] as f32 / SIZE[1] as f32, 0.05, 40_000_000.0);
+        let camera = Camera::perspective_look_to(eye, forward.as_vec3(), up, std::f32::consts::FRAC_PI_4, SIZE[0] as f32 / SIZE[1] as f32, 0.05, 40_000_000.0);
         *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, picks: None, kept: None, export: None });
         for _ in 0..frames {
             self.scene.world.flush_gpu_mirror(&self.queue);
@@ -139,10 +138,12 @@ impl Harness {
         data
     }
 
-    /// The blades every resident tile draws (its band at their distance from `origin`,
-    /// the eye; far bands hold tufts under the near ones that never draw there), at world
-    /// origin `origin`; and the resident tiles.
-    fn blades(&self, origin: DVec3) -> (Vec<Blade>, usize) {
+    /// The blades every resident tile draws (its band at their distance from `eye`; far bands
+    /// hold tufts under the near ones that never draw there), in world space; and the
+    /// resident tiles.
+    fn blades(&self, eye: DVec3) -> (Vec<Blade>, usize) {
+        let origin = self.renderer.world_origin();
+        let eye_in_frame = (eye - origin).as_vec3();
         let place = self.renderer.find_pass::<FoliagePlacePass>().unwrap();
         let bands = *place.bands();
         let tiles: Vec<GpuFoliageTile> = bytemuck::cast_slice(&self.read(&place.tile_table)).to_vec();
@@ -159,7 +160,7 @@ impl Harness {
             for blade in &arena[tile.blade_offset as usize..(tile.blade_offset + tile.blade_count) as usize] {
                 let p = unpack_blade(blade);
                 let root = frame.point(p.tile_uv[0], p.tile_uv[1], tile.bounds_center + p.height_offset);
-                if helio_pass_foliage_place::tuft_scale(&bands, &band, root.length(), p.rank) > 0.0 {
+                if helio_pass_foliage_place::tuft_scale(&bands, &band, (root - eye_in_frame).length(), p.rank) > 0.0 {
                     out.push(Blade { kind: p.type_id, root: origin + root.as_dvec3() });
                 }
             }
