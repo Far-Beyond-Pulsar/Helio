@@ -315,10 +315,9 @@ constants.
 
 - **Walls**: the generator's ground material at the cell (depth from the
   generated top), so strata and rock types continue into caves.
-- **Floors**: cells under a primitive's floor plane, inside its radius,
-  take the network's `floor_material` (sediment: gravel, clay, regolith on
-  the Moon) through the per-cell material path features use. (Follow-up:
-  see Open work.)
+- **Floors**: today the walls' material too. Sediment floors (gravel,
+  clay, regolith on the Moon) need the per-cell material path to see the
+  natural volume, not only the post-edit masks: see Open work.
 - **Cliff faces**: the generator's rules by slope, as before.
 
 ## Settings (`volumes::Volumes`)
@@ -334,7 +333,33 @@ linked, entrances as skylights.
 
 ## Cost
 
-Measured (below) against the old caves and lean.
+GENBENCH (`HELIO_VOXEL_GEN_BENCH=6`), seed 75, RTX 3060, 1600x900, the
+same holds before (old noise caves and lean, c610222d) and after:
+
+| view | tiles us/tile | of which old halos / new volumes | chunk columns us/chunk | all us/tile |
+|---|---|---|---|---|
+| Earth cave, before | 25.36 | 0.73 | 9.93 | 40.56 |
+| Earth cave, after | 23.40 | 2.44 | 6.58 | 34.25 |
+| Earth mountain slope, before | 30.10 | 2.91 | 7.04 | 41.77 |
+| Earth mountain slope, after | 24.75 | 2.41 | 5.34 | 34.16 |
+| Desert cave, before | 21.47 | 5.29 | 17.90 | 45.84 |
+| Desert cave, after | 16.55 | 1.76 | 4.49 | 24.79 |
+| Desert mountain slope, after | 21.42 | 2.12 | 4.70 | 29.96 |
+
+Generation is 15-46% cheaper per tile everywhere measured. The new tile
+passes (`tile_caves`, `tile_volumes`) cost 1.8-2.4 us a tile, against the
+old halo pass's 0.7-5.3. Chunk columns fall most (desert caves 17.9 ->
+4.5 us a chunk): a column tests the few primitives its 8x8 brick kept,
+not 3D noise at every cell of a depth band, and the band is the measured
+volume range rather than the worst case. The "before" and "after" cave
+holds stand at different places (the search follows the system), so
+their rows compare generation over the same kind of view, not the same
+pixels.
+
+Frame cost is unchanged in kind: the volumes only change which cells
+are solid. Under the ground the first trace round walks from the eye
+(`point_walk`), one extra walk for the pixels of an eye in a cave and
+none above the ground.
 
 ## Open work
 
