@@ -460,14 +460,7 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     let up = looking(ground_point, sun, up_fov);
     let source = view.ground.clone().unwrap();
     let settle_ground = |view: &mut View, eye: Vec3, camera: &Camera| {
-        *source.lock().unwrap() = Some(PlanetFrame {
-            eye: eye.as_dvec3(),
-            planet: planet.clone(),
-            sun,
-            picks: None,
-            kept: None,
-            export: None,
-        });
+        *source.lock().unwrap() = Some(PlanetFrame::single(eye.as_dvec3(), planet.clone(), sun));
         let started = std::time::Instant::now();
         loop {
             view.render(camera);
@@ -605,14 +598,7 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
         1.0e9,
     );
     let source = view.ground.clone().unwrap();
-    *source.lock().unwrap() = Some(PlanetFrame {
-        eye,
-        planet,
-        sun,
-        picks: None,
-        kept: None,
-        export: None,
-    });
+    *source.lock().unwrap() = Some(PlanetFrame::single(eye, planet, sun));
     let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
     let mut images = Vec::new();
     for air in [air, air.with_clouds(clouds)] {

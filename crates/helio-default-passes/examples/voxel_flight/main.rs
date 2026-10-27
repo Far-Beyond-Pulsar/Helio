@@ -20,6 +20,11 @@
 //! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide|sway` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
+//! * `HELIO_VOXEL_FLIGHT_VOLUMES=tour` stands on the planet's ground with
+//!   other volumes in the scene ([`volumes_tour`]): a Moon orbiting and
+//!   spinning over the horizon, a ship-sized block circling and turning a
+//!   few metres away; frames saved along the way, GPU times recorded
+//!   (`volumes_tour.csv`).
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert, [`worlds`]: the planet, its features, look, sky and
@@ -28,7 +33,7 @@
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
 //! `_LOOK=exposure,contrast,saturation` (default the preset's exposure, 2 under air, 1.06, 1: voxel_craft's look), `_DEBUG=<mode>` (the renderer's;
-//! the voxel draw's 32 trace cost, 33 levels, 34 levels over the left half).
+//! the voxel draw's 32 trace cost, 34 levels, 35 levels over the left half).
 //!
 //! Diagnostics of worlds the harness drives itself ([`harness_world`]):
 //! `HELIO_VOXEL_CHUNKS_COUNT` (trace counters), `_ROUNDS=n` (the primary
@@ -47,8 +52,11 @@ use helio::{
 };
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPicks, SharedPlanetFrame};
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
+use helio_pass_voxel_planet::chunks::VolumeId;
+use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPicks, SharedPlanetFrame, VolumeFrame};
+use helio_pass_voxel_planet::{
+    Brush, BrushOp, BrushShape, Planet, PlanetRecipe, VolumeTransform, VoxelVolume,
+};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -72,6 +80,8 @@ struct Flight {
     in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
     /// Pick requests drawn frames answer (`pick_probe`).
     picks: Option<SharedPicks>,
+    /// Volumes drawn beside the planet (`volumes_tour`), placed each frame.
+    extra: Vec<VoxelVolume>,
 }
 
 /// The planet's up at `eye`.
@@ -316,6 +326,7 @@ impl Flight {
             output: output.to_path_buf(),
             in_flight: Default::default(),
             picks: None,
+            extra: Vec::new(),
         }
     }
 
@@ -324,14 +335,14 @@ impl Flight {
     /// milliseconds recording it took and those waiting.
     fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
         let started = Instant::now();
-        *self.source.lock().unwrap() = Some(PlanetFrame {
-            eye,
-            planet: self.planet.clone(),
-            sun: self.sun_at(eye),
+        let mut frame = PlanetFrame {
             picks: self.picks.clone(),
-            kept: None,
-            export: None,
-        });
+            ..PlanetFrame::single(eye, self.planet.clone(), self.sun_at(eye))
+        };
+        frame
+            .volumes
+            .extend(self.extra.iter().cloned().map(VolumeFrame::new));
+        *self.source.lock().unwrap() = Some(frame);
         let up = up_for(eye);
         let forward = forward.normalize();
         let up = if forward.dot(up).abs() > 0.999 {
@@ -415,6 +426,118 @@ impl Flight {
         )
         .unwrap();
     }
+}
+
+/// `HELIO_VOXEL_FLIGHT_VOLUMES=tour`: the planet with other volumes, one
+/// renderer drawing them all. Standing on the ground at `ground`, looking
+/// along `heading` and up: a Moon (the Moon preset's world, its radius and
+/// voxels) on an orbit 22 000 km out rising over the horizon and spinning,
+/// and a ship-sized block (a 12.8 m plane with a cabin on it) circling 25 m
+/// ahead and turning. `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (15) of frames at a
+/// fixed 60 Hz step (the motion is the same whatever the frame rate):
+/// GPU and CPU times each frame (`volumes_tour.csv`), every 150th frame
+/// saved (`volumes_tour_<n>.png`).
+fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15.0);
+    let moon = Arc::new(
+        Planet::new(PlanetRecipe {
+            radius_m: worlds::Preset::Moon.radius_m(),
+            voxel_size_m: flight.planet.grid().voxel_size(),
+            terrain: worlds::Preset::Moon.stack().source(seed),
+            features: worlds::Preset::Moon
+                .features()
+                .grow(flight.planet.grid().voxel_size(), seed),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let mut ship = Planet::new(PlanetRecipe {
+        shape: helio_pass_voxel_planet::grid::Shape::Plane,
+        plane_size_m: 12.8,
+        voxel_size_m: 0.1,
+        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat_at(1.2).source(seed),
+        ..Default::default()
+    })
+    .unwrap();
+    ship.apply(Brush {
+        center: [0.0, 2.4, 0.0],
+        radius: 1.2,
+        shape: BrushShape::Cube,
+        op: BrushOp::Add,
+        material: helio_pass_voxel_planet::terrain::material::PLANKS,
+        height: 0.0,
+    })
+    .unwrap();
+    let ship = Arc::new(ship);
+    let up = ground.normalize();
+    let ahead = tangent(ground, heading).as_dvec3();
+    let side = ahead.cross(up);
+    let orbit = 22_000_000.0;
+    // Where each volume is `t` seconds in: the Moon rising from 8 degrees
+    // over the horizon ahead, a turn a minute about its axis; the ship
+    // circling a point 25 m ahead and 6 m up, turning as it goes.
+    let place = |t: f64| {
+        let elevation = (8.0 + 2.0 * t).to_radians();
+        let moon_at = (ahead * elevation.cos() + up * elevation.sin()) * orbit;
+        let spin = glam::DQuat::from_axis_angle(side, t * std::f64::consts::TAU / 60.0);
+        let around = 0.5 * t;
+        let ship_at = ground
+            + ahead * 25.0
+            + up * 6.0
+            + (ahead * around.cos() + side * around.sin()) * 8.0;
+        let ship_turn = glam::DQuat::from_rotation_arc(DVec3::Y, up)
+            * glam::DQuat::from_rotation_y(-around * 2.0);
+        [
+            VolumeTransform::new(moon_at, spin),
+            VolumeTransform::new(ship_at, ship_turn),
+        ]
+    };
+    let forward = (ahead * 15f64.to_radians().cos() + up * 15f64.to_radians().sin())
+        .normalize()
+        .as_vec3();
+    let mut csv = String::from("frame,t,cpu_ms,wait_ms,gpu_ms,voxel_gpu_ms
+");
+    let frames = (seconds * 60.0) as u32;
+    let started = Instant::now();
+    for frame in 0..frames {
+        let t = f64::from(frame) / 60.0;
+        let [moon_at, ship_at] = place(t);
+        flight.extra = vec![
+            VoxelVolume::new(2, moon.clone(), moon_at),
+            VoxelVolume::new(3, ship.clone(), ship_at),
+        ];
+        let (cpu, wait) = flight.draw(ground, forward);
+        let snapshot = flight.renderer.timing_snapshot();
+        let gpu: f64 = snapshot
+            .passes
+            .iter()
+            .filter_map(|p| p.gpu_ms)
+            .map(f64::from)
+            .sum();
+        let voxel: f64 = snapshot
+            .passes
+            .iter()
+            .filter(|p| p.name == "VoxelChunks")
+            .filter_map(|p| p.gpu_ms)
+            .map(f64::from)
+            .sum();
+        csv.push_str(&format!("{frame},{t:.3},{cpu:.3},{wait:.3},{gpu:.3},{voxel:.3}
+"));
+        if frame % 150 == 149 {
+            let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+            flight.capture(&format!("volumes_tour_{:02}", frame / 150));
+            let pass = flight.renderer.find_pass::<ChunkPass>().unwrap();
+            eprintln!("VOLUMES frame {frame} t {t:.1} s: {}", pass.diagnostics());
+        }
+    }
+    std::fs::write(flight.output.join("volumes_tour.csv"), csv).unwrap();
+    eprintln!(
+        "VOLUMES tour: {frames} frames in {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn percentile(values: &[f64], p: f64) -> f64 {
@@ -614,7 +737,7 @@ fn chunk_settle(
 /// `HELIO_VOXEL_CHUNKS_COUNT`, its primary trace repeated
 /// `HELIO_VOXEL_CHUNKS_ROUNDS` times a draw, recording
 /// `HELIO_VOXEL_CHUNKS_DEBUG_PIXEL=x,y`'s boxes, drawn in
-/// `HELIO_VOXEL_FLIGHT_DEBUG`'s mode (32 trace cost, 33 levels, 34 levels
+/// `HELIO_VOXEL_FLIGHT_DEBUG`'s mode (32 trace cost, 34 levels, 35 levels
 /// over the left half).
 fn harness_world(flight: &Flight) -> helio_pass_voxel_planet::chunks::ChunkWorld {
     use helio_pass_voxel_planet::chunks::{Capacity, ChunkWorld};
@@ -623,7 +746,7 @@ fn harness_world(flight: &Flight) -> helio_pass_voxel_planet::chunks::ChunkWorld
         ..Capacity::default()
     };
     let mut world =
-        ChunkWorld::with_capacity(&flight.device, &flight.queue, &flight.planet, capacity);
+        ChunkWorld::of_planet(&flight.device, &flight.queue, &flight.planet, capacity);
     world.set_trace_rounds(
         std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS")
             .ok()
@@ -952,7 +1075,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             if let Some(h) = cpu {
                 eprintln!(
                     "  over the cpu hit: {:?}",
-                    world.chunks_over(h.cell.face, h.cell.i, h.cell.j)
+                    world.chunks_over(VolumeId(0), h.cell.face, h.cell.i, h.cell.j)
                 );
             }
         }
@@ -1001,7 +1124,7 @@ fn chunk_dig(
     // One frame: follow the planet's edits, update, draw; GPU times and the
     // tiles generated again.
     let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
-        assert!(world.sync_edits(planet), "edits follow");
+        assert!(world.sync_edits(VolumeId(0), planet), "edits follow");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let stats = world.update(
             &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
@@ -1565,6 +1688,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let started = Instant::now();
         let mut frames = 0;
         let mut last = Instant::now();
+        let mut grew = false;
         while frames < 10
             || !flight
                 .renderer
@@ -1573,6 +1697,16 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         {
             flight.draw(eye, forward);
             frames += 1;
+            // Pool growth: its CPU time, and the intervals of its frame and
+            // the next (the copies run on the GPU between them).
+            if let Some(pass) = flight.renderer.find_pass::<ChunkPass>() {
+                let s = pass.stats();
+                let interval = last.elapsed().as_secs_f64() * 1e3;
+                if s.grow_ms > 0.1 || grew {
+                    eprintln!("CHUNKLOAD {mode}: frame {frames} interval {interval:.1} ms, grow {:.2} ms, slots {} leaf pages {}", s.grow_ms, s.chunk_slots, s.leaf_pages.1);
+                }
+                grew = s.grow_ms > 0.1;
+            }
             // Load progress: the frame's interval, the pass's CPU stages
             // (results, plan, evict, generate, drawn set, table) and work.
             if frames % 50 == 0 {
@@ -1616,7 +1750,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     {
         world.take_counts();
     }
-    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms
+    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms,grow_ms,chunk_slots,leaf_page_capacity
 ");
     let (mut intervals, mut coarse, mut worst, mut switch_px) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -1788,8 +1922,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         shown_chunks += s.shown_chunks;
         emptied_chunks += s.emptied_chunks;
         unseen_evicted += s.evicted_unseen;
-        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
-", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
+        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2},{:.2},{},{}
+", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1], s.grow_ms, s.chunk_slots, s.leaf_pages.1);
         // A frame after a capture waited for its readback.
         if !captured {
             intervals.push(interval);
@@ -1828,6 +1962,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                     eprintln!("LOSTDIAG search from face {face} level {level} cell {cell:?}");
                     for l in level..flight.planet.grid().levels() {
                         let key = helio_pass_voxel_planet::chunks::NodeKey {
+                            volume: 0,
                             face,
                             level: l,
                             cx: (cell[0] >> (l - level)) >> 6,
@@ -1866,13 +2001,14 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                         Some(hit) => {
                             eprintln!("LOSTDIAG t {t:.3} altitude {altitude:.0} pixel {px},{py}: ground at {:.0} m, cell {:?}", hit.distance, hit.cell);
                             for (key, z, drawn) in
-                                world.chunks_over(hit.cell.face, hit.cell.i, hit.cell.j)
+                                world.chunks_over(VolumeId(0), hit.cell.face, hit.cell.i, hit.cell.j)
                             {
                                 eprintln!("LOSTDIAG   level {} node {},{},{} occupied {z:?} drawn {drawn}", key.level, key.cx, key.cy, key.cz);
                             }
                             // The nodes over it at every level, in the drawn set.
                             for level in 0..flight.planet.grid().levels() {
                                 let key = helio_pass_voxel_planet::chunks::NodeKey {
+                                    volume: 0,
                                     face: hit.cell.face,
                                     level,
                                     cx: (hit.cell.i >> level) >> 6,
@@ -2148,7 +2284,7 @@ fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
                 "PICK {view} {},{}: chunks over the cpu cell {:?}",
                 p[0],
                 p[1],
-                world.chunks_over(c.cell.face, c.cell.i, c.cell.j)
+                world.chunks_over(VolumeId(0), c.cell.face, c.cell.i, c.cell.j)
             );
         }
     }
@@ -2696,6 +2832,10 @@ fn main() {
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0, preset.level_spawn_m());
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_VOLUMES").is_some() {
+        volumes_tour(&mut flight, ground, heading, seed);
+        return;
+    }
     if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
         chunk_fly(&flight, &mode, ground, heading);
         return;
