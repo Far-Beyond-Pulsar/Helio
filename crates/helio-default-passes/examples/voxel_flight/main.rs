@@ -28,7 +28,7 @@
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
 //! `_LOOK=exposure,contrast,saturation` (default the preset's exposure, 2 under air, 1.06, 1: voxel_craft's look), `_DEBUG=<mode>` (the renderer's;
-//! the voxel draw's 32 trace cost, 33 levels, 34 levels over the left half).
+//! the voxel draw's 32 trace cost, 34 levels, 35 levels over the left half).
 //!
 //! Diagnostics of worlds the harness drives itself ([`harness_world`]):
 //! `HELIO_VOXEL_CHUNKS_COUNT` (trace counters), `_ROUNDS=n` (the primary
@@ -614,7 +614,7 @@ fn chunk_settle(
 /// `HELIO_VOXEL_CHUNKS_COUNT`, its primary trace repeated
 /// `HELIO_VOXEL_CHUNKS_ROUNDS` times a draw, recording
 /// `HELIO_VOXEL_CHUNKS_DEBUG_PIXEL=x,y`'s boxes, drawn in
-/// `HELIO_VOXEL_FLIGHT_DEBUG`'s mode (32 trace cost, 33 levels, 34 levels
+/// `HELIO_VOXEL_FLIGHT_DEBUG`'s mode (32 trace cost, 34 levels, 35 levels
 /// over the left half).
 fn harness_world(flight: &Flight) -> helio_pass_voxel_planet::chunks::ChunkWorld {
     use helio_pass_voxel_planet::chunks::{Capacity, ChunkWorld};

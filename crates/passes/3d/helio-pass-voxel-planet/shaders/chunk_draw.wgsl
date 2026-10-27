@@ -1756,7 +1756,7 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
 }
 
 // Renderer-wide debug mode (`params.debug.x` & 0xff): 32 the voxel trace's
-// cost, 33 the levels drawn, 34 the levels over the left half.
+// cost, 34 the levels drawn, 35 the levels over the left half.
 fn debug_mode() -> u32 {
     return params.debug.x & 0xffu;
 }
