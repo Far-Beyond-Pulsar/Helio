@@ -25,7 +25,6 @@ mod voxel_component;
 mod voxel_component_runtime;
 mod voxel_features;
 pub mod voxel_generator_editor;
-pub mod voxel_mesh;
 pub mod voxel_stack_editor;
 pub mod voxel_world;
 mod water_volume_component;

@@ -3,6 +3,7 @@
 //! against the CPU field.
 use crate::planet::Planet;
 use crate::terrain::TerrainProgram;
+use crate::volume::{VolumeTransform, VoxelVolume};
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Vec3};
 use std::sync::{Arc, Mutex};
@@ -19,33 +20,73 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float,
 ];
 
-/// One published view of the planet. `eye` is the host's planet-centred
-/// camera sample, used for residency. When the renderer supplies a world
-/// origin, ChunkPass traces from the active camera's absolute eye instead
-/// (including predicted stereo poses). Otherwise this is also the trace eye
-/// for hosts supplying an already eye-relative camera.
+/// One published view of the voxel volumes. `eye` is the host's camera
+/// sample in the world (the frame every volume's transform places it in),
+/// used for residency. When the renderer supplies a world origin, ChunkPass
+/// traces from the active camera's absolute eye instead (including
+/// predicted stereo poses). Otherwise this is also the trace eye for hosts
+/// supplying an already eye-relative camera.
 #[derive(Clone)]
 pub struct PlanetFrame {
     pub eye: DVec3,
-    pub planet: Arc<Planet>,
-    /// Direction towards the sun (planet-centred frame).
+    /// The volumes shown: a planet, moons, planes, small free volumes. The
+    /// first is the primary one (foliage grows on it, GI probes trace it).
+    pub volumes: Vec<VolumeFrame>,
+    /// Direction towards the sun (world frame).
     pub sun: Vec3,
     /// Where tools ask for the terrain hit under points of the view.
     pub picks: Option<SharedPicks>,
-    /// Chunks a save kept of the planet's edits: a world built for exactly
-    /// those edits restores them by copy instead of generating them
-    /// (others are refused, [`crate::chunks::ChunkWorld::load_kept`]).
+}
+
+impl PlanetFrame {
+    /// A frame of one world at the origin (its own frame is the world's).
+    pub fn single(eye: DVec3, planet: Arc<Planet>, sun: Vec3) -> Self {
+        Self {
+            eye,
+            volumes: vec![VolumeFrame::new(VoxelVolume::new(
+                0,
+                planet,
+                VolumeTransform::IDENTITY,
+            ))],
+            sun,
+            picks: None,
+        }
+    }
+
+    /// The primary volume's world, if any.
+    pub fn planet(&self) -> Option<&Arc<Planet>> {
+        self.volumes.first().map(|v| &v.volume.planet)
+    }
+}
+
+/// A volume of a frame: the world and where it is, and its saves' chunks.
+#[derive(Clone)]
+pub struct VolumeFrame {
+    pub volume: VoxelVolume,
+    /// Chunks a save kept of the volume's edits: a volume built for exactly
+    /// those edits restores them by copy instead of generating them (others
+    /// are refused, [`crate::chunks::ChunkWorld::load_kept`]).
     pub kept: Option<Arc<crate::chunks::KeptChunks>>,
-    /// Where a host asks for the edited chunks for a save.
+    /// Where a host asks for the volume's edited chunks for a save.
     pub export: Option<SharedKeptExport>,
+}
+
+impl VolumeFrame {
+    pub fn new(volume: VoxelVolume) -> Self {
+        Self {
+            volume,
+            kept: None,
+            export: None,
+        }
+    }
 }
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
-/// A save's request for the edited chunks: the host sets `wanted`; the pass
-/// packs every resident edited chunk and, a few frames later, answers with
-/// the planet shown and its world's kept chunks, valid for that planet's
-/// edits ([`crate::chunks::ChunkWorld::kept_chunks`]).
+/// A save's request for a volume's edited chunks: the host sets `wanted`;
+/// the pass packs every resident edited chunk of it and, a few frames
+/// later, answers with the world shown and its kept chunks, valid for that
+/// world's edits ([`crate::chunks::ChunkWorld::kept_chunks`]).
 #[derive(Default)]
 pub struct KeptExport {
     pub wanted: bool,
@@ -72,6 +113,8 @@ pub struct PickResult {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickHit {
+    /// The volume hit (`VoxelVolume::id`); `cell` is in its frame.
+    pub volume: u64,
     /// From the eye along the pixel's ray.
     pub distance: f64,
     /// The level cell drawn there: at level 0 the exact voxel.
