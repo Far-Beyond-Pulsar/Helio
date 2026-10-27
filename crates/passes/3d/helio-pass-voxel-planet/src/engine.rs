@@ -3,6 +3,7 @@
 //! against the CPU field.
 use crate::planet::Planet;
 use crate::terrain::TerrainProgram;
+use crate::volume::{VolumeTransform, VoxelVolume};
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Vec3};
 use std::sync::{Arc, Mutex};
@@ -19,33 +20,73 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float,
 ];
 
-/// One published view of the planet. `eye` is the host's planet-centred
-/// camera sample, used for residency. When the renderer supplies a world
-/// origin, ChunkPass traces from the active camera's absolute eye instead
-/// (including predicted stereo poses). Otherwise this is also the trace eye
-/// for hosts supplying an already eye-relative camera.
+/// One published view of the voxel volumes. `eye` is the host's camera
+/// sample in the world (the frame every volume's transform places it in),
+/// used for residency. When the renderer supplies a world origin, ChunkPass
+/// traces from the active camera's absolute eye instead (including
+/// predicted stereo poses). Otherwise this is also the trace eye for hosts
+/// supplying an already eye-relative camera.
 #[derive(Clone)]
 pub struct PlanetFrame {
     pub eye: DVec3,
-    pub planet: Arc<Planet>,
-    /// Direction towards the sun (planet-centred frame).
+    /// The volumes shown: a planet, moons, planes, small free volumes. The
+    /// first is the primary one (foliage grows on it, GI probes trace it).
+    pub volumes: Vec<VolumeFrame>,
+    /// Direction towards the sun (world frame).
     pub sun: Vec3,
     /// Where tools ask for the terrain hit under points of the view.
     pub picks: Option<SharedPicks>,
-    /// Chunks a save kept of the planet's edits: a world built for exactly
-    /// those edits restores them by copy instead of generating them
-    /// (others are refused, [`crate::chunks::ChunkWorld::load_kept`]).
+}
+
+impl PlanetFrame {
+    /// A frame of one world at the origin (its own frame is the world's).
+    pub fn single(eye: DVec3, planet: Arc<Planet>, sun: Vec3) -> Self {
+        Self {
+            eye,
+            volumes: vec![VolumeFrame::new(VoxelVolume::new(
+                0,
+                planet,
+                VolumeTransform::IDENTITY,
+            ))],
+            sun,
+            picks: None,
+        }
+    }
+
+    /// The primary volume's world, if any.
+    pub fn planet(&self) -> Option<&Arc<Planet>> {
+        self.volumes.first().map(|v| &v.volume.planet)
+    }
+}
+
+/// A volume of a frame: the world and where it is, and its saves' chunks.
+#[derive(Clone)]
+pub struct VolumeFrame {
+    pub volume: VoxelVolume,
+    /// Chunks a save kept of the volume's edits: a volume built for exactly
+    /// those edits restores them by copy instead of generating them (others
+    /// are refused, [`crate::chunks::ChunkWorld::load_kept`]).
     pub kept: Option<Arc<crate::chunks::KeptChunks>>,
-    /// Where a host asks for the edited chunks for a save.
+    /// Where a host asks for the volume's edited chunks for a save.
     pub export: Option<SharedKeptExport>,
+}
+
+impl VolumeFrame {
+    pub fn new(volume: VoxelVolume) -> Self {
+        Self {
+            volume,
+            kept: None,
+            export: None,
+        }
+    }
 }
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
-/// A save's request for the edited chunks: the host sets `wanted`; the pass
-/// packs every resident edited chunk and, a few frames later, answers with
-/// the planet shown and its world's kept chunks, valid for that planet's
-/// edits ([`crate::chunks::ChunkWorld::kept_chunks`]).
+/// A save's request for a volume's edited chunks: the host sets `wanted`;
+/// the pass packs every resident edited chunk of it and, a few frames
+/// later, answers with the world shown and its kept chunks, valid for that
+/// world's edits ([`crate::chunks::ChunkWorld::kept_chunks`]).
 #[derive(Default)]
 pub struct KeptExport {
     pub wanted: bool,
@@ -72,6 +113,8 @@ pub struct PickResult {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickHit {
+    /// The volume hit (`VoxelVolume::id`); `cell` is in its frame.
+    pub volume: u64,
     /// From the eye along the pixel's ray.
     pub distance: f64,
     /// The level cell drawn there: at level 0 the exact voxel.
@@ -174,8 +217,7 @@ pub(crate) struct WorldGpu {
     grid: [i32; 4],
     /// domain scale (Q24), pad.
     scale: [u32; 4],
-    /// sphere domain constants (`Grid::sphere_constants`); w: columns store
-    /// a surface word per cell.
+    /// sphere domain constants (`Grid::sphere_constants`).
     sphere: [u32; 4],
 }
 
@@ -193,11 +235,7 @@ impl WorldGpu {
                 let (inv, shift, layer_q16) = g.volume_constants();
                 [g.domain_scale(), inv, shift, layer_q16]
             },
-            sphere: {
-                let mut sphere = g.sphere_constants();
-                sphere[3] = u32::from(planet.field().program().wgsl.contains("fn terrain_surface"));
-                sphere
-            },
+            sphere: g.sphere_constants(),
         }
     }
 }
@@ -268,12 +306,6 @@ pub(crate) fn terrain_source(
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
-    if !program.wgsl.contains("fn terrain_surface") {
-        // No surface word: columns store none (`World::sphere.w`).
-        s.push_str(
-            "fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n",
-        );
-    }
     if !program.wgsl.contains("fn terrain_density") {
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
         s.push_str(
@@ -557,7 +589,8 @@ pub fn verify_field(
     let e = verify_extra[id.x];
     let level = u32(a.w);
     let p = domain_point(u32(a.x), a.y, a.z, level);
-    let height = field_height(u32(a.x), a.y, a.z, level);
+    let column = generation_column(u32(a.x), a.y, a.z, level, false);
+    let height = column.x;
     // A layer near the column top (inside any volumetric extent).
     let top = top_cells(height, level);
     let extent = terrain_extent(p, level);
@@ -567,7 +600,7 @@ pub fn verify_field(
     let density = terrain_density(p, q, level, top, height, height + (e.z & 8191) - 4096, k);
     let lean = terrain_lean(level);
     let offset = terrain_lean_offset(p, a.y, a.z, k, level);
-    let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
+    let surface = u32(column.y) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
         density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257
             + lean.x * 7 + lean.y * 13 + offset.x * 31 + offset.y * 131);

@@ -167,6 +167,8 @@ pub struct Worst {
 }
 
 pub struct Planner {
+    /// The volume it plans (its keys').
+    volume: u16,
     nodes: FxHashMap<NodeKey, Node>,
     footprints: FxHashMap<Footprint, Fp>,
     /// The frame rays last met each node or a node under it.
@@ -190,13 +192,20 @@ impl Planner {
     /// Roots: every node of the coarsest level from the planet's centre (a
     /// plane's lowest ground) to its highest, and as deep and high as the
     /// edits reach, with the planet's whole height range (`range`, base
-    /// layers) as their footprints' estimate.
-    pub fn new(grid: &Grid, range: (i32, i32), config: PlanConfig, edits: Arc<EditView>) -> Self {
+    /// layers) as their footprints' estimate; nodes of volume `volume`.
+    pub fn new(
+        volume: u16,
+        grid: &Grid,
+        range: (i32, i32),
+        config: PlanConfig,
+        edits: Arc<EditView>,
+    ) -> Self {
         let level = grid.levels() - 1;
         let occluder = (!grid.is_plane())
             .then(|| grid.radius() + f64::from(range.0) * f64::from(grid.layer_mm()) * 1e-3)
             .filter(|r| *r > 0.0);
         let mut planner = Self {
+            volume,
             nodes: FxHashMap::default(),
             footprints: FxHashMap::default(),
             seen: FxHashMap::default(),
@@ -244,6 +253,7 @@ impl Planner {
             for cx in 0..n {
                 for cy in 0..n {
                     let fp = Footprint {
+                        volume: self.volume,
                         face,
                         level,
                         cx,
@@ -302,6 +312,7 @@ impl Planner {
         for (q, (a, b)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
             let ranges = quarters[q].unwrap_or(whole).child();
             let fp = Footprint {
+                volume: key.volume,
                 face: key.face,
                 level: key.level - 1,
                 cx: key.cx * 2 + a,
@@ -952,8 +963,10 @@ impl Event {
     }
 }
 
-/// A plan the worker made, and the nodes it evicted.
+/// A volume's plan the worker made, and the nodes it evicted.
 pub struct Planned {
+    /// The volume planned.
+    pub volume: u16,
     pub plan: Plan,
     /// Nodes drawn now and not by the last plan sent (or drawn as
     /// something else), and the reverse.
@@ -962,99 +975,165 @@ pub struct Planned {
     pub evicted: Vec<NodeKey>,
     /// What the plan was made for.
     pub made_for: PlannedFor,
-    /// The frame whose eye it was made for, and the worker's milliseconds
-    /// on it (plan and eviction).
+}
+
+/// A job's plans, a volume each (the volumes the job held).
+pub struct Plans {
+    pub volumes: Vec<Planned>,
+    /// Structural events up to this number had reached the planners, and
+    /// this many frames of ray reports.
+    pub events_seen: u64,
+    pub reports_seen: u64,
+    /// The frame whose eye they were made for, and the worker's
+    /// milliseconds on them (plans and evictions).
     pub frame: u64,
     pub ms: f64,
 }
 
-/// What a plan was made for: structural events up to this number had
-/// reached the planner, and this many frames of ray reports; the eye and
-/// the view.
+/// What a volume's plan was made for: the eye and the view (in the
+/// volume's frame), and the version of the edits it classified with
+/// (`EditView::version`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlannedFor {
-    pub events_seen: u64,
-    pub reports_seen: u64,
     pub eye: DVec3,
     pub view: Option<View>,
-    /// The version of the edits it classified with (`EditView::version`).
     pub edits: u64,
+}
+
+/// A volume's part of a plan: its eye moving at `velocity` and view (in
+/// its frame), what happened to its nodes since its last plan, generated
+/// nodes to evict for chunk slots, and its edits when they changed.
+pub struct VolumeJob {
+    pub volume: u16,
+    pub eye: DVec3,
+    pub velocity: DVec3,
+    pub view: Option<View>,
+    pub events: Vec<Event>,
+    pub need: usize,
+    pub edits: Option<Arc<EditView>>,
+}
+
+/// A volume coming or going.
+enum Change {
+    Add {
+        volume: u16,
+        grid: Grid,
+        range: (i32, i32),
+        config: PlanConfig,
+        edits: Arc<EditView>,
+    },
+    Remove(u16),
 }
 
 struct Job {
     events_seen: u64,
     reports_seen: u64,
-    eye: DVec3,
-    velocity: DVec3,
-    view: Option<View>,
     frame: u64,
-    events: Vec<Event>,
-    /// Generated nodes to evict for chunk slots.
-    need: usize,
-    edits: Option<Arc<EditView>>,
+    changes: Vec<Change>,
+    volumes: Vec<VolumeJob>,
 }
 
-/// The planner on its own thread: a job at a time, the latest plan taken
-/// without waiting.
+/// A volume's planner on the worker, and what its last plan drew.
+struct Planning {
+    grid: Grid,
+    planner: Planner,
+    drawn: FxHashMap<NodeKey, Kind>,
+}
+
+/// The planners of a world's volumes on their own thread: a job at a time
+/// (every volume's plan), the latest plans taken without waiting.
 pub struct Worker {
     jobs: std::sync::mpsc::Sender<Job>,
-    results: std::sync::Mutex<std::sync::mpsc::Receiver<Planned>>,
+    results: std::sync::Mutex<std::sync::mpsc::Receiver<Plans>>,
     busy: bool,
+    /// Volumes added or removed since the last job.
+    changes: Vec<Change>,
     /// Structural events and frames of ray reports submitted so far.
     events_sent: u64,
     reports_sent: u64,
 }
 
 impl Worker {
-    pub fn spawn(grid: Grid, range: (i32, i32), config: PlanConfig, edits: Arc<EditView>) -> Self {
+    pub fn spawn() -> Self {
         let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
         let (outbox, results) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("chunk residency".into())
             .spawn(move || {
-                let mut planner = Planner::new(&grid, range, config, edits);
-                let mut drawn: FxHashMap<NodeKey, Kind> = FxHashMap::default();
+                let mut planning: FxHashMap<u16, Planning> = FxHashMap::default();
                 while let Ok(job) = inbox.recv() {
-                    if let Some(edits) = job.edits {
-                        planner.set_edits(&grid, edits);
-                    }
-                    for event in job.events {
-                        planner.apply(event, job.frame);
+                    for change in job.changes {
+                        match change {
+                            Change::Add {
+                                volume,
+                                grid,
+                                range,
+                                config,
+                                edits,
+                            } => {
+                                planning.insert(
+                                    volume,
+                                    Planning {
+                                        grid,
+                                        planner: Planner::new(volume, &grid, range, config, edits),
+                                        drawn: FxHashMap::default(),
+                                    },
+                                );
+                            }
+                            Change::Remove(volume) => {
+                                planning.remove(&volume);
+                            }
+                        }
                     }
                     let started = std::time::Instant::now();
-                    let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);
-                    let evicted = planner.evict(job.frame, job.need);
-                    let now: FxHashMap<NodeKey, Kind> = plan.drawn.iter().copied().collect();
-                    let added = plan
-                        .drawn
-                        .iter()
-                        .filter(|(k, kind)| drawn.get(k) != Some(kind))
-                        .copied()
-                        .collect();
-                    let removed = drawn
-                        .iter()
-                        .filter(|(k, kind)| now.get(k) != Some(kind))
-                        .map(|(k, _)| *k)
-                        .collect();
-                    drawn = now;
-                    if outbox
-                        .send(Planned {
+                    let mut volumes = Vec::with_capacity(job.volumes.len());
+                    for v in job.volumes {
+                        let Some(p) = planning.get_mut(&v.volume) else {
+                            continue;
+                        };
+                        if let Some(edits) = v.edits {
+                            p.planner.set_edits(&p.grid, edits);
+                        }
+                        for event in v.events {
+                            p.planner.apply(event, job.frame);
+                        }
+                        let plan = p.planner.plan(&p.grid, v.eye, v.velocity, v.view, job.frame);
+                        let evicted = p.planner.evict(job.frame, v.need);
+                        let now: FxHashMap<NodeKey, Kind> = plan.drawn.iter().copied().collect();
+                        let added = plan
+                            .drawn
+                            .iter()
+                            .filter(|(k, kind)| p.drawn.get(k) != Some(kind))
+                            .copied()
+                            .collect();
+                        let removed = p
+                            .drawn
+                            .iter()
+                            .filter(|(k, kind)| now.get(k) != Some(kind))
+                            .map(|(k, _)| *k)
+                            .collect();
+                        p.drawn = now;
+                        volumes.push(Planned {
+                            volume: v.volume,
                             plan,
                             added,
                             removed,
                             evicted,
                             made_for: PlannedFor {
-                                events_seen: job.events_seen,
-                                reports_seen: job.reports_seen,
-                                eye: job.eye,
-                                view: job.view,
-                                edits: planner.edits.version,
+                                eye: v.eye,
+                                view: v.view,
+                                edits: p.planner.edits.version,
                             },
-                            frame: job.frame,
-                            ms: started.elapsed().as_secs_f64() * 1e3,
-                        })
-                        .is_err()
-                    {
+                        });
+                    }
+                    let plans = Plans {
+                        volumes,
+                        events_seen: job.events_seen,
+                        reports_seen: job.reports_seen,
+                        frame: job.frame,
+                        ms: started.elapsed().as_secs_f64() * 1e3,
+                    };
+                    if outbox.send(plans).is_err() {
                         break;
                     }
                 }
@@ -1064,51 +1143,71 @@ impl Worker {
             jobs,
             results: std::sync::Mutex::new(results),
             busy: false,
+            changes: Vec::new(),
             events_sent: 0,
             reports_sent: 0,
         }
     }
 
-    /// Plan for this eye with these events (`reports` frames of ray
-    /// reports among them; and edits, when they changed) unless a plan is
-    /// under way (then they stay with the caller).
-    #[allow(clippy::too_many_arguments)]
-    pub fn submit(
+    /// Plan volume `volume` (of `grid`, its height range `range` in base
+    /// layers, its edits `edits`) from the next job on.
+    pub fn add_volume(
         &mut self,
-        eye: DVec3,
-        velocity: DVec3,
-        view: Option<View>,
-        frame: u64,
-        events: &mut Vec<Event>,
-        reports: &mut u64,
-        need: usize,
-        edits: &mut Option<Arc<EditView>>,
+        volume: u16,
+        grid: Grid,
+        range: (i32, i32),
+        config: PlanConfig,
+        edits: Arc<EditView>,
     ) {
-        if !self.busy {
-            self.events_sent += events.iter().filter(|e| e.structural()).count() as u64;
-            self.reports_sent += std::mem::take(reports);
-            self.busy = self
-                .jobs
-                .send(Job {
-                    events_seen: self.events_sent,
-                    reports_seen: self.reports_sent,
-                    eye,
-                    velocity,
-                    view,
-                    frame,
-                    events: std::mem::take(events),
-                    need,
-                    edits: edits.take(),
-                })
-                .is_ok();
-        }
+        self.changes.push(Change::Add {
+            volume,
+            grid,
+            range,
+            config,
+            edits,
+        });
     }
 
-    /// The finished plan, if any.
-    pub fn poll(&mut self) -> Option<Planned> {
-        let planned = self.results.get_mut().ok()?.try_recv().ok()?;
+    /// Stop planning volume `volume` (its nodes' bookkeeping dropped).
+    pub fn remove_volume(&mut self, volume: u16) {
+        self.changes.push(Change::Remove(volume));
+    }
+
+    /// Whether a job is under way (a submit now would be dropped: callers
+    /// keep their events until it is not).
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Plan every volume of `volumes` for `frame` (`reports` frames of ray
+    /// reports among their events), unless a job is under way.
+    pub fn submit(&mut self, frame: u64, reports: &mut u64, volumes: Vec<VolumeJob>) {
+        if self.busy {
+            return;
+        }
+        self.events_sent += volumes
+            .iter()
+            .flat_map(|v| &v.events)
+            .filter(|e| e.structural())
+            .count() as u64;
+        self.reports_sent += std::mem::take(reports);
+        self.busy = self
+            .jobs
+            .send(Job {
+                events_seen: self.events_sent,
+                reports_seen: self.reports_sent,
+                frame,
+                changes: std::mem::take(&mut self.changes),
+                volumes,
+            })
+            .is_ok();
+    }
+
+    /// The finished plans, if any.
+    pub fn poll(&mut self) -> Option<Plans> {
+        let plans = self.results.get_mut().ok()?.try_recv().ok()?;
         self.busy = false;
-        Some(planned)
+        Some(plans)
     }
 
     /// Structural events submitted so far ([`Event::structural`]).
@@ -1197,7 +1296,7 @@ mod tests {
                 20.0,
             ],
         );
-        let planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
+        let planner = Planner::new(0, &grid, (-2000, 2000), config(), no_edits(&grid));
         (grid, eye, planner)
     }
 
@@ -1389,6 +1488,7 @@ mod tests {
         let (grid, eye, _) = setup();
         let release = 200;
         let mut planner = Planner::new(
+            0,
             &grid,
             (-2000, 2000),
             PlanConfig {
@@ -1454,6 +1554,7 @@ mod tests {
         });
         let cut = |seen: bool| {
             let mut planner = Planner::new(
+                0,
                 &grid,
                 (-2000, 2000),
                 PlanConfig {
@@ -1466,6 +1567,7 @@ mod tests {
             // One ray report somewhere else: rays are on, nothing here met.
             planner.apply(
                 Event::Seen(NodeKey {
+                    volume: 0,
                     face: 0,
                     level: 0,
                     cx: 0,
@@ -1533,7 +1635,7 @@ mod tests {
             f64::from(grid.cells()) * 0.53,
         ];
         let eye = grid.position(2, [at[0], at[1], 200.0]);
-        let mut planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
+        let mut planner = Planner::new(0, &grid, (-2000, 2000), config(), no_edits(&grid));
         let mut frame = 0;
         // Ground within a metre of layer 0 everywhere.
         loop {
@@ -1560,6 +1662,7 @@ mod tests {
         // The level-2 node holding the eye, its children dropped.
         let tiles: Vec<i32> = (0..grid.levels()).map(|l| tiles_at(&grid, l)).collect();
         let held = NodeKey {
+            volume: 0,
             face: 2,
             level: 2,
             cx: (at[0] as i32 >> 2) / CHUNK,
@@ -1598,6 +1701,7 @@ mod tests {
     fn children_are_estimated_from_their_quarter() {
         let (grid, _, mut planner) = setup();
         let key = NodeKey {
+            volume: 0,
             face: 2,
             level: 6,
             cx: 10,
@@ -1643,6 +1747,7 @@ mod tests {
         planner.estimate_children(key, 1);
         let child = |a: i32, b: i32| {
             planner.footprints[&Footprint {
+                volume: 0,
                 face: 2,
                 level: 5,
                 cx: 20 + a,
