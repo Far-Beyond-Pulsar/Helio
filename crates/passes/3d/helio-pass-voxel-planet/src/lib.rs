@@ -37,6 +37,7 @@ mod ridge_envelope;
 pub mod snapshot;
 pub mod stamp;
 pub mod terrain;
+pub mod volumes;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

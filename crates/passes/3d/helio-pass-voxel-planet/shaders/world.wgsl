@@ -155,13 +155,6 @@ fn top_cells(height: i32, level: u32) -> i32 {
     return div_floor(height, world.grid.y) >> level;
 }
 
-// Density of a heightfield cell (`terrain::heightfield_density`): its
-// distance to the column top, 256 per level cell, positive inside solid.
-fn heightfield_density(top: i32, k: i32) -> i32 {
-    let cells = clamp(top - k, -65536, 65536);
-    return cells * 256 - 128;
-}
-
 fn terrain_kind(top: i32, k: i32) -> u32 {
     return select(0u, 1u, k < top);
 }

@@ -397,7 +397,8 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     .source(7);
     let desert = TerrainLayers::desert().source(7);
     let mut deep = TerrainLayers::earth();
-    deep.caves.depth_m = 900.0;
+    deep.volumes.caves.depth_max_m = 700.0;
+    deep.volumes.caves.max_depth_m = 900.0;
     let deep = deep.source(7);
     let mut cliffs = TerrainLayers::earth();
     cliffs.layers.push(Layer {
@@ -469,39 +470,42 @@ fn ground_view_across_a_face_edge_matches_cpu_ray_casts() {
     matches(&gpu, &planet, View::new(eye, forward.as_vec3(), [320, 180]));
 }
 
-/// An eye inside a generated cave: an air cell with air around it, at least
-/// four cells below its column's heightfield top, walls, floor and ceiling
-/// within 8 m.
+/// An eye inside a cave network (`docs/volumes.md`): over the floor of a
+/// passage or chamber near the test sites, an air cell with air around it,
+/// walls, floor and ceiling within 12 m, looking along the passage.
 fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
     let grid = *planet.grid();
-    let field = planet.field();
-    let mut next = xorshift(0x2545_F491_4F6C_DD1D);
+    let shift = planet.volumes()?.region_shift();
     let sites = (0..6u8)
         .flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
     for (face, a, b) in sites {
         let (base, _) = grid.locate(planet.surface_point(land(planet, face, a, b), 0.0));
-        for _ in 0..4_000 {
-            let i = base.i + (next() % 8000) as i32 - 4000;
-            let j = base.j + (next() % 8000) as i32 - 4000;
-            let (below, _) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
-            if below == 0 {
-                continue;
-            }
-            let top = planet.column_top(base.face, i, j, 0);
-            let k = top - 4 - (next() % below.max(1) as u64) as i32;
-            let air = |di: i32, dj: i32, dk: i32| {
-                !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk))
-            };
-            if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| air(a, b, c)))) {
-                let eye = grid.cell_center(Cell::new(base.face, i, j, k));
-                let up = eye.normalize();
-                let forward = (up.any_orthonormal_vector() - up * 0.15).normalize();
-                let side = up.cross(forward);
-                if [forward, -forward, side, -side, up, -up]
-                    .iter()
-                    .all(|d| planet.raycast(eye, *d, 8.0).is_some())
-                {
-                    return Some((eye, forward.as_vec3()));
+        for n in 0..25 {
+            let (ri, rj) = ((base.i >> shift) + n % 5 - 2, (base.j >> shift) + n / 5 - 2);
+            for p in planet.cave_network(base.face, ri, rj).iter() {
+                for t in [1, 2, 3] {
+                    let at = |c: usize| (p.a[c] * (4 - t) + p.b[c] * t) / 4;
+                    let k = ((at(2) + i64::from(p.rv) / 3) >> 2) as i32;
+                    let (i, j) = ((at(0) >> 2) as i32, (at(1) >> 2) as i32);
+                    let air = |di: i32, dj: i32, dk: i32| {
+                        !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk))
+                    };
+                    if !(-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| air(a, b, c)))) {
+                        continue;
+                    }
+                    let eye = grid.cell_center(Cell::new(base.face, i, j, k));
+                    let up = eye.normalize();
+                    let end = grid.cell_center(Cell::new(base.face, (p.b[0] >> 2) as i32, (p.b[1] >> 2) as i32, k));
+                    let along = end - eye - up * (end - eye).dot(up);
+                    let ahead = if along.length() > 1.0 {
+                        along.normalize()
+                    } else {
+                        up.any_orthonormal_vector()
+                    };
+                    let forward = (ahead - up * 0.15).normalize();
+                    if [-up, up].iter().all(|d| planet.raycast(eye, *d, 12.0).is_some()) {
+                        return Some((eye, forward.as_vec3()));
+                    }
                 }
             }
         }
@@ -509,7 +513,7 @@ fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
     None
 }
 
-/// Generated caves render exactly from inside: walls, floor and ceiling.
+/// Cave networks render exactly from inside: walls, floor and ceiling.
 #[test]
 fn cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
@@ -518,12 +522,14 @@ fn cave_view_matches_canonical_cpu_ray_casts() {
     matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
 }
 
-/// Caves 800 m deep: from inside one at a random depth.
+/// Caves 600 m deep: networks far under the ground.
 #[test]
 fn deep_cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let mut stack = TerrainLayers::earth();
-    stack.caves.depth_m = 800.0;
+    stack.volumes.caves.depth_min_m = 400.0;
+    stack.volumes.caves.depth_max_m = 600.0;
+    stack.volumes.caves.max_depth_m = 900.0;
     let planet = Planet::new(PlanetRecipe {
         terrain: stack.source(7),
         ..Default::default()
@@ -533,11 +539,24 @@ fn deep_cave_view_matches_canonical_cpu_ray_casts() {
     matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
 }
 
-/// An eye over leaning ground, looking up the slope: a column whose
-/// generated cells the lean moved off the heightfield by two cells or more.
+/// Lava tubes on the Moon: wide flat-floored passages under the regolith.
+#[test]
+fn lava_tube_view_matches_canonical_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        terrain: TerrainLayers::moon().source(7),
+        ..Default::default()
+    })
+    .unwrap();
+    let (eye, forward) = find_cave(&planet).expect("a lava tube near the test sites");
+    matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
+}
+
+/// An eye over a cliff shape, looking up the slope: a column whose cells
+/// the cliff layer moved off the heightfield by two cells or more.
 fn find_overhang(planet: &Planet) -> Option<(DVec3, Vec3)> {
     let grid = *planet.grid();
-    let field = planet.field();
     let mut next = xorshift(0x1D8E_4E27_C47D_124F);
     let sites = (0..6u8)
         .flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
@@ -546,16 +565,14 @@ fn find_overhang(planet: &Planet) -> Option<(DVec3, Vec3)> {
         for _ in 0..20_000 {
             let i = base.i + (next() % 40_000) as i32 - 20_000;
             let j = base.j + (next() % 40_000) as i32 - 20_000;
-            let (_, above) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
-            if above < 20 {
+            let column = planet.volume_column(base.face, i, j, 0);
+            if column.cliff.cells < 20 {
                 continue;
             }
             let top = |di: i32, dj: i32| planet.column_top(base.face, i + di, j + dj, 0);
             let (si, sj) = (top(20, 0) - top(-20, 0), top(0, 20) - top(0, -20));
-            if si.abs().max(sj.abs()) < 8 {
-                continue;
-            }
             let t = top(0, 0);
+            let above = column.cliff.cells;
             if (t - above..t + above)
                 .filter(|&k| planet.solid(Cell::new(base.face, i, j, k)) != (k < t))
                 .count()
@@ -579,13 +596,16 @@ fn find_overhang(planet: &Planet) -> Option<(DVec3, Vec3)> {
     None
 }
 
-/// Generated overhangs render exactly: the generation's lean lattice is
-/// the field's.
+/// Cliff shapes render exactly: ledges and undercuts on steep ground.
 #[test]
 fn overhang_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let mut stack = TerrainLayers::earth();
-    stack.caves.enabled = false;
+    stack.volumes.caves.enabled = false;
+    stack.layers.push(Layer {
+        coverage: 0.6,
+        ..Layer::new(LayerKind::Cliffs)
+    });
     let planet = Planet::new(PlanetRecipe {
         terrain: stack.source(7),
         ..Default::default()
@@ -1181,16 +1201,7 @@ fn uniform_leaf_top(planet: &Planet, c: Cell) -> Option<u32> {
     for a in 0..4 {
         for b in 0..4 {
             let (i, j) = (li + a, lj + b);
-            let height = planet.column_height(c.face, i, j, 0);
-            let top = helio_pass_voxel_planet::terrain::generated_top(
-                grid,
-                planet.field(),
-                c.face,
-                i,
-                j,
-                0,
-                height,
-            );
+            let top = planet.generated_top(c.face, i, j, 0);
             if !(lk..lk + 4).contains(&(top - 1)) {
                 return None;
             }

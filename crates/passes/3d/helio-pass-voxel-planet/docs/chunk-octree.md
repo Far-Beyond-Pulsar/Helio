@@ -92,9 +92,10 @@ cells may not show:
 - **Rounding.** Coarse cells round their tops down. The field's band is
   widened by `DESCENT` (2) cells, and a Mixed node whose chunk comes back
   empty is still refined (drawn as air).
-- **Caves.** `terrain_extent` is empty where a level cannot show a cave;
-  the Buried band reaches `TerrainField::volume_bounds` under the surface
-  at every level (`EditView::volume_depth`).
+- **Caves.** A column's volume extent is empty where a level cannot show
+  a cave ([`volumes.md`](volumes.md)); the Buried band reaches
+  `Planet::volume_bounds` under the surface at every level
+  (`EditView::volume_depth`).
 - **Small edits.** A brush under half a cell is inactive at a level, and
   coarse baked bricks are built by majority (a 4 m shaft vanishes in 6.4 m
   cells). Brushes classify at any size; `BrickIndex` marks every brick's
@@ -179,12 +180,14 @@ Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):
    relief); for levels 0 to 3 the
    level-4 heights and block slopes materials read
    (`Planet::material_slope`), kept with the columns in the pool.
-4. `tile_halo_main`: the lean lattice's heights past the footprint's
-   edges, once a footprint.
+4. `tile_caves_main`, `tile_volumes_main`: the footprint's cave
+   primitives from its regions' networks, then each column's volume
+   extent (cliff band, caves over it) and the measured volume range
+   ([`volumes.md`](volumes.md)).
 5. `tile_features_main`: the footprint's feature placements
    ([`features.md`](features.md)), its ranges raised over them.
 6. `chunk_columns_main`: each column's 64 cells in a chunk as a 64-bit mask
-   (bit z: layer `64 cz + z`): the heightfield, volume terms and lean,
+   (bit z: layer `64 cz + z`): the heightfield, cliff shapes and caves,
    features, then the edits in order (large brushes, baked cells, recent
    brushes), and the materials of its cells. A workgroup (8x8 columns)
    culls the feature placements over it and their parts together, a lane
@@ -469,7 +472,7 @@ shadows and sky 1.72 ms. Generation in the cruise stress flight: about
 columns 1.9 us). Settled test views take 3,000 to 10,000 detail pages.
 
 Gates (`tests/chunks.rs`): drawn hits match CPU ray casts (ground, face
-edges, caves 800 m deep, overhangs, planes, brushes, a 600 m shaft, a 3 km
+edges, cave networks 600 m deep, lava tubes, cliff shapes, planes, brushes, a 600 m shaft, a 3 km
 crater, a hollowed core, an underground hall, 18 000 block edits, sealed
 edits, features); `uniform_leaves_draw_canonical_materials`,
 `dug_walls_draw_canonical_materials` and

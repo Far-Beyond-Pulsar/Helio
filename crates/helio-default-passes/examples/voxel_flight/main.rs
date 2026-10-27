@@ -23,7 +23,7 @@
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert, [`worlds`]: the planet, its features, look, sky and
-//! ground cover) or `_LAYERS=<json>` (a layer stack), `_EXPORT=<dir>` (its layers, features and look as a Pulsar level holds them), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
+//! ground cover) or `_LAYERS=<json>` (a layer stack), `_EXPORT=<dir>` (its layers, features and look as a Pulsar level holds them), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_CLIFFS`,
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
@@ -738,7 +738,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             let part =
                 |k: usize| t.iter().map(|f| f.tile_stages[k]).sum::<f64>() * 1e3 / tiles as f64;
             eprintln!(
-                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tiles {:.2} us/tile (nodes {:.2}, columns {:.2}, halos {:.2}, features {:.2}), chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
+                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tiles {:.2} us/tile (nodes {:.2}, columns {:.2}, volumes {:.2}, features {:.2}), chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
                 t.len(),
                 a * 1e3 / tiles as f64,
                 part(0),
@@ -2444,14 +2444,56 @@ fn carve_tunnel(flight: &mut Flight, ground: DVec3, heading: f64) -> (DVec3, Vec
     (eye, (ahead - up * 0.25).normalize().as_vec3())
 }
 
-/// Views of generated volumetric terrain near `near`: inside a tunnel (an
-/// air pocket with walls within 8 m, below its column's heightfield top) and
-/// under an overhang (air below a solid cell above the heightfield top).
+/// Views of generated volumetric terrain near `near`: inside a cave (the
+/// nearest network passage or chamber with air around its axis, looking
+/// along it) and under a cliff's overhang (air below a solid cell over the
+/// heightfield top).
 fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)> {
     use helio_pass_voxel_planet::Cell;
     let grid = *planet.grid();
-    let field = planet.field();
     let (base, _) = grid.locate(near);
+    let mut views = Vec::new();
+    let Some(volumes) = planet.volumes() else {
+        return views;
+    };
+    let air = |c: Cell| {
+        (-1..=1).all(|a| {
+            (-1..=1).all(|b| (-1..=1).all(|d| !planet.solid(Cell::new(c.face, c.i + a, c.j + b, c.k + d))))
+        })
+    };
+    let shift = volumes.region_shift();
+    let (ri, rj) = (base.i >> shift, base.j >> shift);
+    let cave = (0..5i32).find_map(|ring| {
+        (-ring..=ring)
+            .flat_map(|a| (-ring..=ring).map(move |b| (a, b)))
+            .filter(|(a, b)| a.abs().max(b.abs()) == ring)
+            .find_map(|(a, b)| {
+                planet
+                    .cave_network(base.face, ri + a, rj + b)
+                    .iter()
+                    .find_map(|p| {
+                        // Over the floor on the axis, a quarter along.
+                        let at = |n: usize| (p.a[n] * 3 + p.b[n]) / 4;
+                        let k = ((at(2) + i64::from(p.rv) / 3) >> 2) as i32;
+                        let cell = Cell::new(base.face, (at(0) >> 2) as i32, (at(1) >> 2) as i32, k);
+                        if !air(cell) {
+                            return None;
+                        }
+                        let eye = grid.cell_center(cell);
+                        let up = grid.up(eye);
+                        let end = grid.cell_center(Cell::new(base.face, (p.b[0] >> 2) as i32, (p.b[1] >> 2) as i32, k));
+                        let along = end - eye;
+                        let along = along - up * along.dot(up);
+                        let ahead = if along.length() > 1.0 {
+                            along.normalize()
+                        } else {
+                            up.any_orthonormal_vector()
+                        };
+                        Some(("cave_tunnel", eye, (ahead - up * 0.1).normalize().as_vec3()))
+                    })
+            })
+    });
+    views.extend(cave);
     let mut rng = 0x2545_F491_4F6C_DD1Du64;
     let mut next = || {
         rng ^= rng << 13;
@@ -2459,47 +2501,25 @@ fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)
         rng ^= rng << 17;
         rng
     };
-    let (mut tunnel, mut overhang) = (None, None);
     for _ in 0..200_000 {
-        if tunnel.is_some() && overhang.is_some() {
-            break;
-        }
         let i = base.i + (next() % 20_000) as i32 - 10_000;
         let j = base.j + (next() % 20_000) as i32 - 10_000;
-        let (below, above) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
-        let top = planet.column_top(base.face, i, j, 0);
-        let solid =
-            |di: i32, dj: i32, k: i32| planet.solid(Cell::new(base.face, i + di, j + dj, k));
-        if tunnel.is_none() && below > 4 {
-            let k = top - 4 - (next() % below as u64) as i32;
-            if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| !solid(a, b, k + c)))) {
-                let eye = grid.cell_center(Cell::new(base.face, i, j, k));
-                let up = grid.up(eye);
-                let ahead = up.any_orthonormal_vector();
-                let side = up.cross(ahead);
-                if [ahead, -ahead, side, -side, up, -up]
-                    .iter()
-                    .all(|d| planet.raycast(eye, *d, 8.0).is_some())
-                {
-                    tunnel = Some(("cave_tunnel", eye, (ahead - up * 0.1).normalize().as_vec3()));
-                }
-            }
+        let column = planet.volume_column(base.face, i, j, 0);
+        if column.above <= 2 {
+            continue;
         }
-        if overhang.is_none() && above > 2 {
-            let k = top + (next() % above as u64) as i32;
-            if solid(0, 0, k) && !solid(0, 0, k - 1) && !solid(0, 0, k - 2) {
-                let eye = grid.cell_center(Cell::new(base.face, i, j, k - 2));
-                let up = grid.up(eye);
-                let ahead = up.any_orthonormal_vector();
-                overhang = Some((
-                    "overhang",
-                    eye - ahead * 6.0,
-                    (ahead + up * 0.25).normalize().as_vec3(),
-                ));
-            }
+        let top = column.top;
+        let k = top + (next() % column.above as u64) as i32;
+        let solid = |k: i32| planet.solid(Cell::new(base.face, i, j, k));
+        if solid(k) && !solid(k - 1) && !solid(k - 2) {
+            let eye = grid.cell_center(Cell::new(base.face, i, j, k - 2));
+            let up = grid.up(eye);
+            let ahead = up.any_orthonormal_vector();
+            views.push(("overhang", eye - ahead * 6.0, (ahead + up * 0.25).normalize().as_vec3()));
+            break;
         }
     }
-    tunnel.into_iter().chain(overhang).collect()
+    views
 }
 
 /// The feature nearest `ground` (a cell of `material` within a few layers
@@ -2607,8 +2627,8 @@ fn main() {
     let voxel: f64 = std::env::var("HELIO_VOXEL_FLIGHT_VOXEL")
         .ok()
         .map_or(0.1, |v| v.parse().unwrap());
-    // HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1: the Earth stack without caves and
-    // overhangs (A/B for volumetric columns).
+    // HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1: the stack without caves and cliff
+    // shapes (A/B for volumetric columns).
     // HELIO_VOXEL_FLIGHT_SEED=<n>: the Earth stack with another seed (7).
     let seed = std::env::var("HELIO_VOXEL_FLIGHT_SEED")
         .ok()
@@ -2627,9 +2647,9 @@ fn main() {
     // HELIO_VOXEL_FLIGHT_GRAIN=scale_m,octaves,ratio: an extra roughness
     // layer (A/B for ground grain).
     let mut stack = stack;
-    // HELIO_VOXEL_FLIGHT_NO_CAVES / _NO_OVERHANGS: A/B for volumetric terms.
-    stack.caves.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CAVES").is_none();
-    stack.overhangs.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_OVERHANGS").is_none();
+    // HELIO_VOXEL_FLIGHT_NO_CAVES / _NO_CLIFFS: A/B for the volume layer.
+    stack.volumes.caves.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CAVES").is_none();
+    stack.volumes.cliffs.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLIFFS").is_none();
     if let Ok(grain) = std::env::var("HELIO_VOXEL_FLIGHT_GRAIN") {
         use helio_pass_voxel_planet::layers::{Layer, LayerKind, LayerMask};
         let v: Vec<f64> = grain
@@ -2723,8 +2743,8 @@ fn main() {
                     mountain(&flight.planet, heading)[usize::from(view == "mountain_slope")];
                 (e, f)
             }
-            // Inside the natural cave nearest the spawn (searched 3 km
-            // apart, cave regions are ~6 km), along it.
+            // Inside the cave network nearest the spawn (searched 3 km
+            // apart), along a passage.
             "cave" => {
                 let up = ground.normalize();
                 let ahead = tangent(ground, heading).as_dvec3();

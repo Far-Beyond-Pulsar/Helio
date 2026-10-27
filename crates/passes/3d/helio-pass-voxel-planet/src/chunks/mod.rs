@@ -133,8 +133,8 @@ struct TileJob {
     _pad: [u32; 3],
 }
 
-/// Footprints the pool holds by default: their columns, halos and material
-/// slopes (75 KB each), within what the device binds.
+/// Footprints the pool holds by default: their columns, cave primitives and
+/// material slopes (70 KB each), within what the device binds.
 const FOOTPRINT_POOL: usize = 2048;
 /// Material slope words a footprint (`SLOPE_STRIDE` of chunk_generate.wgsl:
 /// a level-3 footprint's 34x34 level-4 blocks).
@@ -180,7 +180,7 @@ impl Default for Capacity {
 }
 
 /// GPU slots of data kept across frames by key: footprints' columns (and
-/// lean halos), so a footprint's columns are computed once while it stays
+/// cave primitives), so a footprint's columns are computed once while it stays
 /// in use, whichever of its nodes are generated when (they were 60-75 % of
 /// a chunk's generation), and feature candidate blocks
 /// (`candidates::CandidateBlocks`). Both depend only on the terrain, never
@@ -1122,7 +1122,7 @@ fn edit_view(
         baked: edits.baked.clone(),
         bricks,
         version,
-        volume_depth: (i64::from(planet.field().volume_bounds().0)
+        volume_depth: (i64::from(planet.volume_bounds().0)
             / i64::from(planet.grid().layer_mm())
             + 1) as i32,
     }
@@ -1386,11 +1386,11 @@ pub struct FrameTimings {
     /// chunk builds.
     pub stages: [f64; 3],
     /// The first stage's parts: eviction and the tiles' nodes, their
-    /// columns, their halos, their features' placements.
+    /// columns, their volumes (caves, extents), their features' placements.
     pub tile_stages: [f64; 4],
 }
 
-/// Timestamps a frame writes: generation start, tile halos end, seed start
+/// Timestamps a frame writes: generation start, tile volumes end, seed start
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
 /// tile nodes end, tile columns end, tile features end, the shadows'
 /// denoiser end; the shadows' parts: sun samples end, sky samples end,
@@ -1669,7 +1669,8 @@ pub struct ChunkWorld {
     gen_layout: wgpu::BindGroupLayout,
     tile_nodes: wgpu::ComputePipeline,
     tile_columns: wgpu::ComputePipeline,
-    tile_halo: wgpu::ComputePipeline,
+    tile_caves: wgpu::ComputePipeline,
+    tile_volumes: wgpu::ComputePipeline,
     tile_slope_nodes: wgpu::ComputePipeline,
     tile_slope_heights: wgpu::ComputePipeline,
     tile_slopes: wgpu::ComputePipeline,
@@ -1774,12 +1775,14 @@ pub struct ChunkWorld {
     debug_pixel: Option<[u32; 2]>,
     world: wgpu::Buffer,
     terrain: wgpu::Buffer,
+    // The volume layer's constants (`volumes::VolumeConstants`).
+    volumes: wgpu::Buffer,
     tile_jobs: wgpu::Buffer,
     tile_data: wgpu::Buffer,
     // The batch's tiles' two-rate nodes (`engine::TILE_NODES`^2 a tile).
     tile_node_data: wgpu::Buffer,
-    // Lean lattice heights past each tile's edges (`HALO_SIDE`^2 a tile).
-    tile_halo_data: wgpu::Buffer,
+    // Each footprint's cave primitives (`volumes::CAVE_SLOT_WORDS` a footprint).
+    tile_cave_data: wgpu::Buffer,
     // Each footprint's material slopes (`SLOPE_STRIDE` a footprint), and
     // the batch's lattices of level-4 tops they come from.
     tile_slope_data: wgpu::Buffer,
@@ -2629,6 +2632,7 @@ impl ChunkWorld {
             let mut bytes =
                 format!("chunk packs {KEPT_FORMAT} {DETAIL_LEVELS} {}", gen_source).into_bytes();
             bytes.extend_from_slice(&terrain_bytes(&program));
+            bytes.extend_from_slice(bytemuck::bytes_of(&crate::engine::volume_constants(planet)));
             bytes.extend_from_slice(bytemuck::bytes_of(&WorldGpu::new(planet)));
             crate::record::fnv64(&bytes)
         };
@@ -2642,6 +2646,7 @@ impl ChunkWorld {
             entries: &[
                 uniform(1, c),
                 uniform(16, c),
+                uniform(18, c),
                 storage(2, true, c),
                 storage(3, false, c),
                 storage(4, false, c),
@@ -2700,7 +2705,8 @@ impl ChunkWorld {
         };
         let tile_nodes = compute("tile_nodes_main");
         let tile_columns = compute("tile_columns_main");
-        let tile_halo = compute("tile_halo_main");
+        let tile_caves = compute("tile_caves_main");
+        let tile_volumes = compute("tile_volumes_main");
         let tile_slope_nodes = compute("tile_slope_nodes_main");
         let tile_slope_heights = compute("tile_slope_heights_main");
         let tile_slopes = compute("tile_slopes_main");
@@ -3479,6 +3485,11 @@ impl ChunkWorld {
             contents: &terrain_bytes(&program),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let volumes = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk volumes"),
+            contents: bytemuck::bytes_of(&crate::engine::volume_constants(planet)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
         let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("chunk materials"),
@@ -3522,7 +3533,8 @@ impl ChunkWorld {
             gen_layout,
             tile_nodes,
             tile_columns,
-            tile_halo,
+            tile_caves,
+            tile_volumes,
             tile_slope_nodes,
             tile_slope_heights,
             tile_slopes,
@@ -3602,6 +3614,7 @@ impl ChunkWorld {
             debug_pixel: None,
             world,
             terrain,
+            volumes,
             tile_jobs: buffer(
                 "chunk tile jobs",
                 (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64,
@@ -3629,9 +3642,9 @@ impl ChunkWorld {
                     * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
-            tile_halo_data: buffer(
-                "chunk footprint halos",
-                pool_size as u64 * 40 * 40 * 4,
+            tile_cave_data: buffer(
+                "chunk footprint caves",
+                pool_size as u64 * crate::volumes::CAVE_SLOT_WORDS as u64 * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
             tile_slope_data: buffer(
@@ -4010,7 +4023,8 @@ impl ChunkWorld {
                 entry(2, &self.tile_jobs),
                 entry(3, &self.tile_data),
                 entry(25, &self.tile_node_data),
-                entry(26, &self.tile_halo_data),
+                entry(18, &self.volumes),
+                entry(26, &self.tile_cave_data),
                 entry(34, &self.tile_slope_data),
                 entry(35, &self.slope_lattice),
                 entry(36, &self.feature_set),
@@ -5365,17 +5379,21 @@ impl ChunkWorld {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("chunk tile halos"),
+                label: Some("chunk tile volumes"),
                 timestamp_writes: stamp(None, 1),
             });
             pass.set_bind_group(0, &group, &[]);
             if computed_count > 0 {
-                pass.set_pipeline(&self.tile_halo);
+                // The footprints' cave primitives, then each column's
+                // volume extent (`docs/volumes.md`).
+                pass.set_pipeline(&self.tile_caves);
                 pass.dispatch_workgroups(
                     (computed_count as u32).min(crate::engine::HALO_GROUPS),
                     1,
                     1,
                 );
+                pass.set_pipeline(&self.tile_volumes);
+                pass.dispatch_workgroups(64, computed_count as u32, 1);
             }
         }
         {
@@ -7743,7 +7761,16 @@ mod tests {
                     "chunk draw (scene materials)",
                     super::scene::scene_source(&draw, 64),
                 );
-                for (label, source) in [generate, (label, draw), textured] {
+                let verify = (
+                    "terrain verification",
+                    crate::engine::verify_source(plane, &program, false),
+                );
+                for (label, source) in [generate, (label, draw), textured, verify] {
+                    // HELIO_DUMP_SHADERS=<dir>: the sources, for offline tools.
+                    if let Some(dir) = std::env::var_os("HELIO_DUMP_SHADERS") {
+                        let name = format!("{label} {plane} {counting}.wgsl").replace(' ', "_");
+                        std::fs::write(std::path::Path::new(&dir).join(name), &source).unwrap();
+                    }
                     let module = naga::front::wgsl::parse_str(&source)
                         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
                     naga::valid::Validator::new(
