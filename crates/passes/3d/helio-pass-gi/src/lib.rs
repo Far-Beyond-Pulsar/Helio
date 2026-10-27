@@ -1158,6 +1158,7 @@ mod shader_tests {
                 ATMOSPHERE_SKY_TABLE_SNIPPET,
                 GI_COMMON_SNIPPET,
                 GI_SAMPLE_SNIPPET,
+                CLOUD_SHADOW_SNIPPET,
             ],
         );
         validate(
@@ -1182,6 +1183,7 @@ mod shader_tests {
                 &[
                     GI_COMMON_SNIPPET,
                     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
+                    CLOUD_SHADOW_SNIPPET,
                 ],
             );
         }
