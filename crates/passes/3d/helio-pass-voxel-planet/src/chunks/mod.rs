@@ -365,6 +365,59 @@ struct DrawParams {
     /// since the last frame: the denoiser reprojects by `motions`; 2: this
     /// volume moved: its hits write their own motion).
     volume: [u32; 4],
+    /// The pass's pixels (x0, y0, x1, y1; x0, y0 multiples of
+    /// `RECT_ALIGN`): its volume's bounds on the screen, the whole view for
+    /// the first pass, which also writes the pixels no volume hits.
+    rect: [u32; 4],
+}
+
+/// A pass rectangle's origin's alignment (pixels): whole workgroups of
+/// every kernel's scale (a 32x32 tile of `feedback`, 4x4 blocks of
+/// `sky_sample` in 8x8 groups).
+const RECT_ALIGN: u32 = 32;
+
+/// Workgroups over `rect` (`DrawParams::rect`) of a kernel taking `per`
+/// pixels a workgroup along each side.
+fn rect_groups(rect: [u32; 4], per: u32) -> (u32, u32) {
+    ((rect[2] - rect[0]).div_ceil(per), (rect[3] - rect[1]).div_ceil(per))
+}
+
+/// The pixels of view `v` volume `vol`'s bounds may cover: the corners of
+/// the box around its bounding ball projected, a pixel more each way, the
+/// origin rounded down to `RECT_ALIGN`; the whole view when the box reaches
+/// behind the eye's near plane or the volume has no bounds.
+fn screen_rect(v: &ViewInput, vol: &volumes::Volume) -> [u32; 4] {
+    let whole = [0, 0, v.size[0], v.size[1]];
+    let Some(radius) = vol.bounds else {
+        return whole;
+    };
+    let centre = vol.transform.position - v.eye;
+    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for n in 0..8 {
+        let corner = centre
+            + DVec3::new(
+                if n & 1 == 0 { -radius } else { radius },
+                if n & 2 == 0 { -radius } else { radius },
+                if n & 4 == 0 { -radius } else { radius },
+            );
+        let clip = v.view_proj * corner.as_vec3().extend(1.0);
+        if clip.w <= v.near.max(1e-6) {
+            return whole;
+        }
+        let ndc = clip.truncate().truncate() / clip.w;
+        lo = lo.min(ndc);
+        hi = hi.max(ndc);
+    }
+    let size = Vec2::new(v.size[0] as f32, v.size[1] as f32);
+    // NDC y up, pixels y down.
+    let x = ((Vec2::new(lo.x, hi.x) * 0.5 + 0.5) * size.x).to_array();
+    let y = ((Vec2::new(-hi.y, -lo.y) * 0.5 + 0.5) * size.y).to_array();
+    let clamp = |p: f32, most: u32| (p.max(0.0) as u32).min(most);
+    let x0 = clamp(x[0] - 1.0, v.size[0]) / RECT_ALIGN * RECT_ALIGN;
+    let y0 = clamp(y[0] - 1.0, v.size[1]) / RECT_ALIGN * RECT_ALIGN;
+    let x1 = clamp(x[1] + 2.0, v.size[0]).max(x0);
+    let y1 = clamp(y[1] + 2.0, v.size[1]).max(y0);
+    [x0, y0, x1, y1]
 }
 
 /// A view of the volumes in the world frame (`ChunkWorld::draw_params`):
@@ -1646,6 +1699,9 @@ pub struct UpdateStats {
     /// pages in use when last read back of the leaf pool's.
     pub chunk_slots: usize,
     pub leaf_pages: (u64, u64),
+    /// CPU milliseconds the pools' growth took this frame (buffers made
+    /// and their copies submitted).
+    pub grow_ms: f64,
     /// Edited chunks restored by copy this frame, those generated (from
     /// the field and the edits over them), and those kept.
     pub restored_chunks: usize,
@@ -2008,7 +2064,7 @@ pub struct ChunkWorld {
 /// nearest first, with its index.
 #[derive(Clone)]
 struct DrawGroups {
-    volumes: Vec<(u16, wgpu::BindGroup)>,
+    volumes: Vec<(u16, wgpu::BindGroup, [u32; 4])>,
 }
 
 /// What generation costs on the GPU: milliseconds of a tile's columns and
@@ -4411,6 +4467,7 @@ impl ChunkWorld {
                 .max(2 * CHUNK_BATCH as u64 * LEAVES_PER_SLOT / LEAF_PAGE)
                 .min(pages / 2)
         };
+        let grow_clock = std::time::Instant::now();
         if self.free_slots.len() + evictions.len() < reserve(self.slot_capacity)
             && self.slot_capacity < self.max_chunks
         {
@@ -4426,6 +4483,7 @@ impl ChunkWorld {
                 vol.grow_footprints(&self.device, &self.queue);
             }
         }
+        stats.grow_ms = grow_clock.elapsed().as_secs_f64() * 1e3;
         let reserve = reserve(self.slot_capacity);
         let mut need = reserve.saturating_sub(self.free_slots.len() + evictions.len());
         let pages = self.leaf_capacity / LEAF_PAGE;
@@ -5773,6 +5831,10 @@ impl ChunkWorld {
                 traced,
                 flags,
             ],
+            rect: match vol {
+                Some((vol, _)) if pass > 0 && v.ortho.is_none() => screen_rect(v, vol),
+                _ => [0, 0, v.size[0], v.size[1]],
+            },
         }
     }
 
@@ -6045,7 +6107,6 @@ impl ChunkWorld {
                 vol,
                 &params,
                 &o.targets,
-                [SUN_OCCLUSION_SIDE; 2],
                 drawn,
                 self.rounds,
                 None,
@@ -6192,7 +6253,7 @@ impl ChunkWorld {
     /// Records volume `vol`'s pass of one view's primary visibility
     /// (`params`: its parameters, uploaded into `view`'s): its drawn chunks
     /// culled and binned, then `rounds` of seed and trace into `targets`
-    /// (`size` pixels; `drawn` chunks), timed as `timing` says. Its pass
+    /// (over `DrawParams::rect`; `drawn` chunks), timed as `timing` says. Its pass
     /// (`DrawParams::volume`) keeps the hits of the volumes traced before
     /// it that are nearer than its own. Its draw bind group, for the stages
     /// that shade its hits.
@@ -6204,7 +6265,6 @@ impl ChunkWorld {
         vol: &volumes::Volume,
         params: &DrawParams,
         targets: &Targets,
-        size: [u32; 2],
         drawn: u32,
         rounds: u32,
         timing: Option<(&wgpu::QuerySet, u32)>,
@@ -6389,7 +6449,8 @@ impl ChunkWorld {
             });
             pass.set_bind_group(0, &group, &[]);
             pass.set_bind_group(1, &trace_group, &[]);
-            pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+            let (x, y) = rect_groups(params.rect, 8);
+            pass.dispatch_workgroups(x, y, 1);
         }
         group
     }
@@ -6535,7 +6596,7 @@ impl ChunkWorld {
         }
         let primary_vol = self.volumes[usize::from(primary)].as_ref().unwrap();
         let camera_group = self.draw_group(&self.params, primary_vol, self.camera_view(primary_vol));
-        let mut groups: Vec<(u16, wgpu::BindGroup)> = Vec::with_capacity(order.len());
+        let mut groups: Vec<(u16, wgpu::BindGroup, [u32; 4])> = Vec::with_capacity(order.len());
         for (pass, &index) in order.iter().enumerate() {
             let vol = self.volumes[usize::from(index)].as_ref().unwrap();
             let last = prev_of(index);
@@ -6548,12 +6609,11 @@ impl ChunkWorld {
                 vol,
                 &params,
                 self.targets.as_ref().unwrap(),
-                size,
                 drawn,
                 self.rounds,
                 timing.map(|(set, _, ring)| (set, ring)),
             );
-            groups.push((index, group));
+            groups.push((index, group, params.rect));
         }
         let targets = self.targets.as_ref().unwrap();
         {
@@ -6639,16 +6699,13 @@ impl ChunkWorld {
                     timestamp_writes: end(12),
                 });
                 pass.set_bind_group(1, &sample_group, &[]);
-                for (index, group) in &groups {
+                for (index, group, rect) in &groups {
                     let p = self.pipelines_of(*index);
                     pass.set_bind_group(0, group, &[]);
                     for pipeline in [&p.shadow_sample, &p.shadow_sample_far] {
                         pass.set_pipeline(pipeline);
-                        pass.dispatch_workgroups(
-                            size[0].div_ceil(2).div_ceil(8),
-                            size[1].div_ceil(2).div_ceil(8),
-                            1,
-                        );
+                        let (x, y) = rect_groups(*rect, 16);
+                        pass.dispatch_workgroups(x, y, 1);
                     }
                 }
             }
@@ -6658,16 +6715,13 @@ impl ChunkWorld {
                     timestamp_writes: end(13),
                 });
                 pass.set_bind_group(1, &sky_group, &[]);
-                for (index, group) in &groups {
+                for (index, group, rect) in &groups {
                     let p = self.pipelines_of(*index);
                     pass.set_bind_group(0, group, &[]);
                     for pipeline in [&p.sky_sample, &p.sky_sample_far] {
                         pass.set_pipeline(pipeline);
-                        pass.dispatch_workgroups(
-                            size[0].div_ceil(4).div_ceil(8),
-                            size[1].div_ceil(4).div_ceil(8),
-                            1,
-                        );
+                        let (x, y) = rect_groups(*rect, 32);
+                        pass.dispatch_workgroups(x, y, 1);
                     }
                 }
             }
@@ -6676,10 +6730,11 @@ impl ChunkWorld {
                 timestamp_writes: end(18),
             });
             pass.set_bind_group(1, &shadow_group, &[]);
-            for (index, group) in &groups {
+            for (index, group, rect) in &groups {
                 pass.set_pipeline(&self.pipelines_of(*index).shadow);
                 pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+                let (x, y) = rect_groups(*rect, 8);
+                pass.dispatch_workgroups(x, y, 1);
             }
             drop(pass);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -6687,7 +6742,7 @@ impl ChunkWorld {
                 timestamp_writes: end(14),
             });
             pass.set_bind_group(1, &fallback_group, &[]);
-            for (index, group) in &groups {
+            for (index, group, _) in &groups {
                 pass.set_pipeline(&self.pipelines_of(*index).shadow_fallback);
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
@@ -6714,24 +6769,22 @@ impl ChunkWorld {
                 ],
             });
             pass.set_bind_group(1, &local_group, &[]);
-            for (index, group) in &groups {
+            for (index, group, rect) in &groups {
                 let p = self.pipelines_of(*index);
                 pass.set_bind_group(0, group, &[]);
                 for pipeline in [&p.local_sample, &p.local_sample_far] {
                     pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(
-                        size[0].div_ceil(2).div_ceil(8),
-                        size[1].div_ceil(2).div_ceil(8),
-                        1,
-                    );
+                    let (x, y) = rect_groups(*rect, 16);
+                    pass.dispatch_workgroups(x, y, 1);
                 }
             }
-            for (index, group) in &groups {
+            for (index, group, rect) in &groups {
                 let p = self.pipelines_of(*index);
                 pass.set_bind_group(0, group, &[]);
                 for pipeline in [&p.local_shadow, &p.local_shadow_far] {
                     pass.set_pipeline(pipeline);
-                    pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+                    let (x, y) = rect_groups(*rect, 8);
+                    pass.dispatch_workgroups(x, y, 1);
                 }
             }
             drop(pass);
@@ -6741,11 +6794,11 @@ impl ChunkWorld {
             });
             // 6. The GI probes' rays (a thread a ray, past the frame's
             // count none), through the primary volume.
-            if let (Some(gi), true, Some(occlusion), Some((_, group))) = (
+            if let (Some(gi), true, Some(occlusion), Some((_, group, _))) = (
                 gi,
                 self.gi_clipmap.is_some(),
                 &self.sun_occlusion,
-                groups.iter().find(|(i, _)| *i == primary),
+                groups.iter().find(|(i, ..)| *i == primary),
             ) {
                 // Hits see the sun by its occlusion maps (none drawn: lit).
                 let gi_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -6804,10 +6857,11 @@ impl ChunkWorld {
                     timestamp_writes: None,
                 });
                 pass.set_bind_group(1, &feedback_group, &[]);
-                for (index, group) in &groups {
+                for (index, group, rect) in &groups {
                     pass.set_pipeline(&self.pipelines_of(*index).feedback);
                     pass.set_bind_group(0, group, &[]);
-                    pass.dispatch_workgroups(size[0].div_ceil(32), size[1].div_ceil(32), 1);
+                    let (x, y) = rect_groups(*rect, 32);
+                    pass.dispatch_workgroups(x, y, 1);
                 }
             }
             let slot = self
@@ -6937,10 +6991,10 @@ impl ChunkWorld {
     ) {
         // Foliage grows on the primary volume: its walks in its frame.
         let Some(primary) = self.primary else { return };
-        let Some((_, group)) = self
+        let Some((_, group, _)) = self
             .last_groups
             .as_ref()
-            .and_then(|g| g.volumes.iter().find(|(i, _)| *i == primary).cloned())
+            .and_then(|g| g.volumes.iter().find(|(i, ..)| *i == primary).cloned())
         else {
             return;
         };
@@ -7427,7 +7481,7 @@ impl ChunkWorld {
         }
         pass.set_bind_group(1, &resolve_group, &[]);
         // Each volume's hits by its own draw (its frame, its materials).
-        for (index, group) in &groups.volumes {
+        for (index, group, rect) in &groups.volumes {
             let plane = self.volumes[usize::from(*index)]
                 .as_ref()
                 .is_some_and(|v| v.grid.is_plane());
@@ -7437,6 +7491,10 @@ impl ChunkWorld {
                 _ => pass.set_pipeline(&pipelines.publish),
             }
             pass.set_bind_group(0, group, &[]);
+            if rect[2] <= rect[0] || rect[3] <= rect[1] {
+                continue;
+            }
+            pass.set_scissor_rect(rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]);
             pass.draw(0..3, 0..1);
         }
     }

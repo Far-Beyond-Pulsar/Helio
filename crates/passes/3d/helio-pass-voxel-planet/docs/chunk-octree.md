@@ -44,7 +44,11 @@ One `ChunkWorld` holds them all (`ChunkWorld::add_volume`,
   its trace walks no farther than them, so the nearest hit of any volume
   wins per pixel, hidden volumes cost little, and volumes may overlap (a
   ship landed in the ground). A chunk's frame stays in its volume's
-  coordinates: a moving or spinning volume rewrites none.
+  coordinates: a moving or spinning volume rewrites none. A later pass's
+  kernels run only over its volume's rectangle on the screen
+  (`DrawParams::rect`: the projected box of its bounding ball, origin on
+  32 pixels; the whole view when the box reaches behind the eye), so a
+  volume costs by the pixels it may cover, as rasterised bodies do.
 - **Shading per volume.** Every shading kernel runs a dispatch a volume
   and takes the hits of its pass's volume (`ours`; the pixels no volume
   hits, the first pass's): sun, sky and local lights walk the hit's own
@@ -193,10 +197,23 @@ without waiting: its drawn set and requests as differences from the last.
 - **Eviction.** Generated nodes no plan has visited for `release_frames`
   (600 by default, `HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`) are released,
   `MAX_RELEASE` a plan, least recently visited first, so residency follows
-  the cut, not the eye's history. When chunk slots or leaf pages run short,
-  the least recently visited go first (never one visited in the last
-  `IDLE_FRAMES`: it may still be fading out). Bookkeeping of nodes not
-  generated is dropped after `keep_frames`.
+  the cut, not the eye's history. When chunk slots or leaf pages run short
+  (an eighth of the pool, at least two batches' worth), the pool grows; at
+  its most (`Capacity::chunks`), the least recently visited go first (never
+  one visited in the last `IDLE_FRAMES`: it may still be fading out).
+  Bookkeeping of nodes not generated is dropped after `keep_frames`.
+- **Pools grow on demand.** The slot pool (8192 slots at first: meta, mids,
+  keys, statics, leaf page lists, draw lists) and the leaf pool (leaves,
+  their materials and normals, each page's detail page, the free stack)
+  double when short, up to `Capacity::chunks` (131072 by default): every
+  buffer is copied into one twice the size in a submit of its own, before
+  the update records anything, so writes queued after land in the new
+  buffers. The chunk table grows with the slots (rebuilt from its CPU
+  mirror and uploaded whole); the leaf stack takes the new pages under the
+  old ones and its count rises on the GPU (`chunk_pool.wgsl`: the count
+  read back lags it, and readbacks from before a growth are ignored). A
+  settled Earth view at 60 m holds a 65536-slot pool: the chunk buffers
+  take 1.5 GB of GPU memory, not the 1.9 GB of the most.
 - **Settled.** A plan counts only for the eye and view it was made for, and
   only once it saw a sweep of ray reports of the cut as it ended up: after
   residency last changed and the last fade ended (what a finer node
@@ -214,9 +231,12 @@ then drawn ones nearest first), then the plan's requests, a footprint's
 nodes together; kept chunks come back by copy.
 
 A footprint's columns depend only on the terrain, so they stay on the GPU
-in the **footprint pool** (2048 slots, about 75 KB each, least recently
-used reused, never one the batch uses): a footprint is computed once while
-it stays in use, whichever of its nodes are generated when. The batch
+in the **footprint pool** (a volume's: 1024 slots at first, doubling up to
+2048 when it would reuse a slot used in the last 120 frames; about 75 KB
+each, least recently used reused, never one the batch uses): a footprint is
+computed once while it stays in use, whichever of its nodes are generated
+when. The two-rate tile nodes are the batch's scratch, one buffer for the
+volumes' largest program. The batch
 lists the footprints it computes first, then those it reads from the pool.
 
 Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):

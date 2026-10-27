@@ -81,6 +81,10 @@ struct DrawParams {
     // the last frame, `motions`; 2: this one moved, its hits write their own
     // motion).
     volume: vec4<u32>,
+    // The pass's pixels: a rectangle (x0, y0, x1, y1; x0 and y0 multiples
+    // of 32) holding its volume's bounds on the screen, the whole view for
+    // the first pass. Its kernels run over it alone (`rect_id`).
+    rect: vec4<u32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -220,6 +224,12 @@ fn slot_volume(slot: u32) -> u32 {
 // traced: every hit).
 fn ours(slot: u32) -> bool {
     return params.volume.z <= 1u || slot_volume(slot) == params.volume.x;
+}
+
+// Invocation `id` of a kernel of `scale` pixels a thread, offset to the
+// pass's rectangle.
+fn rect_id(id: vec3<u32>, scale: u32) -> vec3<u32> {
+    return id + vec3<u32>(params.rect.xy / scale, 0u);
 }
 
 // Whether this pass writes pixel hit `slot` (NONE: no volume's hit, the
@@ -1551,12 +1561,14 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
 // the walk folds away (3% of its instructions, and registers);
 // orthographic views' (`ortho_view`) start on their near plane.
 @compute @workgroup_size(8, 8)
-fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
+fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 1u);
     trace_pixel(id, false);
 }
 
 @compute @workgroup_size(8, 8)
-fn trace_ortho(@builtin(global_invocation_id) id: vec3<u32>) {
+fn trace_ortho(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 1u);
     trace_pixel(id, true);
 }
 
@@ -2450,7 +2462,8 @@ fn sky_pixel(b: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
 
 // One thread a 4x4 block: dispatch over a quarter of each side.
 @compute @workgroup_size(8, 8)
-fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
+fn sky_sample(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 4u);
     let size = textureDimensions(hit_distance);
     let quarter = (size + 3u) / 4u;
     if id.x >= quarter.x || id.y >= quarter.y { return; }
@@ -2468,7 +2481,8 @@ fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // `sky_sample` for the hits of exact levels (after it).
 @compute @workgroup_size(8, 8)
-fn sky_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
+fn sky_sample_far(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 4u);
     let size = textureDimensions(hit_distance);
     let quarter = (size + 3u) / 4u;
     if id.x >= quarter.x || id.y >= quarter.y { return; }
@@ -2513,7 +2527,8 @@ fn sample_pixel(b: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
 
 // One thread a 2x2 block: dispatch over half the size.
 @compute @workgroup_size(8, 8)
-fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
+fn shadow_sample(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 2u);
     let size = textureDimensions(hit_distance);
     let half = (size + 1u) / 2u;
     if id.x >= half.x || id.y >= half.y { return; }
@@ -2533,7 +2548,8 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // `shadow_sample` for the hits of exact levels (after it).
 @compute @workgroup_size(8, 8)
-fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
+fn shadow_sample_far(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 2u);
     let size = textureDimensions(hit_distance);
     let half = (size + 1u) / 2u;
     if id.x >= half.x || id.y >= half.y { return; }
@@ -2661,7 +2677,8 @@ fn stochastic_share(p: vec2<i32>, size: vec2<u32>, v: vec2<u32>, mesh: vec4<f32>
 }
 
 @compute @workgroup_size(8, 8)
-fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
+fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 1u);
     let size = textureDimensions(hit_distance);
     if id.x >= size.x || id.y >= size.y { return; }
     let p = vec2<i32>(id.xy);
@@ -2905,7 +2922,8 @@ fn store_local_sample(b: vec2<u32>, size: vec2<u32>, fine: bool) {
 // One thread a 2x2 block: dispatch over half the size (the fine levels'
 // hits, then the exact levels').
 @compute @workgroup_size(8, 8)
-fn local_sample(@builtin(global_invocation_id) id: vec3<u32>) {
+fn local_sample(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 2u);
     let size = textureDimensions(hit_distance);
     let half = (size + 1u) / 2u;
     if id.x >= half.x || id.y >= half.y || params.light_eye.w == 0.0 { return; }
@@ -2913,7 +2931,8 @@ fn local_sample(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(8, 8)
-fn local_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
+fn local_sample_far(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 2u);
     let size = textureDimensions(hit_distance);
     let half = (size + 1u) / 2u;
     if id.x >= half.x || id.y >= half.y || params.light_eye.w == 0.0 { return; }
@@ -2952,7 +2971,8 @@ fn local_word(p: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> vec2<u32> {
 // The fine levels' hits (no mesh in front of them): a sample's word, else
 // their own walks.
 @compute @workgroup_size(8, 8)
-fn local_shadow(@builtin(global_invocation_id) id: vec3<u32>) {
+fn local_shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 1u);
     let size = textureDimensions(hit_distance);
     if id.x >= size.x || id.y >= size.y { return; }
     let v = textureLoad(hit_visibility, vec2<i32>(id.xy), 0).xy;
@@ -2970,7 +2990,8 @@ fn local_shadow(@builtin(global_invocation_id) id: vec3<u32>) {
 // fine ones), meshes in front of the terrain (their own walks), the sky
 // (all seen).
 @compute @workgroup_size(8, 8)
-fn local_shadow_far(@builtin(global_invocation_id) id: vec3<u32>) {
+fn local_shadow_far(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 1u);
     let size = textureDimensions(hit_distance);
     if id.x >= size.x || id.y >= size.y { return; }
     let p = vec2<i32>(id.xy);
@@ -3896,7 +3917,8 @@ fn wanted_node(v: vec2<u32>, t: f32, p: vec2<u32>, size: vec2<u32>) -> vec4<i32>
 }
 
 @compute @workgroup_size(16, 16)
-fn feedback(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+fn feedback(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let id = rect_id(gid, 2u);
     let size = textureDimensions(hit_distance);
     if li == 0u { atomicStore(&w_count, 0u); }
     atomicStore(&w_table[li], 0u);
