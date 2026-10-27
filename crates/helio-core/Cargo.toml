@@ -11,6 +11,7 @@ wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 thiserror = { workspace = true }
+smallvec = "1.15.1"
 pulsar_scenedb = { workspace = true }
 naga = { version = "30.0.0", features = ["wgsl-in"] }
 

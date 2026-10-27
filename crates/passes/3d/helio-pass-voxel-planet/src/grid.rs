@@ -378,12 +378,25 @@ impl Grid {
     pub fn locate(&self, p: DVec3) -> (Cell, [f64; 3]) {
         let face = if self.is_plane() {
             PLANE_FACE
+        } else if p == DVec3::ZERO {
+            // The planet centre has no radial direction, so it belongs to no
+            // face hemisphere. Give it a stable address on +Y for callers
+            // that need a cell for an interior point (notably a camera at the
+            // origin while a new planet is being rendered).
+            2
         } else {
             face_of(p)
         };
-        let c = self
-            .face_coords(face, p)
-            .expect("point is in its face hemisphere");
+        let c = if !self.is_plane() && p == DVec3::ZERO {
+            [
+                f64::from(self.cells) * 0.5,
+                f64::from(self.cells) * 0.5,
+                -self.radius / self.voxel_size(),
+            ]
+        } else {
+            self.face_coords(face, p)
+                .expect("point is in its face hemisphere")
+        };
         let last = self.cells - 1;
         let cell = Cell::new(
             face,

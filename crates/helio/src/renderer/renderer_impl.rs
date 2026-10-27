@@ -13,7 +13,7 @@ use super::config::{RenderMode, RendererConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use super::stereo_mirror::StereoMirror;
 
-/// Closure that rebuilds the render graph on resize.
+/// Closure that rebuilds the render graph when graph-level configuration changes.
 pub type GraphRebuilder = Arc<
     dyn Fn(
             &Arc<wgpu::Device>,
@@ -28,13 +28,16 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
-/// Reapplies application-owned pass settings after a resize rebuilds the graph.
+/// Reapplies application-owned pass settings after a graph rebuild.
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
 use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 
 use super::debug::DebugDrawState;
+
+/// Mono, stereo, and a few application-owned auxiliary views.
+const MAX_VIEW_HISTORY: usize = 16;
 
 /// Backend-only fallback bindings for the material sampling contract.
 ///
@@ -76,7 +79,7 @@ pub struct Renderer {
     /// it is expressed in. Stereo callers submit eyes sequentially, so a
     /// single matrix would make each eye reproject from the other eye's
     /// camera.
-    pub(crate) prev_view_proj_by_view: HashMap<u32, (glam::Mat4, glam::DVec3)>,
+    pub(crate) prev_view_proj_by_view: HashMap<u32, (glam::Mat4, glam::DVec3, u64)>,
     /// GPU work deriving drawable scene buffers from the frontend's authored
     /// ones, run each frame between the SceneDB snapshot and the graph. See
     /// `helio_core::scene_derivation`.
@@ -100,8 +103,8 @@ pub struct Renderer {
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
-    /// rebuild (resize, a config change) hands the graph builder, so the new
-    /// graph has the same passes and pass settings (Helio#254/#255).
+    /// rebuild hands the graph builder, so the new graph has the same passes
+    /// and pass settings (Helio#254/#255).
     ///
     /// Opaque to the renderer: it never interprets pass-specific fields
     /// (shadow atlas, SSR, foliage, portals, TSR, reflections), it only
@@ -165,6 +168,10 @@ pub struct Renderer {
     pub(crate) bake_scene: Option<helio_bake::SceneGeometry>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
+    /// A pending size update also needs a fresh graph because graph-level
+    /// settings or the pass topology changed. Ordinary viewport resizes keep
+    /// the existing passes and resize their resources in place.
+    pub(crate) pending_graph_rebuild: bool,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
@@ -183,7 +190,7 @@ pub struct Renderer {
     /// cameras and nothing else.
     pub(crate) xr_stage_transform: glam::Mat4,
     /// Templates registered by the user for the gbuffer (opaque) path.
-    /// Preserved across graph rebuilds (resize). Shared (not cloned) with
+    /// Preserved across graph rebuilds. Shared (not cloned) with
     /// passes and the GPU scene via `Arc<RwLock<_>>` — see
     /// `SharedTemplateRegistry` for why cloning this must be avoided.
     pub(crate) template_registry: SharedTemplateRegistry,
@@ -193,7 +200,7 @@ pub struct Renderer {
     pub(crate) transparent_template_registry: SharedTemplateRegistry,
     pub(crate) render_mode: RenderMode,
     /// Whether the render graph was built in OpenXR multiview mode. Mirrors
-    /// `config.enable_xr` and is preserved across graph rebuilds (resize) so an
+    /// `config.enable_xr` and is preserved across graph rebuilds so an
     /// opt-in is not silently lost.
     pub(crate) enable_xr: bool,
     #[cfg(not(target_arch = "wasm32"))]
@@ -264,7 +271,7 @@ impl Renderer {
         // This view's last projection, rebased from the origin it was in; a
         // view's first frame has none (no motion).
         let previous_projection = match self.prev_view_proj_by_view.get(&camera.view_id) {
-            Some(&(previous, origin)) => helio_core::temporal::rebase_previous_projection(
+            Some(&(previous, origin, _)) => helio_core::temporal::rebase_previous_projection(
                 previous,
                 self.world_origin - origin,
             ),
@@ -288,8 +295,10 @@ impl Renderer {
             (
                 glam::Mat4::from_cols_array(&uniforms.view_proj),
                 self.world_origin,
+                self.frame_count,
             ),
         );
+        self.trim_view_history();
         self.camera_data = uniforms;
     }
 
@@ -345,7 +354,7 @@ impl Renderer {
             let previous =
                 self.prev_view_proj_by_view
                     .get(&view_id)
-                    .map_or(current, |&(previous, origin)| {
+                    .map_or(current, |&(previous, origin, _)| {
                         helio_core::temporal::rebase_previous_projection(
                             previous,
                             self.world_origin - origin,
@@ -353,8 +362,9 @@ impl Renderer {
                     });
             camera.prev_view_proj = previous.to_cols_array();
             self.prev_view_proj_by_view
-                .insert(view_id, (current, self.world_origin));
+                .insert(view_id, (current, self.world_origin, self.frame_count));
         }
+        self.trim_view_history();
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[left, right]));
         self.camera_data = left;
@@ -362,6 +372,21 @@ impl Renderer {
         // new view, and make the next mono frame compare afresh.
         self.camera_identity = None;
         self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
+    fn trim_view_history(&mut self) {
+        while self.prev_view_proj_by_view.len() > MAX_VIEW_HISTORY {
+            let oldest = self
+                .prev_view_proj_by_view
+                .iter()
+                .min_by_key(|(_, (_, _, used))| used)
+                .map(|(view_id, _)| *view_id);
+            if let Some(oldest) = oldest {
+                self.prev_view_proj_by_view.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Change the shadow quality. The passes that use it are configured at
@@ -377,6 +402,7 @@ impl Renderer {
     /// Rebuild the graph from [`Self::renderer_config`] before the next frame.
     /// No-op for graphs installed without a rebuilder.
     pub fn request_graph_rebuild(&mut self) {
+        self.pending_graph_rebuild = true;
         self.pending_resize = Some((self.output_width, self.output_height));
     }
 

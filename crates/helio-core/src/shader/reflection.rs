@@ -198,6 +198,15 @@ pub fn populate_bind_group_entries<'a>(
     overrides: &crate::graph::BindingOverrideBuilder,
     resources: &crate::ResourceRegistry<'a>,
 ) -> Result<Vec<wgpu::BindGroupEntry<'a>>, ReflectionError> {
+    collect_bind_group_entries(bindings, group, overrides, resources)
+}
+
+fn collect_bind_group_entries<'a, C: FromIterator<wgpu::BindGroupEntry<'a>>>(
+    bindings: &[ReflectedBinding],
+    group: u32,
+    overrides: &crate::graph::BindingOverrideBuilder,
+    resources: &crate::ResourceRegistry<'a>,
+) -> Result<C, ReflectionError> {
     bindings
         .iter()
         .filter(|binding| binding.group == group)
@@ -349,6 +358,63 @@ fn binding_identity(entry: &wgpu::BindGroupEntry<'_>) -> Option<(u32, BindingIde
     Some((entry.binding, identity))
 }
 
+/// Compare borrowed entries to the retained key. Building another owned key
+/// on a hit used to allocate a vector (and every resource array) per draw.
+fn binding_key_matches(
+    key: &[(u32, BindingIdentity)],
+    entries: &[wgpu::BindGroupEntry<'_>],
+) -> bool {
+    key.len() == entries.len()
+        && key.iter().zip(entries).all(|((binding, identity), entry)| {
+            *binding == entry.binding
+                && match (identity, &entry.resource) {
+                    (
+                        BindingIdentity::Buffer(buffer, offset, size),
+                        wgpu::BindingResource::Buffer(actual),
+                    ) => {
+                        buffer == actual.buffer && *offset == actual.offset && *size == actual.size
+                    }
+                    (
+                        BindingIdentity::Buffers(buffers),
+                        wgpu::BindingResource::BufferArray(actual),
+                    ) => {
+                        buffers.len() == actual.len()
+                            && buffers.iter().zip(*actual).all(
+                                |((buffer, offset, size), actual)| {
+                                    buffer == actual.buffer
+                                        && *offset == actual.offset
+                                        && *size == actual.size
+                                },
+                            )
+                    }
+                    (BindingIdentity::Sampler(cached), wgpu::BindingResource::Sampler(actual)) => {
+                        cached == *actual
+                    }
+                    (
+                        BindingIdentity::Samplers(cached),
+                        wgpu::BindingResource::SamplerArray(actual),
+                    ) => cached.iter().eq(actual.iter().copied()),
+                    (
+                        BindingIdentity::TextureView(cached),
+                        wgpu::BindingResource::TextureView(actual),
+                    ) => cached == *actual,
+                    (
+                        BindingIdentity::TextureViews(cached),
+                        wgpu::BindingResource::TextureViewArray(actual),
+                    ) => cached.iter().eq(actual.iter().copied()),
+                    (
+                        BindingIdentity::AccelerationStructure(cached),
+                        wgpu::BindingResource::AccelerationStructure(actual),
+                    ) => cached == *actual,
+                    (
+                        BindingIdentity::AccelerationStructures(cached),
+                        wgpu::BindingResource::AccelerationStructureArray(actual),
+                    ) => cached.iter().eq(actual.iter().copied()),
+                    _ => false,
+                }
+        })
+}
+
 /// A bind group kept across frames by a pass, rebuilt only when its layout
 /// or a resource it binds changes. Resources compare by identity, so a
 /// buffer SceneDB reallocated, or a view recreated on resize, is a change
@@ -381,12 +447,12 @@ impl CachedBindGroup {
         device: &wgpu::Device,
         desc: &wgpu::BindGroupDescriptor<'_>,
     ) -> &wgpu::BindGroup {
-        let key: Option<Vec<_>> = desc.entries.iter().map(binding_identity).collect();
         let reusable = matches!(
-            (&self.cached, &key),
-            (Some((layout, Some(cached), _)), Some(key)) if layout == desc.layout && cached == key
+            &self.cached,
+            Some((layout, Some(cached), _)) if layout == desc.layout && binding_key_matches(cached, desc.entries)
         );
         if !reusable {
+            let key: Option<Vec<_>> = desc.entries.iter().map(binding_identity).collect();
             let group = device.create_bind_group(desc);
             self.cached = Some((desc.layout.clone(), key, group));
         }
@@ -427,33 +493,56 @@ pub fn reuse_or_create_reflected_bind_groups<'a>(
     device: &wgpu::Device,
     cache: &mut Vec<Option<CachedReflectedGroup>>,
 ) -> Result<Vec<wgpu::BindGroup>, ReflectionError> {
+    let mut groups = Vec::new();
+    reuse_or_create_reflected_bind_groups_into(
+        label,
+        bindings,
+        layouts,
+        overrides,
+        resources,
+        device,
+        cache,
+        &mut groups,
+    )?;
+    Ok(groups)
+}
+
+pub(crate) fn reuse_or_create_reflected_bind_groups_into<'a>(
+    label: &str,
+    bindings: &[ReflectedBinding],
+    layouts: &[wgpu::BindGroupLayout],
+    overrides: &crate::graph::BindingOverrideBuilder,
+    resources: &crate::ResourceRegistry<'a>,
+    device: &wgpu::Device,
+    cache: &mut Vec<Option<CachedReflectedGroup>>,
+    groups: &mut Vec<wgpu::BindGroup>,
+) -> Result<(), ReflectionError> {
+    groups.clear();
     cache.truncate(layouts.len());
     cache.resize_with(layouts.len(), || None);
-    layouts
-        .iter()
-        .enumerate()
-        .map(|(group, layout)| {
-            let entries =
-                populate_bind_group_entries(bindings, group as u32, overrides, resources)?;
-            let key: Option<Vec<_>> = entries.iter().map(binding_identity).collect();
-            if let (Some(key), Some(cached)) = (key.as_ref(), cache[group].as_ref()) {
-                if cached.layout == *layout && cached.key == *key {
-                    return Ok(cached.group.clone());
-                }
+    for (group, layout) in layouts.iter().enumerate() {
+        let entries: smallvec::SmallVec<[wgpu::BindGroupEntry<'a>; 16]> =
+            collect_bind_group_entries(bindings, group as u32, overrides, resources)?;
+        if let Some(cached) = cache[group].as_ref() {
+            if cached.layout == *layout && binding_key_matches(&cached.key, &entries) {
+                groups.push(cached.group.clone());
+                continue;
             }
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("{label} Group {group}")),
-                layout,
-                entries: &entries,
-            });
-            cache[group] = key.map(|key| CachedReflectedGroup {
-                layout: layout.clone(),
-                key,
-                group: bind_group.clone(),
-            });
-            Ok(bind_group)
-        })
-        .collect()
+        }
+        let key: Option<Vec<_>> = entries.iter().map(binding_identity).collect();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("{label} Group {group}")),
+            layout,
+            entries: &entries,
+        });
+        cache[group] = key.map(|key| CachedReflectedGroup {
+            layout: layout.clone(),
+            key,
+            group: bind_group.clone(),
+        });
+        groups.push(bind_group);
+    }
+    Ok(())
 }
 
 /// Creates all bind groups for a reflected shader from the generic resource

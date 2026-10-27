@@ -16,25 +16,90 @@
 // next; until then only the recorder side and the tests use this module.
 #![allow(dead_code)]
 
+use smallvec::SmallVec;
 use std::num::NonZeroU32;
 use std::ops::Range;
 
 /// One recorded stream. Encoder-level, render-pass and compute-pass commands
 /// share it; `BeginRenderPass`/`EndRenderPass` and
 /// `BeginComputePass`/`EndComputePass` bracket the pass commands.
-pub(crate) type Stream = Vec<Cmd>;
+#[derive(Debug, Default)]
+pub(crate) struct Stream {
+    commands: Vec<Cmd>,
+    // Recycle descriptor boxes and attachment storage, but release every GPU
+    // handle when a scratch stream is cleared. Bound spare storage per unit.
+    render_passes: Vec<Box<RenderPassDesc>>,
+}
+
+impl Stream {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn push(&mut self, command: Cmd) {
+        self.commands.push(command);
+    }
+
+    pub(crate) fn begin_render_pass(
+        &mut self,
+        desc: &wgpu::RenderPassDescriptor<'_>,
+    ) -> &mut RenderPassDesc {
+        let mut captured = self.render_passes.pop().unwrap_or_default();
+        captured.capture_from(desc);
+        self.commands.push(Cmd::BeginRenderPass(captured));
+        match self.commands.last_mut().unwrap() {
+            Cmd::BeginRenderPass(desc) => desc,
+            _ => unreachable!(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for command in self.commands.drain(..) {
+            if let Cmd::BeginRenderPass(mut desc) = command {
+                desc.color.clear();
+                desc.depth_stencil = None;
+                desc.timestamp_writes = None;
+                desc.occlusion_query_set = None;
+                if self.render_passes.len() < 64 {
+                    self.render_passes.push(desc);
+                }
+            }
+        }
+    }
+}
+
+impl std::ops::Deref for Stream {
+    type Target = [Cmd];
+    fn deref(&self) -> &[Cmd] {
+        &self.commands
+    }
+}
+
+impl PartialEq for Stream {
+    fn eq(&self, other: &Self) -> bool {
+        self.commands == other.commands
+    }
+}
+
+impl PartialEq<&[Cmd]> for Stream {
+    fn eq(&self, other: &&[Cmd]) -> bool {
+        self.commands == *other
+    }
+}
 
 /// A debug label. Never part of a recording's identity.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Label(pub(crate) Option<Box<str>>);
+pub(crate) struct Label(Option<SmallVec<[u8; 64]>>);
 
 impl Label {
     pub(crate) fn new(label: Option<&str>) -> Self {
-        Self(label.map(Into::into))
+        Self(label.map(|text| SmallVec::from_slice(text.as_bytes())))
     }
 
     fn get(&self) -> Option<&str> {
-        self.0.as_deref()
+        self.0
+            .as_deref()
+            .map(|bytes| std::str::from_utf8(bytes).expect("label originated as UTF-8"))
     }
 }
 
@@ -66,7 +131,7 @@ pub(crate) struct DepthStencilAttachment {
     pub(crate) stencil_ops: Option<wgpu::Operations<u32>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RenderPassDesc {
     pub(crate) label: Label,
     pub(crate) color: Vec<Option<ColorAttachment>>,
@@ -78,36 +143,38 @@ pub(crate) struct RenderPassDesc {
 
 impl RenderPassDesc {
     pub(crate) fn capture(desc: &wgpu::RenderPassDescriptor<'_>) -> Self {
-        Self {
-            label: Label::new(desc.label),
-            color: desc
-                .color_attachments
-                .iter()
-                .map(|attachment| {
-                    attachment.as_ref().map(|a| ColorAttachment {
-                        view: a.view.clone(),
-                        depth_slice: a.depth_slice,
-                        resolve_target: a.resolve_target.cloned(),
-                        ops: a.ops,
-                    })
+        let mut captured = Self::default();
+        captured.capture_from(desc);
+        captured
+    }
+
+    fn capture_from(&mut self, desc: &wgpu::RenderPassDescriptor<'_>) {
+        self.label = Label::new(desc.label);
+        self.color.clear();
+        self.color
+            .extend(desc.color_attachments.iter().map(|attachment| {
+                attachment.as_ref().map(|a| ColorAttachment {
+                    view: a.view.clone(),
+                    depth_slice: a.depth_slice,
+                    resolve_target: a.resolve_target.cloned(),
+                    ops: a.ops,
                 })
-                .collect(),
-            depth_stencil: desc
-                .depth_stencil_attachment
+            }));
+        self.depth_stencil =
+            desc.depth_stencil_attachment
                 .as_ref()
                 .map(|d| DepthStencilAttachment {
                     view: d.view.clone(),
                     depth_ops: d.depth_ops,
                     stencil_ops: d.stencil_ops,
-                }),
-            timestamp_writes: desc.timestamp_writes.as_ref().map(|t| PassTimestamps {
-                set: t.query_set.clone(),
-                begin: t.beginning_of_pass_write_index,
-                end: t.end_of_pass_write_index,
-            }),
-            occlusion_query_set: desc.occlusion_query_set.cloned(),
-            multiview_mask: desc.multiview_mask,
-        }
+                });
+        self.timestamp_writes = desc.timestamp_writes.as_ref().map(|t| PassTimestamps {
+            set: t.query_set.clone(),
+            begin: t.beginning_of_pass_write_index,
+            end: t.end_of_pass_write_index,
+        });
+        self.occlusion_query_set = desc.occlusion_query_set.cloned();
+        self.multiview_mask = desc.multiview_mask;
     }
 }
 
@@ -248,11 +315,11 @@ pub(crate) enum Cmd {
     SetBindGroup {
         index: u32,
         group: Option<wgpu::BindGroup>,
-        offsets: Vec<u32>,
+        offsets: SmallVec<[u32; 4]>,
     },
     SetImmediates {
         offset: u32,
-        data: Vec<u8>,
+        data: SmallVec<[u8; 32]>,
     },
 
     // Render pass.
@@ -313,7 +380,7 @@ pub(crate) enum Cmd {
         count_offset: u64,
         max_count: u32,
     },
-    ExecuteBundles(Vec<wgpu::RenderBundle>),
+    ExecuteBundles(SmallVec<[wgpu::RenderBundle; 1]>),
 
     // Compute pass.
     SetComputePipeline(wgpu::ComputePipeline),

@@ -1398,7 +1398,7 @@ impl RenderPass for TsrPass {
         // drawn yet) reads zero: deterministic shading.
         let stochastic_view = if self.stochastic_mask {
             ctx.registry
-                .read_texture_view(helio_core::ResourceKey::new(STOCHASTIC_MASK), "TSR")
+                .texture_view(helio_core::ResourceKey::new(STOCHASTIC_MASK))
                 .unwrap_or(&self.reactivity_fallback_view)
         } else {
             &self.reactivity_fallback_view

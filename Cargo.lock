@@ -1686,6 +1686,7 @@ dependencies = [
  "pollster 0.4.0",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native?rev=45cda191beb316fee0859ae40d59f0dff986a66a)",
  "pulsar_scenedb",
+ "smallvec",
  "thiserror 2.0.20",
  "wgpu",
 ]

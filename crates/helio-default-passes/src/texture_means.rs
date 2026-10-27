@@ -13,6 +13,16 @@ use std::sync::{Arc, Mutex};
 const STRIDE: u64 = 256;
 /// Textures measured a dispatch at most.
 const BATCH: usize = 64;
+/// Keep a small working set of measured textures. Entries own `Texture`
+/// handles, so an unbounded cache would keep replaced assets alive on the GPU.
+const MAX_KNOWN: usize = 512;
+/// Bound strong texture references held by queued and mapped readbacks.
+const MAX_PENDING: usize = 256;
+
+struct KnownMean {
+    mean: [f32; 3],
+    last_used: u64,
+}
 
 const SHADER: &str = r"
 @group(0) @binding(0) var texture: texture_2d<f32>;
@@ -37,12 +47,13 @@ fn texture_mean() {
 pub struct TextureMeans {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
-    known: HashMap<wgpu::Texture, [f32; 3]>,
+    known: HashMap<wgpu::Texture, KnownMean>,
     /// Asked for, not yet dispatched.
     queued: Vec<wgpu::Texture>,
     /// Dispatched, readback pending.
     in_flight: HashSet<wgpu::Texture>,
     arrived: Arc<Mutex<Vec<(wgpu::Texture, [f32; 3])>>>,
+    clock: u64,
 }
 
 impl TextureMeans {
@@ -96,6 +107,7 @@ impl TextureMeans {
             queued: Vec::new(),
             in_flight: HashSet::new(),
             arrived: Arc::new(Mutex::new(Vec::new())),
+            clock: 0,
         }
     }
 
@@ -103,8 +115,10 @@ impl TextureMeans {
     /// Textures that cannot be measured (not 2D, not float-sampled) have
     /// none.
     pub fn mean(&mut self, texture: &wgpu::Texture) -> Option<[f32; 3]> {
-        if let Some(mean) = self.known.get(texture) {
-            return Some(*mean);
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(known) = self.known.get_mut(texture) {
+            known.last_used = self.clock;
+            return Some(known.mean);
         }
         let measurable = texture.dimension() == wgpu::TextureDimension::D2
             && texture
@@ -114,7 +128,11 @@ impl TextureMeans {
                 texture.format().sample_type(None, None),
                 Some(wgpu::TextureSampleType::Float { .. })
             );
-        if measurable && !self.in_flight.contains(texture) && !self.queued.contains(texture) {
+        if measurable
+            && self.queued.len() + self.in_flight.len() < MAX_PENDING
+            && !self.in_flight.contains(texture)
+            && !self.queued.contains(texture)
+        {
             self.queued.push(texture.clone());
         }
         None
@@ -127,7 +145,26 @@ impl TextureMeans {
         let any = !arrived.is_empty();
         for (texture, mean) in arrived {
             self.in_flight.remove(&texture);
-            self.known.insert(texture, mean);
+            self.clock = self.clock.wrapping_add(1);
+            self.known.insert(
+                texture,
+                KnownMean {
+                    mean,
+                    last_used: self.clock,
+                },
+            );
+            while self.known.len() > MAX_KNOWN {
+                let oldest = self
+                    .known
+                    .iter()
+                    .min_by_key(|(_, known)| known.last_used)
+                    .map(|(texture, _)| texture.clone());
+                if let Some(oldest) = oldest {
+                    self.known.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
         }
         any
     }
