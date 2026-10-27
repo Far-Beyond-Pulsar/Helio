@@ -1160,7 +1160,7 @@ pub fn height(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32
     height_parts(k, maps, p, level).0
 }
 
-/// Surface word of a column (`terrain_surface`), by material style.
+/// Surface word of a column (`terrain_column_nodes(..).y`), by material style.
 /// Earthlike and rules: the erosion term as a signed byte of the erosion
 /// amplitude sum (negative: gully floors, positive: the ribs between
 /// them), [`RIVER_BED`] in a river's channel, [`ALLUVIUM`] on the planet

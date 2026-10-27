@@ -1885,6 +1885,7 @@ fn part_along(dot: i32, length: i32) -> i32 {
 // centre (smooth, held where the part keeps half its cells)
 // (`CompiledPart::holds`).
 fn part_holds(q: Part, p: vec3<i32>, base: bool, cell: vec3<i32>) -> bool {
+    if any(p < q.lo * 16) || any(p >= (q.hi + 1) * 16) { return false; }
     var h = 0u;
     if base {
         h = hash3(cell.x, cell.y, cell.z, q.seed);
