@@ -729,10 +729,41 @@ impl RenderGraph {
         self.resize_pending = true;
 
         if self.locked {
-            self.locked = false;
-            self.lock(width, height);
+            let resize_start = std::time::Instant::now();
+            // A resize changes attachment extents, not graph topology. Keep
+            // the locked graph's reflected pipelines, pass schedule, and
+            // descriptor probes; `lock()` rebuilds all of those and can make
+            // an editor viewport resize take seconds.
+            self.pool.clear();
+            self.reflected_group_cache.clear();
+            self.collect_declarations();
+            self.allocate_textures();
+            self.resources_allocated = true;
+            let allocation_time = resize_start.elapsed();
+
+            let pass_resize_start = std::time::Instant::now();
             for pass in &mut self.passes {
                 pass.on_resize(&self.device, width, height);
+            }
+            let pass_resize_time = pass_resize_start.elapsed();
+
+            // Bundles may capture resource bindings, so recreate them against
+            // the newly allocated textures while retaining the graph itself.
+            let bundle_start = std::time::Instant::now();
+            self.rebuild_gpu_render_bundles();
+            let bundle_time = bundle_start.elapsed();
+
+            let elapsed = resize_start.elapsed();
+            if elapsed >= std::time::Duration::from_millis(100) {
+                log::warn!(
+                    "RenderGraph resize {}x{} took {:.1}ms (attachments {:.1}ms, pass callbacks {:.1}ms, bundles {:.1}ms)",
+                    width,
+                    height,
+                    elapsed.as_secs_f64() * 1000.0,
+                    allocation_time.as_secs_f64() * 1000.0,
+                    pass_resize_time.as_secs_f64() * 1000.0,
+                    bundle_time.as_secs_f64() * 1000.0,
+                );
             }
         } else {
             self.pool.clear();
