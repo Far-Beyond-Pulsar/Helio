@@ -836,7 +836,11 @@ fn foliage_expand(lod: u32, index: u32) {
         }
     } else {
         let tuft_height = mix(ty.height_min, ty.height_max, f32(it.record.packed_scale_type & 0xffu) / 255.0) * it.scale;
-        let reach = 0.5 * cube + tuft_height * mix(ty.lean_min, ty.lean_max, 0.6) * 0.8;
+        // At least a pixel and a half across: thinner, a far tuft is a sliver the
+        // jittered samples find on some frames and miss on others (shimmer at the
+        // horizon); as wide, it covers the share of the ground its tufts would.
+        let pixel = distance(it.root, cameras[0].position_near.xyz) * 2.0 / max(cameras[0].proj[1][1] * globals.screen_size.y, 1.0e-6);
+        let reach = max(0.5 * cube + tuft_height * mix(ty.lean_min, ty.lean_max, 0.6) * 0.8, 0.75 * pixel);
         let first = foliage_box_room(2u);
         for (var k = 0u; k < 2u; k++) {
             let half = select(vec2<f32>(0.5 * cube, reach), vec2<f32>(reach, 0.5 * cube), k == 0u);

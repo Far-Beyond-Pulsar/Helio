@@ -143,7 +143,7 @@ impl Default for FoliageRange {
             keep_distance: 14.0,
             keep_power: 1.5,
             keep_knee: 20.0,
-            keep_far_power: 0.9,
+            keep_far_power: 1.1,
             growth_power: 0.3,
             growth_max: 2.0,
             cluster_edge: 4,
@@ -377,8 +377,9 @@ mod tests {
         let steep = (table.keep_distance / (2.0 * table.keep_distance)).powf(table.keep_power);
         let slow = keep(&table, 2.0 * knee) / keep(&table, knee);
         assert!(slow > steep, "{slow} past the knee, {steep} before");
-        // The middle distance keeps a cover: a tenth of the tufts at 100 m.
-        assert!(keep(&table, 100.0) > 0.1, "{}", keep(&table, 100.0));
+        // The middle distance keeps a cover: about a tenth of the tufts at 100 m (a
+        // twentieth with one power to the range).
+        assert!(keep(&table, 100.0) > 0.09, "{}", keep(&table, 100.0));
     }
 
     #[test]

@@ -2117,8 +2117,9 @@ fn screen_ground(q: vec2<u32>, size: vec2<u32>, t: f32) -> vec3<f32> {
 
 // Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
 // by their own faces (a slope reads as its steps, each shadowing the next);
-// a natural step (air above it) is lit partly with the slope's normal,
-// `Materials::detail.w` (step softness), its sun ray passing its own steps.
+// a natural step (air above it, of a material that lets no light through)
+// is lit partly with the slope's normal, `Materials::detail.w` (step
+// softness), its sun ray passing its own steps.
 // Voxels of a pixel or less are lit by the slope's normal, at every level:
 // the weight follows the voxel's size on screen, not the cell's, so it is
 // the same on both sides of a switch between levels, and a coarse level's
@@ -2139,7 +2140,11 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
     let small = 1.0 - smoothstep(1.0, 3.0, params.planet.y / max(pixel_m, 1e-6));
     let coarse = max(under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6)), small);
-    let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
+    // Ground's steps only: a leaf cell's top (air over a canopy) stands for
+    // no slope, and its sun ray passing the leaves around it shadowed them
+    // by chance (canopy speckle).
+    let foliage = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x > 0.0;
+    let step = !foliage && !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
     // The heightfield's exact slope stored with the leaf; else, cells of a
