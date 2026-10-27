@@ -4,7 +4,7 @@
 //! dug, still on a still camera.
 use std::sync::{Arc, Mutex};
 
-use glam::{DVec3, Vec3};
+use glam::DVec3;
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
@@ -158,14 +158,7 @@ impl Harness {
             0.05,
             40_000_000.0,
         );
-        *self.source.lock().unwrap() = Some(PlanetFrame {
-            eye,
-            planet: planet.clone(),
-            sun: up,
-            picks: None,
-            kept: None,
-            export: None,
-        });
+        *self.source.lock().unwrap() = Some(PlanetFrame::single(eye, planet.clone(), up));
         for _ in 0..frames {
             self.scene.world.flush_gpu_mirror(&self.queue);
             self.renderer.render(&camera, &self.view).unwrap();

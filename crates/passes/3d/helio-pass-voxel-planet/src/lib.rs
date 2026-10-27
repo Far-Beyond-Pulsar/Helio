@@ -11,8 +11,10 @@
 //!   grows natural ones (trees, shrubs, boulders, craters), and a
 //!   [`feature_recipe`] describes a world's (what grows where, in metres)
 //!   for any voxel size and seed.
+//! * [`volume`] — worlds placed in a scene by f64 transforms, any number
+//!   of them, queried by world positions.
 //! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
-//!   residency, drawing and lighting, and the Helio pass.
+//!   residency, drawing and lighting of every volume, and the Helio pass.
 //! * `engine` — what hosts share with the pass (frames, picks) and the
 //!   terrain half of the shaders, checked against the CPU field.
 #[cfg(feature = "engine")]
@@ -37,8 +39,10 @@ mod ridge_envelope;
 pub mod snapshot;
 pub mod stamp;
 pub mod terrain;
+pub mod volume;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};
 pub use planet::{BrickCell, Matter, Planet, PlanetRecipe, RayHit, Walked};
 pub use terrain::{GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, TerrainSource};
+pub use volume::{VolumeTransform, Volumes, VoxelVolume};
