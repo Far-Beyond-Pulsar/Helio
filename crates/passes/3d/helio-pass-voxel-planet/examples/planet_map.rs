@@ -10,7 +10,9 @@
 //! across; `river,km` centres it on the largest river's valley) writes
 //! `region_<n>.png` (512 x 512). River channels are drawn
 //! blue. `climate.png` is the planet's climate at its ground: moisture from
-//! brown (dry) to green (wet), cold toward white.
+//! brown (dry) to green (wet), cold toward white. `erosion.png` is what the
+//! drainage wore: grey relief, red where it cut the terrain down (bright:
+//! 300 m or more), yellow where sediment buries the ground (bright: 100 m).
 //!
 //! `HELIO_PLANET_MAP_LAYERS=<json>` maps another layer stack (Earth's
 //! settings JSON, e.g. with another climate) at seed 7.
@@ -201,6 +203,35 @@ fn main() {
         }
     }
     save(&out.join("climate.png"), &img, w, h);
+
+    // The worn terrain: cuts and sediment.
+    for y in 0..h {
+        for x in 0..w {
+            let lon = (x as f64 + 0.5) / w as f64 * std::f64::consts::TAU;
+            let lat = (0.5 - (y as f64 + 0.5) / h as f64) * std::f64::consts::PI;
+            let d = DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
+            let (height, _, p) = sample_at(&planet, d, level);
+            let (cut, fill) = planet.field().erosion(p);
+            let grey = (90.0 + f64::from(height) / 40_000.0).clamp(40.0, 200.0);
+            let mut c = [grey; 3];
+            let worn = (f64::from(-cut) / 300_000.0).clamp(0.0, 1.0);
+            let buried = if fill > i32::MIN / 2 && fill >= height - 1_000 {
+                (f64::from(fill.max(-1_000_000)) - f64::from(height - 100_000)).clamp(0.0, 100_000.0) / 100_000.0
+            } else {
+                0.0
+            };
+            c = [
+                c[0] + (230.0 - c[0]) * worn.max(buried),
+                c[1] * (1.0 - worn) + (210.0 - c[1]) * buried,
+                c[2] * (1.0 - worn.max(buried)),
+            ];
+            if height < -3_000 {
+                c = [30.0, 60.0, 120.0];
+            }
+            img[(y * w + x) * 3..][..3].copy_from_slice(&c.map(|v| v.clamp(0.0, 255.0) as u8));
+        }
+    }
+    save(&out.join("erosion.png"), &img, w, h);
     if let Some(maps) = field.maps() {
         println!("maps: {:?}", maps.stats);
         // The rivers nearest the planet's top (voxel_flight's spawn): their

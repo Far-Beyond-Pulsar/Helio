@@ -74,6 +74,11 @@ pub enum LayerKind {
     /// floodplain and channel grow with the square root of the discharge,
     /// incision and depth with its fourth root. The valley walls slope
     /// `ratio` (rise over run), their shoulders rounded over `ratio3` m.
+    /// `coverage` is how much the drainage has worn the planet (0: not at
+    /// all): ranges lowered along their rivers, sediment filling basins
+    /// into plains and fanning out where it leaves the ranges. `octaves`
+    /// refines the drainage below the maps into streams that many levels
+    /// (each four times finer, at most three: creeks).
     Rivers,
 }
 
@@ -218,6 +223,7 @@ impl Layer {
                 base_m: 2.0,
                 scale_km: 0.25,
                 region_km: 50.0,
+                octaves: 3,
                 ratio: 0.3,
                 ratio2: 0.12,
                 ratio3: 6.0,
@@ -356,7 +362,7 @@ impl MaterialRule {
         let eighths = |s: f64| (s * 8.0).clamp(-1.0e9, 1.0e9).floor() as i32;
         let cells = |m: f64| (m / grid.voxel_size()).clamp(-1.0e9, 1.0e9).round() as i32;
         let q16 = |v: f64| (v.clamp(0.0, 1.0) * 65_536.0).round() as i32;
-        let byte = |v: f64| (v.clamp(-1.0, 1.0) * 127.0).round() as i32;
+        let byte = |v: f64| (v.clamp(-1.0, 1.0) * 126.0).round() as i32;
         let degrees = |c: f64| {
             (c * f64::from(crate::planet_maps::DEGREE)).clamp(-2.0e9, 2.0e9).round() as i32
         };
@@ -1235,6 +1241,8 @@ impl TerrainLayers {
                 depth_m: l.base_m.max(0.0),
                 wall: l.ratio,
                 rounding_m: l.ratio3,
+                erosion: l.coverage.clamp(0.0, 4.0),
+                streams: l.octaves.min(crate::streams::MAX_LEVELS),
             });
         let spec = crate::planet_maps::MapSpec {
             climate: self.climate.spec(),
@@ -1580,6 +1588,7 @@ mod tests {
         let maps = crate::planet_maps::MapView {
             header: &k.maps,
             tables: &[],
+            streams: None,
         };
         let gully = (-100i32 as u32) & 0xff;
         let id = |m: u32| m & material::ID;

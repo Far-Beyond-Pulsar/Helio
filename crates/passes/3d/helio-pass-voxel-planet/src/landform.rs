@@ -1163,15 +1163,25 @@ pub fn height(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32
 /// Surface word of a column (`terrain_surface`), by material style.
 /// Earthlike and rules: the erosion term as a signed byte of the erosion
 /// amplitude sum (negative: gully floors, positive: the ribs between
-/// them), [`RIVER_BED`] in a river's channel. Lunar: the freshest ejecta
+/// them), [`RIVER_BED`] in a river's channel, [`ALLUVIUM`] on the planet
+/// maps' sediment. Lunar: the freshest ejecta
 /// (bits 0..6) and the basin flag (bit 7).
 pub fn surface(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32) -> u32 {
     height_parts(k, maps, p, level).1
 }
 
 /// The surface word of a column in a river's channel (Earthlike and rules
-/// styles; erosion bytes stop at -127).
+/// styles; erosion bytes stop at -126).
 pub const RIVER_BED: u32 = 0x80;
+/// The surface word of a column on sediment (buried by the planet maps'
+/// erosion at least [`ALLUVIUM_DEPTH`]).
+pub const ALLUVIUM: u32 = 0x81;
+pub const ALLUVIUM_DEPTH: i32 = 1_000;
+
+/// `max(a, b)`, rounded over `k` like [`smooth_min`].
+pub(crate) fn smooth_max(a: i32, b: i32, k: i32) -> i32 {
+    -smooth_min(-a, -b, k)
+}
 
 /// Two-rate evaluation (`docs/two-rate-field.md`): octaves at least this
 /// many shifts above a column's level (wavelengths of 256 node spacings
@@ -1600,6 +1610,11 @@ impl SingleRate {
     pub(crate) fn height(&self, k: &LandformConstants, p: IVec3) -> i32 {
         parts(k, None, p, self.level, None, self.ops.iter().copied()).0
     }
+    /// [`Self::height`] with `maps` (the streams' routing: worn, not
+    /// carved).
+    pub(crate) fn height_in(&self, k: &LandformConstants, maps: Option<MapView>, p: IVec3) -> i32 {
+        parts(k, maps, p, self.level, None, self.ops.iter().copied()).0
+    }
 }
 
 /// The octaves of `ops` at `p` (reference level `level`), the macro ones
@@ -1735,15 +1750,29 @@ fn parts(
     let mut h = 0i32;
     let mut basin = 0i32;
     let mut river_bed = false;
+    let mut alluvium = false;
     for (l, layer) in k.stack_layers().iter().enumerate() {
         let x = match layer.kind {
             StackLayer::RIVERS => {
-                // Valleys and channels along the river segments, cut into
+                // The worn terrain (cut down, buried under sediment), then
+                // valleys and channels along the river segments, cut into
                 // what lies below them in the stack.
                 if let Some(m) = maps {
+                    if m.header[0][0] & planet_maps::FLAG_EROSION != 0 {
+                        let (cut, fill) = planet_maps::erosion(m, p);
+                        let worn = h.wrapping_add(cut);
+                        h = smooth_max(worn, fill, m.header[4][2]);
+                        alluvium = fill > worn.wrapping_add(ALLUVIUM_DEPTH);
+                    }
                     let (carved, bed) = planet_maps::carve(m, p, level, h);
                     h = carved;
                     river_bed |= bed;
+                    // The streams below the maps' texels.
+                    if let Some(s) = m.streams {
+                        let (carved, bed) = s.carve(m, p, level, h);
+                        h = carved;
+                        river_bed |= bed;
+                    }
                 }
                 continue;
             }
@@ -1788,8 +1817,9 @@ fn parts(
     }
     let surface = match k.style[0] {
         STYLE_EARTHLIKE | STYLE_RULES if river_bed => RIVER_BED,
+        STYLE_EARTHLIKE | STYLE_RULES if alluvium => ALLUVIUM,
         STYLE_EARTHLIKE | STYLE_RULES => {
-            ((eroded * 127 / k.stack[1].max(1)).clamp(-127, 127) as u32) & 0xff
+            ((eroded * 126 / k.stack[1].max(1)).clamp(-126, 126) as u32) & 0xff
         }
         STYLE_LUNAR => (ejecta >> 1) | (u32::from(basin >= FINE_ONE / 2) << 7),
         _ => 0,
@@ -1883,6 +1913,19 @@ fn earthlike_material(
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 {
         return SNOW;
+    }
+    if surface == ALLUVIUM && !steep && depth < dirt * 3 {
+        // Sediment: dry fans of sand and gravel, wet plains of meadow over
+        // soil and silt.
+        return if wet < FINE_ONE / 10 * 3 {
+            if depth == 0 && h & 3 != 0 { SAND } else { GRAVEL }
+        } else if depth == 0 {
+            GRASS
+        } else if depth < dirt {
+            DIRT
+        } else {
+            CLAY
+        };
     }
     if wet < FINE_ONE / 10 * 3 {
         // Dry lands: sand over banded sandstone and clay.
@@ -1986,7 +2029,8 @@ fn rules_material(
     layer: i32,
 ) -> u32 {
     let river = surface == RIVER_BED;
-    let erosion = i32::from(surface as u8 as i8).max(-127);
+    // Sediment is no gully.
+    let erosion = if surface == ALLUVIUM { 0 } else { i32::from(surface as u8 as i8).max(-126) };
     let altitude = layer.wrapping_mul(c.header[1]);
     let (temperature, wet) = planet_maps::climate(maps, p, altitude);
     let seed = c.header[3] as u32;
@@ -2094,6 +2138,7 @@ pub struct LandformField {
     ridge_suffix: Option<[[i32; 4]; 66]>,
     plan: Box<LandformPlan>,
     maps: Option<Arc<PlanetMaps>>,
+    streams: Option<Arc<crate::streams::Streams>>,
 }
 
 impl LandformField {
@@ -2105,9 +2150,22 @@ impl LandformField {
         volume: LandformVolume,
         maps: Option<Arc<PlanetMaps>>,
     ) -> Self {
+        let streams = maps.as_ref().and_then(|m| {
+            let r = m.rivers()?;
+            constants.maps = m.header;
+            (r.streams > 0).then(|| Arc::new(crate::streams::Streams::new(m.clone(), &constants, r, r.streams)))
+        });
         if let Some(m) = &maps {
             constants.maps = m.header;
-            let (cut, slope) = m.valley_bounds();
+            if let Some(s) = &streams {
+                constants.maps[0][0] |= planet_maps::FLAG_STREAMS | (s.levels() as i32) << 8;
+            }
+            let (mut cut, mut slope) = m.valley_bounds();
+            if let Some(s) = &streams {
+                let (a, b) = s.bounds();
+                cut = cut.saturating_add(a);
+                slope = slope.saturating_add(b);
+            }
             for layer in constants.layers.iter_mut() {
                 if layer.kind == StackLayer::RIVERS {
                     (layer.a, layer.b) = (cut, slope);
@@ -2134,6 +2192,7 @@ impl LandformField {
             volume,
             plan,
             maps,
+            streams,
         }
     }
     pub fn constants(&self) -> &LandformConstants {
@@ -2143,11 +2202,16 @@ impl LandformField {
     pub fn maps(&self) -> Option<&Arc<PlanetMaps>> {
         self.maps.as_ref()
     }
+    /// The refined drainage, if the stack's rivers have streams.
+    pub fn streams(&self) -> Option<&crate::streams::Streams> {
+        self.streams.as_deref()
+    }
     /// What climate and river lookups read.
     pub fn map_view(&self) -> MapView<'_> {
         MapView {
             header: &self.constants.maps,
             tables: self.maps.as_ref().map_or(&[], |m| &m.tables),
+            streams: self.streams.as_deref(),
         }
     }
     pub fn volume(&self) -> &LandformVolume {
@@ -2201,6 +2265,12 @@ impl TerrainField for LandformField {
     }
     fn climate(&self, p: IVec3, height: i32) -> (i32, i32) {
         planet_maps::climate(self.map_view(), p, height)
+    }
+    fn erosion(&self, p: IVec3) -> (i32, i32) {
+        planet_maps::erosion(self.map_view(), p)
+    }
+    fn drainage(&self, p: IVec3) -> [i32; 4] {
+        planet_maps::drainage(self.map_view(), p)
     }
     fn height_range(&self) -> (i32, i32) {
         self.constants.height_range()
@@ -2272,6 +2342,10 @@ impl TerrainField for LandformField {
                 .maps
                 .as_ref()
                 .map_or_else(|| Arc::from(Vec::new()), |m| Arc::from(m.tables.as_slice())),
+            regions: self
+                .streams
+                .clone()
+                .map(|s| crate::terrain::Regions(s as Arc<dyn crate::terrain::TerrainRegions>)),
         }
     }
 }

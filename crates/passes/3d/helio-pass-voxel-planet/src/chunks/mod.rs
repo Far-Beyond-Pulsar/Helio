@@ -47,6 +47,9 @@ const RANGE_WORDS: usize = 16;
 type Quarters = [Option<Ranges>; 4];
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
+/// Terrain regions kept on the GPU (`engine::RegionPool`; streams: 832
+/// bytes each).
+const REGION_CAPACITY: usize = 8192;
 /// Chunk slots by default (`Capacity::chunks`), within what the device can
 /// bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
@@ -1776,6 +1779,9 @@ pub struct ChunkWorld {
     terrain: wgpu::Buffer,
     /// The terrain program's tables (`terrain_tables`: its planet maps).
     terrain_tables: wgpu::Buffer,
+    /// The terrain program's regions (`terrain_regions`: its streams),
+    /// kept resident for the footprints generated.
+    regions: crate::engine::RegionPool,
     tile_jobs: wgpu::Buffer,
     tile_data: wgpu::Buffer,
     // The batch's tiles' two-rate nodes (`engine::TILE_NODES`^2 a tile).
@@ -2682,6 +2688,7 @@ impl ChunkWorld {
                 storage(38, false, c),
                 storage(39, false, c),
                 storage(40, true, c),
+                storage(41, true, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3607,6 +3614,7 @@ impl ChunkWorld {
             world,
             terrain,
             terrain_tables: crate::engine::tables_buffer(device, &program),
+            regions: crate::engine::RegionPool::new(device, &program, REGION_CAPACITY),
             tile_jobs: buffer(
                 "chunk tile jobs",
                 (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64,
@@ -4013,6 +4021,7 @@ impl ChunkWorld {
                 entry(1, &self.world),
                 entry(16, &self.terrain),
                 entry(40, &self.terrain_tables),
+                entry(41, self.regions.buffer()),
                 entry(2, &self.tile_jobs),
                 entry(3, &self.tile_data),
                 entry(25, &self.tile_node_data),
@@ -4296,6 +4305,25 @@ impl ChunkWorld {
             chunks.push((cz, refs, detailed));
         }
         if chunks.is_empty() {
+            return 0;
+        }
+        // The terrain's regions over the footprint (its streams), resident
+        // while its tiles and chunks generate; near levels' feature
+        // candidates read the ground at level 0.
+        let read = if self.has_features && fp.level < crate::features::NEAR_LEVELS {
+            0
+        } else {
+            fp.level
+        };
+        let up = fp.level - read;
+        let keys = self.regions.keys(
+            &grid,
+            fp.face,
+            read,
+            [fp.cx * CHUNK << up, ((fp.cx * CHUNK + CHUNK) << up) - 1],
+            [fp.cy * CHUNK << up, ((fp.cy * CHUNK + CHUNK) << up) - 1],
+        );
+        if !self.regions.reserve(&keys, self.frame_now) {
             return 0;
         }
         // A footprint to compute keeps its candidate blocks this frame.
@@ -5246,6 +5274,7 @@ impl ChunkWorld {
         });
         let restore_group = (!restores.jobs.is_empty())
             .then(|| self.keep_group(&[[0; 4]], &restores.jobs, &restores.data));
+        self.regions.flush(&self.queue);
         let group = self.gen_group(
             &refs_buffer,
             &evictions_buffer,

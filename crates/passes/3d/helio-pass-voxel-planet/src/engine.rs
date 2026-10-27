@@ -215,6 +215,170 @@ pub(crate) fn tables_buffer(device: &wgpu::Device, program: &TerrainProgram) -> 
     })
 }
 
+/// Most probes a region lookup makes (`terrain_region`): the table is at
+/// most half full.
+const REGION_PROBES: usize = 64;
+
+/// A region key's hash (`terrain_region_hash` in WGSL).
+fn region_hash(key: [u32; 2]) -> u32 {
+    let h = key[0].wrapping_mul(0x9e37_79b1) ^ key[1].wrapping_mul(0x85eb_ca77);
+    (h ^ (h >> 15)).wrapping_mul(0x2c1b_3c6d) ^ (h >> 13)
+}
+
+/// A program's regions on the GPU (`terrain_regions`, binding 41;
+/// [`crate::terrain::TerrainRegions`]): an open-addressed table of the
+/// resident keys and the regions' words, which the field makes on the CPU
+/// the first time a footprint needs them. Layout (`vec4<u32>`): a head
+/// (table mask, capacity, words a region, where regions start in words /
+/// 4), the table (key, slot + 1), then the regions.
+pub(crate) struct RegionPool {
+    source: Option<crate::terrain::Regions>,
+    words: usize,
+    capacity: usize,
+    entries: usize,
+    buffer: wgpu::Buffer,
+    resident: rustc_hash::FxHashMap<[u32; 2], (u32, u64)>,
+    free: Vec<u32>,
+    /// Regions made since the last flush, and whether the table changed.
+    pending: Vec<(u32, Vec<u32>)>,
+    table_dirty: bool,
+}
+
+impl RegionPool {
+    /// A pool of `capacity` regions of `program`'s (none without regions:
+    /// a one-word buffer for the binding).
+    pub(crate) fn new(device: &wgpu::Device, program: &TerrainProgram, capacity: usize) -> Self {
+        let source = program.regions.clone();
+        let capacity = if source.is_some() { capacity.max(1) } else { 0 };
+        let words = source.as_ref().map_or(4, |r| r.0.words().next_multiple_of(4));
+        let entries = (2 * capacity).next_power_of_two();
+        let size = 16 * (1 + entries as u64) + 4 * (words * capacity) as u64;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain regions"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut head = buffer.slice(..16).get_mapped_range_mut().expect("a mapped region head");
+            let head_words = [(entries - 1) as u32, capacity as u32, words as u32, (1 + entries) as u32];
+            head.copy_from_slice(bytemuck::cast_slice(&head_words));
+        }
+        buffer.unmap();
+        Self {
+            source,
+            words,
+            capacity,
+            entries,
+            buffer,
+            resident: Default::default(),
+            free: (0..capacity as u32).rev().collect(),
+            pending: Vec::new(),
+            table_dirty: false,
+        }
+    }
+
+    pub(crate) fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// The regions the program reads over footprint columns `[i0, i1] x
+    /// [j0, j1]` of `face` at grid level `level` (none without regions).
+    pub(crate) fn keys(&self, grid: &crate::grid::Grid, face: u8, level: u32, i: [i32; 2], j: [i32; 2]) -> Vec<[u32; 2]> {
+        let mut out = Vec::new();
+        if let Some(r) = &self.source {
+            r.0.keys(grid, face, level, i, j, &mut out);
+        }
+        out
+    }
+
+    /// Keep regions `keys` resident through `frame`, making the missing
+    /// ones (on the CPU, in parallel) and evicting the longest unused:
+    /// false when the pool cannot hold them besides those `frame` keeps
+    /// (then nothing is made).
+    pub(crate) fn reserve(&mut self, keys: &[[u32; 2]], frame: u64) -> bool {
+        use rayon::prelude::*;
+        let Some(source) = self.source.clone() else {
+            return true;
+        };
+        let mut missing = Vec::new();
+        for k in keys {
+            match self.resident.get_mut(k) {
+                Some(e) => e.1 = e.1.max(frame),
+                None => missing.push(*k),
+            }
+        }
+        if missing.is_empty() {
+            return true;
+        }
+        if self.free.len() < missing.len() {
+            let mut old: Vec<([u32; 2], u32, u64)> = self
+                .resident
+                .iter()
+                .filter(|(_, e)| e.1 < frame)
+                .map(|(k, e)| (*k, e.0, e.1))
+                .collect();
+            let need = missing.len() - self.free.len();
+            if old.len() < need {
+                return false;
+            }
+            // The longest unused, an eighth of the pool at least: evictions
+            // come in batches, not a table upload a footprint.
+            old.sort_unstable_by_key(|e| (e.2, e.0));
+            for e in old.iter().take(need.max(self.capacity / 8)) {
+                self.resident.remove(&e.0);
+                self.free.push(e.1);
+            }
+            self.table_dirty = true;
+        }
+        let words = self.words;
+        let made: Vec<Vec<u32>> = missing
+            .par_iter()
+            .map(|k| {
+                let mut w = vec![0u32; words];
+                source.0.region(*k, &mut w[..source.0.words()]);
+                w
+            })
+            .collect();
+        for (k, w) in missing.into_iter().zip(made) {
+            let slot = self.free.pop().expect("a free region slot");
+            self.resident.insert(k, (slot, frame));
+            self.pending.push((slot, w));
+        }
+        self.table_dirty = true;
+        true
+    }
+
+    /// Upload the regions made and the table, if it changed (before the
+    /// dispatches that read them).
+    pub(crate) fn flush(&mut self, queue: &wgpu::Queue) {
+        let base = 16 * (1 + self.entries as u64);
+        for (slot, w) in self.pending.drain(..) {
+            queue.write_buffer(&self.buffer, base + 4 * (u64::from(slot) * self.words as u64), bytemuck::cast_slice(&w));
+        }
+        if !self.table_dirty || self.capacity == 0 {
+            return;
+        }
+        let mask = self.entries - 1;
+        let mut table = vec![[0u32; 4]; self.entries];
+        let mut keys: Vec<_> = self.resident.iter().map(|(k, e)| (*k, e.0)).collect();
+        keys.sort_unstable();
+        for (k, slot) in keys {
+            let mut h = region_hash(k) as usize & mask;
+            for probe in 0.. {
+                assert!(probe < REGION_PROBES, "region table clustered");
+                if table[h][2] == 0 {
+                    table[h] = [k[0], k[1], slot + 1, 0];
+                    break;
+                }
+                h = (h + 1) & mask;
+            }
+        }
+        queue.write_buffer(&self.buffer, 16, bytemuck::cast_slice(&table));
+        self.table_dirty = false;
+    }
+}
+
 /// Terrain constants padded to a whole uniform (16-byte multiple).
 pub(crate) fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     let mut bytes = program.constants.clone();
@@ -304,6 +468,16 @@ pub(crate) fn terrain_source(
             crate::terrain::DEFAULT_CLIMATE[1]
         ));
     }
+    if !program.wgsl.contains("fn terrain_erosion") {
+        // No erosion (`TerrainField::erosion`).
+        s.push_str("fn terrain_erosion(p: vec3<i32>) -> vec2<i32> { return vec2<i32>(0, i32(0x80000000u)); }
+");
+    }
+    if !program.wgsl.contains("fn terrain_drainage") {
+        // No drainage (`TerrainField::drainage`).
+        s.push_str("fn terrain_drainage(p: vec3<i32>) -> vec4<i32> { return vec4<i32>(0, 0, 0x7fffffff, 0); }
+");
+    }
     if !program.wgsl.contains("fn terrain_lean") {
         // No lean (`TerrainField::lean`).
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
@@ -314,8 +488,34 @@ pub(crate) fn terrain_source(
         "@group(0) @binding(1) var<uniform> world: World;
 @group(0) @binding(16) var<uniform> terrain: TerrainConstants;
 @group(0) @binding(40) var<storage, read> terrain_tables: array<vec4<u32>>;
+@group(0) @binding(41) var<storage, read> terrain_regions: array<vec4<u32>>;
 ",
     );
+    s.push_str(&format!(
+        "// The program's regions (`engine::RegionPool`).
+fn terrain_region_hash(key: vec2<u32>) -> u32 {{
+    let h = (key.x * 0x9e3779b1u) ^ (key.y * 0x85ebca77u);
+    return ((h ^ (h >> 15u)) * 0x2c1b3c6du) ^ (h >> 13u);
+}}
+fn terrain_region(key: vec2<u32>) -> i32 {{
+    let head = terrain_regions[0];
+    if head.y == 0u {{ return -1; }}
+    var h = terrain_region_hash(key) & head.x;
+    for (var probe = 0u; probe < {REGION_PROBES}u; probe++) {{
+        let e = terrain_regions[1u + h];
+        if e.z == 0u {{ return -1; }}
+        if e.x == key.x && e.y == key.y {{ return i32(e.z) - 1; }}
+        h = (h + 1u) & head.x;
+    }}
+    return -1;
+}}
+fn terrain_region_word(slot: u32, i: u32) -> u32 {{
+    let head = terrain_regions[0];
+    let at = head.w * 4u + slot * head.z + i;
+    return terrain_regions[at >> 2u][at & 3u];
+}}
+"
+    ));
     // World shape: 0 sphere, 1 plane.
     s.push_str(&format!("const SHAPE: u32 = {};\nconst PLANE_FACE: u32 = 2u;\nfn is_plane() -> bool {{ return SHAPE == 1u; }}\n", if plane { "1u" } else { "0u" }));
     s
@@ -534,8 +734,6 @@ pub fn verify_field(
     samples: u32,
 ) -> Result<(), String> {
     let grid = *planet.grid();
-    let field = planet.field();
-    let program = field.program();
     let mut rng = 0x1234_5678u64;
     let mut next = || {
         rng ^= rng << 13;
@@ -543,8 +741,6 @@ pub fn verify_field(
         rng ^= rng << 17;
         rng
     };
-    let (lo, hi) = field.height_range();
-    let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
     let mut columns = Vec::new();
     for s in 0..samples {
         let level = (next() % u64::from(grid.levels())) as u32;
@@ -603,7 +799,7 @@ pub fn verify_columns(
 @group(0) @binding(21) var<storage, read> verify_extra: array<vec4<i32>>;
 @group(0) @binding(22) var<storage, read_write> verify_out: array<vec4<i32>>;
 @compute @workgroup_size(64) fn verify(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= arrayLength(&verify_in) { return; }
+    if id.x >= arrayLength(&verify_in) || arrayLength(&terrain_regions) == 0u { return; }
     let a = verify_in[id.x];
     let e = verify_extra[id.x];
     let level = u32(a.w);
@@ -620,10 +816,13 @@ pub fn verify_columns(
     let offset = terrain_lean_offset(p, a.y, a.z, k, level);
     let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
     let climate = terrain_climate(q, e.x);
+    let worn = terrain_erosion(q);
+    let drains = terrain_drainage(q);
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
         density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257
             + lean.x * 7 + lean.y * 13 + offset.x * 31 + offset.y * 131
-            + climate.x * 524287 + climate.y * 8191);
+            + climate.x * 524287 + climate.y * 8191
+            + worn.x * 3 + worn.y * 5 + drains.x * 17 + drains.y * 19 + drains.z * 23 + drains.w * 29);
 }
 ";
     let module = helio_core::shader::module(
@@ -665,6 +864,20 @@ pub fn verify_columns(
         wgpu::BufferUsages::UNIFORM,
     );
     let tables = tables_buffer(device, &program);
+    // Every region the columns read, resident at once.
+    let keys: Vec<[u32; 2]> = {
+        let probe = RegionPool::new(device, &program, 0);
+        let mut keys: Vec<[u32; 2]> = columns
+            .iter()
+            .flat_map(|c| probe.keys(&grid, c[0] as u8, c[3] as u32, [c[1], c[1]], [c[2], c[2]]))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    };
+    let mut regions = RegionPool::new(device, &program, keys.len());
+    regions.reserve(&keys, 0);
+    regions.flush(queue);
     let ins = init(
         "verify inputs",
         bytemuck::cast_slice(&inputs),
@@ -703,6 +916,10 @@ pub fn verify_columns(
             wgpu::BindGroupEntry {
                 binding: 40,
                 resource: tables.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 41,
+                resource: regions.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 20,
@@ -768,6 +985,8 @@ pub fn verify_columns(
         let offset = field.lean_offset(p, a.y, a.z, k, level);
         let surface = field.surface(column, height) & 0xff;
         let climate = field.climate(q, e.x);
+        let worn = field.erosion(q);
+        let drains = field.drainage(q);
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
@@ -781,7 +1000,13 @@ pub fn verify_columns(
                 .wrapping_add(offset.0.wrapping_mul(31))
                 .wrapping_add(offset.1.wrapping_mul(131))
                 .wrapping_add(climate.0.wrapping_mul(524_287))
-                .wrapping_add(climate.1.wrapping_mul(8_191)),
+                .wrapping_add(climate.1.wrapping_mul(8_191))
+                .wrapping_add(worn.0.wrapping_mul(3))
+                .wrapping_add(worn.1.wrapping_mul(5))
+                .wrapping_add(drains[0].wrapping_mul(17))
+                .wrapping_add(drains[1].wrapping_mul(19))
+                .wrapping_add(drains[2].wrapping_mul(23))
+                .wrapping_add(drains[3].wrapping_mul(29)),
         ];
         if *g != cpu {
             return Err(format!(

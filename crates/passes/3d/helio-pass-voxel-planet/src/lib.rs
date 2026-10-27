@@ -34,6 +34,7 @@ pub mod meadow;
 pub mod noise;
 pub mod planet;
 pub mod planet_maps;
+pub mod streams;
 pub mod queries;
 pub mod record;
 mod ridge_envelope;

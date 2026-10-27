@@ -16,7 +16,7 @@ struct TerrainConstants {
     stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
     materials: vec4<i32>, // rules style: rule count, fallback material; coarsest erosion octave's shift (-1: none)
     // Planet maps (`planet_maps::MAP_HEADER`): lookups and the climate.
-    maps: array<vec4<i32>, 4>,
+    maps: array<vec4<i32>, 5>,
     layers: array<StackLayer, 8>,
     octaves: array<LandformOctave, 64>,
     rules: array<MaterialRule, 16>,
@@ -50,8 +50,15 @@ const LAYER_BASINS: u32 = 8u;
 const LAYER_PLATEAU: u32 = 9u;
 const LAYER_CLIFFS: u32 = 10u;
 const LAYER_RIVERS: u32 = 11u;
-// Surface word of a river's channel (`landform::RIVER_BED`).
+// Surface words of a river's channel and of sediment (`landform::RIVER_BED`,
+// `landform::ALLUVIUM`).
 const RIVER_BED: u32 = 0x80u;
+const ALLUVIUM: u32 = 0x81u;
+const ALLUVIUM_DEPTH: i32 = 1000;
+
+fn landform_smooth_max(a: i32, b: i32, k: i32) -> i32 {
+    return -landform_smooth_min(-a, -b, k);
+}
 
 // `landform::terrace`: terraces of `step` height units, rising over the last
 // `riser_q10` / 1024 of each step.
@@ -923,14 +930,26 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     var h = 0;
     var basin = 0;
     var river_bed = false;
+    var alluvium = false;
     for (var l = 0u; l < landform_layer_count(); l++) {
         let layer = terrain.layers[l];
         var x = 0;
         if layer.kind == LAYER_RIVERS {
-            // Valleys and channels along the river segments (`map_carve`).
+            // The worn terrain (`terrain_erosion`), then valleys and channels
+            // along the river segments (`map_carve`).
+            if (terrain.maps[0].x & MAP_FLAG_EROSION) != 0 {
+                let e = terrain_erosion(p);
+                let worn = h + e.x;
+                h = landform_smooth_max(worn, e.y, terrain.maps[4].z);
+                alluvium = e.y > worn + ALLUVIUM_DEPTH;
+            }
             let carved = map_carve(p, level, h);
             h = carved.x;
             river_bed = river_bed || carved.y != 0;
+            // The streams below the maps' texels (`map_streams`).
+            let streams = map_streams(p, level, h);
+            h = streams.x;
+            river_bed = river_bed || streams.y != 0;
             continue;
         }
         if layer.kind == LAYER_CONTINENTS {
@@ -960,8 +979,10 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     var surface = 0;
     if (terrain.style.x == 0 || terrain.style.x == 3) && river_bed {
         surface = i32(RIVER_BED);
+    } else if (terrain.style.x == 0 || terrain.style.x == 3) && alluvium {
+        surface = i32(ALLUVIUM);
     } else if terrain.style.x == 0 || terrain.style.x == 3 {
-        surface = clamp(eroded * 127 / max(terrain.stack.y, 1), -127, 127) & 0xff;
+        surface = clamp(eroded * 126 / max(terrain.stack.y, 1), -126, 126) & 0xff;
     } else if terrain.style.x == 1 {
         surface = (ejecta >> 1u) | (select(0, 1, basin >= FINE_ONE / 2) << 7u);
     }
@@ -1245,7 +1266,8 @@ fn ground_rules(surface: u32, top_height: i32, slope: i32) -> u32 {
     if terrain.style.x != 3 { return 0u; }
     // A river bed counts as the deepest gully.
     let river = surface == RIVER_BED;
-    let erosion = max(i32(surface << 24u) >> 24u, -127);
+    // Sediment is no gully.
+    let erosion = select(max(i32(surface << 24u) >> 24u, -126), 0, surface == ALLUVIUM);
     let count = min(u32(max(terrain.materials.x, 0)), 16u);
     var rules = 0u;
     for (var index = 0u; index < count; index++) {
@@ -1398,6 +1420,13 @@ fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, s
     }
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }
+    if surface == ALLUVIUM && !steep && depth < dirt * 3 {
+        // Sediment: dry fans of sand and gravel, wet plains of meadow over
+        // soil and silt (`earthlike_material`).
+        if wet < FINE_ONE / 10 * 3 { return select(M_GRAVEL, M_SAND, depth == 0 && (h & 3u) != 0u); }
+        if depth == 0 { return M_GRASS; }
+        return select(M_CLAY, M_DIRT, depth < dirt);
+    }
     if wet < FINE_ONE / 10 * 3 {
         if depth < dirt && !steep { return M_SAND; }
         let band = rem_floor(div_floor(landform_strata(p, altitude), 2100), 5);

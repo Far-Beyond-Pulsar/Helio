@@ -289,9 +289,9 @@ mod tests {
             let canonical = k.bound_margins(&grid);
             assert_eq!(canonical, k.bound_margins(&grid));
         }
-        // Constants (2592: the planet maps' header and rules' climate rows
+        // Constants (2608: the planet maps' header and rules' climate rows
         // included) and the ridge suffix (1056).
-        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 3648);
+        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 3664);
     }
 
     #[test]

@@ -664,7 +664,10 @@ pub enum VoxelLayerKind {
     /// layers before it, from sources draining Region size squared of wet
     /// land to the sea. At a source the valley sinks Height, its
     /// floodplain is Scale wide with a channel Ratio 2 of it, Base deep;
-    /// walls slope Ratio, shoulders rounded over Ratio 3 metres.
+    /// walls slope Ratio, shoulders rounded over Ratio 3 metres. Coverage
+    /// is how much the drainage has worn the planet (ranges lowered,
+    /// basins filled with sediment); Octaves refines it into streams that
+    /// many levels (at most three: creeks).
     Rivers,
 }
 

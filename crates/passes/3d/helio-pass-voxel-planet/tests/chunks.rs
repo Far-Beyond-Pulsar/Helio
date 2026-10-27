@@ -490,6 +490,63 @@ fn rivers_are_bit_identical_to_cpu() {
     }
 }
 
+/// Streams (the maps' drainage refined to creeks) on the GPU are the
+/// CPU's: columns of every level along stream levels' cells near the
+/// planet's top and across a face edge, on a sphere and an infinite plane.
+#[test]
+fn streams_are_bit_identical_to_cpu() {
+    let Some(gpu) = gpu() else { return };
+    let mut stack = TerrainLayers::earth();
+    for l in &mut stack.layers {
+        if l.kind == helio_pass_voxel_planet::layers::LayerKind::Rivers {
+            l.octaves = 3;
+        }
+    }
+    for (shape, size) in [(Shape::Sphere, 0.1), (Shape::InfinitePlane, 0.1)] {
+        let planet = Planet::new(PlanetRecipe {
+            shape,
+            voxel_size_m: size,
+            terrain: stack.source(7),
+            ..Default::default()
+        })
+        .unwrap();
+        let grid = *planet.grid();
+        let mut next = xorshift(0x57_7ea_3);
+        let mut columns = Vec::new();
+        // Spots 0..40 km apart near the top (or the plane's origin) and
+        // along the +Y face's edge.
+        let spots: Vec<DVec3> = (0..24)
+            .map(|n| {
+                let a = f64::from(n) * 2.4;
+                let d = 1_700.0 * f64::from(n);
+                if grid.is_plane() {
+                    DVec3::new(a.cos() * d, 0.0, a.sin() * d)
+                } else if n % 3 == 0 {
+                    DVec3::new(1.0, 1.0, (f64::from(n) / 24.0) - 0.5).normalize() * grid.radius()
+                } else {
+                    (DVec3::Y * grid.radius() + DVec3::new(a.cos() * d, 0.0, a.sin() * d)).normalize() * grid.radius()
+                }
+            })
+            .collect();
+        for (n, &world) in spots.iter().enumerate() {
+            let (cell, _) = grid.locate(world);
+            for level in 0..14u32 {
+                let reach = 40_000.0 / grid.voxel_size();
+                for _ in 0..(if level < 6 { 60 } else { 12 }) {
+                    let d = |v: u64| (v % (2 * reach as u64)) as i32 - reach as i32;
+                    let (i, j) = (cell.i + d(next()), cell.j + d(next()));
+                    let last = grid.cells() - 1;
+                    columns.push([i32::from(cell.face), i.clamp(0, last) >> level, j.clamp(0, last) >> level, level as i32]);
+                }
+            }
+            let _ = n;
+        }
+        eprintln!("{shape:?} {size} m: {} stream columns", columns.len());
+        helio_pass_voxel_planet::engine::verify_columns(&gpu.device, &gpu.queue, &planet, &columns)
+            .unwrap_or_else(|e| panic!("streams on {shape:?} at {size} m: {e}"));
+    }
+}
+
 #[test]
 fn ground_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
