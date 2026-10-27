@@ -108,7 +108,7 @@ struct World {
     /// GI probe rays the draws trace (`GiRays`: frame, rays, hits, sun),
     /// the clipmap around the eye.
     gi: Option<[wgpu::Buffer; 4]>,
-    /// Whether each frame draws a level of the sun's occlusion.
+    /// Whether each frame draws the sun's occlusion pages it lacks.
     sun_occlusion: bool,
     /// The projection jittered each frame as Helio's (`r1_r2_jitter`): the
     /// next frame's place in the jitter's sequence.
@@ -253,6 +253,20 @@ impl World {
             .unwrap();
         self.frame += 1;
         stats
+    }
+
+    /// Frames until the sun's occlusion pages the pixels asked for are all
+    /// traced (and current).
+    fn settle_sun_pages(&mut self, gpu: &Gpu, planet: &Planet, view: &View) {
+        for n in 0.. {
+            self.frame(gpu, planet, view, None);
+            let s = self.chunks.sun_page_stats().expect("drawn");
+            if n >= 3 && s.missing == 0 && s.stale == 0 {
+                eprintln!("sun pages settled in {n} frames: {s:?}");
+                return;
+            }
+            assert!(n < 160, "sun pages did not settle: {s:?}");
+        }
     }
 
     /// Frames until residency settles; every pixel's hit then.
@@ -3925,25 +3939,30 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
     ));
     world.sun_occlusion = true;
     world.settle(gpu, planet, view);
-    // Every level of the sun's occlusion drawn for this eye.
-    for _ in 0..4 {
-        world.frame(gpu, planet, view, None);
-    }
+    // The sun's occlusion pages this view asks for.
+    world.settle_sun_pages(gpu, planet, view);
     // One frame's hits (the GI pass clears them each frame).
     let gi = world.gi.as_ref().unwrap();
     gpu.queue
         .write_buffer(&gi[2], 0, &vec![0u8; gi[2].size() as usize]);
     world.frame(gpu, planet, view, None);
     let hits = read_words(gpu, &world.gi.as_ref().unwrap()[2]);
-    let (maps, occlusion) = world.chunks.read_sun_occlusion().expect("drawn");
+    let pages = world.chunks.read_sun_occlusion().expect("drawn");
     let near = 0.7 * planet.grid().voxel_size() / view.pixel_angle();
     let voxel = planet.grid().voxel_size();
     let sun = world.sun.as_dvec3();
     let leaf = planet.field().appearance().materials[material::LEAVES as usize].transmission;
     let leaf_through = (leaf * 255.0 + 0.5) as u32;
-    // The sun at `from` by the maps (none: near a texel's edge, or past them).
-    let sun_seen = |from: DVec3| {
-        occlusion_lit(&maps, &occlusion, eye, from).map(|(lit, ..)| if lit { 1.0 } else { 0.0 })
+    // The sun at `from` (receiver normal `n`) by the pages, as the tracer
+    // reads them: a hit's cell its footprint (none: no page holds it).
+    let sun_seen = |from: DVec3, n: DVec3| {
+        pages
+            .read(
+                (from - eye).as_vec3().to_array(),
+                n.as_vec3().to_array(),
+                voxel as f32,
+            )
+            .map(|r| f64::from(r.lit))
     };
     let mut c = GiRayCheck::default();
     for (k, d) in dirs.iter().enumerate() {
@@ -3993,7 +4012,7 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
         let facing = cpu.normal.dot(sun);
         if facing > 0.2 {
             // Where the tracer reads the maps: half a cell off the face.
-            let Some(seen) = sun_seen(at + cpu.normal * (0.5 * voxel)) else {
+            let Some(seen) = sun_seen(at + cpu.normal * (0.5 * voxel), cpu.normal) else {
                 continue;
             };
             c.lit += 1;
@@ -4001,7 +4020,7 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
             c.sun_wrong += usize::from((seen - f64::from(hit[2] >> 24) / 255.0).abs() > 0.5);
         } else if leaf && facing < -0.2 {
             // Past the leaf cell, half a cell off its far side.
-            let Some(seen) = sun_seen(at - cpu.normal * (1.5 * voxel)) else {
+            let Some(seen) = sun_seen(at - cpu.normal * (1.5 * voxel), DVec3::ZERO) else {
                 continue;
             };
             c.back += 1;
@@ -4048,7 +4067,7 @@ fn terrain_traces_gi_probe_rays() {
     let c = trace_gi_rays(gpu, &planet, eye, &view);
     assert!(c.rock > 50 && c.rock_wrong == 0, "{c:?}");
     assert!(c.compared > 1500 && c.wrong * 100 <= c.compared, "{c:?}");
-    // The maps answer for the hits away from their texels' edges (a third).
+    // The pages answer as the tracer reads them.
     assert!(c.shadowed > 10 && c.sun_wrong * 100 <= c.lit, "{c:?}");
     assert_eq!(c.through_wrong, 0, "{c:?}");
 }
@@ -4098,52 +4117,16 @@ fn gi_rays_see_light_through_leaves() {
 /// with the shader's bias (`sun_occlusion.wgsl`, without its filter), the
 /// level, its texel (m) and how far it sees toward the sun from `p` (m);
 /// `None` outside every level, or near a texel's edge.
-fn occlusion_lit(
-    maps: &[f32],
-    frame: &helio_pass_shadow_matrix::SunOcclusionFrame,
-    eye: DVec3,
-    p: DVec3,
-) -> Option<(bool, usize, f32, f32)> {
-    let side = frame.info[1];
-    let v3 = |a: [f32; 4]| Vec3::new(a[0], a[1], a[2]);
-    let rel = (p - eye).as_vec3();
-    for (level, l) in frame.levels.iter().enumerate() {
-        let half = l.centre[3];
-        if half <= 0.0 {
-            continue;
-        }
-        let d = rel - v3(l.centre);
-        let uv = glam::Vec2::new(d.dot(v3(l.right)), -d.dot(v3(l.up))) / half * 0.5 + 0.5;
-        if uv.min_element() < 0.02 || uv.max_element() > 0.98 {
-            continue;
-        }
-        let at = uv * side;
-        let f = at - at.floor();
-        if f.min_element() < 0.2 || f.max_element() > 0.8 {
-            return None;
-        }
-        let (x, y) = (at.x as usize, at.y as usize);
-        let stored = maps[(level * side as usize + y) * side as usize + x];
-        let t = d.dot(v3(l.forward));
-        return Some((
-            stored <= 0.0 || t <= stored + 3.0 * half / side,
-            level,
-            2.0 * half / side,
-            t,
-        ));
-    }
-    None
-}
-
-/// The terrain occludes the sun for the volumetric fog (`sun_occlusion`):
-/// towers sized to each level, out to its reach, cast shadows under a low
-/// sun; around each, points between a quarter and three quarters of its
-/// height (above the coarser terrain the far levels draw) are lit by the
-/// maps as a CPU ray toward the sun (as far as the level sees) finds them,
-/// but for occluders within a few of the level's texels (its bias); a
-/// fiftieth may differ (a texel's edge along a step). The same with the sun
-/// turning a little each frame (as a day goes by): each level is read with
-/// the axes it was drawn with, against a CPU ray toward its own sun.
+/// The terrain occludes the sun for the volumetric fog, GI hits and fine
+/// cells (`sun_occlusion`): towers out to a kilometre cast shadows under a
+/// low sun; points around each, between a quarter and three quarters of
+/// its height, read at the footprint a pixel there has (or the nearest
+/// coarser level resident), are lit by the pages as a CPU ray toward their
+/// epoch's sun finds them, but for occluders within a few texels (the
+/// bias) and reads across a shadow's edge (the filter's blend); a fiftieth
+/// may differ (a texel's edge along a step). The same with the sun turning
+/// a little each frame (as a day goes by): new epochs traced, each page
+/// read with the sun it was traced for.
 #[test]
 fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     let Some(gpu) = gpu() else { return };
@@ -4153,7 +4136,7 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     let up = eye.normalize();
     let side = up.any_orthonormal_vector();
     let fwd = up.cross(side);
-    // (distance from the eye, height, width), m: one tower a level.
+    // (distance from the eye, height, width), m.
     let towers = [
         (10.0, 4.0, 1.5),
         (60.0, 16.0, 4.0),
@@ -4184,16 +4167,14 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     // A low sun, across the line of towers: long shadows beside them.
     world.sun = (up * 0.5 + side * 0.87).normalize().as_vec3();
     world.settle(gpu, &planet, &view);
-    // Every level drawn for this eye.
-    for _ in 0..4 {
-        world.frame(gpu, &planet, &view, None);
-    }
+    world.settle_sun_pages(gpu, &planet, &view);
     let check = |world: &World| {
-        let (maps, frame) = world.chunks.read_sun_occlusion().expect("drawn");
+        let pages = world.chunks.read_sun_occlusion().expect("drawn");
         let mut next = xorshift(0x2545_f491_4f6c_dd1d);
         let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
-        let (mut compared, mut shadowed, mut wrong) = ([0usize; 4], [0usize; 4], 0);
-        for k in 0..960 {
+        let (mut compared, mut shadowed, mut wrong) = (0usize, 0usize, 0usize);
+        let mut levels = std::collections::BTreeMap::new();
+        for k in 0..2000 {
             let (&(_, height, width), &base) = (&towers[k % 4], &bases[k % 4]);
             let up = base.normalize();
             // Beside the tower, from its sunward side out past its shadow.
@@ -4203,42 +4184,50 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             if planet.solid(planet.grid().locate(p).0) || (p - base).dot(up) < 0.2 * height {
                 continue;
             }
-            let Some((lit, level, texel, reach)) = occlusion_lit(&maps, &frame, eye, p) else {
+            let footprint = ((p - eye).length() * view.pixel_angle()) as f32;
+            let Some(read) = pages.read((p - eye).as_vec3().to_array(), [0.0; 3], footprint) else {
                 continue;
             };
-            // Toward the sun the level was drawn for, as far as it sees: what
-            // lies farther is not in the maps.
-            let f = frame.levels[level].forward;
-            let sun = -DVec3::new(f64::from(f[0]), f64::from(f[1]), f64::from(f[2])).normalize();
-            let hit = planet.raycast(p, sun, f64::from(reach) - 1.0);
-            // Occluders within a few texels: the maps' bias and texels decide.
+            // Across a shadow's edge the filter blends.
+            if read.lit > 0.0 && read.lit < 1.0 {
+                continue;
+            }
+            // Toward the sun the page was traced for, up to its near plane.
+            let sun = DVec3::from_array(read.sun.map(f64::from)).normalize();
+            let hit = planet.raycast(p, sun, f64::from(read.depth));
+            // Occluders within a few texels: the bias and texels decide.
             if hit
                 .as_ref()
-                .is_some_and(|h| h.distance < 4.0 * f64::from(texel))
+                .is_some_and(|h| h.distance < 4.0 * f64::from(read.texel))
             {
                 continue;
             }
             let cpu = hit.is_none();
-            compared[level] += 1;
-            shadowed[level] += usize::from(!cpu);
-            if lit != cpu {
+            compared += 1;
+            shadowed += usize::from(!cpu);
+            *levels.entry(read.level).or_insert(0usize) += 1;
+            if (read.lit >= 0.5) != cpu {
                 wrong += 1;
                 if wrong < 8 {
-                    eprintln!("point {k} level {level} ({a:.1}, {b:.1}): maps {lit}, cpu {cpu}");
+                    eprintln!(
+                        "point {k} level {} ({a:.1}, {b:.1}): pages {}, cpu {cpu}",
+                        read.level, read.lit
+                    );
                 }
             }
         }
-        let total: usize = compared.iter().sum();
-        eprintln!("sun occlusion: compared {compared:?}, shadowed {shadowed:?}, wrong {wrong}");
-        assert!(
-            compared.iter().zip(shadowed).all(|(&c, s)| c > 40 && s > 8),
-            "{compared:?} compared, {shadowed:?} shadowed"
+        eprintln!(
+            "sun occlusion: compared {compared} by level {levels:?}, shadowed {shadowed}, wrong {wrong}"
         );
-        assert!(wrong * 50 <= total, "{wrong} of {total} wrong");
+        assert!(
+            compared > 400 && shadowed > 80,
+            "{compared} compared, {shadowed} shadowed"
+        );
+        assert!(wrong * 50 <= compared, "{wrong} of {compared} wrong");
     };
     check(&world);
-    // The sun turns 0.03 degrees a frame for 40 frames: levels drawn under
-    // suns up to a degree apart, each kept with its own.
+    // The sun turns 0.03 degrees a frame for 40 frames: epochs traced under
+    // suns up to a degree apart, each page read with its own.
     let axis = up.cross(world.sun.as_dvec3()).normalize();
     for _ in 0..40 {
         world.sun = glam::DQuat::from_axis_angle(axis, 0.03_f64.to_radians())
@@ -4247,6 +4236,97 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
         world.frame(gpu, &planet, &view, None);
     }
     check(&world);
+}
+
+/// The sun's occlusion pages a pixel reads have texels about its footprint
+/// at any eye height: at the Moon's pole 700 m up, and over the Earth from
+/// orbit to the ground, hits of cells under a pixel and a half (those the
+/// pages light) read texels no wider than two of their pixels' footprints
+/// once the pages they asked for are traced.
+#[test]
+fn sun_occlusion_texels_follow_pixel_footprints() {
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let moon = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let earth = Planet::new(PlanetRecipe::default()).unwrap();
+    let mut poses = vec![(
+        "moon pole",
+        &moon,
+        View::new(
+            DVec3::new(0.0, 1_738_104.0, 0.0),
+            Vec3::new(-0.07329183, -0.57357645, 0.81586665),
+            [320, 180],
+        ),
+    )];
+    let grid = *earth.grid();
+    let dir = grid.direction(
+        2,
+        f64::from(grid.cells()) * 0.3,
+        f64::from(grid.cells()) * 0.7,
+    );
+    let side = dir.any_orthonormal_vector();
+    for (name, height, down) in [
+        ("earth orbit", 300_000.0, 1.0),
+        ("earth 10 km", 10_000.0, 0.5),
+        ("earth ground", 2.0, 0.15),
+    ] {
+        let eye = earth.surface_point(dir, height);
+        poses.push((
+            name,
+            &earth,
+            View::new(eye, (side - dir * down).normalize().as_vec3(), [320, 180]),
+        ));
+    }
+    for (name, planet, view) in poses {
+        let mut world = World::new(gpu, planet);
+        world.sun_occlusion = true;
+        // The sun 50 degrees over the eye's horizon.
+        let up = view.eye.normalize();
+        let across = up.cross(side).normalize();
+        world.sun = (up * 50f64.to_radians().sin() + across * 50f64.to_radians().cos())
+            .normalize()
+            .as_vec3();
+        let hits = world.settle(gpu, planet, &view);
+        world.settle_sun_pages(gpu, planet, &view);
+        let pages = world.chunks.read_sun_occlusion().expect("drawn");
+        let view_proj = view.view_proj(planet);
+        let (mut read, mut wide, mut none, mut worst) = (0usize, 0usize, 0usize, 0.0f64);
+        for y in (0..view.size[1]).step_by(2) {
+            for x in (0..view.size[0]).step_by(2) {
+                let Some(hit) = hits[(y * view.size[0] + x) as usize] else {
+                    continue;
+                };
+                let footprint = hit.distance * view.pixel_angle();
+                // Cells of a pixel and a half or more walk their own sun.
+                if planet.grid().voxel_size() * f64::from(1u32 << hit.level) >= 1.5 * footprint {
+                    continue;
+                }
+                let p = view.pixel_dir(view_proj, x, y) * hit.distance;
+                let Some(r) = pages.read(p.as_vec3().to_array(), [0.0; 3], footprint as f32)
+                else {
+                    none += 1;
+                    continue;
+                };
+                read += 1;
+                let ratio = f64::from(r.texel) / footprint;
+                worst = worst.max(ratio);
+                wide += usize::from(ratio > 2.0);
+            }
+        }
+        eprintln!(
+            "{name}: {read} read, {none} unread, {wide} wider than two footprints (worst {worst:.2})"
+        );
+        assert!(read > 1000, "{name}: {read} read");
+        assert!(none * 100 <= read, "{name}: {none} unread of {read}");
+        assert!(wide * 100 <= read, "{name}: {wide} of {read} wider than two footprints");
+    }
 }
 
 /// Ground probes for foliage (`chunks::ground`) over a 3x3 block of tiles around the
