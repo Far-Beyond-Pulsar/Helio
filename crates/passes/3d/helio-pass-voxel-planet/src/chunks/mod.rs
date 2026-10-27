@@ -48,8 +48,8 @@ type Quarters = [Option<Ranges>; 4];
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
 /// Terrain regions kept on the GPU (`engine::RegionPool`; streams: 832
-/// bytes each).
-const REGION_CAPACITY: usize = 8192;
+/// bytes each, 27 MB).
+const REGION_CAPACITY: usize = 32768;
 /// Chunk slots by default (`Capacity::chunks`), within what the device can
 /// bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
@@ -4308,9 +4308,13 @@ impl ChunkWorld {
             return 0;
         }
         // The terrain's regions over the footprint (its streams), resident
-        // while its tiles and chunks generate; near levels' feature
-        // candidates read the ground at level 0.
-        let read = if self.has_features && fp.level < crate::features::NEAR_LEVELS {
+        // while its tiles and chunks generate (made off the frame: the
+        // footprint waits for them); near levels' feature candidates read
+        // the ground at level 0.
+        let read = if self.has_features
+            && fp.level < crate::features::NEAR_LEVELS
+            && self.features.near(fp.level) > 0
+        {
             0
         } else {
             fp.level

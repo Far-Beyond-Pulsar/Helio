@@ -242,6 +242,10 @@ pub(crate) struct RegionPool {
     /// Regions made since the last flush, and whether the table changed.
     pending: Vec<(u32, Vec<u32>)>,
     table_dirty: bool,
+    /// Regions being made off the frame ([`Self::reserve`]), and those made
+    /// and not yet in the pool.
+    making: rustc_hash::FxHashSet<[u32; 2]>,
+    made: std::sync::Arc<std::sync::Mutex<Vec<([u32; 2], Vec<u32>)>>>,
 }
 
 impl RegionPool {
@@ -275,6 +279,8 @@ impl RegionPool {
             free: (0..capacity as u32).rev().collect(),
             pending: Vec::new(),
             table_dirty: false,
+            making: Default::default(),
+            made: Default::default(),
         }
     }
 
@@ -292,11 +298,40 @@ impl RegionPool {
         out
     }
 
+    /// Make room for `n` more regions besides those `frame` keeps,
+    /// evicting the longest unused (an eighth of the pool at least:
+    /// evictions come in batches, not a table upload a footprint): how many
+    /// fit.
+    fn room(&mut self, n: usize, frame: u64) -> usize {
+        if self.free.len() < n {
+            let mut old: Vec<([u32; 2], u32, u64)> = self
+                .resident
+                .iter()
+                .filter(|(_, e)| e.1 < frame)
+                .map(|(k, e)| (*k, e.0, e.1))
+                .collect();
+            old.sort_unstable_by_key(|e| (e.2, e.0));
+            for e in old.iter().take((n - self.free.len()).max(self.capacity / 8)) {
+                self.resident.remove(&e.0);
+                self.free.push(e.1);
+            }
+            self.table_dirty = true;
+        }
+        n.min(self.free.len())
+    }
+
+    /// Region `key`'s words `w` into a free slot, kept through `frame`.
+    fn place(&mut self, key: [u32; 2], w: Vec<u32>, frame: u64) {
+        let slot = self.free.pop().expect("a free region slot");
+        self.resident.insert(key, (slot, frame));
+        self.pending.push((slot, w));
+        self.table_dirty = true;
+    }
+
     /// Keep regions `keys` resident through `frame`, making the missing
-    /// ones (on the CPU, in parallel) and evicting the longest unused:
-    /// false when the pool cannot hold them besides those `frame` keeps
-    /// (then nothing is made).
-    pub(crate) fn reserve(&mut self, keys: &[[u32; 2]], frame: u64) -> bool {
+    /// ones now (on the CPU, in parallel): false when the pool cannot hold
+    /// them besides those `frame` keeps (then nothing is made).
+    pub(crate) fn reserve_now(&mut self, keys: &[[u32; 2]], frame: u64) -> bool {
         use rayon::prelude::*;
         let Some(source) = self.source.clone() else {
             return true;
@@ -308,28 +343,8 @@ impl RegionPool {
                 None => missing.push(*k),
             }
         }
-        if missing.is_empty() {
-            return true;
-        }
-        if self.free.len() < missing.len() {
-            let mut old: Vec<([u32; 2], u32, u64)> = self
-                .resident
-                .iter()
-                .filter(|(_, e)| e.1 < frame)
-                .map(|(k, e)| (*k, e.0, e.1))
-                .collect();
-            let need = missing.len() - self.free.len();
-            if old.len() < need {
-                return false;
-            }
-            // The longest unused, an eighth of the pool at least: evictions
-            // come in batches, not a table upload a footprint.
-            old.sort_unstable_by_key(|e| (e.2, e.0));
-            for e in old.iter().take(need.max(self.capacity / 8)) {
-                self.resident.remove(&e.0);
-                self.free.push(e.1);
-            }
-            self.table_dirty = true;
+        if self.room(missing.len(), frame) < missing.len() {
+            return false;
         }
         let words = self.words;
         let made: Vec<Vec<u32>> = missing
@@ -341,12 +356,53 @@ impl RegionPool {
             })
             .collect();
         for (k, w) in missing.into_iter().zip(made) {
-            let slot = self.free.pop().expect("a free region slot");
-            self.resident.insert(k, (slot, frame));
-            self.pending.push((slot, w));
+            self.place(k, w, frame);
         }
-        self.table_dirty = true;
         true
+    }
+
+    /// Whether regions `keys` are all resident, kept through `frame` if
+    /// so. Missing ones are made off the frame (the thread pool) and enter
+    /// the pool on a later call: a footprint waits for its regions instead
+    /// of the frame making them.
+    pub(crate) fn reserve(&mut self, keys: &[[u32; 2]], frame: u64) -> bool {
+        let Some(source) = self.source.clone() else {
+            return true;
+        };
+        self.admit(frame);
+        let mut ready = true;
+        for &k in keys {
+            if let Some(e) = self.resident.get_mut(&k) {
+                e.1 = e.1.max(frame);
+                continue;
+            }
+            ready = false;
+            if self.making.insert(k) {
+                let (source, made, words) = (source.clone(), self.made.clone(), self.words);
+                rayon::spawn(move || {
+                    let mut w = vec![0u32; words];
+                    source.0.region(k, &mut w[..source.0.words()]);
+                    made.lock().unwrap_or_else(|e| e.into_inner()).push((k, w));
+                });
+            }
+        }
+        ready
+    }
+
+    /// Regions made off the frame into the pool, as many as fit besides
+    /// those `frame` keeps (the rest wait).
+    fn admit(&mut self, frame: u64) {
+        let mut done = std::mem::take(&mut *self.made.lock().unwrap_or_else(|e| e.into_inner()));
+        if done.is_empty() {
+            return;
+        }
+        let fit = self.room(done.len(), frame);
+        let rest = done.split_off(fit);
+        for (k, w) in done {
+            self.making.remove(&k);
+            self.place(k, w, frame);
+        }
+        self.made.lock().unwrap_or_else(|e| e.into_inner()).extend(rest);
     }
 
     /// Upload the regions made and the table, if it changed (before the
@@ -876,7 +932,7 @@ pub fn verify_columns(
         keys
     };
     let mut regions = RegionPool::new(device, &program, keys.len());
-    regions.reserve(&keys, 0);
+    regions.reserve_now(&keys, 0);
     regions.flush(queue);
     let ins = init(
         "verify inputs",
