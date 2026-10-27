@@ -1625,9 +1625,9 @@ fn pixel_width(q: vec2<u32>, size: vec2<u32>, t: f32) -> f32 {
 }
 
 // Material `m`'s colour varied by its patches (409 m and 25.6 m), clumps
-// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, by
-// `voxel`), at domain point `p` for a pixel `pixel` m wide.
-fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32) -> vec3<f32> {
+// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, in
+// [-0.5, 0.5], by `voxel`), at domain point `p` for a pixel `pixel` m wide.
+fn material_albedo(m: u32, p: vec3<i32>, blade: f32, pixel: f32, voxel: f32) -> vec3<f32> {
     let material = materials.m[min(m, 31u)];
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
@@ -1639,7 +1639,6 @@ fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32
     if pixel < 0.8 {
         clumps += 0.3 * f32(noise(p, 7u, 0x9b05688cu)) / f32(NOISE_ONE) * clamp((0.8 - pixel) / 0.4, 0.0, 1.0);
     }
-    let blade = f32(blade_hash & 255u) / 255.0 - 0.5;
     let t = clamp(0.52 + materials.detail.x * (0.7 * broad + 0.16 * patches + clumps) + materials.detail.y * blade * voxel, 0.0, 1.0);
     return select(mix(material.patches[1].rgb, material.patches[2].rgb, t * 2.0 - 1.0), mix(material.patches[0].rgb, material.patches[1].rgb, t * 2.0), t < 0.5);
 }
@@ -1717,9 +1716,15 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
     // face of it.
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz) * (vec3<f32>(cell) + 0.5);
     let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + centre / DOMAIN_UNIT));
+    // Each voxel's own brightness and hue, as much shared with the voxels
+    // around (0.4 m clumps) as its own: a hash a voxel alone read as a
+    // checkerboard wherever light alone shapes nothing (shade, overcast).
+    let clump = f32(noise(p, 5u, 0x3a1f9e27u)) / f32(NOISE_ONE);
     let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
-    let pigment = 1.0 + materials.detail.y * (mix(0.5, f32(hv & 255u) / 255.0, mosaic) - 0.5);
-    let albedo = material_albedo(material, p, hash3(p.x, p.y, p.z, 0x1b873593u), pixel_m, mosaic) * pigment;
+    let shade = 0.6 * (f32(hv & 255u) / 255.0 - 0.5) + 0.4 * clump;
+    let pigment = 1.0 + materials.detail.y * shade * mosaic;
+    let hue = 0.6 * (f32(hash3(p.x, p.y, p.z, 0x1b873593u) & 255u) / 255.0 - 0.5) + 0.4 * clump;
+    let albedo = material_albedo(material, p, hue, pixel_m, mosaic) * pigment;
     // Occlusion: around the air cell in front of the face, where voxels
     // (not cells: the same at every level, as `hit_face`'s slope) are a
     // few pixels wide; under that the sky samples hold the occlusion and
@@ -4052,7 +4057,7 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
                 // already reads as the meadow.
                 let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
                 let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
-                let colour = material_albedo(min(m, 31u), p, 0u, 0.4, 0.0);
+                let colour = material_albedo(min(m, 31u), p, 0.0, 0.4, 0.0);
                 hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(n), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
             }
         }

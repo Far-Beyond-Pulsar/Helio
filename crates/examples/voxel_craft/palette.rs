@@ -28,8 +28,9 @@ pub fn load(world: &mut World) -> Palette {
         appearance.materials[block.material() as usize] = block.look();
     }
     // Small voxels: each one's pigment varies a little and the land's
-    // patches show; voxel edges darken a touch.
-    appearance.detail = [0.3, 0.16, 0.08, 0.0];
+    // patches show; voxel edges darken a touch; natural steps are lit
+    // mostly by their slope (no dark contour lines over gentle ground).
+    appearance.detail = [0.3, 0.16, 0.08, 0.75];
     let hand = Block::HOTBAR
         .into_iter()
         .map(|block| {

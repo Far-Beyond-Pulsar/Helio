@@ -267,7 +267,7 @@ fn frame(
     pass.begin(&gpu.queue, eye, n, scene.sky, Vec3::ZERO);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut cmds = helio_core::CommandRecorder::from_encoder(&mut encoder);
-    pass.record(&gpu.device, &mut cmds, None, None, lights);
+    pass.record(&gpu.device, &mut cmds, None, None, lights, None);
     drop(cmds);
     gpu.queue.submit([encoder.finish()]);
     let [frame_buffer, _, rays, hits, sun, light] = pass.buffers();
@@ -291,6 +291,7 @@ fn frame(
         None,
         scene.materials.as_ref(),
         lights.map(|l| (l, 1)),
+        None,
         None,
         n as u32,
     );

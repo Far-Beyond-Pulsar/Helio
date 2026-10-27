@@ -454,11 +454,14 @@ impl Default for TerrainAppearance {
         // A cell of leaves (a cluster with gaps) passes about two thirds of
         // the light on it.
         materials[LEAVES as usize].transmission = 0.65;
-        // Voxels a pixel wide or more are lit by their own faces: slopes read
-        // as their steps (no step softness).
+        // Natural steps are lit mostly by the slope they stand for (step
+        // softness 0.75): lit by their own faces, every 10 cm step of a
+        // gentle slope showed its riser and the shadow it casts as a dark
+        // contour line ("sound waves" over meadows). Edges and corner
+        // occlusion still draw the voxels.
         Self {
             materials,
-            detail: [0.3, 0.4, 0.08, 0.0],
+            detail: [0.3, 0.4, 0.08, 0.75],
         }
     }
 }
