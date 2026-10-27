@@ -28,7 +28,10 @@ use std::{
 
 /// Typed payload for block lifecycle events. Coordinates are the exact
 /// world-space centre of the base cell; `material` is the material present
-/// when the event occurred (before a break, or after a placement).
+/// when the event occurred (before a break, or after a placement). An edit
+/// changing more than `helio_pass_voxel_planet::edit_yield::EXACT_CELLS`
+/// cells reports regions instead: `count` cells of that material around a
+/// brick's centre (1 for a single block).
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockData {
@@ -40,10 +43,12 @@ pub struct BlockData {
     pub z: f64,
     #[property]
     pub material: u32,
+    #[property]
+    pub count: u64,
 }
 
 /// Typed payload for a terrain cell whose material changed from one solid
-/// material to another.
+/// material to another (`count` cells of a region, as `BlockData`).
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockMaterialChange {
@@ -57,6 +62,8 @@ pub struct BlockMaterialChange {
     pub previous_material: u32,
     #[property]
     pub material: u32,
+    #[property]
+    pub count: u64,
 }
 
 #[component_events(class = "VoxelTerrainComponent")]

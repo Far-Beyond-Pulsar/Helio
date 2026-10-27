@@ -9,7 +9,9 @@
 //! self's if it is drawn too, else `KIND_ANCESTOR`), whether a strict
 //! ancestor is drawn (`UNDER_DRAWN`) and its content: the
 //! box of its cells anything non-empty may occupy, `x | y << 7 | z << 14`
-//! for its low and high corners ([lo, hi); lo > hi: nothing). A drawn
+//! for its low and high corners ([lo, hi); lo > hi: nothing), and a Solid
+//! or Buried node's material in bits 24..32 of the high corner's word
+//! (what its rock shows: `DrawnSet::set_rock`). A drawn
 //! Mixed chunk's content is its occupied layers over its footprint, a
 //! Solid or Buried node's its whole box, an ancestor's the union of its
 //! children's (rounded out to its cells). Empty nodes have no entry: a
@@ -125,6 +127,8 @@ impl Content {
 struct Drawn {
     kind: Kind,
     chunk: Option<NodeChunk>,
+    /// A Solid or Buried node's material.
+    rock: u8,
 }
 
 impl Drawn {
@@ -232,6 +236,8 @@ pub struct DrawnSet {
     dirty: Vec<u32>,
     /// Bumped whenever `list` changes (its slots are uploaded then).
     version: u64,
+    /// Materials of uniform nodes about to be added (`set_rock`).
+    rocks: FxHashMap<NodeKey, u8>,
 }
 
 impl DrawnSet {
@@ -252,7 +258,15 @@ impl DrawnSet {
             mask: entries as u32 - 1,
             dirty: Vec::new(),
             version: 0,
+            rocks: FxHashMap::default(),
         }
+    }
+
+    /// What Solid or Buried node `key`, added by the next update, shows
+    /// where a ray hits it (a ray meets such rock where an edit uncovers
+    /// it before its chunk is generated).
+    pub fn set_rock(&mut self, key: NodeKey, material: u8) {
+        self.rocks.insert(key, material);
     }
 
     pub fn mask(&self) -> u32 {
@@ -344,8 +358,8 @@ impl DrawnSet {
                 self.add_node(
                     *key,
                     Drawn {
-                        kind: d.kind,
                         chunk: chunk_of(*key),
+                        ..d
                     },
                 );
             }
@@ -370,8 +384,10 @@ impl DrawnSet {
             } else {
                 None
             };
-            self.add_node(key, Drawn { kind, chunk });
+            let rock = self.rocks.get(&key).copied().unwrap_or(0);
+            self.add_node(key, Drawn { kind, chunk, rock });
         }
+        self.rocks.clear();
         self.settle_entries();
     }
 
@@ -573,8 +589,9 @@ impl DrawnSet {
                                 d.chunk.map_or(-1, |c| c.slot as i32),
                                 self.state_of(key),
                                 d.kind_code() | under | (lo << 8),
-                                hi,
+                                hi | (i32::from(d.rock) << 24),
                             ],
+
                             None => [-1, 0, KIND_ANCESTOR | under | (lo << 8), hi],
                         };
                         Some(Entry { content, value })

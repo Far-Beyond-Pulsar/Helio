@@ -136,11 +136,9 @@ impl World {
         }
     }
 
-    /// The planet's edits now (a new world for a history it cannot follow).
-    fn sync(&mut self, gpu: &Gpu, planet: &Planet) {
-        if !self.chunks.sync_edits(planet) {
-            *self = Self::new(gpu, planet);
-        }
+    /// The planet's edits now.
+    fn sync(&mut self, _gpu: &Gpu, planet: &Planet) {
+        self.chunks.sync_edits(planet);
     }
 
     /// One frame: residency, the draw, `picks` copied; its residency.
@@ -2034,16 +2032,18 @@ fn large_sculpt_strokes_settle() {
 }
 
 /// What a burst of sculpt strokes looks like while it happens, under a
-/// host's generation budget (a report: `--ignored --nocapture`): each
-/// frame's sampled pixels against the CPU's ray casts of the world as
-/// edited (wrong: off by more than a metre and 2% of the distance, or a
-/// hit where there is none or none where there is one), pixels drawing
-/// material 0 (magenta), the coarsest level drawn, and the frames after
-/// the last stroke until the view is right again.
+/// host's generation budget (a report: `--ignored --nocapture`). Every
+/// frame's hits (every fourth pixel each way) are kept, then judged
+/// against the burst's own settled frame (CPU ray casts of the Moon cost
+/// a third of a second each): coarse pixels (drawn three levels or more
+/// coarser than settled there), wrong ones after the last stroke (off by
+/// more than a metre and 2%, or a hit where there is none or none where
+/// there is one), pixels drawing material 0 (magenta), and the frames
+/// after the last stroke until the view is right again (`BURST_FRAMES=<dir>`
+/// saves some frames).
 #[test]
 #[ignore]
 fn sculpt_bursts_while_they_happen() {
-    use rayon::prelude::*;
     let Some(gpu) = gpu() else { return };
     let voxel = 0.1;
     let mut planet = Planet::new(PlanetRecipe {
@@ -2069,60 +2069,47 @@ fn sculpt_bursts_while_they_happen() {
     let mut world = World::new(&gpu, &planet);
     world.jitter = Some(0);
     world.settle(&gpu, &planet, &view);
-    let view_proj = view.view_proj(&planet);
-    // Every fourth pixel each way.
-    let pixels: Vec<(u32, u32)> = (0..view.size[1])
+    let pixels: Vec<usize> = (0..view.size[1])
         .step_by(4)
-        .flat_map(|y| (0..view.size[0]).step_by(4).map(move |x| (x, y)))
+        .flat_map(|y| (0..view.size[0]).step_by(4).map(move |x| (y * view.size[0] + x) as usize))
         .collect();
-    let dirs: Vec<DVec3> = pixels
-        .iter()
-        .map(|&(x, y)| view.pixel_dir(view_proj, x, y))
-        .collect();
-    // (wrong, magenta, coarsest level) of the frame just drawn.
-    let judge = |world: &World, planet: &Planet| -> (usize, usize, u32) {
+    let sample = |world: &World| -> Vec<Option<PickHit>> {
         let hits = world.chunks.read_hits();
-        let cpu: Vec<Option<f64>> = dirs
-            .par_iter()
-            .map(|&d| planet.raycast(view.eye, d, 3000.0).map(|h| h.distance))
-            .collect();
-        let (mut wrong, mut magenta, mut coarsest) = (0, 0, 0);
-        for (n, &(x, y)) in pixels.iter().enumerate() {
-            let drawn = hits[(y * view.size[0] + x) as usize];
-            if let Some(h) = drawn {
-                magenta += usize::from(h.material == 0);
-                coarsest = coarsest.max(h.level);
-            }
-            let bad = match (drawn, cpu[n]) {
-                (Some(h), Some(c)) => (h.distance - c).abs() > 1.0f64.max(c * 0.02),
-                (None, None) => false,
-                (Some(h), None) => h.distance < 2500.0,
-                (None, Some(_)) => true,
-            };
-            wrong += usize::from(bad);
-        }
-        (wrong, magenta, coarsest)
+        pixels.iter().map(|&p| hits[p]).collect()
     };
-    let before = judge(&world, &planet);
-    eprintln!(
-        "BURST settled: wrong {} magenta {} coarsest level {} of {} pixels",
-        before.0,
-        before.1,
-        before.2,
-        pixels.len()
-    );
+    let save = |world: &World, name: String| {
+        let Some(dir) = std::env::var_os("BURST_FRAMES") else {
+            return;
+        };
+        let pixels = read_rgba8(gpu, &world.chunks.targets().unwrap().colour);
+        image::RgbaImage::from_raw(
+            view.size[0],
+            view.size[1],
+            // Brightened: the plain colour is dim.
+            pixels
+                .into_iter()
+                .flat_map(|p| [p[0], p[1], p[2]].map(|c| c.saturating_mul(3)).into_iter().chain([255]))
+                .collect(),
+        )
+        .unwrap()
+        .save(std::path::Path::new(&dir).join(format!("{name}.png")))
+        .unwrap();
+    };
+    let wrong = |a: &Option<PickHit>, b: &Option<PickHit>| match (a, b) {
+        (Some(a), Some(b)) => (a.distance - b.distance).abs() > 1.0f64.max(b.distance * 0.02),
+        (None, None) => false,
+        _ => true,
+    };
     let bursts: [(&str, f64, BrushOp, u32, f64); 4] = [
-        ("dig 3 m", 3.0, BrushOp::Remove, 0, 1.0),
-        ("dig 12 m", 12.0, BrushOp::Remove, 0, 4.0),
-        ("build 60 m", 60.0, BrushOp::Add, material::COBBLE, 4.0),
-        ("dig 60 m", 60.0, BrushOp::Remove, 0, 4.0),
+        ("dig_3m", 3.0, BrushOp::Remove, 0, 1.0),
+        ("dig_12m", 12.0, BrushOp::Remove, 0, 4.0),
+        ("build_60m", 60.0, BrushOp::Add, material::COBBLE, 4.0),
+        ("dig_60m", 60.0, BrushOp::Remove, 0, 4.0),
     ];
+    let strokes = 40;
     for (label, radius, op, material, step) in bursts {
-        let (mut wrong_frames, mut wrong_sum, mut wrong_max) = (0, 0, 0);
-        let (mut magenta_sum, mut coarsest) = (0, 0);
+        let mut frames: Vec<Vec<Option<PickHit>>> = Vec::new();
         let mut cpu = Vec::new();
-        let strokes = 40;
-        let mut frames_after = None;
         let mut frame = 0;
         loop {
             if frame < strokes {
@@ -2143,26 +2130,42 @@ fn sculpt_bursts_while_they_happen() {
             let t = std::time::Instant::now();
             world.frame_with(&gpu, &planet, &view, &config);
             cpu.push(t.elapsed().as_secs_f64() * 1e3);
-            let (wrong, magenta, level) = judge(&world, &planet);
-            wrong_sum += wrong;
-            wrong_max = wrong_max.max(wrong);
-            wrong_frames += usize::from(wrong * 200 > pixels.len());
-            magenta_sum += magenta;
-            coarsest = coarsest.max(level);
-            frame += 1;
-            if frame >= strokes && wrong * 200 <= pixels.len() && frames_after.is_none() {
-                frames_after = Some(frame - strokes);
+            frames.push(sample(&world));
+            if [4, 12, 24, 39, strokes + 8].contains(&frame) {
+                save(&world, format!("{label}_{frame:03}"));
             }
-            if frame >= strokes && (world.chunks.settled() || frame > strokes + 1500) {
+            frame += 1;
+            if frame >= strokes && (world.chunks.settled() || frame > strokes + 900) {
                 break;
+            }
+        }
+        let settled = frames.last().unwrap().clone();
+        save(&world, format!("{label}_settled"));
+        let (mut coarse_sum, mut coarse_max, mut magenta_sum) = (0, 0, 0);
+        let (mut wrong_after, mut right_after) = (0, None);
+        for (n, hits) in frames.iter().enumerate() {
+            let coarse = hits
+                .iter()
+                .zip(&settled)
+                .filter(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a.level >= b.level + 3))
+                .count();
+            coarse_sum += coarse;
+            coarse_max = coarse_max.max(coarse);
+            magenta_sum += hits.iter().flatten().filter(|h| h.material == 0).count();
+            if n >= strokes {
+                let w = hits.iter().zip(&settled).filter(|(a, b)| wrong(a, b)).count();
+                wrong_after += w;
+                if right_after.is_none() && w * 200 <= pixels.len() {
+                    right_after = Some(n - strokes);
+                }
             }
         }
         cpu.sort_by(f64::total_cmp);
         eprintln!(
-            "BURST {label}: {frame} frames; wrong over 0.5% in {wrong_frames}, wrong pixel-frames {wrong_sum} (most a frame {wrong_max} of {}), magenta pixel-frames {magenta_sum}, coarsest level {coarsest}; right {:?} frames after the last stroke, settled {}; frame ms p50 {:.1} p95 {:.1} max {:.1}",
-            pixels.len(),
-            frames_after,
+            "BURST {label}: {frame} frames ({} after the strokes); coarse pixel-frames {coarse_sum} (most a frame {coarse_max} of {}), magenta pixel-frames {magenta_sum}; after the strokes wrong pixel-frames {wrong_after}, right {:?} frames after; frame ms p50 {:.1} p95 {:.1} max {:.1}",
             frame - strokes,
+            pixels.len(),
+            right_after,
             cpu[cpu.len() / 2],
             cpu[cpu.len() * 95 / 100],
             cpu[cpu.len() - 1]

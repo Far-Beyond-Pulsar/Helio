@@ -446,13 +446,17 @@ impl ChunkPass {
         // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too).
         self.planet_ground.set_grid(*frame.planet.grid());
         let recipe = frame.planet.recipe_fingerprint();
-        // Edits follow the planet; another recipe or history, a new world.
-        if self.built_for != Some(recipe)
-            || self
-                .world
-                .as_mut()
-                .is_some_and(|w| !w.sync_edits(&frame.planet))
-        {
+        // Edits follow the planet (any history, in place); another recipe,
+        // a new world.
+        if let Some(world) = self.world.as_mut().filter(|_| self.built_for == Some(recipe)) {
+            // Another history (a level loaded): its saved chunks too.
+            if world.sync_edits(&frame.planet) {
+                self.kept_loaded = frame
+                    .kept
+                    .as_ref()
+                    .map(|kept| world.load_kept(&frame.planet, kept));
+            }
+        } else {
             let mut world = ChunkWorld::new(ctx.device, ctx.queue, &frame.planet);
             world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);

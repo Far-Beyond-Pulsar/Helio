@@ -154,8 +154,9 @@ pub struct Edits {
     /// Brushes sealed and the history hash after them: the baked state.
     sealed_count: usize,
     sealed_hash: u64,
-    undo_seals: VecDeque<SealUndo>,
-    changes: VecDeque<BakedChange>,
+    /// Shared by copies until one seals (a snapshot copies pointers).
+    undo_seals: Arc<VecDeque<Arc<SealUndo>>>,
+    changes: Arc<VecDeque<BakedChange>>,
 }
 
 /// A seal and what it replaced, to undo it.
@@ -272,17 +273,16 @@ impl Edits {
     }
     fn changed(&mut self, before: BakedState, columns: Vec<ChangedColumn>, world: bool) {
         let after = self.baked_state();
-        self.changes.push_back(BakedChange {
+        let changes = Arc::make_mut(&mut self.changes);
+        changes.push_back(BakedChange {
             before,
             after,
             columns: columns.into(),
             world,
         });
-        let mut kept: usize = self.changes.iter().map(|c| c.columns.len()).sum();
-        while self.changes.len() > 1
-            && (self.changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT)
-        {
-            if let Some(old) = self.changes.pop_front() {
+        let mut kept: usize = changes.iter().map(|c| c.columns.len()).sum();
+        while changes.len() > 1 && (changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT) {
+            if let Some(old) = changes.pop_front() {
                 kept -= old.columns.len();
             }
         }
@@ -372,7 +372,8 @@ pub enum Matter {
 }
 
 pub struct Planet {
-    recipe: PlanetRecipe,
+    /// Shared by copies (with features, hundreds of kilobytes).
+    recipe: Arc<PlanetRecipe>,
     /// `record::recipe_fingerprint` of the recipe, once: a recipe with
     /// features serializes to hundreds of kilobytes (renderers compare it
     /// every frame).
@@ -385,15 +386,21 @@ pub struct Planet {
     edit_top: f64,
     /// Lowest radius any remove brush reaches.
     edit_bottom: f64,
-    heights: Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>,
+    /// Column heights and feature placements: functions of the terrain
+    /// alone, so every copy of the world (a snapshot) shares them.
+    heights: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>>,
     features: Arc<CompiledFeatures>,
-    placements: Mutex<PlacementCache>,
+    placements: Arc<Mutex<PlacementCache>>,
 }
 
+/// A copy shares everything but what its edits change: the recipe, field,
+/// features and caches by pointer, the edits' layers structurally
+/// (`Edits`), so publishing a snapshot costs microseconds and its queries
+/// find the caches warm.
 impl Clone for Planet {
     fn clone(&self) -> Self {
         Self {
-            recipe: self.recipe.clone(),
+            recipe: Arc::clone(&self.recipe),
             fingerprint: self.fingerprint,
             grid: self.grid,
             field: Arc::clone(&self.field),
@@ -401,9 +408,9 @@ impl Clone for Planet {
             revision: self.revision,
             edit_top: self.edit_top,
             edit_bottom: self.edit_bottom,
-            heights: Mutex::new(Default::default()),
+            heights: Arc::clone(&self.heights),
             features: Arc::clone(&self.features),
-            placements: Mutex::new(Default::default()),
+            placements: Arc::clone(&self.placements),
         }
     }
 }
@@ -430,16 +437,16 @@ impl Planet {
         )?);
         Ok(Self {
             fingerprint: crate::record::recipe_fingerprint(&recipe),
-            recipe,
+            recipe: Arc::new(recipe),
             grid,
             field,
             edits: Edits::default(),
             revision: 0,
             edit_top: 0.0,
             edit_bottom: f64::INFINITY,
-            heights: Mutex::new(Default::default()),
+            heights: Default::default(),
             features,
-            placements: Mutex::new(Default::default()),
+            placements: Default::default(),
         })
     }
     pub fn recipe(&self) -> &PlanetRecipe {
@@ -642,14 +649,15 @@ impl Planet {
         edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
         edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
         let columns = changed_columns(&store, &edits.baked);
-        edits.undo_seals.push_back(SealUndo {
+        let undo_seals = Arc::make_mut(&mut edits.undo_seals);
+        undo_seals.push_back(Arc::new(SealUndo {
             brushes: brushes[..n].iter().copied().zip(hashes).collect(),
             store,
             large,
             before,
-        });
-        if edits.undo_seals.len() > UNDO_SEALS {
-            edits.undo_seals.pop_front();
+        }));
+        if undo_seals.len() > UNDO_SEALS {
+            undo_seals.pop_front();
         }
         edits.changed(before, columns, false);
         Ok(())
@@ -658,7 +666,9 @@ impl Planet {
     /// Undo the latest seal: its bricks and large brushes go back, its
     /// brushes become recent again.
     fn unseal(&mut self) -> Option<()> {
-        let undo = self.edits.undo_seals.pop_back()?;
+        let undo = Arc::make_mut(&mut self.edits.undo_seals).pop_back()?;
+        let undo = Arc::try_unwrap(undo).unwrap_or_else(|shared| (*shared).clone());
+
         let edits = &mut self.edits;
         let before = edits.baked_state();
         let undone = undo.store.clone();
@@ -1026,9 +1036,26 @@ impl Planet {
             self.column_height(face, i, j, 0),
         )
     }
+    /// The terrain's rock: its material 64 cells under the middle of the
+    /// first face. What a renderer shows where a ray meets ground it has
+    /// not generated yet (an edit uncovering it).
+    pub fn rock_material(&self) -> u32 {
+        let face = self.grid.faces()[0];
+        let middle = if self.grid.shape() == Shape::InfinitePlane {
+            0
+        } else {
+            (self.grid.cells() / 2) as i32
+        };
+        let top = self.terrain_top(face, middle, middle);
+        match self.terrain_material(Cell::new(face, middle, middle, top - 64)) {
+            material::AIR => material::STONE,
+            m => m,
+        }
+    }
     /// The material the terrain gives base cell `cell` were it solid there,
     /// edits and features ignored.
     pub fn terrain_material(&self, cell: Cell) -> u32 {
+
         let slope = self.material_slope(cell.face, cell.i, cell.j);
         // Materials vary in 3D (`shade` samples the cell's volume point): a
         // cliff's voxels are not one column's colour.
@@ -2307,72 +2334,5 @@ mod scaling {
                 t.elapsed().as_secs_f64() * 1000.0 / copies as f64
             );
         }
-    }
-}
-
-/// The cells one brush changes on `planet`, and how: what the gameplay
-/// API reports as blocks broken, placed and changed.
-#[derive(Clone, Debug, Default)]
-pub struct EditEvents {
-    /// Each changed cell's centre (planet-centred), material before and
-    /// after (0: air).
-    pub cells: Vec<(DVec3, u32, u32)>,
-}
-
-impl std::fmt::Display for EditEvents {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let broken = self.cells.iter().filter(|c| c.1 != 0).count();
-        let placed = self.cells.iter().filter(|c| c.2 != 0).count();
-        write!(f, "{} cells changed, {broken} broken, {placed} placed", self.cells.len())
-    }
-}
-
-/// [`EditEvents`] of `brush` over `planet`: every base cell the brush
-/// holds, its material before and after (on a copy with the brush applied).
-pub fn edit_events(planet: &Planet, brush: &Brush) -> EditEvents {
-    let grid = planet.grid();
-    let mut preview = planet.clone();
-    let mut cells = std::collections::HashSet::new();
-    for face_brush in brush.resolve(grid).unwrap_or_default() {
-        let radius = i64::from(face_brush.radius_half);
-        let center = face_brush.center;
-        let low = center.map(|value| (i64::from(value) - radius - 1).div_euclid(2));
-        let high = center.map(|value| (i64::from(value) + radius - 1).div_euclid(2));
-        for k in low[2]..=high[2] {
-            for j in low[1]..=high[1] {
-                for i in low[0]..=high[0] {
-                    let [i, j, k] = [i as i32, j as i32, k as i32];
-                    let sample = [
-                        crate::edits::center_half(i, 0),
-                        crate::edits::center_half(j, 0),
-                        crate::edits::center_half(k, 0),
-                    ];
-                    if !face_brush
-                        .contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0))
-                    {
-                        continue;
-                    }
-                    let position = grid.position(
-                        face_brush.face(),
-                        [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5],
-                    );
-                    cells.insert(grid.locate(position).0);
-                }
-            }
-        }
-    }
-    let before: Vec<_> = cells
-        .into_iter()
-        .map(|cell| (cell, preview.material(cell)))
-        .collect();
-    let _ = preview.apply(*brush);
-    EditEvents {
-        cells: before
-            .into_iter()
-            .filter_map(|(cell, was)| {
-                let now = preview.material(cell);
-                (was != now).then(|| (grid.cell_center(cell), was, now))
-            })
-            .collect(),
     }
 }

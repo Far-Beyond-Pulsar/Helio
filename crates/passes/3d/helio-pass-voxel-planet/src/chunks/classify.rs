@@ -185,11 +185,15 @@ pub struct EditView {
     pub grid: Grid,
     /// The large layer's faces (the first `large_faces`), then the recent
     /// brushes' (`recent_counts` a brush).
-    pub faces: Vec<FaceBrush>,
-    /// Where the large faces are, shared while seals leave the large layer
-    /// as it was (`BrushIndex`); where the recent ones are.
-    pub index: std::sync::Arc<BrushIndex>,
+    pub faces: Faces,
+    /// Where the large faces are (`LargeIndex`: a seal adds to it); where
+    /// the recent ones are.
+    pub index: LargeIndex,
     pub recent_index: BrushIndex,
+    /// Base layers the adding and removing brushes reach (the planner's
+    /// roots cover them), the large layer's kept with it.
+    pub reach: Option<(i32, i32)>,
+    pub large_reach: Option<(i32, i32)>,
     pub large_faces: usize,
     /// Large brushes the view holds, and the history's hash at the last of
     /// them (`EditLog::prefix_hash`): a later view extends them while the
@@ -213,21 +217,30 @@ pub struct EditView {
 /// Where an edit store's bricks are, at every level they show and over
 /// them: a node whose descendants hold baked edits is Mixed though its own
 /// level's cells, built by majority, may not show them (a 4 m shaft in
-/// 6.4 m cells), so the cut refines down to them.
-#[derive(Default)]
+/// 6.4 m cells), so the cut refines down to them. Kept in shared runs, the
+/// latest smallest, merged like a binary counter: a seal adds a run of its
+/// own bricks (it once copied the whole index).
+#[derive(Clone, Default)]
 pub struct BrickIndex {
-    /// Footprints holding bricks of their level.
-    pub footprints: FxHashSet<Footprint>,
-    /// Each footprint's layers of nodes holding bricks or over them.
-    pub nodes: rustc_hash::FxHashMap<Footprint, Vec<i32>>,
+    runs: Vec<std::sync::Arc<BrickRun>>,
     /// Base layers the bricks span.
     pub layers: Option<(i32, i32)>,
+}
+
+/// Bricks of a [`BrickIndex`]: footprints holding bricks of their level,
+/// each footprint's layers of nodes holding bricks or over them, and how
+/// many bricks it came from.
+#[derive(Clone, Default)]
+struct BrickRun {
+    footprints: FxHashSet<Footprint>,
+    nodes: FxHashMap<Footprint, Vec<i32>>,
+    bricks: usize,
 }
 
 impl BrickIndex {
     pub fn new(grid: &Grid, store: &EditStore) -> Self {
         let mut index = Self::default();
-        index.add(grid, store.bricks().map(|(k, _)| k));
+        index.add(grid, store.bricks().map(|(k, _)| k).collect());
         index
     }
 
@@ -239,11 +252,7 @@ impl BrickIndex {
         store: &EditStore,
         columns: impl Iterator<Item = crate::edit_store::ColumnKey>,
     ) -> Self {
-        let mut index = Self {
-            footprints: self.footprints.clone(),
-            nodes: self.nodes.clone(),
-            layers: self.layers,
-        };
+        let mut index = self.clone();
         let keys: Vec<crate::edit_store::BrickKey> = columns
             .filter_map(|c| {
                 store.column(&c).map(|column| {
@@ -261,15 +270,43 @@ impl BrickIndex {
             })
             .flatten()
             .collect();
-        index.add(grid, keys.into_iter());
+        index.add(grid, keys);
         index
     }
 
-    fn add(&mut self, grid: &Grid, keys: impl Iterator<Item = crate::edit_store::BrickKey>) {
+    /// Whether `fp` holds bricks of its level.
+    pub fn holds(&self, fp: &Footprint) -> bool {
+        self.runs.iter().any(|r| r.footprints.contains(fp))
+    }
+
+    /// The layers of `fp`'s nodes holding bricks or over them (a layer may
+    /// come more than once).
+    pub fn node_layers(&self, fp: &Footprint) -> impl Iterator<Item = i32> + '_ {
+        let fp = *fp;
+        self.runs
+            .iter()
+            .flat_map(move |r| r.nodes.get(&fp).into_iter().flatten().copied())
+    }
+
+    fn holds_node(&self, node: &NodeKey) -> bool {
+        let fp = node.footprint();
+        self.runs
+            .iter()
+            .any(|r| r.nodes.get(&fp).is_some_and(|l| l.contains(&node.cz)))
+    }
+
+    fn add(&mut self, grid: &Grid, keys: Vec<crate::edit_store::BrickKey>) {
+        if keys.is_empty() {
+            return;
+        }
         let top = grid.levels() - 1;
+        let mut run = BrickRun {
+            bricks: keys.len(),
+            ..Default::default()
+        };
         for k in keys {
             let level = u32::from(k.level);
-            self.footprints.insert(Footprint {
+            run.footprints.insert(Footprint {
                 face: k.face,
                 level,
                 cx: k.bi >> 3,
@@ -289,7 +326,10 @@ impl BrickIndex {
                 cz: k.bk >> 3,
             };
             loop {
-                let layers = self.nodes.entry(node.footprint()).or_default();
+                if self.holds_node(&node) {
+                    break;
+                }
+                let layers = run.nodes.entry(node.footprint()).or_default();
                 if layers.contains(&node.cz) {
                     break;
                 }
@@ -300,7 +340,173 @@ impl BrickIndex {
                 node = node.parent();
             }
         }
+        self.runs.push(std::sync::Arc::new(run));
+        while self.runs.len() >= 2 {
+            let n = self.runs.len();
+            if self.runs[n - 2].bricks > self.runs[n - 1].bricks {
+                break;
+            }
+            let last = self.runs.pop().expect("two runs");
+            let mut merged = (*self.runs.pop().expect("two runs")).clone();
+            merged.bricks += last.bricks;
+            merged.footprints.extend(last.footprints.iter().copied());
+            for (fp, layers) in &last.nodes {
+                let into = merged.nodes.entry(*fp).or_default();
+                for cz in layers {
+                    if !into.contains(cz) {
+                        into.push(*cz);
+                    }
+                }
+            }
+            self.runs.push(std::sync::Arc::new(merged));
+        }
     }
+}
+
+/// Faces in shared runs, only the last of which grows: a copy shares every
+/// run, and extending it copies at most the last.
+const RUN: usize = 4096;
+
+/// An edit view's faces: the large layer's in shared runs (a later view
+/// extends them by pointer, so an edit or a seal copies at most a run, not
+/// the history), then the recent brushes'.
+#[derive(Clone, Default)]
+pub struct Faces {
+    runs: Vec<std::sync::Arc<Vec<FaceBrush>>>,
+    large: usize,
+    recent: Vec<FaceBrush>,
+}
+
+impl Faces {
+    pub fn len(&self) -> usize {
+        self.large + self.recent.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// The large layer's faces.
+    pub fn large_len(&self) -> usize {
+        self.large
+    }
+    /// The large layer extended by `faces`.
+    pub fn extend_large(&mut self, faces: impl IntoIterator<Item = FaceBrush>) {
+        for fb in faces {
+            if self.runs.last().is_none_or(|r| r.len() >= RUN) {
+                self.runs.push(std::sync::Arc::new(Vec::with_capacity(RUN)));
+            }
+            std::sync::Arc::make_mut(self.runs.last_mut().expect("pushed")).push(fb);
+            self.large += 1;
+        }
+    }
+    /// The recent brushes' faces, replaced.
+    pub fn set_recent(&mut self, faces: Vec<FaceBrush>) {
+        self.recent = faces;
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &FaceBrush> + '_ {
+        self.runs.iter().flat_map(|r| r.iter()).chain(&self.recent)
+    }
+    /// Faces from `from` on, as contiguous slices with the index of their
+    /// first.
+    pub fn slices_from(&self, from: usize) -> Vec<(usize, &[FaceBrush])> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        for run in self.runs.iter().map(|r| r.as_slice()).chain([self.recent.as_slice()]) {
+            let end = at + run.len();
+            if end > from && !run.is_empty() {
+                let skip = from.saturating_sub(at);
+                out.push((at + skip, &run[skip..]));
+            }
+            at = end;
+        }
+        out
+    }
+    /// Faces from `from` on (without walking those before).
+    pub fn iter_from(&self, from: usize) -> impl Iterator<Item = &FaceBrush> + '_ {
+        self.slices_from(from).into_iter().flat_map(|(_, run)| run.iter())
+    }
+    /// The faces `[from, to)` in one list.
+    pub fn collect(&self, from: usize, to: usize) -> Vec<FaceBrush> {
+        self.iter_from(from).take(to - from).copied().collect()
+    }
+}
+
+impl std::ops::Index<usize> for Faces {
+    type Output = FaceBrush;
+    fn index(&self, n: usize) -> &FaceBrush {
+        if n < self.large {
+            &self.runs[n / RUN][n % RUN]
+        } else {
+            &self.recent[n - self.large]
+        }
+    }
+}
+
+/// Where the large layer's faces are: indices of runs of them, the latest
+/// smallest. A seal's faces join as a run of their own and a run no larger
+/// than the one after it merges with it (a binary counter), so a face is indexed again O(log n)
+/// times over the history, not at every seal (each large brush once
+/// rebuilt the whole index).
+#[derive(Clone, Default)]
+pub struct LargeIndex {
+    /// Each run's first face, faces and index.
+    runs: Vec<(usize, usize, std::sync::Arc<BrushIndex>)>,
+}
+
+impl LargeIndex {
+    /// The large faces of `faces` from `from` (the faces indexed so far)
+    /// added.
+    pub fn extend(&mut self, faces: &Faces, from: usize) {
+        let to = faces.large_len();
+        if to <= from {
+            return;
+        }
+        self.runs.push((
+            from,
+            to - from,
+            std::sync::Arc::new(BrushIndex::new(&faces.collect(from, to), from as u32, true)),
+        ));
+        while self.runs.len() >= 2 {
+            let (a, b) = (&self.runs[self.runs.len() - 2], &self.runs[self.runs.len() - 1]);
+            if a.1 > b.1 {
+                break;
+            }
+            let (first, count) = (a.0, a.1 + b.1);
+            self.runs.truncate(self.runs.len() - 2);
+            self.runs.push((
+                first,
+                count,
+                std::sync::Arc::new(BrushIndex::new(
+                    &faces.collect(first, first + count),
+                    first as u32,
+                    true,
+                )),
+            ));
+        }
+    }
+
+    /// [`BrushIndex::query`] over every run, in the faces' order.
+    pub fn query(&self, face: u8, i: (i64, i64), j: (i64, i64), level: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (_, _, index) in &self.runs {
+            out.extend(index.query(face, i, j, level));
+        }
+        out
+    }
+}
+
+/// Base layers (inclusive) the adding and removing faces of `faces`
+/// reach, joined with `reach`.
+pub fn faces_reach<'a>(
+    reach: Option<(i32, i32)>,
+    faces: impl IntoIterator<Item = &'a FaceBrush>,
+) -> Option<(i32, i32)> {
+    faces
+        .into_iter()
+        .filter(|fb| fb.op() <= 1)
+        .fold(reach, |r, fb| {
+            let (lo, hi) = (fb.k_lo.div_euclid(2), fb.k_hi.div_euclid(2));
+            Some(r.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))))
+        })
 }
 
 /// Where the analytic brushes are on each face: a loose grid of levels
@@ -543,11 +749,8 @@ impl EditView {
     /// bricks or over them.
     fn baked_bands(&self, fp: Footprint) -> impl Iterator<Item = (i32, i32)> + '_ {
         self.bricks
-            .nodes
-            .get(&fp)
-            .into_iter()
-            .flatten()
-            .map(|&cz| (cz * CHUNK, cz * CHUNK + CHUNK))
+            .node_layers(&fp)
+            .map(|cz| (cz * CHUNK, cz * CHUNK + CHUNK))
     }
 
     /// `fp`'s nodes from its `ranges`: the field's surface band and every
@@ -596,7 +799,38 @@ impl EditView {
         }
     }
 
+    /// The material of an adding brush that makes uniform node `key`
+    /// Solid: the last brush adding or removing at its middle, if it adds
+    /// (else the node is the field's rock).
+    pub fn added_material(&self, key: NodeKey) -> Option<u32> {
+        let fp = key.footprint();
+        let (i, j, z) = (
+            fp.cx * CHUNK + CHUNK / 2,
+            fp.cy * CHUNK + CHUNK / 2,
+            key.cz * CHUNK + CHUNK / 2,
+        );
+        let centre = [
+            center_half(i, fp.level),
+            center_half(j, fp.level),
+            center_half(z, fp.level),
+        ];
+        let mut point = None;
+        self.shapes_over(fp)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|(_, b)| b)
+            .find(|b| {
+                b.contains(centre, || {
+                    *point.get_or_insert_with(|| self.grid.volume_point(fp.face, i, j, z, fp.level))
+                })
+            })
+            .filter(|b| b.op() == 1)
+            .map(FaceBrush::material)
+    }
+
     /// Node `cz` of `fp`, of class `class`. Outside every surface band a
+
     /// node lies wholly inside or outside each brush: at the cell under the
     /// footprint's centre in its middle layer, the last brush that adds or
     /// removes there decides; else the field's buried volume, rock under
@@ -666,10 +900,19 @@ mod tests {
                 }
             })
             .collect();
-        // The first half large (applying below their bake level).
+        // The first half large (applying below their bake level), indexed
+        // in runs as seals add them.
         let large = faces.len() / 2;
-        let index = BrushIndex::new(&faces[..large], 0, true);
+        let mut runs = Faces::default();
+        let mut index = LargeIndex::default();
+        for chunk in faces[..large].chunks(97) {
+            let from = runs.large_len();
+            runs.extend_large(chunk.iter().copied());
+            index.extend(&runs, from);
+        }
+        assert!(index.runs.len() < 16, "{} runs", index.runs.len());
         let recent = BrushIndex::new(&faces[large..], large as u32, false);
+
         for _ in 0..2000 {
             let face = (next() % 6) as u8;
             let level = (next() % 12) as u32;

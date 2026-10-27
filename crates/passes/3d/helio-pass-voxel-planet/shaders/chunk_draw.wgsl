@@ -493,6 +493,8 @@ fn leaf_detail(index: u32, c: vec3<i32>) -> u32 {
 // lookups in the chunk over (`solid_over`) inside the walk's loop cost the
 // loop registers (+45% on a mountain's primary rays).
 fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
+    // A Solid or Buried node's rock: its material alone.
+    if (pair & ROCK_PAIR) != 0u { return pair & 0xffu; }
     let own = cell_detail(slot, c);
     if own != 0u { return own; }
     return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_over(slot, c));
@@ -928,8 +930,8 @@ fn cell_at(cell: vec3<i32>, frac: vec3<f32>, diff: i32) -> vec3<i32> {
 // What a ray meets at a cell: a drawn chunk (`slot`), or air to cross,
 // cells [lo, hi) of `level` (LOST: off the drawn cut; ROCK: a Solid node,
 // a hit where the ray enters; BURIED: a Buried node, the same, its key in
-// lo and hi.x), in the frame of chunk `frame` when it is finer than the
-// ray's (else NONE).
+// lo and hi.x; both with their material in hi.y), in the frame of chunk
+// `frame` when it is finer than the ray's (else NONE).
 struct Place {
     slot: u32,
     level: i32,
@@ -941,6 +943,14 @@ struct Place {
 const LOST: i32 = 99;
 const BURIED: i32 = 98;
 const ROCK: i32 = 97;
+// A walk's hit pair (`WalkEnd::material`) of a Solid or Buried node: its
+// material in the low byte, no cell of a chunk to look up.
+const ROCK_PAIR: u32 = 0x10000u;
+
+// The hit pair of uniform node `place` (ROCK or BURIED).
+fn rock_pair(place: Place) -> u32 {
+    return ROCK_PAIR | (u32(place.hi.y) & 0xffu);
+}
 
 // A table entry's kind (`drawn::KIND_*`) and content box ([lo, hi) in its
 // node's cells; nothing when lo > hi).
@@ -1136,8 +1146,9 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     if !empty {
         let v = chunk_table[e * 2u + 1u];
         let kind = entry_kind(v);
-        if kind == KIND_SOLID { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0), NONE); }
-        if kind == KIND_BURIED { return Place(NONE, BURIED, key.yzw, vec3<i32>(key.x, 0, 0), NONE); }
+        let rock = (v.w >> 24u) & 0xff;
+        if kind == KIND_SOLID { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0, rock, 0), NONE); }
+        if kind == KIND_BURIED { return Place(NONE, BURIED, key.yzw, vec3<i32>(key.x, rock, 0), NONE); }
         if v.x >= 0 { return Place(bitcast<u32>(v.x), at, vec3<i32>(0), vec3<i32>(0), NONE); }
     }
     // Air: the node's box, grown through its ancestors' empty slabs.
@@ -1444,7 +1455,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                     let n = atomicAdd(&buried.count, 1u);
                     if n < arrayLength(&buried.keys) { buried.keys[n] = vec4<i32>(next.hi.x, next.lo); }
                 }
-                return WalkEnd(true, t_prev, slot, vec3<i32>(vec3<u32>(last, last >> 6u, last >> 12u) & vec3<u32>(63u)), (last >> 18u) & 3u, (last >> 20u) & 1u, 0u);
+                return WalkEnd(true, t_prev, slot, vec3<i32>(vec3<u32>(last, last >> 6u, last >> 12u) & vec3<u32>(63u)), (last >> 18u) & 3u, (last >> 20u) & 1u, rock_pair(next));
             }
             real = false;
             // Air of an exact level, or without a frame where the ray's is
@@ -2280,7 +2291,8 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
                     let n = atomicAdd(&buried.count, 1u);
                     if n < arrayLength(&buried.keys) { buried.keys[n] = vec4<i32>(next.hi.x, next.lo); }
                 }
-                return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
+                return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), rock_pair(next));
+
             }
             // Air, crossed in this frame or the finer one given.
             if next.frame != NONE {

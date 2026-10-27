@@ -102,7 +102,7 @@ fn edit_cost_through_the_game_paths() {
         let snapshot = ms(t);
         // Sealed: what baking it costs when its seal comes.
         let t = Instant::now();
-        world.seal_all();
+        world.seal_all().unwrap();
         let seal = ms(t);
         eprintln!(
             "EDITCOST r {radius} m: apply {apply:.2} ms, snapshot {snapshot:.2} ms, seal {seal:.1} ms"
@@ -118,7 +118,7 @@ fn edit_cost_through_the_game_paths() {
             continue;
         }
         let t = Instant::now();
-        let events = helio_pass_voxel_planet::planet::edit_events(&planet, &brush);
+        let events = planet.edit_yield(&brush).unwrap();
         eprintln!(
             "EDITCOST r {radius} m: events {:.1} ms ({events})",
             ms(t)

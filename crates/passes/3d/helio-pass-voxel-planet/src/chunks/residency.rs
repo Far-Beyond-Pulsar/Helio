@@ -87,6 +87,14 @@ struct Node {
     /// The layers (level cells, [lo, hi)) its chunk occupies, once its
     /// result came back (generated or restored).
     occupied: Option<(i32, i32)>,
+    /// What it was drawn as when it was last a leaf of the cut (Mixed: its
+    /// chunk; Empty: air), and that plan (frame + 1).
+    leaf: Option<(Kind, u64)>,
+    /// Edits made it Mixed and its chunk is not generated yet: drawn as it
+    /// was (Empty: air; Solid or Buried: rock) meanwhile, without holding
+    /// its parent back, so an edit never shows a coarse ancestor in its
+    /// place.
+    stand_in: Option<Kind>,
 }
 
 struct Fp {
@@ -230,9 +238,9 @@ impl Planner {
             -(grid.radius() / grid.voxel_size()).ceil() as i32
         };
         let (mut lo, mut hi) = (bottom.min(self.range.0), self.range.1);
-        for fb in self.edits.faces.iter().filter(|fb| fb.op() <= 1) {
-            lo = lo.min(fb.k_lo.div_euclid(2));
-            hi = hi.max(fb.k_hi.div_euclid(2));
+        if let Some((a, b)) = self.edits.reach {
+            lo = lo.min(a);
+            hi = hi.max(b);
         }
         if let Some((a, b)) = self.edits.bricks.layers {
             lo = lo.min(a);
@@ -512,6 +520,9 @@ impl Planner {
         if refine {
             self.estimate_children(key, frame);
             for &m in &members {
+                // A member drawn as it was before an edit hands that to its
+                // children (rock's children are rock, air's air).
+                let inherited = self.nodes.get(&m).and_then(|n| n.stand_in);
                 let below: Vec<NodeKey> = m.children(tiles[m.level as usize - 1]).collect();
                 for child in below {
                     let kind = self.kind(child);
@@ -519,9 +530,13 @@ impl Planner {
                     let entry = self.nodes.entry(child).or_default();
                     entry.used = frame;
                     if !entry.generated && needs {
-                        // A Buried child is rock meanwhile; a Mixed one has
-                        // no stand-in but its parent.
-                        if kind == Kind::Mixed {
+                        if entry.stand_in.is_none() {
+                            entry.stand_in = inherited;
+                        }
+                        // A Buried child is rock meanwhile, an edited one
+                        // what it was; another Mixed one has no stand-in
+                        // but its parent.
+                        if kind == Kind::Mixed && entry.stand_in.is_none() {
                             ready = false;
                         }
                         wanted.push((priority, child));
@@ -624,21 +639,36 @@ impl Planner {
             }
             let kind = self.kind(key);
             let node = *self.nodes.entry(key).or_default();
-            self.nodes.get_mut(&key).unwrap().used = frame;
+            let this_plan = frame + 1;
+            let n = self.nodes.get_mut(&key).unwrap();
+            n.used = frame;
+            n.leaf = None;
             if kind == Kind::Empty {
+                n.stand_in = None;
+                n.leaf = Some((Kind::Empty, this_plan));
                 continue;
             }
             if !self.needs_data(grid, key, kind, &eyes[0]) {
+                let n = self.nodes.get_mut(&key).unwrap();
+                n.stand_in = None;
+                n.leaf = Some((kind, this_plan));
                 plan.drawn.push((key, kind));
                 continue;
             }
             if !node.generated {
-                // A Buried node a ray met, or holding the eye, is rock until
-                // its chunk comes (it never holds its parent back). Else
-                // only a root can be ungenerated here: children are visited
-                // once every Mixed one is generated.
-                if kind == Kind::Buried {
-                    plan.drawn.push((key, kind));
+                // An edited node is drawn as it was until its chunk comes;
+                // a Buried node a ray met, or holding the eye, is rock (it
+                // never holds its parent back). Else only a root can be
+                // ungenerated here: children are visited once every Mixed
+                // one is generated or stands in.
+                let shown = node
+                    .stand_in
+                    .or((kind == Kind::Buried).then_some(Kind::Buried));
+                if let Some(shown) = shown {
+                    self.nodes.get_mut(&key).unwrap().leaf = Some((shown, this_plan));
+                    if shown != Kind::Empty {
+                        plan.drawn.push((key, shown));
+                    }
                 }
                 wanted.push((f64::INFINITY, key));
                 continue;
@@ -658,7 +688,9 @@ impl Planner {
             // horizon.
             let hidden = self.beyond(grid, key.footprint(), band_layers, &eyes[0]);
             if hidden && self.beyond(grid, key.footprint(), band_layers, &eyes[1]) {
-                self.nodes.get_mut(&key).unwrap().refined = false;
+                let n = self.nodes.get_mut(&key).unwrap();
+                n.refined = false;
+                n.leaf = Some((if node.empty { Kind::Empty } else { kind }, this_plan));
                 if !node.empty {
                     plan.drawn.push((key, kind));
                 }
@@ -734,6 +766,7 @@ impl Planner {
             if ready {
                 stack.extend(children);
             } else {
+                n.leaf = Some((if node.empty { Kind::Empty } else { kind }, this_plan));
                 if shows {
                     n.drawn = frame + 1;
                     drawn_in_view += 1;
@@ -785,12 +818,14 @@ impl Planner {
                 let n = self.nodes.entry(k).or_default();
                 n.generated = true;
                 n.empty = false;
+                n.stand_in = None;
             }
             Event::Emptied(k) => {
                 let n = self.nodes.entry(k).or_default();
                 n.generated = true;
                 n.empty = true;
                 n.occupied = None;
+                n.stand_in = None;
             }
             Event::Occupied(k, layers) => {
                 if let Some(n) = self.nodes.get_mut(&k).filter(|n| n.generated) {
@@ -805,14 +840,37 @@ impl Planner {
                 }
             }
             Event::Edited(face, boxes) => {
-                for (k, n) in self.nodes.iter_mut() {
-                    if n.generated
-                        && n.empty
-                        && k.face == face
-                        && boxes.iter().any(|b| b.contains(k))
-                    {
+                // The boxes' nodes, looked up where they are fewer than the
+                // nodes known, else found by a scan.
+                let volume: u64 = boxes.iter().map(NodeBox::volume).sum();
+                let keys: Vec<NodeKey> = if volume < self.nodes.len() as u64 {
+                    boxes
+                        .iter()
+                        .flat_map(|b| b.keys(face))
+                        .filter(|k| self.nodes.contains_key(k))
+                        .collect()
+                } else {
+                    self.nodes
+                        .keys()
+                        .filter(|k| k.face == face && boxes.iter().any(|b| b.contains(k)))
+                        .copied()
+                        .collect()
+                };
+                let last = self.last_plan;
+                for k in keys {
+                    let n = self.nodes.get_mut(&k).unwrap();
+                    // Drawn as it was until it is generated again: air (one
+                    // generated empty: its chunk dropped, known only here)
+                    // or rock.
+                    let was = n.leaf.filter(|&(_, plan)| plan == last).map(|(kind, _)| kind);
+                    if n.generated && n.empty {
                         n.generated = false;
                         n.empty = false;
+                        n.stand_in = Some(Kind::Empty);
+                    } else if !n.generated {
+                        if let Some(kind) = was.filter(|k| *k != Kind::Mixed) {
+                            n.stand_in = Some(kind);
+                        }
                     }
                 }
             }
@@ -910,8 +968,8 @@ pub enum Event {
     /// Its chunk came back (generated or restored) occupying these layers
     /// (level cells, [lo, hi)).
     Occupied(NodeKey, (i32, i32)),
-    /// Edited and not generated again yet, or its chunk dropped: its
-    /// nearest generated ancestor is drawn until it is `Generated` again.
+    /// Its chunk dropped (out of the cut, or evicted): wanted again before
+    /// it is drawn.
     Stale(NodeKey),
     /// A footprint's ranges by quarter (`Fp::quarters`).
     Measured(Footprint, [Option<Ranges>; 4]),
@@ -935,7 +993,28 @@ pub struct NodeBox {
 }
 
 impl NodeBox {
+    fn volume(&self) -> u64 {
+        let side = |r: [i32; 2]| (i64::from(r[1]) - i64::from(r[0]) + 1).max(0) as u64;
+        side(self.x)
+            .saturating_mul(side(self.y))
+            .saturating_mul(side(self.z))
+    }
+    /// Its nodes on `face`.
+    fn keys(&self, face: u8) -> impl Iterator<Item = NodeKey> + '_ {
+        (self.x[0]..=self.x[1]).flat_map(move |cx| {
+            (self.y[0]..=self.y[1]).flat_map(move |cy| {
+                (self.z[0]..=self.z[1]).map(move |cz| NodeKey {
+                    face,
+                    level: self.level,
+                    cx,
+                    cy,
+                    cz,
+                })
+            })
+        })
+    }
     pub fn contains(&self, k: &NodeKey) -> bool {
+
         k.level == self.level
             && (self.x[0]..=self.x[1]).contains(&k.cx)
             && (self.y[0]..=self.y[1]).contains(&k.cy)
@@ -1172,9 +1251,11 @@ mod tests {
     fn no_edits(grid: &Grid) -> Arc<EditView> {
         Arc::new(EditView {
             grid: *grid,
-            faces: Vec::new(),
+            faces: Default::default(),
             index: Default::default(),
             recent_index: Default::default(),
+            reach: None,
+            large_reach: None,
             large_faces: 0,
             large_brushes: 0,
             large_prefix: 0,
@@ -1349,6 +1430,55 @@ mod tests {
         planner.apply(Event::Generated(child), frame);
         frame += 1;
         let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(!plan.drawn.iter().any(|d| d.0 == parent));
+    }
+
+    /// An edit over a node drawn as air (generated empty) wants it again
+    /// without its parent drawn in its place: it stays air until its chunk
+    /// comes, the cut as it was.
+    #[test]
+    fn an_edited_node_stands_in_as_it_was() {
+        let (grid, eye, mut planner) = setup();
+        let mut frame = 0;
+        settle(&grid, eye, None, &mut planner, &mut frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        let child = plan
+            .drawn
+            .iter()
+            .find(|(k, kind)| k.level == 0 && *kind == Kind::Mixed)
+            .unwrap()
+            .0;
+        let parent = child.parent();
+        planner.apply(Event::Emptied(child), frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(!plan.drawn.iter().any(|d| d.0 == child || d.0 == parent));
+        let around = |v: i32| [v, v];
+        planner.apply(
+            Event::Edited(
+                child.face,
+                vec![NodeBox {
+                    level: 0,
+                    x: around(child.cx),
+                    y: around(child.cy),
+                    z: around(child.cz),
+                }]
+                .into(),
+            ),
+            frame,
+        );
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(plan.requests.contains(&child), "the edited node is wanted");
+        assert!(
+            !plan.drawn.iter().any(|d| d.0 == child || d.0 == parent),
+            "neither it nor its parent drawn meanwhile"
+        );
+        planner.apply(Event::Generated(child), frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(plan.drawn.iter().any(|d| d.0 == child));
         assert!(!plan.drawn.iter().any(|d| d.0 == parent));
     }
 
