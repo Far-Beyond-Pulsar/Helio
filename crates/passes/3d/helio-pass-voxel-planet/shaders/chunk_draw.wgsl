@@ -542,7 +542,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
         let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
         var size = 16;
         if bit64(root.root_occ, m) {
-            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive[axis]); }
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m] & 0xffffu, positive[axis]); }
             if m != node_at {
                 node = mids[slot * 64u + m];
                 first_leaf = mid_leaves[slot * 64u + m];
@@ -551,7 +551,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
             let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
             size = 4;
             if bit64(node.xy, l) {
-                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive[axis]); }
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m] & 0xffffu, positive[axis]); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
                     stored = leaf_at_page(slot, index);
@@ -560,7 +560,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), positive[axis]);
+                    return Hit(t, c, axis, true, (leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u)) & 0xffffu, positive[axis]);
                 }
             }
         }
@@ -796,7 +796,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
         let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
         var size = 16;
         if bit64(root.root_occ, m) {
-            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive); }
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m] & 0xffffu, positive); }
             if m != node_at {
                 node = mids[slot * 64u + m];
                 first_leaf = mid_leaves[slot * 64u + m];
@@ -805,7 +805,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
             let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
             size = 4;
             if bit64(node.xy, l) {
-                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive); }
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m] & 0xffffu, positive); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
                     stored = leaf_at_page(slot, index);
@@ -814,7 +814,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), positive);
+                    return Hit(t, c, axis, true, (leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u)) & 0xffffu, positive);
                 }
             }
         }
@@ -944,7 +944,8 @@ const LOST: i32 = 99;
 const BURIED: i32 = 98;
 const ROCK: i32 = 97;
 // A walk's hit pair (`WalkEnd::material`) of a Solid or Buried node: its
-// material in the low byte, no cell of a chunk to look up.
+// material in the low byte, no cell of a chunk to look up. (Chunk hits'
+// pairs are masked to 16 bits: a leaf's word holds its neighbour's too.)
 const ROCK_PAIR: u32 = 0x10000u;
 
 // The hit pair of uniform node `place` (ROCK or BURIED).
