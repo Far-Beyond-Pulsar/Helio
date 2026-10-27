@@ -174,8 +174,7 @@ pub(crate) struct WorldGpu {
     grid: [i32; 4],
     /// domain scale (Q24), pad.
     scale: [u32; 4],
-    /// sphere domain constants (`Grid::sphere_constants`); w: columns store
-    /// a surface word per cell.
+    /// sphere domain constants (`Grid::sphere_constants`).
     sphere: [u32; 4],
 }
 
@@ -193,11 +192,7 @@ impl WorldGpu {
                 let (inv, shift, layer_q16) = g.volume_constants();
                 [g.domain_scale(), inv, shift, layer_q16]
             },
-            sphere: {
-                let mut sphere = g.sphere_constants();
-                sphere[3] = u32::from(planet.field().program().wgsl.contains("fn terrain_surface"));
-                sphere
-            },
+            sphere: g.sphere_constants(),
         }
     }
 }
@@ -269,12 +264,6 @@ pub(crate) fn terrain_source(
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
-    if !program.wgsl.contains("fn terrain_surface") {
-        // No surface word: columns store none (`World::sphere.w`).
-        s.push_str(
-            "fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n",
-        );
-    }
     if !program.wgsl.contains("fn terrain_cave_gate") {
         // Networks wherever their share allows (`TerrainField::cave_gate`).
         s.push_str("fn terrain_cave_gate(surface: u32, height: i32) -> i32 { return 256; }\n");
@@ -594,12 +583,10 @@ pub fn verify_field(
                 level as i32,
             ));
             extra.push(material);
-            // (z 1: a cave sample; the shading surface word is the
-            // generator's own concern and stays out of its comparison.)
             volume.push(IVec4::new(
                 (vnext() % 64) as i32,
                 ((at(2) + spread) >> 2 >> level) as i32,
-                1,
+                0,
                 0,
             ));
             break;
@@ -736,7 +723,7 @@ pub fn verify_field(
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
             cell[0] + cell[1] * 2 + cell[2] * 64,
-            (q.x ^ q.y ^ q.z).wrapping_add(if v.z == 1 { 0 } else { surface as i32 * 7919 }),
+            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919),
         ];
         if *g != cpu {
             return Err(format!(
@@ -803,12 +790,13 @@ fn verify_cell(face: u32, i: i32, j: i32, level: u32, slope: i32, k: i32, height
     let v = verify_volume[id.x];
     let level = u32(a.w);
     let p = domain_point(u32(a.x), a.y, a.z, level);
-    let height = field_height(u32(a.x), a.y, a.z, level);
+    let column = generation_column(u32(a.x), a.y, a.z, level, false);
+    let height = column.x;
     let q = volume_point(u32(a.x), a.y, a.z, v.y, level);
     let cell = verify_cell(u32(a.x), a.y, a.z, level, v.x, v.y, height, p);
-    let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
+    let surface = u32(column.y) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
-        cell.x + cell.y * 2 + cell.z * 64, (q.x ^ q.y ^ q.z) + select(i32(surface) * 7919, 0, v.z == 1));
+        cell.x + cell.y * 2 + cell.z * 64, (q.x ^ q.y ^ q.z) + i32(surface) * 7919);
 }
 ";
     terrain_source(plane, program, wide64, false) + kernel

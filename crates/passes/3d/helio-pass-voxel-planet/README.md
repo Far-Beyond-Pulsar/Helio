@@ -367,10 +367,10 @@ full contract is in `terrain.rs`'s module docs. The program defines:
   four nodes' words through the engine's `generation_node_word(slot)`).
   A program without large octaves says `terrain_has_nodes` false.
   `TerrainField::height` must blend the same way (it takes a `Column`).
-- Optionally `terrain_surface(p, level, height) -> u32`, the 8-bit surface
-  word alone, for shading (0 without). The surface word is what materials
-  need besides height (the erosion term, fresh ejecta), so shading never
-  runs the generator per pixel.
+- The surface word (the column's `.y`, 8 bits, 0 without) is what
+  materials need besides height (the erosion term, fresh ejecta); it is
+  stored with each column cell, so shading never runs the generator per
+  pixel.
 
 Caves and cliff shapes are the engine's volume layer over any field: a
 generator supplies its settings (`TerrainField::volumes`, a compiled
