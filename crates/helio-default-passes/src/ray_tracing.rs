@@ -327,8 +327,12 @@ impl SceneDbRayTracing {
             };
             match (slot, object) {
                 // A non-caster changed and still is not one.
-                (None, None) => {}
-                (None, Some(object)) if !self.projects(object) => {}
+                (None, None) => {
+                    self.skipped.remove(&change.entity);
+                }
+                (None, Some(object)) if !self.projects(object) => {
+                    self.skipped.remove(&change.entity);
+                }
                 // One left out moved, or went.
                 (None, object)
                     if self

@@ -122,8 +122,11 @@ pub struct GpuProfiler {
 /// in which labels first appeared. A graph may record the same logical pass
 /// more than once (for example, when a pass is split across command streams),
 /// but profiler consumers expect one timing per label.
-fn aggregate_timings(samples: impl IntoIterator<Item = GpuTimestamp>) -> Vec<GpuTimestamp> {
-    let mut aggregated = Vec::new();
+fn aggregate_timings_into(
+    samples: impl IntoIterator<Item = GpuTimestamp>,
+    aggregated: &mut Vec<GpuTimestamp>,
+) {
+    aggregated.clear();
     for sample in samples {
         if let Some(existing) = aggregated
             .iter_mut()
@@ -134,6 +137,12 @@ fn aggregate_timings(samples: impl IntoIterator<Item = GpuTimestamp>) -> Vec<Gpu
             aggregated.push(sample);
         }
     }
+}
+
+#[cfg(test)]
+fn aggregate_timings(samples: impl IntoIterator<Item = GpuTimestamp>) -> Vec<GpuTimestamp> {
+    let mut aggregated = Vec::new();
+    aggregate_timings_into(samples, &mut aggregated);
     aggregated
 }
 
@@ -482,21 +491,23 @@ impl GpuProfiler {
             };
 
             let timestamps: &[u64] = bytemuck::cast_slice(&data);
-            let query_count = self.readback_slots[index].queries.len();
-            let mut samples = Vec::with_capacity(query_count);
-            for &(name, start_index, end_index) in &self.readback_slots[index].queries {
-                if (end_index as usize) < timestamps.len()
-                    && (start_index as usize) < timestamps.len()
-                {
-                    let duration_ticks = timestamps[end_index as usize]
-                        .saturating_sub(timestamps[start_index as usize]);
-                    samples.push(GpuTimestamp {
-                        name,
-                        duration_ns: (duration_ticks as f32 * self.timestamp_period) as u64,
-                    });
-                }
-            }
-            self.last_timings = aggregate_timings(samples);
+            let samples = self.readback_slots[index].queries.iter().filter_map(
+                |&(name, start_index, end_index)| {
+                    if (end_index as usize) < timestamps.len()
+                        && (start_index as usize) < timestamps.len()
+                    {
+                        let duration_ticks = timestamps[end_index as usize]
+                            .saturating_sub(timestamps[start_index as usize]);
+                        Some(GpuTimestamp {
+                            name,
+                            duration_ns: (duration_ticks as f32 * self.timestamp_period) as u64,
+                        })
+                    } else {
+                        None
+                    }
+                },
+            );
+            aggregate_timings_into(samples, &mut self.last_timings);
             self.last_completed_frame = Some(frame_index);
             drop(data);
 
