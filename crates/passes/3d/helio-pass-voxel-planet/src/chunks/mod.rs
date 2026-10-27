@@ -1642,6 +1642,10 @@ pub struct UpdateStats {
     pub out_of_details: bool,
     /// Detail pages in use when last read back, of the capacity.
     pub detail_pages: (u64, u64),
+    /// The pools' sizes now (they grow on demand): chunk slots, and leaf
+    /// pages in use when last read back of the leaf pool's.
+    pub chunk_slots: usize,
+    pub leaf_pages: (u64, u64),
     /// Edited chunks restored by copy this frame, those generated (from
     /// the field and the edits over them), and those kept.
     pub restored_chunks: usize,
@@ -1974,6 +1978,8 @@ pub struct ChunkWorld {
     /// Generated nodes with a chunk, and their layers by footprint.
     nodes: FxHashMap<NodeKey, Resident>,
     footprint_nodes: FxHashMap<Footprint, Vec<i32>>,
+    /// Resident nodes by volume index.
+    held: FxHashMap<u16, usize>,
     /// Slots of chunks dropped between updates (edits), freed by the next.
     dropped: Vec<u32>,
     free_slots: Vec<u32>,
@@ -3148,6 +3154,7 @@ impl ChunkWorld {
             frame_now: 0,
             nodes: Default::default(),
             footprint_nodes: Default::default(),
+            held: Default::default(),
             dropped: Vec::new(),
             free_slots: (0..slots as u32).rev().collect(),
             serial: 0,
@@ -3556,6 +3563,7 @@ impl ChunkWorld {
     fn insert_resident(&mut self, key: NodeKey, resident: Resident) -> Option<Resident> {
         let old = self.nodes.insert(key, resident);
         if old.is_none() {
+            *self.held.entry(key.volume).or_default() += 1;
             self.footprint_nodes
                 .entry(key.footprint())
                 .or_default()
@@ -3566,6 +3574,9 @@ impl ChunkWorld {
 
     fn remove_resident(&mut self, key: NodeKey) -> Option<Resident> {
         let old = self.nodes.remove(&key)?;
+        if let Some(n) = self.held.get_mut(&key.volume) {
+            *n -= 1;
+        }
         if let Some(list) = self.footprint_nodes.get_mut(&key.footprint()) {
             list.retain(|&cz| cz != key.cz);
             if list.is_empty() {
@@ -4425,10 +4436,6 @@ impl ChunkWorld {
             need = need.max(((page_reserve - self.free_pages_seen) as f64 / per_node).ceil() as usize);
         }
         // Each volume frees its share, by the chunks it holds.
-        let mut held: FxHashMap<u16, usize> = FxHashMap::default();
-        for key in self.nodes.keys() {
-            *held.entry(key.volume).or_default() += 1;
-        }
         let resident = self.nodes.len().max(1);
         // The eye in each volume's frame, its view and its motion relative
         // to it.
@@ -4464,7 +4471,8 @@ impl ChunkWorld {
                     velocity: local_velocity,
                     view: local_view,
                     events: std::mem::take(&mut vol.events),
-                    need: (need * held.get(&vol.index).copied().unwrap_or(0)).div_ceil(resident),
+                    need: (need * self.held.get(&vol.index).copied().unwrap_or(0))
+                        .div_ceil(resident),
                     edits: vol.edits_unsent.take(),
                 });
             }
@@ -5147,6 +5155,9 @@ impl ChunkWorld {
         }
         stats.drawn_chunks = self.drawn_set.list.len();
         stats.detail_pages = (self.detail_used_seen, self.detail_capacity);
+        let pages = self.leaf_capacity / LEAF_PAGE;
+        stats.chunk_slots = self.slot_capacity;
+        stats.leaf_pages = (pages.saturating_sub(self.free_pages_seen), pages);
         stats.resident_chunks = self.nodes.len();
         stats
     }
