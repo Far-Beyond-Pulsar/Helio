@@ -37,8 +37,8 @@
 //! The engine has the column's nodes ready when `terrain_has_nodes`. The
 //! surface word (8 bits, stored with each column cell) is whatever the
 //! materials need besides height (biome, sediment, crater age), so shading
-//! never runs the generator per pixel; a program may also define it alone
-//! for shading (`terrain_surface`, 0 without).
+//! never runs the generator per pixel. It comes with the height
+//! (`terrain_column_nodes(..).y`): nothing reads it apart.
 //!
 //! Its CPU field must blend the same way ([`TerrainField::height`] is by
 //! [`Column`] for this).
@@ -237,7 +237,7 @@ pub trait TerrainField: Send + Sync + 'static {
         layer: i32,
     ) -> u32;
     /// Surface word (8 bits) of `column`, whose height is `height`
-    /// (`terrain_surface` in WGSL, stored per column cell at generation):
+    /// (`terrain_column_nodes(..).y` in WGSL, stored per column cell at generation):
     /// inputs of the materials besides height. 0 when the program has none.
     fn surface(&self, _column: Column, _height: i32) -> u32 {
         0

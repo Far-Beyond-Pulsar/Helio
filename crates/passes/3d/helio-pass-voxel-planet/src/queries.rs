@@ -580,6 +580,169 @@ impl WorldQueries {
     }
 }
 
+/// [`WorldQueries`] of placed volumes (`crate::volume`), read by world
+/// positions: each volume's bricks are its own world's (in its frame); a
+/// point or ray is moved into each volume it can meet by its transform, and
+/// the nearest hit wins. A host keeps it in step with the scene's volumes
+/// ([`Self::set_volume`] every frame a volume moves or is edited).
+#[derive(Default)]
+pub struct VolumeQueries {
+    volumes: Vec<QueriedVolume>,
+    threads: usize,
+}
+
+struct QueriedVolume {
+    id: u64,
+    transform: crate::volume::VolumeTransform,
+    bounds: Option<f64>,
+    queries: WorldQueries,
+}
+
+impl VolumeQueries {
+    /// Each volume's queries on `threads` workers.
+    pub fn new(threads: usize) -> Self {
+        Self {
+            volumes: Vec::new(),
+            threads,
+        }
+    }
+
+    /// Volume `id` is `planet` placed by `transform` (published to its
+    /// queries when it changed; added when new).
+    pub fn set_volume(&mut self, id: u64, planet: Arc<Planet>, transform: crate::volume::VolumeTransform) {
+        let bounds = crate::volume::bounding_radius(&planet);
+        match self.volumes.iter_mut().find(|v| v.id == id) {
+            Some(v) => {
+                v.transform = transform;
+                v.bounds = bounds;
+                v.queries.publish(planet);
+            }
+            None => self.volumes.push(QueriedVolume {
+                id,
+                transform,
+                bounds,
+                queries: WorldQueries::new(planet, self.threads),
+            }),
+        }
+    }
+
+    /// Stop querying volume `id`.
+    pub fn remove_volume(&mut self, id: u64) {
+        self.volumes.retain(|v| v.id != id);
+    }
+
+    /// Volume `id`'s queries (in its own frame) and where it is.
+    pub fn volume(&self, id: u64) -> Option<(&WorldQueries, crate::volume::VolumeTransform)> {
+        self.volumes
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| (&v.queries, v.transform))
+    }
+
+    /// Whether world point `p` lies within volume `v`'s bounds widened by
+    /// `margin`.
+    fn near(v: &QueriedVolume, p: DVec3, margin: f64) -> bool {
+        v.bounds
+            .is_none_or(|r| p.distance(v.transform.position) <= r + margin)
+    }
+
+    /// Keep the bricks within `radius` of world point `center` resident in
+    /// every volume they reach (focus `id`).
+    pub fn focus(&self, id: u64, center: DVec3, radius: f64) {
+        for v in &self.volumes {
+            if Self::near(v, center, radius) {
+                v.queries.focus(id, v.transform.to_local(center), radius);
+            } else {
+                v.queries.unfocus(id);
+            }
+        }
+    }
+
+    /// Stop keeping focus `id`'s bricks.
+    pub fn unfocus(&self, id: u64) {
+        for v in &self.volumes {
+            v.queries.unfocus(id);
+        }
+    }
+
+    /// Bricks wanted and not resident yet, over every volume.
+    pub fn loading(&self) -> usize {
+        self.volumes.iter().map(|v| v.queries.loading()).sum()
+    }
+
+    /// Whether world point `p` is solid `matter` in any volume (`Pending`
+    /// while a volume holding it has not sampled it).
+    pub fn solid_at(&self, p: DVec3, matter: Matter) -> Resident<bool> {
+        let mut pending = false;
+        for v in self.volumes.iter().filter(|v| Self::near(v, p, 0.0)) {
+            let local = v.transform.to_local(p);
+            let planet = v.queries.planet();
+            match v.queries.solid(planet.grid().locate(local).0, matter) {
+                Resident::Ready(true) => return Resident::Ready(true),
+                Resident::Ready(false) => {}
+                Resident::Pending => pending = true,
+            }
+        }
+        if pending {
+            Resident::Pending
+        } else {
+            Resident::Ready(false)
+        }
+    }
+
+    /// The first solid `matter` cell along a world ray, over every volume
+    /// it can meet ([`WorldQueries::raycast`] in each one's frame): the
+    /// nearest hit, `Pending` while a volume the ray enters before it has
+    /// not sampled its bricks.
+    pub fn raycast(
+        &self,
+        origin: DVec3,
+        direction: DVec3,
+        max: f64,
+        matter: Matter,
+    ) -> Resident<Option<crate::volume::VolumeHit>> {
+        let dir = direction.normalize();
+        // The volumes the ray meets, nearest entry first.
+        let mut met: Vec<(f64, usize)> = self
+            .volumes
+            .iter()
+            .enumerate()
+            .filter_map(|(n, v)| match v.bounds {
+                None => Some((0.0, n)),
+                Some(r) => crate::volume::ray_ball(origin, dir, v.transform.position, r)
+                    .filter(|&(enter, leave)| leave >= 0.0 && enter <= max)
+                    .map(|(enter, _)| (enter.max(0.0), n)),
+            })
+            .collect();
+        met.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut best: Option<crate::volume::VolumeHit> = None;
+        for (enter, n) in met {
+            let limit = best.map_or(max, |b| b.hit.distance);
+            if enter > limit {
+                break;
+            }
+            let v = &self.volumes[n];
+            let t = &v.transform;
+            match v
+                .queries
+                .raycast(t.to_local(origin), t.dir_to_local(dir), limit, matter)
+            {
+                Resident::Pending => return Resident::Pending,
+                Resident::Ready(Some(hit)) if hit.distance <= limit => {
+                    best = Some(crate::volume::VolumeHit {
+                        index: n,
+                        id: v.id,
+                        hit,
+                        normal: t.dir_to_world(hit.normal),
+                    });
+                }
+                Resident::Ready(_) => {}
+            }
+        }
+        Resident::Ready(best)
+    }
+}
+
 impl Drop for WorldQueries {
     fn drop(&mut self) {
         self.shared.state.lock().expect("queries").stop = true;
@@ -825,6 +988,77 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(60), "never resident");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Two placed volumes, a turned Earth and a block over its ground, read
+    /// by world positions: rays and solid points are the exact casts'
+    /// (`Volumes`, each in its frame), the block's hits nearer than the
+    /// ground's, once their bricks are resident.
+    #[test]
+    fn volume_reads_are_the_volumes_exact_answers() {
+        use crate::volume::{VolumeTransform, Volumes, VoxelVolume};
+        let earth = Arc::new(earth());
+        let place = VolumeTransform::new(
+            DVec3::new(-4.0e6, 9.0e6, 2.5e5),
+            glam::DQuat::from_axis_angle(DVec3::new(1.0, -0.3, 0.6).normalize(), 0.9),
+        );
+        let ground = earth.surface_point(DVec3::new(0.3, 0.9, -0.2).normalize(), 0.0);
+        let up = ground.normalize();
+        let mut block = Planet::new(PlanetRecipe {
+            shape: crate::grid::Shape::Plane,
+            plane_size_m: 12.8,
+            terrain: TerrainLayers::flat_at(1.0).source(3),
+            ..Default::default()
+        })
+        .unwrap();
+        block
+            .apply(crate::Brush {
+                center: [0.0, 2.0, 0.0],
+                radius: 1.0,
+                shape: BrushShape::Cube,
+                op: BrushOp::Add,
+                material: material::PLANKS,
+                height: 0.0,
+            })
+            .unwrap();
+        let block_place = VolumeTransform::new(
+            place.to_world(ground + up * 6.0),
+            place.rotation * glam::DQuat::from_rotation_arc(DVec3::Y, up),
+        );
+        let volumes = Volumes::new(vec![
+            VoxelVolume::new(1, earth.clone(), place),
+            VoxelVolume::new(2, Arc::new(block), block_place),
+        ]);
+        let mut queries = VolumeQueries::new(4);
+        for v in &volumes.volumes {
+            queries.set_volume(v.id, v.planet.clone(), v.transform);
+        }
+        let eye = place.to_world(ground + up * 14.0 + up.any_orthonormal_vector() * 9.0);
+        queries.focus(1, eye, 24.0);
+        let started = Instant::now();
+        while queries.loading() > 0 {
+            assert!(started.elapsed() < Duration::from_secs(120), "bricks still loading");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let target = place.to_world(ground + up * 2.0);
+        let mut by_volume = [0; 3];
+        for n in 0..64 {
+            let a = f64::from(n) * 0.61;
+            let aim = target
+                + place.dir_to_world(up.any_orthonormal_vector() * (a.cos() * 7.0))
+                + place.dir_to_world(up.cross(up.any_orthonormal_vector()) * (a.sin() * 7.0));
+            let dir = (aim - eye).normalize();
+            let exact = volumes.raycast(eye, dir, 22.0, Matter::All);
+            let read = ready(|| queries.raycast(eye, dir, 22.0, Matter::All));
+            assert_eq!(read.map(|h| (h.id, h.hit.cell)), exact.map(|h| (h.id, h.hit.cell)), "ray {n}");
+            by_volume[exact.map_or(0, |h| h.id as usize)] += 1;
+            if let Some(h) = exact {
+                // Just inside the hit cell: solid there.
+                let inside = eye + dir * (h.hit.distance + 0.02);
+                assert_eq!(ready(|| queries.solid_at(inside, Matter::All)), volumes.solid(inside, Matter::All));
+            }
+        }
+        assert!(by_volume[1] > 4 && by_volume[2] > 4, "{by_volume:?}");
     }
 
     /// Around a focus in a forest, every read is the planet's own answer:

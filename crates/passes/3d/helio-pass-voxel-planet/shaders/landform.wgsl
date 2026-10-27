@@ -949,21 +949,7 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     } else if terrain.style.x == 1 {
         surface = (ejecta >> 1u) | (select(0, 1, basin >= FINE_ONE / 2) << 7u);
     }
-    landform_surface = surface;
-    landform_surface_at = vec4<i32>(p, i32(level));
     return vec2<i32>(h, surface);
-}
-
-// Surface word of the last height evaluated in this invocation: generation
-// asks for it right after the column's height.
-var<private> landform_surface: i32 = 0;
-var<private> landform_surface_at: vec4<i32> = vec4<i32>(0x7fffffff);
-
-// Surface word (`landform::surface`), by material style: the column's at
-// `p`, evaluated just before (`field_height`).
-fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 {
-    if any(landform_surface_at != vec4<i32>(p, i32(level))) { return 0u; }
-    return u32(landform_surface);
 }
 
 // Height and surface word of the column at `p` (`landform::column_parts`;

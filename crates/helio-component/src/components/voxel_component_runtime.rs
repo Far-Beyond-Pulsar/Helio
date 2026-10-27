@@ -6,7 +6,7 @@
 use engine_class_derive::{register_component_runtime, register_world_component};
 
 use super::{
-    TerrainEventsEventWriterExt as _, VoxelComponent, VoxelTerrainComponent,
+    TerrainEventsEventWriterExt as _, VoxelTerrainComponent,
     VoxelTerrainLayersComponent,
 };
 
@@ -73,9 +73,6 @@ impl VoxelTerrainComponent {
         );
     }
 }
-
-#[register_world_component]
-impl VoxelComponent {}
 
 #[register_world_component]
 impl VoxelTerrainComponent {}

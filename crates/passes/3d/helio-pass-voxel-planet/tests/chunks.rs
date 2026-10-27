@@ -6,7 +6,7 @@ mod common;
 use common::{gpu, Gpu};
 use glam::{DVec3, Mat4, Vec3};
 use helio_pass_voxel_planet::chunks::{
-    residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights,
+    residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights, VolumeId,
 };
 use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
 use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
@@ -124,7 +124,7 @@ impl World {
 
     fn with_capacity(gpu: &Gpu, planet: &Planet, capacity: Capacity) -> Self {
         Self {
-            chunks: ChunkWorld::with_capacity(&gpu.device, &gpu.queue, planet, capacity),
+            chunks: ChunkWorld::of_planet(&gpu.device, &gpu.queue, planet, capacity),
             frame: 0,
             sun: Vec3::new(0.3, 0.8, 0.4).normalize(),
             scene_depth: None,
@@ -138,7 +138,9 @@ impl World {
 
     /// The planet's edits now.
     fn sync(&mut self, _gpu: &Gpu, planet: &Planet) {
-        self.chunks.sync_edits(planet);
+        self.chunks
+            .sync_edits(VolumeId(0), planet)
+            .expect("the world's volume");
     }
 
     /// One frame: residency, the draw, `picks` copied; its residency.
@@ -1802,12 +1804,12 @@ fn a_loaded_world_restores_its_edited_chunks() {
         saved.frame(&gpu, &planet, &here, None);
     }
     assert_eq!(saved.chunks.keeping(), 0, "packing the resident chunks");
-    let bytes = saved.chunks.kept_chunks(&planet).to_bytes();
+    let bytes = saved.chunks.kept_chunks(VolumeId(0), &planet).to_bytes();
     let snapshot = planet.snapshot();
     let loaded = Planet::from_snapshot(PlanetRecipe::default(), &snapshot).unwrap();
     let chunks = KeptChunks::from_bytes(&bytes).unwrap();
     let mut world = World::new(&gpu, &loaded);
-    let kept = world.chunks.load_kept(&loaded, &chunks).unwrap();
+    let kept = world.chunks.load_kept(VolumeId(0), &loaded, &chunks).unwrap();
     let (again, (restored, generated), keeping_ms, _) =
         settle_counting(&gpu, &mut world, &loaded, &here);
     let mut cold = World::new(&gpu, &loaded);
@@ -1849,7 +1851,7 @@ fn a_loaded_world_restores_its_edited_chunks() {
         .unwrap();
     assert!(World::new(&gpu, &other)
         .chunks
-        .load_kept(&other, &chunks)
+        .load_kept(VolumeId(0), &other, &chunks)
         .is_err());
     // Damaged bytes: refused.
     let mut damaged = bytes.clone();
@@ -2175,6 +2177,67 @@ fn sculpt_bursts_while_they_happen() {
             cpu[cpu.len() - 1]
         );
     }
+}
+
+/// The Moon's pole at seed 75 (Pulsar's Moon example), 300 m over the
+/// ground. Capsule parts once held cells far outside their box (the
+/// distance test overflowed i32 there): the CPU met a boulder floating
+/// 290 m over its anchor that the GPU, bounding stamps by their boxes,
+/// never drew, and every shadow ray toward it came back black.
+#[test]
+fn moon_pole_view_matches_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let eye = DVec3::new(0.0, 1_738_104.0, 0.0);
+    let up = eye.length() - planet.surface_point(eye.normalize(), 0.0).length();
+    let view = View::new(
+        eye,
+        Vec3::new(-0.07329183, -0.57357645, 0.81586665),
+        [320, 180],
+    );
+    // The top-left pixel's ray once met the floating boulder 9 m away.
+    let wall = planet
+        .raycast(eye, view.pixel_dir(view.view_proj(&planet), 0, 0), 2000.0)
+        .expect("ground");
+    assert!(
+        wall.distance > up * 0.5,
+        "the top-left ray met {:?} {:.1} m away, {up:.0} m over the ground",
+        wall.cell,
+        wall.distance
+    );
+    // Nothing here is near enough for level 0 (`compare`): the drawn
+    // levels must meet the exact ground within a few of their cells.
+    let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut mismatched) = (0, 0);
+    for y in (0..view.size[1]).step_by(12) {
+        for x in (0..view.size[0]).step_by(12) {
+            let Some(cpu) = planet.raycast(eye, view.pixel_dir(view_proj, x, y), 2000.0) else {
+                continue;
+            };
+            compared += 1;
+            let drawn = hits[(y * view.size[0] + x) as usize];
+            let near = drawn.is_some_and(|h| {
+                (h.distance - cpu.distance).abs()
+                    <= 8.0 * voxel * f64::from(1u32 << h.level) + cpu.distance * 0.02
+            });
+            if !near {
+                mismatched += 1;
+                eprintln!("pixel {x},{y}: drawn {drawn:?}, cpu {:?} at {:.1}", cpu.cell, cpu.distance);
+            }
+        }
+    }
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 100, "{compared} pixels compared");
+    assert!(mismatched * 50 <= compared, "{mismatched} of {compared}");
 }
 
 #[test]
@@ -3422,7 +3485,7 @@ fn footprint_placements_are_the_cpus() {
         );
         let mut world = World::new(&gpu, &planet);
         world.settle(&gpu, &planet, &view);
-        let (footprints, buffer) = world.chunks.footprint_placements();
+        let (footprints, buffer) = world.chunks.footprint_placements(VolumeId(0));
         let words = read_words(&gpu, buffer);
         for (fp, slot) in footprints {
             let near = features.near(fp.level);

@@ -15,9 +15,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 const DESCENT: i32 = 2;
 
 /// The 64x64 columns of one level over a stack of nodes: the unit of
-/// column generation and of classification.
+/// column generation and of classification, in volume `volume` (a world's
+/// index of it, `chunks::VolumeId`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Footprint {
+    pub volume: u16,
     pub face: u8,
     pub level: u32,
     pub cx: i32,
@@ -27,6 +29,7 @@ pub struct Footprint {
 impl Footprint {
     pub fn node(self, cz: i32) -> NodeKey {
         NodeKey {
+            volume: self.volume,
             face: self.face,
             level: self.level,
             cx: self.cx,
@@ -49,10 +52,11 @@ impl Footprint {
 }
 
 /// A node of the octree: 64^3 cells of `level`, layer `cz` over footprint
-/// (`face`, `level`, `cx`, `cy`). Its key in the chunk table is
-/// `(face | level << 8, cx, cy, cz)`.
+/// (`face`, `level`, `cx`, `cy`) of volume `volume`. Its key in the chunk
+/// table is `(face | level << 8 | volume << 16, cx, cy, cz)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeKey {
+    pub volume: u16,
     pub face: u8,
     pub level: u32,
     pub cx: i32,
@@ -63,6 +67,7 @@ pub struct NodeKey {
 impl NodeKey {
     pub fn footprint(self) -> Footprint {
         Footprint {
+            volume: self.volume,
             face: self.face,
             level: self.level,
             cx: self.cx,
@@ -72,7 +77,7 @@ impl NodeKey {
 
     pub fn table_key(self) -> [i32; 4] {
         [
-            i32::from(self.face) | ((self.level as i32) << 8),
+            i32::from(self.face) | ((self.level as i32) << 8) | (i32::from(self.volume) << 16),
             self.cx,
             self.cy,
             self.cz,
@@ -81,8 +86,9 @@ impl NodeKey {
 
     pub fn from_table_key(k: [i32; 4]) -> Self {
         Self {
+            volume: (k[0] >> 16) as u16,
             face: (k[0] & 0xff) as u8,
-            level: (k[0] >> 8) as u32,
+            level: ((k[0] >> 8) & 0xff) as u32,
             cx: k[1],
             cy: k[2],
             cz: k[3],
@@ -91,6 +97,7 @@ impl NodeKey {
 
     pub fn parent(self) -> Self {
         Self {
+            volume: self.volume,
             face: self.face,
             level: self.level + 1,
             cx: self.cx >> 1,
@@ -106,6 +113,7 @@ impl NodeKey {
         (0..8).filter_map(move |n| {
             let level = level?;
             let c = Self {
+                volume: self.volume,
                 face: self.face,
                 level,
                 cx: self.cx * 2 + (n & 1),
@@ -222,6 +230,8 @@ pub struct EditView {
 /// own bricks (it once copied the whole index).
 #[derive(Clone, Default)]
 pub struct BrickIndex {
+    /// The volume whose store it indexes (its keys').
+    pub volume: u16,
     runs: Vec<std::sync::Arc<BrickRun>>,
     /// Base layers the bricks span.
     pub layers: Option<(i32, i32)>,
@@ -238,8 +248,11 @@ struct BrickRun {
 }
 
 impl BrickIndex {
-    pub fn new(grid: &Grid, store: &EditStore) -> Self {
-        let mut index = Self::default();
+    pub fn new(grid: &Grid, store: &EditStore, volume: u16) -> Self {
+        let mut index = Self {
+            volume,
+            ..Self::default()
+        };
         index.add(grid, store.bricks().map(|(k, _)| k).collect());
         index
     }
@@ -307,6 +320,7 @@ impl BrickIndex {
         for k in keys {
             let level = u32::from(k.level);
             run.footprints.insert(Footprint {
+                volume: self.volume,
                 face: k.face,
                 level,
                 cx: k.bi >> 3,
@@ -319,6 +333,7 @@ impl BrickIndex {
             );
             // A node marked is marked with its ancestors.
             let mut node = NodeKey {
+                volume: self.volume,
                 face: k.face,
                 level,
                 cx: k.bi >> 3,

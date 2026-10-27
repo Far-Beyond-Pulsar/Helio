@@ -3,8 +3,8 @@
 //! Owned by `helio-pass-forward-lit`: forward-lit is the pass most directly
 //! tied to per-light shading data, per the project's "only individual passes
 //! know about specific types" mandate. Other passes that also shade against
-//! lights (deferred-light, light-cull, hlfs, shadow-matrix, voxel-mesh,
-//! voxel-raymarch) depend on this crate for the shape, the same way they
+//! lights (deferred-light, light-cull, hlfs, shadow-matrix, voxel-planet)
+//! depend on this crate for the shape, the same way they
 //! already depend on `helio-pass-gbuffer` for materials.
 
 use bytemuck::{Pod, Zeroable};
