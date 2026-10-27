@@ -343,6 +343,12 @@ once. A plan that changes a switch under way ends it at once.
    (Buried reports itself); Empty, or outside an ancestor's content box,
    air grown to the largest slab of the coarsest ancestor whose content the
    point is outside of, so open air and dug halls cross in a few steps.
+   Under the ground (a drawn chunk over the eye's column reaches above
+   it: a cave, a dig, an overhang) the first round walks from the eye
+   itself (`DrawParams::cut.z`, `point_walk`): in a large chamber the
+   chunks around the eye are air (freed) or hold it under their occupied
+   layers, and the rock beside them (Buried nodes) has no box, so a ray
+   seeded by the boxes started past them.
    Across a cube face's edge the walk continues on the face beyond
    (`across_edge`: equal-angle faces meet cell for cell on the edge). Over
    the ceiling (`Planet::outer_radius` and 16 m) and rising, a ray meets

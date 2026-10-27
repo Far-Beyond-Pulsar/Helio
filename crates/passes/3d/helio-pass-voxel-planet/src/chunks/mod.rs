@@ -6080,6 +6080,29 @@ impl ChunkWorld {
     /// pixels; `near`: its near plane, 0 for an orthographic view), lit by the sun toward `sun`, `drawn` chunks drawn; scene lights
     /// at `light_eye`, GI probes traced when `gi`. The camera's perspective:
     /// [`Self::draw_sun_occlusion`] makes orthographic views of them.
+    /// The chunk an eye under the ground walks from (`DrawParams::cut.z`,
+    /// `NONE` over it): the finest drawn chunk over the eye's column whose
+    /// occupied layers reach above the eye. In a cave the chunks around the
+    /// eye may be air (freed) or hold the eye under their occupied layers
+    /// (out of their raster boxes), and the rock beside them (Buried nodes)
+    /// has no box: a ray seeded by the boxes would start far away.
+    fn eye_chunk(&self, eye: DVec3) -> u32 {
+        let (cell, _) = self.grid.locate(eye);
+        self.nodes
+            .iter()
+            .filter(|(k, c)| {
+                k.face == cell.face
+                    && (cell.i >> k.level).div_euclid(CHUNK) == k.cx
+                    && (cell.j >> k.level).div_euclid(CHUNK) == k.cy
+                    && self.drawn_set.contains(c.slot)
+                    && c.z.is_some_and(|(_, hi)| {
+                        (i64::from(k.cz * CHUNK + hi) << k.level) > i64::from(cell.k)
+                    })
+            })
+            .min_by_key(|(k, _)| k.level)
+            .map_or(u32::MAX, |(_, c)| c.slot)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_params(
         &self,
@@ -6147,7 +6170,12 @@ impl ChunkWorld {
                 self.exact_level.min(99) as f32,
                 (eye.length_squared() - self.grid.radius() * self.grid.radius()) as f32,
             ],
-            cut: [self.grid.levels() - 1, self.drawn_set.fading() as u32, 0, 0],
+            cut: [
+                self.grid.levels() - 1,
+                self.drawn_set.fading() as u32,
+                self.eye_chunk(eye),
+                0,
+            ],
             light_eye: light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
             // Two of the finest probes' spacings: the probes' visibility
             // holds the occlusion past them.

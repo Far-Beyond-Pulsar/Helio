@@ -518,18 +518,27 @@ pub fn verify_field(
     let (lo, hi) = field.height_range();
     let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
     let volumes = planet.volumes();
+    // The volume's draws come from a sequence of their own, so the
+    // columns and material inputs are the same as without volumes.
+    let mut vrng = 0x9E37_79B9_7F4A_7C15u64;
+    let mut vnext = || {
+        vrng ^= vrng << 13;
+        vrng ^= vrng >> 7;
+        vrng ^= vrng << 17;
+        vrng
+    };
     let mut inputs = Vec::new();
     let mut extra = Vec::new();
     let mut volume = Vec::new();
     for s in 0..samples {
-        let mut level = (next() % u64::from(grid.levels())) as u32;
+        let level = (next() % u64::from(grid.levels())) as u32;
         let cells = (grid.cells() >> level).max(1) as u64;
         let face = if grid.is_plane() {
             i32::from(crate::grid::PLANE_FACE)
         } else {
             (next() % 6) as i32
         };
-        let (mut i, mut j) = if s % 4 == 0 {
+        let (i, j) = if s % 4 == 0 {
             (
                 (next() % 2) as i32 * (cells as i32 - 1),
                 (next() % cells) as i32,
@@ -537,32 +546,13 @@ pub fn verify_field(
         } else {
             ((next() % cells) as i32, (next() % cells) as i32)
         };
-        // A layer near the top, a slope for the cliff shapes (eighths).
-        let mut k = None;
-        let slope = (next() % 64) as i32;
-        // Cells of a cave primitive, at a level that resolves it.
-        if let Some(v) = volumes.filter(|v| v.caves() && s % 3 == 1) {
-            let regions = (grid.cells() >> v.region_shift()).max(1) as u64;
-            for _ in 0..16 {
-                let (ri, rj) = ((next() % regions) as i32, (next() % regions) as i32);
-                let network = planet.cave_network(face as u8, ri, rj);
-                if network.is_empty() {
-                    continue;
-                }
-                let p = network[(next() % network.len() as u64) as usize];
-                let deepest = v.deepest_level(p.flags & crate::volumes::CHAMBER != 0).max(0) as u64;
-                level = (next() % (deepest + 1)) as u32;
-                let t = (next() % 17) as i64;
-                let at = |n: usize| p.a[n] + (p.b[n] - p.a[n]) * t / 16;
-                let (x, y, z) = (at(0), at(1), at(2));
-                let reach = i64::from(p.r) * ((next() % 5) as i64 - 2) / 2;
-                i = ((x + reach) >> 2 >> level) as i32;
-                j = ((y - reach) >> 2 >> level) as i32;
-                let spread = i64::from(p.rv) * ((next() % 7) as i64 - 3) / 2;
-                k = Some(((z + spread) >> 2 >> level) as i32);
-                break;
-            }
-        }
+        let material = IVec4::new(
+            (i64::from(lo) + (next() % span) as i64) as i32,
+            (next() % 40) as i32,
+            (next() % 40) as i32,
+            (next() % 200_000) as i32 - 100_000,
+        );
+        // A layer near the top, and a slope for the cliff shapes (eighths).
         let column = crate::terrain::Column {
             face: face as u8,
             i,
@@ -570,16 +560,52 @@ pub fn verify_field(
             level,
         };
         let top = crate::terrain::top_cells(&grid, field.height(column), level);
-        let k = k.unwrap_or(top + (next() % 81) as i32 - 40);
         inputs.push(IVec4::new(face, i, j, level as i32));
-        extra.push(IVec4::new(
-            (i64::from(lo) + (next() % span) as i64) as i32,
-            (next() % 40) as i32,
-            (next() % 40) as i32,
-            (next() % 200_000) as i32 - 100_000,
+        extra.push(material);
+        volume.push(IVec4::new(
+            (vnext() % 64) as i32,
+            top + (vnext() % 81) as i32 - 40,
+            0,
+            0,
         ));
-        volume.push(IVec4::new(slope, k, 0, 0));
+        // Every third sample, a cell of a cave primitive as well, at a
+        // level that resolves it.
+        let Some(v) = volumes.filter(|v| v.caves() && s % 3 == 1) else {
+            continue;
+        };
+        let regions = (grid.cells() >> v.region_shift()).max(1) as u64;
+        for _ in 0..16 {
+            let (ri, rj) = ((vnext() % regions) as i32, (vnext() % regions) as i32);
+            let network = planet.cave_network(face as u8, ri, rj);
+            if network.is_empty() {
+                continue;
+            }
+            let p = network[(vnext() % network.len() as u64) as usize];
+            let deepest = v.deepest_level(p.flags & crate::volumes::CHAMBER != 0).max(0) as u64;
+            let level = (vnext() % (deepest + 1)) as u32;
+            let t = (vnext() % 17) as i64;
+            let at = |n: usize| p.a[n] + (p.b[n] - p.a[n]) * t / 16;
+            let reach = i64::from(p.r) * ((vnext() % 5) as i64 - 2) / 2;
+            let spread = i64::from(p.rv) * ((vnext() % 7) as i64 - 3) / 2;
+            inputs.push(IVec4::new(
+                face,
+                ((at(0) + reach) >> 2 >> level) as i32,
+                ((at(1) - reach) >> 2 >> level) as i32,
+                level as i32,
+            ));
+            extra.push(material);
+            // (z 1: a cave sample; the shading surface word is the
+            // generator's own concern and stays out of its comparison.)
+            volume.push(IVec4::new(
+                (vnext() % 64) as i32,
+                ((at(2) + spread) >> 2 >> level) as i32,
+                1,
+                0,
+            ));
+            break;
+        }
     }
+    let samples = inputs.len() as u32;
     let module = helio_core::shader::module(
         device,
         "terrain verification",
@@ -710,7 +736,7 @@ pub fn verify_field(
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
             cell[0] + cell[1] * 2 + cell[2] * 64,
-            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919),
+            (q.x ^ q.y ^ q.z).wrapping_add(if v.z == 1 { 0 } else { surface as i32 * 7919 }),
         ];
         if *g != cpu {
             return Err(format!(
@@ -782,7 +808,7 @@ fn verify_cell(face: u32, i: i32, j: i32, level: u32, slope: i32, k: i32, height
     let cell = verify_cell(u32(a.x), a.y, a.z, level, v.x, v.y, height, p);
     let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
-        cell.x + cell.y * 2 + cell.z * 64, (q.x ^ q.y ^ q.z) + i32(surface) * 7919);
+        cell.x + cell.y * 2 + cell.z * 64, (q.x ^ q.y ^ q.z) + select(i32(surface) * 7919, 0, v.z == 1));
 }
 ";
     terrain_source(plane, program, wide64, false) + kernel

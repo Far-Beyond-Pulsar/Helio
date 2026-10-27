@@ -513,13 +513,39 @@ fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
     None
 }
 
+/// [`matches`] for an eye in a cave, printing what each side has there on
+/// a mismatch: the CPU's cells and primitives over the eye's column, the
+/// GPU's resident chunks over it.
+fn cave_matches(gpu: &Gpu, planet: &Planet, eye: DVec3, forward: Vec3) {
+    let view = View::new(eye, forward, [320, 180]);
+    let mut world = World::new(gpu, planet);
+    let (compared, mismatched) = compare(gpu, &mut world, planet, &view);
+    if mismatched * 1000 > compared {
+        let (cell, _) = planet.grid().locate(eye);
+        let column = planet.volume_column(cell.face, cell.i, cell.j, 0);
+        eprintln!(
+            "eye {cell:?}: top {} below {} above {} primitives {:?}",
+            column.top, column.below, column.above, column.primitives
+        );
+        let kinds: String = (cell.k - 40..cell.k + 40)
+            .map(|k| if planet.solid(Cell::new(cell.face, cell.i, cell.j, k)) { '#' } else { '.' })
+            .collect();
+        eprintln!("cpu cells k {}..: {kinds}", cell.k - 40);
+        for (key, occupied, drawn) in world.chunks.chunks_over(cell.face, cell.i, cell.j) {
+            eprintln!("gpu {key:?} occupied {occupied:?} drawn {drawn}");
+        }
+    }
+    assert!(compared > 1000, "{compared} pixels compared");
+    assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
 /// Cave networks render exactly from inside: walls, floor and ceiling.
 #[test]
 fn cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let planet = Planet::new(PlanetRecipe::default()).unwrap();
     let (eye, forward) = find_cave(&planet).expect("a cave near the test sites");
-    matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
+    cave_matches(&gpu, &planet, eye, forward);
 }
 
 /// Caves 600 m deep: networks far under the ground.
@@ -536,7 +562,7 @@ fn deep_cave_view_matches_canonical_cpu_ray_casts() {
     })
     .unwrap();
     let (eye, forward) = find_cave(&planet).expect("a cave near the test sites");
-    matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
+    cave_matches(&gpu, &planet, eye, forward);
 }
 
 /// Lava tubes on the Moon: wide flat-floored passages under the regolith.
@@ -550,7 +576,7 @@ fn lava_tube_view_matches_canonical_cpu_ray_casts() {
     })
     .unwrap();
     let (eye, forward) = find_cave(&planet).expect("a lava tube near the test sites");
-    matches(&gpu, &planet, View::new(eye, forward, [320, 180]));
+    cave_matches(&gpu, &planet, eye, forward);
 }
 
 /// An eye over a cliff shape, looking up the slope: a column whose cells
