@@ -115,7 +115,11 @@ struct Scene {
 
 impl Scene {
     fn new(gpu: &Gpu, volumes: &Volumes) -> Self {
-        let mut world = ChunkWorld::with_capacity(&gpu.device, &gpu.queue, CAPACITY);
+        Self::with_capacity(gpu, volumes, CAPACITY)
+    }
+
+    fn with_capacity(gpu: &Gpu, volumes: &Volumes, capacity: Capacity) -> Self {
+        let mut world = ChunkWorld::with_capacity(&gpu.device, &gpu.queue, capacity);
         let ids = volumes
             .volumes
             .iter()
@@ -137,13 +141,18 @@ impl Scene {
         }
     }
 
-    /// One frame: residency, the draw, `picks` copied.
-    fn frame(&mut self, gpu: &Gpu, camera: &Camera, picks: Option<&SharedPicks>) {
+    /// One frame: residency, the draw, `picks` copied; its residency.
+    fn frame(
+        &mut self,
+        gpu: &Gpu,
+        camera: &Camera,
+        picks: Option<&SharedPicks>,
+    ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         let view_proj = camera.view_proj();
         let prev = self.last.replace(view_proj).unwrap_or(view_proj);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
-        self.world.update(
+        let stats = self.world.update(
             &mut recorder,
             camera.eye,
             DVec3::ZERO,
@@ -175,17 +184,25 @@ impl Scene {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         self.frame += 1;
+        stats
     }
 
     /// Frames until residency settles; every pixel's hit then.
     fn settle(&mut self, gpu: &Gpu, camera: &Camera) -> Vec<Option<PickHit>> {
         let started = self.frame;
         loop {
-            self.frame(gpu, camera, None);
+            let stats = self.frame(gpu, camera, None);
             if self.world.settled() {
                 break;
             }
-            assert!(self.frame - started < 4000, "residency did not settle");
+            if (self.frame - started) % 500 == 0 {
+                eprintln!(
+                    "frame {}: volumes (id, tag, resident, drawn, waiting) {:?}; {stats:?}",
+                    self.frame - started,
+                    self.world.volume_stats()
+                );
+            }
+            assert!(self.frame - started < 4000, "residency did not settle: {stats:?}");
         }
         eprintln!(
             "settled in {} frames: {} chunks drawn",
@@ -210,38 +227,68 @@ struct Agreement {
 }
 
 /// Drawn hits against CPU casts (`Volumes::raycast`, each in its world's
-/// frame) at every second pixel: one within the level-0 range of its
+/// frame) at every second pixel. A hit within the level-0 range of its
 /// volume (cells of a pixel or more) must be drawn at level 0 in the same
 /// volume at the same cell (or its neighbour across an edge the ray runs
-/// along) and distance; farther ones, in the same volume within a few of
-/// their drawn level's cells.
+/// along) and distance; one past it but within the casts' reach (the
+/// farthest volume's level-0 range), in the same volume within a few of the
+/// drawn level's cells. Past the casts' reach a drawn hit must lie in the
+/// bounds of the volume it names, along the ray.
 fn compare(hits: &[Option<PickHit>], volumes: &Volumes, camera: &Camera) -> Agreement {
     let view_proj = camera.view_proj();
     let mut out = Agreement {
         by_volume: vec![0; volumes.volumes.len()],
         ..Default::default()
     };
+    let near_of = |v: &VoxelVolume| 0.7 * v.planet.grid().voxel_size() / camera.pixel_angle();
+    let reach = volumes.volumes.iter().map(near_of).fold(0.0, f64::max);
     for y in (0..camera.size[1]).step_by(2) {
         for x in (0..camera.size[0]).step_by(2) {
             let dir = camera.pixel_dir(view_proj, x, y);
-            let cpu = volumes.raycast(camera.eye, dir, 1.0e8, Matter::All);
+            let cpu = volumes.raycast(camera.eye, dir, reach, Matter::All);
             let drawn = hits[(y * camera.size[0] + x) as usize];
             let Some(cpu) = cpu else {
-                // The sky: only a coarse silhouette may differ.
+                // Past the casts' reach: the named volume's bounds hold the
+                // drawn hit.
                 out.coarse += 1;
-                out.other_volume += usize::from(drawn.is_some());
+                let plausible = drawn.is_none_or(|h| {
+                    h.distance >= reach * 0.99
+                        && volumes.volumes.iter().filter(|v| v.id == h.volume).any(|v| {
+                            let r = helio_pass_voxel_planet::volume::bounding_radius(&v.planet)
+                                .unwrap_or(f64::INFINITY);
+                            helio_pass_voxel_planet::volume::ray_ball(
+                                camera.eye,
+                                dir,
+                                v.transform.position,
+                                r,
+                            )
+                            .is_some_and(|(enter, leave)| {
+                                h.distance >= enter - 1.0 && h.distance <= leave + 1.0
+                            })
+                        })
+                });
+                if !plausible && out.other_volume < 4 {
+                    eprintln!("pixel {x},{y}: drawn {drawn:?} past the casts' reach");
+                }
+                out.other_volume += usize::from(!plausible);
                 continue;
             };
-            let planet = &volumes.volumes[cpu.index].planet;
+            let v = &volumes.volumes[cpu.index];
+            let planet = &v.planet;
             let voxel = planet.grid().voxel_size();
-            let near = 0.7 * voxel / camera.pixel_angle();
-            if cpu.hit.distance >= near {
+            if cpu.hit.distance >= near_of(v) {
                 out.coarse += 1;
                 let same = drawn.is_some_and(|h| {
                     let cell = voxel * f64::from(1u32 << h.level);
                     h.volume == cpu.id
                         && (h.distance - cpu.hit.distance).abs() <= 4.0 * cell + 1e-4 * cpu.hit.distance
                 });
+                if !same && out.other_volume < 4 {
+                    eprintln!(
+                        "pixel {x},{y}: drawn {drawn:?}, cpu volume {} at {} (coarse)",
+                        cpu.id, cpu.hit.distance
+                    );
+                }
                 out.other_volume += usize::from(!same);
                 continue;
             }
@@ -352,10 +399,13 @@ fn block() -> Planet {
     planet
 }
 
-/// A small moon: 20 km across, 0.5 m voxels, the Moon's ground.
+/// A moon 600 km across, 0.5 m voxels, the Moon's ground. (A sphere keeps
+/// about 1024 cells across a face at its coarsest level, all its roots
+/// resident: a 10 km moon with the Moon's kilometres of relief held 30 000
+/// root chunks.)
 fn moon() -> Planet {
     Planet::new(PlanetRecipe {
-        radius_m: 10_000.0,
+        radius_m: 300_000.0,
         voxel_size_m: 0.5,
         terrain: TerrainLayers::moon().source(11),
         ..Default::default()
@@ -377,21 +427,25 @@ fn a_planet_a_moon_and_a_block_draw_as_one_scene() {
     let across = up.any_orthonormal_vector();
     // Looking out over the ground, a little down.
     let forward = (across - up * 0.15).normalize();
-    // The moon 60 km away, high over the horizon, turned.
-    let moon_at = eye + (across + up * 0.35).normalize() * 60_000.0;
+    // The moon 1 800 km away, high over the horizon, turned.
+    let moon_at = eye + (across + up * 0.35).normalize() * 1_800_000.0;
     let moon = VoxelVolume::new(
         2,
         Arc::new(moon()),
         VolumeTransform::new(moon_at, DQuat::from_rotation_z(0.4) * DQuat::from_rotation_x(1.1)),
     );
-    // The block 9 m ahead, its plane's up tilted from the planet's.
-    let block_at = eye + forward * 9.0 + up * 0.5;
+    // The block set into the ground 9 m ahead, turned and leaning a little:
+    // its slab's top, sides and cabin show. (A plane's underside is no
+    // world's: the CPU's casts clip a plane to its terrain's band, the draw
+    // to its root chunks.)
+    let ground = earth.surface_point(eye + across * 9.0, 0.0);
+    let block_at = ground - up * 1.0;
     let block = VoxelVolume::new(
         5,
         Arc::new(block()),
         VolumeTransform::new(
             block_at,
-            DQuat::from_rotation_arc(DVec3::Y, (up + across * 0.3).normalize())
+            DQuat::from_rotation_arc(DVec3::Y, (up + across * 0.05).normalize())
                 * DQuat::from_rotation_y(0.6),
         ),
     );
@@ -406,7 +460,15 @@ fn a_planet_a_moon_and_a_block_draw_as_one_scene() {
         up: up.as_vec3(),
         size: [320, 180],
     };
-    let mut scene = Scene::new(gpu, &volumes);
+    // The horizon's chunks, the moon's and the block's: twice the slots.
+    let mut scene = Scene::with_capacity(
+        gpu,
+        &volumes,
+        Capacity {
+            chunks: 2 * CAPACITY.chunks,
+            ..CAPACITY
+        },
+    );
     let hits = scene.settle(gpu, &camera);
     let a = compare(&hits, &volumes, &camera);
     assert!(a.by_volume[0] > 500 && a.by_volume[2] > 500, "{a:?}");
@@ -477,8 +539,10 @@ fn picks_name_the_volume_they_hit() {
     let dir = land(&earth, 4, 0.37, 0.61);
     let eye = earth.surface_point(dir, 3.0);
     let up = eye.normalize();
-    let forward = (up.any_orthonormal_vector() - up * 0.6).normalize();
-    let block_at = eye + forward * 7.0;
+    let across = up.any_orthonormal_vector();
+    let forward = (across - up * 0.2).normalize();
+    // The block on the ground ahead and to the right, the ground beside it.
+    let block_at = eye + across * 14.0 + across.cross(up) * 5.0 - up * 2.5;
     let volumes = Volumes::new(vec![
         VoxelVolume::new(1, earth, VolumeTransform::IDENTITY),
         VoxelVolume::new(
@@ -496,7 +560,18 @@ fn picks_name_the_volume_they_hit() {
     let mut scene = Scene::new(gpu, &volumes);
     let hits = scene.settle(gpu, &camera);
     let picks: SharedPicks = Arc::new(Mutex::new(Picks::default()));
-    let at = [[0.5f32, 0.5], [0.05, 0.95], [0.5, 0.15], [0.95, 0.9]];
+    // A pixel each volume shows, by the middle of the most it shows.
+    let at: Vec<[f32; 2]> = [1u64, 5]
+        .iter()
+        .map(|&id| {
+            let shown: Vec<usize> = (0..hits.len())
+                .filter(|&n| hits[n].is_some_and(|h| h.volume == id))
+                .collect();
+            assert!(shown.len() > 100, "volume {id} shows {} pixels", shown.len());
+            let n = shown[shown.len() / 2];
+            [((n % 256) as f32 + 0.5) / 256.0, ((n / 256) as f32 + 0.5) / 160.0]
+        })
+        .collect();
     picks.lock().unwrap().requests = at
         .iter()
         .enumerate()

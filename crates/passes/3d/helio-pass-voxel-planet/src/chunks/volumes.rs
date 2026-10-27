@@ -1065,6 +1065,25 @@ impl ChunkWorld {
             .collect()
     }
 
+    /// Each volume's residency (diagnostics): its id and tag, resident
+    /// chunks, drawn chunks, and nodes its plan waits for.
+    pub fn volume_stats(&self) -> Vec<(VolumeId, u64, usize, usize, usize)> {
+        self.volumes
+            .iter()
+            .flatten()
+            .map(|v| {
+                let resident = self.nodes.keys().filter(|k| k.volume == v.index).count();
+                let drawn = self
+                    .drawn_set
+                    .list
+                    .iter()
+                    .filter(|c| (self.slot_keys[c.slot as usize][0] >> 16) as u16 == v.index)
+                    .count();
+                (VolumeId(v.index), v.tag, resident, drawn, v.plan.waiting)
+            })
+            .collect()
+    }
+
     /// The volume whose ground foliage grows on and whose GI probes trace
     /// (the first added that is still held, unless set).
     pub fn set_primary(&mut self, id: VolumeId) {
