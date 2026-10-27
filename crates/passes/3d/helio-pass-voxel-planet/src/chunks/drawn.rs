@@ -256,6 +256,25 @@ impl DrawnSet {
         }
     }
 
+    /// `slots` chunk slots (no fewer than before) and a table of
+    /// `entries` (a power of two); whether the table grew (its entries
+    /// placed again: upload it whole).
+    pub fn grow(&mut self, slots: usize, entries: usize) -> bool {
+        self.position.resize(slots, NONE);
+        if entries <= self.table.len() / 2 {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.table, vec![EMPTY; 2 * entries]);
+        self.mask = entries as u32 - 1;
+        for pair in old.chunks_exact(2) {
+            if pair[0][0] != -1 {
+                self.put(pair[0], pair[1]);
+            }
+        }
+        self.dirty.clear();
+        true
+    }
+
     pub fn mask(&self) -> u32 {
         self.mask
     }
@@ -1010,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn the_table_finds_every_drawn_chunk_after_nodes_come_and_go() {
+    fn the_table_finds_every_drawn_chunk_after_nodes_come_and_go_and_it_grows() {
         // A small table so probe runs collide and wrap.
         let mut set = DrawnSet::new(4096, 1024);
         set.set_top_level(0, 0);
@@ -1028,6 +1047,11 @@ mod tests {
                 .map(|d| d.0)
                 .collect();
             let (added, removed) = diff(&drawn, &last);
+            // Halfway, the slots and the table grow (entries placed again).
+            if round == 100 {
+                assert!(set.grow(8192, 4096));
+                assert!(!set.grow(8192, 2048));
+            }
             set.update(&added, &removed, &changed, round, |k| {
                 Some(NodeChunk {
                     slot: k.cx as u32,

@@ -49,9 +49,14 @@ const RANGE_WORDS: usize = 16;
 type Quarters = [Option<Ranges>; 4];
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
-/// Chunk slots by default (`Capacity::chunks`), within what the device can
-/// bind.
+/// Chunk slots at most by default (`Capacity::chunks`), within what the
+/// device can bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
+/// Chunk slots a world starts with (fewer if its capacity is less): the slot
+/// pool and the leaf pool each double when short (`ChunkWorld::grow_slots`,
+/// `ChunkWorld::grow_leaves`), up to the capacity, so a world holds what its
+/// views have needed (a settled Earth view some 30k chunks), not the most.
+const CHUNKS_START: usize = 8192;
 /// Chunk jobs of `DETAIL_LEVELS` a batch (`cell_materials` slots:
 /// `CELL_WORDS` words a column, 288 KiB each).
 const DETAIL_JOBS: usize = 128;
@@ -135,9 +140,12 @@ struct TileJob {
     _pad: [u32; 3],
 }
 
-/// Footprints the pool holds by default: their columns, halos and material
-/// slopes (75 KB each), within what the device binds.
+/// Footprints a volume's pool holds at most by default: their columns, halos
+/// and material slopes (75 KB each), within what the device binds. A pool
+/// starts at two batches' and doubles when it would reuse a slot used in
+/// the last `FOOTPRINT_RECENT` frames (`Volume::grow_footprints`).
 const FOOTPRINT_POOL: usize = 2048;
+const FOOTPRINT_RECENT: u64 = 120;
 /// Material slope words a footprint (`SLOPE_STRIDE` of chunk_generate.wgsl:
 /// a level-3 footprint's 34x34 level-4 blocks).
 const SLOPE_STRIDE: u64 = 1156;
@@ -196,6 +204,9 @@ struct SlotPool<K> {
     used: Vec<u64>,
     referenced: Vec<bool>,
     hand: usize,
+    /// Whether a slot used in the last `FOOTPRINT_RECENT` frames was reused
+    /// (or none was free) since the pool last grew.
+    pressed: bool,
 }
 
 impl<K: Copy + Eq + std::hash::Hash> SlotPool<K> {
@@ -206,7 +217,20 @@ impl<K: Copy + Eq + std::hash::Hash> SlotPool<K> {
             used: vec![u64::MAX; size],
             referenced: vec![false; size],
             hand: 0,
+            pressed: false,
         }
+    }
+
+    fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// `size` slots (no fewer than before), the new ones free.
+    fn grow(&mut self, size: usize) {
+        self.keys.resize(size, None);
+        self.used.resize(size, u64::MAX);
+        self.referenced.resize(size, false);
+        self.pressed = false;
     }
 
     /// `key`'s slot at `frame`, and whether its data is there already;
@@ -229,6 +253,7 @@ impl<K: Copy + Eq + std::hash::Hash> SlotPool<K> {
             }
             if let Some(old) = self.keys[h].take() {
                 self.slots.remove(&old);
+                self.pressed |= self.used[h].saturating_add(FOOTPRINT_RECENT) > frame;
             }
             self.keys[h] = Some(key);
             self.slots.insert(key, h as u32);
@@ -236,6 +261,7 @@ impl<K: Copy + Eq + std::hash::Hash> SlotPool<K> {
             self.referenced[h] = true;
             return Some((h as u32, false));
         }
+        self.pressed = true;
         None
     }
 }
@@ -1555,6 +1581,8 @@ struct Readback {
     footprints: Vec<Footprint>,
     /// Chunk jobs in order: node, slot, serial.
     chunks: Vec<(NodeKey, u32, u64)>,
+    /// Leaf pool growths when recorded.
+    leaf_growths: u32,
 }
 
 /// What [`ChunkWorld::update`] did.
@@ -1888,9 +1916,17 @@ pub struct ChunkWorld {
     free_pages: wgpu::Buffer,
     leaf_pages: wgpu::Buffer,
     job_results: wgpu::Buffer,
-    /// Chunk slots and leaves this world holds.
+    /// Chunk slots and leaves the pools hold now, and at most
+    /// (`Capacity::chunks`); leaf pool growths so far (free pages read back
+    /// from before the latest are stale).
+    slot_capacity: usize,
     max_chunks: usize,
     leaf_capacity: u64,
+    leaf_max: u64,
+    leaf_growths: u32,
+    /// The leaf pool's free count raised when it grows (`chunk_pool.wgsl`).
+    pool_layout: wgpu::BindGroupLayout,
+    pool_pipeline: wgpu::ComputePipeline,
     /// Per-voxel materials (`chunk_generate.wgsl`): a batch's edited cell
     /// materials, each leaf page's detail page, the pages, the stack of
     /// those given back, and the allocator (the stack's count, the
@@ -2326,6 +2362,33 @@ impl Targets {
 
 fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
     texture.create_view(&Default::default())
+}
+
+/// The entries of a chunk table for `slots` chunk slots: a power of two,
+/// within what the device binds (`binding` bytes).
+fn table_entries(slots: usize, binding: u64) -> usize {
+    (slots * TABLE_PER_SLOT)
+        .next_power_of_two()
+        .min((binding / 32).next_power_of_two() as usize / 2)
+}
+
+/// `buffer` in a new one of `size` bytes (its usage, `label`), its contents
+/// copied by `encoder`.
+fn regrown(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    buffer: &wgpu::Buffer,
+    label: &str,
+    size: u64,
+) -> wgpu::Buffer {
+    let next = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: buffer.usage(),
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(buffer, 0, &next, 0, buffer.size());
+    next
 }
 
 fn storage(
@@ -2766,15 +2829,14 @@ impl ChunkWorld {
             .min((binding / 1024) as usize)
             .min((binding / (LEAVES_PER_SLOT * 8)) as usize)
             .max(1024);
-        let leaf_capacity = max_chunks as u64 * LEAVES_PER_SLOT;
+        let slots = max_chunks.min(CHUNKS_START);
+        let leaf_capacity = slots as u64 * LEAVES_PER_SLOT;
         let detail_max = capacity
             .detail_pages
             .min((binding / (DETAIL_WORDS * 4)) as usize)
             .max(64) as u64;
         let detail_capacity = detail_max.min(DETAIL_PAGES_START);
-        let table_slots = (max_chunks * TABLE_PER_SLOT)
-            .next_power_of_two()
-            .min((binding / 32).next_power_of_two() as usize / 2);
+        let table_slots = table_entries(slots, binding);
         let queries = device
             .features()
             .contains(wgpu::Features::TIMESTAMP_QUERY)
@@ -2803,8 +2865,35 @@ impl ChunkWorld {
                 ready: None,
             })
             .collect();
-        let drawn_set = drawn::DrawnSet::new(max_chunks, table_slots);
+        let drawn_set = drawn::DrawnSet::new(slots, table_slots);
         let chunk_table = buffer("chunk table", (table_slots * 32) as u64, s);
+        let pool_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("chunk pool"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_pool.wgsl").into()),
+        });
+        let pool_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk pool"),
+            entries: &[storage(0, false, c), storage(1, true, c)],
+        });
+        let pool_pipeline = helio_core::shader::create_compute_pipeline(
+            device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("chunk pool"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[Some(&pool_layout)],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &pool_module,
+                entry_point: Some("pool_grow"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
+        // The pools' buffers are copied into larger ones when they grow.
+        let g = s | wgpu::BufferUsages::COPY_SRC;
         queue.write_buffer(&chunk_table, 0, bytemuck::cast_slice(drawn_set.table()));
         Self {
             device: device.clone(),
@@ -2869,26 +2958,10 @@ impl ChunkWorld {
                 CHUNK_BATCH as u64 * TILE_COLUMNS * 8,
                 wgpu::BufferUsages::STORAGE,
             ),
-            chunk_meta: buffer(
-                "chunk meta",
-                (max_chunks * 48) as u64,
-                s | wgpu::BufferUsages::COPY_SRC,
-            ),
-            mids: buffer(
-                "chunk mids",
-                (max_chunks * 64 * 16) as u64,
-                wgpu::BufferUsages::STORAGE,
-            ),
-            mid_leaves: buffer(
-                "chunk mid leaves",
-                (max_chunks * 64 * 4) as u64,
-                wgpu::BufferUsages::STORAGE,
-            ),
-            leaves: buffer(
-                "chunk leaves",
-                leaf_capacity * 8,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            chunk_meta: buffer("chunk meta", (slots * 48) as u64, g),
+            mids: buffer("chunk mids", (slots * 64 * 16) as u64, g),
+            mid_leaves: buffer("chunk mid leaves", (slots * 64 * 4) as u64, g),
+            leaves: buffer("chunk leaves", leaf_capacity * 8, g),
             // Every page free: the stack's count, no overflow.
             leaf_alloc: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk leaf allocator"),
@@ -2900,29 +2973,25 @@ impl ChunkWorld {
                 CHUNK_BATCH as u64 * TILE_COLUMNS * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
-            leaf_materials: buffer("chunk leaf materials", leaf_capacity * 2, s),
-            leaf_normals: buffer("chunk leaf normals", leaf_capacity * 2, s),
-            mid_materials: buffer(
-                "chunk mid materials",
-                (max_chunks * 64 * 4) as u64,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            leaf_materials: buffer("chunk leaf materials", leaf_capacity * 2, g),
+            leaf_normals: buffer("chunk leaf normals", leaf_capacity * 2, g),
+            mid_materials: buffer("chunk mid materials", (slots * 64 * 4) as u64, g),
             params: buffer(
                 "chunk draw params",
                 std::mem::size_of::<DrawParams>() as u64,
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             ),
-            chunk_keys: buffer("chunk keys", (max_chunks * 16) as u64, s),
+            chunk_keys: buffer("chunk keys", (slots * 16) as u64, g),
             chunk_table,
             statics: buffer(
                 "chunk statics",
-                (max_chunks * std::mem::size_of::<ChunkStatic>()) as u64,
-                s,
+                (slots * std::mem::size_of::<ChunkStatic>()) as u64,
+                g,
             ),
-            draw_list: buffer("chunk draw list", (max_chunks * 4) as u64, s),
-            drawn_slots: buffer("chunk drawn slots", (max_chunks * 4) as u64, s),
+            draw_list: buffer("chunk draw list", (slots * 4) as u64, g),
+            drawn_slots: buffer("chunk drawn slots", (slots * 4) as u64, g),
             cull_state: buffer("chunk cull", CULL_BYTES, s | wgpu::BufferUsages::COPY_SRC),
-            cull_bins: buffer("chunk cull bins", (max_chunks * 4) as u64, s),
+            cull_bins: buffer("chunk cull bins", (slots * 4) as u64, g),
             seed_args: buffer("chunk seed draws", 32, s | wgpu::BufferUsages::INDIRECT),
             motions: buffer(
                 "chunk volume motions",
@@ -2986,7 +3055,7 @@ impl ChunkWorld {
                     state: ReachState::Free,
                 })
                 .collect(),
-            slot_keys: vec![[-1, 0, 0, 0]; max_chunks],
+            slot_keys: vec![[-1, 0, 0, 0]; slots],
             table_layout,
             table_pipeline,
             pack_data: buffer(
@@ -3013,20 +3082,21 @@ impl ChunkWorld {
                 contents: bytemuck::cast_slice(
                     &(0..(leaf_capacity / LEAF_PAGE) as u32).collect::<Vec<u32>>(),
                 ),
-                usage: wgpu::BufferUsages::STORAGE,
+                usage: g,
             }),
-            leaf_pages: buffer(
-                "chunk leaf pages",
-                max_chunks as u64 * LEAF_PAGES * 4,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            leaf_pages: buffer("chunk leaf pages", slots as u64 * LEAF_PAGES * 4, g),
             job_results: buffer(
                 "chunk job results",
                 (CHUNK_BATCH * 16) as u64,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             ),
+            slot_capacity: slots,
             max_chunks,
             leaf_capacity,
+            leaf_max: max_chunks as u64 * LEAVES_PER_SLOT,
+            leaf_growths: 0,
+            pool_layout,
+            pool_pipeline,
             cell_materials: buffer(
                 "chunk cell materials",
                 DETAIL_JOBS as u64 * TILE_COLUMNS * CELL_WORDS * 4,
@@ -3039,7 +3109,7 @@ impl ChunkWorld {
                     u32::MAX;
                     (leaf_capacity / LEAF_PAGE) as usize
                 ]),
-                usage: wgpu::BufferUsages::STORAGE,
+                usage: g,
             }),
             detail_cells: buffer(
                 "chunk detail cells",
@@ -3056,11 +3126,7 @@ impl ChunkWorld {
                 detail_capacity * 4,
                 s | wgpu::BufferUsages::COPY_SRC,
             ),
-            slot_details: buffer(
-                "chunk slot details",
-                max_chunks as u64 * 4,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            slot_details: buffer("chunk slot details", slots as u64 * 4, g),
             detail_capacity,
             detail_max,
             detail_used_seen: 0,
@@ -3079,7 +3145,7 @@ impl ChunkWorld {
             nodes: Default::default(),
             footprint_nodes: Default::default(),
             dropped: Vec::new(),
-            free_slots: (0..max_chunks as u32).rev().collect(),
+            free_slots: (0..slots as u32).rev().collect(),
             serial: 0,
             readbacks: std::collections::VecDeque::new(),
             drawn_set,
@@ -3112,6 +3178,124 @@ impl ChunkWorld {
             .unwrap();
         let out = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
         out
+    }
+
+    /// The slot pool doubled (up to its most): every per-slot buffer copied
+    /// into one twice the size, the new slots free, the chunk table larger
+    /// with it (rebuilt from its mirror). The copies are submitted at once,
+    /// before the update records anything: writes queued since land in the
+    /// new buffers, after them.
+    fn grow_slots(&mut self) {
+        let old = self.slot_capacity;
+        let slots = (old * 2).min(self.max_chunks);
+        let device = self.device.clone();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let per = |bytes: usize| (slots * bytes) as u64;
+        let e = &mut encoder;
+        self.chunk_meta = regrown(&device, e, &self.chunk_meta, "chunk meta", per(48));
+        self.mids = regrown(&device, e, &self.mids, "chunk mids", per(64 * 16));
+        self.mid_leaves = regrown(&device, e, &self.mid_leaves, "chunk mid leaves", per(64 * 4));
+        self.mid_materials =
+            regrown(&device, e, &self.mid_materials, "chunk mid materials", per(64 * 4));
+        self.chunk_keys = regrown(&device, e, &self.chunk_keys, "chunk keys", per(16));
+        self.statics = regrown(
+            &device,
+            e,
+            &self.statics,
+            "chunk statics",
+            per(std::mem::size_of::<ChunkStatic>()),
+        );
+        self.draw_list = regrown(&device, e, &self.draw_list, "chunk draw list", per(4));
+        self.drawn_slots = regrown(&device, e, &self.drawn_slots, "chunk drawn slots", per(4));
+        self.cull_bins = regrown(&device, e, &self.cull_bins, "chunk cull bins", per(4));
+        self.leaf_pages = regrown(
+            &device,
+            e,
+            &self.leaf_pages,
+            "chunk leaf pages",
+            per(LEAF_PAGES as usize * 4),
+        );
+        self.slot_details = regrown(&device, e, &self.slot_details, "chunk slot details", per(4));
+        self.queue.submit([encoder.finish()]);
+        let limits = device.limits();
+        let binding = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
+        if self.drawn_set.grow(slots, table_entries(slots, binding)) {
+            self.chunk_table = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chunk table"),
+                size: (self.drawn_set.table().len() * 16) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue
+                .write_buffer(&self.chunk_table, 0, bytemuck::cast_slice(self.drawn_set.table()));
+        }
+        // The old free slots taken first.
+        let mut free: Vec<u32> = (old as u32..slots as u32).rev().collect();
+        free.append(&mut self.free_slots);
+        self.free_slots = free;
+        self.slot_keys.resize(slots, [-1, 0, 0, 0]);
+        self.slots_version = None;
+        self.slot_capacity = slots;
+    }
+
+    /// The leaf pool doubled (up to its most): leaves, their materials and
+    /// normals and each page's detail page copied into buffers twice the
+    /// size; the new pages go on the free stack under the old ones, and its
+    /// count rises by them on the GPU (`chunk_pool.wgsl`: the GPU's count is
+    /// ahead of any read back). Submitted at once, as `grow_slots`.
+    fn grow_leaves(&mut self) {
+        let old_pages = self.leaf_capacity / LEAF_PAGE;
+        let leaves = (self.leaf_capacity * 2).min(self.leaf_max);
+        let pages = leaves / LEAF_PAGE;
+        let added = pages - old_pages;
+        let device = self.device.clone();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let e = &mut encoder;
+        self.leaves = regrown(&device, e, &self.leaves, "chunk leaves", leaves * 8);
+        self.leaf_materials =
+            regrown(&device, e, &self.leaf_materials, "chunk leaf materials", leaves * 2);
+        self.leaf_normals = regrown(&device, e, &self.leaf_normals, "chunk leaf normals", leaves * 2);
+        self.detail_pages = regrown(&device, e, &self.detail_pages, "chunk detail pages", pages * 4);
+        self.queue.write_buffer(
+            &self.detail_pages,
+            old_pages * 4,
+            bytemuck::cast_slice(&vec![u32::MAX; added as usize]),
+        );
+        // The stack: the new pages, then the old stack (its count's worth
+        // valid) over them.
+        let free = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("chunk free pages"),
+            size: pages * 4,
+            usage: self.free_pages.usage(),
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(
+            &free,
+            0,
+            bytemuck::cast_slice(&(old_pages as u32..pages as u32).collect::<Vec<u32>>()),
+        );
+        encoder.copy_buffer_to_buffer(&self.free_pages, 0, &free, added * 4, old_pages * 4);
+        let added_words = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk pool growth"),
+            contents: bytemuck::bytes_of(&(added as i32)),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk pool"),
+            layout: &self.pool_layout,
+            entries: &[entry(0, &self.leaf_alloc), entry(1, &added_words)],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.pool_pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.free_pages = free;
+        self.free_pages_seen += added;
+        self.leaf_capacity = leaves;
+        self.leaf_growths += 1;
     }
 
     /// The detail pool doubled (up to its most): its pages and the stack
@@ -4046,7 +4230,7 @@ impl ChunkWorld {
                     self.put_volume(vol);
                 }
                 let at = base + r.chunks.len() * 4;
-                if let Some(&free) = words.get(at) {
+                if let Some(&free) = words.get(at).filter(|_| r.leaf_growths == self.leaf_growths) {
                     self.free_pages_seen = free.max(0) as u64;
                 }
                 if let [given, overflow, taken, capacity] =
@@ -4201,8 +4385,25 @@ impl ChunkWorld {
             }
         }
         // Slots and leaf pages kept free for a frame's generation and
-        // more: the least recently visited nodes go when either runs short.
-        let reserve = (self.max_chunks / 8).max(2 * CHUNK_BATCH);
+        // more: short of either, its pool grows (doubling, up to its most);
+        // at its most, the least recently visited nodes go.
+        let reserve = |slots: usize| (slots / 8).max(2 * CHUNK_BATCH);
+        if self.free_slots.len() + evictions.len() < reserve(self.slot_capacity)
+            && self.slot_capacity < self.max_chunks
+        {
+            self.grow_slots();
+        }
+        if self.free_pages_seen < self.leaf_capacity / LEAF_PAGE / 8
+            && self.leaf_capacity < self.leaf_max
+        {
+            self.grow_leaves();
+        }
+        let reserve = reserve(self.slot_capacity);
+        for vol in self.volumes.iter_mut().flatten() {
+            if vol.pool.pressed && vol.pool.len() < vol.pool_max {
+                vol.grow_footprints(&self.device, &self.queue);
+            }
+        }
         let mut need = reserve.saturating_sub(self.free_slots.len() + evictions.len());
         let pages = self.leaf_capacity / LEAF_PAGE;
         if self.free_pages_seen < pages / 8 && !self.nodes.is_empty() {
@@ -4338,6 +4539,7 @@ impl ChunkWorld {
             ready: Default::default(),
             footprints: Vec::new(),
             chunks: Vec::new(),
+            leaf_growths: self.leaf_growths,
         };
         // The frame's generation: `footprints_per_frame` footprints at most
         // and, with a time budget, the measured cost of their columns and

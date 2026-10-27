@@ -133,6 +133,10 @@ pub(super) struct Volume {
     pub has_features: bool,
     pub pool: SlotPool<Footprint>,
     pub pool_measured: Vec<Option<Quarters>>,
+    /// The footprints its pool holds at most, and each one's placement
+    /// bytes.
+    pub pool_max: usize,
+    pub placement_stride: u64,
     /// The edits classification and generation read, shared with the
     /// planner; the version it has not seen yet; the brushes' buffer and
     /// the faces it has room for; baked bricks on the GPU; which edits.
@@ -470,6 +474,34 @@ impl DrawLayouts {
             resolve,
             cull,
         }
+    }
+}
+
+impl Volume {
+    /// Its footprint pool doubled (up to its most): columns, halos, slopes
+    /// and placements copied into buffers twice the size (submitted at
+    /// once, before the update records anything), the new slots free.
+    pub fn grow_footprints(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let size = (self.pool.len() * 2).min(self.pool_max);
+        let n = size as u64;
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let e = &mut encoder;
+        self.tile_data =
+            regrown(device, e, &self.tile_data, "chunk footprint columns", n * TILE_COLUMNS * 16);
+        self.tile_halo_data =
+            regrown(device, e, &self.tile_halo_data, "chunk footprint halos", n * 40 * 40 * 4);
+        self.tile_slope_data =
+            regrown(device, e, &self.tile_slope_data, "chunk footprint slopes", n * SLOPE_STRIDE * 4);
+        self.tile_placements = regrown(
+            device,
+            e,
+            &self.tile_placements,
+            "chunk footprint placements",
+            (n * self.placement_stride).max(8),
+        );
+        queue.submit([encoder.finish()]);
+        self.pool.grow(size);
+        self.pool_measured.resize(size, None);
     }
 }
 
@@ -860,13 +892,15 @@ impl ChunkWorld {
         let binding = u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
         let features = planet.features();
         let placement_stride = features.stride as u64 * 8;
-        // A pool of at least two batches' footprints, no more than the world
-        // has.
-        let pool_size = (self.capacity.footprints as u64)
+        // A pool of two batches' footprints, growing up to the capacity's
+        // (at least two batches'), no more than the world has.
+        let pool_max = (self.capacity.footprints as u64)
             .min(binding / (TILE_COLUMNS * 16))
             .min(binding / placement_stride.max(1))
             .max(2 * TILE_BATCH as u64)
             .min(footprints_of(&grid).max(1)) as usize;
+        let pool_size = pool_max.min(2 * TILE_BATCH);
+        let g = s | wgpu::BufferUsages::COPY_SRC;
         // Brushes kept analytic: the large ones, then the recent ones.
         let edits = planet.edits();
         let view = std::sync::Arc::new(edit_view(
@@ -931,11 +965,7 @@ impl ChunkWorld {
                 camera: params("chunk draw params"),
                 sun: params("chunk sun params"),
             },
-            tile_data: buffer(
-                "chunk footprint columns",
-                pool_size as u64 * TILE_COLUMNS * 16,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, g),
             // The tiles' nodes, the scratch nodes, the tiles' slope lattice
             // rings, the block jobs' node quads, and the 8 a column's node
             // words read past the last.
@@ -953,16 +983,8 @@ impl ChunkWorld {
                     * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
-            tile_halo_data: buffer(
-                "chunk footprint halos",
-                pool_size as u64 * 40 * 40 * 4,
-                wgpu::BufferUsages::STORAGE,
-            ),
-            tile_slope_data: buffer(
-                "chunk footprint slopes",
-                pool_size as u64 * SLOPE_STRIDE * 4,
-                wgpu::BufferUsages::STORAGE,
-            ),
+            tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, g),
+            tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, g),
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk features"),
                 contents: bytemuck::cast_slice(&features.gpu_words()),
@@ -971,7 +993,7 @@ impl ChunkWorld {
             tile_placements: buffer(
                 "chunk footprint placements",
                 (pool_size as u64 * placement_stride).max(8),
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                g,
             ),
             feature_blocks: buffer(
                 "chunk feature candidate blocks",
@@ -983,6 +1005,8 @@ impl ChunkWorld {
             has_features: !features.is_empty(),
             pool: SlotPool::new(pool_size),
             pool_measured: vec![None; pool_size],
+            pool_max,
+            placement_stride,
             edits: view,
             edits_unsent: None,
             brushes,
