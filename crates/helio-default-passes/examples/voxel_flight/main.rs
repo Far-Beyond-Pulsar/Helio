@@ -1688,6 +1688,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let started = Instant::now();
         let mut frames = 0;
         let mut last = Instant::now();
+        let mut grew = false;
         while frames < 10
             || !flight
                 .renderer
@@ -1696,6 +1697,16 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         {
             flight.draw(eye, forward);
             frames += 1;
+            // Pool growth: its CPU time, and the intervals of its frame and
+            // the next (the copies run on the GPU between them).
+            if let Some(pass) = flight.renderer.find_pass::<ChunkPass>() {
+                let s = pass.stats();
+                let interval = last.elapsed().as_secs_f64() * 1e3;
+                if s.grow_ms > 0.1 || grew {
+                    eprintln!("CHUNKLOAD {mode}: frame {frames} interval {interval:.1} ms, grow {:.2} ms, slots {} leaf pages {}", s.grow_ms, s.chunk_slots, s.leaf_pages.1);
+                }
+                grew = s.grow_ms > 0.1;
+            }
             // Load progress: the frame's interval, the pass's CPU stages
             // (results, plan, evict, generate, drawn set, table) and work.
             if frames % 50 == 0 {
