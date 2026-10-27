@@ -5424,6 +5424,23 @@ impl ChunkWorld {
             && swept
     }
 
+    /// What keeps the world from settling ([`Self::settled`]'s terms), for
+    /// diagnostics.
+    pub fn settle_report(&self) -> String {
+        format!(
+            "current {} pending {} readbacks {} requests {} urgent {} stale {} fading {} reports {:?}/{}",
+            self.planned_for.is_some_and(|p| p.edits == self.edits.version),
+            self.pending.is_some(),
+            self.readbacks.len(),
+            self.last_requests,
+            self.urgent.len(),
+            self.stale.len(),
+            self.drawn_set.fading(),
+            self.planned_for.map(|p| p.reports_seen),
+            self.quiet_from + REPORT_FRAMES,
+        )
+    }
+
     /// Node and occupied layers of the chunk in `slot`.
     pub fn chunk_at(&self, slot: u32) -> Option<(NodeKey, Option<(i32, i32)>)> {
         self.nodes

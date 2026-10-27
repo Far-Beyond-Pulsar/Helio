@@ -1953,6 +1953,86 @@ fn sealed_edits_render_exactly_under_a_running_world() {
 /// allows: a hit wherever the ray meets the sphere 20 km below the datum,
 /// sky wherever it misses the sphere 20 km above it (no relief reaches
 /// either).
+/// The editor's sculpt strokes on the Moon (a drag lays a ball 120 m across
+/// every few metres, built then dug) settle, seen from 300 m: residency
+/// stops asking for chunks a few hundred frames after the last stroke. Two
+/// such strokes once kept the Pulsar editor generating for 20 000 frames.
+#[test]
+fn large_sculpt_strokes_settle() {
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let mut planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let view = View::new(
+        ground + up * 300.0 - fwd * 300.0,
+        (fwd - up * 0.7).normalize().as_vec3(),
+        [480, 270],
+    );
+    let mut world = World::new(&gpu, &planet);
+    world.jitter = Some(0);
+    world.settle(&gpu, &planet, &view);
+    for (op, material) in [(BrushOp::Add, material::COBBLE), (BrushOp::Remove, 0)] {
+        for n in 0..40 {
+            let along = (n as f64 - 20.0) * 4.0;
+            let centre = planet.surface_point((ground + side * along).normalize(), 0.0);
+            planet
+                .apply(Brush {
+                    center: centre.to_array(),
+                    radius: 60.0,
+                    shape: BrushShape::Sphere,
+                    op,
+                    material,
+                    height: 0.0,
+                })
+                .unwrap();
+            // A brush a frame, as a drag lays them.
+            world.sync(&gpu, &planet);
+            world.frame(&gpu, &planet, &view, None);
+        }
+    }
+    let started = world.frame;
+    let mut cpu = Vec::new();
+    loop {
+        let t = std::time::Instant::now();
+        let stats = world.frame(&gpu, &planet, &view, None);
+        cpu.push(t.elapsed().as_secs_f64() * 1e3);
+        if world.chunks.settled() {
+            break;
+        }
+        if (world.frame - started) % 250 == 0 {
+            eprintln!(
+                "frame {}: {} ms, {}",
+                world.frame - started,
+                cpu.last().unwrap(),
+                world.chunks.settle_report()
+            );
+            eprintln!("  {stats:?}");
+        }
+        assert!(
+            world.frame - started < 3000,
+            "sculpted Moon did not settle: {stats:?}"
+        );
+    }
+    cpu.sort_by(f64::total_cmp);
+    eprintln!(
+        "settled {} frames after the strokes; frame ms p50 {:.1} max {:.1}",
+        world.frame - started,
+        cpu[cpu.len() / 2],
+        cpu[cpu.len() - 1]
+    );
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };
