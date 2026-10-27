@@ -361,6 +361,30 @@ impl RegionPool {
         true
     }
 
+    /// Have regions `keys` made off the frame if they are not resident
+    /// (a footprint the frame may reach: its regions come together).
+    pub(crate) fn request(&mut self, keys: &[[u32; 2]]) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        for &k in keys {
+            if self.resident.contains_key(&k) || !self.making.insert(k) {
+                continue;
+            }
+            let (source, made, words) = (source.clone(), self.made.clone(), self.words);
+            rayon::spawn(move || {
+                let mut w = vec![0u32; words];
+                source.0.region(k, &mut w[..source.0.words()]);
+                made.lock().unwrap_or_else(|e| e.into_inner()).push((k, w));
+            });
+        }
+    }
+
+    /// Whether regions `keys` are all resident.
+    pub(crate) fn resident(&self, keys: &[[u32; 2]]) -> bool {
+        self.source.is_none() || keys.iter().all(|k| self.resident.contains_key(k))
+    }
+
     /// Whether regions `keys` are all resident, kept through `frame` if
     /// so. Missing ones are made off the frame (the thread pool) and enter
     /// the pool on a later call: a footprint waits for its regions instead

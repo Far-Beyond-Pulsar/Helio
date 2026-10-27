@@ -1780,8 +1780,9 @@ pub struct ChunkWorld {
     /// The terrain program's tables (`terrain_tables`: its planet maps).
     terrain_tables: wgpu::Buffer,
     /// The terrain program's regions (`terrain_regions`: its streams),
-    /// kept resident for the footprints generated.
+    /// kept resident for the footprints generated, and each footprint's.
     regions: crate::engine::RegionPool,
+    region_key_cache: rustc_hash::FxHashMap<Footprint, std::sync::Arc<[[u32; 2]]>>,
     tile_jobs: wgpu::Buffer,
     tile_data: wgpu::Buffer,
     // The batch's tiles' two-rate nodes (`engine::TILE_NODES`^2 a tile).
@@ -3615,6 +3616,7 @@ impl ChunkWorld {
             terrain,
             terrain_tables: crate::engine::tables_buffer(device, &program),
             regions: crate::engine::RegionPool::new(device, &program, REGION_CAPACITY),
+            region_key_cache: Default::default(),
             tile_jobs: buffer(
                 "chunk tile jobs",
                 (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64,
@@ -4241,6 +4243,38 @@ impl ChunkWorld {
         Some(old)
     }
 
+    /// The terrain regions footprint `fp`'s generation reads (near
+    /// levels' feature candidates read the ground at level 0), kept.
+    fn region_keys(&mut self, fp: Footprint) -> std::sync::Arc<[[u32; 2]]> {
+        if let Some(keys) = self.region_key_cache.get(&fp) {
+            return keys.clone();
+        }
+        if self.region_key_cache.len() >= 1 << 16 {
+            self.region_key_cache.clear();
+        }
+        let read = if self.has_features
+            && fp.level < crate::features::NEAR_LEVELS
+            && self.features.near(fp.level) > 0
+        {
+            0
+        } else {
+            fp.level
+        };
+        let up = fp.level - read;
+        let keys: std::sync::Arc<[[u32; 2]]> = self
+            .regions
+            .keys(
+                &self.grid,
+                fp.face,
+                read,
+                [fp.cx * CHUNK << up, ((fp.cx * CHUNK + CHUNK) << up) - 1],
+                [fp.cy * CHUNK << up, ((fp.cy * CHUNK + CHUNK) << up) - 1],
+            )
+            .into();
+        self.region_key_cache.insert(fp, keys.clone());
+        keys
+    }
+
     /// Jobs generating nodes `czs` of `fp` into `batch` (one footprint job,
     /// a chunk job each); their old chunks to `evictions`. How many fit.
     #[allow(clippy::too_many_arguments)]
@@ -4309,24 +4343,8 @@ impl ChunkWorld {
         }
         // The terrain's regions over the footprint (its streams), resident
         // while its tiles and chunks generate (made off the frame: the
-        // footprint waits for them); near levels' feature candidates read
-        // the ground at level 0.
-        let read = if self.has_features
-            && fp.level < crate::features::NEAR_LEVELS
-            && self.features.near(fp.level) > 0
-        {
-            0
-        } else {
-            fp.level
-        };
-        let up = fp.level - read;
-        let keys = self.regions.keys(
-            &grid,
-            fp.face,
-            read,
-            [fp.cx * CHUNK << up, ((fp.cx * CHUNK + CHUNK) << up) - 1],
-            [fp.cy * CHUNK << up, ((fp.cy * CHUNK + CHUNK) << up) - 1],
-        );
+        // footprint waits for them).
+        let keys = self.region_keys(fp);
         if !self.regions.reserve(&keys, self.frame_now) {
             return 0;
         }
@@ -5175,6 +5193,23 @@ impl ChunkWorld {
         // The plan's requests, a footprint's nodes together.
         let mut restores = Restores::default();
         let requests = std::mem::take(&mut self.plan.requests);
+        // The terrain regions of the footprints the next frames may reach,
+        // asked for together (made off the frame); a footprint whose regions
+        // are not resident yet waits while the next ones go on.
+        let mut ahead = Vec::new();
+        for k in &requests {
+            let fp = k.footprint();
+            if ahead.last() != Some(&fp) {
+                ahead.push(fp);
+                if ahead.len() >= 4 * most {
+                    break;
+                }
+            }
+        }
+        for fp in ahead {
+            let keys = self.region_keys(fp);
+            self.regions.request(&keys);
+        }
         let mut at = 0;
         while at < requests.len() && !full(&batch) {
             let fp = requests[at].footprint();
@@ -5182,6 +5217,11 @@ impl ChunkWorld {
                 .iter()
                 .position(|k| k.footprint() != fp)
                 .map_or(requests.len(), |n| at + n);
+            let keys = self.region_keys(fp);
+            if !self.regions.resident(&keys) {
+                at = end;
+                continue;
+            }
             // Generated since that plan.
             let mut czs: Vec<i32> = requests[at..end]
                 .iter()
