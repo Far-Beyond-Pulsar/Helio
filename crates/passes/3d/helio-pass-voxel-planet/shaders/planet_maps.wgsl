@@ -290,7 +290,7 @@ fn stream_ratio(a: i32, b: i32) -> i32 {
 // How much of a stream of reach `reach` shows at cells `cell` wide (Q8,
 // `streams::resolved`).
 fn stream_resolved(reach: i32, cell: i32) -> i32 {
-    return clamp((min(reach, 1 << 23u) << 7u) / max(cell, 1) - 256, 0, 256);
+    return clamp((min(reach, 1 << 23u) << 6u) / max(cell, 1) - 256, 0, 256);
 }
 
 // The carve's weight (Q16) at distance `d` (`streams::weight`).
@@ -372,6 +372,8 @@ fn map_streams(p: vec3<i32>, level: u32, h: i32) -> vec2<i32> {
     var inside = false;
     var bent = false;
     var bend = array<vec3<i32>, 3>(vec3<i32>(0), vec3<i32>(0), vec3<i32>(0));
+    var last_key = vec2<u32>(0xffffffffu);
+    var last_region = -1;
     for (var r = 0u; r <= levels; r++) {
         if stream_resolved(header[4].w >> (2u * r), cell) == 0 { continue; }
         let shift = 16u - 2u * r;
@@ -413,7 +415,12 @@ fn map_streams(p: vec3<i32>, level: u32, h: i32) -> vec2<i32> {
                         key = vec2<u32>((r - 1u) | (slot << 2u) | (u32(x >> 2u) << 5u), u32(y >> 2u));
                         record = u32(x & 3) + 4u * u32(y & 3);
                     }
-                    let region = terrain_region(key);
+                    // Neighbouring cells share their parents' regions.
+                    if key.x != last_key.x || key.y != last_key.y {
+                        last_key = key;
+                        last_region = terrain_region(key);
+                    }
+                    let region = last_region;
                     if region < 0 { continue; }
                     let at = record * STREAM_RECORD_WORDS;
                     let reach = bitcast<i32>(terrain_region_word(u32(region), at + 10u));

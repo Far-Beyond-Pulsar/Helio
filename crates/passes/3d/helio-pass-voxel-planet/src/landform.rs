@@ -2233,6 +2233,15 @@ impl TerrainField for LandformField {
         )
         .0
     }
+    /// Streams only cut (and the layers after them keep the order), so the
+    /// field without them bounds it from above.
+    fn height_bound(&self, column: Column) -> i32 {
+        let view = MapView {
+            streams: None,
+            ..self.map_view()
+        };
+        column_parts(&self.constants, Some(view), &self.plan, &self.grid, column).0
+    }
     fn ground_material(
         &self,
         p: IVec3,

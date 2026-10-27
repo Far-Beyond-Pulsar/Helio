@@ -7174,8 +7174,10 @@ impl ChunkWorld {
                     .into_iter()
                     .map(|(u, v)| {
                         let (cell, _) = grid.locate(f.origin + f.axis_u * u + f.axis_v * v);
+                        // A bound is enough (the probe starts over it):
+                        // the field without its streams, cheap on the CPU.
                         grid.layer_radius(f64::from(
-                            planet.column_top(cell.face, cell.i, cell.j, 0),
+                            planet.column_top_bound(cell.face, cell.i, cell.j, 0),
                         )) - grid.radius()
                     })
                     .fold(f64::NEG_INFINITY, f64::max);

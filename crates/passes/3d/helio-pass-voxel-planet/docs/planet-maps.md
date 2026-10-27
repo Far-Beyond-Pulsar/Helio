@@ -72,7 +72,7 @@ changed bake never loads an old file). Files go to
 `HELIO_PLANET_MAPS_CACHE` (empty: none), `planet_maps::set_disk_cache`,
 else the user's cache directory (`helio/planet-maps`); they are written
 whole and renamed, checksummed, and a damaged or foreign file is baked
-again.
+again. The newest eight are kept.
 
 1. **Coarse heights**: the mean (and highest) of 2x2 samples a texel of the
    field without its rivers (`height_parts` without maps), at the level
@@ -224,9 +224,11 @@ levels, at most 3):
   depth. A point meets only its own cell's segment and the eight around
   it (nodes keep a quarter cell from their cells' edges); faces' edges add
   the neighbouring face's cells.
-- **Levels of detail.** A stream level shows where its reach spans four
-  of a column's cells and fades out by two: coarse levels are band-limited
-  samples of the same streams, never deeper than the finer ones.
+- **Levels of detail.** A stream level shows where its reach spans eight
+  of a column's cells and fades out by four: coarse levels are
+  band-limited samples of the same streams, never deeper than the finer
+  ones, and far footprints need no fine streams' regions (farther, a
+  creek's valley is a few pixels).
 
 Every quantity is deterministic, so each level stays consistent with the
 one above. The CPU makes a parent cell's records once (`Streams`, cached);

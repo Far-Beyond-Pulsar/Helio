@@ -716,6 +716,26 @@ impl Planet {
     pub fn column_top(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
         terrain::top_cells(&self.grid, self.column_height(face, i, j, level), level)
     }
+    /// A layer at least [`Self::column_top`]'s, of the natural terrain
+    /// (`TerrainField::height_bound`: cheaper, for bounds).
+    pub fn column_top_bound(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
+        // Cached with the heights, keyed past the grid's levels.
+        let key = (face, i, j, level + 64);
+        let cached = self.heights.lock().ok().and_then(|c| c.get(&key).copied());
+        let h = cached.unwrap_or_else(|| {
+            let h = self
+                .field
+                .height_bound(crate::terrain::Column { face, i, j, level });
+            if let Ok(mut cache) = self.heights.lock() {
+                if cache.len() > 1 << 20 {
+                    cache.clear();
+                }
+                cache.insert(key, h);
+            }
+            h
+        });
+        terrain::top_cells(&self.grid, h, level)
+    }
     /// The brushes of `log` that can change level cell `(i, j, k)` (`k`
     /// `None`: any cell of the column), in order.
     fn face_brushes(

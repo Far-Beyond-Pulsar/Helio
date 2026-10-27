@@ -21,8 +21,8 @@
 //! A stream of level `r` reaches at most a quarter of its cell from its
 //! segment (valley, walls and meanders), so a point meets only the
 //! segments of its own cell and the eight around it. Levels fade out
-//! where their reach spans fewer than four of a column's cells: coarse
-//! levels are band-limited samples of the same field.
+//! where their reach spans fewer than eight of a column's cells (none
+//! under four): coarse levels are band-limited samples of the same field.
 use crate::landform::{smooth_min, LandformConstants, SingleRate};
 use crate::noise::{hash3, mul_shr_signed, unit_q30};
 use crate::planet_maps::{self, CubeGrid, MapView, PlanetMaps, RiverSpec, FLAG_RIVERS};
@@ -636,9 +636,11 @@ impl Streams {
 }
 
 /// How much of a level shows at cells `cell` domain units wide (Q8): all
-/// where its reach spans four cells, none under two.
+/// where its reach spans eight cells, none under four (farther, a
+/// stream's valley is under a few pixels, and every region out to the
+/// horizon would be needed).
 fn resolved(reach: i32, cell: i32) -> i32 {
-    (((reach.min(1 << 23)) << 7) / cell.max(1) - 256).clamp(0, 256)
+    (((reach.min(1 << 23)) << 6) / cell.max(1) - 256).clamp(0, 256)
 }
 
 /// `a / b` in Q16 for `0 <= a <= b < 2^23`, exactly in 32 bits (two
@@ -1067,15 +1069,83 @@ mod tests {
         }
     }
 
+    /// Cold columns (`--ignored --nocapture`): level-0 heights scattered
+    /// over 50 km on one thread, as a CPU probe or ray in a new area pays.
+    #[test]
+    #[ignore]
+    fn cold_column_costs() {
+        let (grid, field) = earth();
+        let (cell, _) = grid.locate(DVec3::Y * grid.radius());
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng % 500_000) as i32 - 250_000
+        };
+        for round in 0..2 {
+            let started = std::time::Instant::now();
+            for _ in 0..200 {
+                let at = Column { face: cell.face, i: cell.i + next(), j: cell.j + next(), level: 0 };
+                std::hint::black_box(field.height(at));
+            }
+            eprintln!("round {round}: {:.2} ms a cold column", started.elapsed().as_secs_f64() * 1e3 / 200.0);
+        }
+    }
+
+    /// A view's regions (`--ignored --nocapture`): footprints in rings
+    /// around the planet's top, as the chunk world reserves them (level-0
+    /// keys where near features read the ground), made in parallel.
+    #[test]
+    #[ignore]
+    fn view_region_costs() {
+        use crate::terrain::TerrainRegions;
+        use rayon::prelude::*;
+        let (grid, field) = earth();
+        let s = field.streams().unwrap();
+        let (cell, _) = grid.locate(DVec3::Y * grid.radius());
+        let mut keys = Vec::new();
+        for level in 0..16u32 {
+            let (ci, cj) = ((cell.i >> level) / 64, (cell.j >> level) / 64);
+            let read = if level < crate::features::NEAR_LEVELS { 0 } else { level };
+            let up = level - read;
+            for dj in -3..=3 {
+                for di in -3..=3 {
+                    let (fx, fy) = (ci + di, cj + dj);
+                    s.keys(&grid, cell.face, read, [fx * 64 << up, ((fx * 64 + 64) << up) - 1], [fy * 64 << up, ((fy * 64 + 64) << up) - 1], &mut keys);
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        let by_level: Vec<usize> = (0..4).map(|l| keys.iter().filter(|k| k[0] & 3 == l).count()).collect();
+        let started = std::time::Instant::now();
+        let n = keys
+            .par_iter()
+            .map(|&k| {
+                let mut w = vec![0u32; REGION_WORDS];
+                s.region(k, &mut w);
+                w[10]
+            })
+            .filter(|&r| r != 0)
+            .count();
+        eprintln!(
+            "{} regions ({by_level:?} by parent level, {n} with streams) in {:.2} s on {} threads",
+            keys.len(),
+            started.elapsed().as_secs_f64(),
+            rayon::current_num_threads()
+        );
+    }
+
     /// Coarser levels never carve deeper than finer ones show: a level's
     /// streams fade out as its cells outgrow their reach.
     #[test]
     fn coarse_levels_fade_streams_out() {
         for r in 0..=3u8 {
             let reach = 100_000 >> (2 * r);
-            assert_eq!(resolved(reach, reach / 4), 256);
-            assert_eq!(resolved(reach, reach / 2), 0);
-            assert!(resolved(reach, reach / 3) > 0 && resolved(reach, reach / 3) < 256);
+            assert_eq!(resolved(reach, reach / 8), 256);
+            assert_eq!(resolved(reach, reach / 4), 0);
+            assert!(resolved(reach, reach / 6) > 0 && resolved(reach, reach / 6) < 256);
         }
         assert_eq!(weight(0, 1000), 65_536);
         assert_eq!(weight(500, 1000), 65_536);

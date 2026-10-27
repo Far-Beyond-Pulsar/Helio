@@ -1127,8 +1127,22 @@ fn store(path: &std::path::Path, key: u64, maps: &PlanetMaps) -> std::io::Result
     std::fs::write(&partial, encode(key, maps))?;
     std::fs::rename(&partial, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&partial);
-    })
+    })?;
+    // The newest few only: every changed world or bake writes a new file.
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "maps"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, old) in files.into_iter().skip(DISK_KEEP) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
 }
+
+/// Bakes the disk cache keeps (the most recently written).
+const DISK_KEEP: usize = 8;
 
 /// Bake the maps (see the module doc).
 pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {

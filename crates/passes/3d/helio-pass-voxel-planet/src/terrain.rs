@@ -296,6 +296,12 @@ pub trait TerrainField: Send + Sync + 'static {
     /// A field may share work between neighbouring columns of a level
     /// (the two-rate field's nodes): it is a column's, not a point's.
     fn height(&self, column: Column) -> i32;
+    /// A height at least `column`'s, cheaper where the field can leave out
+    /// terms that only lower it (a landform's streams): what bounds want
+    /// without the exact surface.
+    fn height_bound(&self, column: Column) -> i32 {
+        self.height(column)
+    }
     /// Material of a solid ground cell: `surface` is its column cell's
     /// surface word ([`Self::surface`]), `top_height` its column's top
     /// ([`HEIGHT_ONE`] units, a whole number of voxel layers), `depth` the
