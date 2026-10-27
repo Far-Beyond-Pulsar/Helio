@@ -5,7 +5,7 @@
 //! cargo run -p helio-default-passes --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
-//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye|altitude`
+//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|overhang|feature|eye|altitude`
 //!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`;
 //!   `feature` the nearest feature, `HELIO_VOXEL_FLIGHT_FEATURE=<material>`'s)
 //!   and holds it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS`: drawn by
@@ -2744,8 +2744,10 @@ fn main() {
                 (e, f)
             }
             // Inside the cave network nearest the spawn (searched 3 km
-            // apart), along a passage.
-            "cave" => {
+            // apart), along a passage; or under the nearest cliff shape's
+            // overhang.
+            "cave" | "overhang" => {
+                let wanted = if view == "cave" { "cave_tunnel" } else { "overhang" };
                 let up = ground.normalize();
                 let ahead = tangent(ground, heading).as_dvec3();
                 let side = ahead.cross(up);
@@ -2762,9 +2764,9 @@ fn main() {
                     .find_map(|near| {
                         volume_views(&flight.planet, near)
                             .into_iter()
-                            .find(|v| v.0 == "cave_tunnel")
+                            .find(|v| v.0 == wanted)
                     })
-                    .expect("a cave within 9 km of the spawn");
+                    .expect("a cave or overhang within 9 km of the spawn");
                 (e, f)
             }
             // The nearest feature, 8 m away (`HELIO_VOXEL_FLIGHT_FEATURE`:
