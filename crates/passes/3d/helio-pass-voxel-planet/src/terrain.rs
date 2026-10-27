@@ -88,9 +88,23 @@
 //! ([`heightfield_density`]). Distances, not just solid or air, are what a
 //! smooth surface (interpolated between cell centres) needs.
 //!
-//! The program reads its constants from the `terrain` uniform. It may call the
+//! The program reads its constants from the `terrain` uniform and its
+//! tables (data too large for a uniform: a world's planet maps,
+//! [`crate::planet_maps`]) from `terrain_tables` (a read-only storage
+//! buffer of `vec4<u32>`, [`TerrainProgram::tables`]). It may call the
 //! integer noise library (`shaders/noise.wgsl`, mirrored in
 //! [`crate::noise`]) and the material ids (`M_*`, see [`material`]).
+//!
+//! A program with a climate defines
+//!
+//! ```wgsl
+//! fn terrain_climate(p: vec3<i32>, height: i32) -> vec2<i32>
+//! ```
+//!
+//! the temperature (1/128 °C) and moisture (Q16, 0 dry to 65535 wet) at
+//! domain point `p` and height `height` (mm), as [`TerrainField::climate`]:
+//! features grow by it (a spawn's climate ranges). Without it the climate is
+//! 15 °C and half wet everywhere.
 //! Heights are integer [`HEIGHT_ONE`] units (millimetres) above the datum;
 //! `p` is the column centre in domain units ([`crate::grid::DOMAIN_UNIT`],
 //! 1.25 cm) on the sphere of the planet's radius (a plane: its horizontal
@@ -110,6 +124,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 /// Heights are integer millimetres above the datum (sea level).
 pub const HEIGHT_ONE: i32 = 1000;
+/// Climate of a field without one: 15 °C (1/128 °C), half wet (Q16).
+pub const DEFAULT_CLIMATE: [i32; 2] = [15 * 128, 32_768];
 /// Largest `TerrainConstants` uniform a program may declare.
 pub const MAX_CONSTANT_BYTES: usize = 16384;
 
@@ -202,6 +218,9 @@ pub struct TerrainProgram {
     /// Bytes of the `TerrainConstants` uniform (WGSL uniform layout, at
     /// most [`MAX_CONSTANT_BYTES`]).
     pub constants: Vec<u8>,
+    /// Words of the `terrain_tables` storage buffer (may be empty), shared
+    /// by every program of the world.
+    pub tables: Arc<[u32]>,
 }
 
 /// A column of the world grid: its face, cell indices and level (grid
@@ -241,6 +260,12 @@ pub trait TerrainField: Send + Sync + 'static {
     /// inputs of the materials besides height. 0 when the program has none.
     fn surface(&self, _column: Column, _height: i32) -> u32 {
         0
+    }
+    /// Climate at domain point `p` and height `height` (mm): temperature in
+    /// 1/128 °C and moisture in Q16 (`terrain_climate` in WGSL; 15 °C and
+    /// half wet without one).
+    fn climate(&self, _p: IVec3, _height: i32) -> (i32, i32) {
+        (DEFAULT_CLIMATE[0], DEFAULT_CLIMATE[1])
     }
     /// Lowest and highest height any column can have at any level.
     fn height_range(&self) -> (i32, i32);

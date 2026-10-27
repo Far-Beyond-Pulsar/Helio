@@ -202,6 +202,19 @@ impl WorldGpu {
     }
 }
 
+/// The program's tables as `terrain_tables` (binding 40): at least one
+/// `vec4<u32>`, a whole number of them.
+pub(crate) fn tables_buffer(device: &wgpu::Device, program: &TerrainProgram) -> wgpu::Buffer {
+    use wgpu::util::DeviceExt;
+    let mut words = program.tables.to_vec();
+    words.resize(words.len().max(4).next_multiple_of(4), 0);
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("terrain tables"),
+        contents: bytemuck::cast_slice(&words),
+        usage: wgpu::BufferUsages::STORAGE,
+    })
+}
+
 /// Terrain constants padded to a whole uniform (16-byte multiple).
 pub(crate) fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     let mut bytes = program.constants.clone();
@@ -251,8 +264,9 @@ fn hardware_wide(noise: &str) -> String {
 /// leaves out, the column functions ([`column_source`]; `generation`: the
 /// generation module's) and the world shape. With `wide64` the
 /// noise library's wide products use hardware 64-bit integers
-/// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms,
-/// declared here (group 0, bindings 1 and 16).
+/// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms
+/// and the `terrain_tables` storage, declared here (group 0, bindings 1, 16
+/// and 40).
 pub(crate) fn terrain_source(
     plane: bool,
     program: &TerrainProgram,
@@ -281,6 +295,15 @@ pub(crate) fn terrain_source(
         );
         s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
+    if !program.wgsl.contains("fn terrain_climate") {
+        // No climate (`TerrainField::climate`).
+        s.push_str(&format!(
+            "fn terrain_climate(p: vec3<i32>, height: i32) -> vec2<i32> {{ return vec2<i32>({}, {}); }}
+",
+            crate::terrain::DEFAULT_CLIMATE[0],
+            crate::terrain::DEFAULT_CLIMATE[1]
+        ));
+    }
     if !program.wgsl.contains("fn terrain_lean") {
         // No lean (`TerrainField::lean`).
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
@@ -290,6 +313,7 @@ pub(crate) fn terrain_source(
     s.push_str(
         "@group(0) @binding(1) var<uniform> world: World;
 @group(0) @binding(16) var<uniform> terrain: TerrainConstants;
+@group(0) @binding(40) var<storage, read> terrain_tables: array<vec4<u32>>;
 ",
     );
     // World shape: 0 sphere, 1 plane.
@@ -521,8 +545,7 @@ pub fn verify_field(
     };
     let (lo, hi) = field.height_range();
     let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
-    let mut inputs = Vec::new();
-    let mut extra = Vec::new();
+    let mut columns = Vec::new();
     for s in 0..samples {
         let level = (next() % u64::from(grid.levels())) as u32;
         let cells = (grid.cells() >> level).max(1) as u64;
@@ -539,7 +562,35 @@ pub fn verify_field(
         } else {
             ((next() % cells) as i32, (next() % cells) as i32)
         };
-        inputs.push(IVec4::new(face, i, j, level as i32));
+        columns.push([face, i, j, level as i32]);
+    }
+    verify_columns(device, queue, planet, &columns)
+}
+
+/// [`verify_field`] at the given columns (`[face, i, j, level]`).
+pub fn verify_columns(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    planet: &Planet,
+    columns: &[[i32; 4]],
+) -> Result<(), String> {
+    let grid = *planet.grid();
+    let field = planet.field();
+    let program = field.program();
+    let mut rng = 0x9e37_79b9u64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (lo, hi) = field.height_range();
+    let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
+    let samples = columns.len() as u32;
+    let mut inputs = Vec::new();
+    let mut extra = Vec::new();
+    for c in columns {
+        inputs.push(IVec4::from_array(*c));
         extra.push(IVec4::new(
             (i64::from(lo) + (next() % span) as i64) as i32,
             (next() % 40) as i32,
@@ -568,9 +619,11 @@ pub fn verify_field(
     let lean = terrain_lean(level);
     let offset = terrain_lean_offset(p, a.y, a.z, k, level);
     let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
+    let climate = terrain_climate(q, e.x);
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
         density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257
-            + lean.x * 7 + lean.y * 13 + offset.x * 31 + offset.y * 131);
+            + lean.x * 7 + lean.y * 13 + offset.x * 31 + offset.y * 131
+            + climate.x * 524287 + climate.y * 8191);
 }
 ";
     let module = helio_core::shader::module(
@@ -611,6 +664,7 @@ pub fn verify_field(
         &terrain_bytes(&program),
         wgpu::BufferUsages::UNIFORM,
     );
+    let tables = tables_buffer(device, &program);
     let ins = init(
         "verify inputs",
         bytemuck::cast_slice(&inputs),
@@ -645,6 +699,10 @@ pub fn verify_field(
             wgpu::BindGroupEntry {
                 binding: 16,
                 resource: terrain.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 40,
+                resource: tables.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 20,
@@ -709,6 +767,7 @@ pub fn verify_field(
         let lean = field.lean(level);
         let offset = field.lean_offset(p, a.y, a.z, k, level);
         let surface = field.surface(column, height) & 0xff;
+        let climate = field.climate(q, e.x);
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
@@ -720,7 +779,9 @@ pub fn verify_field(
                 .wrapping_add(lean.0 * 7)
                 .wrapping_add(lean.1 * 13)
                 .wrapping_add(offset.0.wrapping_mul(31))
-                .wrapping_add(offset.1.wrapping_mul(131)),
+                .wrapping_add(offset.1.wrapping_mul(131))
+                .wrapping_add(climate.0.wrapping_mul(524_287))
+                .wrapping_add(climate.1.wrapping_mul(8_191)),
         ];
         if *g != cpu {
             return Err(format!(

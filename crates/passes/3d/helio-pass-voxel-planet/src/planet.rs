@@ -475,7 +475,7 @@ impl Planet {
             if cache.len() > 1 << 20 {
                 cache.clear();
             }
-            FeatureEval::new(&self.features, &self.grid, &top, &mut cache)
+            FeatureEval::new(&self.features, &self.grid, &*self.field, &top, &mut cache)
                 .coarse_cell(face, level, i, j, k)
         };
         if near.is_some() {
@@ -491,7 +491,7 @@ impl Planet {
             self.column_height(face, i, j, level),
         );
         self.features
-            .far_cover(&self.grid, face, level, i, j, ground)
+            .far_cover(&self.grid, &*self.field, face, level, i, j, ground)
             .and_then(|cover| CompiledFeatures::far_cell(level, k, cover))
     }
     /// Layers features stand over the ground at most.
@@ -823,7 +823,7 @@ impl Planet {
             if cache.len() > 1 << 20 {
                 cache.clear();
             }
-            FeatureEval::new(&self.features, &self.grid, &top, &mut cache).brick(
+            FeatureEval::new(&self.features, &self.grid, &*self.field, &top, &mut cache).brick(
                 face,
                 origin,
                 n,
@@ -842,6 +842,7 @@ impl Planet {
                     .then(|| {
                         self.features.far_cover(
                             &self.grid,
+                            &*self.field,
                             face,
                             0,
                             i,
@@ -1612,7 +1613,7 @@ mod tests {
             )
         };
         let mut cache = PlacementCache::default();
-        let mut eval = FeatureEval::new(&*planet.features, g, &top, &mut cache);
+        let mut eval = FeatureEval::new(&*planet.features, g, planet.field(), &top, &mut cache);
         // A feature's solid cell over the terrain, in the column of its anchor.
         let (cell, ground) = (0..planet.features.spawns.len())
             .flat_map(|s| eval.placements_near(s, face, [c0, c0 + 4000], [c0, c0 + 4000]))

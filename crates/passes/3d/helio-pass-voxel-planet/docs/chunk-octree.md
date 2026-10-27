@@ -246,7 +246,7 @@ edit snapshot (Pulsar's `VoxelKeptChunks`).
 
 `Planet::material` is the canonical material of a base cell (picks, a
 dig's yield, gameplay). Generation evaluates `ground_material` with the
-same inputs:
+same inputs (its climate from the planet maps, [`planet-maps.md`](planet-maps.md)):
 
 - **Point.** Each evaluation (a column's top cell, its soil and rock
   samples) uses its cell's volume point.

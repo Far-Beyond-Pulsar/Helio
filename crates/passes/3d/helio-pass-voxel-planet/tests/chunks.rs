@@ -438,6 +438,58 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     }
 }
 
+/// Rivers' valleys, floodplains and channels on the GPU are the CPU's:
+/// columns of every level around river segments' nodes, on spheres and an
+/// infinite plane.
+#[test]
+fn rivers_are_bit_identical_to_cpu() {
+    let Some(gpu) = gpu() else { return };
+    for (shape, size) in [
+        (Shape::Sphere, 0.1),
+        (Shape::Sphere, 1.0),
+        (Shape::InfinitePlane, 0.1),
+    ] {
+        let planet = Planet::new(PlanetRecipe {
+            shape,
+            voxel_size_m: size,
+            ..Default::default()
+        })
+        .unwrap();
+        let grid = *planet.grid();
+        let field = TerrainLayers::earth()
+            .field(&grid, 7)
+            .unwrap();
+        let nodes = field.maps().expect("Earth bakes maps").river_nodes();
+        let mut next = xorshift(0x5eed_0f_d1ce);
+        let mut columns = Vec::new();
+        for (n, &(p, floodplain, _)) in nodes.iter().enumerate().step_by((nodes.len() / 4_000).max(1)) {
+            // The node's column, then a column across its valley.
+            let world = if grid.is_plane() {
+                DVec3::new(f64::from(p.x), 0.0, f64::from(p.z)) * helio_pass_voxel_planet::grid::DOMAIN_UNIT
+            } else {
+                p.as_dvec3().normalize() * grid.radius()
+            };
+            let (cell, _) = grid.locate(world);
+            let level = (n as u32) % 12;
+            let reach = ((floodplain / grid.voxel_size()) as u64).max(8);
+            for _ in 0..4 {
+                let d = |v: u64| (v % (2 * reach)) as i32 - reach as i32;
+                let (i, j) = (cell.i + d(next()), cell.j + d(next()));
+                let last = grid.cells() - 1;
+                columns.push([
+                    i32::from(cell.face),
+                    i.clamp(0, last) >> level,
+                    j.clamp(0, last) >> level,
+                    level as i32,
+                ]);
+            }
+        }
+        eprintln!("{shape:?} {size} m: {} river columns", columns.len());
+        helio_pass_voxel_planet::engine::verify_columns(&gpu.device, &gpu.queue, &planet, &columns)
+            .unwrap_or_else(|e| panic!("rivers on {shape:?} at {size} m: {e}"));
+    }
+}
+
 #[test]
 fn ground_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
@@ -3183,7 +3235,7 @@ fn footprint_placements_are_the_cpus() {
     };
     let mut cache = Default::default();
     let mut eval =
-        helio_pass_voxel_planet::features::FeatureEval::new(features, grid, &top, &mut cache);
+        helio_pass_voxel_planet::features::FeatureEval::new(features, grid, planet.field(), &top, &mut cache);
     let mut by_level = [0usize; 10];
     let (mut placed, mut excluded) = (0, 0);
     for (height, down) in [(1.7, 0.3), (60.0, 0.8)] {
@@ -3212,7 +3264,7 @@ fn footprint_placements_are_the_cpus() {
                     let (gx, gy) = (g0[0] + n as i32 % side, g0[1] + n as i32 / side);
                     let at = 2 * (slot as usize * features.stride + offset + n);
                     let (x, y) = (words[at], words[at + 1]);
-                    let want = features.candidate(s, grid, &top, fp.face, gx, gy);
+                    let want = features.candidate(s, grid, planet.field(), &top, fp.face, gx, gy);
                     let got = (x != 0).then(|| {
                         (
                             sp.stamps[((x >> 21) & 0x7f) as usize],

@@ -13,6 +13,7 @@
 //! field rather than an independent smooth replacement.
 use crate::grid::Grid;
 use crate::layers::{Caves, Overhangs};
+use crate::planet_maps::{self, MapView, PlanetMaps, MAP_HEADER};
 use crate::noise::{
     fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine,
     noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30,
@@ -24,6 +25,7 @@ use crate::terrain::{
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 /// Program key: one WGSL source for every stack; generation compiles the
 /// ridge-envelope display variant of it.
@@ -482,6 +484,10 @@ impl Octave {
 /// | basins | depth (height units) | mask threshold (Q24) |
 /// | plateau | height (height units, whole layers) | |
 /// | cliffs (riser share in 1/1024 in kind bits 16..) | step (height units, whole layers) | mask threshold (Q24) |
+/// | rivers | | |
+///
+/// Rivers carve what lies below them in the stack along the planet maps'
+/// river segments (`planet_maps::carve`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct StackLayer {
@@ -503,6 +509,7 @@ impl StackLayer {
     pub const BASINS: u32 = 8;
     pub const PLATEAU: u32 = 9;
     pub const CLIFFS: u32 = 10;
+    pub const RIVERS: u32 = 11;
 
     /// The kind without its parameter bits.
     pub fn base_kind(&self) -> u32 {
@@ -546,6 +553,9 @@ pub struct PackedRule {
     /// erosion range (the signed surface byte), strata band period (mm, 0:
     /// none) and parity.
     pub surface_bands: [i32; 4],
+    /// temperature range (1/128 °C at the cell), river beds (0 any, 1 only
+    /// on them, 2 never), pad.
+    pub climate: [i32; 4],
 }
 
 /// `TerrainConstants` of `landform.wgsl` (uniform layout).
@@ -555,8 +565,8 @@ pub struct LandformConstants {
     /// octave count (warp slots included), layer thickness (mm), soil
     /// depth (cells), seed.
     pub header: [i32; 4],
-    /// moisture shift, continents layer + 1 (0: none, all land), snowline,
-    /// low-basin height (mm).
+    /// pad, continents layer + 1 (0: none, all land), pad, low-basin height
+    /// (mm).
     pub levels: [i32; 4],
     /// ridge display layer + 1 (0: none), steep slope (cells/cell), ridge
     /// display flag, vertical axis (0 radial, 1 the plane's +Y).
@@ -570,6 +580,9 @@ pub struct LandformConstants {
     /// octave's shift (-1: none: erosion is resolved up to its level less
     /// `RESOLVED_SHIFT`), pad.
     pub materials: [i32; 4],
+    /// The planet maps' header (`planet_maps::MAP_HEADER`): climate and
+    /// river lookups, uniform climate without maps.
+    pub maps: [[i32; 4]; MAP_HEADER],
     pub layers: [StackLayer; LAYERS],
     pub octaves: [Octave; OCTAVES],
     pub rules: [PackedRule; RULES],
@@ -611,7 +624,10 @@ impl LandformConstants {
         for (l, layer) in self.stack_layers().iter().enumerate() {
             m[l] += match layer.kind {
                 StackLayer::CONTINENTS => f64::from(layer.a).abs() + f64::from(layer.b).abs(),
-                StackLayer::BASINS | StackLayer::PLATEAU => f64::from(layer.a).abs(),
+                // Rivers cut at most this far under the terrain's lowest.
+                StackLayer::BASINS | StackLayer::PLATEAU | StackLayer::RIVERS => {
+                    f64::from(layer.a).abs()
+                }
                 // A terrace moves a height by less than a step.
                 _ if layer.base_kind() == StackLayer::CLIFFS => f64::from(layer.a).abs(),
                 _ => 0.0,
@@ -709,8 +725,16 @@ impl LandformConstants {
                 .filter(|l| l.base_kind() == StackLayer::CLIFFS)
                 .map(|l| 2.0 * f64::from(l.a))
                 .sum();
-            let excess_mm =
-                dropped + terraces + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
+            // River valleys: their walls, beds and channels slope at most
+            // `b / 256` height units per domain unit (unwarped).
+            let valleys: f64 = layers
+                .iter()
+                .filter(|l| l.kind == StackLayer::RIVERS)
+                .map(|l| f64::from(l.b) / 256.0)
+                .sum();
+            let excess_mm = dropped
+                + terraces
+                + (lipschitz * (1.0 + warp) + unwarped + valleys) * half_diagonal;
             let cell_mm = f64::from(self.header[1]) * 2f64.powi(level as i32);
             out[level as usize] =
                 ((excess_mm / cell_mm).ceil() as i64 + 2).clamp(2, 1 << 20) as i32;
@@ -758,6 +782,23 @@ pub const RESOLVED_SHIFT: u32 = 5;
 #[inline]
 fn resolved(o: &Octave, level: u32) -> bool {
     matches!(o.class(), CONTINENT | REGION | BASIN) || o.shift >= level + RESOLVED_SHIFT
+}
+
+/// Largest relief (height units) of the octaves `level` omits: what finer
+/// levels may add to its heights (the planet maps' bound on the terrain a
+/// map texel does not resolve).
+pub fn unresolved_relief(k: &LandformConstants, level: u32) -> f64 {
+    k.table()
+        .iter()
+        .filter(|o| !resolved(o, level))
+        .map(|o| {
+            let a = f64::from(o.amplitude).abs();
+            match o.class() {
+                CRATER => 2.0 * a * (1.0 + f64::from(k.layers[o.layer()].a) / 65_536.0),
+                _ => a,
+            }
+        })
+        .sum()
 }
 
 /// Gradients are in height units per `2^GRAD_SHIFT` domain units (3.3 km):
@@ -983,7 +1024,7 @@ fn steering(k: &LandformConstants, s: &Accumulators) -> IVec3 {
 /// `2^60 / d` for `d` in `[2^29, 2^30)`: Newton from a linear guess, four
 /// fixed steps on exact 64-bit products.
 #[inline]
-fn recip_q30(d: u32) -> u32 {
+pub(crate) fn recip_q30(d: u32) -> u32 {
     let mut y = 3_031_741_621u32 - mul_shr(d, 2_021_161_080, 30);
     for _ in 0..4 {
         y = mul_shr(y, 2 * Q30 - mul_shr(d, y, 30), 30);
@@ -1000,7 +1041,7 @@ fn squared_ratio(r2: u32, rad2: u32) -> u32 {
 
 /// Polynomial smooth minimum of `a` and `b` over a width `k` (mm).
 #[inline]
-fn smooth_min(a: i32, b: i32, k: i32) -> i32 {
+pub(crate) fn smooth_min(a: i32, b: i32, k: i32) -> i32 {
     let m = a.min(b);
     let gap = (a - b).abs();
     if k <= 0 || gap >= k {
@@ -1113,18 +1154,24 @@ fn crater_octave(
 }
 
 /// Surface height (height units above the datum) of the column centred at
-/// domain point `p` with a `2^level` reference cell footprint.
-pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
-    height_parts(k, p, level).0
+/// domain point `p` with a `2^level` reference cell footprint (single
+/// rate: every octave at `p`).
+pub fn height(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32) -> i32 {
+    height_parts(k, maps, p, level).0
 }
 
 /// Surface word of a column (`terrain_surface`), by material style.
-/// Earthlike: the erosion term as a signed byte of the erosion amplitude
-/// sum (negative: gully floors, positive: the ribs between them). Lunar:
-/// the freshest ejecta (bits 0..6) and the basin flag (bit 7).
-pub fn surface(k: &LandformConstants, p: IVec3, level: u32) -> u32 {
-    height_parts(k, p, level).1
+/// Earthlike and rules: the erosion term as a signed byte of the erosion
+/// amplitude sum (negative: gully floors, positive: the ribs between
+/// them), [`RIVER_BED`] in a river's channel. Lunar: the freshest ejecta
+/// (bits 0..6) and the basin flag (bit 7).
+pub fn surface(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32) -> u32 {
+    height_parts(k, maps, p, level).1
 }
+
+/// The surface word of a column in a river's channel (Earthlike and rules
+/// styles; erosion bytes stop at -127).
+pub const RIVER_BED: u32 = 0x80;
 
 /// Two-rate evaluation (`docs/two-rate-field.md`): octaves at least this
 /// many shifts above a column's level (wavelengths of 256 node spacings
@@ -1486,6 +1533,7 @@ fn macro_at(k: &LandformConstants, grid: &Grid, column: Column, level: u32, eros
 /// terrain's definition, mirrored by `landform.wgsl`).
 pub fn column_parts(
     k: &LandformConstants,
+    maps: Option<MapView>,
     plan: &LandformPlan,
     grid: &Grid,
     column: Column,
@@ -1496,13 +1544,14 @@ pub fn column_parts(
         let erosion = k.materials[2] >= (level + RESOLVED_SHIFT) as i32;
         parts(
             k,
+            maps,
             p,
             level,
             Some(&macro_at(k, grid, column, level, erosion)),
             plan.ops(level),
         )
     } else {
-        parts(k, p, level, None, plan.ops(level))
+        parts(k, maps, p, level, None, plan.ops(level))
     }
 }
 
@@ -1523,15 +1572,41 @@ fn ridge_step(s: &mut Accumulators, l: usize, o: &Octave, n: i32, d: IVec3, eros
 }
 
 /// [`height`] and [`surface`] of the point `p` with every octave evaluated
-/// there (the single-rate field; a column's is [`column_parts`]).
-pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
-    parts(k, p, level, None, level_ops(k, level, false).into_iter())
+/// there (the single-rate field; a column's is [`column_parts`]). Without
+/// `maps` rivers carve nothing (the terrain the maps are baked from).
+pub fn height_parts(
+    k: &LandformConstants,
+    maps: Option<MapView>,
+    p: IVec3,
+    level: u32,
+) -> (i32, u32) {
+    parts(k, maps, p, level, None, level_ops(k, level, false).into_iter())
+}
+
+/// [`height_parts`] of many points of one level without maps (the planet
+/// maps' bake): the level's single-rate ops compiled once.
+pub(crate) struct SingleRate {
+    ops: Vec<u16>,
+    level: u32,
+}
+
+impl SingleRate {
+    pub(crate) fn new(k: &LandformConstants, level: u32) -> Self {
+        Self {
+            ops: level_ops(k, level, false),
+            level,
+        }
+    }
+    pub(crate) fn height(&self, k: &LandformConstants, p: IVec3) -> i32 {
+        parts(k, None, p, self.level, None, self.ops.iter().copied()).0
+    }
 }
 
 /// The octaves of `ops` at `p` (reference level `level`), the macro ones
 /// from `m` when given (interpolated: [`macro_at`]).
 fn parts(
     k: &LandformConstants,
+    maps: Option<MapView>,
     p: IVec3,
     level: u32,
     m: Option<&Node>,
@@ -1659,8 +1734,19 @@ fn parts(
     let (land, wet) = land_masks(c);
     let mut h = 0i32;
     let mut basin = 0i32;
+    let mut river_bed = false;
     for (l, layer) in k.stack_layers().iter().enumerate() {
         let x = match layer.kind {
+            StackLayer::RIVERS => {
+                // Valleys and channels along the river segments, cut into
+                // what lies below them in the stack.
+                if let Some(m) = maps {
+                    let (carved, bed) = planet_maps::carve(m, p, level, h);
+                    h = carved;
+                    river_bed |= bed;
+                }
+                continue;
+            }
             StackLayer::CONTINENTS => continent_base(c, layer.a, layer.b),
             StackLayer::MOUNTAINS => mul_fine(s.value[l], region_weight(s.region[l], layer.a)),
             StackLayer::BASINS => {
@@ -1701,6 +1787,7 @@ fn parts(
         h = h.wrapping_add(masked(layer.mask, x, land, wet));
     }
     let surface = match k.style[0] {
+        STYLE_EARTHLIKE | STYLE_RULES if river_bed => RIVER_BED,
         STYLE_EARTHLIKE | STYLE_RULES => {
             ((eroded * 127 / k.stack[1].max(1)).clamp(-127, 127) as u32) & 0xff
         }
@@ -1710,16 +1797,20 @@ fn parts(
     (h, surface)
 }
 
-/// Moisture in Q24 [0, FINE_ONE] from very low-frequency noise at `p`
-/// (fine, so dry-land edges follow smooth curves).
-pub fn moisture(k: &LandformConstants, p: IVec3) -> i32 {
-    (noise_fine(
-        p,
-        k.levels[0].max(1) as u32,
-        (k.header[3] as u32) ^ 0x51ED_270B,
-    ) + FINE_ONE)
-        / 2
+/// Snowline (mm) where the sea-level temperature is `t0` (1/128 °C): the
+/// height at which the lapse rate brings it to the snow temperature.
+fn snowline(c: &LandformConstants, t0: i32) -> i32 {
+    let (snow, per) = (c.maps[3][0], c.maps[3][1]);
+    if per == 0 {
+        return if t0 > snow { i32::MAX / 2 } else { i32::MIN / 2 };
+    }
+    (t0 - snow).clamp(-8192, 8192) * per
 }
+
+/// The Earthlike snowline's spread: moisture moves it by up to 375 m,
+/// noise by 500 m over ~1.6 km, and the alpine rock band under it is 500 m.
+const SNOW_WET: i32 = 750_000;
+const SNOW_BAND: i32 = 500_000;
 
 /// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
 /// through them never show flat rings.
@@ -1728,9 +1819,11 @@ fn strata(c: &LandformConstants, p: IVec3, altitude: i32) -> i32 {
 }
 
 /// Earthlike materials: meadows, dry lands, rock outcrops, strata and snow
-/// above the snowline; gravel in erosion gullies.
+/// above the snowline (the climate's: latitude and height); gravel in
+/// erosion gullies and river beds.
 fn earthlike_material(
     c: &LandformConstants,
+    maps: MapView,
     p: IVec3,
     surface: u32,
     top_height: i32,
@@ -1741,10 +1834,15 @@ fn earthlike_material(
     use crate::terrain::material::*;
     let dirt = c.header[2];
     let steep = slope >= c.shape[1];
-    let wet = moisture(c, p);
+    let (t0, wet) = planet_maps::climate(maps, p, 0);
+    let wet = wet << 8;
     // Hash every domain axis: on a face one of them is nearly constant.
     let h = hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x2545_F491);
     let altitude = layer.wrapping_mul(c.header[1]);
+    if surface == RIVER_BED && depth < dirt * 2 {
+        // River beds: gravel and sand over silt.
+        return if depth == 0 && h & 3 == 0 { SAND } else if depth < dirt { GRAVEL } else { CLAY };
+    }
     if top_height < c.levels[3] {
         // Low basins: meadow with mud patches of a few metres over silt,
         // gravel and stone. Patches follow position noise, never height
@@ -1764,17 +1862,14 @@ fn earthlike_material(
             STONE
         };
     }
-    // The snowline wanders a sixth of its height over ~1.6 km (a level
-    // snowline drew a ruler-straight edge along every range), and the
-    // alpine rock band below it is a sixth of its height: meadows climb.
-    let wander = scale(
-        noise(p, 17, (c.header[3] as u32) ^ 0x3C6E_F372),
-        c.levels[2] / 6,
-    );
-    let snowline = c.levels[2] + mul_fine(c.levels[2] / 4, wet - FINE_ONE / 2) + wander;
+    // The snowline wanders 500 m over ~1.6 km (a level snowline drew a
+    // ruler-straight edge along every range), and the alpine rock band
+    // below it is 500 m: meadows climb.
+    let wander = scale(noise(p, 17, (c.header[3] as u32) ^ 0x3C6E_F372), SNOW_BAND);
+    let snowline = snowline(c, t0) + mul_fine(SNOW_WET, wet - FINE_ONE / 2) + wander;
     // Alpine weight: 0 below the rockline, ONE at the snowline.
-    let rockline = snowline - c.levels[2] / 6;
-    let band = (snowline - rockline).max(256);
+    let rockline = snowline - SNOW_BAND;
+    let band = SNOW_BAND;
     let alpine = ((top_height - rockline).clamp(0, band) / 256) * ONE / (band / 256);
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
     // Noise is clamped to +-ONE, so below the rockline on gentler slopes no
@@ -1849,6 +1944,7 @@ fn earthlike_material(
 /// of the cell; `p` is the cell's volume point.
 pub fn ground_material(
     c: &LandformConstants,
+    maps: MapView,
     p: IVec3,
     surface: u32,
     top_height: i32,
@@ -1858,7 +1954,7 @@ pub fn ground_material(
 ) -> u32 {
     match c.style[0] {
         STYLE_LUNAR => lunar_material(c, p, surface, depth, slope, layer),
-        STYLE_RULES => rules_material(c, p, surface, top_height, depth, slope, layer),
+        STYLE_RULES => rules_material(c, maps, p, surface, top_height, depth, slope, layer),
         STYLE_LAYERED => {
             (if depth == 0 {
                 c.style[1]
@@ -1868,16 +1964,20 @@ pub fn ground_material(
                 c.style[3]
             }) as u32
         }
-        _ => earthlike_material(c, p, surface, top_height, depth, slope, layer),
+        _ => earthlike_material(c, maps, p, surface, top_height, depth, slope, layer),
     }
 }
 
 /// The first rule whose conditions hold, else the fallback material.
-/// Patches are noise above a threshold (their coverage); strata bands
-/// follow the undulating altitude (`strata`); specks are single cells
-/// flagged [`crate::terrain::material::SPECK`] on the surface.
+/// Moisture and temperature are the climate's at the cell (its altitude);
+/// a river bed counts as the deepest gully. Patches are noise above a
+/// threshold (their coverage); strata bands follow the undulating altitude
+/// (`strata`); specks are single cells flagged
+/// [`crate::terrain::material::SPECK`] on the surface.
+#[allow(clippy::too_many_arguments)]
 fn rules_material(
     c: &LandformConstants,
+    maps: MapView,
     p: IVec3,
     surface: u32,
     top_height: i32,
@@ -1885,9 +1985,10 @@ fn rules_material(
     slope: i32,
     layer: i32,
 ) -> u32 {
-    let wet = moisture(c, p) >> 8;
-    let erosion = i32::from(surface as u8 as i8);
+    let river = surface == RIVER_BED;
+    let erosion = i32::from(surface as u8 as i8).max(-127);
     let altitude = layer.wrapping_mul(c.header[1]);
+    let (temperature, wet) = planet_maps::climate(maps, p, altitude);
     let seed = c.header[3] as u32;
     let count = (c.materials[0].max(0) as usize).min(RULES);
     for (index, r) in c.rules[..count].iter().enumerate() {
@@ -1897,6 +1998,9 @@ fn rules_material(
             || !within(depth, r.depth_moisture[0], r.depth_moisture[1])
             || !within(wet, r.depth_moisture[2], r.depth_moisture[3])
             || !within(erosion, r.surface_bands[0], r.surface_bands[1])
+            || !within(temperature, r.climate[0], r.climate[1])
+            || (r.climate[2] == 1 && !river)
+            || (r.climate[2] == 2 && river)
         {
             continue;
         }
@@ -1981,7 +2085,7 @@ pub fn lunar_appearance() -> TerrainAppearance {
     }
 }
 
-/// A compiled terrain stack on one grid.
+/// A compiled terrain stack on one grid, with its planet maps.
 pub struct LandformField {
     grid: Grid,
     constants: LandformConstants,
@@ -1989,10 +2093,27 @@ pub struct LandformField {
     bounds: [i32; 24],
     ridge_suffix: Option<[[i32; 4]; 66]>,
     plan: Box<LandformPlan>,
+    maps: Option<Arc<PlanetMaps>>,
 }
 
 impl LandformField {
-    pub fn new(grid: &Grid, constants: LandformConstants, volume: LandformVolume) -> Self {
+    /// The field of `constants` (their uniform climate in `maps`' rows
+    /// unless baked `maps` replace them).
+    pub fn new(
+        grid: &Grid,
+        mut constants: LandformConstants,
+        volume: LandformVolume,
+        maps: Option<Arc<PlanetMaps>>,
+    ) -> Self {
+        if let Some(m) = &maps {
+            constants.maps = m.header;
+            let (cut, slope) = m.valley_bounds();
+            for layer in constants.layers.iter_mut() {
+                if layer.kind == StackLayer::RIVERS {
+                    (layer.a, layer.b) = (cut, slope);
+                }
+            }
+        }
         let mut bounds = constants.bound_margins(grid);
         // Stacks without a supported display layer keep the canonical path.
         // In particular, do not saturate invalid huge amplitudes into new
@@ -2012,10 +2133,22 @@ impl LandformField {
             constants,
             volume,
             plan,
+            maps,
         }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
+    }
+    /// The baked planet maps, if the stack has any.
+    pub fn maps(&self) -> Option<&Arc<PlanetMaps>> {
+        self.maps.as_ref()
+    }
+    /// What climate and river lookups read.
+    pub fn map_view(&self) -> MapView<'_> {
+        MapView {
+            header: &self.constants.maps,
+            tables: self.maps.as_ref().map_or(&[], |m| &m.tables),
+        }
     }
     pub fn volume(&self) -> &LandformVolume {
         &self.volume
@@ -2027,7 +2160,14 @@ impl LandformField {
 
 impl TerrainField for LandformField {
     fn height(&self, column: Column) -> i32 {
-        column_parts(&self.constants, &self.plan, &self.grid, column).0
+        column_parts(
+            &self.constants,
+            Some(self.map_view()),
+            &self.plan,
+            &self.grid,
+            column,
+        )
+        .0
     }
     fn ground_material(
         &self,
@@ -2038,10 +2178,29 @@ impl TerrainField for LandformField {
         slope: i32,
         layer: i32,
     ) -> u32 {
-        ground_material(&self.constants, p, surface, top_height, depth, slope, layer)
+        ground_material(
+            &self.constants,
+            self.map_view(),
+            p,
+            surface,
+            top_height,
+            depth,
+            slope,
+            layer,
+        )
     }
     fn surface(&self, column: Column, _height: i32) -> u32 {
-        column_parts(&self.constants, &self.plan, &self.grid, column).1
+        column_parts(
+            &self.constants,
+            Some(self.map_view()),
+            &self.plan,
+            &self.grid,
+            column,
+        )
+        .1
+    }
+    fn climate(&self, p: IVec3, height: i32) -> (i32, i32) {
+        planet_maps::climate(self.map_view(), p, height)
     }
     fn height_range(&self) -> (i32, i32) {
         self.constants.height_range()
@@ -2104,8 +2263,15 @@ impl TerrainField for LandformField {
         constants.extend_from_slice(bytemuck::bytes_of(&*self.plan));
         TerrainProgram {
             key: Cow::Borrowed(DISPLAY_PROGRAM),
-            wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
+            wgsl: Cow::Borrowed(concat!(
+                include_str!("../shaders/landform.wgsl"),
+                include_str!("../shaders/planet_maps.wgsl")
+            )),
             constants,
+            tables: self
+                .maps
+                .as_ref()
+                .map_or_else(|| Arc::from(Vec::new()), |m| Arc::from(m.tables.as_slice())),
         }
     }
 }
@@ -2121,11 +2287,11 @@ mod tests {
     #[test]
     fn two_rate_field_stays_within_a_fraction_of_a_cell() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = crate::layers::TerrainLayers::earth()
-            .compile(&grid, 75)
-            .unwrap()
-            .0;
-        let plan = LandformPlan::new(&k);
+        let field = crate::layers::TerrainLayers::earth()
+            .field(&grid, 75)
+            .unwrap();
+        let (k, maps) = (field.constants(), Some(field.map_view()));
+        let plan = LandformPlan::new(k);
         let n = f64::from(grid.cells());
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
@@ -2145,9 +2311,10 @@ mod tests {
                     j: (fj * n) as i32 >> level,
                     level,
                 };
-                let a = column_parts(&k, &plan, &grid, column).0;
+                let a = column_parts(k, maps, &plan, &grid, column).0;
                 let b = height_parts(
-                    &k,
+                    k,
+                    maps,
                     grid.domain_point(column.face, column.i, column.j, column.level),
                     level + grid.level_offset(),
                 )
@@ -2161,8 +2328,8 @@ mod tests {
     use crate::layers::TerrainLayers;
     use crate::terrain::{generated_kind, top_cells, TerrainField};
 
-    fn earth(grid: &Grid) -> LandformConstants {
-        TerrainLayers::earth().compile(grid, 7).unwrap().0
+    fn earth(grid: &Grid) -> LandformField {
+        TerrainLayers::earth().field(grid, 7).unwrap()
     }
 
     /// Caves and overhangs change cells only inside the declared extent;
@@ -2553,7 +2720,8 @@ mod tests {
     fn climate_bounds_cover_both_signs_of_canonical_height_change() {
         for voxel in [0.1, 0.3, 1.0] {
             let grid = Grid::new(6_371_000.0, voxel).unwrap();
-            let k = earth(&grid);
+            let field = earth(&grid);
+            let (k, maps) = (field.constants(), Some(field.map_view()));
             let bounds = k.bound_margins(&grid);
             let mut rng = 0x2545_F491_4F6C_DD1Du64;
             let mut next = || {
@@ -2569,7 +2737,8 @@ mod tests {
                 let i = (next() % cells) as i32;
                 let j = (next() % cells) as i32;
                 let coarse = height(
-                    &k,
+                    k,
+                    maps,
                     grid.domain_point(face, i, j, level),
                     level + grid.level_offset(),
                 );
@@ -2577,7 +2746,8 @@ mod tests {
                 let fi = (i << level) + (next() % (1u64 << level)) as i32;
                 let fj = (j << level) + (next() % (1u64 << level)) as i32;
                 let canonical = i64::from(height(
-                    &k,
+                    k,
+                    maps,
                     grid.domain_point(face, fi, fj, 0),
                     grid.level_offset(),
                 ));
@@ -2595,7 +2765,8 @@ mod tests {
     #[test]
     fn height_range_is_planetary_and_levels_agree_on_large_scale() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = earth(&grid);
+        let field = earth(&grid);
+        let (k, maps) = (field.constants(), Some(field.map_view()));
         let (range_lo, range_hi) = k.height_range();
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
@@ -2605,8 +2776,8 @@ mod tests {
             let i = (s * 7919 % 400) * (n / 400);
             let j = (s * 104_729 % 400) * (n / 400);
             let p = grid.domain_point((s % 6) as u8, i, j, 0);
-            let h0 = height(&k, p, offset);
-            let h12 = height(&k, p, 12 + offset);
+            let h0 = height(k, maps, p, offset);
+            let h12 = height(k, maps, p, 12 + offset);
             lo = lo.min(h0);
             hi = hi.max(h0);
             // Band limiting only removes octaves shorter than the level.
@@ -2632,7 +2803,8 @@ mod tests {
     #[test]
     fn the_field_has_no_steps_between_neighbouring_columns() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = earth(&grid);
+        let field = earth(&grid);
+        let (k, maps) = (field.constants(), Some(field.map_view()));
         let n = grid.cells() as u64;
         let mut rng = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
@@ -2650,7 +2822,8 @@ mod tests {
             for d in [(1, 0), (0, 1)] {
                 let h = |t: i32| {
                     height(
-                        &k,
+                        k,
+                        maps,
                         grid.domain_point(face, i + d.0 * t, j + d.1 * t, 0),
                         offset,
                     )

@@ -6,6 +6,8 @@
 //!   built-in one (ordered layer stacks, interpreted by [`landform`]).
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
+//! * [`planet_maps`] — what the terrain knows of its planet as a whole:
+//!   drainage, rivers, lakes and climate, baked once per world.
 //! * [`features`] — procedural content (trees, rocks, buildings) generated
 //!   like the terrain (docs/features.md), from [`stamp`] models; [`flora`]
 //!   grows natural ones (trees, shrubs, boulders, craters), and a
@@ -31,6 +33,7 @@ pub mod layers;
 pub mod meadow;
 pub mod noise;
 pub mod planet;
+pub mod planet_maps;
 pub mod queries;
 pub mod record;
 mod ridge_envelope;

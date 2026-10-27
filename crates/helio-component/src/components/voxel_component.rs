@@ -660,6 +660,12 @@ pub enum VoxelLayerKind {
     /// before it step into terraces Height tall, joined by cliffs over the
     /// last Ratio of each step.
     Cliffs,
+    /// Rivers and lakes from the planet's drainage: valleys cut into the
+    /// layers before it, from sources draining Region size squared of wet
+    /// land to the sea. At a source the valley sinks Height, its
+    /// floodplain is Scale wide with a channel Ratio 2 of it, Base deep;
+    /// walls slope Ratio, shoulders rounded over Ratio 3 metres.
+    Rivers,
 }
 
 /// Where a terrain layer applies.
@@ -708,6 +714,28 @@ pub enum VoxelMaterialStyle {
     Rules,
 }
 
+/// Where a material rule holds on river beds
+/// (`helio_pass_voxel_planet::layers::RiverBed`).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
+pub enum VoxelRiverBed {
+    #[default]
+    Any,
+    /// Only in rivers' channels.
+    Only,
+    /// Never in them.
+    Never,
+}
+
 /// One material rule: the material of a ground cell where every condition
 /// holds (ranges are inclusive). Rules are tried in order.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -730,11 +758,19 @@ pub struct VoxelMaterialRule {
     pub min_depth_m: f64,
     #[property(min = 0.0, max = 1000000.0, step = 0.1, label = "Max depth (m)")]
     pub max_depth_m: f64,
-    /// Moisture, 0 (dry) to 1 (wet).
+    /// Moisture, 0 (dry) to 1 (wet): the climate's.
     #[property(min = 0.0, max = 1.0, step = 0.01)]
     pub min_moisture: f64,
     #[property(min = 0.0, max = 1.0, step = 0.01)]
     pub max_moisture: f64,
+    /// Annual mean temperature at the cell (the climate's, cooler higher).
+    #[property(min = -1000.0, max = 1000.0, step = 0.5, label = "Min temperature (C)")]
+    pub min_temperature_c: f64,
+    #[property(min = -1000.0, max = 1000.0, step = 0.5, label = "Max temperature (C)")]
+    pub max_temperature_c: f64,
+    /// Where river beds count.
+    #[property(label = "River beds")]
+    pub river_bed: VoxelRiverBed,
     /// Erosion, -1 (gully floors) to 1 (the ribs between gullies).
     #[property(min = -1.0, max = 1.0, step = 0.05)]
     pub min_erosion: f64,
@@ -767,6 +803,9 @@ impl Default for VoxelMaterialRule {
             max_depth_m: 1.0e6,
             min_moisture: 0.0,
             max_moisture: 1.0,
+            min_temperature_c: -1.0e3,
+            max_temperature_c: 1.0e3,
+            river_bed: VoxelRiverBed::Any,
             min_erosion: -1.0,
             max_erosion: 1.0,
             patch_km: 0.0,
@@ -1032,6 +1071,81 @@ impl Default for VoxelCaves {
     }
 }
 
+/// A world's climate (`helio_pass_voxel_planet::layers::Climate`):
+/// temperature from latitude and height, moisture from the rain belts, the
+/// way to the sea and rain shadows; baked over the whole planet with Maps,
+/// else Latitude's everywhere.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[category("Climate", category_color = "#5E9EA8")]
+#[derive(pulsar_reflection::Reflectable)]
+#[serde(default)]
+pub struct VoxelClimate {
+    /// Bake planet maps: climate over the whole planet, and the drainage a
+    /// Rivers layer carves.
+    #[property(category = "Climate", label = "Maps")]
+    pub maps: bool,
+    /// The planet's axis (world direction): latitudes run around it.
+    #[property(category = "Climate")]
+    pub pole: [f32; 3],
+    /// Latitude of a flat world's origin (north is -Z), and of an unmapped
+    /// world's climate.
+    #[property(min = -90.0, max = 90.0, step = 1.0, category = "Climate", label = "Latitude (deg)")]
+    pub latitude_deg: f64,
+    /// Annual mean temperatures at sea level.
+    #[property(min = -100.0, max = 100.0, step = 0.5, category = "Climate", label = "Equator (C)")]
+    pub equator_c: f64,
+    #[property(min = -100.0, max = 100.0, step = 0.5, category = "Climate", label = "Poles (C)")]
+    pub pole_c: f64,
+    /// Cooling with height.
+    #[property(min = 0.0, max = 20.0, step = 0.1, category = "Climate", label = "Lapse rate (C/km)")]
+    pub lapse_c_per_km: f64,
+    /// Ground colder than this keeps its snow.
+    #[property(min = -50.0, max = 50.0, step = 0.5, category = "Climate", label = "Snow (C)")]
+    pub snow_c: f64,
+    /// Scale of the rain (1: Earth's); an unmapped world's moisture is its
+    /// latitude's rain belt times it.
+    #[property(min = 0.0, max = 4.0, step = 0.05, category = "Climate")]
+    pub wetness: f64,
+    /// How far inland, upwind, the rain halves.
+    #[property(min = 1.0, max = 20000.0, step = 10.0, category = "Climate", label = "Continentality (km)")]
+    pub continentality_km: f64,
+    /// Height of ground upwind that halves the rain behind it.
+    #[property(min = 1.0, max = 20000.0, step = 10.0, category = "Climate", label = "Rain shadow (m)")]
+    pub rain_shadow_m: f64,
+    /// Ground under the datum is sea.
+    #[property(category = "Climate")]
+    pub ocean: bool,
+    /// Size of the maps' texels at face centres.
+    #[property(min = 0.1, max = 1000.0, step = 1.0, category = "Climate", label = "Map texel (km)")]
+    pub texel_km: f64,
+}
+
+impl VoxelClimate {
+    /// The generator's climate as the component holds it.
+    fn from_generator(climate: helio_pass_voxel_planet::layers::Climate) -> Self {
+        serde_json::to_value(climate)
+            .and_then(serde_json::from_value)
+            .expect("climate settings mirror the generator's")
+    }
+    /// Earth's: warm tropics, frozen poles, oceans, rain belts.
+    pub fn earth() -> Self {
+        Self::from_generator(helio_pass_voxel_planet::layers::Climate::earth())
+    }
+    /// `latitude_deg`'s climate everywhere, unbaked.
+    pub fn uniform(latitude_deg: f64, wetness: f64) -> Self {
+        Self::from_generator(helio_pass_voxel_planet::layers::Climate::uniform(
+            latitude_deg,
+            wetness,
+        ))
+    }
+}
+
+impl Default for VoxelClimate {
+    fn default() -> Self {
+        Self::earth()
+    }
+}
+
 /// Generated overhangs: steep ground leaning over, a continuous
 /// deformation of the heightfield (no floating rock).
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -1104,9 +1218,10 @@ pub struct VoxelTerrainStack {
     pub overhangs: VoxelOverhangs,
     #[property(label = "Material style")]
     pub materials: VoxelMaterialStyle,
-    /// Earthlike: flat ground above this height is snow.
-    #[property(min = -10000.0, max = 100000.0, step = 10.0, label = "Snowline (m)")]
-    pub snowline_m: f64,
+    /// Temperature and moisture: the Earthlike snow and dry lands, rules'
+    /// and features' climate ranges, and the maps rivers come from.
+    #[property]
+    pub climate: VoxelClimate,
     /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
     #[property(min = 0.0, max = 1000.0, step = 0.1, label = "Soil depth (m)")]
     pub soil_depth_m: f64,
@@ -1219,7 +1334,8 @@ impl VoxelTerrainStack {
     }
 
     /// Continents and oceans, ridged mountains with branching erosion,
-    /// hills and roughness; caves, overhangs, meadows, rock and snow.
+    /// hills, river valleys and lakes, and roughness; caves, overhangs;
+    /// Earth's climate over meadows, dry lands, rock and snow.
     pub fn earth() -> Self {
         use VoxelLayerKind::*;
         Self {
@@ -1232,6 +1348,7 @@ impl VoxelTerrainStack {
                 },
                 VoxelTerrainLayer::new(Erosion),
                 Self::earth_hills(),
+                VoxelTerrainLayer::new(Rivers),
                 VoxelTerrainLayer {
                     mask: VoxelLayerMask::AboveDeepSea,
                     ..VoxelTerrainLayer::new(Roughness)
@@ -1240,7 +1357,7 @@ impl VoxelTerrainStack {
             caves: VoxelCaves::default(),
             overhangs: VoxelOverhangs::default(),
             materials: VoxelMaterialStyle::Earthlike,
-            snowline_m: 3_000.0,
+            climate: VoxelClimate::earth(),
             soil_depth_m: 0.7,
             surface: VoxelTerrainMaterial::Grass,
             soil: VoxelTerrainMaterial::Dirt,
@@ -1265,9 +1382,9 @@ impl VoxelTerrainStack {
     pub fn desert() -> Self {
         use VoxelTerrainMaterial as M;
         let mut earth = Self::earth();
-        earth
-            .layers
-            .retain(|l| l.kind != VoxelLayerKind::Continents);
+        earth.layers.retain(|l| {
+            l.kind != VoxelLayerKind::Continents && l.kind != VoxelLayerKind::Rivers
+        });
         // The desert's hills stay gentle under its dunes.
         for l in earth
             .layers
@@ -1316,7 +1433,7 @@ impl VoxelTerrainStack {
                 },
             ],
             rock: M::Sandstone,
-            snowline_m: 1.0e5,
+            climate: VoxelClimate::uniform(25.0, 0.2),
             ..earth
         }
     }
@@ -1358,6 +1475,7 @@ impl VoxelTerrainStack {
                 ..VoxelOverhangs::default()
             },
             materials: VoxelMaterialStyle::Lunar,
+            climate: VoxelClimate::uniform(0.0, 0.0),
             soil_depth_m: 4.0,
             ..Self::earth()
         }
@@ -1379,6 +1497,7 @@ impl VoxelTerrainStack {
                 ..VoxelOverhangs::default()
             },
             materials: VoxelMaterialStyle::Layered,
+            climate: VoxelClimate::uniform(45.0, 1.0),
             soil_depth_m: 1.0,
             ..Self::earth()
         }

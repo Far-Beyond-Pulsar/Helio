@@ -1774,6 +1774,8 @@ pub struct ChunkWorld {
     debug_pixel: Option<[u32; 2]>,
     world: wgpu::Buffer,
     terrain: wgpu::Buffer,
+    /// The terrain program's tables (`terrain_tables`: its planet maps).
+    terrain_tables: wgpu::Buffer,
     tile_jobs: wgpu::Buffer,
     tile_data: wgpu::Buffer,
     // The batch's tiles' two-rate nodes (`engine::TILE_NODES`^2 a tile).
@@ -2629,6 +2631,7 @@ impl ChunkWorld {
             let mut bytes =
                 format!("chunk packs {KEPT_FORMAT} {DETAIL_LEVELS} {}", gen_source).into_bytes();
             bytes.extend_from_slice(&terrain_bytes(&program));
+            bytes.extend_from_slice(bytemuck::cast_slice(&program.tables));
             bytes.extend_from_slice(bytemuck::bytes_of(&WorldGpu::new(planet)));
             crate::record::fnv64(&bytes)
         };
@@ -2678,6 +2681,7 @@ impl ChunkWorld {
                 storage(37, false, c),
                 storage(38, false, c),
                 storage(39, false, c),
+                storage(40, true, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3602,6 +3606,7 @@ impl ChunkWorld {
             debug_pixel: None,
             world,
             terrain,
+            terrain_tables: crate::engine::tables_buffer(device, &program),
             tile_jobs: buffer(
                 "chunk tile jobs",
                 (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64,
@@ -4007,6 +4012,7 @@ impl ChunkWorld {
             entries: &[
                 entry(1, &self.world),
                 entry(16, &self.terrain),
+                entry(40, &self.terrain_tables),
                 entry(2, &self.tile_jobs),
                 entry(3, &self.tile_data),
                 entry(25, &self.tile_node_data),

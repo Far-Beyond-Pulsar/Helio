@@ -5,15 +5,18 @@ struct LandformOctave { shift: u32, amplitude: i32, seed: u32, kind: u32 } // ki
 struct StackLayer { kind: u32, mask: u32, a: i32, b: i32 }
 // `landform::PackedRule`: material, speck share, patch shift and threshold;
 // height and slope ranges; depth and moisture ranges; erosion range, band
-// period and parity.
-struct MaterialRule { head: vec4<i32>, height_slope: vec4<i32>, depth_moisture: vec4<i32>, surface_bands: vec4<i32> }
+// period and parity; temperature range and river beds (0 any, 1 only, 2
+// never).
+struct MaterialRule { head: vec4<i32>, height_slope: vec4<i32>, depth_moisture: vec4<i32>, surface_bands: vec4<i32>, climate: vec4<i32> }
 struct TerrainConstants {
     header: vec4<i32>, // octave count, layer mm, soil depth (cells), seed
-    levels: vec4<i32>, // moisture shift, continents layer + 1, snowline, low-basin height (mm)
+    levels: vec4<i32>, // pad, continents layer + 1, pad, low-basin height (mm)
     shape: vec4<i32>,  // ridge display layer + 1, steep slope (cells), ridge display flag, plane (+Y up)
     style: vec4<i32>,  // material style, Layered surface / soil / rock ids
     stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
     materials: vec4<i32>, // rules style: rule count, fallback material; coarsest erosion octave's shift (-1: none)
+    // Planet maps (`planet_maps::MAP_HEADER`): lookups and the climate.
+    maps: array<vec4<i32>, 4>,
     layers: array<StackLayer, 8>,
     octaves: array<LandformOctave, 64>,
     rules: array<MaterialRule, 16>,
@@ -46,6 +49,9 @@ const LAYER_CRATERS: u32 = 7u;
 const LAYER_BASINS: u32 = 8u;
 const LAYER_PLATEAU: u32 = 9u;
 const LAYER_CLIFFS: u32 = 10u;
+const LAYER_RIVERS: u32 = 11u;
+// Surface word of a river's channel (`landform::RIVER_BED`).
+const RIVER_BED: u32 = 0x80u;
 
 // `landform::terrace`: terraces of `step` height units, rising over the last
 // `riser_q10` / 1024 of each step.
@@ -916,9 +922,17 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     let lw = landform_land(c);
     var h = 0;
     var basin = 0;
+    var river_bed = false;
     for (var l = 0u; l < landform_layer_count(); l++) {
         let layer = terrain.layers[l];
         var x = 0;
+        if layer.kind == LAYER_RIVERS {
+            // Valleys and channels along the river segments (`map_carve`).
+            let carved = map_carve(p, level, h);
+            h = carved.x;
+            river_bed = river_bed || carved.y != 0;
+            continue;
+        }
         if layer.kind == LAYER_CONTINENTS {
             x = landform_base(c, layer.a, layer.b);
         } else if layer.kind == LAYER_MOUNTAINS {
@@ -944,7 +958,9 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
         h += landform_masked(layer.mask, x, lw);
     }
     var surface = 0;
-    if terrain.style.x == 0 || terrain.style.x == 3 {
+    if (terrain.style.x == 0 || terrain.style.x == 3) && river_bed {
+        surface = i32(RIVER_BED);
+    } else if terrain.style.x == 0 || terrain.style.x == 3 {
         surface = clamp(eroded * 127 / max(terrain.stack.y, 1), -127, 127) & 0xff;
     } else if terrain.style.x == 1 {
         surface = (ejecta >> 1u) | (select(0, 1, basin >= FINE_ONE / 2) << 7u);
@@ -972,9 +988,17 @@ fn terrain_column_nodes(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     return landform_column(p, level, display && terrain.shape.z != 0);
 }
 
-fn landform_moisture(p: vec3<i32>) -> i32 {
-    return (noise_fine(p, u32(max(terrain.levels.x, 1)), bitcast<u32>(terrain.header.w) ^ 0x51ED270Bu) + FINE_ONE) / 2;
+// Snowline (mm) where the sea-level temperature is `t0` (`landform::snowline`).
+fn landform_snowline(t0: i32) -> i32 {
+    let snow = terrain.maps[3].x;
+    let per = terrain.maps[3].y;
+    if per == 0 { return select(-1073741824, 1073741823, t0 > snow); }
+    return clamp(t0 - snow, -8192, 8192) * per;
 }
+
+// The Earthlike snowline's spread by moisture and its rock band (`landform::SNOW_*`).
+const SNOW_WET: i32 = 750000;
+const SNOW_BAND: i32 = 500000;
 
 // Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts through
 // them never show flat rings (`strata` in landform.rs).
@@ -1219,13 +1243,17 @@ fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slop
 // height, slope and erosion tests pass (bit by rule; 0 in other styles).
 fn ground_rules(surface: u32, top_height: i32, slope: i32) -> u32 {
     if terrain.style.x != 3 { return 0u; }
-    let erosion = i32(surface << 24u) >> 24u;
+    // A river bed counts as the deepest gully.
+    let river = surface == RIVER_BED;
+    let erosion = max(i32(surface << 24u) >> 24u, -127);
     let count = min(u32(max(terrain.materials.x, 0)), 16u);
     var rules = 0u;
     for (var index = 0u; index < count; index++) {
         let height_slope = terrain.rules[index].height_slope;
         let bands = terrain.rules[index].surface_bands.xy;
         if top_height < height_slope.x || top_height > height_slope.y || slope < height_slope.z || slope > height_slope.w || erosion < bands.x || erosion > bands.y { continue; }
+        let mode = terrain.rules[index].climate.z;
+        if (mode == 1 && !river) || (mode == 2 && river) { continue; }
         rules |= 1u << index;
     }
     return rules;
@@ -1253,21 +1281,23 @@ fn column_ground_material(rules: u32, p: vec3<i32>, surface: u32, top_height: i3
 fn rules_material(rules: u32, p: vec3<i32>, depth: i32, layer: i32) -> u32 {
     let altitude = layer * terrain.header.y;
     let seed = bitcast<u32>(terrain.header.w);
-    // The moisture noise once a rule reaches it (most fail on depth
-    // first); each rule's words as its tests read them.
-    var wet = 0;
-    var wet_known = false;
+    // The climate once a rule reaches it (most fail on depth first); each
+    // rule's words as its tests read them.
+    var climate = vec2<i32>(0);
+    var climate_known = false;
     var left = rules;
     while left != 0u {
         let index = firstTrailingBit(left);
         left &= left - 1u;
         let depth_moisture = terrain.rules[index].depth_moisture;
         if depth < depth_moisture.x || depth > depth_moisture.y { continue; }
-        if !wet_known {
-            wet = landform_moisture(p) >> 8u;
-            wet_known = true;
+        if !climate_known {
+            climate = terrain_climate(p, altitude);
+            climate_known = true;
         }
-        if wet < depth_moisture.z || wet > depth_moisture.w { continue; }
+        if climate.y < depth_moisture.z || climate.y > depth_moisture.w { continue; }
+        let temperature = terrain.rules[index].climate.xy;
+        if climate.x < temperature.x || climate.x > temperature.y { continue; }
         let bands = terrain.rules[index].surface_bands;
         let salt = index * 0x9E3779B9u;
         if bands.z > 0 && (div_floor(landform_strata(p, altitude), bands.z) & 1) != bands.w { continue; }
@@ -1300,10 +1330,16 @@ fn lunar_material(p: vec3<i32>, surface: u32, depth: i32, slope: i32, layer: i32
 fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
-    let wet = landform_moisture(p);
+    let climate = terrain_climate(p, 0);
+    let wet = climate.y << 8u;
     // Hash every domain axis: on a face one of them is nearly constant.
     let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
     let altitude = layer * terrain.header.y;
+    if surface == RIVER_BED && depth < dirt * 2 {
+        // River beds: gravel and sand over silt (`earthlike_material`).
+        if depth == 0 && (h & 3u) == 0u { return M_SAND; }
+        return select(M_CLAY, M_GRAVEL, depth < dirt);
+    }
     if top_height < terrain.levels.w {
         // Low basins: meadow with mud patches of a few metres (position
         // noise, never aligned with height contours) over silt, gravel and
@@ -1317,12 +1353,13 @@ fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, s
         }
         return M_STONE;
     }
-    // A wandering snowline over a narrow rock band (`earthlike_material`).
-    let wander = scale_q16(noise(p, 17u, bitcast<u32>(terrain.header.w) ^ 0x3C6EF372u), terrain.levels.z / 6);
-    let snowline = terrain.levels.z + mul_fine(terrain.levels.z / 4, wet - FINE_ONE / 2) + wander;
+    // A wandering snowline (the climate's) over a narrow rock band
+    // (`earthlike_material`).
+    let wander = scale_q16(noise(p, 17u, bitcast<u32>(terrain.header.w) ^ 0x3C6EF372u), SNOW_BAND);
+    let snowline = landform_snowline(climate.x) + mul_fine(SNOW_WET, wet - FINE_ONE / 2) + wander;
     // Alpine weight: 0 below the rockline, NOISE_ONE at the snowline.
-    let rockline = snowline - terrain.levels.z / 6;
-    let band = max(snowline - rockline, 256);
+    let rockline = snowline - SNOW_BAND;
+    let band = SNOW_BAND;
     let alpine = (clamp(top_height - rockline, 0, band) / 256) * NOISE_ONE / (band / 256);
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
     // Noise is clamped to +-NOISE_ONE, so below the rockline on gentler slopes no

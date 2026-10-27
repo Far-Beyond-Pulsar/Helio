@@ -10,6 +10,10 @@
 //! on CPU and GPU (`landform.rs`, `landform.wgsl`): changing layers never
 //! recompiles shaders, and erosion octaves see the slope of everything
 //! coarser than themselves, in any layer, at every level.
+//!
+//! A stack's [`Climate`] and its `Rivers` layers bake the world's planet
+//! maps ([`crate::planet_maps`]): drainage, rivers and lakes carved into
+//! the terrain, temperature and moisture the materials and features read.
 use crate::grid::{Grid, DOMAIN_UNIT};
 use crate::landform::{
     noise_quantile, LandformConstants, LandformField, LandformVolume, Octave, PackedRule,
@@ -62,6 +66,15 @@ pub enum LayerKind {
     /// layers before it step into terraces `height_m` tall, flat treads
     /// joined by cliffs over the last `ratio` of each step (0.1: sheer).
     Cliffs,
+    /// Rivers and lakes from the planet's drainage (its maps): valleys cut
+    /// into the layers before it along every river, from a source draining
+    /// `region_km` x `region_km` of wet land to the sea. At a source the
+    /// valley sinks `height_m` under the filled terrain, its floodplain is
+    /// `scale_km` wide with a channel `ratio2` of it, `base_m` deep; the
+    /// floodplain and channel grow with the square root of the discharge,
+    /// incision and depth with its fourth root. The valley walls slope
+    /// `ratio` (rise over run), their shoulders rounded over `ratio3` m.
+    Rivers,
 }
 
 /// Tallest cliff step (m): terraces are evaluated in 32-bit integers.
@@ -200,6 +213,16 @@ impl Layer {
                 ratio: 0.12,
                 ..base
             },
+            Rivers => Self {
+                height_m: 30.0,
+                base_m: 2.0,
+                scale_km: 0.25,
+                region_km: 50.0,
+                ratio: 0.3,
+                ratio2: 0.12,
+                ratio3: 6.0,
+                ..base
+            },
         }
     }
 }
@@ -207,7 +230,8 @@ impl Layer {
 /// How surface and buried cells get their materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialStyle {
-    /// Meadows, dry lands, rock outcrops, strata and snow above `snowline_m`;
+    /// Meadows, dry lands (by the climate's moisture), rock outcrops,
+    /// strata and snow above the climate's snowline;
     /// gravel in erosion gullies.
     #[default]
     Earthlike,
@@ -237,9 +261,15 @@ pub struct MaterialRule {
     /// Depth below the column top (m); 0 is the exposed surface.
     pub min_depth_m: f64,
     pub max_depth_m: f64,
-    /// Moisture, 0 (dry) to 1 (wet), varying over the continents' scale.
+    /// Moisture, 0 (dry) to 1 (wet): the climate's ([`Climate`]).
     pub min_moisture: f64,
     pub max_moisture: f64,
+    /// Annual mean temperature at the cell (°C): the climate's, falling
+    /// with height.
+    pub min_temperature_c: f64,
+    pub max_temperature_c: f64,
+    /// Where river beds (the channels of a `Rivers` layer) count.
+    pub river_bed: RiverBed,
     /// Erosion, -1 (gully floors) to 1 (the ribs between gullies).
     pub min_erosion: f64,
     pub max_erosion: f64,
@@ -265,6 +295,9 @@ impl Default for MaterialRule {
             max_depth_m: 1.0e6,
             min_moisture: 0.0,
             max_moisture: 1.0,
+            min_temperature_c: -1.0e3,
+            max_temperature_c: 1.0e3,
+            river_bed: RiverBed::Any,
             min_erosion: -1.0,
             max_erosion: 1.0,
             patch_km: 0.0,
@@ -295,6 +328,8 @@ impl MaterialRule {
             self.max_depth_m,
             self.min_moisture,
             self.max_moisture,
+            self.min_temperature_c,
+            self.max_temperature_c,
             self.min_erosion,
             self.max_erosion,
             self.patch_km,
@@ -322,6 +357,9 @@ impl MaterialRule {
         let cells = |m: f64| (m / grid.voxel_size()).clamp(-1.0e9, 1.0e9).round() as i32;
         let q16 = |v: f64| (v.clamp(0.0, 1.0) * 65_536.0).round() as i32;
         let byte = |v: f64| (v.clamp(-1.0, 1.0) * 127.0).round() as i32;
+        let degrees = |c: f64| {
+            (c * f64::from(crate::planet_maps::DEGREE)).clamp(-2.0e9, 2.0e9).round() as i32
+        };
         let patch = if self.patch_km > 0.0 {
             let shift = ((self.patch_km * 1_000.0 / DOMAIN_UNIT)
                 .log2()
@@ -365,7 +403,140 @@ impl MaterialRule {
                 mm(self.band_m).max(0),
                 i32::from(self.odd_bands),
             ],
+            climate: [
+                degrees(self.min_temperature_c),
+                degrees(self.max_temperature_c),
+                match self.river_bed {
+                    RiverBed::Any => 0,
+                    RiverBed::Only => 1,
+                    RiverBed::Never => 2,
+                },
+                0,
+            ],
         }
+    }
+}
+
+/// Where a [`MaterialRule`] holds on river beds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RiverBed {
+    #[default]
+    Any,
+    /// Only in rivers' channels.
+    Only,
+    /// Never in them.
+    Never,
+}
+
+/// A world's climate: temperature from latitude and height, moisture from
+/// the rain belts, the way to the sea and rain shadows. With `maps` it is
+/// baked over the whole planet ([`crate::planet_maps`]); without, the
+/// climate of `latitude_deg` holds everywhere (heights still cool it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Climate {
+    pub maps: bool,
+    /// The planet's axis (world direction, any length): latitudes run
+    /// around it. Earth's tilts 45 degrees from world up, as its weather
+    /// does, so the top of a planet at the origin lies at mid-latitudes.
+    pub pole: [f64; 3],
+    /// Latitude of a flat world's origin (its north is -Z), and of an
+    /// unmapped world's climate (degrees).
+    pub latitude_deg: f64,
+    /// Annual mean temperatures at sea level (°C).
+    pub equator_c: f64,
+    pub pole_c: f64,
+    /// Cooling with height (°C per km).
+    pub lapse_c_per_km: f64,
+    /// Ground colder than this keeps its snow (°C).
+    pub snow_c: f64,
+    /// Scale of the rain (1: Earth's). An unmapped world's moisture is its
+    /// latitude's rain belt times this.
+    pub wetness: f64,
+    /// How far inland from the sea, upwind, the rain halves (km).
+    pub continentality_km: f64,
+    /// Height of ground upwind that halves the rain behind it (m).
+    pub rain_shadow_m: f64,
+    /// Ground under the datum is sea (rivers end there, coasts are wet).
+    pub ocean: bool,
+    /// Size of the maps' texels at face centres (km).
+    pub texel_km: f64,
+}
+
+impl Default for Climate {
+    fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl Climate {
+    /// Earth's: warm tropics and frozen poles, oceans, rain belts.
+    pub fn earth() -> Self {
+        Self {
+            maps: true,
+            pole: [0.0, std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2],
+            latitude_deg: 45.0,
+            equator_c: 28.0,
+            pole_c: -22.0,
+            lapse_c_per_km: 6.5,
+            snow_c: -3.0,
+            wetness: 1.0,
+            continentality_km: 2_000.0,
+            rain_shadow_m: 2_000.0,
+            ocean: true,
+            texel_km: 25.0,
+        }
+    }
+
+    /// The same everywhere: `latitude_deg`'s climate, unbaked.
+    pub fn uniform(latitude_deg: f64, wetness: f64) -> Self {
+        Self {
+            maps: false,
+            latitude_deg,
+            wetness,
+            ..Self::earth()
+        }
+    }
+
+    fn spec(&self) -> crate::planet_maps::ClimateSpec {
+        crate::planet_maps::ClimateSpec {
+            maps: self.maps,
+            pole: glam::DVec3::from_array(self.pole),
+            latitude_deg: self.latitude_deg,
+            equator_c: self.equator_c,
+            pole_c: self.pole_c,
+            lapse_c_per_km: self.lapse_c_per_km,
+            snow_c: self.snow_c,
+            wetness: self.wetness,
+            continentality_km: self.continentality_km,
+            rain_shadow_m: self.rain_shadow_m,
+            ocean: self.ocean,
+            texel_km: self.texel_km,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let values = [
+            self.latitude_deg,
+            self.equator_c,
+            self.pole_c,
+            self.lapse_c_per_km,
+            self.snow_c,
+            self.wetness,
+            self.continentality_km,
+            self.rain_shadow_m,
+            self.texel_km,
+        ];
+        if values.iter().chain(&self.pole).any(|v| !v.is_finite()) {
+            return Err("climate settings must be finite".into());
+        }
+        if self.lapse_c_per_km < 0.0 || self.wetness < 0.0 || self.texel_km <= 0.0 {
+            return Err("climate lapse rate, wetness and texel size must be positive".into());
+        }
+        if self.maps && self.pole.iter().all(|v| *v == 0.0) {
+            return Err("a mapped climate needs a pole".into());
+        }
+        Ok(())
     }
 }
 
@@ -450,8 +621,9 @@ pub struct TerrainLayers {
     pub caves: Caves,
     pub overhangs: Overhangs,
     pub materials: MaterialStyle,
-    /// Earthlike: flat ground above this height is snow.
-    pub snowline_m: f64,
+    /// Temperature and moisture: the Earthlike snow and dry lands, rules'
+    /// and features' climate ranges.
+    pub climate: Climate,
     /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
     pub soil_depth_m: f64,
     /// Layered: material names (see [`material::NAMES`]); `rock` is also
@@ -471,8 +643,9 @@ impl Default for TerrainLayers {
 
 impl TerrainLayers {
     /// Continents and ocean basins, ridged mountain ranges with branching
-    /// erosion gullies, hills and metre-scale roughness; caves, overhangs,
-    /// meadows, dry lands, rock, strata and snow.
+    /// erosion gullies, hills, river valleys and lakes from the planet's
+    /// drainage, and metre-scale roughness; caves, overhangs; Earth's
+    /// climate over meadows, dry lands, rock, strata and snow.
     pub fn earth() -> Self {
         use LayerKind::*;
         Self {
@@ -485,6 +658,7 @@ impl TerrainLayers {
                 },
                 Layer::new(Erosion),
                 Self::earth_hills(),
+                Layer::new(Rivers),
                 Layer {
                     mask: LayerMask::AboveDeepSea,
                     ..Layer::new(Roughness)
@@ -493,7 +667,7 @@ impl TerrainLayers {
             caves: Caves::default(),
             overhangs: Overhangs::default(),
             materials: MaterialStyle::Earthlike,
-            snowline_m: 3_000.0,
+            climate: Climate::earth(),
             soil_depth_m: 0.7,
             surface: "Grass".into(),
             soil: "Dirt".into(),
@@ -516,11 +690,14 @@ impl TerrainLayers {
 
     /// A dry world of dunes and mesas, with materials from rules: dune sand
     /// on gentle ground, sandstone and clay strata on slopes, gravel in the
-    /// gullies, scattered stone patches and dark stone specks.
+    /// gullies, scattered stone patches and dark stone specks; a dry
+    /// subtropical climate everywhere.
     pub fn desert() -> Self {
         use LayerKind::*;
         let mut earth = Self::earth();
-        earth.layers.retain(|l| l.kind != Continents);
+        earth
+            .layers
+            .retain(|l| l.kind != Continents && l.kind != Rivers);
         // The desert's hills stay gentle under its dunes.
         for l in earth.layers.iter_mut().filter(|l| l.kind == Hills) {
             *l = Layer {
@@ -563,7 +740,7 @@ impl TerrainLayers {
                 }),
             ],
             rock: "Sandstone".into(),
-            snowline_m: 1.0e5,
+            climate: Climate::uniform(25.0, 0.2),
             ..earth
         }
     }
@@ -610,6 +787,7 @@ impl TerrainLayers {
                 ..Overhangs::default()
             },
             materials: MaterialStyle::Lunar,
+            climate: Climate::uniform(0.0, 0.0),
             soil_depth_m: 4.0,
             ..Self::earth()
         }
@@ -637,6 +815,7 @@ impl TerrainLayers {
                 ..Overhangs::default()
             },
             materials: MaterialStyle::Layered,
+            climate: Climate::uniform(45.0, 1.0),
             soil_depth_m: 1.0,
             ..Self::earth()
         }
@@ -694,7 +873,13 @@ impl TerrainLayers {
                 ));
             }
         }
-        for kind in [LayerKind::Warp, LayerKind::Continents] {
+        if enabled
+            .iter()
+            .any(|l| l.kind == LayerKind::Rivers && l.mask != LayerMask::Everywhere)
+        {
+            return Err("a Rivers layer is not masked: rivers carve land and end at the sea".into());
+        }
+        for kind in [LayerKind::Warp, LayerKind::Continents, LayerKind::Rivers] {
             if enabled.iter().filter(|l| l.kind == kind).count() > 1 {
                 return Err(format!("a terrain has at most one {kind:?} layer"));
             }
@@ -729,10 +914,10 @@ impl TerrainLayers {
         {
             return Err("cave and overhang wavelengths must be positive".into());
         }
-        if !self.snowline_m.is_finite() || !self.soil_depth_m.is_finite() || self.soil_depth_m < 0.0
-        {
-            return Err("snowline and soil depth must be finite (soil depth non-negative)".into());
+        if !self.soil_depth_m.is_finite() || self.soil_depth_m < 0.0 {
+            return Err("soil depth must be finite and non-negative".into());
         }
+        self.climate.validate()?;
         for name in [&self.surface, &self.soil, &self.rock] {
             if material::from_name(name).is_none() {
                 return Err(format!("unknown material {name:?}"));
@@ -958,6 +1143,10 @@ impl TerrainLayers {
                         kind: tag | BASIN,
                     });
                 }
+                LayerKind::Rivers => {
+                    // Its bounds come with the maps (`LandformField::new`).
+                    layer.kind = StackLayer::RIVERS;
+                }
                 LayerKind::Plateau => {
                     layer.kind = StackLayer::PLATEAU;
                     layer.a = units(l.height_m).div_euclid(grid.layer_mm() as i32)
@@ -982,13 +1171,6 @@ impl TerrainLayers {
         table[WARP_OCTAVES..WARP_OCTAVES + octaves.len()].copy_from_slice(&octaves);
         let soil = ((self.soil_depth_m / grid.voxel_size()).round() as i32).max(1);
         let id = |name: &str| material::from_name(name).unwrap_or(material::STONE) as i32;
-        // Moisture follows the continents' scale (or 3000 km without them).
-        let moisture = self
-            .layers
-            .iter()
-            .find(|l| l.enabled && l.kind == LayerKind::Continents)
-            .map_or(3_000.0, |l| l.scale_km)
-            * 1_000.0;
         let style = match self.materials {
             MaterialStyle::Earthlike => STYLE_EARTHLIKE,
             MaterialStyle::Lunar => STYLE_LUNAR,
@@ -1006,12 +1188,7 @@ impl TerrainLayers {
                 soil,
                 seed as i32,
             ],
-            levels: [
-                shift(moisture / 2.0) as i32,
-                continents,
-                units(self.snowline_m),
-                units(-8.0),
-            ],
+            levels: [0, continents, 0, units(-8.0)],
             shape: [display, 16, 0, i32::from(grid.is_plane())],
             style: [style, id(&self.surface), id(&self.soil), id(&self.rock)],
             stack: [
@@ -1031,6 +1208,7 @@ impl TerrainLayers {
                     .unwrap_or(-1),
                 0,
             ],
+            maps: crate::planet_maps::climate_header(&self.climate.spec()),
             layers,
             octaves: table,
             rules,
@@ -1043,10 +1221,37 @@ impl TerrainLayers {
 }
 
 impl TerrainLayers {
-    /// The compiled field on `grid`.
+    /// What the stack's planet maps are made of (`None`: it bakes none).
+    pub fn map_spec(&self, seed: u32) -> Option<crate::planet_maps::MapSpec> {
+        let rivers = self
+            .layers
+            .iter()
+            .find(|l| l.enabled && l.kind == LayerKind::Rivers)
+            .map(|l| crate::planet_maps::RiverSpec {
+                source_km2: l.region_km * l.region_km,
+                incision_m: l.height_m.max(0.0),
+                floodplain_m: l.scale_km.max(0.0) * 1_000.0,
+                channel_ratio: l.ratio2.clamp(0.0, 1.0),
+                depth_m: l.base_m.max(0.0),
+                wall: l.ratio,
+                rounding_m: l.ratio3,
+            });
+        let spec = crate::planet_maps::MapSpec {
+            climate: self.climate.spec(),
+            rivers,
+            seed,
+        };
+        spec.baked().then_some(spec)
+    }
+
+    /// The compiled field on `grid`, with its planet maps (baked once per
+    /// process and world).
     pub fn field(&self, grid: &Grid, seed: u32) -> Result<LandformField, String> {
         let (constants, volume) = self.compile(grid, seed)?;
-        Ok(LandformField::new(grid, constants, volume))
+        let maps = self
+            .map_spec(seed)
+            .map(|spec| crate::planet_maps::maps(&spec, &constants, grid));
+        Ok(LandformField::new(grid, constants, volume, maps))
     }
 
     /// A world terrain source using this stack.
@@ -1372,6 +1577,10 @@ mod tests {
         use crate::landform::ground_material;
         let grid = Grid::new(1_000_000.0, 0.1).unwrap();
         let (k, _) = TerrainLayers::desert().compile(&grid, 7).unwrap();
+        let maps = crate::planet_maps::MapView {
+            header: &k.maps,
+            tables: &[],
+        };
         let gully = (-100i32 as u32) & 0xff;
         let id = |m: u32| m & material::ID;
         let mut seen = std::collections::BTreeMap::new();
@@ -1379,16 +1588,16 @@ mod tests {
             let p = grid.domain_point(2, 1_000 + n * 977, 2_000 + n * 131, 0);
             // A gully floor on a slope: gravel, the first rule.
             assert_eq!(
-                ground_material(&k, p, gully, 500_000, 0, 4, 5_000),
+                ground_material(&k, maps, p, gully, 500_000, 0, 4, 5_000),
                 material::GRAVEL
             );
             // Gentle ground near the surface: sand.
             assert_eq!(
-                ground_material(&k, p, 0, 500_000, 3, 2, 5_000),
+                ground_material(&k, maps, p, 0, 500_000, 3, 2, 5_000),
                 material::SAND
             );
             // Deeper: stone patches, clay bands or the sandstone fallback.
-            let deep = id(ground_material(&k, p, 0, 500_000, 40, 2, 4_960 + n % 40));
+            let deep = id(ground_material(&k, maps, p, 0, 500_000, 40, 2, 4_960 + n % 40));
             assert!(
                 [material::STONE, material::CLAY, material::SANDSTONE].contains(&deep),
                 "{deep}"
@@ -1396,7 +1605,7 @@ mod tests {
             *seen.entry(deep).or_insert(0) += 1;
             // Steep exposed ground: dark stone specks among the others.
             *seen
-                .entry(1000 + id(ground_material(&k, p, 0, 500_000, 0, 10, 5_000)))
+                .entry(1000 + id(ground_material(&k, maps, p, 0, 500_000, 0, 10, 5_000)))
                 .or_insert(0) += 1;
         }
         eprintln!("{seen:?}");
